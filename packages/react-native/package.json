@@ -37,16 +37,19 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@opengeni/contracts": "workspace:*",
     "@opengeni/react": "workspace:*",
     "@opengeni/sdk": "workspace:*"
   },
   "devDependencies": {
     "@types/react": "^19.2.14",
+    "expo-audio": "~57.0.5",
     "react-native-markdown-display": "^7.0.2",
     "react-native-safe-area-context": "~5.7.0"
   },
   "peerDependencies": {
     "expo": ">=57",
+    "expo-audio": "*",
     "expo-crypto": "*",
     "expo-document-picker": "*",
     "expo-file-system": "*",

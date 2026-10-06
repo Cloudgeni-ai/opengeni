@@ -4,18 +4,26 @@
 // namespaced per signed-in principal); everything else here is the standard Expo
 // implementation of the adapter contract.
 import { AppState } from "react-native";
+import { useMemo } from "react";
 import * as Crypto from "expo-crypto";
 import * as DocumentPicker from "expo-document-picker";
 import { fetch as expoFetch } from "expo/fetch";
+import {
+  RecordingPresets,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  useAudioRecorder,
+} from "expo-audio";
 import { File } from "expo-file-system";
 import * as ImagePicker from "expo-image-picker";
-import type { FetchLike } from "@opengeni/sdk";
+import type { FetchLike, OpenGeniClient } from "@opengeni/sdk";
 import type {
   NativeLifecycleState,
   NativePersistenceAdapter,
   NativePickedFile,
   OpenGeniReactNativeAdapters,
 } from "./adapters";
+import type { NativeVoiceRecorder, NativeVoiceRecording } from "./voice-input";
 
 function lifecycleState(value: string | null | undefined): NativeLifecycleState {
   if (value === "active") return "active";
@@ -152,4 +160,103 @@ export function createExpoOpenGeniAdapters(input: {
     fetch: expoStreamingFetch,
     persistence: input.persistence,
   };
+}
+
+// Mono AAC in an MPEG-4 container: small uploads, accepted by every transcription provider.
+const DICTATION_RECORDING = {
+  ...RecordingPresets.HIGH_QUALITY,
+  numberOfChannels: 1,
+  bitRate: 64_000,
+  isMeteringEnabled: true,
+};
+
+function discardRecordingFile(uri: string | null) {
+  if (!uri) return;
+  try {
+    const file = new File(uri);
+    if (file.exists) file.delete();
+  } catch {
+    // A leftover cache file is harmless; the system clears the cache directory.
+  }
+}
+
+/** Dictation recorder backed by expo-audio. */
+export function useExpoVoiceRecorder(): NativeVoiceRecorder {
+  const recorder = useAudioRecorder(DICTATION_RECORDING);
+  return useMemo<NativeVoiceRecorder>(
+    () => ({
+      async requestPermission() {
+        const permission = await requestRecordingPermissionsAsync();
+        return permission.granted;
+      },
+      async start() {
+        await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+        await recorder.prepareToRecordAsync();
+        recorder.record();
+      },
+      async stop() {
+        const durationSeconds = recorder.getStatus().durationMillis / 1000;
+        await recorder.stop();
+        await setAudioModeAsync({ allowsRecording: false }).catch(() => undefined);
+        const uri = recorder.uri;
+        return uri ? { uri, mimeType: "audio/mp4", durationSeconds } : null;
+      },
+      async cancel() {
+        if (recorder.isRecording) await recorder.stop();
+        await setAudioModeAsync({ allowsRecording: false }).catch(() => undefined);
+        discardRecordingFile(recorder.uri);
+      },
+      durationSeconds() {
+        return recorder.getStatus().durationMillis / 1000;
+      },
+      level() {
+        // Metering is in decibels (silence is about -160); map the useful -55…0 range.
+        const decibels = recorder.getStatus().metering;
+        if (typeof decibels !== "number") return null;
+        return Math.max(0, Math.min(1, (decibels + 55) / 55));
+      },
+    }),
+    [recorder],
+  );
+}
+
+/**
+ * Send a recording to the deployment's transcription API. The device file is
+ * streamed as multipart form data, then removed.
+ */
+export async function transcribeExpoRecording(input: {
+  client: Pick<OpenGeniClient, "fetchApi">;
+  workspaceId: string;
+  recording: NativeVoiceRecording;
+}): Promise<string> {
+  const form = new FormData();
+  // expo-file-system's File is a Blob, which Expo's fetch uploads from disk.
+  form.append("audio", new File(input.recording.uri) as unknown as Blob, "dictation.m4a");
+  form.append("mimeType", input.recording.mimeType);
+  form.append("durationSeconds", input.recording.durationSeconds.toFixed(3));
+  try {
+    const response = await input.client.fetchApi(
+      `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/transcriptions`,
+      { method: "POST", body: form },
+    );
+    const text = await response.text();
+    let body: { text?: unknown; error?: { message?: unknown }; message?: unknown } = {};
+    try {
+      body = JSON.parse(text) as typeof body;
+    } catch {
+      // A non-JSON body is reported by status below.
+    }
+    if (!response.ok) {
+      const message =
+        typeof body.error?.message === "string"
+          ? body.error.message
+          : typeof body.message === "string"
+            ? body.message
+            : `Transcription failed (${response.status}).`;
+      throw new Error(message);
+    }
+    return typeof body.text === "string" ? body.text : "";
+  } finally {
+    discardRecordingFile(input.recording.uri);
+  }
 }

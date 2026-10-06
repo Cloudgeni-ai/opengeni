@@ -30,6 +30,14 @@ export {
   type OpenGeniNativeSessionController,
 } from "./use-native-session";
 export {
+  appendDictation,
+  useNativeVoiceInput,
+  type NativeVoiceInput,
+  type NativeVoiceInputStatus,
+  type NativeVoiceRecorder,
+  type NativeVoiceRecording,
+} from "./voice-input";
+export {
   boundedJson,
   formatNativeRelativeTime,
   nativeHumanInputRequestPreview,

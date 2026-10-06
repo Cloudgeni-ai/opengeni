@@ -36,7 +36,7 @@ export type {
   NativeTimelineThemeOverrides,
   WebColorToken,
 } from "./theme";
-export { NativeSessionScreen } from "./session-screen";
+export { AttachmentChips, NativeSessionScreen } from "./session-screen";
 export type { NativeSessionScreenProps } from "./session-screen";
 export { ComposerPill, SessionComposer } from "./composer";
 export { ModelPickerSheet } from "./model-picker";

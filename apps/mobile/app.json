@@ -27,6 +27,13 @@
         {
           "mode": "development"
         }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Opengeni uses the microphone to dictate your messages.",
+          "recordAudioAndroid": true
+        }
       ]
     ],
     "experiments": {

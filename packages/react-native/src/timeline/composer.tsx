@@ -18,6 +18,7 @@ import Animated, { useAnimatedKeyboard, useAnimatedStyle } from "react-native-re
 import { Icon, type NativeIconName } from "./icon";
 import { withAlpha } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
+import type { NativeVoiceInput } from "../voice-input";
 
 /* ----------------------------------------------------------------------------
    The session composer, designed for each platform rather than copied from
@@ -75,6 +76,8 @@ export interface SessionComposerProps {
   messages?: Partial<ChatComposerMessages> | undefined;
   /** Called when the trailing action fires (host haptics). */
   onActionFeedback?: (() => void) | undefined;
+  /** Dictation: a mic beside the leading actions, and the recording strip while it runs. */
+  voice?: NativeVoiceInput | undefined;
 }
 
 /** Whether to draw Liquid Glass: iOS 26+, the native module present, transparency allowed. */
@@ -184,11 +187,26 @@ export function SessionComposer(props: SessionComposerProps) {
   const messages = { ...defaultChatComposerMessages, ...props.messages };
   const fieldSize = ios ? 17 : 16;
   const compact = !props.options;
-  const leading = props.renderLeading ? (
+  const voice = props.voice?.available ? props.voice : undefined;
+  const capturing =
+    voice !== undefined &&
+    (voice.status === "recording" ||
+      voice.status === "requesting-permission" ||
+      voice.status === "transcribing");
+  const attach = props.renderLeading ? (
     props.renderLeading()
   ) : props.onAttach ? (
     <ToolbarButton icon="plus" accessibilityLabel={messages.attachFiles} onPress={props.onAttach} />
   ) : null;
+  const leading =
+    attach || voice ? (
+      <>
+        {attach}
+        {voice ? (
+          <ToolbarButton icon="mic" accessibilityLabel="Dictate" onPress={voice.start} />
+        ) : null}
+      </>
+    ) : null;
   const field = (inline: boolean) => (
     <TextInput
       ref={props.inputRef}
@@ -240,7 +258,37 @@ export function SessionComposer(props: SessionComposerProps) {
       <ComposerSurface radius={compact ? 22 : 24}>
         {props.header}
         {props.below}
-        {compact ? (
+        {voice?.status === "error" && voice.error ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`${voice.error} Dismiss`}
+            onPress={voice.clearError}
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 8,
+              paddingHorizontal: 16,
+              paddingTop: 10,
+            }}
+          >
+            <Icon name="circle-alert" size={14} color={c["status-failed"]} />
+            <Text
+              style={{
+                ...fontStyle(theme),
+                flex: 1,
+                fontSize: 13,
+                lineHeight: 18,
+                color: c["status-failed"],
+              }}
+            >
+              {voice.error}
+            </Text>
+            <Icon name="x" size={14} color={c["fg-subtle"]} />
+          </Pressable>
+        ) : null}
+        {capturing && voice ? (
+          <VoiceStrip voice={voice} />
+        ) : compact ? (
           // No options to show: one row, as native messaging apps lay it out.
           <View
             style={{
@@ -312,6 +360,143 @@ export function ToolbarButton({
     >
       <Icon name={icon} size={20} color={theme.colors["fg-muted"]} />
     </Pressable>
+  );
+}
+
+const LEVEL_BARS = 28;
+
+function formatDictationTime(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+/**
+ * Dictation in progress, in place of the field: cancel, a live level meter with
+ * the elapsed time, and stop (which transcribes into the draft).
+ */
+function VoiceStrip({ voice }: { voice: NativeVoiceInput }) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const [levels, setLevels] = useState<number[]>(() => Array<number>(LEVEL_BARS).fill(0));
+  const recording = voice.status === "recording";
+  const transcribing = voice.status === "transcribing";
+  useEffect(() => {
+    if (!recording) return;
+    setLevels((current) => [...current.slice(1), voice.level ?? 0.15]);
+  }, [recording, voice.durationSeconds, voice.level]);
+  const remaining =
+    voice.maxDurationSeconds !== null && voice.maxDurationSeconds - voice.durationSeconds <= 10
+      ? ` · ${Math.max(0, Math.ceil(voice.maxDurationSeconds - voice.durationSeconds))}s left`
+      : "";
+  return (
+    <View
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 8,
+        paddingHorizontal: 6,
+        paddingVertical: 6,
+        minHeight: 56,
+      }}
+    >
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Cancel dictation"
+        onPress={voice.cancel}
+        disabled={transcribing}
+        hitSlop={4}
+        style={({ pressed }) => ({
+          width: 36,
+          height: 36,
+          borderRadius: 18,
+          alignItems: "center",
+          justifyContent: "center",
+          backgroundColor: pressed ? c.hover : "transparent",
+          opacity: transcribing ? 0.4 : 1,
+        })}
+      >
+        <Icon name="x" size={18} color={c["fg-muted"]} />
+      </Pressable>
+      <View
+        accessible
+        accessibilityLiveRegion="polite"
+        accessibilityLabel={
+          transcribing ? "Transcribing" : `Recording, ${formatDictationTime(voice.durationSeconds)}`
+        }
+        style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 10, minWidth: 0 }}
+      >
+        {transcribing ? (
+          <>
+            <ActivityIndicator size="small" color={c["fg-muted"]} />
+            <Text style={{ ...fontStyle(theme), fontSize: 15, color: c["fg-muted"] }}>
+              Transcribing…
+            </Text>
+          </>
+        ) : (
+          <>
+            <View
+              style={{
+                flex: 1,
+                height: 28,
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                overflow: "hidden",
+              }}
+            >
+              {levels.map((value, index) => (
+                <View
+                  // Fixed slots: the meter scrolls by shifting values, not keys.
+                  // oxlint-disable-next-line react/no-array-index-key
+                  key={index}
+                  style={{
+                    width: 3,
+                    borderRadius: 1.5,
+                    height: 4 + Math.round(value * 24),
+                    backgroundColor: index === LEVEL_BARS - 1 ? c.fg : c["fg-subtle"],
+                  }}
+                />
+              ))}
+            </View>
+            <Text
+              style={{
+                ...fontStyle(theme, 500),
+                fontSize: 14,
+                color: c["fg-muted"],
+                fontVariant: ["tabular-nums"],
+              }}
+            >
+              {formatDictationTime(voice.durationSeconds)}
+              {remaining}
+            </Text>
+          </>
+        )}
+      </View>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Stop and transcribe"
+        onPress={voice.stop}
+        disabled={!recording}
+        hitSlop={6}
+        style={({ pressed }) => ({
+          width: 34,
+          height: 34,
+          borderRadius: 17,
+          alignItems: "center",
+          justifyContent: "center",
+          backgroundColor: recording ? c.accent : withAlpha(c.fg, 0.08),
+          opacity: pressed ? 0.8 : 1,
+          transform: [{ scale: pressed ? 0.94 : 1 }],
+        })}
+      >
+        <Icon
+          name="check"
+          size={18}
+          strokeWidth={2.5}
+          color={recording ? c["accent-fg"] : c["fg-subtle"]}
+        />
+      </Pressable>
+    </View>
   );
 }
 

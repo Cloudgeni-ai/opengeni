@@ -20,6 +20,7 @@ import {
 import { Icon } from "./icon";
 import { withAlpha } from "./primitives";
 import type { OpenGeniNativeSessionController } from "../use-native-session";
+import type { NativeFileAttachmentsResult } from "../attachments";
 import { SessionComposer, type SessionComposerProps } from "./composer";
 import { TurnFeedbackButtons, useTurnRatings, type TurnFeedbackTarget } from "./feedback";
 import { Button } from "./controls";
@@ -56,6 +57,7 @@ export interface NativeSessionScreenProps extends Omit<
           | "onAttach"
           | "messages"
           | "onActionFeedback"
+          | "voice"
         >
       >
     | undefined;
@@ -191,6 +193,7 @@ export function NativeSessionScreen({
         keyboardBottomOffset={keyboardBottomOffset}
         inputRef={composerInput}
         messages={composerSlots?.messages}
+        voice={composerSlots?.voice}
         below={
           composer.draftConflict ? (
             <DraftConflictStrip
@@ -289,11 +292,7 @@ function LoadFailure({ message, onRetry }: { message?: string | undefined; onRet
 }
 
 /** Composer attachment chips: name, upload state, tap to retry a failure, remove. */
-function AttachmentChips({
-  attachments,
-}: {
-  attachments: OpenGeniNativeSessionController["attachments"];
-}) {
+export function AttachmentChips({ attachments }: { attachments: NativeFileAttachmentsResult }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   if (attachments.attachments.length === 0) return null;

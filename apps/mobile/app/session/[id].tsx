@@ -21,7 +21,9 @@ import { BrandMark } from "@/brand-mark";
 import { copyText } from "@/clipboard";
 import { useSessionComputeLabel } from "@/compute-label";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
+import { ComposerPlusMenu } from "@/new-session-options";
 import { AppThemeProvider } from "@/theme";
+import { useComposerVoice } from "@/voice";
 
 const renderMarkdown = createWebMarkdownRenderer({ onCopy: (text) => void copyText(text) });
 
@@ -65,6 +67,12 @@ function LiveSession(props: {
   const [pickerOpen, setPickerOpen] = useState(false);
   // The composer owns the next turn's policy, exactly as the web picker edits it.
   const composer = controller.composer;
+  const voice = useComposerVoice({
+    workspaceId: props.workspaceId,
+    value: composer.value,
+    setValue: composer.setValue,
+    scope: props.sessionId,
+  });
   const policy = composer.policy ?? null;
   const model = policy?.model ?? session?.model ?? null;
   const effort = policy?.reasoningEffort ?? session?.reasoningEffort ?? null;
@@ -101,6 +109,13 @@ function LiveSession(props: {
       ) : null,
     [props.client, refreshSession, session],
   );
+  // Photos and files, as the web composer's + offers them.
+  const attachMenu = (
+    <ComposerPlusMenu
+      onPickImages={() => void controller.attachments.pickImages()}
+      onPickFiles={() => void controller.attachments.pickDocuments()}
+    />
+  );
   return (
     <>
       <Stack.Screen
@@ -123,6 +138,8 @@ function LiveSession(props: {
         feedback={feedback}
         composer={{
           onActionFeedback: () => void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light),
+          voice,
+          renderLeading: () => attachMenu,
           options: pill ? (
             <ComposerPill
               label={pill.effort ? `${pill.name} · ${pill.effort}` : pill.name}

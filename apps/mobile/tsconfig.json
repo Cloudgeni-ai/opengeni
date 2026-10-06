@@ -20,7 +20,8 @@
       "@opengeni/react-native/timeline": ["../../packages/react-native/src/timeline/index.ts"],
       "@opengeni/react-native/timeline/markdown": [
         "../../packages/react-native/src/timeline/markdown.tsx"
-      ]
+      ],
+      "@opengeni/contracts": ["../../packages/contracts/src/index.ts"]
     }
   },
   "include": ["**/*.ts", "**/*.tsx"]

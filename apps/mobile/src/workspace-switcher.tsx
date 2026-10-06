@@ -16,10 +16,8 @@ import { openOnWeb, webPaths } from "@/web-links";
  * the menu lists the organization's workspaces and, only for a person in
  * several organizations, the others.
  */
-export function WorkspaceSwitcherBlock() {
-  const theme = useNativeTimelineTheme();
-  const c = theme.colors;
-  const scheme = useColorScheme();
+/** The workspace menu's actions and handler, shared by the rail block and the header title. */
+function useWorkspaceMenu() {
   const { account, workspace, workspaces, organizations, setWorkspaceId, selectOrganization } =
     useAccount();
   const activeOrgId = workspace?.accountId ?? organizations[0]?.accountId ?? null;
@@ -27,7 +25,6 @@ export function WorkspaceSwitcherBlock() {
   const inOrg = activeOrgId ? workspacesInOrg(workspaces, activeOrgId) : [];
   const others = organizations.filter((each) => each.accountId !== activeOrgId);
   const personal = workspace?.kind === "personal";
-  const [width, setWidth] = useState(0);
 
   const actions: MenuAction[] = [
     {
@@ -64,23 +61,29 @@ export function WorkspaceSwitcherBlock() {
         ]
       : []),
   ];
+  const onPressAction = ({ nativeEvent }: { nativeEvent: { event: string } }) => {
+    const [kind, id] = nativeEvent.event.split(/:(.*)/su);
+    void Haptics.selectionAsync().catch(() => undefined);
+    if (kind === "workspace" && id) setWorkspaceId(id);
+    else if (kind === "organization" && id) selectOrganization(id);
+    else if (nativeEvent.event === "organization-settings" && account && workspace) {
+      openOnWeb(account.baseUrl, webPaths.organizationSettings(workspace.id));
+    }
+  };
+  return { actions, onPressAction, workspace, org, personal };
+}
+
+export function WorkspaceSwitcherBlock() {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const scheme = useColorScheme();
+  const { actions, onPressAction, workspace, org, personal } = useWorkspaceMenu();
+  const [width, setWidth] = useState(0);
 
   return (
     // A SwiftUI menu sizes to its trigger: measure the row so it spans it.
     <View onLayout={(event) => setWidth(Math.round(event.nativeEvent.layout.width))}>
-      <MenuView
-        actions={actions}
-        colorScheme={scheme}
-        onPressAction={({ nativeEvent }) => {
-          const [kind, id] = nativeEvent.event.split(/:(.*)/su);
-          void Haptics.selectionAsync().catch(() => undefined);
-          if (kind === "workspace" && id) setWorkspaceId(id);
-          else if (kind === "organization" && id) selectOrganization(id);
-          else if (nativeEvent.event === "organization-settings" && account && workspace) {
-            openOnWeb(account.baseUrl, webPaths.organizationSettings(workspace.id));
-          }
-        }}
-      >
+      <MenuView actions={actions} colorScheme={scheme} onPressAction={onPressAction}>
         <View
           accessible
           accessibilityRole="button"
@@ -128,6 +131,57 @@ export function WorkspaceSwitcherBlock() {
         </View>
       </MenuView>
     </View>
+  );
+}
+
+/**
+ * The header title: the current workspace with its organization beneath, as the
+ * web phone header names where a new chat goes; tapping opens the workspace menu.
+ */
+export function WorkspaceSwitcherTitle() {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const scheme = useColorScheme();
+  const { actions, onPressAction, workspace, org, personal } = useWorkspaceMenu();
+  return (
+    <MenuView actions={actions} colorScheme={scheme} onPressAction={onPressAction}>
+      <View
+        accessible
+        accessibilityRole="button"
+        accessibilityLabel={`${workspace?.name ?? "Select workspace"}${org ? `, ${org.label}` : ""}. Switch workspace`}
+        style={{ alignItems: "center", paddingHorizontal: 8, paddingVertical: 2, maxWidth: 240 }}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+          {personal ? <Icon name="lock" size={13} color={c.fg} /> : null}
+          <Text
+            numberOfLines={1}
+            style={{
+              ...fontStyle(theme, 600),
+              fontSize: 16,
+              lineHeight: 20,
+              color: c.fg,
+              flexShrink: 1,
+            }}
+          >
+            {workspace?.name ?? "Opengeni"}
+          </Text>
+          <Icon name="chevron-down" size={14} color={c["fg-subtle"]} />
+        </View>
+        {org ? (
+          <Text
+            numberOfLines={1}
+            style={{
+              ...fontStyle(theme, 500),
+              fontSize: 12,
+              lineHeight: 15,
+              color: c["fg-subtle"],
+            }}
+          >
+            {org.label}
+          </Text>
+        ) : null}
+      </View>
+    </MenuView>
   );
 }
 

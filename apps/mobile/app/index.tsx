@@ -1,7 +1,9 @@
 import { compactModelPill } from "@opengeni/react/model-policy";
 import { partitionPinnedSessions, recentSessionsForHome } from "@opengeni/react/session-list-model";
 import type { LatencyMode, ReasoningEffort, Session } from "@opengeni/sdk";
+import { useNativeFileAttachments } from "@opengeni/react-native";
 import {
+  AttachmentChips,
   Button,
   ComposerPill,
   ModelPickerSheet,
@@ -21,9 +23,15 @@ import * as Haptics from "expo-haptics";
 import { useAccount } from "@/account";
 import { BrandMark } from "@/brand-mark";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
+import {
+  ComposerPlusMenu,
+  NewSessionOptionChips,
+  useNewSessionOptions,
+} from "@/new-session-options";
 import { SignInScreen } from "@/sign-in-screen";
 import { AppThemeProvider } from "@/theme";
-import { AccountMenuButton } from "@/workspace-switcher";
+import { useComposerVoice } from "@/voice";
+import { AccountMenuButton, WorkspaceSwitcherTitle } from "@/workspace-switcher";
 import { openOnWeb, webPaths } from "@/web-links";
 
 export default function HomeScreen() {
@@ -72,8 +80,18 @@ function Home() {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();
-  const { account, client, config, models, workspaceId, workspaces, accessContext, error, reload } =
-    useAccount();
+  const {
+    account,
+    adapters,
+    client,
+    config,
+    models,
+    workspaceId,
+    workspaces,
+    accessContext,
+    error,
+    reload,
+  } = useAccount();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(false);
   const [draft, setDraft] = useState("");
@@ -131,18 +149,43 @@ function Home() {
     return recentSessionsForHome(sessions, pinned, 6);
   }, [sessions]);
 
+  // The new chat's photos and files upload to the workspace as they are picked.
+  const attachments = useNativeFileAttachments({
+    client,
+    workspaceId: workspaceId ?? "",
+    sessionId: "new-session",
+    files: adapters.files,
+    crypto: adapters.crypto,
+  });
+  const options = useNewSessionOptions(workspaceId);
+  const voice = useComposerVoice({ workspaceId, value: draft, setValue: setDraft, scope: "home" });
+  const attached = attachments.readyResources.length > 0;
+  const canCreate =
+    Boolean(workspaceId) &&
+    !creating &&
+    (Boolean(draft.trim()) || attached) &&
+    !attachments.uploading &&
+    !attachments.hasUnresolved;
+
   const create = async () => {
     const text = draft.trim();
-    if (!workspaceId || !text || creating) return;
+    if (!workspaceId || !canCreate) return;
     setCreating(true);
     try {
+      const chosen = options.request();
       const created = await client.createSession(workspaceId, {
-        initialMessage: text,
+        // A file-only message still says what it carries, as the web composer does.
+        initialMessage: text || "See the attached files.",
         ...(model ? { model } : {}),
         ...(effort ? { reasoningEffort: effort } : {}),
         ...(latencyMode !== "standard" ? { latencyMode } : {}),
+        ...(chosen.visibility ? { visibility: chosen.visibility } : {}),
+        ...(chosen.targetSandboxId ? { targetSandboxId: chosen.targetSandboxId } : {}),
+        resources: [...chosen.resources, ...attachments.readyResources],
       });
       setDraft("");
+      attachments.clear();
+      options.reset();
       router.push(`/session/${created.id}`);
     } catch (caught) {
       setListError(caught instanceof Error ? caught.message : String(caught));
@@ -159,8 +202,8 @@ function Home() {
           headerShown: true,
           headerStyle: { backgroundColor: c.bg },
           headerShadowVisible: true,
-          headerTitle: HeaderWordmark,
-          headerTitleAlign: "left",
+          headerTitle: HeaderWorkspaceTitle,
+          headerTitleAlign: "center",
           headerLeft: HeaderMenuButton,
           headerRight: HeaderAccountButton,
         }}
@@ -196,9 +239,23 @@ function Home() {
             value={draft}
             onChangeText={setDraft}
             onSend={() => void create()}
-            canSend={Boolean(draft.trim()) && !creating && Boolean(workspaceId)}
+            canSend={canCreate}
             sending={creating}
             placeholder="Describe a task for the agent..."
+            voice={voice}
+            renderLeading={() => (
+              <ComposerPlusMenu
+                onPickImages={() => void attachments.pickImages()}
+                onPickFiles={() => void attachments.pickDocuments()}
+                options={options}
+              />
+            )}
+            header={
+              <>
+                <NewSessionOptionChips options={options} />
+                <AttachmentChips attachments={attachments} />
+              </>
+            }
             inset={0}
             liftWithKeyboard={false}
             bottomInset={0}
@@ -280,12 +337,19 @@ function Home() {
 }
 
 // Navigator chrome renders outside the screen tree, so it takes its own theme.
-function HeaderWordmark() {
+// The title names where a new chat goes (web's phone header shows the workspace
+// in its rail); it falls back to the wordmark before workspaces load.
+function HeaderWorkspaceTitle() {
   return (
     <AppThemeProvider>
-      <Wordmark />
+      <WorkspaceTitleOrWordmark />
     </AppThemeProvider>
   );
+}
+
+function WorkspaceTitleOrWordmark() {
+  const { workspace } = useAccount();
+  return workspace ? <WorkspaceSwitcherTitle /> : <Wordmark />;
 }
 
 function HeaderMenuButton() {
