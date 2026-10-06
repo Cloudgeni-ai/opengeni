@@ -506,6 +506,11 @@ Managed production package availability is reconciled automatically after the
 runtime becomes healthy; it does not wait for later acceptance. See
 `reconcile-production-packages.yml` and `docs/deployment.md`.
 
+Canary publication freezes all archives before writing, retains each intent and
+HTTP acknowledgement, then checks the cohort with bounded read-only receipts.
+Unknown writes never replay automatically. Site pins and independent signed-byte
+acceptance remain separate gates; see `CONTRIBUTING.md`.
+
 If a change alters architecture, terminology, the run lifecycle, the memory model, or a "do not" guardrail above, update this file, [`docs/architecture.md`](docs/architecture.md), and the relevant `docs/*.md` in the same change. In particular, structural changes (an app/package/sandbox backend added, removed, or renamed; a moved responsibility; a changed invariant, data-flow, or canonical source) belong in `docs/architecture.md` — see its "Keeping this current" section. An out-of-date AGENTS.md or doc is a bug, not a nicety.
 
 ## Keeping docs true

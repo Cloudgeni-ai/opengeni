@@ -1923,6 +1923,9 @@ lanes declare services/credentials.
 
 Manifests/Changesets/CI/release scripts govern evidence-bound npm/image/Helm/Rust
 publication, retaining source identity. Web builds target both CPUs.
+Canary packages prepack the complete cohort, retain write acknowledgements, then
+perform bounded strict read-only verification before producing Site pins.
+An uncertain publication never automatically replays; signed-byte acceptance remains separate.
 `reconcile-production-packages.yml` reconciles npm availability independently of acceptance.
 
 Commands: [`../AGENTS.md`](../AGENTS.md), [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
