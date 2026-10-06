@@ -2369,6 +2369,9 @@
 :where(.og-root).max-w-\[min\(18rem\,calc\(100vw-1\.5rem\)\)\],:where(.og-root) .max-w-\[min\(18rem\,calc\(100vw-1\.5rem\)\)\] {
     max-width: min(18rem, calc(100vw - 1.5rem));
   }
+:where(.og-root).max-w-\[min\(24rem\,60vw\)\],:where(.og-root) .max-w-\[min\(24rem\,60vw\)\] {
+    max-width: min(24rem, 60vw);
+  }
 :where(.og-root).max-w-full,:where(.og-root) .max-w-full {
     max-width: 100%;
   }

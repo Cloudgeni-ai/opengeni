@@ -27,9 +27,16 @@ import {
   galleryToolSelection,
   galleryToolServers,
   GALLERY_WORKSPACE_ID,
+  galleryTurn,
   type ChromeScenario,
 } from "@/dev/composer-chrome-fixtures";
 import type { IntelligenceEffort } from "@/lib/session-tools";
+
+const SIMULATED_QUEUE_PROMPTS = [
+  "Also check that the retry banner disappears once the webhook succeeds.",
+  "Use the staging workspace for this, not production.",
+  "When you're done, summarize what changed in the runbook.",
+];
 
 const VOICE_CAPABILITY: ClientVoiceInputConfig = {
   available: true,
@@ -49,6 +56,7 @@ function useHarnessLiveQueue(seed: UseTurnQueueResult): {
   queue: UseTurnQueueResult;
   dismissIncoming: (inputId: string) => void;
   addCommandResult: (summary: string) => void;
+  appendTurn: (turn: SessionTurn) => void;
 } {
   const [turns, setTurns] = useState<SessionTurn[]>(seed.queue);
   const [inputs, setInputs] = useState<SessionPendingInputPreview[]>(seed.pendingInputs);
@@ -95,6 +103,7 @@ function useHarnessLiveQueue(seed: UseTurnQueueResult): {
 
   return {
     queue,
+    appendTurn: (turn) => setTurns((prev) => [...prev, turn]),
     addCommandResult: (summary) =>
       setInputs((prev) => [
         ...prev,
@@ -177,17 +186,57 @@ export function ScenarioStack({
   composer,
   /** Phone stage uses tighter padding to match the session dock. */
   variant = "gallery",
+  queueSimulator = false,
 }: {
   scenario: ChromeScenario;
   composer: ComposerState;
   variant?: "gallery" | "phone";
+  /** Show a control that queues a sample message the way a Send during a turn does. */
+  queueSimulator?: boolean;
 }) {
   const [model, setModel] = useState("gpt-6-astra");
   const [effort, setEffort] = useState<IntelligenceEffort>("medium");
   const [toolSelection, setToolSelection] = useState(galleryToolSelection);
   const [connectorCustomizing, setConnectorCustomizing] = useState(false);
   const attachments = useMemo(() => emptyAttachments(), []);
-  const { queue, dismissIncoming, addCommandResult } = useHarnessLiveQueue(scenario.queue);
+  const { queue, dismissIncoming, addCommandResult, appendTurn } = useHarnessLiveQueue(
+    scenario.queue,
+  );
+  // Mimic a live Send that lands in the queue: an optimistic "sending" row
+  // first, then the server-confirmed turn replaces it.
+  const [optimisticMessages, setOptimisticMessages] = useState<
+    NonNullable<ComposerState["optimisticMessages"]>
+  >([]);
+  const [simulatedCount, setSimulatedCount] = useState(0);
+  const liveComposer = useMemo<ComposerState>(
+    () => ({ ...composer, optimisticMessages }),
+    [composer, optimisticMessages],
+  );
+  const simulateQueuedSend = () => {
+    const index = simulatedCount;
+    setSimulatedCount(index + 1);
+    const text = SIMULATED_QUEUE_PROMPTS[index % SIMULATED_QUEUE_PROMPTS.length]!;
+    const clientEventId = crypto.randomUUID();
+    setOptimisticMessages((prev) => [
+      ...prev,
+      {
+        clientEventId,
+        delivery: "send",
+        destination: "queue",
+        text,
+        annotations: [],
+        resources: [],
+        occurredAt: new Date().toISOString(),
+        state: "sending",
+      },
+    ]);
+    setTimeout(() => {
+      setOptimisticMessages((prev) =>
+        prev.filter((message) => message.clientEventId !== clientEventId),
+      );
+      appendTurn(galleryTurn(40 + index, text));
+    }, 450);
+  };
   const goal = useHarnessLiveGoal(scenario.goal);
   const agents = scenario.agentNodes;
   const [commands, setCommands] = useState(scenario.commands ?? []);
@@ -224,7 +273,7 @@ export function ScenarioStack({
     <SessionChrome
       key={`${scenario.id}-${scenario.defaultActive ?? "none"}`}
       queue={queue}
-      composer={composer}
+      composer={liveComposer}
       goal={goal}
       readOnly={scenario.readOnly}
       commandsCount={
@@ -305,6 +354,19 @@ export function ScenarioStack({
   // Match `session.tsx`: SessionChrome card, then composer — same spacing in phone + gallery.
   const stack = (
     <>
+      {queueSimulator ? (
+        <div className="px-4 pb-3 text-xs text-fg-subtle sm:px-6">
+          <button
+            type="button"
+            className="underline"
+            data-harness-enqueue=""
+            onClick={simulateQueuedSend}
+          >
+            Queue a message
+          </button>
+          <span className="ml-2">acts like pressing Send while the agent is working</span>
+        </div>
+      ) : null}
       {scenario.showDeliveredInputs ? (
         <div className="mx-auto w-full max-w-3xl px-4 py-6">
           <MessageTimeline events={receivedEvents} status="idle" />
