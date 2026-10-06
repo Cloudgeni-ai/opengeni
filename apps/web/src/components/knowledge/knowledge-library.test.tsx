@@ -216,6 +216,12 @@ test("By collection shows only top-level collections, sub-collections first as r
     expect(tile(rowsInRunbooks[1]!)).not.toBe(tile(rowsInRunbooks[0]!));
     expect(rowsInRunbooks[1]!.textContent).toContain("Decision");
     expect(rowsInRunbooks[1]!.querySelector("[data-slot=relative-time]")).not.toBeNull();
+    expect(rowsInRunbooks[0]!.querySelector("[data-slot=relative-time]")?.textContent).toStartWith(
+      "Edited ",
+    );
+    expect(
+      rowsInRunbooks[1]!.querySelector("[data-slot=relative-time]")?.textContent,
+    ).not.toStartWith("Edited ");
     expect(
       listKnowledgeEntries.mock.calls.some(
         ([, request]) => request.kind === "group" && request.rootOnly === true,

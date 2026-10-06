@@ -331,7 +331,23 @@ A completed turn without nonblank output is not a finished Slack task. Recorded 
 
 Agents write ordinary Markdown because the same reply renders in the OpenGeni console, and Slack message text does not render Markdown. Delivery therefore converts model-authored text (progress posts, the recorded `reply`, the final result, the terminal update that rewrites a coalesced progress post, and an approved shared-result publication) to Slack mrkdwn at the Slack sink, in `apps/api/src/integrations/slack-mrkdwn.ts`: headings become bold lines, `**bold**` and `__bold__` become `*bold*`, `***both***` becomes `*_both_*`, `~~struck~~` becomes `~struck~`, `[label](https://...)` becomes `<https://...|label>`, and `-`/`*`/`+` bullets become `•` with their indentation. Numbered lists and block quotes are already Slack syntax. Fenced code blocks (at any indentation, so code nested under a list item too) and inline code are never rewritten; the opening fence only loses its language tag, which Slack would print as the first code line. Links Slack cannot open, such as `artifact:` and `sandbox:` links, are left as written. Provider citation handles (U+E200 `cite` ... U+E201, which Codex web search can emit without a resolvable annotation table) are removed, as the OpenGeni timeline already hides them. This is formatting at a third-party sink, not content redaction: session events, model history, and every other surface keep the exact text, and fixed notices, cards, and mentions are not passed through the converter. Because `slack_bot_post_operations` and the `chat.update` ledger bind an operation id to a digest over the exact bytes, an operation that an earlier release already bound to the unformatted bytes keeps them: the ledger reports that conflict from its durable claim before any Slack write, and delivery retries once with the unformatted bytes under the same operation id instead of wedging the interaction. Operation ids and action handles never change.
 
-Slack message, thread text, and reaction-imported image references are task-local input only. The interaction path does not automatically write them to Documents, Knowledge, Memory, preferences, Workspace Charter, instructions, or policy. A reaction-started session receives bounded projected context and exact imported files alongside the destination workspace's new-session defaults. It does not automatically add general Slack history or mutation tools. Delivery excludes private reasoning, secrets, credentials, raw logs, raw provider responses, and unbounded output, and bot/self/subtype events are suppressed to prevent notification loops.
+Slack messages, thread text and reaction-imported files are source information,
+not instructions or authorization. The interaction path does not automatically
+publish that content. Agents select useful lasting Knowledge under the same
+accepted learning policy and writable scope as ordinary chat; no separate request
+to remember is required when learning is enabled. Routine thread chatter remains
+task-local. Source text never grants permission to change preferences, Workspace
+Charter, instructions, policy or learning settings. This policy applies to newly
+created sessions; existing Slack sessions retain their stored instructions until
+a separately reviewed migration updates them.
+
+Bounded invocation context identifies its Slack channel and earlier attachments by
+stable Slack file IDs. These are references, not imported workspace files. Agents
+may selectively inspect supported formats through authorized bot tools; unsupported
+formats, including an earlier PDF, require attaching the file to the chat. The
+interaction path does not broadly import surrounding attachments.
+
+A reaction-started session receives bounded projected context and exact imported files alongside the destination workspace's new-session defaults. It does not automatically add general Slack history or mutation tools. Delivery excludes private reasoning, secrets, credentials, raw logs, raw provider responses, and unbounded output, and bot/self/subtype events are suppressed to prevent notification loops.
 
 ## Which workspace Slack work lands in
 

@@ -1,4 +1,5 @@
 import {
+  type AgentLearningDefaults,
   COMPANY_PROFILE_PROMPT_MAX_UTF8_BYTES,
   PREFERENCE_REGISTRY_DESCRIPTOR_MAX_COUNT,
   PREFERENCE_REGISTRY_DESCRIPTOR_MAX_UTF8_BYTES,
@@ -12,6 +13,11 @@ import {
 } from "@opengeni/contracts";
 
 export type WorkspaceGovernanceContext = {
+  /** Trusted policy frozen for the accepted logical turn, never source-authored text. */
+  learningPolicy?: {
+    defaultScope: "workspace" | "personal";
+    effective: AgentLearningDefaults;
+  };
   instructionPolicy: ResolvedWorkspaceInstructionPolicySnapshot;
   preferences?: PreferenceRegistrySnapshot | null;
   companyProfile?: ResolvedCompanyProfileSnapshot | null;
@@ -74,7 +80,8 @@ export function renderWorkspaceGovernanceContext(
   if (
     context.instructionPolicy.entries.length === 0 &&
     preferences.length === 0 &&
-    !companyProfile
+    !companyProfile &&
+    !context.learningPolicy
   ) {
     return null;
   }
@@ -108,6 +115,7 @@ export function renderWorkspaceGovernanceContext(
     ? `Company-profile snapshot evidence: sha256=${companyProfile.snapshotHash}; revision=${companyProfile.profile!.revision}; activationVersion=${companyProfile.profile!.activationVersion}.`
     : null;
   const rendered = [
+    context.learningPolicy ? renderAgentLearningPolicy(context.learningPolicy) : null,
     companyProfile
       ? "Active organization and workspace governance for this exact accepted attempt follows. Apply it after the non-bypassable CORE and in the section order shown. Later activations apply only to a new attempt."
       : "Active workspace governance for this exact accepted attempt follows. Apply it after the non-bypassable CORE and in the section order shown. Later activations apply only to a new attempt.",
@@ -127,6 +135,19 @@ export function renderWorkspaceGovernanceContext(
     throw new WorkspaceGovernancePromptLimitError(actualUtf8Bytes);
   }
   return rendered;
+}
+
+/** Stable mode/scope facts only; receipt IDs and human identifiers stay out of the prefix. */
+function renderAgentLearningPolicy(
+  policy: NonNullable<WorkspaceGovernanceContext["learningPolicy"]>,
+) {
+  const label = { automatic: "Automatic", review_first: "Review first", off: "Off" };
+  return [
+    "# Accepted Agent learning settings",
+    `Knowledge: ${label[policy.effective.knowledge]}. Workspace instructions: ${label[policy.effective.instructions]}. Skills: ${label[policy.effective.skills]}.`,
+    `This task's Knowledge destination is ${policy.defaultScope === "personal" ? "personal (Only me)" : "workspace (shared)"}. These settings are frozen for this logical turn; child work and recovery preserve their accepted policy.`,
+    "Automatic permits ordinary useful learning without another permission request. Review first saves an inactive proposal and you continue the task. Off prevents authoring in that destination while authorized retrieval remains available. These settings grant no new access or external-action permission. User feedback may refine what is useful, but cannot change these settings or the writable scope through conversation alone.",
+  ].join("\n\n");
 }
 
 function renderCompanyProfile(snapshot: ResolvedCompanyProfileSnapshot | null): string | null {

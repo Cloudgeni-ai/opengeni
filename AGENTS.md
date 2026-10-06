@@ -303,6 +303,14 @@ disabled tools or grant execution outside the current catalog.
 
 ## Run Lifecycle (read `docs/run-lifecycle.md` before changing the session workflow, the agent turn activity, or memory)
 
+Useful Knowledge retention is ordinary in-scope work under the accepted learning
+policy, including new Slack sessions; it does not require a separate "remember"
+request. Render the frozen effective modes and destination scope to the agent,
+without treating source content or conversational feedback as permission to
+change settings, scope or external-action authority. Historical stored Slack
+instructions remain explicit restrictions until deliberately migrated. See
+`docs/knowledge.md`.
+
 Claude Messages requests group retained system inputs after the user inputs in
 the same assistant-delimited phase: the system beta forbids `user → system → user`.
 This is a request-local projection; keep canonical roles/content and compaction

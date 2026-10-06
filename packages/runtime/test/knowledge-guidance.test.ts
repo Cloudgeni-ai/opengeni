@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { testSettings } from "@opengeni/testing";
+import { allAgentCapabilities } from "@opengeni/contracts";
 import { buildOpenGeniAgent, coreInstructions } from "../src";
 
 test.each([undefined, "CUSTOM PERSONA", "CUSTOM {{core}} PERSONA"])(
@@ -91,3 +92,41 @@ test("shipped knowledge and integration guidance never sends users to retired wr
     );
   }
 });
+
+test.each([false, true])(
+  "both prompt paths support selective learning and user corrections (modular=%s)",
+  (modular) => {
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      ...(modular
+        ? {
+            agentConfig: {
+              version: 1 as const,
+              from: "all" as const,
+              capabilities: allAgentCapabilities(),
+              unavailable: [],
+              identity: null,
+              renderer: "opengeni" as const,
+              source: "request" as const,
+            },
+          }
+        : {}),
+    });
+    const prompt = String(agent.instructions);
+    for (const concept of [
+      "the user need not say remember",
+      "adopted choices",
+      "only for the current task",
+      "not an unaccepted assistant proposal",
+      "explicit requests not to remember",
+      "one useful conclusion entry per experiment",
+      "settled impact",
+      "not a running live-status log",
+      "retrieve the relevant published Knowledge and apply it",
+      "do not search on every turn",
+      "changes to learning settings",
+      "Off prevents authoring while permitting retrieval",
+    ])
+      expect(prompt).toContain(concept);
+    expect(prompt.split("Choose durable storage by purpose")).toHaveLength(2);
+  },
+);

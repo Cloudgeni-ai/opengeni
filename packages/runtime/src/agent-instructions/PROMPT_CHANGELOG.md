@@ -14,6 +14,15 @@ The legacy locks also include the shared goal-completion handoff guidance.
 All fourteen omitted/null legacy cases retain the same composition and layer
 order. Shared guidance is not an intentional removal or modular-only addition.
 
+Both compositions now share one Knowledge guidance source: useful retention is
+ordinary work under the accepted learning policy, adopted feedback corrects
+existing entries, and relevant retrieval precedes dependent tasks. Task-only
+feedback, unaccepted proposals, interim experiment rounds and live status do not
+become settled knowledge. The worker also renders accepted modes and Knowledge
+scope in governance. These changes preserve destination authority and do not add
+permission for external actions or settings changes. New Slack sessions follow
+the same policy; old stored Slack session instructions remain unchanged.
+
 ## Authoring rule
 
 With `capabilities: "all"`, renderer `opengeni`, and every resource present

@@ -3381,7 +3381,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       "Execute a direct, safe, sufficiently specified request immediately",
     );
     expect(session!.initial_message).toContain("Ask one concise clarifying question only when");
-    expect(session!.initial_message).toContain("Do not infer permission to ingest or persist");
+    expect(session!.initial_message).toContain("accepted Knowledge learning policy");
     expect(session!.initial_message).toContain("bounded Slack context limit");
     const [persistence] = await shared!.admin<{ documents: number; memories: number }[]>`
       select
