@@ -11,6 +11,7 @@ import {
   getOrCreateWorkspaceInstructionPolicySnapshot,
   PreferenceRegistryInitiatorError,
   resolveSessionAttemptPersonalResources,
+  freezeAgentLearningPolicy,
 } from "@opengeni/db";
 import {
   projectHistoryForProvider,
@@ -66,6 +67,7 @@ import type { ClaimTurnOk } from "./claim";
 import type { EventingState, WorkspaceRefState } from "./turn-context";
 
 export type GovernanceModelDeps = {
+  learningPolicy: Awaited<ReturnType<typeof freezeAgentLearningPolicy>>;
   input: RunAgentTurnInput;
   db: ActivityServices["db"];
   observability: ActivityServices["observability"];
@@ -267,6 +269,7 @@ export async function prepareGovernanceAndModel(
   const companyProfileIncluded = contextSelection.receipt.companyProfileIncluded;
   const workspaceGovernance = renderWorkspaceGovernanceContext(
     {
+      learningPolicy: deps.learningPolicy,
       companyProfile: companyProfileSnapshot,
       instructionPolicy: instructionPolicySnapshot,
       preferences: preferenceSnapshot,

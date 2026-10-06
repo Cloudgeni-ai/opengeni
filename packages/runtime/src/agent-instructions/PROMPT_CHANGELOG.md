@@ -14,6 +14,21 @@ The legacy locks also include the shared goal-completion handoff guidance.
 All fourteen omitted/null legacy cases retain the same composition and layer
 order. Shared guidance is not an intentional removal or modular-only addition.
 
+Both compositions now share one Knowledge guidance source: useful retention is
+ordinary work under the accepted learning policy, adopted feedback corrects
+existing entries, and relevant retrieval precedes dependent tasks. Task-only
+feedback, unaccepted proposals, interim experiment rounds and live status do not
+become settled knowledge. The worker also renders accepted modes and Knowledge
+scope in governance. These changes preserve destination authority and do not add
+permission for external actions or settings changes. New Slack sessions follow
+the same policy; old stored Slack session instructions remain unchanged.
+
+Prompt-size review condensed Knowledge guidance from 941 to 317 words (6,686 to
+2,372 characters), keeping workflow details in tool descriptions. The accepted
+learning block supplies modes/scope without repeating the doctrine. Slack file
+guidance appears only when context contains files. Intentional legacy locks and
+the independent default-persona fixture are updated with this shared revision.
+
 ## Authoring rule
 
 With `capabilities: "all"`, renderer `opengeni`, and every resource present
