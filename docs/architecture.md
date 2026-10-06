@@ -1943,7 +1943,10 @@ owns SDK all-activity count/validity through drain. Original validity deadlines
 positive classification-stage completion and same-evaluation UID coverage
 fence the dedicated recording-rule pipeline. Rules, HPA selectors and adapter
 queries bind all five source identity labels; the adapter checks both
-final-series age and deadline companions, independently of request matchers.
+final-series age and same-evaluation, all-label-matched deadline companions
+before aggregation, independently of request matchers. Identity labels live
+on every recording rule, not the group; semantic fixtures cover Prometheus
+2.55.1 and 3.5.0 without claiming all engine/CRD versions are qualified.
 
 Procedures, provider requirements, activation and recovery: [`deployment.md`](deployment.md).
 Host ports/in-process composition: [`embedding.md`](embedding.md).

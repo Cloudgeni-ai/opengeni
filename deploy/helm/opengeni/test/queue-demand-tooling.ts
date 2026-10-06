@@ -21,13 +21,22 @@ async function download(url: string): Promise<Uint8Array> {
   return new Uint8Array(await response.arrayBuffer());
 }
 
-export async function testTool(name: "helm" | "promtool"): Promise<string> {
-  const explicit = process.env[`OPENGENI_${name.toUpperCase()}`] ?? Bun.which(name);
+export async function testTool(
+  name: "helm" | "promtool",
+  promtoolVersion?: "2.55.1" | "3.5.0",
+): Promise<string> {
+  if (promtoolVersion && name !== "promtool") throw new Error("Version override is promtool-only");
+  const override = promtoolVersion
+    ? `OPENGENI_PROMTOOL_${promtoolVersion.replaceAll(".", "_")}`
+    : `OPENGENI_${name.toUpperCase()}`;
+  // A generic PATH/override must not substitute a different engine for a
+  // versioned compatibility check. Specific overrides are checked by tests.
+  const explicit = process.env[override] ?? (promtoolVersion ? undefined : Bun.which(name));
   if (explicit) return explicit;
   if (process.platform !== "linux" || process.arch !== "x64") {
-    throw new Error(`Install ${name} on PATH or set OPENGENI_${name.toUpperCase()}`);
+    throw new Error(`Install ${name} or set ${override}`);
   }
-  const version = name === "helm" ? "3.19.0" : "3.5.0";
+  const version = name === "helm" ? "3.19.0" : (promtoolVersion ?? "3.5.0");
   const dir = join(tmpdir(), `opengeni-${name}-${version}-linux-amd64`);
   const binary = join(
     dir,

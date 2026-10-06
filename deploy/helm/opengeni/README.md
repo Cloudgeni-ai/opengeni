@@ -121,6 +121,9 @@ All Object metrics bind namespace/release/environment/Temporal namespace/queue;
 the adapter example must be rebound to that exact rendered source identity.
 Atomic completion evidence rejects empty-but-failed classification stages;
 queue producer observations expire at 45 seconds, other raw/activity TTLs at 60.
+Identity is declared per recording rule, tested with Prometheus 2.55.1 and 3.5.0.
+The adapter pairs each value with its same-evaluation expiry on all labels
+except the metric name before MAX aggregation, including HA cohorts.
 
 Run real Helm/schema and Prometheus rule fixtures with:
 

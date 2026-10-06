@@ -121,6 +121,13 @@ selection, independently of the legacy alerts' enabled switch. Confirm the
 Operator actually selects this new object. Helm requires the
 `monitoring.coreos.com/v1` API; offline renders must pass
 `--api-versions monitoring.coreos.com/v1`.
+The five identity labels are declared on **every recording rule**, not the
+group. This avoids the newer `group.labels` field and keeps explicit probe
+labels and atomic completion-marker labels intact. Source rule checks and
+semantic fixtures are tested with Prometheus **2.55.1 and 3.5.0**; this is not
+a blanket engine/Operator/CRD compatibility claim. Confirm the installed
+engine and CRD accept and evaluate the actual rendered rules; the Operator
+API capability alone is not runtime qualification.
 
 ## Freshness and completeness
 
@@ -198,8 +205,10 @@ source identity as well; request matchers alone are not sufficient because
 clients can omit them. The public fragment explicitly selects
 `namespace="opengeni", release="opengeni", environment="production",
 temporal_namespace="default", task_queue="opengeni-runs-ts-turns"`.
-Replace all five literals in **every** selector from the actual rendered
-worker-scaler group's labels before use. A partial request must select only
+Replace all five literals in **every** selector from the unanimous identity
+labels on **every rendered recording rule** before use. Do not infer identity
+from a group label or only one rule: validate all records against the HPA.
+A partial request must select only
 that source; a conflicting request must return absent, never another queue.
 Private source selection, maintenance capture/restore and runtime proof must
 retain those exact candidate-derived values. Do not combine different
@@ -212,6 +221,12 @@ ahead, as in the example. Require an identically labeled companion with
 `time() < validUntil <= time() + 65` (60-second TTL plus the five-second clock
 allowance). Missing, nonfinite, expired, unbounded-future or differently
 scoped deadlines cannot support demand, even with freshly timestamped values.
+Also require **equal value/companion sample timestamps**, matched on every
+label except `__name__`, **before aggregation**. An older value must not inherit
+a newer expiry, nor may a newly observed fleet inherit an older fleet's expiry.
+Matching only namespace, or comparing MAX timestamps after aggregation, can
+mix evaluations or disjoint HA cohorts. Both healthy positive counts and real
+zeros must retain their matching companion from the same evaluation.
 Prometheus's default lookback otherwise resurrects old demand after stalled
 or erroring rules. Empty series and Prometheus/adapter errors must stay
 missing/errors, not zero. Original-deadline checks and evaluation-stall checks
@@ -262,9 +277,14 @@ bun install --frozen-lockfile
 bun scripts/check-worker-queue-demand.ts
 ```
 
-Tests run actual Helm rendering/schema validation and official promtool on
-the **rendered** dedicated rules, not an extracted/reimplemented expression.
+Tests run actual Helm rendering/schema validation and official promtool
+**2.55.1 and 3.5.0** on the **rendered** dedicated rules, not an
+extracted/reimplemented expression. All semantic, completion, identity,
+pairing and expiry fixtures run on both engines.
 Linux x64 can download checksum-verified pinned test binaries; other platforms
-provide `OPENGENI_HELM` and `OPENGENI_PROMTOOL` or install them on PATH. Tests
+provide `OPENGENI_HELM`, `OPENGENI_PROMTOOL_2_55_1` and
+`OPENGENI_PROMTOOL_3_5_0`. The remaining chart checks use `OPENGENI_PROMTOOL`
+or PATH. Versioned compatibility checks never substitute a generic PATH
+binary for a pinned engine, and verify the reported versions. Tests
 must not silently skip Prometheus evaluation. These are local source proofs,
 not a production/staging deployment or recovery acceptance result.

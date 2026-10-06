@@ -3,7 +3,7 @@
 # connection and APIService/TLS values; this file installs nothing itself.
 # SOURCE-BOUND example identity: namespace/release opengeni, production,
 # Temporal default, opengeni-runs-ts-turns. Replace ALL five literals in discovery
-# and EVERY query selector with the actual rendered worker-scaler group.labels.
+# and EVERY query selector with the identity labels on EVERY rendered scaler rule.
 # Do not replace this fence with request-only LabelMatchers: partial API queries
 # must never select another environment/Temporal namespace/queue.
 rules:
@@ -29,12 +29,21 @@ rules:
         as: '${1}'
       # No lookback resurrection on stalled/evaluation-error rule groups.
       # An empty/error result must remain missing at custom.metrics, not zero.
+      # Pair value and expiry from the SAME evaluation and complete label cohort
+      # BEFORE aggregation. A fresh expiry cannot renew an older count, nor can
+      # an old expiry authorize a newly observed fleet. Do not join by namespace
+      # alone: disjoint HA/exporter series must never lend each other deadlines.
       metricsQuery: |
         max(
           <<.Series>>{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>} >= 0
           and <<.Series>>{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>} < +Inf
           and (time() - timestamp(<<.Series>>{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>}) < 30)
           and (time() - timestamp(<<.Series>>{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>}) >= -5)
+          and ignoring (__name__) (
+            timestamp(<<.Series>>{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>})
+            == ignoring (__name__)
+            timestamp(<<.Series>>_valid_until_timestamp_seconds{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>})
+          )
           and ignoring (__name__) (
             <<.Series>>_valid_until_timestamp_seconds{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>} > time()
             and <<.Series>>_valid_until_timestamp_seconds{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>} <= time() + 65

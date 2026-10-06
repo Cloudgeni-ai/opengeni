@@ -5,7 +5,17 @@ import { join, resolve } from "node:path";
 import { run, testTool } from "./queue-demand-tooling";
 
 const chart = resolve(import.meta.dir, "..");
-const tools = Promise.all([testTool("helm"), testTool("promtool")]);
+const tools = Promise.all([
+  testTool("helm"),
+  testTool("promtool", "3.5.0"),
+  testTool("promtool", "2.55.1"),
+]);
+async function checkPromtool(args: string[]) {
+  for (const binary of (await tools).slice(1)) {
+    const result = await run([binary, ...args]);
+    expect(result.code, `${binary}: ${result.stdout}${result.stderr}`).toBe(0);
+  }
+}
 const enabled = {
   fullnameOverride: "fixture",
   config: { OPENGENI_ENVIRONMENT: "fixture" },
@@ -81,9 +91,11 @@ describe("queue demand schema v1 actual Helm rendering", () => {
       expect(result.code, `${profile}: ${result.stderr}`).toBe(0);
       const group = find(result.manifests, "PrometheusRule", "fixture-worker-scaler").spec
         .groups[0];
+      expect(group.labels).toBeUndefined();
       const hpa = find(result.manifests, "HorizontalPodAutoscaler", "fixture-worker-turns").spec;
       for (const metric of hpa.metrics.filter((m: any) => m.type === "Object"))
-        expect(metric.object.metric.selector.matchLabels).toEqual(group.labels);
+        for (const rule of group.rules)
+          expect(metric.object.metric.selector.matchLabels).toEqual(rule.labels);
       expect(hpa.behavior.scaleDown.selectPolicy).toBe("Disabled");
     }
   }, 180_000);
@@ -169,13 +181,8 @@ describe("queue demand schema v1 actual Helm rendering", () => {
     });
     const rules = find(result.manifests, "PrometheusRule", "fixture-worker-scaler");
     expect(rules.spec.groups[0].interval).toBe("15s");
-    expect(rules.spec.groups[0].labels).toEqual({
-      namespace: "fixture",
-      release: "fixture",
-      environment: "fixture",
-      temporal_namespace: "default",
-      task_queue: "opengeni-runs-ts-turns",
-    });
+    expect(rules.spec.groups[0].labels).toBeUndefined();
+    for (const rule of rules.spec.groups[0].rules) expect(rule.labels).toEqual(identity);
     const monitor = find(result.manifests, "ServiceMonitor", "fixture-worker-turns");
     expect(monitor.spec.endpoints[0].relabelings).toContainEqual({
       sourceLabels: ["__meta_kubernetes_pod_uid"],
@@ -375,8 +382,307 @@ function inputs(
     .filter((input): input is Input => input !== null);
 }
 
+test("per-record identity and probe labels are compatible with pinned Prometheus 2.55.1 and 3.5.0", async () => {
+  const [, current, older] = await tools;
+  for (const [binary, version] of [
+    [current, "3.5.0"],
+    [older, "2.55.1"],
+  ]) {
+    const result = await run([binary!, "--version"]);
+    expect(result.code).toBe(0);
+    expect(result.stdout + result.stderr).toContain(`version ${version}`);
+  }
+  const rendered = await render(enabled);
+  expect(rendered.code, rendered.stderr).toBe(0);
+  const group = find(rendered.manifests, "PrometheusRule", "fixture-worker-scaler").spec.groups[0];
+  expect(group.labels).toBeUndefined();
+  expect(group.rules).toHaveLength(24);
+  for (const rule of group.rules) expect(rule.labels).toEqual(identity);
+  const dir = await mkdtemp(join(tmpdir(), "opengeni-queue-compatibility-"));
+  try {
+    // Reproduce the rejected historical shape: the 2.x engine does not accept
+    // group labels. The production render must not depend on that field.
+    await Bun.write(
+      join(dir, "unsupported-group.json"),
+      JSON.stringify({ groups: [{ ...group, labels: identity }] }),
+    );
+    const rejected = await run([older, "check", "rules", join(dir, "unsupported-group.json")]);
+    expect(rejected.code).not.toBe(0);
+    expect(rejected.stderr).toContain("field labels not found");
+    await Bun.write(
+      join(dir, "rules.json"),
+      JSON.stringify({
+        groups: [
+          {
+            ...group,
+            rules: [
+              ...group.rules,
+              {
+                record: "opengeni_worker_scaler_probe",
+                expr: `opengeni:worker_scaler:targets{${labelSet},scaler_stage_complete="true"}`,
+                labels: { ...identity, probe: "preserved" },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    await Bun.write(
+      join(dir, "fixtures.json"),
+      JSON.stringify({
+        rule_files: ["rules.json"],
+        evaluation_interval: "15s",
+        tests: [
+          {
+            name: "per-rule identity preserves explicit probe labels and atomic completion marker labels",
+            input_series: inputs(),
+            promql_expr_test: [
+              {
+                expr: `opengeni_worker_scaler_probe{${labelSet}}`,
+                eval_time: "2m",
+                exp_samples: [
+                  {
+                    labels: `{__name__="opengeni_worker_scaler_probe",${labelSet},probe="preserved",scaler_stage_complete="true"}`,
+                    value: 1,
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    await checkPromtool(["check", "rules", join(dir, "rules.json")]);
+    await checkPromtool(["test", "rules", join(dir, "fixtures.json")]);
+    console.info(
+      "Per-rule identity/probe/atomic-marker compatibility verified on promtool 2.55.1 and 3.5.0",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 180_000);
+
+test("actual adapter pairs value and original expiry by full label cohort and same evaluation BEFORE MAX on both engines", async () => {
+  const rendered = await render(enabled);
+  expect(rendered.code, rendered.stderr).toBe(0);
+  const group = find(rendered.manifests, "PrometheusRule", "fixture-worker-scaler").spec.groups[0];
+  const fragment = Bun.YAML.parse(
+    await Bun.file(join(chart, "prometheus-adapter.queue-demand.example.yaml")).text(),
+  ) as any;
+  const query = (metric: string) =>
+    bindAdapterSource(fragment.rules.custom[1].metricsQuery)
+      .replaceAll("<<.Series>>", metric)
+      .replaceAll("<<.LabelMatchers>>", labelSet)
+      .replaceAll("<<.GroupBy>>", "namespace");
+  const expected = (
+    expr: string,
+    time: string,
+    value?: number,
+    labels = '{namespace="fixture"}',
+  ) => ({
+    expr,
+    eval_time: time,
+    exp_samples: value === undefined ? [] : [{ labels, value }],
+  });
+  const dir = await mkdtemp(join(tmpdir(), "opengeni-queue-pairs-"));
+  try {
+    const tests: any[] = [];
+    for (const metric of [
+      "opengeni_turn_worker_queued",
+      "opengeni_turn_worker_demand",
+      "opengeni_turn_worker_busy",
+    ]) {
+      const value = (values: string, labels = labelSet) => ({
+        series: `${metric}{${labels}}`,
+        values,
+      });
+      const expiry = (values: string, labels = labelSet) => ({
+        series: `${metric}_valid_until_timestamp_seconds{${labels}}`,
+        values,
+      });
+      for (const count of [0, 11])
+        tests.push({
+          name: `${metric} preserves healthy ${count} same-evaluation cohort`,
+          input_series: [value(`${count}+0x30`), expiry("60+15x30")],
+          promql_expr_test: [expected(query(metric), "2m", count)],
+        });
+      tests.push(
+        {
+          name: `${metric} older value cannot inherit a fresh companion expiry`,
+          input_series: [value("_ _ _ 9 _ _ _ _ _"), expiry("_ _ _ 65 105 _ _ _ _")],
+          promql_expr_test: ["64s", "65s", "66s", "74s"].map((time) =>
+            expected(query(metric), time),
+          ),
+        },
+        {
+          name: `${metric} newer value cannot inherit an old companion expiry`,
+          input_series: [value("_ _ _ _ _ 9 _ _ _"), expiry("_ _ _ _ 120 _ _ _ _")],
+          promql_expr_test: ["79s", "80s", "85s"].map((time) => expected(query(metric), time)),
+        },
+        {
+          name: `${metric} aligned old cohort retains only its original expiry`,
+          input_series: [value("_ _ _ 9 _ _ _ _ _"), expiry("_ _ _ 65 _ _ _ _ _")],
+          promql_expr_test: [expected(query(metric), "64s", 9), expected(query(metric), "65s")],
+        },
+        {
+          name: `${metric} disjoint HA series cannot lend deadlines despite equal timestamps`,
+          input_series: [
+            value("9+0x30", `${labelSet},replica="a"`),
+            expiry("60+15x30", `${labelSet},replica="b"`),
+          ],
+          promql_expr_test: [expected(query(metric), "2m")],
+        },
+        {
+          name: `${metric} pair equality must filter cohorts BEFORE MAX, not aggregate timestamp equality`,
+          input_series: [
+            value("_ _ _ 999 _ _ _ _ _", `${labelSet},replica="a"`),
+            expiry("_ _ _ 65 105 _ _ _ _", `${labelSet},replica="a"`),
+            value("_ _ _ _ 11 _ _ _ _", `${labelSet},replica="b"`),
+            expiry("_ _ _ _ 105 _ _ _ _", `${labelSet},replica="b"`),
+          ],
+          promql_expr_test: [
+            expected(query(metric), "64s", 11),
+            expected(query(metric), "65s", 11),
+          ],
+        },
+        {
+          name: `${metric} extra companion label cannot weaken full-cohort matching`,
+          input_series: [value("9+0x30"), expiry("60+15x30", `${labelSet},replica="b"`)],
+          promql_expr_test: [expected(query(metric), "2m")],
+        },
+      );
+    }
+    await Bun.write(join(dir, "pairs.json"), JSON.stringify({ evaluation_interval: "15s", tests }));
+    await checkPromtool(["test", "rules", join(dir, "pairs.json")]);
+
+    // Reproduce the independently reviewed failure through the ACTUAL rules:
+    // omit the final value stage but keep raw reads/deadline stages evaluating.
+    for (const [index, metric] of [
+      "opengeni_turn_worker_queued",
+      "opengeni_turn_worker_demand",
+    ].entries()) {
+      const ruleFile = `old-value-${index}.rules.json`;
+      await Bun.write(
+        join(dir, ruleFile),
+        JSON.stringify({
+          groups: [{ ...group, rules: group.rules.filter((r: any) => r.record !== metric) }],
+        }),
+      );
+      const input = inputs({
+        mutate: (i) =>
+          i.series.startsWith("opengeni_turn_capacity_monitor_last_success")
+            ? { ...i, values: "20 20 20 20 60+15x26" }
+            : i.series.startsWith("opengeni_turn_eligible_backlog")
+              ? { ...i, values: `${i.values.split("+")[0]}+0x3 999+0x26` }
+              : i,
+      });
+      input.push({
+        series: `${metric}{${labelSet}}`,
+        values: `_ _ _ ${metric.endsWith("queued") ? 11 : 14} _ _ _ _ _ _`,
+      });
+      const fixture = join(dir, `old-value-${index}.json`);
+      await Bun.write(
+        fixture,
+        JSON.stringify({
+          rule_files: [ruleFile],
+          evaluation_interval: "15s",
+          tests: [
+            {
+              name: `${metric} a newly computed expiry cannot revive old value beyond original expiry65`,
+              input_series: input,
+              promql_expr_test: [
+                expected(
+                  `${metric}_valid_until_timestamp_seconds{${labelSet}}`,
+                  "45s",
+                  65,
+                  `{__name__="${metric}_valid_until_timestamp_seconds",${labelSet}}`,
+                ),
+                expected(
+                  `${metric}_valid_until_timestamp_seconds{${labelSet}}`,
+                  "60s",
+                  105,
+                  `{__name__="${metric}_valid_until_timestamp_seconds",${labelSet}}`,
+                ),
+                ...["64s", "65s", "66s", "74s"].map((time) => expected(query(metric), time)),
+              ],
+            },
+          ],
+        }),
+      );
+      await checkPromtool(["test", "rules", fixture]);
+    }
+    const busyInput = inputs({
+      mutate: (i) =>
+        i.series.startsWith("kube_deployment_status_replicas")
+          ? { ...i, values: "2+0x4 3+0x25" }
+          : i,
+    });
+    for (const i of inputs().filter((candidate) =>
+      candidate.series.includes('pod="fixture-worker-turns-a"'),
+    )) {
+      busyInput.push({
+        series: i.series
+          .replaceAll("fixture-worker-turns-a", "fixture-worker-turns-c")
+          .replaceAll("uid-a", "uid-c")
+          .replaceAll('instance="a"', 'instance="c"'),
+        values: i.series.includes("timestamp_seconds")
+          ? "_ _ _ _ _ 20+15x25"
+          : i.series.startsWith("opengeni_turn_worker_activities_inflight")
+            ? "_ _ _ _ _ 0+0x25"
+            : `_ _ _ _ _ ${i.values.split("+")[0]}+0x25`,
+      });
+    }
+    busyInput.push({
+      series: `opengeni_turn_worker_busy_valid_until_timestamp_seconds{${labelSet}}`,
+      values: "_ _ _ _ 120 _ _ _ _ _",
+    });
+    await Bun.write(
+      join(dir, "old-busy.rules.json"),
+      JSON.stringify({
+        groups: [
+          {
+            ...group,
+            rules: group.rules.filter(
+              (r: any) => r.record !== "opengeni_turn_worker_busy_valid_until_timestamp_seconds",
+            ),
+          },
+        ],
+      }),
+    );
+    await Bun.write(
+      join(dir, "old-busy.json"),
+      JSON.stringify({
+        rule_files: ["old-busy.rules.json"],
+        evaluation_interval: "15s",
+        tests: [
+          {
+            name: "new fleet expiry80 cannot inherit old companion expiry120",
+            input_series: busyInput,
+            promql_expr_test: [
+              expected(
+                `opengeni:worker_scaler:fleet_valid_until{${labelSet}}`,
+                "75s",
+                80,
+                `{__name__="opengeni:worker_scaler:fleet_valid_until",${labelSet}}`,
+              ),
+              ...["79s", "80s", "85s"].map((time) =>
+                expected(query("opengeni_turn_worker_busy"), time),
+              ),
+            ],
+          },
+        ],
+      }),
+    );
+    await checkPromtool(["test", "rules", join(dir, "old-busy.json")]);
+    console.info(
+      `Validated ${tests.length} same-evaluation/all-label pair controls plus3 actual-rule mismatch counterexamples on both engines`,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 240_000);
+
 test("actual rendered promtool fixtures: complete identity, MAX, failure, rollout, drain, true zero and stalls", async () => {
-  const [, promtool] = await tools;
   const rendered = await render(enabled);
   expect(rendered.code, rendered.stderr).toBe(0);
   const groups = find(rendered.manifests, "PrometheusRule", "fixture-worker-scaler").spec.groups;
@@ -975,18 +1281,17 @@ test("actual rendered promtool fixtures: complete identity, MAX, failure, rollou
       join(dir, "fixtures.json"),
       JSON.stringify({ rule_files: ["rules.json"], evaluation_interval: "15s", tests: scenarios }),
     );
-    const checked = await run([promtool, "check", "rules", join(dir, "rules.json")]);
-    expect(checked.code, checked.stdout + checked.stderr).toBe(0);
-    const result = await run([promtool, "test", "rules", join(dir, "fixtures.json")]);
-    expect(result.code, result.stdout + result.stderr).toBe(0);
-    console.info(`Validated ${scenarios.length} rendered-rule edge fixtures with real promtool`);
+    await checkPromtool(["check", "rules", join(dir, "rules.json")]);
+    await checkPromtool(["test", "rules", join(dir, "fixtures.json")]);
+    console.info(
+      `Validated ${scenarios.length} rendered-rule edge fixtures on promtool 2.55.1 and 3.5.0`,
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 }, 240_000);
 
 test("atomic positive stage completion and exact intermediate identity resist independent review counterexamples", async () => {
-  const [, promtool] = await tools;
   const rendered = await render(enabled);
   expect(rendered.code, rendered.stderr).toBe(0);
   const group = find(rendered.manifests, "PrometheusRule", "fixture-worker-scaler").spec.groups[0];
@@ -1072,8 +1377,7 @@ test("atomic positive stage completion and exact intermediate identity resist in
         fixture,
         JSON.stringify({ rule_files: [ruleFile], evaluation_interval: "15s", tests }),
       );
-      const result = await run([promtool, "test", "rules", fixture]);
-      expect(result.code, result.stdout + result.stderr).toBe(0);
+      await checkPromtool(["test", "rules", fixture]);
     }
     await Bun.write(join(dir, "rules.json"), JSON.stringify({ groups: [group] }));
     const foreignTests = Object.keys(identity).flatMap((key) =>
@@ -1113,10 +1417,9 @@ test("atomic positive stage completion and exact intermediate identity resist in
         tests: foreignTests,
       }),
     );
-    const result = await run([promtool, "test", "rules", join(dir, "foreign.json")]);
-    expect(result.code, result.stdout + result.stderr).toBe(0);
+    await checkPromtool(["test", "rules", join(dir, "foreign.json")]);
     console.info(
-      `Validated ${omissionCases} actual stage omission/stall cases and ${foreignTests.length} foreign-record identity cases`,
+      `Validated ${omissionCases} stage omission/stall cases and ${foreignTests.length} foreign-record cases on both engines`,
     );
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -1124,7 +1427,6 @@ test("atomic positive stage completion and exact intermediate identity resist in
 }, 240_000);
 
 test("real adapter query and inter-stage dependency fences reject evaluation stalls, errors and future samples", async () => {
-  const [, promtool] = await tools;
   const rendered = await render(enabled);
   expect(rendered.code, rendered.stderr).toBe(0);
   const group = find(rendered.manifests, "PrometheusRule", "fixture-worker-scaler").spec.groups[0];
@@ -1271,17 +1573,27 @@ test("real adapter query and inter-stage dependency fences reject evaluation sta
             ],
             promql_expr_test: [
               queryTest(
-                query.replaceAll(
-                  `opengeni_turn_worker_queued{${labelSet},${labelSet}}`,
-                  `opengeni_turn_worker_queued{${labelSet},${labelSet}} @ 120`,
-                ),
+                query
+                  .replaceAll(
+                    `opengeni_turn_worker_queued{${labelSet},${labelSet}}`,
+                    `opengeni_turn_worker_queued{${labelSet},${labelSet}} @ 120`,
+                  )
+                  .replaceAll(
+                    `opengeni_turn_worker_queued_valid_until_timestamp_seconds{${labelSet},${labelSet}}`,
+                    `opengeni_turn_worker_queued_valid_until_timestamp_seconds{${labelSet},${labelSet}} @ 120`,
+                  ),
                 "110s",
               ),
               queryTest(
-                query.replaceAll(
-                  `opengeni_turn_worker_queued{${labelSet},${labelSet}}`,
-                  `opengeni_turn_worker_queued{${labelSet},${labelSet}} @ 120`,
-                ),
+                query
+                  .replaceAll(
+                    `opengeni_turn_worker_queued{${labelSet},${labelSet}}`,
+                    `opengeni_turn_worker_queued{${labelSet},${labelSet}} @ 120`,
+                  )
+                  .replaceAll(
+                    `opengeni_turn_worker_queued_valid_until_timestamp_seconds{${labelSet},${labelSet}}`,
+                    `opengeni_turn_worker_queued_valid_until_timestamp_seconds{${labelSet},${labelSet}} @ 120`,
+                  ),
                 "115s",
                 9,
               ),
@@ -1327,7 +1639,7 @@ test("real adapter query and inter-stage dependency fences reject evaluation sta
               { series: `opengeni_turn_worker_queued{${labelSet}}`, values: "9+0x30" },
               deadlineInput("60 _ _ _ _ _ _ _ _ _"),
             ],
-            promql_expr_test: [queryTest(query, "15s", 9), queryTest(query, "30s")],
+            promql_expr_test: [queryTest(query, "15s"), queryTest(query, "30s")],
           },
           {
             name: "deadline requires identical Temporal identity",
@@ -1344,8 +1656,7 @@ test("real adapter query and inter-stage dependency fences reject evaluation sta
         ],
       }),
     );
-    const adapter = await run([promtool, "test", "rules", join(dir, "adapter.json")]);
-    expect(adapter.code, adapter.stdout + adapter.stderr).toBe(0);
+    await checkPromtool(["test", "rules", join(dir, "adapter.json")]);
     // The adapter must respect the ORIGINAL producer expiry between the 15s
     // evaluations, even while the latest final count is still freshly recorded.
     // Exercise real rendered raw->rules->adapter, not synthetic final records.
@@ -1417,13 +1728,7 @@ test("real adapter query and inter-stage dependency fences reject evaluation sta
         ],
       }),
     );
-    const producerExpiry = await run([
-      promtool,
-      "test",
-      "rules",
-      join(dir, "producer-expiry.json"),
-    ]);
-    expect(producerExpiry.code, producerExpiry.stdout + producerExpiry.stderr).toBe(0);
+    await checkPromtool(["test", "rules", join(dir, "producer-expiry.json")]);
     // An earlier recording stage can fail while the final stage keeps running.
     // Use the rendered final rule unchanged to prove it cannot re-timestamp an
     // expired upstream sample forever. Raw stages have the same helper fence.
@@ -1490,8 +1795,7 @@ test("real adapter query and inter-stage dependency fences reject evaluation sta
         ],
       }),
     );
-    const stages = await run([promtool, "test", "rules", join(dir, "stages.json")]);
-    expect(stages.code, stages.stdout + stages.stderr).toBe(0);
+    await checkPromtool(["test", "rules", join(dir, "stages.json")]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
