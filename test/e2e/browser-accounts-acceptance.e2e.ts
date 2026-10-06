@@ -41,6 +41,10 @@ import {
 import { createApp } from "../../apps/api/src/app";
 import { withAccountMenuAxeDiagnostics } from "./browser-account-axe-diagnostics";
 import { createAccountReadDiagnostics } from "./browser-account-read-diagnostics";
+import {
+  createFiniteReviewReadDiagnostics,
+  type FiniteReviewDiagnosticsWindow,
+} from "./browser-account-finite-review-diagnostics";
 import { observeReloadCapabilities } from "./browser-account-reload-barrier";
 import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
 import {
@@ -5072,9 +5076,13 @@ describe("provider-neutral browser account acceptance", () => {
       organizationName: "Review Reader Organization",
     });
     const browser = await launchAccountBrowser(requestedEngine as EngineName);
+    let diagnostics: ReturnType<typeof createFiniteReviewReadDiagnostics> | undefined;
     try {
       const page = await browser.newPage();
       const problems = observeBrowser(page);
+      diagnostics = createFiniteReviewReadDiagnostics(page);
+      await diagnostics.install();
+      diagnostics.mark(null, "sign-in");
       setBrowserPhase(problems, "primary-set-sign-in");
       await signIn(page, reviewAccount);
       await waitForFiniteReadQuiescence(problems);
@@ -5083,17 +5091,27 @@ describe("provider-neutral browser account acceptance", () => {
       // must reach a native terminal before another poll; no routing, fetch
       // replacement, navigation, or cancellation exemption is involved.
       for (let i = 0; i < 100; i++) {
+        diagnostics.mark(i, "response-wait");
         const pending = page.waitForResponse((response) =>
           response.url().endsWith("/knowledge/entries/search"),
         );
-        await page.evaluate(() =>
-          window.dispatchEvent(new Event("opengeni:knowledge-review-updated")),
-        );
+        await page.evaluate((iteration) => {
+          (
+            window as FiniteReviewDiagnosticsWindow
+          ).__opengeniFiniteReviewReadDiagnostics?.markIteration(iteration);
+          return window.dispatchEvent(new Event("opengeni:knowledge-review-updated"));
+        }, i);
         const response = await pending;
+        diagnostics.mark(i, "response-assertion");
         expect(response.status()).toBe(200);
+        diagnostics.mark(i, "quiescence");
         await waitForFiniteReadQuiescence(problems);
       }
+      diagnostics.mark(null, "browser-assertion");
       await expectNoBrowserProblems(problems);
+    } catch (error) {
+      if (diagnostics) await diagnostics.rethrowFailure(error);
+      throw error;
     } finally {
       await browser.close();
     }
