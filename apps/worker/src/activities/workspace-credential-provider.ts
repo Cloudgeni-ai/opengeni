@@ -6,6 +6,7 @@ import {
   type CredentialProviderRequest,
   type RunCredentialsRequest,
   type RunCredentialsResolution,
+  type SandboxV2CredentialProviderSelection,
 } from "@opengeni/contracts";
 import {
   decryptEnvironmentValue,
@@ -26,9 +27,14 @@ export class CredentialProviderError extends Error {
   }
 }
 
-export type WorkspaceRunCredentialResolver = (
+export type WorkspaceRunCredentialResolver = ((
   input: RunCredentialsRequest,
-) => Promise<RunCredentialsResolution>;
+) => Promise<RunCredentialsResolution>) & {
+  readonly binding?: Exclude<
+    SandboxV2CredentialProviderSelection,
+    { kind: "host" } | { kind: "none" }
+  >;
+};
 
 type ProviderOk = Extract<CredentialProviderResponse, { status: "ok" }>;
 
@@ -107,6 +113,8 @@ export function credentialProviderRequestBody(
     initiatingHumanSubjectId,
     initiatingHuman,
     sandboxBackend: input.effectiveSandboxBackend,
+    ...(input.sandboxEngine ? { sandboxEngine: input.sandboxEngine } : {}),
+    ...(input.machineProvider ? { machineProvider: input.machineProvider } : {}),
     sandboxOs: input.sandboxOs,
   };
 }
@@ -173,15 +181,29 @@ export async function workspaceCredentialProviderResolver(
 ): Promise<WorkspaceRunCredentialResolver | null> {
   const row = await (deps.resolveProvider ?? resolveWorkspaceCredentialProvider)(db, scope);
   if (!row) return null;
+  const binding = {
+    kind:
+      "workspaceId" in row && row.workspaceId !== null
+        ? ("workspace" as const)
+        : ("organization" as const),
+    id: row.id,
+    enabled: row.enabled,
+  };
+  const bound = (resolver: WorkspaceRunCredentialResolver): WorkspaceRunCredentialResolver =>
+    Object.defineProperty(resolver, "binding", {
+      value: Object.freeze(binding),
+      enumerable: false,
+      writable: false,
+    });
   if (!row.enabled) {
     // A disabled workspace override is an explicit pause, not an absent
     // provider. Return a resolver so the deployment port cannot be borrowed.
-    return async (input) => ({
+    return bound(async (input) => ({
       status: "not_applicable",
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
-    });
+    }));
   }
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
@@ -198,7 +220,7 @@ export async function workspaceCredentialProviderResolver(
         : ("organization" as const),
     mcpServers: (deps.mcpServers ?? []).map(({ id, url }) => ({ id, url })),
   };
-  return async (input) => {
+  return bound(async (input) => {
     const echo = {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -253,7 +275,7 @@ export async function workspaceCredentialProviderResolver(
       return failure(input, echo, "returned an invalid response body");
     }
     return toRunCredentialsResolution(parsed, echo);
-  };
+  });
 }
 
 function errorName(error: unknown): string {

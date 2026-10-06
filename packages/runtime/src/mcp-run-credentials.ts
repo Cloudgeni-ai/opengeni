@@ -42,6 +42,7 @@ export class RunMcpCredentials {
   #remoteTargets: readonly RunMcpCredentialTarget[] | undefined;
   readonly #now: () => number;
   #closed = false;
+  #generation: { attemptId: string; generationId: string; ordinal: number } | null = null;
   readonly #onAbort = () => this.close();
 
   constructor(
@@ -60,6 +61,7 @@ export class RunMcpCredentials {
     this.#closed = true;
     this.#entries.clear();
     this.#managed.clear();
+    this.#generation = null;
     this.#signal?.removeEventListener("abort", this.#onAbort);
   }
 
@@ -70,6 +72,21 @@ export class RunMcpCredentials {
 
   /** Validate a complete replacement before changing any live request headers. */
   prepare(material: RunMcpCredentialMaterial | null): () => void {
+    this.#assertOpen();
+    if (this.#generation)
+      throw new RunMcpCredentialError("Ordered run MCP credentials require their generation owner");
+    const commit = this.#prepare(material);
+    return () => {
+      this.#assertOpen();
+      if (this.#generation)
+        throw new RunMcpCredentialError(
+          "Ordered run MCP credentials require their generation owner",
+        );
+      commit();
+    };
+  }
+
+  #prepare(material: RunMcpCredentialMaterial | null): () => void {
     this.#assertOpen();
     const next = new Map<string, { headers: Record<string, string>; expiresAt: number | null }>();
     const parsed = CredentialProviderMcpMaterial.safeParse(
@@ -140,6 +157,39 @@ export class RunMcpCredentials {
 
   replace(material: RunMcpCredentialMaterial | null): void {
     this.prepare(material)();
+  }
+
+  /** One attempt-owned ordered activation stream. A delayed observer's older
+   * notification cannot replace newer headers in the SAME host controller.
+   * This grants no mint/request authority; the lifecycle owner supplies only
+   * activated immutable generations after normal resource/attempt checks. */
+  replaceGeneration(
+    input: { attemptId: string; generationId: string; ordinal: number },
+    material: RunMcpCredentialMaterial | null,
+  ): boolean {
+    this.#assertOpen();
+    if (
+      [input.attemptId, input.generationId].some(
+        (value) =>
+          typeof value !== "string" || !value || value.length > 512 || value.includes("\0"),
+      ) ||
+      !Number.isSafeInteger(input.ordinal) ||
+      input.ordinal < 0
+    )
+      throw new RunMcpCredentialError("Run MCP credential generation identity is invalid");
+    if (this.#generation) {
+      if (input.attemptId !== this.#generation.attemptId)
+        throw new RunMcpCredentialError("Run MCP credential attempt changed");
+      if (input.ordinal < this.#generation.ordinal) return false;
+      if (input.ordinal === this.#generation.ordinal) {
+        if (input.generationId !== this.#generation.generationId)
+          throw new RunMcpCredentialError("Run MCP credential generation changed");
+        return true;
+      }
+    }
+    this.#prepare(material)();
+    this.#generation = { ...input };
+    return true;
   }
 
   /** Refuse credentials for native, omitted, local, or rewritten server routes. */

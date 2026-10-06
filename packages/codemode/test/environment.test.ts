@@ -39,6 +39,68 @@ function definition(
 }
 
 describe("AttemptToolEnvironment", () => {
+  test("native model operations retain identity across observers and recheck authority", async () => {
+    const operations: string[] = [];
+    let allowed = true;
+    let authorizations = 0;
+    const build = (attemptId = scope.attemptId, stableModelOperations = true) =>
+      createAttemptToolEnvironment({
+        scope: { ...scope, attemptId },
+        generation: 1,
+        stableModelOperations,
+        definitions: [
+          definition("files", "read", async (_args, context) => {
+            operations.push(context.operationId);
+            return { content: [{ type: "text", text: "read" }] };
+          }),
+        ],
+        authorize: () => {
+          authorizations++;
+          if (!allowed) throw new Error("Synthetic authority withdrawn");
+        },
+      });
+    const call = {
+      modelName: "files__read",
+      sourceCallId: "accepted-sdk-call",
+      arguments: {},
+      subjectId: "synthetic-model",
+    };
+    await build().callModel(call);
+    await build().callModel(call);
+    expect(operations[1]).toBe(operations[0]);
+    await build().callModel({ ...call, sourceCallId: "next-sdk-call" });
+    await build("66666666-6666-4666-8666-666666666666").callModel(call);
+    expect(new Set(operations).size).toBe(3);
+    allowed = false;
+    await expect(build().callModel(call)).rejects.toThrow("Synthetic authority withdrawn");
+    expect(authorizations).toBe(5);
+    expect(operations).toHaveLength(4);
+    await expect(
+      build().callModel({
+        modelName: call.modelName,
+        arguments: call.arguments,
+        subjectId: call.subjectId,
+      }),
+    ).rejects.toThrow("accepted SDK call identity");
+    await expect(
+      build().callModel({ ...call, operationId: "77777777-7777-4777-8777-777777777777" }),
+    ).rejects.toThrow("operation identity changed");
+    const approvalRequired = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      stableModelOperations: true,
+      definitions: [{ ...definition("files", "read"), approval: "human" }],
+      confirmModelApproval: () => false,
+    });
+    await expect(approvalRequired.callModel(call)).rejects.toBeInstanceOf(
+      AttemptToolApprovalRequiredError,
+    );
+    allowed = true;
+    await build(scope.attemptId, false).callModel(call);
+    await build(scope.attemptId, false).callModel(call);
+    expect(operations[4]).not.toBe(operations[5]);
+  });
+
   test("binds a deterministic digest to exact attempt scope and tool catalog", () => {
     const createdAt = new Date("2026-08-09T12:00:00.000Z");
     const first = createAttemptToolEnvironment({

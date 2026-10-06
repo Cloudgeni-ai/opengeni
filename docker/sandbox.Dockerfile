@@ -49,10 +49,12 @@ RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/carg
     --mount=type=cache,id=opengeni-sandbox-cargo-target-${TARGETPLATFORM},target=/src/agent/target,sharing=locked \
     set -eux; \
     rust_target="$(xx-cargo --print-target-triple)"; \
-    xx-cargo build --locked --release --target-dir /src/agent/target -p opengeni-computer-native; \
+    xx-cargo build --locked --release --target-dir /src/agent/target -p opengeni-computer-native -p opengeni-run; \
     mkdir -p /out; \
     install -m 0755 "target/${rust_target}/release/opengeni-computer-native" /out/opengeni-computer-native; \
-    xx-verify /out/opengeni-computer-native
+    install -m 0755 "target/${rust_target}/release/opengeni-run" /out/opengeni-run; \
+    xx-verify /out/opengeni-computer-native; \
+    xx-verify /out/opengeni-run
 
 # The command supervisor shares the existing native cross-toolchain and target
 # ABI verification. It has no runtime beyond libc and never routes user output
@@ -228,6 +230,10 @@ RUN set -eux; \
 
 COPY --from=computer-native-build /out/opengeni-computer-native /out/opengeni-computer-native
 COPY --from=computer-native-build /out/opengeni-command-supervisor /out/opengeni-command-supervisor
+COPY --from=computer-native-build /out/opengeni-run /out/opengeni-run
+RUN printf '%s  %s\n' \
+      "$(sha256sum /out/opengeni-run | awk '{print $1}')" \
+      /usr/local/bin/opengeni-run >> /out/SHA256SUMS
 RUN printf '%s  %s\n' \
       "$(sha256sum /out/opengeni-command-supervisor | awk '{print $1}')" \
       /usr/local/bin/opengeni-command-supervisor \
@@ -540,6 +546,7 @@ COPY --from=browserd-build /out/agent-browser /usr/local/lib/opengeni/agent-brow
 COPY --from=browserd-build /out/lightpanda /usr/local/lib/opengeni/lightpanda
 COPY --from=browserd-build /out/opengeni-computer-native /usr/local/lib/opengeni/opengeni-computer-native
 COPY --from=browserd-build /out/opengeni-command-supervisor /usr/local/bin/opengeni-command-supervisor
+COPY --from=browserd-build /out/opengeni-run /usr/local/bin/opengeni-run
 COPY --from=browserd-build /out/lightpanda-LICENSE /usr/local/share/licenses/lightpanda/LICENSE
 COPY --from=browserd-build /out/lightpanda-0.3.5-source.tar.gz /usr/local/share/source/lightpanda-0.3.5.tar.gz
 COPY --from=browserd-build /out/SHA256SUMS /usr/local/share/opengeni/browserd-SHA256SUMS

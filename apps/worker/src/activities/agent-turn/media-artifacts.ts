@@ -35,6 +35,8 @@ import {
 } from "../retained-screenshots";
 import { objectStorageForSandboxDownloads } from "./file-resources";
 import type { TurnEventPublisher } from "./model-usage";
+import type { SandboxRuntimeState } from "./turn-context";
+import { materializeNativeGeneratedImage } from "./native-generated-image";
 
 export type NativeImageGenerationRetention = {
   providerId: string;
@@ -58,6 +60,7 @@ export type TurnMediaArtifactDeps = {
   toolCancellationFenceRef: { current: TurnToolCancellationFence | null };
   getResolvedSandbox: () => ResumedTurnSandbox | null;
   getSetupBoxSession: () => unknown;
+  getNativeTurn: () => SandboxRuntimeState["nativeTurn"];
   getSandboxGroupId: () => string | null;
   runWorkspaceMutation: <T>(
     sandbox: ResumedTurnSandbox,
@@ -71,6 +74,7 @@ export class TurnMediaArtifacts {
   modelCanReceiveRetainedSessionImages = true;
   readonly generatedImageReceiptsByProviderItemId = new Map<string, GeneratedImageReceipt>();
   readonly generatedImageReceiptsCreatedThisTurn = new Map<string, GeneratedImageReceipt>();
+  private readonly pendingNativeGeneratedImageMaterialization = new Set<string>();
   private generatedImageMaterializationCache: {
     instanceId: string;
     fileIds: Set<string>;
@@ -213,6 +217,24 @@ export class TurnMediaArtifacts {
   };
 
   materializeGeneratedImage = async (receipt: GeneratedImageReceipt): Promise<boolean> => {
+    const nativeTurn = this.deps.getNativeTurn();
+    if (nativeTurn) {
+      try {
+        if (!this.deps.objectStorage)
+          throw new Error("Generated image sandbox materialization requires object storage");
+        await materializeNativeGeneratedImage(
+          this.deps.db,
+          nativeTurn,
+          this.deps.objectStorage,
+          receipt,
+        );
+        this.pendingNativeGeneratedImageMaterialization.delete(receipt.artifact.artifactId);
+        return true;
+      } catch (error) {
+        this.warnGeneratedImageMaterializationDeferred(error);
+        return false;
+      }
+    }
     if (this.sandboxFileDownloadBackend === "none") return false;
     const resolvedSandbox = this.deps.getResolvedSandbox();
     const setupBoxSession = this.deps.getSetupBoxSession();
@@ -237,7 +259,11 @@ export class TurnMediaArtifacts {
   ): Promise<GeneratedImageReceipt> => {
     if (output.providerItemId) {
       const existing = this.generatedImageReceiptsByProviderItemId.get(output.providerItemId);
-      if (existing) return existing;
+      if (existing) {
+        if (this.pendingNativeGeneratedImageMaterialization.has(existing.artifact.artifactId))
+          await this.materializeGeneratedImage(existing);
+        return existing;
+      }
     }
     const context = this.nativeImageGenerationRetention;
     if (!context || !output.providerItemId) {
@@ -258,6 +284,8 @@ export class TurnMediaArtifacts {
     });
     this.generatedImageReceiptsByProviderItemId.set(output.providerItemId, retained.receipt);
     this.rememberGeneratedImageCreatedThisTurn(retained.receipt);
+    if (this.deps.getNativeTurn())
+      this.pendingNativeGeneratedImageMaterialization.add(retained.receipt.artifact.artifactId);
     await this.materializeGeneratedImage(retained.receipt);
     return retained.receipt;
   };
@@ -277,6 +305,13 @@ export class TurnMediaArtifacts {
         continue;
       }
       await this.retainNativeGeneratedImage(output);
+    }
+    // A retained hosted receipt can precede a temporarily deferred native
+    // download. Retry only this turn's pending original deliveries; history
+    // never creates a new image or adopts an older turn's artifact.
+    for (const artifactId of [...this.pendingNativeGeneratedImageMaterialization]) {
+      const receipt = this.generatedImageReceiptsCreatedThisTurn.get(artifactId);
+      if (receipt) await this.materializeGeneratedImage(receipt);
     }
     assertGeneratedImageHistoryRetained(history, this.generatedImageReceiptsByProviderItemId);
   };

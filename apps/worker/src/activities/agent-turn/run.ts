@@ -5,7 +5,9 @@ import {
   loadClaudeSubscriptionUsageCredential,
   resolveClaudeSubscriptionCredential,
   ClaudeSubscriptionReconnectRequired,
+  readSandboxSessionEngineRoute,
 } from "@opengeni/db";
+import { prepareNativeTurnSandbox } from "./native-preparation";
 import { routingEnabled } from "../../sandbox-routing";
 import { resolveAgentToolFamilies } from "@opengeni/contracts";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
@@ -191,6 +193,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       entitlements,
       connectionCredentials,
       personalGitHubCredentials,
+      sandboxV2ControlProviders,
       startVideoGenerationWorkflow,
     } = resolvedServices;
     const activityContext = currentActivityContext();
@@ -332,6 +335,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       toolCancellationFenceRef: eventing.toolCancellationFenceRef,
       getResolvedSandbox: () => sandboxState.resolvedSandbox,
       getSetupBoxSession: () => sandboxState.setupBoxSession,
+      getNativeTurn: () => sandboxState.nativeTurn,
       getSandboxGroupId: () => sandboxState.sandboxGroupId,
       runWorkspaceMutation: runWorkspaceMutationForSandbox,
     });
@@ -1126,128 +1130,315 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
           const knowledgeSourcePreparationNote = knowledgeRecoveryNote;
 
-          const sandboxRoute = await resolveSandboxRoute({
-            input,
-            settings,
-            db,
-            eventing,
-            sandboxState,
-            media,
-            fileAuthoritySubjectId,
-            runSettings,
-            logicalSandboxSettings,
-          });
-          const {
-            routingOn,
-            activeSandboxBackend,
-            machinePrimary,
-            groupBoxBackend,
-            sandboxCreationBackend,
-            effectiveRunCredentialBackend,
-          } = sandboxRoute;
-
-          // A bare github.com repository URI (API caller, older session, or an
-          // agent-spawned child inheriting its parent's resources) resolves to
-          // the workspace's GitHub App binding here, before credential minting
-          // and the runtime clone plan derive binding ids from the same resource
-          // set. A Connected Machine receives no platform Git credential, so its
-          // resources stay exactly as stored. Resolution never fails the turn;
-          // an unusable bound repository stays bare and is reported visibly.
-          const hasCredentialProvider =
-            activeSandboxBackend !== "selfhosted" &&
-            (
-              await waitForTurnOperation(
-                getWorkspaceCredentialProvider(db, {
+          const sandboxPreparation = await (async () => {
+            const engineRoute = await waitForTurnOperation(
+              readSandboxSessionEngineRoute(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+              }),
+              cancellationSignal,
+              undefined,
+            );
+            if (engineRoute.engine === "machine-v2") {
+              const runCredentials = await prepareNativeTurnSandbox({
+                context: {
+                  db,
+                  settings: runSettings,
                   accountId: input.accountId,
                   workspaceId: input.workspaceId,
-                }),
-                cancellationSignal,
-                undefined,
-              )
-            )?.enabled === true;
-          const boundResources = await waitForTurnOperation(
-            applyTurnGitHubRepositoryBindings({
+                  session,
+                  turn,
+                  attemptId: input.attemptId,
+                  variableSet: workspaceVariableSet
+                    ? { id: workspaceVariableSet.id, name: workspaceVariableSet.name }
+                    : null,
+                  initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
+                  localMcpServerIds: installedApiIntegrations.map(
+                    (integration) => integration.serverId,
+                  ),
+                  effectiveTools: turnTools,
+                  connectionCredentials: connectionCredentials ?? null,
+                },
+                providers: sandboxV2ControlProviders,
+                settings,
+                objectStorage,
+                bus,
+                sandboxState,
+                eventing,
+                renewals,
+                runtimeResources: claimedRuntimeResources,
+                mcpAccountBindings: turn.mcpAccountBindings,
+                workspaceEnvironment: sandboxWorkspaceEnvironmentValues,
+                rigVersion,
+                hasGeneratedVideoInputs: requiredGeneratedVideoFiles.length > 0,
+                signal: runtimeCancellationSignal,
+              });
+              return {
+                kind: "native" as const,
+                runCredentials,
+                routingOn: false,
+                activeSandboxBackend: undefined,
+                groupBoxBackend: "none" as const,
+                turnResources: claimedTurnResources,
+                runtimeResources: claimedRuntimeResources,
+                retainsOptionalRepository: () => true,
+                fileResourceDownloads: [] as SandboxFileDownload[],
+              };
+            }
+            const sandboxRoute = await resolveSandboxRoute({
+              input,
+              settings,
               db,
-              settings: runSettings,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
+              eventing,
+              sandboxState,
+              media,
+              fileAuthoritySubjectId,
+              runSettings,
+              logicalSandboxSettings,
+            });
+            const {
+              routingOn,
               activeSandboxBackend,
-              hasCredentialProvider,
-              claimedTurnResources,
-              claimedRuntimeResources,
-              publish: async (events) => {
-                await eventing.publish!(events, true);
-              },
-              warn: (message, fields) => observability.warn(message, fields),
-            }),
-            cancellationSignal,
-            undefined,
-          );
-          // An automatically attached (optional) repository that lost its
-          // allowlist entry or its GitHub App access since the session started
-          // sits this turn out with a warning, before the strict allowlist
-          // recheck and token mint below would fail the whole turn for it.
-          const {
-            turnResources,
-            runtimeResources,
-            retainsResource: retainsOptionalRepository,
-          } = await waitForTurnOperation(
-            dropUnavailableOptionalRepositories({
-              db,
-              settings: runSettings,
-              workspaceId: input.workspaceId,
-              activeSandboxBackend,
-              hostMintsGitCredentials: Boolean(connectionCredentials?.gitCredentials),
-              turnResources: boundResources.turnResources,
-              runtimeResources: boundResources.runtimeResources,
-              publish: async (events) => {
-                await eventing.publish!(events, true);
-              },
-              warn: (message, fields) => observability.warn(message, fields),
-            }),
-            cancellationSignal,
-            undefined,
-          );
+              machinePrimary,
+              groupBoxBackend,
+              sandboxCreationBackend,
+              effectiveRunCredentialBackend,
+            } = sandboxRoute;
 
-          const runCredentials = await prepareRunCredentials({
-            turnTools,
-            localMcpServerIds: installedApiIntegrations.map((integration) => integration.serverId),
-            input,
-            settings,
-            db,
-            observability,
-            cancellationSignal,
-            connectionCredentials,
-            personalGitHubCredentials,
-            eventing,
-            attempt,
-            renewals,
-            sandboxState,
-            sandboxRuntime,
-            turn,
-            session,
-            turnExecutionPolicy,
-            fileAuthoritySubjectId,
-            runSettings,
-            workspaceVariableSet,
-            turnResources,
-            requiredGeneratedVideoFiles,
-            machinePrimary,
+            // A bare github.com repository URI (API caller, older session, or an
+            // agent-spawned child inheriting its parent's resources) resolves to
+            // the workspace's GitHub App binding here, before credential minting
+            // and the runtime clone plan derive binding ids from the same resource
+            // set. A Connected Machine receives no platform Git credential, so its
+            // resources stay exactly as stored. Resolution never fails the turn;
+            // an unusable bound repository stays bare and is reported visibly.
+            const hasCredentialProvider =
+              activeSandboxBackend !== "selfhosted" &&
+              (
+                await waitForTurnOperation(
+                  getWorkspaceCredentialProvider(db, {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                  }),
+                  cancellationSignal,
+                  undefined,
+                )
+              )?.enabled === true;
+            const boundResources = await waitForTurnOperation(
+              applyTurnGitHubRepositoryBindings({
+                db,
+                settings: runSettings,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                activeSandboxBackend,
+                hasCredentialProvider,
+                claimedTurnResources,
+                claimedRuntimeResources,
+                publish: async (events) => {
+                  await eventing.publish!(events, true);
+                },
+                warn: (message, fields) => observability.warn(message, fields),
+              }),
+              cancellationSignal,
+              undefined,
+            );
+            // An automatically attached (optional) repository that lost its
+            // allowlist entry or its GitHub App access since the session started
+            // sits this turn out with a warning, before the strict allowlist
+            // recheck and token mint below would fail the whole turn for it.
+            const {
+              turnResources,
+              runtimeResources,
+              retainsResource: retainsOptionalRepository,
+            } = await waitForTurnOperation(
+              dropUnavailableOptionalRepositories({
+                db,
+                settings: runSettings,
+                workspaceId: input.workspaceId,
+                activeSandboxBackend,
+                hostMintsGitCredentials: Boolean(connectionCredentials?.gitCredentials),
+                turnResources: boundResources.turnResources,
+                runtimeResources: boundResources.runtimeResources,
+                publish: async (events) => {
+                  await eventing.publish!(events, true);
+                },
+                warn: (message, fields) => observability.warn(message, fields),
+              }),
+              cancellationSignal,
+              undefined,
+            );
+
+            const runCredentials = await prepareRunCredentials({
+              turnTools,
+              localMcpServerIds: installedApiIntegrations.map(
+                (integration) => integration.serverId,
+              ),
+              input,
+              settings,
+              db,
+              observability,
+              cancellationSignal,
+              connectionCredentials,
+              personalGitHubCredentials,
+              eventing,
+              attempt,
+              renewals,
+              sandboxState,
+              sandboxRuntime,
+              turn,
+              session,
+              turnExecutionPolicy,
+              fileAuthoritySubjectId,
+              runSettings,
+              workspaceVariableSet,
+              turnResources,
+              requiredGeneratedVideoFiles,
+              machinePrimary,
+              activeSandboxBackend,
+              groupBoxBackend,
+              sandboxCreationBackend,
+              effectiveRunCredentialBackend,
+              sandboxWorkspaceEnvironmentValues,
+              connectionScope,
+              runWorkspaceMutationForSandbox,
+            });
+            const {
+              establishPolicy,
+              sandboxEnvironment,
+              transientCodemodeEnvironment,
+              startRunGitCredentialsMint,
+            } = runCredentials;
+
+            await establishTurnSandbox({
+              ...sandboxRoute,
+              input,
+              settings,
+              db,
+              bus,
+              objectStorage,
+              observability,
+              cancellationSignal,
+              runtimeCancellationSignal,
+              sandboxResumeSignal,
+              activityContext,
+              opJournal,
+              sandboxState,
+              eventing,
+              attempt,
+              turn,
+              session,
+              fileAuthoritySubjectId,
+              capabilitySettings,
+              turnExecutionPolicy,
+              runSettings,
+              logicalSandboxSettings,
+              verifiedRigProviderImageId,
+              runtimePreparationStartedAt,
+              establishPolicy,
+              sandboxEnvironment,
+              startRunGitCredentialsMint,
+              machineOpObserver,
+              sandboxOperationObserver,
+              sandboxRuntime,
+              transientCodemodeEnvironment,
+              rigVersion,
+              turnResources,
+            });
+
+            const ordinaryFileResourceDownloads = await (async () => {
+              const fileResolutionStartedAt = performance.now();
+              let fileResolutionOutcome: "completed" | "failed" = "completed";
+              try {
+                return await waitForTurnOperation(
+                  sandboxFileDownloadsForRun(
+                    runSettings,
+                    db,
+                    objectStorage,
+                    input.accountId,
+                    input.workspaceId,
+                    fileAuthoritySubjectId,
+                    turn.resources,
+                    activeSandboxBackend ?? groupBoxBackend,
+                  ),
+                  cancellationSignal,
+                  undefined,
+                );
+              } catch (error) {
+                fileResolutionOutcome = "failed";
+                throw error;
+              } finally {
+                recordTurnStartupPhase(observability, {
+                  phase: "file_resolution",
+                  provider: turnExecutionPolicy.providerId,
+                  backend: activeSandboxBackend ?? groupBoxBackend,
+                  outcome: fileResolutionOutcome,
+                  durationSeconds: (performance.now() - fileResolutionStartedAt) / 1_000,
+                  count: turn.resources.length,
+                });
+              }
+            })();
+            if (requiredGeneratedVideoFiles.length > 0 && !objectStorage) {
+              throw new Error("Generated video materialization requires object storage");
+            }
+            const generatedVideoDownloads: SandboxFileDownload[] = [];
+            if (objectStorage && requiredGeneratedVideoFiles.length > 0) {
+              const downloadStorage = objectStorageForSandboxDownloads(
+                eventing.modelRunSettings,
+                objectStorage,
+                media.sandboxFileDownloadBackend,
+              );
+              for (const file of requiredGeneratedVideoFiles) {
+                const signed = await downloadStorage.createGetUrl({
+                  key: file.objectKey,
+                });
+                generatedVideoDownloads.push({
+                  fileId: file.fileId,
+                  mountPath: "generated-videos",
+                  filename: file.filename,
+                  url: signed.url,
+                  expiresAt: signed.expiresAt,
+                  sizeBytes: file.sizeBytes,
+                  sha256: file.sha256,
+                });
+              }
+            }
+            const fileResourceDownloads = [
+              ...new Map(
+                [...ordinaryFileResourceDownloads, ...generatedVideoDownloads].map((download) => [
+                  download.fileId,
+                  download,
+                ]),
+              ).values(),
+            ];
+            return {
+              kind: "legacy" as const,
+              sandboxRoute,
+              runCredentials,
+              routingOn,
+              activeSandboxBackend,
+              groupBoxBackend,
+              turnResources,
+              runtimeResources,
+              retainsOptionalRepository,
+              fileResourceDownloads,
+            };
+          })();
+          const {
+            runCredentials,
+            routingOn,
             activeSandboxBackend,
             groupBoxBackend,
-            sandboxCreationBackend,
-            effectiveRunCredentialBackend,
-            sandboxWorkspaceEnvironmentValues,
-            connectionScope,
-            runWorkspaceMutationForSandbox,
-          });
+            turnResources,
+            runtimeResources,
+            retainsOptionalRepository,
+            fileResourceDownloads,
+          } = sandboxPreparation;
           const {
             runCredentialResolver,
             runMcpCredentials,
-            establishPolicy,
             initialRunCredentialMaterial,
             runCredentialsNote,
-            codemodeAuthority,
             sandboxArtifactRuntime,
             sandboxEnvironment,
             sandboxGitToken,
@@ -1255,118 +1446,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sandboxGitCredentialBindings,
             sandboxCodemodeToken,
             sandboxCodemodeTokenExpiresAt,
-            transientCodemodeEnvironment,
             initialGitCredentials,
-            startRunGitCredentialsMint,
             attachGitCredentialRenewal,
             attachCodemodeTokenRenewal,
             attachRunCredentialRenewal,
           } = runCredentials;
-
-          await establishTurnSandbox({
-            ...sandboxRoute,
-            input,
-            settings,
-            db,
-            bus,
-            objectStorage,
-            observability,
-            cancellationSignal,
-            runtimeCancellationSignal,
-            sandboxResumeSignal,
-            activityContext,
-            opJournal,
-            sandboxState,
-            eventing,
-            attempt,
-            turn,
-            session,
-            fileAuthoritySubjectId,
-            capabilitySettings,
-            turnExecutionPolicy,
-            runSettings,
-            logicalSandboxSettings,
-            verifiedRigProviderImageId,
-            runtimePreparationStartedAt,
-            establishPolicy,
-            sandboxEnvironment,
-            startRunGitCredentialsMint,
-            machineOpObserver,
-            sandboxOperationObserver,
-            sandboxRuntime,
-            transientCodemodeEnvironment,
-            rigVersion,
-            turnResources,
-          });
-
-          const ordinaryFileResourceDownloads = await (async () => {
-            const fileResolutionStartedAt = performance.now();
-            let fileResolutionOutcome: "completed" | "failed" = "completed";
-            try {
-              return await waitForTurnOperation(
-                sandboxFileDownloadsForRun(
-                  runSettings,
-                  db,
-                  objectStorage,
-                  input.accountId,
-                  input.workspaceId,
-                  fileAuthoritySubjectId,
-                  turn.resources,
-                  activeSandboxBackend ?? groupBoxBackend,
-                ),
-                cancellationSignal,
-                undefined,
-              );
-            } catch (error) {
-              fileResolutionOutcome = "failed";
-              throw error;
-            } finally {
-              recordTurnStartupPhase(observability, {
-                phase: "file_resolution",
-                provider: turnExecutionPolicy.providerId,
-                backend: activeSandboxBackend ?? groupBoxBackend,
-                outcome: fileResolutionOutcome,
-                durationSeconds: (performance.now() - fileResolutionStartedAt) / 1_000,
-                count: turn.resources.length,
-              });
-            }
-          })();
-          if (requiredGeneratedVideoFiles.length > 0 && !objectStorage) {
-            throw new Error("Generated video materialization requires object storage");
-          }
-          const generatedVideoDownloads: SandboxFileDownload[] = [];
-          if (objectStorage && requiredGeneratedVideoFiles.length > 0) {
-            const downloadStorage = objectStorageForSandboxDownloads(
-              eventing.modelRunSettings,
-              objectStorage,
-              media.sandboxFileDownloadBackend,
-            );
-            for (const file of requiredGeneratedVideoFiles) {
-              const signed = await downloadStorage.createGetUrl({
-                key: file.objectKey,
-              });
-              generatedVideoDownloads.push({
-                fileId: file.fileId,
-                mountPath: "generated-videos",
-                filename: file.filename,
-                url: signed.url,
-                expiresAt: signed.expiresAt,
-                sizeBytes: file.sizeBytes,
-                sha256: file.sha256,
-              });
-            }
-          }
-          const fileResourceDownloads = [
-            ...new Map(
-              [...ordinaryFileResourceDownloads, ...generatedVideoDownloads].map((download) => [
-                download.fileId,
-                download,
-              ]),
-            ).values(),
-          ];
           const toolRuntime = await prepareTurnToolRuntime({
             fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
-            runCredentialRenewals: runCredentialResolver ? renewals : undefined,
+            runCredentialRenewals:
+              sandboxState.nativeTurn || runCredentialResolver ? renewals : undefined,
             runMcpCredentials,
             input,
             catalogSourceSettings,
@@ -1477,53 +1565,61 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           });
           const { agent, modelVisibleSkillCatalogText, postAgentPreparationStartedAt } = builtAgent;
 
-          await bindLazySandboxProvisioner({
-            ...sandboxRoute,
-            input,
-            settings,
-            db,
-            bus,
-            objectStorage,
-            observability,
-            cancellationSignal,
-            runtimeCancellationSignal,
-            sandboxResumeSignal,
-            activityContext,
-            opJournal,
-            sandboxState,
-            eventing,
-            attempt,
-            turn,
-            session,
-            fileAuthoritySubjectId,
-            capabilitySettings,
-            turnExecutionPolicy,
-            runSettings,
-            logicalSandboxSettings,
-            verifiedRigProviderImageId,
-            runtimePreparationStartedAt,
-            establishPolicy,
-            sandboxEnvironment,
-            startRunGitCredentialsMint,
-            machineOpObserver,
-            sandboxOperationObserver,
-            sandboxRuntime,
-            transientCodemodeEnvironment,
-            agent,
-            attachRunCredentialRenewal,
-            attachGitCredentialRenewal,
-            attachCodemodeTokenRenewal,
-            throwIfWorkerShuttingDown,
-            throwIfTurnCancelled,
-            initialRunCredentialMaterial,
-            sandboxCodemodeToken,
-            media,
-            toolResultSpill,
-            connectionScope,
-            codemodeAuthority,
-            rigVersion,
-            turnResources,
-          });
+          if (sandboxPreparation.kind === "legacy") {
+            const {
+              establishPolicy,
+              startRunGitCredentialsMint,
+              transientCodemodeEnvironment,
+              codemodeAuthority,
+            } = sandboxPreparation.runCredentials;
+            await bindLazySandboxProvisioner({
+              ...sandboxPreparation.sandboxRoute,
+              input,
+              settings,
+              db,
+              bus,
+              objectStorage,
+              observability,
+              cancellationSignal,
+              runtimeCancellationSignal,
+              sandboxResumeSignal,
+              activityContext,
+              opJournal,
+              sandboxState,
+              eventing,
+              attempt,
+              turn,
+              session,
+              fileAuthoritySubjectId,
+              capabilitySettings,
+              turnExecutionPolicy,
+              runSettings,
+              logicalSandboxSettings,
+              verifiedRigProviderImageId,
+              runtimePreparationStartedAt,
+              establishPolicy,
+              sandboxEnvironment,
+              startRunGitCredentialsMint,
+              machineOpObserver,
+              sandboxOperationObserver,
+              sandboxRuntime,
+              transientCodemodeEnvironment,
+              agent,
+              attachRunCredentialRenewal,
+              attachGitCredentialRenewal,
+              attachCodemodeTokenRenewal,
+              throwIfWorkerShuttingDown,
+              throwIfTurnCancelled,
+              initialRunCredentialMaterial,
+              sandboxCodemodeToken,
+              media,
+              toolResultSpill,
+              connectionScope,
+              codemodeAuthority,
+              rigVersion,
+              turnResources,
+            });
+          }
 
           let companyBrainContributionReceiptRecorded = false;
           const recordCompanyBrainContributionReceiptOnce = (): void => {
@@ -1608,7 +1704,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             durationSeconds: (performance.now() - postAgentPreparationStartedAt) / 1_000,
           });
           let fileMaterializationFailures: SandboxFileDownloadFailure[] = [];
-          let fileDownloadsMaterializedForRun = false;
+          let fileDownloadsMaterializedForRun = Boolean(sandboxState.nativeTurn);
           if (
             sandboxState.resolvedSandbox &&
             sandboxState.setupBoxSession &&

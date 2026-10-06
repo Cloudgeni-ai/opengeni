@@ -56,6 +56,11 @@ export function createSharedActivityServices(
         settings: resolvedSettings,
         catalogSourceSettings: settings,
         db,
+        ...(dependencies.sandboxV2ControlProviders
+          ? {
+              sandboxV2ControlProviders: new Map(dependencies.sandboxV2ControlProviders),
+            }
+          : {}),
         bus:
           dependencies.bus ??
           (await createNatsEventBus(

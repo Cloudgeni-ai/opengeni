@@ -448,6 +448,18 @@ and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 
 ### 3.9 Compute routing and sandbox ownership stay explicit
 
+Experimental [sandbox v2](design/sandbox-v2.md) is default-off with no qualified
+provider installed. Migration 0638 retains group engines and native ownership;
+native engines never fall back to legacy leases.
+
+`agent-turn/native-preparation.ts` composes the installed provider, original
+credentials/files and ordinary agent stream. Runtime `sandbox/v2/` owns lifecycle
+and sessions; `agent/crates/opengeni-run/` owns native command evidence. DB/core
+owners retain permissions, receipts and physical-writer fences; dedicated Temporal
+workflows recover original operations. Guest journals grant no authority.
+
+The [handoff](design/sandbox-v2-handoff.md) maps the code and unfinished contracts.
+
 Modal recovery: singleton human consent (`packages/core/src/application/sandbox-recovery.ts`)
 or proved provider loss (`packages/db/src/index.ts`): the quiescent group restores a
 verified checkpoint, else continues empty, warning every member; never replays.

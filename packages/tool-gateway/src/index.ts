@@ -41,6 +41,8 @@ import { summarizeToolGatewayInputErrors } from "./input-issues";
 export type ToolGatewayExecutionContext = {
   operationId: string;
   caller: ToolGatewayCaller;
+  /** Host digest of the authorized request. Binds replay inputs; grants no authority. */
+  requestDigest?: string;
   /** Trusted in-process SDK correlation; not operation identity or approval authority. */
   sourceCallId?: string;
   /** In-process transport metadata; never part of catalog identity or digest. */
@@ -233,10 +235,10 @@ export class ToolGateway {
       operationId: input.operationId,
       catalogDigest: input.catalogDigest,
       identity: input.identity,
-      arguments: input.arguments,
+      arguments: structuredClone(input.arguments),
     });
     const operationId = request.operationId ?? input.operationId;
-    const caller = input.caller;
+    const caller = structuredClone(input.caller);
     if (request.catalogDigest !== this.catalogDigest) {
       throw new ToolGatewayCatalogStaleError();
     }
@@ -283,6 +285,15 @@ export class ToolGateway {
         context,
       }),
     );
+    const executionArguments = structuredClone(request.arguments);
+    const executionCaller = structuredClone(caller);
+    const requestDigest = digestCanonicalJson({
+      version: 1,
+      catalogDigest: request.catalogDigest,
+      identity: request.identity,
+      arguments: executionArguments,
+      caller: executionCaller,
+    });
     return {
       call,
       entry: definition.entry,
@@ -301,9 +312,10 @@ export class ToolGateway {
             let result: ToolGatewayResultValue;
             try {
               result = ToolGatewayResult.parse(
-                await definition.execute(request.arguments, {
+                await definition.execute(structuredClone(executionArguments), {
                   operationId,
-                  caller,
+                  caller: structuredClone(executionCaller),
+                  requestDigest,
                   ...(context.sourceCallId === undefined
                     ? {}
                     : { sourceCallId: context.sourceCallId }),

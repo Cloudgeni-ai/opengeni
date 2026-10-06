@@ -99,6 +99,7 @@ import {
   wrapChannelABoxWithRouting,
 } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
+import { requireLegacySandboxApiRoute } from "./engine-route";
 
 export type ChannelAServices = {
   db: Database;
@@ -547,6 +548,7 @@ async function withChannelAOperation<T>(
     ? sandboxCaptureWaitMetricObserver(services.observability)
     : undefined;
   const { accountId, workspaceId, session } = ctx;
+  await requireLegacySandboxApiRoute(db, ctx);
 
   if (session.sandboxBackend === "none") {
     throw new HTTPException(409, { message: "sandbox not available" });

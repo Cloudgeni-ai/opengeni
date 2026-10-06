@@ -872,6 +872,9 @@ const SettingsSchema = z.object({
   azureOpenaiAdToken: z.string().optional(),
   disableOpenaiTracing: EnvBoolean.default(false),
   sandboxBackend: SandboxBackend.default("docker"),
+  // Admission only: existing groups retain their persisted engine when this
+  // switch changes. A workspace must also explicitly opt into machine v2.
+  sandboxV2Enabled: EnvBoolean.default(false),
   dockerImage: z.string().default("opengeni-sandbox:local"),
   // Explicit deployment contract: the configured base sandbox image contains
   // the verified, self-contained native artifact runtime at its fixed image
@@ -3510,6 +3513,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     azureOpenaiAdToken: optional("OPENGENI_AZURE_OPENAI_AD_TOKEN"),
     disableOpenaiTracing: optional("OPENGENI_DISABLE_OPENAI_TRACING"),
     sandboxBackend: optional("OPENGENI_SANDBOX_BACKEND"),
+    sandboxV2Enabled: optional("OPENGENI_SANDBOX_V2_ENABLED"),
     dockerImage: optional("OPENGENI_DOCKER_IMAGE"),
     sandboxArtifactRuntimeEnabled: optional("OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED"),
     dockerExposedPorts: optional("OPENGENI_DOCKER_EXPOSED_PORTS"),

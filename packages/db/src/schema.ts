@@ -1,4 +1,5 @@
 import type { StoredSessionAdmissionBlock } from "./session-admission-block";
+import { sandboxV2Commands } from "./sandbox-v2-schema";
 import {
   commentaryInclusiveMeaningfulSessionEventSql,
   meaningfulSessionEventSql,
@@ -10690,6 +10691,8 @@ export const sessionBackgroundCommands = pgTable(
       .notNull()
       .default("running"),
     retainedProcessId: uuid("retained_process_id"),
+    /** Exact native launch intent; mutually exclusive with a legacy process. */
+    nativeOperationId: uuid("native_operation_id"),
     // Exact launch receipt, never inferred from a later turn or session owner.
     launchTurnId: uuid("launch_turn_id"),
     launchAttemptId: uuid("launch_attempt_id"),
@@ -10761,6 +10764,19 @@ export const sessionBackgroundCommands = pgTable(
       columns: [table.retainedProcessId],
       foreignColumns: [sandboxRetainedProcesses.id],
     }).onDelete("restrict"),
+    nativeOperation: foreignKey({
+      name: "session_background_commands_native_operation_fk",
+      columns: [table.accountId, table.workspaceId, table.sessionId, table.nativeOperationId],
+      foreignColumns: [
+        sandboxV2Commands.accountId,
+        sandboxV2Commands.workspaceId,
+        sandboxV2Commands.sessionId,
+        sandboxV2Commands.operationId,
+      ],
+    }).onDelete("cascade"),
+    nativeOperationUnique: uniqueIndex("session_background_commands_native_operation_uq")
+      .on(table.nativeOperationId)
+      .where(sql`${table.nativeOperationId} is not null`),
     managedProcess: uniqueIndex("session_background_commands_process_uq")
       .on(table.retainedProcessId)
       .where(sql`${table.retainedProcessId} is not null`),
@@ -10795,7 +10811,8 @@ export const sessionBackgroundCommands = pgTable(
       "session_background_commands_provider_identity_check",
       sql`(
           ${table.provider} = 'managed'
-          and ${table.retainedProcessId} is not null
+          and ((${table.retainedProcessId} is not null and ${table.nativeOperationId} is null)
+            or (${table.retainedProcessId} is null and ${table.nativeOperationId} is not null))
           and ${table.controlWorkspaceId} is null
           and ${table.enrollmentId} is null
           and ${table.connectionInstanceId} is null
@@ -10803,6 +10820,7 @@ export const sessionBackgroundCommands = pgTable(
         ) or (
           ${table.provider} = 'connected_machine'
           and ${table.retainedProcessId} is null
+          and ${table.nativeOperationId} is null
           and ${table.controlWorkspaceId} is not null
           and ${table.enrollmentId} is not null
           and ${table.connectionInstanceId} is not null
@@ -14473,6 +14491,7 @@ export * from "./memory-governance-schema";
 export * from "./scoped-knowledge-schema";
 export * from "./task-notes-schema";
 export * from "./work-claims-schema";
+export * from "./sandbox-v2-schema";
 export * from "./company-brain-context-selection-schema";
 export * from "./governed-learning-evaluator-schema";
 export * from "./governed-learning-activation-schema";

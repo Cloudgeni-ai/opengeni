@@ -33,6 +33,39 @@ function material(url = target.url, expiresAt?: string) {
 }
 
 describe("attempt-local MCP credentials", () => {
+  test("ordered activation preserves newer headers across delayed observers and staged legacy commits", () => {
+    const credentials = new RunMcpCredentials([target]);
+    const beforeOrdered = credentials.prepare(material());
+    const first = { attemptId: scope.sessionId, generationId: "synthetic-first", ordinal: 0 };
+    const second = { ...first, generationId: "synthetic-second", ordinal: 1 };
+    const newer = {
+      ...material()!,
+      mcp: [{ url: target.url, headers: { Authorization: "synthetic-newer" } }],
+    };
+    expect(credentials.replaceGeneration(first, material())).toBe(true);
+    expect(credentials.replaceGeneration(second, newer)).toBe(true);
+    expect(credentials.replaceGeneration(first, material())).toBe(false);
+    expect(
+      new Headers(credentials.requestInit(target, target.url)?.headers).get("Authorization"),
+    ).toBe("synthetic-newer");
+    expect(() => beforeOrdered()).toThrow("generation owner");
+    expect(() => credentials.replace(material())).toThrow("generation owner");
+    expect(() =>
+      credentials.replaceGeneration(
+        { ...second, generationId: "changed-same-ordinal" },
+        material(),
+      ),
+    ).toThrow("generation changed");
+    expect(() =>
+      credentials.replaceGeneration({ ...second, attemptId: crypto.randomUUID() }, material()),
+    ).toThrow("attempt changed");
+    const empty = { ...second, generationId: "synthetic-empty", ordinal: 2 };
+    expect(credentials.replaceGeneration(empty, null)).toBe(true);
+    expect(credentials.replaceGeneration(second, newer)).toBe(false);
+    expect(() => credentials.requestInit(target, target.url)).toThrow("authentication unavailable");
+    credentials.close();
+    expect(() => credentials.replaceGeneration(empty, null)).toThrow("attempt is closed");
+  });
   test("native connection targets never enter provider selection or credential ownership", () => {
     const native = {
       ...target,

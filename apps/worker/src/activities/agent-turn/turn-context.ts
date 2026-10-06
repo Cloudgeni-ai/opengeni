@@ -26,6 +26,7 @@ import type { TurnOutcome } from "../../observability-metrics";
 import type { ResumedTurnSandbox, TurnSandboxLeaseHolderId } from "../../sandbox-resume";
 import type { TurnEventPublisher } from "./model-usage";
 import type { TurnSandboxProvisioner } from "./sandbox-provision";
+import type { SandboxV2TurnExecution } from "../../sandbox-v2-execution";
 
 /** Stamps the claimed turn/attempt ids onto a phase's own outcome. */
 export type ClaimedResult = (
@@ -83,6 +84,8 @@ export type BillingState = {
 };
 
 export type SandboxRuntimeState = {
+  /** Separate native owner. Legacy lease/archive fields stay unused. */
+  nativeTurn?: SandboxV2TurnExecution;
   resolvedSandbox: ResumedTurnSandbox | null;
   attemptWritersDrained: boolean;
   lateSandboxesAwaitingWriterDrain: Set<ResumedTurnSandbox>;
@@ -112,6 +115,31 @@ export type SandboxRuntimeState = {
   // recorded backend and later ones report the effective route.
   startupMilestoneBackend: Settings["sandboxBackend"] | null;
 };
+
+/** Native execution cannot inherit a legacy lease, provider continuation or
+ * archive writer. Check this before construction, streaming and finalization;
+ * an empty resolvedSandbox alone does not rule out a late legacy writer. */
+export function assertNativeTurnHasNoLegacySandboxOwners(state: SandboxRuntimeState): void {
+  if (
+    state.nativeTurn &&
+    (state.resolvedSandbox ||
+      state.lazyOwnedSandbox ||
+      state.machinePrimarySession ||
+      state.setupBoxSession ||
+      state.lateSandboxesAwaitingWriterDrain.size ||
+      state.turnSandboxProvisioner ||
+      state.resumeManagedGroupBox ||
+      state.prefetchedManagedBox ||
+      state.prefetchedManagedBoxResult ||
+      state.sandboxHolderId ||
+      state.leaseHeartbeatTimer ||
+      state.rotationPreemptionInFlight ||
+      state.deadlineRotationRequested ||
+      state.snapshotInFlight ||
+      state.turnEndCaptureInProgress)
+  )
+    throw new Error("Native execution cannot use legacy sandbox owners");
+}
 
 export type RenewalState = {
   /** Secret-only local state; closed on every attempt finalization path. */

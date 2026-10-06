@@ -11,12 +11,14 @@ import type {
   Database,
   SessionWorkflowWakeDeliveryResult,
   SessionAdmissionFence,
+  SandboxJournalControlAuthority,
 } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import type { OpenGeniRuntime } from "@opengeni/runtime";
 import type { ObjectStorage } from "@opengeni/storage";
+import type { SandboxV2ControlProviders } from "../sandbox-v2-control";
 
 // Signal (start-if-needed) a session's Temporal workflow so a queued turn it
 // cannot otherwise observe gets claimed. Used to wake a PARENT session's
@@ -68,6 +70,7 @@ export type SessionAttemptQuiescenceProof = {
   workflowId: string;
   workflowRunId: string;
   activityId: string;
+  nativeAuthority?: SandboxJournalControlAuthority;
 };
 
 export type SignalSessionAttemptQuiesced = (input: SessionAttemptQuiescenceProof) => Promise<void>;
@@ -88,6 +91,7 @@ export type SharedActivityServices = {
    */
   catalogSourceSettings?: Settings;
   db: Database;
+  sandboxV2ControlProviders?: SandboxV2ControlProviders;
   bus: EventBus;
   objectStorage: ObjectStorage | null;
   observability: Observability;

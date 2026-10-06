@@ -36,6 +36,9 @@ import {
 } from "./skill-files";
 export * from "./model-connection-access";
 export * from "./sandbox-provider-command";
+export * from "./sandbox-v2";
+export * from "./sandbox-v2-command";
+export * from "./sandbox-v2-preparation";
 import { z } from "zod";
 import {
   FIRST_PARTY_ATTEMPT_TOOL_FAMILY_NAMES,
@@ -2366,6 +2369,9 @@ export const WorkspaceDefaultSandboxImage = z
 
 export const WorkspaceSettingsSchema = z
   .object({
+    // Reads stay lenient for old stored bags. Only literal true opts in;
+    // deployment qualification is a separate trusted admission requirement.
+    sandboxV2Enabled: z.unknown().optional(),
     memoryEnabled: z.boolean().optional(),
     memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
     sessionDefaults: WorkspaceSessionDefaults.optional(),
@@ -2570,6 +2576,7 @@ export function workspaceSlackReactionChannelAllowed(
 // passthrough carries forward-compatible unknown keys.
 export const UpdateWorkspaceSettingsRequest = z
   .object({
+    sandboxV2Enabled: z.boolean().optional(),
     memoryEnabled: z.boolean().optional(),
     memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
     sessionDefaults: WorkspaceSessionDefaults.optional(),
@@ -4296,7 +4303,10 @@ export type RunCredentialsRequest = {
   /** Immutable authority admitted with this turn. */
   initiator: TurnInitiator;
   initiatorContext: TurnInitiatorContext;
-  effectiveSandboxBackend: SandboxBackend;
+  effectiveSandboxBackend: SandboxBackend | "machine-v2";
+  /** Native engine/provider identity is independent of legacy backend defaults. */
+  sandboxEngine?: "machine-v2";
+  machineProvider?: string;
   sandboxOs: SandboxOs;
   purpose: "provision" | "renewal";
   forceRefresh: boolean;
@@ -4783,6 +4793,18 @@ export type ConnectionCredentialsPort = {
    * remains the sole owner of connection selection and credential policy.
    */
   runCredentials?(input: RunCredentialsRequest): Promise<RunCredentialsResolution>;
+  /** Native recovery binds this stable host authority identity in its retained
+   * plan. Authorization performs no mint; check current grants for the original
+   * frozen request/remote targets. Legacy resolver use does not require it. */
+  runCredentialAuthority?: {
+    identity: string;
+    authorize(
+      input: RunCredentialsRequest,
+      selection: {
+        mcpServers: readonly { id: string; url: string }[];
+      },
+    ): Promise<void>;
+  };
 };
 
 // ============ connection-credential provider — GitHub App API port (BYO-App, §7.6 / GitHub credential prototype remainder) ===

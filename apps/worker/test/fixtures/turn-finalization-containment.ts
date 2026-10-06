@@ -2,6 +2,7 @@ import type { Settings } from "@opengeni/config";
 import { finalizeTurnAttempt, type TurnFinalizationDeps } from "../../src/activities/agent-turn/finalization";
 import { createTurnContext } from "../../src/activities/agent-turn/turn-context";
 import { TURN_QUIESCENCE_WATCHDOG_MS } from "../../src/activities/agent-turn/quiescence";
+import type { SandboxV2TurnExecution } from "../../src/sandbox-v2-execution";
 
 // Accelerate only the containment timer inside this isolated process. Use the
 // real production finalizer and process.exit so the test cannot pass merely
@@ -23,6 +24,14 @@ if (mode === "writers") {
   };
 }
 if (mode === "snapshot") context.sandboxState.snapshotInFlight = pending;
+if (mode === "native-writers") {
+  context.sandboxState.nativeTurn = {
+    credentialRenewal: null,
+    runMcpCredentials: null,
+    closeAndDrain: () => pending,
+    finalize: () => pending,
+  } as unknown as SandboxV2TurnExecution;
+}
 let held = true;
 const keepAlive = setInterval(() => {}, 1_000);
 const deps = {

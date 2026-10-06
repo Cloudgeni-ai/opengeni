@@ -123,6 +123,8 @@ export const checkpointBrowserBeforeDeadline =
 export const drainSandboxLease = defaultControlActivities.drainSandboxLease;
 export const maintainSandboxLeaseSweep = defaultControlActivities.maintainSandboxLeaseSweep;
 export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;
+export const listSandboxV2Machines = defaultControlActivities.listSandboxV2Machines;
+export const reconcileSandboxV2Machine = defaultControlActivities.reconcileSandboxV2Machine;
 export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUploads;
 export const recoverVideoGenerationWorkflows =
   defaultControlActivities.recoverVideoGenerationWorkflows;

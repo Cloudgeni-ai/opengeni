@@ -93,6 +93,81 @@ const skillFiles = [
 ];
 
 describe("fsWriteFiles", () => {
+  test("named workspace steps recover framed reads and send large file content over stdin", async () => {
+    const { root } = workspace();
+    const completed = new Map<
+      string,
+      { args: ChannelAExecArgs; stdin?: string; result: unknown }
+    >();
+    let executions = 0;
+    let stdinWrites = 0;
+    const channel = () =>
+      new SandboxChannelAService({
+        session: {},
+        workspaceRoot: root,
+        commandExecution: {
+          scopeId: "synthetic-accepted-operation",
+          execute: async (stepId, args, stdin) => {
+            const retained = completed.get(stepId);
+            if (retained) {
+              expect(args).toEqual(retained.args);
+              expect(stdin).toBe(retained.stdin);
+              return retained.result as { stdout: string; stderr: string; exitCode: number };
+            }
+            executions++;
+            const child = Bun.spawn(["/bin/bash", "-c", args.cmd], {
+              cwd: root,
+              stdin: stdin === undefined ? "ignore" : "pipe",
+              stdout: "pipe",
+              stderr: "pipe",
+            });
+            if (stdin !== undefined) {
+              stdinWrites++;
+              const sink = child.stdin as import("bun").FileSink;
+              sink.write(stdin);
+              await sink.end();
+            }
+            const [stdout, stderr, exitCode] = await Promise.all([
+              new Response(child.stdout).text(),
+              new Response(child.stderr).text(),
+              child.exited,
+            ]);
+            const result = { stdout, stderr, exitCode };
+            completed.set(stepId, {
+              args: structuredClone(args),
+              ...(stdin ? { stdin } : {}),
+              result,
+            });
+            return result;
+          },
+        },
+      });
+    const request = {
+      directory: "synthetic-skill",
+      files: [{ path: "SKILL.md", content: "ordinary content", encoding: "utf8" as const }],
+    };
+    expect((await channel().fsWriteFiles(request)).written).toEqual(["SKILL.md"]);
+    const listing = { path: "synthetic-skill", depth: 1, maxEntries: 10, includeHidden: true };
+    const read = { path: "synthetic-skill/SKILL.md", encoding: "utf8" as const, maxBytes: 100 };
+    expect((await channel().fsList(listing)).root.children?.[0]?.name).toBe("SKILL.md");
+    expect((await channel().fsRead(read)).content).toBe("ordinary content");
+    const beforeRecovery = executions;
+    expect((await channel().fsWriteFiles(request)).written).toEqual(["SKILL.md"]);
+    expect((await channel().fsList(listing)).root.children?.[0]?.name).toBe("SKILL.md");
+    expect((await channel().fsRead(read)).content).toBe("ordinary content");
+    expect(executions).toBe(beforeRecovery);
+    const large = "large ordinary input\n".repeat(10_000);
+    await channel().fsWrite({
+      path: "synthetic-skill/large.txt",
+      content: large,
+      encoding: "utf8",
+      overwrite: false,
+      createParents: true,
+    });
+    expect(readFileSync(join(root, "synthetic-skill/large.txt"), "utf8")).toBe(large);
+    expect(stdinWrites).toBe(1);
+  });
+
   test("creates a nested tree with exact bytes in one command and one change event", async () => {
     const { root } = workspace();
     const { session, commands } = shellSession(root);

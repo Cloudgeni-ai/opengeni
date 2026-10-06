@@ -49,6 +49,8 @@ export type AttemptToolScope = Pick<
 export type AttemptToolExecutionContext = {
   operationId: string;
   caller: AttemptToolCaller;
+  /** Host digest of the authorized request. Binds replay inputs; grants no authority. */
+  requestDigest?: string;
   /** Trusted in-process SDK correlation; not operation identity or approval authority. */
   sourceCallId?: string;
   /** In-process transport metadata; never part of catalog identity or digest. */
@@ -77,6 +79,9 @@ export type CreateAttemptToolEnvironmentInput = {
   generation: number;
   definitions: readonly AttemptToolDefinition[];
   createdAt?: Date;
+  /** Native physical steps must recover the same gateway operation when the
+   * host retries an accepted SDK call. Correlation alone grants no authority. */
+  stableModelOperations?: boolean;
   authorize?: AttemptToolAuthorization;
   /** Host-only approval projection for one exact model invocation. */
   confirmModelApproval?: (input: { modelName: string; subjectId: string }) => boolean;
@@ -539,6 +544,7 @@ export class AttemptToolEnvironment {
   constructor(
     readonly catalog: AttemptToolCatalogValue,
     private readonly gateway: ToolGateway,
+    private readonly stableModelOperations = false,
   ) {}
 
   async call(
@@ -563,6 +569,26 @@ export class AttemptToolEnvironment {
   }
 
   async callModel(input: ModelAttemptToolCall): Promise<AttemptToolResultValue> {
+    if (this.stableModelOperations) {
+      if (!input.sourceCallId || input.sourceCallId.length > 512)
+        throw new Error("Native model tool requires its accepted SDK call identity");
+      const scope = this.catalog;
+      const digest = digestCanonicalJson({
+        version: "attempt-model-operation-v1",
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        sessionId: scope.sessionId,
+        turnId: scope.turnId,
+        attemptId: scope.attemptId,
+        executionGeneration: scope.executionGeneration,
+        modelName: input.modelName,
+        sourceCallId: input.sourceCallId,
+      });
+      const operationId = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+      if (input.operationId !== undefined && input.operationId !== operationId)
+        throw new Error("Native model tool operation identity changed");
+      input = { ...input, operationId };
+    }
     return await this.gateway.callModel(input);
   }
 }
@@ -619,6 +645,7 @@ export function createAttemptToolEnvironment(
           }
         : {}),
     }),
+    input.stableModelOperations ?? false,
   );
 }
 

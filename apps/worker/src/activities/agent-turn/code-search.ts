@@ -1,4 +1,4 @@
-import type { AttemptToolDefinition } from "@opengeni/codemode";
+import type { AttemptToolDefinition, AttemptToolExecutionContext } from "@opengeni/codemode";
 import { usableJevApiKey, type Settings } from "@opengeni/config";
 import {
   CODE_SEARCH_TOOL_DESCRIPTION,
@@ -101,7 +101,7 @@ function textResult(text: string, isError: boolean) {
 export function createCodeSearchAttemptToolDefinition(input: {
   settings: Pick<Settings, "jevApiKey" | "jevBaseUrl" | "jevModel" | "jevRequestTimeoutMs">;
   apiKey: string;
-  workspace: () => Promise<CodeSearchWorkspace>;
+  workspace: (context: AttemptToolExecutionContext) => Promise<CodeSearchWorkspace>;
   observability: Observability;
   /** Records Jev usage against the workspace. Failures are logged, never surfaced. */
   recordUsage?: (usage: CodeSearchUsage) => Promise<void>;
@@ -153,7 +153,7 @@ export function createCodeSearchAttemptToolDefinition(input: {
             true,
           );
         }
-        const workspace = await input.workspace();
+        const workspace = await input.workspace(context);
         const result = await runCodeSearch({
           ...request,
           workspace,
@@ -249,16 +249,18 @@ export function codeSearchToolDefinitions(input: {
   enabled: boolean;
   settings: Pick<Settings, "jevApiKey" | "jevBaseUrl" | "jevModel" | "jevRequestTimeoutMs">;
   backend: Settings["sandboxBackend"];
+  /** Exact prepared native owner; deployment legacy backend may be disabled. */
+  nativeWorkspace?: boolean;
   /** The turn's Connected Machine workspace root, when a machine is primary. */
   machineWorkspaceRoot?: string | null;
   observability: Observability;
-  workspace: () => Promise<CodeSearchWorkspace>;
+  workspace: (context: AttemptToolExecutionContext) => Promise<CodeSearchWorkspace>;
   recordUsage?: (usage: CodeSearchUsage) => Promise<void>;
   breaker?: JevCircuitBreaker;
 }): AttemptToolDefinition[] {
   const apiKey = usableJevApiKey(input.settings);
   const breaker = input.breaker ?? codeSearchCircuitBreaker;
-  if (!input.enabled || !apiKey || input.backend === "none") return [];
+  if (!input.enabled || !apiKey || (input.backend === "none" && !input.nativeWorkspace)) return [];
   if (input.machineWorkspaceRoot && isWindowsConnectedMachinePath(input.machineWorkspaceRoot)) {
     return [];
   }

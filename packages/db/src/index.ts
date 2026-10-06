@@ -1,4 +1,21 @@
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
+export * from "./sandbox-v2-machines";
+export * from "./sandbox-v2-attempt-demand";
+export * from "./sandbox-v2-commands";
+export * from "./sandbox-v2-preparation";
+export * from "./sandbox-v2-credential-generations";
+export * from "./sandbox-v2-background-credentials";
+export * from "./sandbox-v2-credential-owners";
+export * from "./sandbox-v2-credential-cleanup";
+import {
+  captureSandboxV2BackgroundCommandOutput,
+  settleSandboxV2BackgroundCommandWithMutation,
+  type SandboxJournalCaptureInput,
+  type SandboxV2BackgroundCommandAuthority,
+  type SandboxJournalControlAuthority,
+} from "./sandbox-v2-commands";
+import { readSandboxV2AttemptQuiescenceTx } from "./sandbox-v2-quiescence";
+import { clearSandboxV2CredentialGenerationsForQuiescedAttempt } from "./sandbox-v2-credential-generations";
 import { currentSessionAttachmentReadAccess } from "./database";
 import {
   CreditDebitAttribution,
@@ -556,7 +573,6 @@ import {
   evaluateSessionControl,
   evaluateSessionControls,
   evaluateSessionDiscoveryControls,
-  evaluateSessionWriteAdmissionControl,
   lockSessionEventWriteRows,
   boundedLockStep,
   workspaceControlLockBudget,
@@ -578,6 +594,11 @@ import {
   type SessionTurnAttemptOutcome,
   type WorkspaceControlRow,
 } from "./session-control";
+import {
+  lockTurnAttemptWriteFenceTx,
+  type TurnAttemptFenceRejectReason,
+} from "./session-attempt-write-fence";
+export type { TurnAttemptFenceRejectReason } from "./session-attempt-write-fence";
 import { ensureManagedHumanPersonalWorkspace } from "./managed-human-provisioning";
 import {
   sessionRealtimeIsActiveInTransaction,
@@ -623,6 +644,11 @@ import {
 } from "./child-lifecycle-notices";
 import { codeSearchDeploymentPolicyForCreate } from "./code-search-policy";
 import {
+  admitSandboxEngineForNewSession,
+  sandboxV2AdmissionPolicyForCreate,
+  type SandboxV2AdmissionPolicy,
+} from "./sandbox-v2-admission";
+import {
   resolveSessionCodeSearchEnabled,
   type CodeSearchDeploymentPolicy,
 } from "@opengeni/contracts/code-search";
@@ -663,6 +689,8 @@ import {
 export { sql as dbSql } from "drizzle-orm";
 export * from "./child-lifecycle-notices";
 export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
+export { configureSandboxV2AdmissionPolicy } from "./sandbox-v2-admission";
+export type { SandboxV2AdmissionPolicy } from "./sandbox-v2-admission";
 export { listRecentSessionRepositoryResources } from "./recent-session-repositories";
 export * from "./session-control";
 import { createArchivedSessionImportPersistence } from "./archived-session-imports";
@@ -34000,6 +34028,7 @@ async function createSessionInTransaction(
   tx: SessionActivityDatabase,
   input: SessionCreateInput,
   id: string,
+  sandboxV2Policy: SandboxV2AdmissionPolicy,
 ): Promise<SessionCreateResult> {
   const variableSetIds = input.variableSetIds ?? (input.variableSetId ? [input.variableSetId] : []);
   const variableSetId = variableSetIds.at(-1) ?? null;
@@ -34407,6 +34436,19 @@ async function createSessionInTransaction(
     sessionId: inserted.id,
     servers: input.mcpServers ?? [],
   });
+  await admitSandboxEngineForNewSession(
+    tx,
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: inserted.id,
+      sandboxGroupId: inserted.sandboxGroupId,
+      joinsExistingGroup: input.sandboxGroupId != null,
+      backend: input.sandboxBackend,
+      workspaceSettings: workspace.settings,
+    },
+    sandboxV2Policy,
+  );
   if (input.scheduledSourceRunId)
     await bindScheduledTaskRunSessionInTransaction(tx, {
       accountId: input.accountId,
@@ -34434,7 +34476,8 @@ export async function createSession(db: Database, input: SessionCreateInput): Pr
       async (scopedDb) =>
         await withSessionActivitySavepoint(
           scopedDb,
-          async (tx) => await createSessionInTransaction(tx, input, id),
+          async (tx) =>
+            await createSessionInTransaction(tx, input, id, sandboxV2AdmissionPolicyForCreate(db)),
         ),
     );
   } catch (error) {
@@ -34471,7 +34514,8 @@ export async function createSessionWithIdempotencyKeyResult(
       async (scopedDb) =>
         await withSessionActivitySavepoint(
           scopedDb,
-          async (tx) => await createSessionInTransaction(tx, input, id),
+          async (tx) =>
+            await createSessionInTransaction(tx, input, id, sandboxV2AdmissionPolicyForCreate(db)),
         ),
     );
   } catch (error) {
@@ -34880,6 +34924,44 @@ export async function deleteSessionTreeIfQuiescent(
             .for("update", { noWait: true });
           if (activeBackgroundCommands.length > 0) {
             return { status: "active_background_commands" as const };
+          }
+
+          // A logically settled turn may still own a physical journal writer.
+          // Preserve its locator and machine until exact cleanup is proved.
+          const machines = await tx
+            .select({ projection: schema.sandboxV2Machines.projection })
+            .from(schema.sandboxV2Machines)
+            .where(
+              and(
+                eq(schema.sandboxV2Machines.workspaceId, input.workspaceId),
+                inArray(schema.sandboxV2Machines.sandboxGroupId, groupIds),
+              ),
+            )
+            .for("update", { noWait: true });
+          const unresolvedCommands = await tx
+            .select({ operationId: schema.sandboxV2Commands.operationId })
+            .from(schema.sandboxV2Commands)
+            .where(
+              and(
+                eq(schema.sandboxV2Commands.workspaceId, input.workspaceId),
+                inArray(schema.sandboxV2Commands.sessionId, sessionIds),
+                isNull(schema.sandboxV2Commands.proof),
+                eq(schema.sandboxV2Commands.abandoned, false),
+              ),
+            )
+            .for("update", { noWait: true });
+          if (
+            unresolvedCommands.length > 0 ||
+            machines.some(
+              ({ projection }) =>
+                !["absent", "destroyed"].includes(projection.state) ||
+                projection.instance !== null ||
+                projection.disk !== null ||
+                projection.transition !== null ||
+                projection.demands.length > 0,
+            )
+          ) {
+            return { status: "live_sandboxes" as const };
           }
 
           const leases = await tx
@@ -41891,144 +41973,6 @@ export async function getHumanInputResumeForEvent(
         response: request.response,
       }
     : null;
-}
-
-export type TurnAttemptFenceRejectReason =
-  | "workspace_paused"
-  | "session_paused"
-  | "pending_control"
-  | "active_turn_changed"
-  | "generation_changed"
-  | "attempt_changed"
-  | "turn_terminal"
-  | "not_found";
-
-type TurnAttemptFenceResult =
-  | {
-      allowed: true;
-      workspace: typeof schema.workspaces.$inferSelect;
-      session: typeof schema.sessions.$inferSelect;
-      turn: typeof schema.sessionTurns.$inferSelect;
-      attempt: typeof schema.sessionTurnAttempts.$inferSelect;
-    }
-  | {
-      allowed: false;
-      reason: TurnAttemptFenceRejectReason;
-      workspace: typeof schema.workspaces.$inferSelect | null;
-      session: typeof schema.sessions.$inferSelect | null;
-      turn: typeof schema.sessionTurns.$inferSelect | null;
-      attempt: typeof schema.sessionTurnAttempts.$inferSelect | null;
-    };
-
-/**
- * Lock order for every activity write fence: workspace control -> actual
- * workspace -> session -> exact turn -> exact attempt.
- *
- * Activity writes only need a shared workspace admission lock: concurrent
- * sessions may write independently, while an exclusive workspace Pause/Resume
- * still waits for every admitted write and prevents later writes from crossing
- * the control boundary. Using FOR UPDATE here serialized every active session in
- * one workspace behind a single row and turned streaming into a workspace-wide
- * lock queue.
- */
-async function lockTurnAttemptWriteFenceTx(
-  tx: Database,
-  input: {
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    executionGeneration: number;
-    attemptId: string;
-    sessionLock?: "no_key_update" | "key_share";
-  },
-): Promise<TurnAttemptFenceResult> {
-  const locks = await lockSessionEventWriteRows(tx, {
-    workspaceId: input.workspaceId,
-    controlLock: "share",
-    sessionLock: input.sessionLock ?? "no_key_update",
-    sessionIds: [input.sessionId],
-    turnIds: [input.turnId],
-    attemptIds: [input.attemptId],
-  });
-  const workspace = locks.workspace;
-  const session = locks.sessions.find((row) => row.id === input.sessionId) ?? null;
-  const turn = locks.turns.find((row) => row.id === input.turnId) ?? null;
-  const attempt = locks.attempts.find((row) => row.id === input.attemptId) ?? null;
-  const base = { workspace, session, turn, attempt };
-  if (!workspace || !session || !turn || !attempt) {
-    return { allowed: false, reason: "not_found", ...base };
-  }
-  const effectiveControl = await evaluateSessionWriteAdmissionControl(
-    tx,
-    input.workspaceId,
-    input.sessionId,
-    {
-      workspaceControl: locks.control ?? undefined,
-    },
-  );
-  if (effectiveControl.state === "paused") {
-    return {
-      allowed: false,
-      reason:
-        effectiveControl.primaryBlockerKind === "workspace" ? "workspace_paused" : "session_paused",
-      ...base,
-    };
-  }
-  if (session.activeTurnId !== input.turnId) {
-    return { allowed: false, reason: "active_turn_changed", ...base };
-  }
-  if (turn.executionGeneration !== input.executionGeneration) {
-    return { allowed: false, reason: "generation_changed", ...base };
-  }
-  if (turn.activeAttemptId !== input.attemptId) {
-    return { allowed: false, reason: "attempt_changed", ...base };
-  }
-  if (
-    turn.accountId !== session.accountId ||
-    turn.sessionId !== input.sessionId ||
-    attempt.accountId !== session.accountId ||
-    attempt.sessionId !== input.sessionId ||
-    attempt.turnId !== input.turnId ||
-    attempt.executionGeneration !== input.executionGeneration ||
-    !["claimed", "running"].includes(attempt.state)
-  ) {
-    return { allowed: false, reason: "attempt_changed", ...base };
-  }
-  let authoritySnapshot;
-  try {
-    authoritySnapshot = assertSessionAuthoritySnapshot({
-      attemptId: input.attemptId,
-      authorityEpoch: attempt.authorityEpoch,
-      authorityVisibility: attempt.authorityVisibility,
-      authorityOwnerOrganizationMembershipId: attempt.authorityOwnerOrganizationMembershipId,
-    });
-  } catch {
-    // The 0222 insert trigger keeps old writers rolling-safe, but no missing
-    // or partial tuple may cross an accepted-attempt write fence.
-    return { allowed: false, reason: "attempt_changed", ...base };
-  }
-  if (!sessionAuthoritySnapshotMatchesSession(authoritySnapshot, session)) {
-    return { allowed: false, reason: "attempt_changed", ...base };
-  }
-  const [interruption] = await tx
-    .select({ id: schema.sessionAttemptInterruptions.id })
-    .from(schema.sessionAttemptInterruptions)
-    .where(
-      and(
-        eq(schema.sessionAttemptInterruptions.workspaceId, input.workspaceId),
-        eq(schema.sessionAttemptInterruptions.sessionId, input.sessionId),
-        eq(schema.sessionAttemptInterruptions.attemptId, input.attemptId),
-        inArray(schema.sessionAttemptInterruptions.state, ["pending", "delivered", "acknowledged"]),
-      ),
-    )
-    .limit(1);
-  if (interruption) {
-    return { allowed: false, reason: "pending_control", ...base };
-  }
-  if (!["running", "requires_action"].includes(turn.status)) {
-    return { allowed: false, reason: "turn_terminal", ...base };
-  }
-  return { allowed: true, workspace, session, turn, attempt };
 }
 
 export class SessionBackgroundCommandAdoptionFencedError extends Error {
@@ -73741,6 +73685,10 @@ export type MarkSessionAttemptQuiescedInput = {
    * admission remains strict because only a durable interruption needs this
    * receipt. */
   allowUninterrupted?: boolean;
+  /** Native completion carries its retained original owner. PostgreSQL still
+   * verifies closed ownership, complete physical writers and credential cleanup;
+   * this metadata alone grants no quiescence or erasure authority. */
+  nativeAuthority?: SandboxJournalControlAuthority;
 };
 
 export type SessionAttemptQuiescenceCommit = {
@@ -73755,6 +73703,7 @@ export async function commitSessionAttemptQuiescence(
   db: Database,
   input: MarkSessionAttemptQuiescedInput,
 ): Promise<SessionAttemptQuiescenceCommit> {
+  input = structuredClone(input);
   const persistence = {
     stage: "session_attempts.mark_quiesced",
     eventTypes: ["session.queue.changed"],
@@ -73852,7 +73801,20 @@ export async function commitSessionAttemptQuiescence(
       recoveryRequest !== undefined &&
       attempt.state === "closed" &&
       attempt.outcome === "interrupted_recoverable";
-    if (!interruption && !recoveryQuiescence) {
+    const native = await readSandboxV2AttemptQuiescenceTx(
+      scopedDb,
+      {
+        accountId: attempt.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: attempt.turnId,
+        attemptId: attempt.id,
+        executionGeneration: attempt.executionGeneration,
+      },
+      input.nativeAuthority,
+    );
+    const nativeCompletion = input.nativeAuthority !== undefined && native.engine === "machine-v2";
+    if (!interruption && !recoveryQuiescence && !nativeCompletion) {
       if (input.allowUninterrupted) return { events: [], workflowWake: null };
       throw new SessionControlInvariantError(
         `Attempt ${input.attemptId} cannot acknowledge quiescence without its interruption or recovery request`,
@@ -73865,6 +73827,7 @@ export async function commitSessionAttemptQuiescence(
         interruption.state === "delivered" ||
         interruption.state === "acknowledged");
     const settledQuiescence =
+      nativeCompletion ||
       recoveryQuiescence ||
       (interruption !== undefined &&
         attempt.state === "closed" &&
@@ -74014,6 +73977,11 @@ export async function commitSessionAttemptQuiescence(
       };
     };
     if (attempt.quiescedAt) {
+      if (native.credentialAuthority)
+        await clearSandboxV2CredentialGenerationsForQuiescedAttempt(
+          scopedDb,
+          native.credentialAuthority,
+        );
       const [existing] = await scopedDb
         .select()
         .from(schema.sessionEvents)
@@ -74060,6 +74028,14 @@ export async function commitSessionAttemptQuiescence(
     if (!marked) {
       throw new SessionControlInvariantError(`Attempt ${input.attemptId} quiescence CAS lost`);
     }
+    // Erasure shares the authoritative receipt transaction. A lost caller
+    // reply cannot strand material between receipt and cleanup; idempotent
+    // replay rechecks the same original scope and tombstones.
+    if (native.credentialAuthority)
+      await clearSandboxV2CredentialGenerationsForQuiescedAttempt(
+        scopedDb,
+        native.credentialAuthority,
+      );
     const [event] = await scopedDb
       .insert(schema.sessionEvents)
       .values(
@@ -83249,6 +83225,72 @@ export type SessionBackgroundCommandTerminalSettlement = {
   events: SessionEvent[];
 };
 
+/** Native jobs reuse ordinary completion events, typed input and conditional
+ * workflow wake semantics after exact output has been retained. */
+export async function settleSandboxV2BackgroundCommand(
+  db: Database,
+  authority: SandboxV2BackgroundCommandAuthority,
+): Promise<SessionBackgroundCommandTerminalSettlement | null> {
+  authority = structuredClone(authority);
+  return withSessionActivityRlsContext(db, authority, async (tx) => {
+    const mutation = backgroundCommandTerminalMutation(authority);
+    const command = await settleSandboxV2BackgroundCommandWithMutation(
+      tx as unknown as Database,
+      authority,
+      mutation,
+    );
+    return command ? { command, events: [...mutation.events] } : null;
+  });
+}
+
+/** Normal command-read events and retained byte cursors commit together. Small
+ * text chunks also fit the ordinary read API after worst-case JSON escaping. */
+export async function captureSandboxV2BackgroundCommandOutputWithEvents(
+  db: Database,
+  authority: SandboxV2BackgroundCommandAuthority,
+  input: SandboxJournalCaptureInput,
+): Promise<{ captured: boolean; events: SessionEvent[] }> {
+  authority = structuredClone(authority);
+  const events: SessionEvent[] = [];
+  const captured = await captureSandboxV2BackgroundCommandOutput(
+    db,
+    authority,
+    input,
+    async (tx, output) => {
+      const inputs: AppendEventInput[] = [];
+      for (const stream of ["stdout", "stderr"] as const) {
+        let chunk = "";
+        let size = 0;
+        const append = () => {
+          if (chunk)
+            inputs.push({
+              type: "sandbox.command.output.delta",
+              payload: {
+                commandId: authority.jobId,
+                stream,
+                streamFidelity: "separate",
+                chunk,
+              },
+            });
+          chunk = "";
+          size = 0;
+        };
+        for (const character of output[stream]) {
+          const bytes = Buffer.byteLength(character, "utf8");
+          if (size + bytes > 16 * 1024) append();
+          chunk += character;
+          size += bytes;
+        }
+        append();
+      }
+      events.push(
+        ...(await appendSessionEvents(tx, authority.workspaceId, authority.sessionId, inputs)),
+      );
+    },
+  );
+  return { captured, events };
+}
+
 export async function settleConnectedMachineSessionBackgroundCommand(
   db: Database,
   input: {
@@ -86853,3 +86895,11 @@ export async function loadDirectModelProviderConnection(
   });
   return { ...metadata, apiKey: connection.credential.apiKey };
 }
+export {
+  findSandboxMachine,
+  insertSandboxMachineInTransaction,
+  compareAndSetSandboxMachine,
+} from "./sandbox-v2-machines";
+export type { SandboxMachineTenant } from "./sandbox-v2-machines";
+export { readSandboxSessionEngineRoute } from "./sandbox-v2-route";
+export type { SandboxSessionEngineRoute } from "./sandbox-v2-route";

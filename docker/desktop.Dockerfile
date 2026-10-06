@@ -44,9 +44,10 @@ RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/carg
     --mount=type=cache,id=opengeni-sandbox-cargo-git,target=/usr/local/cargo/git,sharing=shared \
     --mount=type=cache,id=opengeni-desktop-cargo-target-${TARGETPLATFORM},target=/src/agent/target,sharing=locked \
     set -eux; \
-    cargo build --locked --release -p opengeni-computer-native; \
+    cargo build --locked --release -p opengeni-computer-native -p opengeni-run; \
     mkdir -p /out; \
-    install -m 0755 target/release/opengeni-computer-native /out/opengeni-computer-native
+    install -m 0755 target/release/opengeni-computer-native /out/opengeni-computer-native; \
+    install -m 0755 target/release/opengeni-run /out/opengeni-run
 
 RUN cc -O2 -std=c11 -Wall -Wextra -Werror \
       native/command-supervisor/supervisor.c -o /out/opengeni-command-supervisor
@@ -210,6 +211,10 @@ RUN set -eux; \
 
 COPY --from=computer-native-build /out/opengeni-computer-native /out/opengeni-computer-native
 COPY --from=computer-native-build /out/opengeni-command-supervisor /out/opengeni-command-supervisor
+COPY --from=computer-native-build /out/opengeni-run /out/opengeni-run
+RUN printf '%s  %s\n' \
+      "$(sha256sum /out/opengeni-run | awk '{print $1}')" \
+      /usr/local/bin/opengeni-run >> /out/SHA256SUMS
 RUN printf '%s  %s\n' \
       "$(sha256sum /out/opengeni-command-supervisor | awk '{print $1}')" \
       /usr/local/bin/opengeni-command-supervisor >> /out/SHA256SUMS
@@ -603,6 +608,7 @@ COPY --from=browserd-build /out/lightpanda-LICENSE /usr/local/share/licenses/lig
 COPY --from=browserd-build /out/lightpanda-0.3.5-source.tar.gz /usr/local/share/source/lightpanda-0.3.5.tar.gz
 COPY --from=browserd-build /out/opengeni-computer-native /usr/local/lib/opengeni/opengeni-computer-native
 COPY --from=browserd-build /out/opengeni-command-supervisor /usr/local/bin/opengeni-command-supervisor
+COPY --from=browserd-build /out/opengeni-run /usr/local/bin/opengeni-run
 COPY --from=browserd-build /out/SHA256SUMS /usr/local/share/opengeni/browserd-SHA256SUMS
 COPY docker/browserd-THIRD-PARTY-NOTICES /usr/local/share/opengeni/browserd-THIRD-PARTY-NOTICES
 COPY --from=browserd-build /out/codemode-runtime /opt/opengeni/codemode-runtime
@@ -618,6 +624,7 @@ RUN set -eux; \
                /usr/local/bin/opengeni-browserd /usr/local/lib/opengeni/agent-browser \
                /usr/local/lib/opengeni/lightpanda \
                /usr/local/bin/opengeni-command-supervisor \
+               /usr/local/bin/opengeni-run \
                /usr/local/lib/opengeni/opengeni-computer-native; \
     chmod 0755 /opt/opengeni/ogtool/bin/ogtool.cjs; \
     ln -s /opt/opengeni/ogtool/bin/ogtool.cjs /usr/local/bin/ogtool; \

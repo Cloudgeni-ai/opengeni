@@ -8,6 +8,7 @@ import {
   ToolGatewayInputValidationError,
   ToolGatewayPathCollisionError,
   createWorkspaceToolGateway,
+  digestCanonicalJson,
   parseVerifiedToolGatewayCatalog,
   type ToolGatewayDefinition,
 } from "../src";
@@ -31,6 +32,70 @@ const definition: ToolGatewayDefinition = {
 };
 
 describe("ToolGateway", () => {
+  test("execution binds a host request digest and preserves prepared inputs", async () => {
+    const executions: {
+      arguments: Record<string, unknown>;
+      digest: string | undefined;
+      subjectId: string;
+    }[] = [];
+    let authorizations = 0;
+    const { catalog, gateway } = createWorkspaceToolGateway({
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      generation: 1,
+      authorize: async () => {
+        authorizations++;
+      },
+      definitions: [
+        {
+          ...definition,
+          execute: async (args, context) => {
+            executions.push({
+              arguments: args,
+              digest: context.requestDigest,
+              subjectId: context.caller.subjectId,
+            });
+            return { content: [{ type: "text", text: "ordinary result" }] };
+          },
+        },
+      ],
+    });
+    const originalCaller = { kind: "model" as const, subjectId: "agent:synthetic" };
+    const prepare = (query = "ordinary", caller = originalCaller) =>
+      gateway.prepareCall(
+        {
+          operationId: crypto.randomUUID(),
+          catalogDigest: catalog.digest,
+          identity: definition.identity,
+          arguments: { query },
+          caller,
+        },
+        { transportMeta: { requestDigest: "0".repeat(64) } },
+      );
+    const prepared = await prepare();
+    prepared.call.arguments.query = "observer changed";
+    prepared.call.caller.subjectId = "agent:observer";
+    await prepared.execute();
+    await (await prepare()).execute();
+    await (await prepare("different")).execute();
+    await (await prepare("ordinary", { ...originalCaller, subjectId: "agent:other" })).execute();
+    const expected = digestCanonicalJson({
+      version: 1,
+      catalogDigest: catalog.digest,
+      identity: definition.identity,
+      arguments: { query: "ordinary" },
+      caller: originalCaller,
+    });
+    expect(executions[0]).toEqual({
+      arguments: { query: "ordinary" },
+      digest: expected,
+      subjectId: "agent:synthetic",
+    });
+    expect(executions[1]!.digest).toBe(expected);
+    expect(executions[2]!.digest).not.toBe(expected);
+    expect(executions[3]!.digest).not.toBe(expected);
+    expect(authorizations).toBe(4);
+  });
   test("prepared gateway timing retains call context after preparation and never replays a rejection", async () => {
     const bodies: any[] = [];
     const observer = createObservability(

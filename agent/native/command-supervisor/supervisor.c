@@ -20,22 +20,27 @@
 #include <sys/syscall.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <sys/vfs.h>
+#include <linux/magic.h>
 #include <time.h>
 #include <unistd.h>
 
 #define PROTOCOL "native-subreaper-v1"
-#define FRAME_SIZE 1024
+#define FRAME_SIZE 8192
 #define CANCEL_GRACE_MS 200
 
 struct options {
     const char *invocation, *nonce, *path, *action, *receipt;
+    const char *io, *cols, *rows;
     char **command;
-    bool launch;
+    bool launch, capture;
 };
+
+static bool quiet_errors;
 
 static void fail(const char *message) {
     /* Never include argv, nonce, command text or socket request in diagnostics. */
-    fprintf(stderr, "command supervisor: %s (errno=%d)\n", message, errno);
+    if (!quiet_errors) fprintf(stderr, "command supervisor: %s (errno=%d)\n", message, errno);
     exit(125);
 }
 
@@ -69,6 +74,11 @@ static struct options parse(int argc, char **argv) {
             o.command = &argv[i + 1];
             break;
         }
+        if (!strcmp(argv[i], "--capture-output")) {
+            if (o.capture) fail("duplicate output capture");
+            o.capture = true;
+            continue;
+        }
         if (i + 1 == argc) fail("missing option value");
         const char **slot = NULL;
         if (!strcmp(argv[i], "--invocation")) slot = &o.invocation;
@@ -76,6 +86,9 @@ static struct options parse(int argc, char **argv) {
         else if (!strcmp(argv[i], "--socket")) slot = &o.path;
         else if (!strcmp(argv[i], "--action")) slot = &o.action;
         else if (!strcmp(argv[i], "--receipt")) slot = &o.receipt;
+        else if (!strcmp(argv[i], "--io")) slot = &o.io;
+        else if (!strcmp(argv[i], "--cols")) slot = &o.cols;
+        else if (!strcmp(argv[i], "--rows")) slot = &o.rows;
         else fail("unknown option");
         if (*slot) fail("duplicate option");
         *slot = argv[++i];
@@ -84,10 +97,13 @@ static struct options parse(int argc, char **argv) {
         !o.path || o.path[0] != '/' || strlen(o.path) >= sizeof(((struct sockaddr_un *)0)->sun_path))
         fail("invalid identity or socket path");
     if (o.launch) {
-        if (!o.command || o.action || o.receipt) fail("invalid launch options");
+        if (!o.command || o.action || o.receipt || (o.io && strcmp(o.io, "pipe") && strcmp(o.io, "pty")) ||
+            ((o.cols || o.rows) && (!o.io || strcmp(o.io, "pty")))) fail("invalid launch options");
     } else {
         if (!o.action || (strcmp(o.action, "release") && strcmp(o.action, "cancel") &&
-            strcmp(o.action, "status") && strcmp(o.action, "ack"))) fail("invalid action");
+            strcmp(o.action, "status") && strcmp(o.action, "ack") && strcmp(o.action, "input") &&
+            strcmp(o.action, "input-status"))) fail("invalid action");
+        if (o.io || o.cols || o.rows || o.capture) fail("invalid control options");
         if (!strcmp(o.action, "ack") ? (!o.receipt || !uuid(o.receipt)) : o.receipt != NULL)
             fail("invalid receipt option");
     }
@@ -224,6 +240,19 @@ static int control(const struct options *o) {
     char frame[FRAME_SIZE];
     snprintf(frame, sizeof(frame), "%s\t%s\t%s\t%s\t%s", PROTOCOL, o->invocation,
         o->nonce, o->action, o->receipt ? o->receipt : "-");
+    if (!strcmp(o->action, "input")) {
+        size_t used = strlen(frame) - 1; /* Replace the payload '-' only. */
+        for (;;) {
+            if (used >= sizeof(frame) - 1) fail("input frame too large");
+            ssize_t n = read(STDIN_FILENO, frame + used, sizeof(frame) - 1 - used);
+            if (n < 0 && errno == EINTR) continue;
+            if (n < 0) fail("input frame unavailable");
+            if (!n) break;
+            if (memchr(frame + used, 0, (size_t)n) || memchr(frame + used, '\t', (size_t)n)) fail("invalid input frame");
+            used += (size_t)n;
+        }
+        frame[used] = 0;
+    }
     if (send(fd, frame, strlen(frame), MSG_NOSIGNAL) != (ssize_t)strlen(frame)) fail("control send failed");
     if (!ready(fd, POLLIN, 2000) || receive_frame(fd, frame) < 0) fail("control response unavailable");
     close(fd);
@@ -231,6 +260,8 @@ static int control(const struct options *o) {
     puts(frame);
     return strstr(frame, "\"error\"") ? 125 : 0;
 }
+
+#include "io.h"
 
 static void initialize(void) {
     struct sigaction action = {.sa_handler = SIG_DFL};
@@ -253,6 +284,14 @@ static void initialize(void) {
 
 static int launch(const struct options *o) {
     initialize(); /* All required primitives checked before any user code. */
+    if ((o->io || o->capture) && signal(SIGPIPE, SIG_IGN) == SIG_ERR)
+        fail("stdin signal configuration unavailable");
+    uint64_t cols = 80, rows = 24;
+    if ((o->cols && (!integer(o->cols, &cols) || !cols || cols > 5000)) ||
+        (o->rows && (!integer(o->rows, &rows) || !rows || rows > 5000))) fail("invalid terminal size");
+    struct command_io io;
+    io_open(&io, !o->io ? IO_NONE : !strcmp(o->io, "pipe") ? IO_PIPE : IO_PTY, o->capture,
+        (unsigned short)cols, (unsigned short)rows);
     validate_directory(o->path, true);
     int listener = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (listener < 0) fail("control socket unavailable");
@@ -269,14 +308,32 @@ static int launch(const struct options *o) {
     char receipt_id[37], response[FRAME_SIZE];
     make_receipt_id(receipt_id);
     for (;;) {
+        if (!cancelled) io_flush_input(&io);
+        io_pump_output(&io, quiescent);
         if (!quiescent && (started || cancelled)) {
             if (cancelled) signal_children(milliseconds() - cancel_at < CANCEL_GRACE_MS ? SIGTERM : SIGKILL);
             if (reap(leader, &leader_exit, &leader_seen)) {
                 if (started && !leader_seen) fail("leader status missing");
+                io_parent(&io);
+                io_pump_output(&io, true);
+                if ((io.mode == IO_PTY || io.capture) && !io.drained) continue;
                 quiescent = true;
+                // Journal logs are final now. Cleanup failures must not append
+                // diagnostics after a caller has durably accepted EOF.
+                if (io.capture) quiet_errors = true;
                 snprintf(response, sizeof(response),
                     "{\"state\":\"quiescent\",\"receipt\":{\"protocol\":\"%s\",\"invocationId\":\"%s\","
                     "\"receiptId\":\"%s\",\"leaderExitCode\":%d}}", PROTOCOL, o->invocation, receipt_id, leader_exit);
+                if (io.mode != IO_NONE) {
+                    size_t end = strlen(response) - 2;
+                    snprintf(response + end, sizeof(response) - end, ",\"acceptedInputSequence\":%" PRIu64, io.accepted);
+                    end = strlen(response);
+                    if (io.pending && io.offset) {
+                        snprintf(response + end, sizeof(response) - end, ",\"incompleteInputSequence\":%" PRIu64, io.pending);
+                        end = strlen(response);
+                    }
+                    snprintf(response + end, sizeof(response) - end, "}}");
+                }
             }
         }
         if (!ready(listener, POLLIN, 10)) continue;
@@ -304,6 +361,14 @@ static int launch(const struct options *o) {
         } else if (!strcmp(fields[3], "ack")) {
             ack = quiescent && !strcmp(fields[4], receipt_id);
             send_frame(client, ack ? response : "{\"error\":\"receipt_mismatch\"}");
+        } else if (!strcmp(fields[3], "input")) {
+            char reply[FRAME_SIZE];
+            io_input(&io, fields[4], started, quiescent, cancelled, reply);
+            send_frame(client, reply);
+        } else if (!strcmp(fields[3], "input-status") && !strcmp(fields[4], "-")) {
+            char reply[FRAME_SIZE];
+            io_reply(&io, 0, "accepted", quiescent ? "terminal" : "state", reply);
+            send_frame(client, reply);
         } else if (strcmp(fields[4], "-") || (strcmp(fields[3], "release") &&
             strcmp(fields[3], "cancel") && strcmp(fields[3], "status"))) {
             send_frame(client, "{\"error\":\"invalid_action\"}");
@@ -311,6 +376,11 @@ static int launch(const struct options *o) {
             if (!strcmp(fields[3], "cancel") && !cancelled && !quiescent) {
                 cancelled = true;
                 cancel_at = milliseconds();
+                if (io.mode == IO_PIPE && !io.closed) {
+                    close(io.input);
+                    io.input = -1;
+                    io.closed = true;
+                }
             }
             if (!strcmp(fields[3], "release") && !started && !cancelled && !quiescent) {
                 leader = fork();
@@ -318,12 +388,14 @@ static int launch(const struct options *o) {
                 if (!leader) {
                     close(client);
                     close(listener);
+                    io_child(&io);
                     /* No supervisor-owned pidfds exist across fork. CLOEXEC on
                      * all private descriptors is defense in depth, not proof. */
                     execvp(o->command[0], o->command);
                     _exit(127);
                 }
                 started = true;
+                io_parent(&io);
                 int fd = pidfd_open_child(leader);
                 close(fd);
             }
@@ -333,6 +405,7 @@ static int launch(const struct options *o) {
         close(client);
         if (ack) {
             close(listener);
+            io_close(&io);
             /* Control housekeeping only; never mutate /workspace after proof. */
             if (unlink(o->path)) fail("control cleanup failed");
             return 0;
@@ -403,6 +476,29 @@ int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "capabilities")) {
         initialize();
         printf("%s", PROTOCOL);
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "journal-capabilities")) {
+        initialize();
+        struct statfs memory;
+        const char *directories[] = {"/dev/shm/opengeni-run-launch", "/dev/shm/opengeni-run-control"};
+        for (size_t i = 0; i < sizeof(directories) / sizeof(directories[0]); i++) {
+            char probe[PATH_MAX];
+            snprintf(probe, sizeof(probe), "%s/probe", directories[i]);
+            validate_directory(probe, true);
+            if (statfs(directories[i], &memory) || memory.f_type != TMPFS_MAGIC) fail("journal tmpfs unavailable");
+        }
+        printf("native-journal-v1");
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "capabilities-io")) {
+        initialize();
+        struct command_io io;
+        io_open(&io, IO_PIPE, true, 80, 24);
+        io_close(&io);
+        io_open(&io, IO_PTY, true, 80, 24);
+        io_close(&io);
+        printf("native-subreaper-io-v1");
         return 0;
     }
     struct options o = parse(argc, argv);

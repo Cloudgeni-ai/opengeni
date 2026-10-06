@@ -13,6 +13,7 @@ members = [
     "crates/opengeni-relay",
     "crates/opengeni-agent-harness",
     "crates/opengeni-computer-native",
+    "crates/opengeni-run",
 ]
 
 # Shared metadata + lint posture for every crate in the agent workspace.

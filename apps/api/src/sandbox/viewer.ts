@@ -91,6 +91,7 @@ import {
 import { establishApiSandboxSpawner } from "./rematerialize";
 import { establishCachedChannelAHandle } from "./channel-a";
 import { loadSessionAttachVariableSetValues } from "./session-attach-variable-sets";
+import { requireLegacySandboxApiRoute, sandboxApiUsesNativeMachine } from "./engine-route";
 
 /** The minimal services a viewer op needs: the DB + settings (lease cadence +
  *  the sandbox client construction the leaf reads from settings). The bus is
@@ -212,6 +213,7 @@ export async function attachViewer(
 ): Promise<ViewerAttachResult> {
   const { db, settings } = services;
   const { accountId, workspaceId } = input;
+  await requireLegacySandboxApiRoute(db, input);
   const groupBackend = managedSessionGroupBackend(
     settings.sandboxBackend,
     input.session.sandboxBackend,
@@ -864,6 +866,7 @@ export async function mintDesktopStream(
   if (!settings.sandboxDesktopEnabled) {
     return null;
   }
+  if (await sandboxApiUsesNativeMachine(db, input)) return null;
   if (!desktopCapableBackend(session.sandboxBackend)) {
     return null;
   }
@@ -1140,6 +1143,7 @@ export async function mintTerminalStream(
   if (!settings.sandboxTerminalEnabled) {
     return null;
   }
+  if (await sandboxApiUsesNativeMachine(db, input)) return null;
   if (!desktopCapableBackend(session.sandboxBackend)) {
     return null;
   }

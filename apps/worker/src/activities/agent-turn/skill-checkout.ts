@@ -1,5 +1,10 @@
-import type { AttemptToolDefinition } from "@opengeni/codemode";
-import { SKILL_READ_MAX_PATHS, type SkillTextFile } from "@opengeni/runtime/skill-library";
+import type { AttemptToolDefinition, AttemptToolExecutionContext } from "@opengeni/codemode";
+import { createHash } from "node:crypto";
+import {
+  SKILL_READ_MAX_PATHS,
+  skillArtifactContentSha256,
+  type SkillTextFile,
+} from "@opengeni/runtime/skill-library";
 import { checkoutSkillDirectory, readSkillDirectory, type SkillFileSystem } from "./skill-transfer";
 import type { SkillSaveReceipt, SkillSaveRequest } from "./skill-save";
 
@@ -32,7 +37,10 @@ export function createSkillCheckoutAttemptToolDefinition(input: {
     scopeVersion: number | null;
     files: readonly SkillTextFile[];
   }>;
-  filesystem: () => Promise<Pick<SkillFileSystem, "fsWriteFiles">>;
+  filesystem: (
+    context: AttemptToolExecutionContext,
+    sourceSnapshotDigest?: string,
+  ) => Promise<Pick<SkillFileSystem, "fsWriteFiles">>;
   /** Telemetry only; a failure here never changes the result. */
   observe?: (observation: SkillCheckoutObservation) => void;
 }): AttemptToolDefinition {
@@ -67,7 +75,7 @@ export function createSkillCheckoutAttemptToolDefinition(input: {
     },
     source: "opengeni",
     approval: "none",
-    execute: async (args) => {
+    execute: async (args, context) => {
       if (
         typeof args.skill !== "string" ||
         typeof args.directory !== "string" ||
@@ -101,7 +109,20 @@ export function createSkillCheckoutAttemptToolDefinition(input: {
           return input.load(args.skill as string);
         });
         outcome = "failed";
-        const filesystem = await timed("sandbox", input.filesystem);
+        const sourceSnapshotDigest = createHash("sha256")
+          .update(
+            JSON.stringify({
+              version: 1,
+              skillId: skill.skillId,
+              revisionId: skill.revisionId,
+              scopeVersion: skill.scopeVersion,
+              contentSha256: skillArtifactContentSha256(skill.files),
+            }),
+          )
+          .digest("hex");
+        const filesystem = await timed("sandbox", () =>
+          input.filesystem(context, sourceSnapshotDigest),
+        );
         copied = await timed("write", () =>
           checkoutSkillDirectory(
             filesystem,
@@ -152,7 +173,9 @@ export function createSkillCheckoutAttemptToolDefinition(input: {
 
 export function createSkillPublishAttemptToolDefinition(input: {
   authorize: () => Promise<void>;
-  filesystem: () => Promise<Pick<SkillFileSystem, "fsList" | "fsRead">>;
+  filesystem: (
+    context: AttemptToolExecutionContext,
+  ) => Promise<Pick<SkillFileSystem, "fsList" | "fsRead">>;
   save: (request: SkillSaveRequest) => Promise<SkillSaveReceipt>;
 }): AttemptToolDefinition {
   return {
@@ -190,9 +213,12 @@ export function createSkillPublishAttemptToolDefinition(input: {
     },
     source: "opengeni",
     approval: "none",
-    execute: async (args) => {
+    execute: async (args, context) => {
       await input.authorize();
-      const artifact = await readSkillDirectory(await input.filesystem(), args.directory as string);
+      const artifact = await readSkillDirectory(
+        await input.filesystem(context),
+        args.directory as string,
+      );
       const output = await input.save({
         operationId: args.operationId as string,
         skillId: args.skillId as string,

@@ -109,11 +109,13 @@ describe("optional Skill directory transfers", () => {
     const skillId = "88888888-8888-4888-8888-888888888888";
     const revisionId = "66666666-6666-4666-8666-666666666666";
     const operationId = "77777777-7777-4777-8777-777777777777";
+    const snapshots: (string | undefined)[] = [];
     const authorize = async () => {
       calls.push("authorize");
     };
-    const filesystem = async () => {
+    const filesystem = async (_context: unknown, sourceSnapshotDigest?: string) => {
       calls.push("filesystem");
+      snapshots.push(sourceSnapshotDigest);
       return fs;
     };
     const environment = createAttemptToolEnvironment({
@@ -162,6 +164,7 @@ describe("optional Skill directory transfers", () => {
       arguments: { skill: skillId, directory: "fresh" },
     });
     expect(calls).toEqual(["authorize", "load", "filesystem"]);
+    expect(snapshots[0]).toMatch(/^[a-f0-9]{64}$/u);
     expect(checkout.structuredContent).toMatchObject({ skillId, revisionId, scopeVersion: 2 });
     const publish = await environment.callModel({
       modelName: "skill_publish",
@@ -176,6 +179,7 @@ describe("optional Skill directory transfers", () => {
       },
     });
     expect(calls.slice(3)).toEqual(["authorize", "filesystem", "save"]);
+    expect(snapshots[1]).toBeUndefined();
     expect(publish.structuredContent).toMatchObject({ outcome: "pending" });
   });
 

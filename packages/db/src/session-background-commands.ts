@@ -1000,6 +1000,59 @@ export type SessionCommandIdentity = {
   commandId: string;
 };
 
+/** Caller holds the canonical session/attempt/machine/command locks and has
+ * checked this native operation's original proof and complete captured output.
+ * The SQL guard independently validates its physical evidence. */
+export async function settleNativeSessionBackgroundCommandInTransaction(
+  tx: SessionActivityDatabase,
+  input: SessionCommandIdentity & {
+    outcome: "exited" | "lost";
+    exitCode: number | null;
+    reason: string;
+  },
+  mutateTerminal: SessionBackgroundCommandTerminalMutation,
+): Promise<SessionBackgroundCommand | null> {
+  await mutateTerminal.prepare(tx);
+  const identity = and(
+    eq(schema.sessionBackgroundCommands.accountId, input.accountId),
+    eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
+    eq(schema.sessionBackgroundCommands.sessionId, input.sessionId),
+    eq(schema.sessionBackgroundCommands.id, input.commandId),
+    eq(schema.sessionBackgroundCommands.nativeOperationId, input.commandId),
+    eq(schema.sessionBackgroundCommands.provider, "managed"),
+  );
+  const [row] = await tx
+    .select()
+    .from(schema.sessionBackgroundCommands)
+    .where(identity)
+    .for("update")
+    .limit(1);
+  if (!row) return null;
+  if (row.state === "exited" || row.state === "lost") {
+    if (row.state !== input.outcome || row.exitCode !== input.exitCode)
+      throw new Error("Native background settlement conflicts with original evidence");
+    return mapCommand(row);
+  }
+  const [updated] = await tx
+    .update(schema.sessionBackgroundCommands)
+    .set({
+      state: input.outcome,
+      exitCode: input.exitCode,
+      settlementReason: boundedSessionBackgroundCommandReason(input.reason, "Native settlement"),
+      settledAt: new Date(),
+      reconcileClaimId: null,
+      reconcileClaimedAt: null,
+      lastReconcileOutcome: `settled_${input.outcome}`,
+      updatedAt: new Date(),
+    })
+    .where(identity)
+    .returning();
+  if (!updated) throw new Error("Native background settlement lost its exact owner");
+  const command = mapCommand(updated);
+  await mutateTerminal.commit(tx, command);
+  return command;
+}
+
 /** Observe terminal state, not output consumption. Native terminal-result adapters
  * call this after settlement. Session-first ordering serializes settlement and
  * inbox claiming; already delivered history is never rewritten. */

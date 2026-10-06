@@ -147,3 +147,38 @@ export { prepareKnowledgeSave } from "./domain/knowledge-preparation";
 export { retainKnowledgeMessage } from "./domain/knowledge-messages";
 
 export * from "./domain/connector-tool-permissions";
+export { createSandboxV2MachineStore } from "./sandbox-v2-store";
+export {
+  establishSandboxV2MachineForAttempt,
+  SandboxV2MachineUnavailableError,
+} from "./sandbox-v2-turn";
+export type { SandboxV2TurnMachine } from "./sandbox-v2-turn";
+export {
+  executeSandboxV2SetupStep,
+  executeSandboxV2WorkspaceStep,
+  SandboxV2SetupFailedError,
+} from "./sandbox-v2-setup";
+export { deliverSandboxV2File } from "./sandbox-v2-files";
+export type { SandboxV2FileDelivery } from "./sandbox-v2-files";
+export {
+  installSandboxV2CredentialGeneration,
+  installSandboxV2BackgroundCredentialGeneration,
+} from "./sandbox-v2-credentials";
+export { createSandboxV2CredentialGenerationOwner } from "./sandbox-v2-credential-owner";
+export { createSandboxV2BackgroundCredentialGenerationOwner } from "./sandbox-v2-background-credential-owner";
+export { createSandboxV2BackgroundCommandTools } from "./sandbox-v2-background-commands";
+export {
+  createSandboxV2BackgroundCommandController,
+  retainSandboxV2BackgroundControlOwner,
+  reconcileSandboxV2BackgroundJobs,
+} from "./sandbox-v2-background-control";
+export * from "./sandbox-v2-credential-cleanup";
+export * from "./sandbox-v2-credential-lifecycle";
+export { reconcileSandboxV2MachineCommands } from "./sandbox-v2-reconcile";
+export { reconcileSandboxV2AttemptWriters } from "./sandbox-v2-attempt-writers";
+export {
+  createSandboxV2CommandPersistence,
+  createSandboxV2CommandReconciler,
+  executeSandboxV2AcceptedToolAction,
+  sandboxV2CausalActionId,
+} from "./sandbox-v2-command-store";

@@ -1,8 +1,9 @@
 import type {
   ConnectionCredentialsPort,
   CredentialAuthNeededPayload,
-  SandboxBackend,
   RunCredentialsRequest,
+  RunCredentialsResolution,
+  SandboxV2CredentialProviderSelection,
   Session,
   SessionTurn,
   ToolRef,
@@ -24,7 +25,8 @@ export type RunCredentialResolutionContext = {
   session: Session;
   turn: SessionTurn & { initiatingHumanSubjectId?: string | null };
   attemptId: string;
-  effectiveSandboxBackend: SandboxBackend;
+  effectiveSandboxBackend: RunCredentialsRequest["effectiveSandboxBackend"];
+  nativeMachineProvider?: string;
   variableSet: { id: string; name: string } | null;
   /** Enables the workspace's configured HTTP credential provider. */
   settings?: Settings;
@@ -36,6 +38,14 @@ export type RunCredentialResolutionContext = {
 };
 
 export type BoundRunCredentialResolver = {
+  /** Recovery metadata; copies only. Older injected test owners may omit it. */
+  readonly request?: RunCredentialsRequest;
+  readonly provider?: SandboxV2CredentialProviderSelection;
+  readonly mcpServers?: readonly { id: string; url: string }[];
+  resolveResolution?(input: {
+    purpose: "provision" | "renewal";
+    forceRefresh: boolean;
+  }): Promise<RunCredentialsResolution>;
   resolve(input: {
     purpose: "provision" | "renewal";
     forceRefresh: boolean;
@@ -65,6 +75,9 @@ export function buildRunCredentialsRequest(
     initiator: input.turn.initiator,
     initiatorContext: input.turn.initiatorContext,
     effectiveSandboxBackend: input.effectiveSandboxBackend,
+    ...(input.nativeMachineProvider
+      ? { sandboxEngine: "machine-v2" as const, machineProvider: input.nativeMachineProvider }
+      : {}),
     sandboxOs: input.turn.sandboxOs ?? input.session.sandboxOs,
     purpose: input.purpose,
     forceRefresh: input.forceRefresh,
@@ -159,16 +172,56 @@ export async function bindRunCredentialResolver(
       turn: input.turn,
       attemptId: input.attemptId,
       effectiveSandboxBackend: input.effectiveSandboxBackend,
+      ...(input.nativeMachineProvider
+        ? { nativeMachineProvider: input.nativeMachineProvider }
+        : {}),
       variableSet: input.variableSet,
       rootSessionId,
       purpose: "provision",
       forceRefresh: false,
     }),
   );
-  return {
+  const mcpServers = input.settings
+    ? selectedSessionRemoteMcpTargets(
+        input.settings,
+        input.session.mcpServers ?? [],
+        input.effectiveTools,
+        (input.localMcpServerIds ?? []).map((id) => ({ id })),
+      )
+    : [];
+  const provider: SandboxV2CredentialProviderSelection | undefined =
+    workspaceResolver?.binding ??
+    (input.connectionCredentials?.runCredentialAuthority
+      ? { kind: "host", identity: input.connectionCredentials.runCredentialAuthority.identity }
+      : undefined);
+  const resolveResolution = async ({
+    purpose,
+    forceRefresh,
+  }: {
+    purpose: "provision" | "renewal";
+    forceRefresh: boolean;
+  }) => {
+    const resolution = await resolver({ ...structuredClone(frozenRequest), purpose, forceRefresh });
+    normalizeRunCredentialsResolution(resolution, scope);
+    return structuredClone(resolution);
+  };
+  const bound: BoundRunCredentialResolver = {
+    get request() {
+      return structuredClone(frozenRequest);
+    },
+    get mcpServers() {
+      return structuredClone(mcpServers);
+    },
+    resolveResolution,
     resolve: async ({ purpose, forceRefresh }) => {
-      const resolution = await resolver({ ...frozenRequest, purpose, forceRefresh });
+      const resolution = await resolveResolution({ purpose, forceRefresh });
       return normalizeRunCredentialsResolution(resolution, scope);
     },
   };
+  if (provider)
+    Object.defineProperty(bound, "provider", {
+      get: () => structuredClone(provider),
+      enumerable: true,
+    });
+  return bound;
 }

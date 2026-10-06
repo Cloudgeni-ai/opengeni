@@ -640,6 +640,7 @@ const UNIFIED_KNOWLEDGE_AUTHORITY_TABLES = [
   "documents",
 ] as const;
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  "list_sandbox_v2_machine_inventory(integer, uuid)",
   "maintain_usage_allowances(integer, integer)",
   "usage_allowance_command(jsonb)",
   "usage_allowance_capability_active(uuid, uuid)",
@@ -998,11 +999,22 @@ export const FORCE_RLS_TABLES = [
   "rig_versions",
   "rigs",
   "sandbox_checkpoint_artifacts",
+  "sandbox_group_engines",
   "sandbox_lease_holders",
   "sandbox_leases",
   "sandbox_pty_sessions",
   "sandbox_retained_processes",
   "sandbox_session_envelopes",
+  "sandbox_v2_background_credentials",
+  "sandbox_v2_background_owners",
+  "sandbox_v2_command_inputs",
+  "sandbox_v2_command_output",
+  "sandbox_v2_commands",
+  "sandbox_v2_credential_cleanup",
+  "sandbox_v2_credential_generations",
+  "sandbox_v2_credential_owners",
+  "sandbox_v2_machines",
+  "sandbox_v2_preparation_plans",
   "sandbox_workspace_mutation_admissions",
   "sandboxes",
   "scheduled_task_connection_authority_snapshots",
@@ -1426,6 +1438,11 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "pr_review_managed_github_authority_nonces",
   "preference_registry_preferences",
   "preference_registry_revisions",
+  "sandbox_group_engines",
+  "sandbox_v2_background_owners",
+  "sandbox_v2_command_inputs",
+  "sandbox_v2_command_output",
+  "sandbox_v2_preparation_plans",
   "session_attempt_tool_catalogs",
   "session_goal_revisions",
   "session_spawn_denials",
@@ -1468,6 +1485,12 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "interaction_operations",
   "interaction_resource_operations",
   "network_routes",
+  "sandbox_v2_background_credentials",
+  "sandbox_v2_commands",
+  "sandbox_v2_credential_cleanup",
+  "sandbox_v2_credential_generations",
+  "sandbox_v2_credential_owners",
+  "sandbox_v2_machines",
   "scheduled_task_runs",
   "scheduled_tasks",
   "session_attempt_codemode_calls",
@@ -2593,6 +2616,17 @@ export function evaluateRuntimeDatabasePosture(
       } else if (names.some((name) => tableByName.get(name)!.owner !== routine.owner)) {
         violations.push(
           `target-schema runtime capability ${routine.name} authority table owners do not match`,
+        );
+      }
+    } else if (routine.name === "list_sandbox_v2_machine_inventory(integer, uuid)") {
+      // public can belong to pg_database_owner while the migration owner owns
+      // the protected table and definer. The table owner is the authority.
+      const table = tableByName.get("sandbox_v2_machines");
+      if (!table) {
+        violations.push("Sandbox machine inventory authority table sandbox_v2_machines is missing");
+      } else if (routine.owner !== table.owner) {
+        violations.push(
+          `Sandbox machine inventory owner ${routine.owner} does not match sandbox_v2_machines owner ${table.owner}`,
         );
       }
     } else if (routine.name === MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE) {

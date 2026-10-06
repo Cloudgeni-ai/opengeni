@@ -524,6 +524,10 @@ async function grantAppRoleIfSchemaExists(
   const runtimeReadInsertUpdateTables = `ARRAY[${RUNTIME_READ_INSERT_UPDATE_TABLES.map(literal).join(", ")}]`;
   const workClaimCapabilityRoutines = `ARRAY[${WORK_CLAIM_CAPABILITY_ROUTINES.map(literal).join(", ")}]`;
   const organizationMembershipLifecycleRoutines = `ARRAY[${[
+    "list_sandbox_v2_machine_inventory(integer,uuid)",
+    "sandbox_v2_credential_writer_action(text,text)",
+    "sandbox_v2_command_has_background_owner(uuid)",
+    "sandbox_v2_attempt_writers_pending(uuid,uuid,uuid,uuid,uuid)",
     "maintain_usage_allowances(integer,integer)",
     "usage_allowance_command(jsonb)",
     "ensure_external_identity(uuid,text,text)",

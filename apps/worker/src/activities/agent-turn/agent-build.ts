@@ -76,6 +76,7 @@ import type {
   ProviderTurnState,
   SandboxRuntimeState,
 } from "./turn-context";
+import { assertNativeTurnHasNoLegacySandboxOwners } from "./turn-context";
 import { SESSION_TITLE_MODEL_TOOL_NAME } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
@@ -145,6 +146,28 @@ export type BuildTurnAgentDeps = {
 };
 
 export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
+  const nativeTurn = deps.sandboxState.nativeTurn;
+  assertNativeTurnHasNoLegacySandboxOwners(deps.sandboxState);
+  if (
+    nativeTurn &&
+    (deps.eventing.toolCancellationFenceRef.current ||
+      deps.activeSandboxBackend !== undefined ||
+      deps.fileResourceDownloads.length ||
+      deps.sandboxArtifactRuntime.available ||
+      deps.sandboxGitToken ||
+      Object.values(deps.sandboxGitTokens ?? {}).some(Boolean) ||
+      deps.sandboxGitCredentialBindings?.length ||
+      deps.sandboxCodemodeToken ||
+      nativeTurn.machine.authority.accountId !== deps.input.accountId ||
+      nativeTurn.machine.authority.workspaceId !== deps.input.workspaceId ||
+      nativeTurn.machine.authority.sessionId !== deps.input.sessionId ||
+      nativeTurn.machine.authority.turnId !== deps.turn.id ||
+      nativeTurn.machine.authority.attemptId !== deps.input.attemptId ||
+      nativeTurn.machine.authority.executionGeneration !== deps.turn.executionGeneration)
+  )
+    throw new Error(
+      "Native worker construction requires its exact owner without legacy preparation",
+    );
   const {
     mcpServers,
     input,
@@ -675,10 +698,16 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           ? { attemptToolCatalog: preparedTools.attemptToolCatalog }
           : {}),
         ...(sandboxArtifactRuntime.available ? { artifactRuntimeAvailable: true } : {}),
-        ...(cancellationSignal ? { turnCancellationSignal: cancellationSignal } : {}),
-        onToolCancellationFence: (fence) => {
-          eventing.toolCancellationFenceRef.current = fence;
-        },
+        ...(nativeTurn
+          ? { machineSandbox: nativeTurn.binding }
+          : {
+              ...(cancellationSignal ? { turnCancellationSignal: cancellationSignal } : {}),
+              onToolCancellationFence: (
+                fence: Parameters<NonNullable<BuildAgentOptions["onToolCancellationFence"]>>[0],
+              ) => {
+                eventing.toolCancellationFenceRef.current = fence;
+              },
+            }),
         // TOKEN-BROKER (B1): forward the per-turn git token OFF-MANIFEST as the clone
         // seed. ONLY when the effective backend is NOT selfhosted (the connected
         // machine uses its own git creds — mirrors the skipGitHubToken gate above)
@@ -837,6 +866,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   })();
   const postAgentPreparationStartedAt = performance.now();
   if (
+    !nativeTurn &&
     eventing.modelRunSettings.sandboxBackend !== "none" &&
     eventing.toolCancellationFenceRef.current === null
   ) {

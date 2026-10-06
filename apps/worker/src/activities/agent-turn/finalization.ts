@@ -16,6 +16,7 @@ import type { Settings } from "@opengeni/config";
 import { signalCodexCapacityWakeTargets } from "../codex-capacity";
 import { startActivityHeartbeat, type currentActivityContext } from "../streaming";
 import { startTurnFinalizationMonitor } from "./finalization-monitor";
+import { SandboxV2AttemptWritersPendingError } from "../../sandbox-v2-execution";
 import type { CodemodeTokenRenewalController } from "../codemode-token-renewal";
 import type { RunCredentialRenewalController } from "../run-credential-renewal";
 import type {
@@ -63,6 +64,7 @@ import type {
   TurnControlState,
   WorkspaceRefState,
 } from "./turn-context";
+import { assertNativeTurnHasNoLegacySandboxOwners } from "./turn-context";
 
 export type TurnFinalizationDeps = {
   input: RunAgentTurnInput;
@@ -178,12 +180,37 @@ async function finalizeTurnAttemptSteps(
   }
   const finalizationStarted = performance.now();
   let finalizationError: unknown;
-  let physicalToolQuiescenceConfirmed = !control.acknowledgeQuiescence;
-  let quiescenceReceiptOrProofDurable = !control.acknowledgeQuiescence;
+  let nativeLocalWritersDrained = false;
+  let preparedToolsClosed = false;
+  let physicalToolQuiescenceConfirmed = !control.acknowledgeQuiescence && !sandboxState.nativeTurn;
+  let quiescenceReceiptOrProofDurable = !control.acknowledgeQuiescence && !sandboxState.nativeTurn;
   const finalizerSignal = turnFinalizerCancellationSignal(
     cancellationSignal,
     control.activityStatus,
   );
+  const closePreparedTools = async (): Promise<void> => {
+    if (preparedToolsClosed) return;
+    monitor.enter("tool_close");
+    eventing.toolPreparationClosing = true;
+    if (eventing.toolPreparationReady)
+      await waitForTurnFinalizerStep(
+        eventing.toolPreparationReady.catch(() => undefined),
+        finalizerSignal,
+      );
+    if (eventing.codemodeDispatcher) {
+      await waitForTurnFinalizerStep(
+        eventing.codemodeDispatcher.close().catch(() => undefined),
+        finalizerSignal,
+      );
+      eventing.codemodeDispatcher = null;
+    }
+    if (eventing.preparedTools)
+      await waitForTurnFinalizerStep(
+        eventing.preparedTools.close().catch(() => undefined),
+        finalizerSignal,
+      );
+    preparedToolsClosed = true;
+  };
   const drainInFlightWarmSnapshot = async (): Promise<void> => {
     const snapshot = sandboxState.snapshotInFlight;
     if (!snapshot) return;
@@ -202,6 +229,7 @@ async function finalizeTurnAttemptSteps(
     }
   };
   try {
+    assertNativeTurnHasNoLegacySandboxOwners(sandboxState);
     const toolCancellationFence = eventing.toolCancellationFenceRef.current;
     // Every renewal controller is an attempt-owned sandbox writer. Capture
     // and close all of them before the tool/run-writer drain and before the
@@ -214,7 +242,8 @@ async function finalizeTurnAttemptSteps(
       renewals.codemodeTokenRenewal as CodemodeTokenRenewalController | null;
     renewals.codemodeTokenRenewal = null;
     renewals.runCredentialRenewalClosed = true;
-    renewals.runMcpCredentials?.close();
+    const runMcpCredentialsToClose = renewals.runMcpCredentials;
+    if (!sandboxState.nativeTurn) runMcpCredentialsToClose?.close();
     delete renewals.runMcpCredentials;
     const runRenewalToStop = renewals.runCredentialRenewal as RunCredentialRenewalController | null;
     renewals.runCredentialRenewal = null;
@@ -223,18 +252,35 @@ async function finalizeTurnAttemptSteps(
     // controllers that can still write a newer generation.
     const credentialSessionToClear = renewals.runCredentialSession;
     renewals.runCredentialSession = null;
-    await drainAttemptOwnedSandboxWriters({
-      // Normal turn completion owns the same process boundary as
-      // Pause/Steer: yielded provider shells must be terminated, polled,
-      // and durably settled before workspace capture. Only receipt
-      // publication remains conditional on acknowledgeQuiescence.
-      toolCancellationFence,
-      onStage: monitor.enter,
-      cancellationReason: cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FINALIZED"),
-      gitCredentialRenewals: gitRenewalsToStop,
-      codemodeTokenRenewal: codemodeRenewalToStop,
-      runCredentialRenewal: runRenewalToStop,
-    });
+    if (sandboxState.nativeTurn) {
+      const native = sandboxState.nativeTurn;
+      if (
+        toolCancellationFence ||
+        credentialSessionToClear ||
+        gitRenewalsToStop.length ||
+        codemodeRenewalToStop ||
+        (runMcpCredentialsToClose && runMcpCredentialsToClose !== native.runMcpCredentials) ||
+        (runRenewalToStop && runRenewalToStop !== native.credentialRenewal)
+      )
+        throw new Error("Native finalization cannot use legacy writer or credential owners");
+      const reason = cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FINALIZED");
+      await native.closeAndDrain(reason);
+      nativeLocalWritersDrained = true;
+      const settled = await native.finalize({ reason, waitMs: 15_000 });
+      if (settled.state !== "drained") throw new SandboxV2AttemptWritersPendingError();
+    } else
+      await drainAttemptOwnedSandboxWriters({
+        // Normal turn completion owns the same process boundary as
+        // Pause/Steer: yielded provider shells must be terminated, polled,
+        // and durably settled before workspace capture. Only receipt
+        // publication remains conditional on acknowledgeQuiescence.
+        toolCancellationFence,
+        onStage: monitor.enter,
+        cancellationReason: cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FINALIZED"),
+        gitCredentialRenewals: gitRenewalsToStop,
+        codemodeTokenRenewal: codemodeRenewalToStop,
+        runCredentialRenewal: runRenewalToStop,
+      });
     // Attempt-qualified credential deletion is also a real workspace write,
     // but it must not be submitted behind the very command being cancelled.
     // Drain tool processes and credential renewals first, then delete only this
@@ -276,14 +322,17 @@ async function finalizeTurnAttemptSteps(
       });
     }
     sandboxState.attemptWritersDrained = true;
-    if (control.acknowledgeQuiescence) {
+    if (control.acknowledgeQuiescence || sandboxState.nativeTurn) {
       // A cancellation before sandbox-backed capabilities exist still has
       // no tool controller to drain. Sandbox agent construction fails closed
       // when a backend exists but no controller was installed. Renewal
       // writers, when present, were drained above in either case.
       physicalToolQuiescenceConfirmed = true;
     }
-    if (control.acknowledgeQuiescence && physicalToolQuiescenceConfirmed) {
+    if (
+      (control.acknowledgeQuiescence || sandboxState.nativeTurn) &&
+      physicalToolQuiescenceConfirmed
+    ) {
       // This receipt is part of the hard cancellation boundary, not
       // housekeeping. Persist it immediately after the sandbox/tool fence
       // and before lease, cache, recording, or provider cleanup. Its
@@ -298,6 +347,9 @@ async function finalizeTurnAttemptSteps(
         workflowId: input.workflowId,
         workflowRunId: input.workflowRunId,
         activityId: dispatchId,
+        ...(sandboxState.nativeTurn
+          ? { nativeAuthority: structuredClone(sandboxState.nativeTurn.machine.authority) }
+          : {}),
       };
       const recoveryMode = await persistOrSignalSessionAttemptQuiescence({
         proof,
@@ -311,6 +363,7 @@ async function finalizeTurnAttemptSteps(
             temporalWorkflowRunId: input.workflowRunId,
             temporalActivityId: dispatchId,
             allowUninterrupted: true,
+            ...(proof.nativeAuthority ? { nativeAuthority: proof.nativeAuthority } : {}),
           }),
         ...(wakeSessionWorkflow
           ? {
@@ -548,11 +601,13 @@ async function finalizeTurnAttemptSteps(
         `[sandbox-e2e] capture preflight ownership=${settings.sandboxOwnershipEnabled} enabled=${settings.workspaceCaptureEnabled} resolved=${Boolean(sandboxState.resolvedSandbox)} session=${Boolean(sandboxState.setupBoxSession)} group=${Boolean(sandboxState.sandboxGroupId)} storage=${Boolean(objectStorage)}`,
       );
     }
-    const runTurnEndPersistence = shouldRunTurnEndWorkspacePersistence({
-      activityStatus: control.activityStatus,
-      cancellationRequested: finalizerSignal?.aborted === true,
-      deadlineRotationRequested: sandboxState.deadlineRotationRequested,
-    });
+    const runTurnEndPersistence =
+      !sandboxState.nativeTurn &&
+      shouldRunTurnEndWorkspacePersistence({
+        activityStatus: control.activityStatus,
+        cancellationRequested: finalizerSignal?.aborted === true,
+        deadlineRotationRequested: sandboxState.deadlineRotationRequested,
+      });
     if (
       settings.workspaceCaptureEnabled &&
       runTurnEndPersistence &&
@@ -611,27 +666,7 @@ async function finalizeTurnAttemptSteps(
         },
       });
     }
-    monitor.enter("tool_close");
-    eventing.toolPreparationClosing = true;
-    if (eventing.toolPreparationReady) {
-      await waitForTurnFinalizerStep(
-        eventing.toolPreparationReady.catch(() => undefined),
-        finalizerSignal,
-      );
-    }
-    if (eventing.codemodeDispatcher) {
-      await waitForTurnFinalizerStep(
-        eventing.codemodeDispatcher.close().catch(() => undefined),
-        finalizerSignal,
-      );
-      eventing.codemodeDispatcher = null;
-    }
-    if (eventing.preparedTools) {
-      await waitForTurnFinalizerStep(
-        eventing.preparedTools.close().catch(() => undefined),
-        finalizerSignal,
-      );
-    }
+    await closePreparedTools();
     monitor.enter("sandbox_provisioning");
     if (sandboxState.turnSandboxProvisioner?.hasStarted()) {
       await waitForTurnFinalizerStep(
@@ -729,6 +764,16 @@ async function finalizeTurnAttemptSteps(
       safeErrorDiagnostic(error),
     );
   } finally {
+    // Unknown native command outcomes retain their durable writer/demand. Once
+    // the actual local callbacks and renewal drained, close host tool resources
+    // independently; that local teardown does not publish physical quiescence.
+    if (nativeLocalWritersDrained && !preparedToolsClosed) {
+      try {
+        await closePreparedTools();
+      } catch (error) {
+        finalizationError ??= error;
+      }
+    }
     // The writer drain is the only authority that licenses settling an
     // abandoned turn admission. Keep this second-stage release outside all
     // later housekeeping so an event/cache/capture/recording failure cannot
@@ -792,7 +837,10 @@ async function finalizeTurnAttemptSteps(
       },
       value: finalizationDurationSeconds,
     });
-    if (control.cancellationRequestedAt !== null) {
+    if (
+      control.cancellationRequestedAt !== null &&
+      (!sandboxState.nativeTurn || sandboxState.attemptWritersDrained)
+    ) {
       const physicalCancellationDurationSeconds =
         (completedAt - control.cancellationRequestedAt) / 1000;
       observability.observeHistogram({
@@ -850,12 +898,12 @@ async function finalizeTurnAttemptSteps(
     // remain strongly reachable until this terminal boundary.
     turnCompletionMemoryCollector.schedule(observability);
     assertPhysicalToolQuiescenceForCancellation({
-      acknowledgeQuiescence: control.acknowledgeQuiescence,
+      acknowledgeQuiescence: control.acknowledgeQuiescence || Boolean(sandboxState.nativeTurn),
       physicalToolQuiescenceConfirmed,
       failure: finalizationError,
     });
     assertSessionAttemptQuiescenceRecoveryDurable({
-      acknowledgeQuiescence: control.acknowledgeQuiescence,
+      acknowledgeQuiescence: control.acknowledgeQuiescence || Boolean(sandboxState.nativeTurn),
       physicalToolQuiescenceConfirmed,
       receiptOrProofDurable: quiescenceReceiptOrProofDurable,
       failure: finalizationError,

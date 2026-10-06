@@ -20,6 +20,8 @@ export type WorkspaceEnvironmentContext = {
 export type RigInstructionsContext = {
   name: string;
   version: number;
+  /** Derived from the prepared native machine binding. */
+  retainedMachine?: boolean;
 };
 
 /**

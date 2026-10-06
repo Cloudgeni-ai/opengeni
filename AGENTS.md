@@ -6,6 +6,50 @@ This repository is a clean TypeScript/Bun stack. The public API is session-based
 
 When the user says **"start the dev server"**, **"spin it up"**, or **"run the full stack"**, they mean the steps under **Full local stack**.
 
+## Experimental sandbox v2
+
+`OPENGENI_SANDBOX_V2_ENABLED` defaults to false. Workspace `sandboxV2Enabled`
+must be literally true and the host must install a qualified backend before any
+fresh group is admitted. Existing groups retain their engine across flag changes;
+never fall back from a persisted v2 machine to a legacy lease. Migration 0638 is
+a maintenance schema install; it does not migrate groups or remove legacy state.
+Provider qualification is incomplete, so no production boot installs a qualified
+v2 adapter. Normal turns read the retained engine before legacy setup and compose
+the native preparer for retained groups with an installed provider. Missing
+providers and unsupported preparation contracts report unavailable. The experimental
+`establishSandboxV2MachineForAttempt` helper establishes exact attempt demand and
+readiness; it does not qualify a provider or enable admission. Trusted setup
+steps use retained plan/step identities; credential stdin and input-close have
+separate identities. Large output keeps complete captured bytes and returns
+bounded UTF-8 windows. The normal native preparer composes ordered credential
+renewal, host MCP switching, guest cleanup and the ordinary agent stream. Host
+credential originals have a separate encrypted, attempt/incarnation-bound store;
+grant checks precede recovery and cached model/tool dispatch. Ciphertext erasure
+requires a closed, physically quiesced exact attempt and leaves its identity.
+Renewal activation and guest cleanup remain separate owners. The preparer
+retains complete nonsecret plans under the exact attempt/incarnation fence;
+retries load the original before resolving new inputs. The runtime can run that
+exact prepared session/capabilities through its standard model/approval pipeline
+without legacy setup or lifetime wrappers. Its native text editor accepts one
+structured patch per call with a 128 KiB UTF-8 file bound; explicitly named
+read/publication/stdin steps recover the original operation. Uncertain failures
+escape the SDK's text renderer before reply retention. The native resource owner
+loads only canonical current-turn attachments, applies ordinary file grants and
+freezes finalized metadata. Prepared directory descriptions enter SDK context
+without rematerialization; grants recheck before preparation and every model/tool
+dispatch. Fresh download URLs use an explicit storage audience. Bounded image
+viewing and current-turn generated-image placement have native owners; historical
+generated inputs, wider binary transfers and remaining manifest kinds do not. Unsupported
+resource/preparation declarations and cross-attempt setup adoption still fail
+closed. See
+[sandbox v2](docs/design/sandbox-v2.md), its
+[research handoff](docs/design/sandbox-v2-handoff.md) and the architecture map.
+
+Journal checks run from `agent/` with `cargo test -p opengeni-run`. Build the finite
+Linux suite from the root with its documented Dockerfile; run it with network
+disabled. `JOURNAL_CONFORMANCE_IMAGE` additionally enables native differential
+transport tests. Keep live provider/account evidence outside the public repository.
+
 ## Full Local Stack
 
 The stack means everything needed to run the Hono API, React web app, Temporal worker, Postgres event store, Core NATS realtime bus, Temporal service, and configured OpenAI Agents SDK sandbox backend.

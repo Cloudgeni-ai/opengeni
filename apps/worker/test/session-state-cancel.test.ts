@@ -325,6 +325,41 @@ describe("session-state interrupt settlement", () => {
         payload: { operation: "attempt_quiesced" },
       },
     ]);
+    const nativeAuthority = {
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      attemptId: "attempt-1",
+      turnId: "turn-1",
+      executionGeneration: 1,
+      machineId: "machine-1",
+      instance: {
+        id: "synthetic-instance",
+        bootId: "a".repeat(64),
+        diskLineage: crypto.randomUUID(),
+      },
+    };
+    await activities.persistSessionAttemptQuiescence({
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      attemptId: "attempt-1",
+      workflowId: "workflow-1",
+      workflowRunId: "run-1",
+      activityId: "activity-1",
+      nativeAuthority,
+    });
+    expect(quiescenceReceipts.at(-1)).toEqual({
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      attemptId: "attempt-1",
+      temporalWorkflowId: "workflow-1",
+      temporalWorkflowRunId: "run-1",
+      temporalActivityId: "activity-1",
+      allowUninterrupted: true,
+      nativeAuthority,
+    });
   });
 
   test("does not retry an authoritative receipt because NATS fanout failed", async () => {

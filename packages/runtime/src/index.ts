@@ -1,4 +1,5 @@
 import { measureMcpPhase } from "@opengeni/observability";
+import { isDeepStrictEqual } from "node:util";
 import { createMcpTransportLogger } from "./mcp-transport-logger";
 import {
   withPreparedCompactionRequest,
@@ -96,6 +97,9 @@ import {
   normalizeResourceMountPath,
   prefixedMcpToolName as sharedPrefixedMcpToolName,
   resourceMountPath,
+  resourceMountPathCollisionKey,
+  SandboxV2PreparationFile,
+  SandboxV2PreparationRepository,
   renderSessionGoalContext,
   signDelegatedAccessToken,
   GenerateImageToolInput,
@@ -341,6 +345,13 @@ import {
 } from "./sandbox/codemode-client";
 import { InputWaitYield, type InputWaitYieldStream } from "./input-wait-yield";
 export { InputWaitYield } from "./input-wait-yield";
+import {
+  invocationDrainedTools,
+  invocationDrainedMcpServer,
+  type TurnInvocationDrain,
+} from "./turn-invocation-drain";
+export { createTurnInvocationDrain } from "./turn-invocation-drain";
+export type { TurnInvocationDrain } from "./turn-invocation-drain";
 import {
   createTurnToolCancellationController,
   TurnSandboxCommandCancelledError,
@@ -2032,6 +2043,25 @@ const modelMcpCallIdentity = new AsyncLocalStorage<{
 } | null>();
 const agentInputWaitYields = new WeakMap<object, InputWaitYield>();
 
+/** An exact, already-prepared native session. The host retains its preparation
+ * plan and command authority; the SDK owns neither setup nor machine lifetime. */
+export type PreparedMachineSandbox = {
+  session: SandboxSessionLike;
+  capabilities: Readonly<ReturnType<typeof Capabilities.default>>;
+  /** Metadata from the host's completed retained file-delivery plan. It carries
+   * no URL, object-store credentials or file bytes and grants no file access. */
+  files?: readonly SandboxV2PreparationFile[];
+  /** Original, completed full-repository preparation. No credential seeds or
+   * SDK materialization are admitted through this metadata. */
+  repositories?: readonly SandboxV2PreparationRepository[];
+  /** Live host check for current-turn input grants. Required for ordinary file
+   * refs and invoked before every model request, including completed setup replay. */
+  authorizeResources?: () => Promise<void>;
+  /** Host invocation drainage, separate from native physical exit proof. The
+   * worker closes/drains it before asking the exact journal settlement gate. */
+  invocationDrain?: TurnInvocationDrain;
+};
+
 export type BuildAgentOptions = {
   /** Durable router use survives capability and tool-policy changes. */
   toolRouterInHistory?: boolean;
@@ -2039,6 +2069,9 @@ export type BuildAgentOptions = {
   authorizeAttemptExecution?: () => Promise<void> | void;
   /** Trusted attempt-local wait receipt shared with prepared tools. */
   inputWaitYield?: InputWaitYield;
+  /** Native capabilities already bound to the turn's retained authority.
+   * File/repository refs must match completed preparation; legacy setup is excluded. */
+  machineSandbox?: PreparedMachineSandbox;
   model?: Model;
   /** Attach the built-in structured human-input tool. Default: enabled. */
   humanInputEnabled?: boolean;
@@ -2409,6 +2442,13 @@ function gitBindingDiscoveryApplies(
   return [...bindingsByProvider.values()].some((ids) => ids.size > 1);
 }
 
+function rigInstructionsForSandbox(
+  rig: RigInstructionsContext | undefined,
+  retainedMachine: boolean,
+): RigInstructionsContext | undefined {
+  return rig && retainedMachine ? { ...rig, retainedMachine: true } : rig;
+}
+
 /**
  * Resource facts for modular module selection. Every input is a session- or
  * turn-level fact, so the composed prefix changes only when they change.
@@ -2419,6 +2459,7 @@ export function agentPromptResourcesFor(
   options: Pick<
     BuildAgentOptions,
     | "activeSandboxBackend"
+    | "machineSandbox"
     | "fileResourceDownloads"
     | "gitCredentialBindings"
     | "gitTokenSeed"
@@ -2428,8 +2469,9 @@ export function agentPromptResourcesFor(
   >,
 ): AgentPromptResources {
   const backend = options.activeSandboxBackend ?? settings.sandboxBackend;
-  const connectedMachine = backend === "selfhosted";
-  const managedSandbox = backend !== "none" && !connectedMachine;
+  const connectedMachine = !options.machineSandbox && backend === "selfhosted";
+  const managedSandbox =
+    Boolean(options.machineSandbox) || (backend !== "none" && !connectedMachine);
   const gitTokenSeeds = Object.values(options.gitTokenSeeds ?? {}).filter(Boolean);
   return {
     managedSandbox,
@@ -2446,7 +2488,9 @@ export function agentPromptResourcesFor(
       (resources.some((resource) => resource.kind === "file") ||
         (options.fileResourceDownloads?.length ?? 0) > 0),
     ...(options.workspaceEnvironment ? { workspaceEnvironment: options.workspaceEnvironment } : {}),
-    ...(options.rig ? { rig: options.rig } : {}),
+    ...(options.rig
+      ? { rig: rigInstructionsForSandbox(options.rig, Boolean(options.machineSandbox)) }
+      : {}),
   };
 }
 
@@ -2460,11 +2504,17 @@ function inspectModularAgentInstructions(
     workspaceIdentity: options.workspaceAgentIdentity ?? options.instructionsTemplate,
     deploymentTemplate: settings.agentInstructionsTemplate,
   });
+  const resources = options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options);
   const composed = composeModularAgentInstructions({
     capabilities: config.capabilities,
     renderer: config.renderer,
     identity,
-    resources: options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options),
+    resources: resources.rig
+      ? {
+          ...resources,
+          rig: rigInstructionsForSandbox(resources.rig, Boolean(options.machineSandbox)),
+        }
+      : resources,
     ...(codemodeIsAvailable(options) ? { codemode: CODEMODE_PROGRAMMATIC_DIRECTIVE } : {}),
     ...(options.codeSearchAvailable ? { codeSearch: CODE_SEARCH_DIRECTIVE } : {}),
     ...(gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)
@@ -2490,7 +2540,7 @@ export function inspectPersistentAgentInstructions(
   const personaAndCore = composeAgentInstructions(
     options.instructionsTemplate ?? settings.agentInstructionsTemplate,
     options.workspaceEnvironment,
-    options.rig,
+    rigInstructionsForSandbox(options.rig, Boolean(options.machineSandbox)),
   );
   const layers: PersistentAgentInstructionLayerDraft[] = [
     {
@@ -2616,6 +2666,20 @@ export function appendGenesisTitleDirective(instructions: string, titleHint?: bo
 }
 
 const agentFileDownloads = new WeakMap<object, SandboxFileDownload[]>();
+const agentMachineSandboxes = new WeakMap<object, PreparedMachineSandbox>();
+/** Worker phase pairing only; this grants no machine or tool authority. */
+export function assertPreparedMachineSandboxAgent(
+  agent: Agent<any, any>,
+  prepared: PreparedMachineSandbox,
+): void {
+  const actual = agentMachineSandboxes.get(agent);
+  if (
+    !actual ||
+    actual.session !== prepared.session ||
+    actual.invocationDrain !== prepared.invocationDrain
+  )
+    throw new Error("Native worker stream requires its exact prepared agent");
+}
 const agentRepositoryCloneHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 const agentArtifactRuntimeHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 // TOKEN-BROKER (B1): the per-turn provider git token seeds, stashed alongside
@@ -2760,6 +2824,108 @@ export function buildOpenGeniAgent(
   resources: ResourceRef[],
   options: BuildAgentOptions = {},
 ): Agent<any, any> {
+  const machineSandbox = options.machineSandbox;
+  if (machineSandbox) {
+    if (
+      machineSandbox.session.state.kind !== "machine-v2" ||
+      !(machineSandbox.session.state.manifest instanceof Manifest) ||
+      !posixPath.isAbsolute(machineSandbox.session.state.manifest.root) ||
+      posixPath.normalize(machineSandbox.session.state.manifest.root) === "/" ||
+      machineSandbox.capabilities.length === 0 ||
+      (options.sandboxWorkspaceRoot !== undefined &&
+        posixPath.resolve(options.sandboxWorkspaceRoot) !==
+          machineSandbox.session.state.manifest.root)
+    )
+      throw new Error("Prepared native sandbox requires its exact session, root and capabilities");
+    if (
+      options.fileResourceDownloads?.length ||
+      options.rigSetup ||
+      options.rigCredentialHookIds?.length ||
+      options.gitTokenSeed ||
+      Object.values(options.gitTokenSeeds ?? {}).some(Boolean) ||
+      options.gitCredentialBindings?.length ||
+      options.codemodeTokenSeed ||
+      options.codemodeTokenSessionId ||
+      options.artifactRuntimeAvailable ||
+      sandboxLifecycleHookIds(settings).length > 0 ||
+      options.activeSandboxBackend !== undefined ||
+      options.turnCancellationSignal ||
+      options.onToolCancellationFence
+    )
+      throw new Error("Native sandbox preparation cannot use legacy setup or cancellation owners");
+    const files = structuredClone(machineSandbox.files ?? []);
+    const expectedManifest = buildSandboxV2PreparedFileManifest(
+      files,
+      machineSandbox.session.state.manifest.root,
+    );
+    const manifest = machineSandbox.session.state.manifest;
+    if (
+      !isDeepStrictEqual(manifest.entries, expectedManifest.entries) ||
+      Object.keys(manifest.environment).length ||
+      manifest.users.length ||
+      manifest.groups.length ||
+      manifest.extraPathGrants.length ||
+      !isDeepStrictEqual(
+        manifest.remoteMountCommandAllowlist,
+        expectedManifest.remoteMountCommandAllowlist,
+      )
+    )
+      throw new Error("Native prepared file manifest does not match its completed plan");
+    const byId = new Map(files.map((prepared) => [prepared.fileId, prepared]));
+    const repositories = SandboxV2PreparationRepository.array()
+      .max(256)
+      .parse(machineSandbox.repositories ?? []);
+    const byPath = new Map(repositories.map((repository) => [repository.mountPath, repository]));
+    if (byPath.size !== repositories.length)
+      throw new Error("Native prepared repository paths collide");
+    assertUniqueResourceMountPaths(resources);
+    const resourceIds = new Set<string>();
+    for (const resource of resources) {
+      if (resource.kind === "repository") {
+        const repository = sandboxV2PreparedRepositoryFor(resource);
+        if (!isDeepStrictEqual(byPath.get(repository.mountPath), repository))
+          throw new Error("Native sandbox preparation cannot use legacy or unprepared resources");
+        resourceIds.add(`repository:${repository.mountPath}`);
+        continue;
+      }
+      const preparedFile = resource.kind === "file" ? byId.get(resource.fileId) : undefined;
+      if (
+        !preparedFile ||
+        resource.kind !== "file" ||
+        resourceIds.has(resource.fileId) ||
+        resourceMountPath(resource) !== normalizeResourceMountPath(preparedFile.mountPath)
+      )
+        throw new Error("Native sandbox preparation cannot use legacy or unprepared resources");
+      resourceIds.add(resource.fileId);
+    }
+    if (resourceIds.size && !machineSandbox.authorizeResources)
+      throw new Error("Native prepared resources require their live authorization owner");
+    const invocationDrain = machineSandbox.invocationDrain;
+    const authorizeResources = machineSandbox.authorizeResources;
+    options = {
+      ...options,
+      machineSandbox: {
+        session: machineSandbox.session,
+        capabilities: [...machineSandbox.capabilities],
+        files,
+        repositories,
+        ...(authorizeResources || invocationDrain
+          ? {
+              authorizeResources: async () => {
+                const authorize = async () => {
+                  invocationDrain?.assertOpen();
+                  await authorizeResources?.();
+                  invocationDrain?.assertOpen();
+                };
+                if (invocationDrain) await invocationDrain.run(authorize);
+                else await authorize();
+              },
+            }
+          : {}),
+        ...(invocationDrain ? { invocationDrain } : {}),
+      },
+    };
+  }
   if (resolveAgentToolFamilies(options.agentConfig).skills === false) {
     const { skillActivations: _disabledActivations, ...withoutSkills } = options;
     options = { ...withoutSkills, skillCatalog: [] };
@@ -2782,7 +2948,8 @@ export function buildOpenGeniAgent(
   }
   // Site authoring needs filesystem execution; managed and connected compute
   // are equivalent. Reading supplied Skill files never needs either.
-  const filesystemAvailable = (options.activeSandboxBackend ?? settings.sandboxBackend) !== "none";
+  const filesystemAvailable =
+    Boolean(machineSandbox) || (options.activeSandboxBackend ?? settings.sandboxBackend) !== "none";
   const skillComposition = composeRuntimeSkills(options.skillActivations ?? [], {
     defaults: !hostSuppliedSkillCatalog,
     editableArtifacts: !hostSuppliedSkillCatalog && editableArtifactToolsAvailable,
@@ -3011,9 +3178,19 @@ export function buildOpenGeniAgent(
     // `new Agent(baseConfig)` path (sandboxBackend === "none") and the
     // `new SandboxAgent({ ...baseConfig, ... })` path via the shared baseConfig
     // spread; the SDK concatenates these with MCP and sandbox capability tools.
-    tools: agentTools,
+    tools: options.machineSandbox?.invocationDrain
+      ? invocationDrainedTools(agentTools, options.machineSandbox.invocationDrain)
+      : agentTools,
     ...(options.inputWaitYield ? { toolUseBehavior: options.inputWaitYield.toolUseBehavior } : {}),
-    ...(options.mcpServers?.length ? { mcpServers: options.mcpServers } : {}),
+    ...(options.mcpServers?.length
+      ? {
+          mcpServers: options.machineSandbox?.invocationDrain
+            ? options.mcpServers.map((server) =>
+                invocationDrainedMcpServer(server, options.machineSandbox!.invocationDrain!),
+              )
+            : options.mcpServers,
+        }
+      : {}),
     // Surface FAILED MCP tool calls as `{ isError: true }` tool output (see
     // mcpToolErrorFunction / mcpToolErrorOutput) instead of the SDK's default
     // flat error string, so a thrown MCP failure (protocol error, auth, timeout,
@@ -3023,7 +3200,7 @@ export function buildOpenGeniAgent(
     mcpConfig: { errorFunction: mcpToolErrorFunction },
   } as const;
 
-  if (settings.sandboxBackend === "none") {
+  if (settings.sandboxBackend === "none" && !machineSandbox) {
     const agent = new Agent(baseConfig);
     if (options.inputWaitYield) agentInputWaitYields.set(agent, options.inputWaitYield);
     agentInstructionInspection.set(agent, instructionInspection);
@@ -3064,45 +3241,68 @@ export function buildOpenGeniAgent(
   const runAs = sandboxRunAs(settings);
   const agent = new SandboxAgent({
     ...baseConfig,
-    defaultManifest: buildManifest(
-      settings,
-      resources,
-      options.sandboxEnvironment,
-      options.fileResourceDownloads,
-      options.activeSandboxBackend === "selfhosted"
-        ? {
-            root: options.sandboxWorkspaceRoot!,
-            includeResourceEntries: false,
-          }
-        : undefined,
-    ),
+    defaultManifest:
+      machineSandbox?.session.state.manifest ??
+      buildManifest(
+        settings,
+        resources,
+        options.sandboxEnvironment,
+        options.fileResourceDownloads,
+        options.activeSandboxBackend === "selfhosted"
+          ? {
+              root: options.sandboxWorkspaceRoot!,
+              includeResourceEntries: false,
+            }
+          : undefined,
+      ),
     ...(runAs ? { runAs } : {}),
-    capabilities: buildAgentCapabilitiesFromComposition(settings, skillComposition, {
-      ...(options.authorizeAttemptExecution
-        ? { authorizeAttemptExecution: options.authorizeAttemptExecution }
-        : {}),
-      ...(editableArtifactToolsAvailable ? { editableArtifactToolsAvailable: true } : {}),
-      ...(options.videoGeneration ? { videoGenerationAvailable: true } : {}),
-      ...repositoryWorkspaceSkillPathsOption(resources),
-      ...(options.structuredToolTransport !== undefined
-        ? { structuredToolTransport: options.structuredToolTransport }
-        : {}),
-      ...(options.supportsImageInput !== undefined
-        ? { supportsImageInput: options.supportsImageInput }
-        : {}),
-      ...(options.onRetainableSessionImageOutput
-        ? {
-            onRetainableSessionImageOutput: options.onRetainableSessionImageOutput,
-          }
-        : {}),
-      ...(options.turnCancellationSignal
-        ? { turnCancellationSignal: options.turnCancellationSignal }
-        : {}),
-      ...(options.onToolCancellationFence
-        ? { onToolCancellationFence: options.onToolCancellationFence }
-        : {}),
-    }),
+    capabilities: options.machineSandbox
+      ? options.machineSandbox.capabilities.map((capability) => {
+          const drain = options.machineSandbox!.invocationDrain;
+          // Use the public SDK clone so a prepared binding remains reusable;
+          // each clone's tools retain its own bound session/model receiver.
+          const copy = capability.clone();
+          const tools = copy.tools;
+          copy.tools = function () {
+            const imageTools =
+              options.supportsImageInput === false
+                ? withoutImageInputTools(tools.call(this))
+                : withStructuredViewImageFunctionResults(tools.call(this));
+            const retainedTools = withRetainableSessionImageOutputHook(
+              imageTools,
+              options.onRetainableSessionImageOutput,
+            );
+            return drain ? invocationDrainedTools(retainedTools, drain) : retainedTools;
+          };
+          return copy;
+        })
+      : buildAgentCapabilitiesFromComposition(settings, skillComposition, {
+          ...(options.authorizeAttemptExecution
+            ? { authorizeAttemptExecution: options.authorizeAttemptExecution }
+            : {}),
+          ...(editableArtifactToolsAvailable ? { editableArtifactToolsAvailable: true } : {}),
+          ...(options.videoGeneration ? { videoGenerationAvailable: true } : {}),
+          ...repositoryWorkspaceSkillPathsOption(resources),
+          ...(options.structuredToolTransport !== undefined
+            ? { structuredToolTransport: options.structuredToolTransport }
+            : {}),
+          ...(options.supportsImageInput !== undefined
+            ? { supportsImageInput: options.supportsImageInput }
+            : {}),
+          ...(options.onRetainableSessionImageOutput
+            ? {
+                onRetainableSessionImageOutput: options.onRetainableSessionImageOutput,
+              }
+            : {}),
+          ...(options.turnCancellationSignal
+            ? { turnCancellationSignal: options.turnCancellationSignal }
+            : {}),
+          ...(options.onToolCancellationFence
+            ? { onToolCancellationFence: options.onToolCancellationFence }
+            : {}),
+        }),
   });
+  if (machineSandbox) agentMachineSandboxes.set(agent, options.machineSandbox!);
   agentSkillSelections.set(agent, skillComposition.selections);
   agentRuntimeSkillIndex.set(agent, skillComposition.index);
   if (options.inputWaitYield) agentInputWaitYields.set(agent, options.inputWaitYield);
@@ -3122,7 +3322,9 @@ export function buildOpenGeniAgent(
   );
   agentRepositoryCloneHooks.set(
     agent,
-    sandboxRepositoryCloneHooks(settings, resources, options.activeSandboxBackend),
+    machineSandbox
+      ? []
+      : sandboxRepositoryCloneHooks(settings, resources, options.activeSandboxBackend),
   );
   if (artifactRuntimeAvailable) {
     agentArtifactRuntimeHooks.set(
@@ -4105,6 +4307,8 @@ export type ToolPreparationPhaseMeasurement = {
 };
 
 export type PrepareToolsOptions = {
+  /** Preserve a native gateway operation across retries of one accepted SDK call. */
+  stableModelOperations?: boolean;
   /** Frozen, explicitly selected account labels keyed by execution route, not provider. */
   mcpAccountLabels?: ReadonlyMap<string, string>;
   /** Opt-in exact-attempt persistence; absence preserves ordinary MCP execution. */
@@ -5213,6 +5417,7 @@ async function prepareAttemptToolEnvironment(
     : definitions;
   const environment = createAttemptToolEnvironment({
     scope,
+    ...(options.stableModelOperations ? { stableModelOperations: true } : {}),
     generation: options.attemptToolCatalogGeneration ?? 1,
     definitions: guardedDefinitions,
     confirmModelApproval: ({ modelName, subjectId: callerSubjectId }) =>
@@ -8402,10 +8607,16 @@ export async function runAgentStream(
   const scope = gate?.beginStream(overrides.signal);
   try {
     if (scope) agent.toolUseBehavior = scope.toolUseBehavior;
+    const nativeAuthorization = agentMachineSandboxes.get(agent)?.authorizeResources;
     const stream = await withModelCallLifecycle(
       {
-        ...(overrides.beforeModelRequest
-          ? { beforeModelRequest: overrides.beforeModelRequest }
+        ...(overrides.beforeModelRequest || nativeAuthorization
+          ? {
+              beforeModelRequest: async () => {
+                await nativeAuthorization?.();
+                await overrides.beforeModelRequest?.();
+              },
+            }
           : {}),
         ...(overrides.onModelResponse ? { onModelResponse: overrides.onModelResponse } : {}),
       },
@@ -8442,6 +8653,26 @@ async function runAgentStreamInternal(
       : input instanceof RunState
         ? { input, persistedHistoryCount: input.history.length }
         : input;
+  const machineSession = agentMachineSandboxes.get(agent)?.session;
+  if (
+    machineSession &&
+    (overrides.ownedSandbox ||
+      overrides.sandboxClient ||
+      overrides.runCredentialSessionId ||
+      overrides.onRunCredentialSessionReady ||
+      overrides.onGitCredentialSessionReady ||
+      overrides.onCodemodeTokenSessionReady ||
+      overrides.onSandboxSessionReady ||
+      overrides.turnToolCancellationFence)
+  )
+    throw new Error("Prepared native sandbox cannot be combined with legacy sandbox owners");
+  if (
+    !machineSession &&
+    [overrides.ownedSandbox?.session, overrides.ownedSandbox?.setupSession].some(
+      (session) => (session as SandboxSessionLike | undefined)?.state?.kind === "machine-v2",
+    )
+  )
+    throw new Error("Native session requires its prepared agent capability binding");
   const environment = overrides.sandboxEnvironment ?? collectSandboxEnvironment(settings);
   const codemodeTokenFile = codemodeTokenFileForAgent(agent, environment);
   const codemodeUrl = environment.OPENGENI_CODEMODE_URL;
@@ -8457,6 +8688,94 @@ async function runAgentStreamInternal(
   installNonLazyModelRequestCapture(agent);
   if (overrides.onRunCredentialSessionReady && !overrides.runCredentialSessionId) {
     throw new Error("runCredentialSessionId is required when run credential setup is enabled");
+  }
+
+  // Both externally-owned paths use the same model admission, approval,
+  // history, modality, compaction and measurement pipeline. Native setup never
+  // passes through a legacy session/client decorator.
+  const runWithProvidedSession = async (
+    client: SandboxClient,
+    agentSession: SandboxSessionLike,
+    sessionState?: unknown,
+  ) => {
+    const providedFilter = composeCallModelInputFilters(
+      [
+        inputWaitYield?.modelInputFilter,
+        measuredModelInputFilter("input_filter_base", baseModelInputFilterForSettings(settings)),
+        measuredModelInputFilter("input_filter_genesis", genesisTitleInputFilter),
+        measuredModelInputFilter("input_filter_host", overrides.callModelInputFilter),
+        // A caller filter may synthesize model input. Re-apply the idempotent
+        // canonical bound before accounting/provider serialization.
+        measuredModelInputFilter(
+          "input_filter_tool_output",
+          boundModelToolOutputsFilterForSettings(settings),
+        ),
+        measuredModelInputFilter(
+          "input_filter_modality",
+          modelModalityProjectionFilterForAgent(
+            agent,
+            prepared.modelInputAlreadyProjected === true,
+          ),
+        ),
+        measuredModelInputFilter(
+          "input_filter_context",
+          deferCompactionToModelBoundary(
+            contextRobustnessFilterForSettings(settings, {
+              throwOnCompactionNeeded: Boolean(
+                overrides.contextCompactionSignal || overrides.contextCompactionRequested,
+              ),
+              ...(overrides.contextCompactionSignal
+                ? { contextCompactionSignal: overrides.contextCompactionSignal }
+                : {}),
+              ...(overrides.contextCompactionRequested
+                ? { contextCompactionRequested: overrides.contextCompactionRequested }
+                : {}),
+            }),
+          ),
+        ),
+        inputWaitYield?.modelDispatchFilter,
+      ].filter((f): f is CallModelInputFilter => Boolean(f)),
+    );
+    const providedRunOptions: Parameters<typeof run>[2] = {
+      stream: true,
+      maxTurns: settings.agentMaxModelCallsPerTurn,
+      historyOwnership: "external",
+      modelResponseRetention: "last",
+      toolExecution: { preApprovalInputGuardrails: true },
+      ...lazyToolRunBindings(agent),
+      callModelInputFilter: providedFilter,
+      ...(inputWaitYield ? { errorHandlers: inputWaitYield.errorHandlers } : {}),
+      ...(overrides.signal ? { signal: overrides.signal } : {}),
+    };
+    providedRunOptions.sandbox = {
+      client,
+      session: withModelPreparationSessionDiagnostics(agentSession),
+      ...(sessionState ? { sessionState } : {}),
+    } as SandboxRunConfig;
+    return await withModelRequestCapture(modelRequestCapture, () =>
+      withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
+        withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
+          recordModelPreparationManifestInventory(
+            "sandbox_agent_manifest_inventory",
+            (agent as { defaultManifest?: Manifest }).defaultManifest,
+          );
+          recordModelPreparationManifestInventory(
+            "sandbox_session_manifest_inventory",
+            agentSession.state.manifest,
+          );
+          return runScopedRunner(settings, agent, inputWaitYield).run(
+            agent,
+            prepared.input,
+            providedRunOptions,
+          );
+        }),
+      ),
+    );
+  };
+  if (machineSession) {
+    // No create/resume/delete/serialization fallback is installed. Durable
+    // machine demand and native command settlement own this session's lifetime.
+    return await runWithProvidedSession({ backendId: "machine-v2" }, machineSession);
   }
 
   // OWNED PATH (P1.2 ownership inversion): the per-turn resume path injected a
@@ -8596,83 +8915,7 @@ async function runAgentStreamInternal(
       ownedHooks,
       ownedHookContext,
     );
-    const ownedFilter = composeCallModelInputFilters(
-      [
-        inputWaitYield?.modelInputFilter,
-        measuredModelInputFilter("input_filter_base", baseModelInputFilterForSettings(settings)),
-        measuredModelInputFilter("input_filter_genesis", genesisTitleInputFilter),
-        measuredModelInputFilter("input_filter_host", overrides.callModelInputFilter),
-        // A caller filter may synthesize model input. Re-apply the idempotent
-        // canonical bound at the literal final seam before accounting/provider
-        // serialization so no extension can bypass the policy.
-        measuredModelInputFilter(
-          "input_filter_tool_output",
-          boundModelToolOutputsFilterForSettings(settings),
-        ),
-        measuredModelInputFilter(
-          "input_filter_modality",
-          modelModalityProjectionFilterForAgent(
-            agent,
-            prepared.modelInputAlreadyProjected === true,
-          ),
-        ),
-        measuredModelInputFilter(
-          "input_filter_context",
-          deferCompactionToModelBoundary(
-            contextRobustnessFilterForSettings(settings, {
-              throwOnCompactionNeeded: Boolean(
-                overrides.contextCompactionSignal || overrides.contextCompactionRequested,
-              ),
-              ...(overrides.contextCompactionSignal
-                ? { contextCompactionSignal: overrides.contextCompactionSignal }
-                : {}),
-              ...(overrides.contextCompactionRequested
-                ? {
-                    contextCompactionRequested: overrides.contextCompactionRequested,
-                  }
-                : {}),
-            }),
-          ),
-        ),
-        // Seal admission before any provider preparation/transport awaits.
-        inputWaitYield?.modelDispatchFilter,
-      ].filter((f): f is CallModelInputFilter => Boolean(f)),
-    );
-    const ownedRunOptions: Parameters<typeof run>[2] = {
-      stream: true,
-      maxTurns: settings.agentMaxModelCallsPerTurn,
-      historyOwnership: "external",
-      modelResponseRetention: "last",
-      toolExecution: { preApprovalInputGuardrails: true },
-      ...lazyToolRunBindings(agent),
-      callModelInputFilter: ownedFilter,
-      ...(inputWaitYield ? { errorHandlers: inputWaitYield.errorHandlers } : {}),
-      ...(overrides.signal ? { signal: overrides.signal } : {}),
-    };
-    ownedRunOptions.sandbox = {
-      client: decoratedClient,
-      session: withModelPreparationSessionDiagnostics(agentSession),
-      ...(sessionState ? { sessionState } : {}),
-    } as SandboxRunConfig;
-    return await withModelRequestCapture(modelRequestCapture, () =>
-      withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
-        withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
-          recordModelPreparationManifestInventory(
-            "sandbox_agent_manifest_inventory",
-            (agent as { defaultManifest?: Manifest }).defaultManifest,
-          );
-          recordModelPreparationManifestInventory(
-            "sandbox_session_manifest_inventory",
-            (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
-          );
-          return runScopedRunner(settings, agent, inputWaitYield).run(
-            agent,
-            prepared.input,
-            ownedRunOptions,
-          );
-        }),
-      ),
-    );
+    return await runWithProvidedSession(decoratedClient, agentSession, sessionState);
   }
 
   const rawClient = overrides.sandboxClient ?? createSandboxClient(settings, environment);
@@ -9720,6 +9963,95 @@ export function buildManifest(
   });
 }
 
+/** Describe already-delivered native attachments without an SDK materializer,
+ * object-store mount or refreshed source. The host supplies completion evidence
+ * and ordinary file grants; this function validates only the nonsecret shape
+ * and common delivery paths. Multiple owned files may share a directory. */
+export function buildSandboxV2PreparedFileManifest(
+  files: readonly SandboxV2PreparationFile[],
+  workspaceRoot = "/workspace",
+): Manifest {
+  if (
+    !posixPath.isAbsolute(workspaceRoot) ||
+    posixPath.normalize(workspaceRoot) === "/" ||
+    workspaceRoot.includes("\0")
+  )
+    throw new Error("Native file manifest requires an absolute workspace directory");
+  const parsed = SandboxV2PreparationFile.array().max(1024).parse(files);
+  if (new Set(parsed.map((prepared) => prepared.fileId)).size !== parsed.length)
+    throw new Error("Native prepared files require unique identities");
+  const normalized = normalizeSandboxFileDownloads(parsed, false);
+  const directories = new Map<string, string[]>();
+  const directoryKeys = new Map<string, string>();
+  const targets = new Set<string>();
+  for (const preparedFile of normalized) {
+    const key = resourceMountPathCollisionKey(preparedFile.mountPath);
+    const previous = directoryKeys.get(key);
+    if (previous && previous !== preparedFile.mountPath)
+      throw new Error("Native prepared file directories collide");
+    directoryKeys.set(key, preparedFile.mountPath);
+    const target = `${key}/${preparedFile.filename.normalize("NFKC").toLowerCase()}`;
+    if (targets.has(target)) throw new Error("Native prepared file targets collide");
+    targets.add(target);
+    directories.set(preparedFile.mountPath, [
+      ...(directories.get(preparedFile.mountPath) ?? []),
+      preparedFile.filename,
+    ]);
+  }
+  for (const target of targets) {
+    const parts = target.split("/");
+    for (let depth = 1; depth < parts.length; depth++) {
+      if (targets.has(parts.slice(0, depth).join("/")))
+        throw new Error("Native prepared file target conflicts with a directory");
+    }
+  }
+  return new Manifest({
+    root: posixPath.normalize(workspaceRoot),
+    entries: Object.fromEntries(
+      [...directories]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([path, filenames]) => [
+          path,
+          dir({
+            description: `Delivered files: ${filenames
+              .sort()
+              .map((filename) => JSON.stringify(filename))
+              .join(", ")}.`,
+          }),
+        ]),
+    ),
+    environment: {},
+  });
+}
+
+/** Normalize the bounded native repository contract without selecting or
+ * copying credentials. Explicit connection preparation remains unsupported. */
+export function sandboxV2PreparedRepositoryFor(
+  resource: Extract<ResourceRef, { kind: "repository" }>,
+): SandboxV2PreparationRepository {
+  if (
+    resource.optional === true ||
+    resource.subpath !== undefined ||
+    repositoryHasExplicitGitConnection(resource) ||
+    resource.provider !== undefined ||
+    resource.installationId !== undefined ||
+    resource.repositoryId !== undefined ||
+    resource.projectId !== undefined ||
+    resource.githubRepositoryId !== undefined ||
+    resource.access !== undefined
+  )
+    throw new Error(
+      "Native repository preparation does not support this connection or extraction contract",
+    );
+  gitRemoteIdentity(resource.uri, undefined);
+  return SandboxV2PreparationRepository.parse({
+    uri: resource.uri,
+    ref: resource.ref,
+    mountPath: resourceMountPath(resource),
+    ...(resource.expectedCommitSha ? { expectedCommitSha: resource.expectedCommitSha } : {}),
+  });
+}
+
 export function repositoryWorkspaceSkillPathsOption(resources: readonly ResourceRef[]): {
   workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
 } {
@@ -9890,11 +10222,14 @@ function normalizeManifestPath(path: string): string {
   return normalizeResourceMountPath(path);
 }
 
-function normalizeSandboxFileDownloads(downloads: SandboxFileDownload[]): SandboxFileDownload[] {
+function normalizeSandboxFileDownloads(
+  downloads: SandboxFileDownload[],
+  requireSource = true,
+): SandboxFileDownload[] {
   return downloads.map((download) => {
     const mountPath = normalizeManifestPath(download.mountPath);
     assertSafeSandboxFilename(download.filename, download.fileId);
-    if (!download.content && !download.url?.trim()) {
+    if (requireSource && !download.content && !download.url?.trim()) {
       throw new Error(
         `File download materialization requires content or a URL for ${download.fileId}`,
       );
@@ -9946,8 +10281,37 @@ function sandboxDownloadLogicalPath(
   return posixPath.join(workspaceRoot, sandboxDownloadRelativePath(download));
 }
 
-function sandboxFileDownloadCommand(download: SandboxFileDownload, targetPath: string): string {
-  if (!download.url) {
+/** Build the shared, workspace-relative atomic delivery command. A trusted
+ * caller may provide the URL through an ephemeral command environment instead
+ * of embedding a refreshed signed URL in retained command text. */
+export function buildSandboxFileDownloadStep(
+  download: SandboxFileDownload,
+  workspaceRoot: string,
+  options: { urlEnvironmentVariable?: string } = {},
+): TurnSandboxCommandArgs {
+  const variable = options.urlEnvironmentVariable;
+  if (variable !== undefined && !/^[A-Z][A-Z0-9_]{0,127}$/u.test(variable))
+    throw new Error("Invalid attachment URL environment variable");
+  if (!posixPath.isAbsolute(workspaceRoot) || posixPath.normalize(workspaceRoot) === "/")
+    throw new Error("An absolute workspace directory is required for file delivery");
+  const normalized = normalizeSandboxFileDownloads(
+    [structuredClone(download)],
+    variable === undefined,
+  )[0]!;
+  return {
+    cmd: sandboxFileDownloadCommand(normalized, sandboxDownloadRelativePath(normalized), variable),
+    workdir: posixPath.normalize(workspaceRoot),
+    yieldTimeMs: 1000,
+    maxOutputTokens: 20_000,
+  };
+}
+
+function sandboxFileDownloadCommand(
+  download: SandboxFileDownload,
+  targetPath: string,
+  urlEnvironmentVariable?: string,
+): string {
+  if (!download.url && !urlEnvironmentVariable) {
     throw new Error(`File download materialization URL is empty for ${download.fileId}`);
   }
   const targetDir = posixPath.dirname(targetPath);
@@ -10000,7 +10364,7 @@ function sandboxFileDownloadCommand(download: SandboxFileDownload, targetPath: s
     `  tmp=$(mktemp ${shellQuote(`${targetPath}.opengeni-download.XXXXXX`)})`,
     '  cleanup() { rm -f -- "$tmp"; }',
     "  trap cleanup EXIT",
-    `  curl --fail --location --silent --show-error --connect-timeout 10 --max-time 120 --retry 3 --retry-delay 1 --retry-max-time 180 --output "$tmp" ${shellQuote(download.url)}`,
+    `  curl --fail --location --silent --show-error --connect-timeout 10 --max-time 120 --retry 3 --retry-delay 1 --retry-max-time 180 --output "$tmp" ${urlEnvironmentVariable ? `"$${urlEnvironmentVariable}"` : shellQuote(download.url!)}`,
     '  if ! verify_attachment "$tmp"; then echo "Downloaded attachment failed size or SHA-256 verification" >&2; exit 74; fi',
     `  mv -f -- "$tmp" ${shellQuote(targetPath)}`,
     "  trap - EXIT",
@@ -11397,117 +11761,166 @@ const SKIPPED_OPTIONAL_REPOSITORY_PREFIX = "Warning: skipped optional repository
 export const OPTIONAL_REPOSITORY_CLONE_TIMEOUT_SECONDS = 60;
 const OPTIONAL_REPOSITORY_CLONE_BUDGET_SECONDS = 90;
 
-const cloneRepositoryFunctionLines: readonly string[] = [
-  "clone_repository() {",
-  '  target="$1"',
-  '  uri="$2"',
-  '  ref="$3"',
-  '  subpath="$4"',
-  '  expected_commit="${5:-}"',
-  // Command-only helper selection: neither the credential nor its helper is
-  // persisted in .git/config. The run-credential wrapper supplies the current
-  // provider store path before this command starts; Git performs exact-host
-  // matching in that store. No matching entry means an anonymous fetch.
-  '  repository_credential_source="${6:-connection}"',
-  "  repository_git() {",
-  '    if [ "$repository_credential_source" = provider ]; then',
-  '      GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= command git -c credential.helper= -c \'credential.helper=!f() { test "$1" = get && test -n "$OPENGENI_GIT_CREDENTIALS_FILE" && sed "/^path=/d" | git credential-store --file="$OPENGENI_GIT_CREDENTIALS_FILE" get; }; f\' "$@"',
-  '    elif [ -n "${OPENGENI_GIT_CREDENTIALS_FILE:-}" ]; then',
-  // Reset the provider's GIT_CONFIG_* helper for this explicit connection,
-  // leaving its platform binding, broker route and askpass behavior intact.
-  '      command git -c credential.helper= -c credential.helper="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/helper" "$@"',
-  "    else",
-  '      command git "$@"',
-  "    fi",
-  "  }",
-  '  if [ -e "$target" ] && { [ -f "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; }; then',
-  // This hook re-runs every turn on a long-lived box, so \"non-empty\" alone is not
-  // proof of a completed materialization: an interrupted clone (worker crash /
-  // lifecycle timeout mid-mv/cp) leaves a partial tree that would otherwise pass
-  // this check forever. A full-repo target must actually BE a work tree to be
-  // skipped; a partial one is wiped and rebuilt (nothing legitimate writes under
-  // the mount path before the repo exists). Subpath extracts are not git repos —
-  // for those the plain non-empty check stands (no stronger signal available).
-  '    if [ -n "$subpath" ] || repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
-  '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(repository_git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
-  '        echo "Repository resource already present at $target"',
-  "        return 0",
-  "      fi",
-  '      echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
-  "    fi",
-  '    echo "Re-materializing partial repository resource at $target" >&2',
-  '    find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} +',
-  "  fi",
-  '  mkdir -p "$(dirname "$target")"',
-  '  tmp="${target}.tmp.$$"',
-  '  rm -rf "$tmp"',
-  // Fetch failures must not leak the pid-suffixed tmp clone beside the mount
-  // (set -eu would exit before any cleanup).
-  '  if ! { repository_git init "$tmp" >/dev/null && repository_git -C "$tmp" remote add origin "$uri" && repository_git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
-  '    rm -rf "$tmp"',
-  '    echo "Repository resource fetch failed for $target" >&2',
-  '    echo "Check repository access and the requested ref. Use a full commit SHA or an existing branch, tag, or PR ref; an abbreviated commit SHA is not a fetchable remote ref." >&2',
-  "    exit 1",
-  "  fi",
-  // origin/HEAD is best-effort: workspace capture diffs the branch against it
-  // when present and already treats a missing origin/HEAD as additive. `git
-  // remote set-head` only accepts a branch that the fetch materialized under
-  // refs/remotes/origin/, so a PR ref (pull/N/head), a tag, or a commit SHA
-  // must not turn a successful fetch into a failed clone.
-  '  if repository_git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
-  '    repository_git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
-  "  fi",
-  '  if ! repository_git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
-  '    rm -rf "$tmp"',
-  '    echo "Repository resource fetch failed for $target" >&2',
-  "    exit 1",
-  "  fi",
-  '  if [ -n "$expected_commit" ] && [ "$(repository_git -C "$tmp" rev-parse HEAD)" != "$expected_commit" ]; then',
-  '    echo "Repository resource resolved to an unexpected commit for $target" >&2',
-  '    rm -rf "$tmp"',
-  "    exit 1",
-  "  fi",
-  '  if [ -n "$subpath" ]; then',
-  '    if [ ! -e "$tmp/$subpath" ]; then',
-  '      echo "Repository subpath not found: $subpath" >&2',
-  '      rm -rf "$tmp"',
-  "      exit 1",
-  "    fi",
-  '    if [ -d "$tmp/$subpath" ]; then',
-  '      mkdir -p "$target"',
-  '      cp -a "$tmp/$subpath/." "$target/"',
-  "    else",
-  '      rmdir "$target" 2>/dev/null || true',
-  '      cp -a "$tmp/$subpath" "$target"',
-  "    fi",
-  '    rm -rf "$tmp"',
-  "  else",
-  '    rmdir "$target" 2>/dev/null || true',
-  // Two concurrent turn holders can race this install: without the existence
-  // re-check the loser's un-flagged `mv` would nest its tmp clone INSIDE the
-  // winner's tree as <name>.tmp.<pid>. If the winner produced a valid work tree,
-  // accept it; a non-empty non-repo survivor here is a mount point the manifest
-  // re-filled — install into it by content copy instead of rename.
-  '    if [ -e "$target" ]; then',
-  '      if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && { [ -z "$expected_commit" ] || [ "$(repository_git -C "$target" rev-parse HEAD)" = "$expected_commit" ]; }; then',
-  '        rm -rf "$tmp"',
-  '        echo "Repository resource already present at $target"',
-  "        return 0",
-  "      fi",
-  '      cp -a "$tmp/." "$target/"',
-  '      rm -rf "$tmp"',
-  "    else",
-  '      mv "$tmp" "$target"',
-  "    fi",
-  '    repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null',
-  "  fi",
-  '  if [ ! -e "$target" ]; then',
-  '    echo "Repository resource was not materialized at $target" >&2',
-  "    exit 1",
-  "  fi",
-  '  echo "Repository resource ready at $target"',
-  "}",
-];
+function cloneRepositoryFunctionLines(preserveExisting = false): readonly string[] {
+  // A pinned SHA identifies the initial checkout. Native persistent work may
+  // advance it with ordinary commits; unrelated history still conflicts.
+  const existingCommitMatches = preserveExisting
+    ? 'repository_git -C "$target" merge-base --is-ancestor "$expected_commit" HEAD >/dev/null 2>&1'
+    : '[ "$(repository_git -C "$target" rev-parse HEAD)" = "$expected_commit" ]';
+  return [
+    "clone_repository() {",
+    '  target="$1"',
+    '  uri="$2"',
+    '  ref="$3"',
+    '  subpath="$4"',
+    '  expected_commit="${5:-}"',
+    // Command-only helper selection: neither the credential nor its helper is
+    // persisted in .git/config. The run-credential wrapper supplies the current
+    // provider store path before this command starts; Git performs exact-host
+    // matching in that store. No matching entry means an anonymous fetch.
+    '  repository_credential_source="${6:-connection}"',
+    ...(preserveExisting
+      ? [
+          '  if [ -L "$target" ]; then',
+          '    echo "Repository target is a symlink; existing work was preserved" >&2',
+          "    return 1",
+          "  fi",
+        ]
+      : []),
+    "  repository_git() {",
+    '    if [ "$repository_credential_source" = provider ]; then',
+    '      GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= command git -c credential.helper= -c \'credential.helper=!f() { test "$1" = get && test -n "$OPENGENI_GIT_CREDENTIALS_FILE" && sed "/^path=/d" | git credential-store --file="$OPENGENI_GIT_CREDENTIALS_FILE" get; }; f\' "$@"',
+    '    elif [ -n "${OPENGENI_GIT_CREDENTIALS_FILE:-}" ]; then',
+    // Reset the provider's GIT_CONFIG_* helper for this explicit connection,
+    // leaving its platform binding, broker route and askpass behavior intact.
+    '      command git -c credential.helper= -c credential.helper="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/helper" "$@"',
+    "    else",
+    '      command git "$@"',
+    "    fi",
+    "  }",
+    '  if [ -e "$target" ] && { [ -f "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; }; then',
+    ...(preserveExisting
+      ? [
+          `    if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && [ "$(repository_git -C "$target" config --get remote.origin.url 2>/dev/null || true)" = "$uri" ] && { [ -z "$expected_commit" ] || ${existingCommitMatches}; }; then`,
+          '      echo "Repository resource already present at $target"',
+          "      return 0",
+          "    fi",
+          '    echo "Repository target conflicts with retained work; existing work was preserved" >&2',
+          "    return 1",
+        ]
+      : [
+          // This hook re-runs every turn on a long-lived box, so \"non-empty\" alone is not
+          // proof of a completed materialization: an interrupted clone (worker crash /
+          // lifecycle timeout mid-mv/cp) leaves a partial tree that would otherwise pass
+          // this check forever. A full-repo target must actually BE a work tree to be
+          // skipped; a partial one is wiped and rebuilt (nothing legitimate writes under
+          // the mount path before the repo exists). Subpath extracts are not git repos —
+          // for those the plain non-empty check stands (no stronger signal available).
+          '    if [ -n "$subpath" ] || repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+          '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(repository_git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
+          '        echo "Repository resource already present at $target"',
+          "        return 0",
+          "      fi",
+          '      echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
+          "    fi",
+          '    echo "Re-materializing partial repository resource at $target" >&2',
+          '    find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} +',
+        ]),
+    "  fi",
+    '  mkdir -p "$(dirname "$target")"',
+    ...(preserveExisting
+      ? ['  tmp="$(mktemp -d "${target}.tmp.XXXXXXXXXX")"']
+      : ['  tmp="${target}.tmp.$$"', '  rm -rf "$tmp"']),
+    // Fetch failures must not leak the pid-suffixed tmp clone beside the mount
+    // (set -eu would exit before any cleanup).
+    '  if ! { repository_git init "$tmp" >/dev/null && repository_git -C "$tmp" remote add origin "$uri" && repository_git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
+    '    rm -rf "$tmp"',
+    '    echo "Repository resource fetch failed for $target" >&2',
+    '    echo "Check repository access and the requested ref. Use a full commit SHA or an existing branch, tag, or PR ref; an abbreviated commit SHA is not a fetchable remote ref." >&2',
+    "    exit 1",
+    "  fi",
+    // origin/HEAD is best-effort: workspace capture diffs the branch against it
+    // when present and already treats a missing origin/HEAD as additive. `git
+    // remote set-head` only accepts a branch that the fetch materialized under
+    // refs/remotes/origin/, so a PR ref (pull/N/head), a tag, or a commit SHA
+    // must not turn a successful fetch into a failed clone.
+    '  if repository_git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
+    '    repository_git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
+    "  fi",
+    '  if ! repository_git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
+    '    rm -rf "$tmp"',
+    '    echo "Repository resource fetch failed for $target" >&2',
+    "    exit 1",
+    "  fi",
+    '  if [ -n "$expected_commit" ] && [ "$(repository_git -C "$tmp" rev-parse HEAD)" != "$expected_commit" ]; then',
+    '    echo "Repository resource resolved to an unexpected commit for $target" >&2',
+    '    rm -rf "$tmp"',
+    "    exit 1",
+    "  fi",
+    '  if [ -n "$subpath" ]; then',
+    '    if [ ! -e "$tmp/$subpath" ]; then',
+    '      echo "Repository subpath not found: $subpath" >&2',
+    '      rm -rf "$tmp"',
+    "      exit 1",
+    "    fi",
+    '    if [ -d "$tmp/$subpath" ]; then',
+    '      mkdir -p "$target"',
+    '      cp -a "$tmp/$subpath/." "$target/"',
+    "    else",
+    '      rmdir "$target" 2>/dev/null || true',
+    '      cp -a "$tmp/$subpath" "$target"',
+    "    fi",
+    '    rm -rf "$tmp"',
+    "  else",
+    '    rmdir "$target" 2>/dev/null || true',
+    // Two concurrent turn holders can race this install: without the existence
+    // re-check the loser's un-flagged `mv` would nest its tmp clone INSIDE the
+    // winner's tree as <name>.tmp.<pid>. If the winner produced a valid work tree,
+    // accept it; a non-empty non-repo survivor here is a mount point the manifest
+    // re-filled — install into it by content copy instead of rename.
+    '    if [ -e "$target" ]; then',
+    `      if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 ${preserveExisting ? '&& [ "$(repository_git -C "$target" config --get remote.origin.url 2>/dev/null || true)" = "$uri" ] ' : ""}&& { [ -z "$expected_commit" ] || ${existingCommitMatches}; }; then`,
+    '        rm -rf "$tmp"',
+    '        echo "Repository resource already present at $target"',
+    "        return 0",
+    "      fi",
+    ...(preserveExisting
+      ? [
+          '      rm -rf "$tmp"',
+          '      echo "Repository target changed during preparation; existing work was preserved" >&2',
+          "      exit 1",
+        ]
+      : ['      cp -a "$tmp/." "$target/"', '      rm -rf "$tmp"']),
+    "    else",
+    ...(preserveExisting
+      ? [
+          '      if ! mv -T -n "$tmp" "$target"; then',
+          '        rm -rf "$tmp"',
+          '        echo "Repository promotion failed; existing work was preserved" >&2',
+          "        exit 1",
+          "      fi",
+          '      if [ -e "$tmp" ]; then',
+          `        if [ ! -L "$target" ] && repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && [ "$(repository_git -C "$target" config --get remote.origin.url 2>/dev/null || true)" = "$uri" ] && { [ -z "$expected_commit" ] || ${existingCommitMatches}; }; then`,
+          '          rm -rf "$tmp"',
+          "          return 0",
+          "        fi",
+          '        rm -rf "$tmp"',
+          '        echo "Repository target changed during preparation; existing work was preserved" >&2',
+          "        exit 1",
+          "      fi",
+        ]
+      : ['      mv "$tmp" "$target"']),
+    "    fi",
+    '    repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null',
+    "  fi",
+    '  if [ ! -e "$target" ]; then',
+    '    echo "Repository resource was not materialized at $target" >&2',
+    "    exit 1",
+    "  fi",
+    '  echo "Repository resource ready at $target"',
+    "}",
+  ];
+}
 
 /**
  * The optional-clone runner, emitted only when a repository is optional. Each
@@ -11518,10 +11931,13 @@ const cloneRepositoryFunctionLines: readonly string[] = [
  * never push the command past OPTIONAL_REPOSITORY_CLONE_BUDGET_SECONDS. Without
  * a usable `timeout` binary an optional clone runs unbounded, as before.
  */
-function optionalRepositoryCloneRunnerLines(timeoutSeconds: number): string[] {
+function optionalRepositoryCloneRunnerLines(
+  timeoutSeconds: number,
+  preserveExisting = false,
+): string[] {
   const script = [
     "set -eu",
-    ...cloneRepositoryFunctionLines,
+    ...cloneRepositoryFunctionLines(preserveExisting),
     `trap 'rm -rf "\${tmp:-/nonexistent-opengeni-optional-clone}"; exit 143' TERM INT`,
     'clone_repository "$@"',
   ].join("\n");
@@ -11552,8 +11968,16 @@ export function repositoryCloneCommand(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
   bindings: GitCredentialBindingSeed[] = [],
   stagedSeeds: StagedGitCredentialBindingSeed[] = [],
-  options: { optionalCloneTimeoutSeconds?: number } = {},
+  options: {
+    optionalCloneTimeoutSeconds?: number;
+    credentialsAlreadyPrepared?: boolean;
+    preserveExisting?: boolean;
+  } = {},
 ): string {
+  if (options.credentialsAlreadyPrepared && (bindings.length || stagedSeeds.length))
+    throw new Error("Retained repository preparation cannot seed legacy credentials");
+  if (options.preserveExisting && resources.some((resource) => resource.subpath !== undefined))
+    throw new Error("Preserving existing work requires full-repository preparation");
   const cloneConcurrency = 4;
   assertUniqueResourceMountPaths(resources);
   const optionalCloneTimeoutSeconds = Math.max(
@@ -11581,10 +12005,12 @@ export function repositoryCloneCommand(
     "  exit 127",
     "}",
     "ensure_git",
-    ...gitCredentialHelperCommandLines(resources, bindings, stagedSeeds),
-    ...cloneRepositoryFunctionLines,
+    ...(options.credentialsAlreadyPrepared
+      ? []
+      : gitCredentialHelperCommandLines(resources, bindings, stagedSeeds)),
+    ...cloneRepositoryFunctionLines(options.preserveExisting),
     ...(resources.some((resource) => resource.optional === true)
-      ? optionalRepositoryCloneRunnerLines(optionalCloneTimeoutSeconds)
+      ? optionalRepositoryCloneRunnerLines(optionalCloneTimeoutSeconds, options.preserveExisting)
       : []),
     "clone_pids=''",
     "clone_failed=0",

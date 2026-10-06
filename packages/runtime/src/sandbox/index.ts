@@ -3,6 +3,12 @@ export type {
   ProviderCommandSession,
 } from "./provider-command-session";
 export {
+  SandboxV2TextFilesystem,
+  SandboxV2FilesystemFailure,
+  SANDBOX_V2_EDITOR_FILE_BYTES,
+  SANDBOX_V2_IMAGE_FILE_BYTES,
+} from "./v2/filesystem";
+export {
   ProviderCommandStartOutcomeUnknownError,
   ProviderCommandObservationUnavailableError,
   isProviderCommandObservationUnavailableError,
@@ -2686,3 +2692,42 @@ export async function serializeReplacementSandboxEnvelope(
     sessionState,
   };
 }
+export { MachineController, MachineConflictError, newMachine } from "./v2/machine-controller";
+export type {
+  MachineStore,
+  MachineBackend,
+  MachineLifecycleOptions,
+  TransitionResult,
+  TransitionProof,
+} from "./v2/machine-controller";
+export { selectSandboxEngine } from "./v2/engine";
+export {
+  MachineJournalClient,
+  JournalBindingError,
+  JournalUnavailableError,
+} from "./v2/journal-client";
+export type { JournalAuthority, JournalAction, MachineExecTransport } from "./v2/journal-client";
+export { DockerMachineExecTransport } from "./v2/docker-transport";
+export { DockerMachineBackend } from "./v2/docker-backend";
+export type { DockerMachineBackendOptions, DockerMachineDisk } from "./v2/docker-backend";
+export {
+  JournalCommand,
+  JournalObservation,
+  JournalInputReply,
+  JournalReceipt,
+  JournalStartRequest,
+  JournalInputAction,
+  JournalCapabilities,
+  journalSpecificationDigest,
+} from "./v2/journal-protocol";
+export {
+  MachineSandboxSession,
+  MachineCommandOutcomeError,
+  MachineCommandHandleUnavailableError,
+} from "./v2/machine-session";
+export type {
+  MachineSessionPersistence,
+  MachineSessionCommand,
+  MachineCommandCursor,
+  MachineExecResult,
+} from "./v2/machine-session";

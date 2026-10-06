@@ -203,6 +203,60 @@ describe("code search ripgrep arguments", () => {
 });
 
 describe("SandboxChannelAService.codeSearchRipgrep", () => {
+  test.skipIf(!hasRipgrep)("named native search steps recover their original output", async () => {
+    const root = fixtureRepo();
+    const calls: string[] = [];
+    const session = hostShellSession(root, calls);
+    const retained = new Map<string, { args: unknown; result: unknown }>();
+    const channel = () =>
+      new SandboxChannelAService({
+        session: {},
+        workspaceRoot: root,
+        commandExecution: {
+          scopeId: "synthetic-search-operation",
+          execute: async (stepId, args) => {
+            const original = retained.get(stepId);
+            if (original) {
+              expect(args).toEqual(original.args);
+              return original.result as { stdout: string; stderr: string; exitCode: number };
+            }
+            const result = await session.exec!(args);
+            retained.set(stepId, { args: structuredClone(args), result });
+            return result;
+          },
+        },
+      });
+    const args = [...SEARCH, "-e", "approvalPolicy", "--", "."];
+    const options = { timeoutMs: 20_000, maxBytes: 1024 * 1024 };
+    const first = await channel().codeSearchRipgrep(args, options);
+    expect(first.available).toBe(true);
+    expect(first.stdout).toContain("approvalPolicy");
+    expect(await channel().codeSearchPathKinds(["src", "src/approval.ts"])).toEqual({
+      src: "directory",
+      "src/approval.ts": "file",
+    });
+    const large = Array.from(
+      { length: 1700 },
+      () => `ordinary-native:${randomBytes(128).toString("hex")}\n`,
+    ).join("");
+    const compressed = gzipSync(Buffer.from(large));
+    expect(compressed.length).toBeGreaterThan(128 * 1024);
+    expect(compressed.length).toBeLessThan(CHUNK_BYTES);
+    writeFileSync(join(root, "src/native-large.txt"), large);
+    const largeArgs = [...SEARCH, "-e", "ordinary-native", "--", "."];
+    const larger = await channel().codeSearchRipgrep(largeArgs, options);
+    expect(larger.truncated).toBe(false);
+    expect(larger.stdout.trim().split("\n")).toHaveLength(1700);
+    const beforeRecovery = calls.length;
+    expect(await channel().codeSearchRipgrep(args, options)).toEqual(first);
+    expect(await channel().codeSearchPathKinds(["src", "src/approval.ts"])).toEqual({
+      src: "directory",
+      "src/approval.ts": "file",
+    });
+    expect(await channel().codeSearchRipgrep(largeArgs, options)).toEqual(larger);
+    expect(calls).toHaveLength(beforeRecovery);
+  });
+
   test.skipIf(!hasRipgrep)("returns exact ripgrep output for matches", async () => {
     const root = fixtureRepo();
     const svc = new SandboxChannelAService({ session: hostShellSession(root) });

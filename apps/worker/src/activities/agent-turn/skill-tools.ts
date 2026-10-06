@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { AttemptToolExecutionContext } from "@opengeni/codemode";
 import type { Settings } from "@opengeni/config";
 import { type SkillActor, type SkillScope, type SkillWriteReceipt } from "@opengeni/contracts";
 import {
@@ -57,7 +58,10 @@ export function createWorkspaceSkillTools(input: {
   subjectId?: string;
   actor: Extract<SkillActor, { kind: "agent" }>;
   selected: readonly { id: string; artifact: RuntimeSkillArtifact }[];
-  filesystem: () => Promise<SkillFileSystem>;
+  filesystem: (
+    context: AttemptToolExecutionContext,
+    sourceSnapshotDigest?: string,
+  ) => Promise<SkillFileSystem>;
   /** Content-free skill_checkout timing; it never changes a result. */
   observeSkillCheckout?: (observation: SkillCheckoutObservation) => void;
   /** The resolved model's bound, which `settings` does not carry. */

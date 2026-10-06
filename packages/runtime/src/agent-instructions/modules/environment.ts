@@ -6,8 +6,12 @@ import { blocks, sentences, type AgentPromptModule } from "../types";
  */
 export function rigInstructions(rig: RigInstructionsContext): string[] {
   return [
-    `This session uses sandbox environment "${rig.name}" (active version v${rig.version}) — a versioned definition of custom sandbox setup and health checks.`,
-    "Your sandbox is an EPHEMERAL FORK of this environment. You may install tools here, but local changes do not update the environment definition or other sessions.",
+    rig.retainedMachine
+      ? `This session uses sandbox environment "${rig.name}" (pinned version v${rig.version}).`
+      : `This session uses sandbox environment "${rig.name}" (active version v${rig.version}) — a versioned definition of custom sandbox setup and health checks.`,
+    rig.retainedMachine
+      ? "Your sandbox machine is retained for this sandbox group. Local changes do not update the environment definition or other sandbox groups."
+      : "Your sandbox is an EPHEMERAL FORK of this environment. You may install tools here, but local changes do not update the environment definition or other sessions.",
     "To make a verified setup change available to future sessions using this environment, call rig_propose_change with the exact command that already worked here. Never assume an unverified change propagates.",
     "If tooling you expect is missing, consult rig_get to see the sandbox environment's current setup and checks before reinstalling.",
   ];

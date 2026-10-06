@@ -6,7 +6,15 @@ import { createObservability } from "@opengeni/observability";
 import { buildTurnAgent, type BuildTurnAgentDeps } from "../src/activities/agent-turn/agent-build";
 import { createTurnContext } from "../src/activities/agent-turn/turn-context";
 import {
+  createSandboxV2TurnExecution,
+  type SandboxV2TurnExecution,
+} from "../src/sandbox-v2-execution";
+import { shell, type SandboxSessionLike } from "@openai/agents/sandbox";
+import type { SandboxV2TurnMachine } from "@opengeni/core";
+import type { MachineBackend } from "@opengeni/runtime/sandbox";
+import {
   buildOpenGeniAgent,
+  buildSandboxV2PreparedFileManifest,
   type ConnectorActionPolicyHooks,
   prefixedMcpToolName,
   prepareAgentTools,
@@ -24,8 +32,10 @@ async function buildWorkerAgent(
   hooks: ConnectorActionPolicyHooks,
   model: ScriptedModel,
   approvedToolCallId?: string,
+  nativeTurn?: SandboxV2TurnExecution,
 ) {
   const context = createTurnContext({ settings: modelRunSettings, cancellationRequestedAt: null });
+  if (nativeTurn) context.sandboxState.nativeTurn = nativeTurn;
   context.eventing.preparedTools = prepared;
   const persistence = [
     spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
@@ -104,6 +114,92 @@ async function buildWorkerAgent(
     for (const spy of persistence) spy.mockRestore();
   }
 }
+
+test("ordinary worker builder consumes the exact prepared native owner and keeps normal model/approval configuration", async () => {
+  const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+  const instance = {
+    id: "synthetic-native",
+    bootId: "a".repeat(64),
+    diskLineage: crypto.randomUUID(),
+  };
+  let execs = 0;
+  let machineStops = 0;
+  const session: SandboxSessionLike = {
+    state: {
+      kind: "machine-v2",
+      machineId: "synthetic-machine",
+      instance,
+      manifest: buildSandboxV2PreparedFileManifest([]),
+    },
+    execCommand: async () => {
+      execs++;
+      return "synthetic worker reply";
+    },
+    supportsPty: () => false,
+    stop: async () => {
+      machineStops++;
+    },
+  };
+  const machine: SandboxV2TurnMachine = {
+    engine: "machine-v2",
+    authority: {
+      accountId: "account",
+      workspaceId: "workspace",
+      sessionId: "session",
+      turnId: "turn",
+      attemptId: "attempt",
+      executionGeneration: 1,
+      machineId: "synthetic-machine",
+      instance,
+    },
+    provider: "synthetic",
+    capabilities: { stdin: false, pty: false },
+    transport: {
+      exec: async () => {
+        throw Error("SDK-bound session owns this synthetic invocation");
+      },
+    },
+    releaseRevoked: async () => false,
+  };
+  const owner = createSandboxV2TurnExecution(
+    {} as db.Database,
+    machine,
+    { session, capabilities: [shell()] },
+    new Map([
+      [
+        "synthetic",
+        {
+          backend: { provider: "synthetic" } as MachineBackend,
+          transport: machine.transport,
+        },
+      ],
+    ]),
+  );
+  const prepared = await prepareAgentTools(settings, []);
+  const model = new ScriptedModel([
+    { output: [functionCall("exec_command", { cmd: "printf synthetic" }, "worker-native-call")] },
+    { outputText: "completed" },
+  ]);
+  try {
+    const hooks: ConnectorActionPolicyHooks = {
+      prepare: async () => ({ managed: false }),
+      begin: async () => ({ allowed: true, managed: false }),
+      complete: async () => {},
+    };
+    const agent = await buildWorkerAgent(settings, [], prepared, hooks, model, undefined, owner);
+    const stream = await runAgentStream(agent, "ordinary native turn", settings);
+    for await (const event of stream) void event;
+    await stream.completed;
+    expect(stream.finalOutput).toBe("completed");
+    expect(execs).toBe(1);
+    expect(machineStops).toBe(0);
+    expect(model.calls).toBe(2);
+  } finally {
+    owner.invocations.cancel();
+    await owner.invocations.waitForDrain();
+    await prepared.close();
+  }
+});
 
 test.each(["approve", "reject", "legacy approve", "legacy reject"] as const)(
   "account-qualified worker calls interrupt and %s after reconstruction",

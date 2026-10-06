@@ -415,6 +415,7 @@ function safePosture(): RuntimeDatabasePosture {
         trigger: false,
       },
       ...knowledgeAuthorityTables(),
+      ...[{ ...knowledgeAuthorityTables()[0]!, name: "sandbox_v2_machines" }],
       ...mcpOperationAuthorityTables(),
       ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
@@ -1006,6 +1007,14 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 0638 adds eleven FORCE-RLS tables, five append-only and six CAS-updatable.
+          (tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
+            ? 11
+            : tables === RUNTIME_READ_INSERT_TABLES
+              ? 5
+              : tables === RUNTIME_READ_INSERT_UPDATE_TABLES
+                ? 6
+                : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 8 : 0) +
           // 0546 adds three organization integration tables.
           (tables === FORCE_RLS_TABLES ||
@@ -1063,7 +1072,18 @@ describe("runtime database posture evaluator", () => {
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
       const tableCount =
-        (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1 + 1 + 3 + 8;
+        (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1 + 1 + 3 + 8 + 11;
+      expect(RUNTIME_TABLE_PRIVILEGES.sandbox_v2_background_owners).toEqual(["SELECT", "INSERT"]);
+      expect(RUNTIME_TABLE_PRIVILEGES.sandbox_v2_background_credentials).toEqual([
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+      ]);
+      expect(RUNTIME_TABLE_PRIVILEGES.sandbox_v2_credential_generations).toEqual([
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+      ]);
       for (const removed of [
         "workspace_packs",
         "pack_installations",
@@ -1638,6 +1658,18 @@ describe("runtime database posture evaluator", () => {
     expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
   });
 
+  test("machine inventory must share its protected table owner even in public", () => {
+    const posture = safePosture();
+    posture.schemas[0]!.owner = "pg_database_owner";
+    const routine = posture.targetRoutines.find(
+      (item) => item.name === "list_sandbox_v2_machine_inventory(integer, uuid)",
+    )!;
+    routine.owner = "pg_database_owner";
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "Sandbox machine inventory owner pg_database_owner does not match sandbox_v2_machines owner opengeni_migrator",
+    );
+  });
+
   test("Knowledge capabilities must share their authority-table owner even in public", () => {
     const posture = safePosture();
     const routine = posture.targetRoutines.find(
@@ -2209,6 +2241,7 @@ describe("runtime database posture evaluator", () => {
       ),
       ...knowledgeAuthorityTables(),
       ...mcpOperationAuthorityTables(true),
+      ...[{ ...knowledgeAuthorityTables()[0]!, name: "sandbox_v2_machines" }],
       ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
       ...managedAuthSessionSetAuthorityTables(),
@@ -2400,6 +2433,7 @@ describe("runtime database posture evaluator", () => {
         artifactMaterializerPolicy: true,
       })),
       ...knowledgeAuthorityTables(),
+      ...[{ ...knowledgeAuthorityTables()[0]!, name: "sandbox_v2_machines" }],
       ...mcpOperationAuthorityTables(true),
       ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),

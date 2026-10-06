@@ -28,6 +28,7 @@ async function finalize(mode: string) {
 describe("completed turn physical finalization", () => {
   for (const [mode, stage] of [
     ["writers", "tool_writers"],
+    ["native-writers", "tool_writers"],
     ["snapshot", "workspace_snapshot"],
   ]) {
     test(`contains a completed turn stuck in ${stage} without releasing its activity`, async () => {

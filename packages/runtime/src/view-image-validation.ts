@@ -51,7 +51,7 @@ export function decodeValidatedViewImageDataUrl(value: string): {
   return { declaredMediaType, actualMediaType };
 }
 
-function validatedViewImageMediaType(bytes: Uint8Array): ViewImageMediaType | null {
+export function validatedViewImageMediaType(bytes: Uint8Array): ViewImageMediaType | null {
   try {
     if (isPng(bytes)) {
       validatePng(bytes);

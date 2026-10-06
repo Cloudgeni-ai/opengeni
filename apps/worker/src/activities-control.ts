@@ -11,6 +11,7 @@ import { createKnowledgeSourceSyncActivities } from "./activities/knowledge-sour
 import { createRetainedScreenshotMaintenanceActivities } from "./activities/retained-screenshot-reaper";
 import { createRigVerificationActivities } from "./activities/rig-verification";
 import { createSandboxLeaseActivities } from "./activities/sandbox-lease";
+import { createSandboxV2ControlActivities } from "./activities/sandbox-v2";
 import { createScheduledTaskActivities } from "./activities/scheduled-tasks";
 import { createSiteAuthMaintenanceActivities } from "./activities/site-auth-maintenance";
 import { createSessionStateActivities } from "./activities/session-state";
@@ -45,6 +46,7 @@ export function createControlActivitiesFromServices(
     ...createRetainedScreenshotMaintenanceActivities(services),
     ...createWorkflowWakeActivities(services),
     ...createSandboxLeaseActivities(services),
+    ...createSandboxV2ControlActivities(services),
   };
 }
 

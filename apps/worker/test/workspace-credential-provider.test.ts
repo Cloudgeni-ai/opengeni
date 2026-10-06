@@ -103,7 +103,7 @@ function turn(): SessionTurn {
   } as unknown as SessionTurn;
 }
 
-async function bind(options: { hostPort?: RunCredentialsResolution } = {}) {
+async function bind(options: { hostPort?: RunCredentialsResolution; native?: boolean } = {}) {
   return await bindRunCredentialResolver({
     effectiveTools: [],
     db: client.db,
@@ -116,7 +116,8 @@ async function bind(options: { hostPort?: RunCredentialsResolution } = {}) {
     session,
     turn: { ...turn(), initiatingHumanSubjectId: "user:owner" },
     attemptId: crypto.randomUUID(),
-    effectiveSandboxBackend: "docker",
+    effectiveSandboxBackend: options.native ? "machine-v2" : "docker",
+    ...(options.native ? { nativeMachineProvider: "synthetic-managed" } : {}),
     variableSet: null,
   });
 }
@@ -216,6 +217,42 @@ describe("workspace credential provider", () => {
     expect(await resolver!.resolve({ purpose: "provision", forceRefresh: false })).toBeNull();
   });
 
+  test("native requests keep provider identity and expose copied selection without minting", async () => {
+    reply = () => Response.json({ status: "not_applicable" });
+    const before = requests.length;
+    const resolver = (await bind({ native: true }))!;
+    expect(requests.length).toBe(before);
+    expect(resolver.provider).toMatchObject({ kind: "workspace", enabled: true });
+    expect(resolver.provider!.kind).toBe("workspace");
+    const copiedProvider = resolver.provider!;
+    if (copiedProvider.kind !== "workspace") throw Error("Expected workspace binding");
+    copiedProvider.enabled = false;
+    expect(resolver.provider).toMatchObject({ enabled: true });
+    const copiedRequest = resolver.request!;
+    copiedRequest.initiatorContext = { synthetic: "local mutation" };
+    expect(
+      await resolver.resolveResolution!({ purpose: "renewal", forceRefresh: true }),
+    ).toMatchObject({
+      status: "not_applicable",
+      ...scope,
+      sessionId: session.id,
+    });
+    expect(requests.at(-1)).toMatchObject({
+      sandboxBackend: "machine-v2",
+      sandboxEngine: "machine-v2",
+      machineProvider: "synthetic-managed",
+      purpose: "renewal",
+      forceRefresh: true,
+      initiatorContext: { context: {} },
+    });
+    expect(resolver.request).toMatchObject({
+      purpose: "provision",
+      forceRefresh: false,
+      initiatorContext: {},
+    });
+    expect(resolver.mcpServers).toEqual([]);
+  });
+
   test("a disabled provider pauses credentials without deployment fallback", async () => {
     await upsertWorkspaceCredentialProvider(client.db, {
       ...scope,
@@ -238,6 +275,7 @@ describe("workspace credential provider", () => {
     expect(requests.length).toBe(before);
     const paused = await bind();
     expect(paused).not.toBeNull();
+    expect(paused!.provider).toMatchObject({ kind: "workspace", enabled: false });
     expect(await paused!.resolve({ purpose: "provision", forceRefresh: false })).toBeNull();
   });
 });

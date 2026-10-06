@@ -32,6 +32,7 @@ import {
   compactionProviderRejection,
   withRunCredentialsSession,
   runOwnedSandboxSetup,
+  assertPreparedMachineSandboxAgent,
   type SandboxFileDownload,
   type OpenGeniRuntime,
   type HistoryProviderApi,
@@ -160,6 +161,7 @@ import type {
   SandboxRuntimeState,
   TurnControlState,
 } from "./turn-context";
+import { assertNativeTurnHasNoLegacySandboxOwners } from "./turn-context";
 
 export type TurnStreamAttemptDeps = {
   input: RunAgentTurnInput;
@@ -711,7 +713,19 @@ export async function runTurnStreamAttempt(
         });
       }
     };
-    const ownedEstablished = ownedTurnSandboxForAgent(sandboxState);
+    const nativeTurn = sandboxState.nativeTurn;
+    if (nativeTurn) {
+      assertNativeTurnHasNoLegacySandboxOwners(sandboxState);
+      assertPreparedMachineSandboxAgent(agent, nativeTurn.binding);
+      if (
+        eventing.toolCancellationFenceRef.current ||
+        runCredentialResolver ||
+        sandboxCodemodeToken ||
+        fileResourceDownloads.length
+      )
+        throw new Error("Native worker stream cannot use legacy sandbox owners");
+    }
+    const ownedEstablished = nativeTurn ? null : ownedTurnSandboxForAgent(sandboxState);
     const runStreamOnce = async (): ReturnType<OpenGeniRuntime["runStream"]> => {
       const eagerResolvedSandbox = sandboxState.resolvedSandbox;
       // Eager owned sessions must settle the exact platform-setup provider
@@ -919,7 +933,7 @@ export async function runTurnStreamAttempt(
                   : {}),
               }
             : {}),
-          ...(eventing.modelRunSettings.sandboxBackend !== "none"
+          ...(!nativeTurn && eventing.modelRunSettings.sandboxBackend !== "none"
             ? {
                 onSandboxSessionReady: async (sandboxSession: CodemodeTokenWriterSession) => {
                   media.sdkOwnedSandboxSession = sandboxSession;

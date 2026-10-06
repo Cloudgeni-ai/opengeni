@@ -331,6 +331,13 @@ export type ChannelAEmitter = (
 
 export type SandboxChannelAServiceOptions = {
   session: ChannelASession;
+  /** Trusted worker dispatch for explicitly named physical steps. Ordinary
+   * providers keep their existing session path. The scope is the accepted
+   * gateway operation, never a permission or a provider identity. */
+  commandExecution?: {
+    scopeId: string;
+    execute(stepId: string, args: ChannelAExecArgs, stdin?: string): Promise<ChannelAExecResult>;
+  };
   // Canonical filesystem root advertised by the selected target. Relative paths
   // resolve beneath it; already-canonical absolute paths stay byte-for-byte paths
   // after validation against the operation's path scope.
@@ -622,6 +629,7 @@ async function settleConcurrentReads<const T extends readonly unknown[]>(reads: 
 
 export class SandboxChannelAService {
   private readonly session: ChannelASession;
+  private readonly commandExecution: SandboxChannelAServiceOptions["commandExecution"];
   private readonly workspaceRoot: string;
   private readonly providerPathMode: "canonical" | "workspace-relative";
   private readonly fileReadScope: "workspace" | "machine";
@@ -632,6 +640,7 @@ export class SandboxChannelAService {
 
   constructor(opts: SandboxChannelAServiceOptions) {
     this.session = opts.session;
+    this.commandExecution = opts.commandExecution;
     const workspaceRoot = opts.workspaceRoot ?? "";
     this.workspaceRoot = isConnectedMachineAbsolutePath(workspaceRoot)
       ? resolveConnectedMachinePath(workspaceRoot, undefined)
@@ -683,7 +692,11 @@ export class SandboxChannelAService {
   // a banner strip. Callers that parse output must independently bound/frame it
   // because provider retained-output truncation drops command prefixes. Throws
   // ChannelAUnsupportedError when neither exists.
-  private async run(args: ChannelAExecArgs): Promise<{
+  private async run(
+    args: ChannelAExecArgs,
+    stepId?: string,
+    stdin?: string,
+  ): Promise<{
     stdout: string;
     stderr: string;
     exitCode: number | null;
@@ -691,6 +704,18 @@ export class SandboxChannelAService {
     wallTimeSeconds: number;
   }> {
     const withRunAs = this.runAs ? { ...args, runAs: this.runAs } : args;
+    if (this.commandExecution) {
+      if (!stepId)
+        throw new ChannelAUnsupportedError("workspace operation has no retained step identity");
+      const r = await this.commandExecution.execute(stepId, withRunAs, stdin);
+      return {
+        stdout: r.stdout ?? r.output ?? "",
+        stderr: r.stderr ?? "",
+        exitCode: r.exitCode ?? null,
+        ...(typeof r.sessionId === "number" ? { sessionId: r.sessionId } : {}),
+        wallTimeSeconds: r.wallTimeSeconds ?? 0,
+      };
+    }
     if (this.session.exec) {
       const r = await this.session.exec(withRunAs);
       return {
@@ -726,7 +751,11 @@ export class SandboxChannelAService {
   /** Run a command that is proven read-only. Routing sessions expose an
    * explicit internal path that skips durable mutation admission; direct
    * provider sessions safely use the ordinary exec path. */
-  private async runReadOnly(args: ChannelAExecArgs): ReturnType<SandboxChannelAService["run"]> {
+  private async runReadOnly(
+    args: ChannelAExecArgs,
+    stepId?: string,
+  ): ReturnType<SandboxChannelAService["run"]> {
+    if (this.commandExecution) return await this.run(args, stepId);
     if (!this.session.execReadOnly) {
       return await this.run(args);
     }
@@ -739,6 +768,12 @@ export class SandboxChannelAService {
       ...(typeof result.sessionId === "number" ? { sessionId: result.sessionId } : {}),
       wallTimeSeconds: result.wallTimeSeconds ?? 0,
     };
+  }
+
+  /** Logical paths and immutable request file/directory ordinals identify
+   * compound steps. Command contents and runtime traversal counters do not. */
+  private commandStepId(operation: string, identity: unknown): string {
+    return `${operation}:${createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
   }
 
   // ════════════════════════════ FileSystem (A2) ═════════════════════════════
@@ -847,11 +882,15 @@ export class SandboxChannelAService {
       "producer_status=${PIPESTATUS[0]};",
       `if [ "$producer_status" -ne 0 ] && [ "$producer_status" -ne 141 ]; then printf '%s\\0' ${shellQuote(FS_LIST_TRUNCATED_MARKER)}; fi`,
     ].join(" ");
-    const { stdout, exitCode } = await this.runInConfinedDirectory(root, {
-      cmd: internalBashCommand(findCommand),
-      yieldTimeMs: 10_000,
-      maxOutputTokens: Math.ceil(FS_LIST_MAX_OUTPUT_BYTES / 4) + 1_024,
-    });
+    const { stdout, exitCode } = await this.runInConfinedDirectory(
+      root,
+      {
+        cmd: internalBashCommand(findCommand),
+        yieldTimeMs: 10_000,
+        maxOutputTokens: Math.ceil(FS_LIST_MAX_OUTPUT_BYTES / 4) + 1_024,
+      },
+      this.commandStepId("fs-list", root),
+    );
     if (exitCode !== 0) {
       throw new ChannelAUnavailableError(
         "Workspace files are temporarily unavailable. Retry the file list.",
@@ -921,11 +960,14 @@ export class SandboxChannelAService {
       if (!relative || /[\u0000-\u001f\u007f\\]/u.test(relative)) {
         throw new ChannelAValidationError("invalid workspace file path");
       }
-      const result = await this.runReadOnly({
-        cmd: confinedFileReadCommand(this.workspaceRoot, relative, req.maxBytes),
-        login: false,
-        maxOutputTokens: Math.ceil((req.maxBytes * 4) / 3) + 1024,
-      });
+      const result = await this.runReadOnly(
+        {
+          cmd: confinedFileReadCommand(this.workspaceRoot, relative, req.maxBytes),
+          login: false,
+          maxOutputTokens: Math.ceil((req.maxBytes * 4) / 3) + 1024,
+        },
+        this.commandStepId("fs-read-confined", relative),
+      );
       if (result.exitCode === 66) throw new ChannelANotFoundError("workspace file not found");
       if (result.exitCode === 67) {
         throw new ChannelAValidationError("workspace file path must not contain symlinks");
@@ -1003,6 +1045,7 @@ export class SandboxChannelAService {
   private async assertConfinedMutationParent(
     path: string,
     options: { allowMissingParents: boolean; rejectFinalSymlink: boolean },
+    stepId?: string,
   ): Promise<void> {
     const root = this.providerWorkspaceRoot();
     const abs = this.joinRoot(path);
@@ -1026,7 +1069,7 @@ export class SandboxChannelAService {
       requireParent,
       `printf '__OPENGENI_FS_CONFINED_OK__'`,
     ].join("; ");
-    const result = await this.runReadOnly({ cmd: internalBashCommand(script) });
+    const result = await this.runReadOnly({ cmd: internalBashCommand(script) }, stepId);
     this.assertConfinementResult(result, path, "mutation");
   }
 
@@ -1085,10 +1128,13 @@ export class SandboxChannelAService {
     ].join("; ");
     let result: Awaited<ReturnType<SandboxChannelAService["run"]>>;
     try {
-      result = await this.runReadOnly({
-        cmd: internalBashCommand(script),
-        maxOutputTokens: Math.ceil((req.maxBytes * 4) / 3) + 1_024,
-      });
+      result = await this.runReadOnly(
+        {
+          cmd: internalBashCommand(script),
+          maxOutputTokens: Math.ceil((req.maxBytes * 4) / 3) + 1_024,
+        },
+        this.commandStepId("fs-read", path),
+      );
     } catch (error) {
       if (error instanceof ChannelAUnsupportedError) throw error;
       throw new ChannelAUnavailableError(
@@ -1147,26 +1193,33 @@ export class SandboxChannelAService {
         ? Buffer.from(req.content, "base64")
         : Buffer.from(req.content, "utf8");
 
-    await this.assertConfinedMutationParent(path, {
-      allowMissingParents: req.createParents,
-      rejectFinalSymlink: true,
-    });
+    await this.assertConfinedMutationParent(
+      path,
+      { allowMissingParents: req.createParents, rejectFinalSymlink: true },
+      this.commandStepId("fs-write-parent-before", path),
+    );
 
     if (!req.overwrite) {
-      const { exitCode } = await this.run({
-        cmd: `test -e ${shellQuote(abs)} || test -L ${shellQuote(abs)}`,
-      });
+      const { exitCode } = await this.run(
+        { cmd: `test -e ${shellQuote(abs)} || test -L ${shellQuote(abs)}` },
+        this.commandStepId("fs-write-exists", path),
+      );
       if (exitCode === 0) {
         throw new ChannelAConflictError(`path exists and overwrite is false: ${path}`);
       }
     }
     if (req.createParents) {
       const dir = dirnameAbs(abs);
-      if (dir) await this.run({ cmd: `mkdir -p ${shellQuote(dir)}` });
-      await this.assertConfinedMutationParent(path, {
-        allowMissingParents: false,
-        rejectFinalSymlink: true,
-      });
+      if (dir)
+        await this.run(
+          { cmd: `mkdir -p ${shellQuote(dir)}` },
+          this.commandStepId("fs-write-parent-create", path),
+        );
+      await this.assertConfinedMutationParent(
+        path,
+        { allowMissingParents: false, rejectFinalSymlink: true },
+        this.commandStepId("fs-write-parent-after", path),
+      );
     }
     // Large payloads must not become a shell argument. Provider writes carry
     // bytes out of band; native agents use a verified chunked transaction.
@@ -1179,9 +1232,15 @@ export class SandboxChannelAService {
       // the whole file). A non-existent parent with createParents:false surfaces a
       // non-zero exit -> 400.
       const b64 = bytes.toString("base64");
-      const { exitCode, stderr } = await this.run({
-        cmd: `printf %s ${shellQuote(b64)} | base64 -d > ${shellQuote(abs)}`,
-      });
+      const { exitCode, stderr } = await this.run(
+        {
+          cmd: this.commandExecution
+            ? `base64 -d > ${shellQuote(abs)} # input-sha256:${createHash("sha256").update(bytes).digest("hex")}`
+            : `printf %s ${shellQuote(b64)} | base64 -d > ${shellQuote(abs)}`,
+        },
+        this.commandStepId("fs-write-content", path),
+        this.commandExecution ? b64 : undefined,
+      );
       if (exitCode !== null && exitCode !== 0) {
         // createEditor fallback for text when exec-write failed and we have a
         // text payload (binary cannot go through apply-patch).
@@ -1316,7 +1375,15 @@ export class SandboxChannelAService {
       batch: { files: PlannedWriteFile[]; directories: Set<number> },
     ): Promise<WriteFilesOutput> => {
       const cmd = command(mode, batch);
-      const result = mode === "check" ? await this.runReadOnly({ cmd }) : await this.run({ cmd });
+      const stepId = this.commandStepId(`fs-write-files-${mode}`, {
+        directory: plan.directory,
+        files: batch.files.map((file) => file.index),
+        directories: [...batch.directories].sort((left, right) => left - right),
+      });
+      const result =
+        mode === "check"
+          ? await this.runReadOnly({ cmd }, stepId)
+          : await this.run({ cmd }, stepId);
       const output = parseWriteFilesOutput(result.stdout);
       for (const index of output.written) written.add(index);
       for (const index of output.same) unchanged.add(index);
@@ -2856,6 +2923,9 @@ export class SandboxChannelAService {
     options: { timeoutMs: number; maxBytes: number; maxTransferBytes?: number },
   ): Promise<CodeSearchRipgrepOutcome> {
     const argv = validateCodeSearchRipgrepArgs(args, this.workspaceRoot);
+    // Native command replies retain a 256 KiB response window. Keep each
+    // base64 frame inside it; the original raw pages remain durable.
+    const chunkBytes = this.commandExecution ? 128 * 1024 : CODE_SEARCH_RG_CHUNK_BYTES;
     const maxBytes = Math.max(1, Math.min(CODE_SEARCH_RG_MAX_BYTES, Math.floor(options.maxBytes)));
     const maxTransferBytes = Math.max(
       CODE_SEARCH_RG_CHUNK_BYTES,
@@ -2913,17 +2983,20 @@ export class SandboxChannelAService {
       "token=-",
       // The worker fails an unstored search that did not time out, so only
       // keep output it will fetch.
-      `if [ "$gz_size" -gt ${CODE_SEARCH_RG_CHUNK_BYTES} ] && { [ "$stored" = 1 ] || [ "$timed_out" = 1 ]; }; then keep_gz=1; token=$(basename "$gz_file"); fi`,
+      `if [ "$gz_size" -gt ${chunkBytes} ] && { [ "$stored" = 1 ] || [ "$timed_out" = 1 ]; }; then keep_gz=1; token=$(basename "$gz_file"); fi`,
       `printf '${CODE_SEARCH_RG_BEGIN}'`,
-      `head -c ${CODE_SEARCH_RG_CHUNK_BYTES} "$gz_file" | base64 | tr -d '\\r\\n'`,
+      `head -c ${chunkBytes} "$gz_file" | base64 | tr -d '\\r\\n'`,
       `printf '${CODE_SEARCH_RG_END}%s:%s:%s:%s:%s:%s__' "$rg_status" "$timed_out" "$gz_size" "$token" "$raw_size" "$stored"`,
     ].join("\n");
-    const { stdout } = await this.runReadOnly({
-      cmd: internalBashCommand(script),
-      workdir: this.providerWorkspaceRoot(),
-      yieldTimeMs: (seconds + 15) * 1_000,
-      maxOutputTokens: CODE_SEARCH_RG_FRAME_CHARS,
-    });
+    const { stdout } = await this.runReadOnly(
+      {
+        cmd: internalBashCommand(script),
+        workdir: this.providerWorkspaceRoot(),
+        yieldTimeMs: (seconds + 15) * 1_000,
+        maxOutputTokens: CODE_SEARCH_RG_FRAME_CHARS,
+      },
+      this.commandStepId("code-search-rg", argv),
+    );
     const trailer = CODE_SEARCH_RG_TRAILER.exec(stdout);
     if (!trailer) {
       throw new ChannelAUnavailableError("code search did not complete in this workspace");
@@ -2959,9 +3032,9 @@ export class SandboxChannelAService {
       // A box that lies about its size never gets more than the transfer cap
       // fetched from it, nor more calls than that cap needs.
       const target = Math.min(reportedSize, maxTransferBytes);
-      const maxCalls = Math.ceil(maxTransferBytes / CODE_SEARCH_RG_CHUNK_BYTES);
+      const maxCalls = Math.ceil(maxTransferBytes / chunkBytes);
       for (let call = 0; call < maxCalls && fetched < target; call++) {
-        const length = Math.min(CODE_SEARCH_RG_CHUNK_BYTES, target - fetched);
+        const length = Math.min(chunkBytes, target - fetched);
         const chunk = await this.codeSearchRipgrepChunk(
           token,
           fetched,
@@ -3021,12 +3094,15 @@ export class SandboxChannelAService {
       `printf '${CODE_SEARCH_RG_END}0:0:0:-__'`,
       'if [ "$4" = 1 ]; then rm -f "$f"; fi',
     ].join("\n");
-    const { stdout } = await this.runReadOnly({
-      cmd: `${internalBashCommand(script)} opengeni-code-search ${shellQuote(token)} ${offset + 1} ${length} ${last ? 1 : 0}`,
-      workdir: this.providerWorkspaceRoot(),
-      yieldTimeMs: 30_000,
-      maxOutputTokens: CODE_SEARCH_RG_FRAME_CHARS,
-    });
+    const { stdout } = await this.runReadOnly(
+      {
+        cmd: `${internalBashCommand(script)} opengeni-code-search ${shellQuote(token)} ${offset + 1} ${length} ${last ? 1 : 0}`,
+        workdir: this.providerWorkspaceRoot(),
+        yieldTimeMs: 30_000,
+        maxOutputTokens: CODE_SEARCH_RG_FRAME_CHARS,
+      },
+      this.commandStepId("code-search-rg-chunk", [token, offset]),
+    );
     const trailer = CODE_SEARCH_RG_TRAILER.exec(stdout);
     if (!trailer) {
       throw new ChannelAUnavailableError("code search did not complete in this workspace");
@@ -3073,12 +3149,15 @@ export class SandboxChannelAService {
       'for p in "$@"; do if denied "$p"; then printf m; elif [ -d "$p" ]; then printf d; elif [ -e "$p" ]; then printf f; else printf m; fi; done',
       `printf '${CODE_SEARCH_KINDS_END}'`,
     ].join("\n");
-    const { stdout } = await this.runReadOnly({
-      cmd: `${internalBashCommand(script)} opengeni-code-search ${checked.map(shellQuote).join(" ")}`,
-      workdir: this.providerWorkspaceRoot(),
-      yieldTimeMs: 20_000,
-      maxOutputTokens: 4_096,
-    });
+    const { stdout } = await this.runReadOnly(
+      {
+        cmd: `${internalBashCommand(script)} opengeni-code-search ${checked.map(shellQuote).join(" ")}`,
+        workdir: this.providerWorkspaceRoot(),
+        yieldTimeMs: 20_000,
+        maxOutputTokens: 4_096,
+      },
+      this.commandStepId("code-search-path-kinds", checked),
+    );
     const match = new RegExp(`${CODE_SEARCH_KINDS_BEGIN}([dfm]*)${CODE_SEARCH_KINDS_END}`).exec(
       stdout,
     );
@@ -3366,6 +3445,7 @@ export class SandboxChannelAService {
   private async runInConfinedDirectory(
     rel: string,
     args: ChannelAExecArgs,
+    stepId?: string,
   ): Promise<{
     stdout: string;
     stderr: string;
@@ -3380,9 +3460,14 @@ export class SandboxChannelAService {
       ? `test ! -L ${shellQuote(abs)} || { printf '__OPENGENI_FS_SYMLINK__'; exit 68; }`
       : ":";
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      // A fresh nonce on each transport attempt prevents a delayed/replayed
-      // response from an earlier attempt from satisfying this attempt's frame.
-      const frameId = crypto.randomUUID().replaceAll("-", "");
+      // Legacy transports use a fresh nonce. A native retained command must
+      // keep the same frame while recovering its original durable response.
+      const frameId = this.commandExecution
+        ? createHash("sha256")
+            .update(JSON.stringify(["channel-a-frame-v1", this.commandExecution.scopeId, stepId]))
+            .digest("hex")
+            .slice(0, 32)
+        : crypto.randomUUID().replaceAll("-", "");
       const successPrefix = `__OPENGENI_FS_CONFINED_${frameId}_OK__\n`;
       const successSuffixPrefix = `__OPENGENI_FS_CONFINED_${frameId}_END__:`;
       const successSuffixTerminator = "__";
@@ -3404,11 +3489,10 @@ export class SandboxChannelAService {
       ].join("; ");
       let result: Awaited<ReturnType<SandboxChannelAService["run"]>>;
       try {
-        result = await this.runReadOnly({
-          ...args,
-          cmd: internalBashCommand(script),
-          workdir: undefined,
-        });
+        result = await this.runReadOnly(
+          { ...args, cmd: internalBashCommand(script), workdir: undefined },
+          stepId,
+        );
       } catch (error) {
         if (error instanceof ChannelAUnsupportedError) throw error;
         if (attempt === 0) continue;

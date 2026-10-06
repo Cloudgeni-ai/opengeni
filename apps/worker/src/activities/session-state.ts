@@ -417,6 +417,7 @@ export function createSessionStateActivities(
       temporalWorkflowRunId: input.workflowRunId,
       temporalActivityId: input.activityId,
       allowUninterrupted: true,
+      ...(input.nativeAuthority ? { nativeAuthority: input.nativeAuthority } : {}),
     });
     try {
       await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, events);

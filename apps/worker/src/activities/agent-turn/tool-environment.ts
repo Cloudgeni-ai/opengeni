@@ -127,6 +127,7 @@ import { codeSearchToolDefinitions, codeSearchWorkspaceFromChannel } from "./cod
 import { createWorkspaceSkillTools } from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
+import { createNativeTurnWorkspaceChannel } from "./native-workspace";
 import { turnCredentialRestriction } from "./credential-restriction";
 
 export type PrepareTurnToolPolicyDeps = {
@@ -718,9 +719,27 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       observe: (observation) => recordSkillRead(observability, observation),
     },
     observeSkillCheckout: (observation) => recordSkillCheckout(observability, observation),
-    filesystem: async () => {
+    filesystem: async (context, sourceSnapshotDigest) => {
       throwIfWorkerShuttingDown();
       throwIfTurnCancelled();
+      const nativeRunAs = sandboxRunAs(runSettings);
+      if (sandboxState.nativeTurn)
+        return guardSkillFilesystem(
+          createNativeTurnWorkspaceChannel(db, sandboxState.nativeTurn, context, {
+            ...(sourceSnapshotDigest === undefined ? {} : { sourceSnapshotDigest }),
+            emit: async (events) => {
+              await eventing.publish?.(events, true);
+            },
+            ...(nativeRunAs ? { runAs: nativeRunAs } : {}),
+          }),
+          {
+            assertActive: () => {
+              throwIfWorkerShuttingDown();
+              throwIfTurnCancelled();
+            },
+            runMutation: async (mutation) => await mutation(),
+          },
+        );
       const access = await resolveTurnSandboxAccess(
         sandboxState,
         media.sdkOwnedSandboxSession,
@@ -817,6 +836,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   });
   const codeSearchTools = codeSearchToolDefinitions({
     enabled: codeSearchEnabled,
+    ...(sandboxState.nativeTurn ? { nativeWorkspace: true } : {}),
     settings: runSettings,
     backend: activeSandboxBackend ?? groupBoxBackend,
     machineWorkspaceRoot: sandboxState.machinePrimarySession?.workspaceRoot ?? null,
@@ -848,9 +868,17 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         idempotencyKey: `usage:code_search.jev_cost:${input.attemptId}:${usage.operationId}`,
       });
     },
-    workspace: async () => {
+    workspace: async (context) => {
       throwIfWorkerShuttingDown();
       throwIfTurnCancelled();
+      if (sandboxState.nativeTurn) {
+        const runAs = sandboxRunAs(runSettings);
+        return codeSearchWorkspaceFromChannel(
+          createNativeTurnWorkspaceChannel(db, sandboxState.nativeTurn, context, {
+            ...(runAs ? { runAs } : {}),
+          }),
+        );
+      }
       const access = await resolveTurnSandboxAccess(
         sandboxState,
         media.sdkOwnedSandboxSession,
@@ -1188,6 +1216,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         nestedAgentDepth: session.nestedAgentDepth,
         effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
         attemptToolDefinitions,
+        ...(sandboxState.nativeTurn ? { stableModelOperations: true } : {}),
         connectorActionPolicy,
         attemptConnectorActionBindings,
       }),

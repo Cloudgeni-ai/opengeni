@@ -103,6 +103,7 @@ import {
   BROWSER_DEADLINE_CHECKPOINT_SWEEP_ID,
   browserDeadlineCheckpointTaskQueue,
 } from "./browser-deadline-checkpoint-contract";
+import { SANDBOX_V2_SWEEP_WORKFLOW_ID, sandboxV2ControlTaskQueue } from "./sandbox-v2-control";
 
 export {
   createHostExportPump,
@@ -334,6 +335,7 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
         for (const taskQueue of [
           sandboxLifecycleTaskQueue(settings.temporalTaskQueue),
           browserDeadlineCheckpointTaskQueue(settings.temporalTaskQueue),
+          sandboxV2ControlTaskQueue(settings.temporalTaskQueue),
         ]) {
           const lifecycleWorker = await Worker.create({
             ...sharedWorkerOptions,
@@ -505,6 +507,12 @@ export async function createWorkerWorkflowSignaler(
         temporal.workflow.start("browserDeadlineCheckpointSweepWorkflow", {
           taskQueue: browserDeadlineCheckpointTaskQueue(settings.temporalTaskQueue),
           workflowId: BROWSER_DEADLINE_CHECKPOINT_SWEEP_ID,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [],
+        }),
+        temporal.workflow.start("sandboxMachineSweepWorkflow", {
+          taskQueue: sandboxV2ControlTaskQueue(settings.temporalTaskQueue),
+          workflowId: SANDBOX_V2_SWEEP_WORKFLOW_ID,
           workflowIdReusePolicy: "ALLOW_DUPLICATE",
           args: [],
         }),

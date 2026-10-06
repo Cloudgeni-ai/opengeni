@@ -287,6 +287,10 @@ import {
   type TerminalStreamMint,
   type ViewerServices,
 } from "../sandbox/viewer";
+import {
+  sandboxApiUsesNativeMachine,
+  unavailableNativeSandboxApiCapabilities,
+} from "../sandbox/engine-route";
 import { buildSessionCodexRealtimeBroker, CodexRealtimeBrokerError } from "../codex-realtime";
 import {
   acceptSessionUserMessage,
@@ -3770,6 +3774,34 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
+    const { shared, sharedSessionIds } = await resolveSharedExposure(workspaceId, session);
+    const visibleSharedSessionIds = relatedSessionAccessFor(c) === "root" ? sharedSessionIds : [];
+    // Per-principal acknowledgment: A acknowledging does not consent for B. The
+    // Surface consent state so the UI can decide whether an explicit desktop
+    // grant may be requested. This descriptor read never mints a credential; the
+    // POST /viewers grant below re-checks both consent bits and stream:view.
+    const ack = await getStreamAcknowledgment(db, {
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      subjectId: grant.subjectId,
+    });
+    const acknowledged = ack
+      ? ack.acknowledgedUnredacted && (!shared || ack.acknowledgedShared)
+      : false;
+
+    if (
+      await sandboxApiUsesNativeMachine(db, { accountId: grant.accountId, workspaceId, session })
+    ) {
+      return c.json(
+        unavailableNativeSandboxApiCapabilities({
+          session,
+          shared,
+          sharedSessionIds: visibleSharedSessionIds,
+          acknowledged,
+        }),
+      );
+    }
+
     // Capability truth follows the ACTIVE placement, not the session's managed
     // home lease. A connected machine has no Modal group lease; treating that
     // absence as `cold` makes the client suppress the very viewer attach that
@@ -3787,20 +3819,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       { db, settings },
       { workspaceId, sandboxGroupId: session.sandboxGroupId },
     );
-    const { shared, sharedSessionIds } = await resolveSharedExposure(workspaceId, session);
-    const visibleSharedSessionIds = relatedSessionAccessFor(c) === "root" ? sharedSessionIds : [];
-    // Per-principal acknowledgment: A acknowledging does not consent for B. The
-    // Surface consent state so the UI can decide whether an explicit desktop
-    // grant may be requested. This descriptor read never mints a credential; the
-    // POST /viewers grant below re-checks both consent bits and stream:view.
-    const ack = await getStreamAcknowledgment(db, {
-      workspaceId,
-      sandboxGroupId: session.sandboxGroupId,
-      subjectId: grant.subjectId,
-    });
-    const acknowledged = ack
-      ? ack.acknowledgedUnredacted && (!shared || ack.acknowledgedShared)
-      : false;
 
     // This GET is deliberately descriptor-only: no provider resume, display/ttyd
     // startup, port exposure, or short-lived bearer mint. Besides enforcing least

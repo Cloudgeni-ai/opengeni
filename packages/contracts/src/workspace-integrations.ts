@@ -389,6 +389,8 @@ export type CredentialProviderRequest = {
   /** Informational, not authority. Optional only for pre-upgrade senders. */
   initiatingHuman?: InitiatingHuman | null;
   sandboxBackend: string;
+  sandboxEngine?: "machine-v2";
+  machineProvider?: string;
   sandboxOs: string;
 };
 

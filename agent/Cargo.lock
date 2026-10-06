@@ -2217,6 +2217,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "opengeni-run"
+version = "0.1.45"
+dependencies = [
+ "base64 0.22.1",
+ "clap",
+ "hex",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "openssl-probe"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
