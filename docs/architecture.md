@@ -1532,6 +1532,12 @@ An older response or follow-up observation cannot replace a later selection.
 Once all pending selections settle, superseded tab mutations reconcile fresh
 inventory without replacing the selected page's admitted observation.
 
+When `browser_open` reuses an active session and needs a new URL, it requests
+tab creation with the owned inventory instead of collecting and discarding a
+page observation. The same control authority and session/controller fences
+apply; unsupported controllers refuse without replay. Default SDK tab opening
+and `browser_tabs` open/select retain their page observations.
+
 ComputerSession attachments use canonical frame streams, including relay kind 4,
 for screens and windows. The viewer paints those exact authenticated pixels and
 uses the painted frame ID, target generation and geometry for human `/actions`;
@@ -1925,6 +1931,9 @@ Manifests/Changesets/CI/release scripts govern evidence-bound npm/image/Helm/Rus
 publication, retaining source identity. Web builds target both CPUs.
 Canary packages prepack the complete cohort, retain write acknowledgements, then
 perform bounded strict read-only verification before producing Site pins.
+Post-write verification selects current tags and one immutable version manifest;
+each actual GET shares the original request quota, deadline and custody limits,
+including final complete-cohort qualification. Pre-write discovery is unchanged.
 An uncertain publication never automatically replays; signed-byte acceptance remains separate.
 `reconcile-production-packages.yml` reconciles npm availability independently of acceptance.
 

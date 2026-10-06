@@ -542,6 +542,30 @@ describe("model display across connection scopes", () => {
     expect(rows[0]?.shortLabel).toBe("Opus 5.5");
   });
 
+  test("uncurated long names drop trailing access and stage qualifiers for narrow triggers", () => {
+    const rows = projectPickerRows([
+      catalogModel({
+        id: "opencode/muse-spark-1.3-contributor-free",
+        label: "Muse Spark 1.3 Contributor Free",
+      }),
+      catalogModel({ id: "google/gemini-3.1-pro-preview", label: "Gemini 3.1 Pro (Preview)" }),
+      catalogModel({ id: "plain/model", label: "Plain Model 2" }),
+      catalogModel({ id: "only/free", label: "Free" }),
+    ]);
+    const short = (id: string) => rows.find((row) => row.id === id)?.shortLabel;
+    expect(short("opencode/muse-spark-1.3-contributor-free")).toBe("Muse Spark 1.3");
+    expect(short("google/gemini-3.1-pro-preview")).toBe("Gemini 3.1 Pro");
+    expect(short("plain/model")).toBeUndefined();
+    expect(short("only/free")).toBeUndefined();
+    expect(
+      compactModelPill(
+        [catalogModel({ id: "opencode/muse", label: "Muse Spark 1.3 Contributor Free" })],
+        "opencode/muse",
+        null,
+      ).name,
+    ).toBe("Muse Spark 1.3");
+  });
+
   test("deployment models with the same name stay separate choices", () => {
     const rows = projectPickerRows([
       catalogModel({ id: "azure/gpt-6-sol", label: "GPT-6 Sol", cost: "credits" }),

@@ -50,6 +50,7 @@ export type { ApprovalStripMessages, ApprovalStripProps, HumanInputCardProps } f
 export { Button, IconButton } from "./controls";
 export type { ButtonVariant } from "./controls";
 export { QueueDock } from "./queue-dock";
+export { SessionCommandsList, SessionSignals } from "./session-signals";
 export { FeedbackSheet, TurnFeedbackButtons, useTurnRatings } from "./feedback";
 export type { TurnFeedbackTarget } from "./feedback";
 export {

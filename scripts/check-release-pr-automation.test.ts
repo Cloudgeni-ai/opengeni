@@ -3977,8 +3977,12 @@ describe("workflow contracts", () => {
       "bun install --frozen-lockfile --ignore-scripts",
       "bun scripts/workflow-execution-graph.ts --git-tree 'HEAD^{tree}'",
     ]);
-    expect(source.steps.slice(0, sourceInstallIndex).filter((step: any) => step.run)).toEqual([]);
-    expect(source.steps.filter((step: any) => step.run)[0]?.name).toBe("Install dependencies");
+    const beforeInstall = source.steps.slice(0, sourceInstallIndex).filter((step: any) => step.run);
+    expect(beforeInstall.map((step: any) => step.name)).toEqual([
+      "Restore complete checkout history without listing refs",
+    ]);
+    expect(beforeInstall[0]?.run).toContain("git fetch --quiet");
+    expect(beforeInstall[0]?.run).toContain(">/dev/null 2>&1");
     for (const stepName of [
       "Validate changeset release plan",
       "Profile impacted TypeScript 7 projects",

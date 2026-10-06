@@ -4400,6 +4400,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "openBrowserTargetWithInventory",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/open-with-inventory",
+    "request": [
+      "BrowserOpenTargetRequest"
+    ],
+    "response": [
+      "BrowserTargetListResponse"
+    ]
+  },
+  {
     "id": "openEventStream",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/events/stream",

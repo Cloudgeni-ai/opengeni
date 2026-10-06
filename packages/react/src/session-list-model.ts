@@ -324,4 +324,54 @@ export function recentSessionsForHome<T extends SessionListRow>(
   return [...pinned, ...running, ...grouped.flatMap((bucket) => bucket.sessions)].slice(0, limit);
 }
 
+/** One project (workspace channel) and its sessions, as the web rail groups them. */
+export type SessionProjectSection<T extends SessionListRow = SessionListRow> = {
+  /** The channel id, or "default" for unfiled sessions. */
+  key: string;
+  channelId: string | null;
+  name: string;
+  sessions: T[];
+};
+
+/**
+ * Group top-level sessions by project in the server's project order (pinned
+ * projects first), then "Default" for unfiled ones and those whose project no
+ * longer exists. Running sessions lead each project, then the most recent.
+ * Sub-agent sessions are reached from their parent, so they are left out.
+ * Projects without sessions are kept only when `keepEmpty` is set.
+ */
+export function groupSessionsByProject<T extends SessionListRow & { channelId?: string | null }>(
+  sessions: readonly T[],
+  projects: readonly { id: string; name: string }[],
+  options: { keepEmpty?: boolean } = {},
+): SessionProjectSection<T>[] {
+  const known = new Set(projects.map((project) => project.id));
+  const byProject = new Map<string | null, T[]>();
+  for (const session of sessions) {
+    if ("parentSessionId" in session && session.parentSessionId) continue;
+    const channelId = session.channelId ?? null;
+    const key = channelId !== null && known.has(channelId) ? channelId : null;
+    byProject.set(key, [...(byProject.get(key) ?? []), session]);
+  }
+  const order = (list: T[]) =>
+    [...list].sort(
+      (left, right) =>
+        Number(isEffectivelyRunning(right)) - Number(isEffectivelyRunning(left)) ||
+        compareSessionActivity(left, right),
+    );
+  const sections: SessionProjectSection<T>[] = projects
+    .map((project) => ({
+      key: project.id,
+      channelId: project.id,
+      name: project.name,
+      sessions: order(byProject.get(project.id) ?? []),
+    }))
+    .filter((section) => options.keepEmpty || section.sessions.length > 0);
+  const unfiled = byProject.get(null) ?? [];
+  if (unfiled.length > 0) {
+    sections.push({ key: "default", channelId: null, name: "Default", sessions: order(unfiled) });
+  }
+  return sections;
+}
+
 export { findPickerRow };

@@ -1045,7 +1045,9 @@ export const Controls = forwardRef<HTMLSpanElement, ComposerControlsProps>(
         ref={ref}
         className={cn(
           "og-composer-controls flex min-w-0 flex-1 flex-wrap items-center gap-1.5",
-          "max-sm:flex-nowrap max-sm:gap-1",
+          // Phone: 44px touch targets already space themselves; tight gaps leave
+          // the model pill room for its name.
+          "max-sm:flex-nowrap max-sm:gap-0.5",
           className,
         )}
       />
@@ -1086,7 +1088,7 @@ export const Actions = forwardRef<HTMLSpanElement, ComposerActionsProps>(functio
       ref={ref}
       className={cn(
         "og-composer-actions ml-auto flex shrink-0 items-center gap-1.5",
-        "max-sm:flex-nowrap max-sm:gap-1",
+        "max-sm:flex-nowrap max-sm:gap-0.5",
         className,
       )}
     />

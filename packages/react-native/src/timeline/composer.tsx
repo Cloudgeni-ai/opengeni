@@ -573,13 +573,20 @@ function TrailingAction(props: SessionComposerProps & { messages: ChatComposerMe
   );
 }
 
-/** The web model pill ("6 Luna ⌄"): a quiet toolbar chip that opens host options. */
+/**
+ * The web model pill ("6 Luna High ⌄"): a quiet toolbar chip that opens host
+ * options. As on web, the muted detail (reasoning effort) gives way first, so a
+ * long name never pushes it into a clipped "Ext…".
+ */
 export function ComposerPill({
   label,
+  detail,
   onPress,
   leading,
 }: {
   label: string;
+  /** Secondary text after the label (the reasoning effort); truncates before the label. */
+  detail?: string | null | undefined;
   onPress?: (() => void) | undefined;
   /** Shown before the label (the web picker's maker mark). */
   leading?: ReactNode;
@@ -588,7 +595,7 @@ export function ComposerPill({
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={label}
+      accessibilityLabel={detail ? `${label}, ${detail}` : label}
       onPress={onPress}
       disabled={!onPress}
       style={({ pressed }) => ({
@@ -596,6 +603,7 @@ export function ComposerPill({
         alignItems: "center",
         gap: 4,
         flexShrink: 1,
+        maxWidth: 260,
         minHeight: 44,
         paddingHorizontal: 8,
         borderRadius: 999,
@@ -614,6 +622,19 @@ export function ComposerPill({
       >
         {label}
       </Text>
+      {detail ? (
+        <Text
+          numberOfLines={1}
+          style={{
+            ...fontStyle(theme, 500),
+            fontSize: theme.size.sm,
+            color: theme.colors["fg-muted"],
+            flexShrink: 9999,
+          }}
+        >
+          {detail}
+        </Text>
+      ) : null}
       <Icon name="chevron-down" size={12} color={theme.colors["fg-muted"]} />
     </Pressable>
   );

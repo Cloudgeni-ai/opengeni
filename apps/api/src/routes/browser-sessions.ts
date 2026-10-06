@@ -656,6 +656,28 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
   );
 
   app.post(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/open-with-inventory",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:control",
+      );
+      const request = await parseJsonBody(context, BrowserOpenTargetRequest);
+      const result = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.control",
+        "browser.control",
+        async ({ sessionClient }) =>
+          BrowserTargetListResponse.parse(await sessionClient.openTargetWithInventory(request.url)),
+      );
+      return context.json(result, 201);
+    },
+  );
+
+  app.post(
     "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/select",
     async (context) => {
       const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(

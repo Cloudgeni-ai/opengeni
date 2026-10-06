@@ -12,7 +12,16 @@ import {
   Toggle,
   VStack,
 } from "@expo/ui/swift-ui";
-import { disabled, font, foregroundStyle, tint } from "@expo/ui/swift-ui/modifiers";
+import {
+  background,
+  disabled,
+  font,
+  foregroundStyle,
+  listRowBackground,
+  scrollContentBackground,
+  tint,
+} from "@expo/ui/swift-ui/modifiers";
+import { useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import { useColorScheme } from "react-native";
 import type { SettingsRow, SettingsSection } from "@/settings-model";
 
@@ -30,11 +39,13 @@ function TwoLine({ title, subtitle }: { title: string; subtitle?: string | undef
   );
 }
 
-function Row({ row }: { row: SettingsRow }) {
+type Modifier = ReturnType<typeof listRowBackground>;
+
+function Row({ row, rowBackground }: { row: SettingsRow; rowBackground: Modifier }) {
   switch (row.kind) {
     case "choice":
       return (
-        <Button onPress={row.onPress}>
+        <Button onPress={row.onPress} modifiers={[rowBackground]}>
           <HStack>
             <TwoLine title={row.title} subtitle={row.subtitle} />
             <Spacer />
@@ -47,14 +58,14 @@ function Row({ row }: { row: SettingsRow }) {
         <Toggle
           isOn={row.value}
           onIsOnChange={row.onChange}
-          modifiers={row.disabled ? [disabled(true)] : []}
+          modifiers={row.disabled ? [disabled(true), rowBackground] : [rowBackground]}
         >
           <TwoLine title={row.title} subtitle={row.subtitle} />
         </Toggle>
       );
     case "info":
       return (
-        <LabeledContent label={row.title}>
+        <LabeledContent label={row.title} modifiers={[rowBackground]}>
           <Text modifiers={[secondary]}>{row.value}</Text>
         </LabeledContent>
       );
@@ -63,13 +74,14 @@ function Row({ row }: { row: SettingsRow }) {
         <Button
           role="destructive"
           onPress={row.onPress}
+          modifiers={[rowBackground]}
           label={row.title}
           {...(row.symbol ? { systemImage: row.symbol } : {})}
         />
       );
     default:
       return (
-        <Button onPress={row.onPress}>
+        <Button onPress={row.onPress} modifiers={[rowBackground]}>
           <HStack>
             {row.symbol ? (
               <Label systemImage={row.symbol}>
@@ -91,17 +103,29 @@ function Row({ row }: { row: SettingsRow }) {
 /** The settings model as a native inset-grouped SwiftUI Form. */
 export function SettingsList({ sections }: { sections: SettingsSection[] }) {
   const scheme = useColorScheme();
+  const theme = useNativeTimelineTheme();
+  // The app's own canvas and card colors (as on the sessions screen and web),
+  // not the system grouped black/grey, so Settings reads as the same app.
+  const c = theme.colors;
+  // Light mode's canvas is the same white as surface-1; rows step to surface-2.
+  const row = listRowBackground(String(c["surface-1"] !== c.bg ? c["surface-1"] : c["surface-2"]));
   return (
     <Host style={{ flex: 1 }} colorScheme={scheme === "dark" ? "dark" : "light"}>
-      <Form modifiers={[tint("primary")]}>
+      <Form
+        modifiers={[
+          tint("primary"),
+          scrollContentBackground("hidden"),
+          background(String(theme.colors.bg)),
+        ]}
+      >
         {sections.map((section) => (
           <Section
             key={section.id}
             {...(section.title ? { title: section.title } : {})}
             {...(section.footer ? { footer: <Text>{section.footer}</Text> } : {})}
           >
-            {section.rows.map((row) => (
-              <Row key={row.id} row={row} />
+            {section.rows.map((item) => (
+              <Row key={item.id} row={item} rowBackground={row} />
             ))}
           </Section>
         ))}

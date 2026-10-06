@@ -24,6 +24,7 @@ import {
   BrowserProtectedAuthFillReceipt,
   BrowserRevisionMaterialization,
   BrowserTarget,
+  BrowserTargetListResponse,
   BrowserTargetState,
   BrowserWorkspaceFileStageRequest,
   BrowserWorkspaceFileStageResponse,
@@ -49,6 +50,7 @@ import {
   type BrowserExternalAuthCommand as BrowserExternalAuthCommandValue,
   type BrowserExternalAuthResult as BrowserExternalAuthResultValue,
   type BrowserDiagnosticKind,
+  type BrowserTargetListResponse as BrowserTargetListResponseValue,
   type BrowserObservation as BrowserObservationValue,
   type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
   type BrowserProtectedAuthFillReceipt as BrowserProtectedAuthFillReceiptValue,
@@ -1513,6 +1515,46 @@ export class BrowserControlSessionClient {
         body: url === undefined ? {} : { url: boundedUrl(url) },
       }),
     );
+  }
+
+  async openTargetWithInventory(url?: string): Promise<BrowserTargetListResponseValue> {
+    let response: BrowserTargetListResponseValue;
+    try {
+      response = BrowserTargetListResponse.parse(
+        await this.parent.requestForSession({
+          method: "POST",
+          path: this.path("targets/open-with-inventory"),
+          token: this.controlToken,
+          body: url === undefined ? {} : { url: boundedUrl(url) },
+        }),
+      );
+    } catch (error) {
+      // An older controller can refuse the new route before dispatch. Never
+      // fall back to another mutation after an uncertain open outcome.
+      if (
+        error instanceof BrowserControlRequestError &&
+        error.status === 404 &&
+        error.error.code === "resource_not_found" &&
+        error.error.message === "route not found"
+      ) {
+        throw browserControllerCompatibilityError("metadata-only tab opening");
+      }
+      throw error;
+    }
+    if (
+      response.browserSessionId !== this.reference.browserSessionId ||
+      response.controllerGeneration !== this.reference.controllerGeneration ||
+      response.targets.some(
+        (target) =>
+          target.browserSessionId !== this.reference.browserSessionId ||
+          target.controllerGeneration !== this.reference.controllerGeneration,
+      )
+    ) {
+      throw new BrowserControlProtocolError(
+        "browser controller returned inventory for another session binding",
+      );
+    }
+    return response;
   }
 
   async selectTarget(targetId: string): Promise<BrowserObservationValue> {

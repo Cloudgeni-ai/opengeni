@@ -130,6 +130,8 @@ function LiveSession(props: {
       />
       <NativeSessionScreen
         controller={controller}
+        client={props.client}
+        models={props.models}
         renderMarkdown={renderMarkdown}
         onCopy={(text) => void copyText(text)}
         onOpenSession={(sessionId) => router.push(`/session/${sessionId}`)}
@@ -142,7 +144,8 @@ function LiveSession(props: {
           renderLeading: () => attachMenu,
           options: pill ? (
             <ComposerPill
-              label={pill.effort ? `${pill.name} · ${pill.effort}` : pill.name}
+              label={pill.name}
+              detail={pill.effort}
               leading={<ModelMark model={model ?? ""} size={14} color={theme.colors.fg} />}
               onPress={
                 policy

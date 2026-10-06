@@ -80,6 +80,7 @@ import {
   type TimelineItem,
   type UserMessageItem,
 } from "@opengeni/react/session";
+import { sessionAgentsSignal } from "@opengeni/react/session-agents-model";
 import { useNavigate } from "@tanstack/react-router";
 import {
   BotIcon,
@@ -1940,30 +1941,7 @@ function SessionChatPane(props: {
     props.session.workspaceId,
     terminal,
   ]);
-  const agentsSignal = useMemo(() => {
-    const agents = props.agentNodes;
-    if (agents.length === 0) return undefined;
-    const runningAgents = agents.filter(
-      (node) =>
-        node.session.status === "running" && node.session.effectiveControl.state === "active",
-    ).length;
-    const pausedAgents = agents.filter(
-      (node) => node.session.effectiveControl.state === "paused",
-    ).length;
-    return {
-      count: agents.length,
-      detail:
-        runningAgents > 0
-          ? `${runningAgents} running`
-          : pausedAgents > 0
-            ? `${pausedAgents} paused`
-            : "Idle",
-      tone: (runningAgents > 0 ? "running" : pausedAgents > 0 ? "waiting" : "neutral") as
-        | "running"
-        | "waiting"
-        | "neutral",
-    };
-  }, [props.agentNodes]);
+  const agentsSignal = useMemo(() => sessionAgentsSignal(props.agentNodes), [props.agentNodes]);
   const codexConnected = modelCatalog.models.some(
     (candidate) =>
       candidate.provider === "codex-subscription" &&

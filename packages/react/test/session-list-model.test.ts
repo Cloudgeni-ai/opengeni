@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { Session } from "@opengeni/sdk";
 
 import {
+  groupSessionsByProject,
   groupSessionsForRail,
   recentSessionModelPresentation,
   recentSessionStatus,
@@ -29,6 +30,37 @@ function session(id: string, overrides: Partial<Session> = {}): Session {
 }
 
 describe("session-list-model", () => {
+  test("project sections: server order, running first, Default last, sub-agents left out", () => {
+    const projects = [
+      { id: "p1", name: "Launch" },
+      { id: "p2", name: "Empty" },
+    ];
+    const sections = groupSessionsByProject(
+      [
+        session("a", { channelId: "p1", updatedAt: "2026-10-03T11:00:00Z" } as Partial<Session>),
+        session("b", {
+          channelId: "p1",
+          status: "running",
+          updatedAt: "2026-10-03T08:00:00Z",
+        } as Partial<Session>),
+        session("c", { channelId: null } as Partial<Session>),
+        session("d", { channelId: "gone" } as Partial<Session>),
+        session("e", { channelId: "p1", parentSessionId: "a" } as Partial<Session>),
+      ],
+      projects,
+    );
+    expect(
+      sections.map((section) => [section.name, section.sessions.map((row) => row.id)]),
+    ).toEqual([
+      ["Launch", ["b", "a"]],
+      ["Default", ["d", "c"]],
+    ]);
+    expect(groupSessionsByProject([], projects, { keepEmpty: true }).map((s) => s.name)).toEqual([
+      "Launch",
+      "Empty",
+    ]);
+  });
+
   test("relative time labels", () => {
     expect(relativeTimeLabel("2026-10-03T11:59:30Z", now)).toBe("now");
     expect(relativeTimeLabel("2026-10-03T11:55:00Z", now)).toBe("5m");

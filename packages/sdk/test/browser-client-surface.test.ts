@@ -86,7 +86,12 @@ const legacyBrowserUnusedMethods = [
 // The agent's browser still capture uses the same authenticated, bounded SDK
 // response transport as the existing computer capture method. It is intentionally
 // available to runtime callers even though the web UI does not call it.
-const agentInteractionMethods = ["captureBrowserTarget", "getBrowserTargetState", "readBrowserDom"];
+const agentInteractionMethods = [
+  "captureBrowserTarget",
+  "getBrowserTargetState",
+  "readBrowserDom",
+  "openBrowserTargetWithInventory",
+];
 
 // The native app exchanges its sign-in code, signs out and manages its push
 // device through the public client. The web app only starts the authorization.
