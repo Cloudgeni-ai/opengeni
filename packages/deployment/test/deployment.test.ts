@@ -1036,6 +1036,32 @@ describe("deployment contract", () => {
     expect(artifacts.helmValuesYaml).not.toContain("AccountKey=secret");
   });
 
+  test("renders the supported Azure Blob account-key alternative privately", () => {
+    const env = {
+      OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME: "fixtureaccount",
+      OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY: "fixture-account-key",
+      OPENGENI_OBJECT_STORAGE_AZURE_ENDPOINT: "https://fixtureaccount.blob.example.test",
+      OPENGENI_OPENAI_API_KEY: "fixture-model-key",
+      ...testImageDigests,
+    };
+    const artifacts = generateRuntimeArtifacts(deploymentProfiles["azure-managed"], {}, env);
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME=fixtureaccount",
+    );
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY=fixture-account-key",
+    );
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_OBJECT_STORAGE_AZURE_ENDPOINT=https://fixtureaccount.blob.example.test",
+    );
+    expect(artifacts.runtimeEnv).not.toContain("OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING=");
+    expect(artifacts.missingEnvVars).not.toContain(
+      "OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING",
+    );
+    expect(artifacts.missingEnvVars).not.toContain("OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY");
+    expect(artifacts.helmValuesYaml).not.toContain("fixture-account-key");
+  });
+
   test("renders managed SaaS product posture without conflating it with the Azure infrastructure profile", () => {
     const contract = contractForProfile("azure-managed", "managed-saas-staging", {});
     const vars = requiredRuntimeEnvVars(contract);
@@ -1043,6 +1069,9 @@ describe("deployment contract", () => {
 
     expect(contract.access.mode).toBe("externalGateway");
     expect(vars).not.toContain("OPENGENI_ACCESS_KEY");
+    expect(vars).toContain("OPENGENI_DELEGATION_SECRET");
+    expect(missingRuntimeEnvVars(contract, {})).toContain("OPENGENI_DELEGATION_SECRET");
+    expect(plan.requiredSecretKeys).toContain("OPENGENI_DELEGATION_SECRET");
     expect(vars).toContain("OPENGENI_BETTER_AUTH_SECRET");
     expect(vars).toContain("OPENGENI_STRIPE_WEBHOOK_SECRET");
     expect(vars).toContain("OPENGENI_STRIPE_CREDITS_PRODUCT_ID");

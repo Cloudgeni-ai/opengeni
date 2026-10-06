@@ -1,10 +1,12 @@
 import {
   DeploymentProfileId,
   ProductOverlayId,
+  SandboxBackend,
   type DeploymentContract,
   type PreflightCheckId,
   contractForProfile,
   missingRuntimeEnvVars,
+  parseDeploymentContract,
   preflightChecksFor,
   requiredRuntimeEnvVars,
 } from "@opengeni/deployment";
@@ -14,11 +16,16 @@ import net from "node:net";
 import {
   publicEndpointOrigin,
   publicProbeErrorDiagnostic,
+  probeHostPort,
 } from "./deployment-preflight-diagnostics";
 
 interface Args {
   profile: string;
   productOverlay: string;
+  productAccessMode: string | null;
+  accessMode: string | null;
+  publicBaseUrl: string | null;
+  sandboxBackend: string | null;
   json: boolean;
   list: boolean;
   checkEnv: boolean;
@@ -42,11 +49,51 @@ if (args.list) {
 
 const profileId = DeploymentProfileId.parse(args.profile);
 const overlay = ProductOverlayId.parse(args.productOverlay);
-const contract = contractForProfile(profileId, overlay);
+const hasAccessSelection =
+  args.productAccessMode !== null || args.accessMode !== null || args.publicBaseUrl !== null;
+if (hasAccessSelection && profileId !== "azure-container-apps") {
+  throw new Error(
+    "Preflight access selectors are supported only for the azure-container-apps profile",
+  );
+}
+if (hasAccessSelection && (args.productAccessMode === null || args.accessMode === null)) {
+  throw new Error("--product-access-mode and --access-mode must be supplied together");
+}
+const sandboxBackend =
+  args.sandboxBackend === null ? undefined : SandboxBackend.parse(args.sandboxBackend);
+const baseContract = contractForProfile(profileId, overlay, process.env, sandboxBackend);
+const contract = hasAccessSelection
+  ? parseDeploymentContract({
+      ...baseContract,
+      access: { ...baseContract.access, mode: args.accessMode },
+      product: {
+        ...baseContract.product,
+        accessMode: args.productAccessMode,
+        ...(args.publicBaseUrl !== null || args.productAccessMode === "managed"
+          ? {
+              publicBaseUrl:
+                args.publicBaseUrl ??
+                process.env.OPENGENI_PUBLIC_BASE_URL ??
+                baseContract.product.publicBaseUrl,
+            }
+          : {}),
+      },
+    })
+  : baseContract;
 const checks = preflightChecksFor(contract);
 const requiredEnvVars = requiredRuntimeEnvVars(contract);
 const missingEnvVars = args.checkEnv ? missingRuntimeEnvVars(contract) : [];
 const liveResults = args.live ? await runLiveProbes(contract) : [];
+const containerApps = contract.runtime.platform === "azure-container-apps";
+const liveFailed = liveResults.some(
+  (result) =>
+    result.status === "failed" ||
+    (containerApps &&
+      result.status === "skipped" &&
+      checks.some((check) => check.id === result.id && check.required)),
+);
+const liveProbeScope =
+  "Partial operator-side CLI/TCP/HTTP checks only; not workload connectivity, protocol authentication, storage read/write, migration success, or conformance proof.";
 
 if (args.json) {
   console.log(
@@ -77,12 +124,13 @@ if (args.json) {
           : {}),
         checks,
         liveResults: args.live ? liveResults : undefined,
+        ...(containerApps && args.live ? { liveProbeScope } : {}),
       },
       null,
       2,
     ),
   );
-  if (args.live && liveResults.some((result) => result.status === "failed")) {
+  if (args.live && liveFailed) {
     process.exit(1);
   }
   if (args.checkEnv && missingEnvVars.length > 0) {
@@ -140,10 +188,11 @@ for (const item of checks) {
 if (args.live) {
   console.log("");
   console.log("Live probes");
+  if (containerApps) console.log(`  ${liveProbeScope}`);
   for (const result of liveResults) {
     console.log(`  - ${result.id}: ${result.status} - ${result.detail}`);
   }
-  if (liveResults.some((result) => result.status === "failed")) {
+  if (liveFailed) {
     process.exitCode = 1;
   }
 }
@@ -152,6 +201,10 @@ function parseArgs(values: string[]): Args {
   const out: Args = {
     profile: "local-compose",
     productOverlay: "none",
+    productAccessMode: null,
+    accessMode: null,
+    publicBaseUrl: null,
+    sandboxBackend: null,
     json: false,
     list: false,
     checkEnv: false,
@@ -159,7 +212,7 @@ function parseArgs(values: string[]): Args {
   };
 
   for (let index = 0; index < values.length; index += 1) {
-    const value = values[index];
+    const value = values[index]!;
     if (value === "--json") {
       out.json = true;
       continue;
@@ -202,6 +255,40 @@ function parseArgs(values: string[]): Args {
       out.productOverlay = value.slice("--product-overlay=".length);
       continue;
     }
+    if (value === "--sandbox-backend") {
+      const next = values[++index];
+      if (!next) throw new Error("--sandbox-backend requires a value");
+      out.sandboxBackend = next;
+      continue;
+    }
+    if (value.startsWith("--sandbox-backend=")) {
+      out.sandboxBackend = value.slice("--sandbox-backend=".length);
+      continue;
+    }
+    if (
+      value === "--product-access-mode" ||
+      value === "--access-mode" ||
+      value === "--public-base-url"
+    ) {
+      const next = values[++index];
+      if (!next) throw new Error(`${value} requires a value`);
+      if (value === "--product-access-mode") out.productAccessMode = next;
+      else if (value === "--access-mode") out.accessMode = next;
+      else out.publicBaseUrl = next;
+      continue;
+    }
+    if (value.startsWith("--product-access-mode=")) {
+      out.productAccessMode = value.slice("--product-access-mode=".length);
+      continue;
+    }
+    if (value.startsWith("--access-mode=")) {
+      out.accessMode = value.slice("--access-mode=".length);
+      continue;
+    }
+    if (value.startsWith("--public-base-url=")) {
+      out.publicBaseUrl = value.slice("--public-base-url=".length);
+      continue;
+    }
     throw new Error(`Unknown argument: ${value}`);
   }
 
@@ -212,6 +299,9 @@ async function runLiveProbes(deploymentContract: DeploymentContract): Promise<Li
   const results: LiveProbeResult[] = [];
   if (deploymentContract.runtime.platform === "kubernetes") {
     results.push(runKubectlNamespaceProbe(deploymentContract.runtime.namespace));
+  }
+  if (deploymentContract.runtime.platform === "azure-container-apps") {
+    results.push(runAzureContainerAppsContextProbe());
   }
 
   const databaseUrl = process.env.OPENGENI_DATABASE_URL;
@@ -237,22 +327,66 @@ async function runLiveProbes(deploymentContract: DeploymentContract): Promise<Li
 
   const objectEndpoint = process.env.OPENGENI_OBJECT_STORAGE_ENDPOINT;
   results.push(
-    objectEndpoint
-      ? await httpReachabilityProbe("object-storage-read-write", objectEndpoint)
-      : skipped(
+    deploymentContract.runtime.platform === "azure-container-apps"
+      ? skipped(
           "object-storage-read-write",
-          "OPENGENI_OBJECT_STORAGE_ENDPOINT is not set in this environment.",
-        ),
+          "Azure Blob read/write and signed browser/sandbox URLs require real conformance; an HTTP reachability probe is not storage proof.",
+        )
+      : objectEndpoint
+        ? await httpReachabilityProbe("object-storage-read-write", objectEndpoint)
+        : skipped(
+            "object-storage-read-write",
+            "OPENGENI_OBJECT_STORAGE_ENDPOINT is not set in this environment.",
+          ),
   );
 
   const apiBaseUrl = process.env.OPENGENI_API_BASE_URL;
   if (apiBaseUrl) {
-    results.push(
-      await httpReachabilityProbe("api-health", new URL("/healthz", apiBaseUrl).toString()),
-    );
+    try {
+      results.push(
+        await httpReachabilityProbe(
+          "api-health",
+          new URL("/healthz", apiBaseUrl).toString(),
+          deploymentContract.runtime.platform === "azure-container-apps",
+        ),
+      );
+    } catch (error) {
+      results.push(
+        failed("api-health", `invalid API base URL: ${publicProbeErrorDiagnostic(error)}`),
+      );
+    }
   }
 
   return results;
+}
+
+function runAzureContainerAppsContextProbe(): LiveProbeResult {
+  const id = "azure-container-apps-context";
+  for (const command of [
+    ["account", "show", "--query", "state", "--output", "tsv", "--only-show-errors"],
+    ["containerapp", "job", "execution", "show", "--help"],
+  ]) {
+    const result = spawnSync("az", command, {
+      encoding: "utf8",
+      timeout: 10_000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if (result.error)
+      return failed(id, `Azure CLI unavailable: ${publicProbeErrorDiagnostic(result.error)}`);
+    if (result.status !== 0) {
+      return failed(
+        id,
+        `Azure CLI prerequisite failed (exit ${result.status ?? "unknown"}); verify az login, the selected subscription, and Container Apps job command availability.`,
+      );
+    }
+    if (command[0] === "account" && result.stdout.trim() !== "Enabled") {
+      return failed(id, "The selected Azure subscription is not enabled.");
+    }
+  }
+  return passed(
+    id,
+    "Azure CLI has an enabled signed-in subscription and job commands; resource permissions, registration, and deployment readiness remain unverified.",
+  );
 }
 
 function runKubectlNamespaceProbe(namespace: string | undefined): LiveProbeResult {
@@ -287,7 +421,7 @@ async function tcpUrlProbe(
     const port = Number(url.port || defaultPort);
     return await tcpConnectProbe(id, url.hostname, port);
   } catch (error) {
-    return failed(id, `invalid URL: ${errorMessage(error)}`);
+    return failed(id, `invalid URL: ${publicProbeErrorDiagnostic(error)}`);
   }
 }
 
@@ -296,9 +430,9 @@ async function tcpHostPortProbe(
   hostPort: string,
   defaultPort: number,
 ): Promise<LiveProbeResult> {
-  const parsed = parseHostPort(hostPort, defaultPort);
+  const parsed = probeHostPort(hostPort, defaultPort);
   if (!parsed) {
-    return failed(id, `invalid host:port value: ${hostPort}`);
+    return failed(id, "invalid host:port value");
   }
   return await tcpConnectProbe(id, parsed.host, parsed.port);
 }
@@ -331,37 +465,22 @@ async function tcpConnectProbe(
 async function httpReachabilityProbe(
   id: LiveProbeResult["id"],
   endpoint: string,
+  requireSuccess = false,
 ): Promise<LiveProbeResult> {
   const publicEndpoint = publicEndpointOrigin(endpoint);
+  if (publicEndpoint.startsWith("[")) return failed(id, publicEndpoint);
   try {
     const response = await fetch(endpoint, {
       method: "GET",
       signal: AbortSignal.timeout(5_000),
     });
-    if (response.status >= 200 && response.status < 500) {
+    if (response.status >= 200 && response.status < (requireSuccess ? 300 : 500)) {
       return passed(id, `HTTP ${response.status} from ${publicEndpoint}`);
     }
     return failed(id, `HTTP ${response.status} from ${publicEndpoint}`);
   } catch (error) {
     return failed(id, `failed to reach ${publicEndpoint}: ${publicProbeErrorDiagnostic(error)}`);
   }
-}
-
-function parseHostPort(value: string, defaultPort: number): { host: string; port: number } | null {
-  if (value.includes("://")) {
-    try {
-      const url = new URL(value);
-      return { host: url.hostname, port: Number(url.port || defaultPort) };
-    } catch {
-      return null;
-    }
-  }
-  const [host, rawPort] = value.split(":");
-  if (!host) {
-    return null;
-  }
-  const port = Number(rawPort || defaultPort);
-  return Number.isInteger(port) && port > 0 ? { host, port } : null;
 }
 
 function passed(id: LiveProbeResult["id"], detail: string): LiveProbeResult {
@@ -374,10 +493,6 @@ function failed(id: LiveProbeResult["id"], detail: string): LiveProbeResult {
 
 function skipped(id: LiveProbeResult["id"], detail: string): LiveProbeResult {
   return { id, status: "skipped", detail };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function compactDetail(value: string): string {

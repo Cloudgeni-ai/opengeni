@@ -1668,6 +1668,7 @@ Current profiles:
 - `single-node-kubernetes`: persistent non-HA Kubernetes stack on one machine, using official images and a private edge.
 - `kubernetes-external`: Kubernetes workloads connected to existing customer services.
 - `azure-managed`: AKS plus Azure-managed substrate where supported, provider-native object storage, and stack-wrapper managed upstream NATS/Temporal charts unless you replace them with existing endpoints.
+- `azure-container-apps`: non-Kubernetes Azure workloads with managed private PostgreSQL, Blob, Key Vault secrets, and externally operated Temporal/NATS. See [the ACA operator guide](azure-container-apps.md).
 - `azure-existing-services`: Azure Kubernetes workloads connected to existing Postgres, Temporal, and object storage.
 - `aws-managed`: EKS plus AWS-managed substrate where supported, provider-native object storage, and stack-wrapper managed upstream NATS/Temporal charts unless you replace them with existing endpoints.
 - `aws-existing-services`: EKS workloads connected to existing Postgres, Temporal, and object storage.
@@ -3752,6 +3753,12 @@ Minimum production alerts:
 - Secret/sandbox hygiene: conformance detects unintended sandbox variable-set variables or sandbox backend startup failures.
 
 ## Azure Reference
+
+For Azure Container Apps rather than AKS, use the independent
+`deploy/terraform/azure-container-apps` root and `azure-container-apps` profile.
+The [ACA operator guide](azure-container-apps.md) owns its bootstrap, migration,
+application activation, validation, and teardown procedure. Do not run the AKS
+Helm or `kubectl` commands against that profile.
 
 The Azure Terraform root lives at `deploy/terraform/azure`.
 

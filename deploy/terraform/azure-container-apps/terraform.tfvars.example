@@ -1,0 +1,93 @@
+# Copy to a PRIVATE directory OUTSIDE the repository. Replace image references
+# with real, matching-release immutable images. These digests are placeholders.
+name_prefix         = "opengeni-aca"
+resource_group_name = "rg-opengeni-aca"
+location            = "northeurope"
+
+# bootstrap (default) creates substrate, secrets, and a MANUAL job, not apps.
+# ACA validates job image pulls at CREATE. For a new create_acr=true registry,
+# first select "foundation" (no job/apps), import matching immutable images into
+# that created ACR, update images below, then select "bootstrap" and run the job.
+deployment_phase             = "bootstrap"
+migration_completed_revision = ""
+
+images = {
+  api    = "registry.example.com/opengeni-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  worker = "registry.example.com/opengeni-worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  web    = "registry.example.com/opengeni-web@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  # outbox_dispatcher = "registry.example.com/opengeni-artifact-outbox-dispatcher@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+}
+
+# Existing, reachable services with their OWN production persistence/auth.
+# Credentials belong in secret_env, never these non-secret endpoint fields.
+external_services = {
+  temporal_host        = "temporal.example.com:7233"
+  temporal_namespace   = "opengeni"
+  temporal_tls_enabled = true
+  temporal_task_queue  = "opengeni-runs-ts"
+  nats_url             = "tls://nats.example.com:4222"
+}
+
+access_mode               = "configured"
+sandbox_backend           = "modal"
+required_model_secret_env = ["OPENGENI_OPENAI_API_KEY"]
+
+# Optional non-secret overrides; serving safety/network/role settings are fixed.
+config_env = {
+  OPENGENI_MODAL_APP_NAME = "opengeni-aca-sandbox"
+  # OPENGENI_MODAL_IMAGE_REF = "public-registry.example.com/opengeni-desktop@sha256:<real-digest>"
+  # OPENGENI_MODAL_ENVIRONMENT = "production"
+  # OPENGENI_OPENAI_MODEL = "<deployment-supported-model>"
+}
+
+# Fill from your secret manager in the PRIVATE copy before enabling apps.
+# Value format: ENV_NAME = { value = "...", roles = ["api", "control", "turn"] }
+# Omitting roles defaults to those three roles. Required for configured/Modal:
+#   OPENGENI_ACCESS_KEY                 (long random shared deployment key)
+#   OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY (stable base64-encoded 32 random bytes)
+#   OPENGENI_OPENAI_API_KEY             (or selected provider credential above)
+#   OPENGENI_MODAL_TOKEN_ID
+#   OPENGENI_MODAL_TOKEN_SECRET
+# Optional Temporal Cloud API key / TLS material and credential-bearing NATS URL:
+#   OPENGENI_TEMPORAL_API_KEY
+#   OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64
+#   OPENGENI_TEMPORAL_TLS_CLIENT_CERTIFICATE_BASE64
+#   OPENGENI_TEMPORAL_TLS_CLIENT_PRIVATE_KEY_BASE64
+#   OPENGENI_NATS_URL
+# managed additionally requires BETTER_AUTH_SECRET, DELEGATION_SECRET,
+# and RESEND_API_KEY (all prefixed OPENGENI_); see README.
+secret_env = {}
+
+vnet_cidr = "10.72.0.0/16"
+postgres = {
+  version               = "16"
+  sku_name              = "B_Standard_B2ms"
+  storage_mb            = 32768
+  backup_retention_days = 7
+  # Production availability/capacity is an operator sizing decision:
+  # sku_name = "GP_Standard_D2ds_v5"
+  # high_availability_mode = "ZoneRedundant"
+}
+
+log_analytics = {
+  retention_in_days = 30
+  daily_quota_gb    = 1
+}
+
+# False only for disposable validation. Destroy never auto-purges a vault.
+key_vault_purge_protection_enabled = true
+
+# Optional EMPTY registry: foundation -> import matching images -> bootstrap
+# (job CREATE validates pulls) -> manual Succeeded -> exact-image apps attestation.
+# No foreign-registry AcrPull grants are created to bypass that ordering.
+create_acr                 = false
+outbox_dispatcher_enabled = false
+migration_timeout_seconds = 3600
+
+# For maintenance upgrades, add EVERY additional old/new API/worker/outbox login
+# for drain detection. The provisioner grants only the exact current app role.
+previous_runtime_database_roles = []
+
+tags = {
+  environment = "production"
+}

@@ -1,11 +1,15 @@
+import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "@opengeni/contracts";
 import { spawnSync } from "node:child_process";
 
 interface Args {
   baseUrl: string;
   timeoutSeconds: number;
   agentMessage: string;
+  model: string | null;
   sandboxBackend: string | null;
   objectConnectTo: string | null;
+  browserOrigin: string | null;
+  denyForeignBrowserOrigin: boolean;
   deploymentAccessKey: string | null;
   productToken: string | null;
   skipAgent: boolean;
@@ -24,6 +28,8 @@ interface CheckResult {
 const args = parseArgs(process.argv.slice(2));
 const results: CheckResult[] = [];
 let workspaceId: string | null = null;
+let clientConfig: any = null;
+let apiContractReady = false;
 
 await runCheck("api-health", async () => {
   const health = await getJson(new URL("/healthz", args.baseUrl));
@@ -33,22 +39,55 @@ await runCheck("api-health", async () => {
   return `service=${String(health.service ?? "unknown")} environment=${String(health.environment ?? "unknown")}`;
 });
 
+await runCheck("api-contract", async () => {
+  clientConfig = await getJson(new URL("/v1/config/client", args.baseUrl), { auth: false });
+  if (clientConfig?.apiContractRevision !== OPENGENI_API_CONTRACT_REVISION) {
+    throw new Error(
+      "API client-config contract does not match this conformance release; no mutations are permitted",
+    );
+  }
+  apiContractReady = true;
+  return `client config matches ${OPENGENI_API_CONTRACT_REVISION}`;
+});
+
 await runCheck("access-boundary", async () => {
-  const config = await getJson(new URL("/v1/config/client", args.baseUrl), { auth: false });
-  const authMode = config?.auth?.mode ?? "unknown";
+  if (!apiContractReady) throw new Error("API contract handshake failed; access is not verified");
+  const authMode = clientConfig?.auth?.mode ?? "unknown";
   if (authMode === "deploymentKey") {
     if (!args.deploymentAccessKey) {
       throw new Error(
         "client config requires x-opengeni-access-key; set OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY or --deployment-access-key",
       );
     }
-    const response = await fetch(new URL("/v1/access/me", args.baseUrl));
+    const response = await fetchApi(new URL("/v1/access/me", args.baseUrl), {
+      headers: requestHeaders(false),
+    });
     if (response.status !== 401) {
       throw new Error(
         `/v1/access/me without deployment access key returned HTTP ${response.status}, expected 401`,
       );
     }
     return "client config is secret-free and protected API routes reject missing deployment access keys";
+  }
+  if (authMode === "configuredToken") {
+    if (!args.deploymentAccessKey && !args.productToken) {
+      throw new Error(
+        "configured-token auth requires --deployment-access-key or --product-token (OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY or OPENGENI_CONFORMANCE_PRODUCT_TOKEN)",
+      );
+    }
+    const response = await fetchApi(new URL("/v1/access/me", args.baseUrl), {
+      headers: requestHeaders(false),
+    });
+    if (response.status !== 401) {
+      throw new Error(
+        `/v1/access/me without conformance credentials returned HTTP ${response.status}, expected 401`,
+      );
+    }
+    // The advertised mode does not distinguish shared-key bootstrap from an
+    // explicit host signing root. Let the API authenticate the supplied key or
+    // bearer; never synthesize a token or fall back after credential rejection.
+    await getJson(new URL("/v1/access/me", args.baseUrl));
+    return "configured-token routes reject anonymous access and authenticate supplied credentials; workspace discovery is checked separately";
   }
   if (args.deploymentAccessKey) {
     throw new Error(`deployment access key was provided, but client auth mode is ${authMode}`);
@@ -106,6 +145,7 @@ if (args.skipAgent) {
     const payload: Record<string, unknown> = {
       initialMessage: args.agentMessage,
       metadata: { conformance: true },
+      ...(args.model ? { model: args.model } : {}),
     };
     if (args.sandboxBackend) {
       payload.sandboxBackend = args.sandboxBackend;
@@ -128,45 +168,54 @@ if (args.skipAgent) {
     return `session ${sessionId} reached idle`;
   });
 
-  await runCheck("event-replay", async () => {
-    const events = await getJson(workspaceUrl(`/sessions/${sessionId}/events?limit=200`));
-    if (!Array.isArray(events)) {
-      throw new Error("events response was not an array");
-    }
-    const types = events.map((event) => event?.type);
-    for (const required of [
-      "session.created",
-      "turn.started",
-      "agent.message.completed",
-      "turn.completed",
-    ]) {
-      if (!types.includes(required)) {
-        throw new Error(`missing event type ${required}`);
+  if (!sessionId) {
+    results.push(skipped("event-replay", "session creation did not return an id"));
+    results.push(skipped("sse-replay", "session creation did not return an id"));
+  } else {
+    await runCheck("event-replay", async () => {
+      const events = await getJson(workspaceUrl(`/sessions/${sessionId}/events?limit=200`));
+      if (!Array.isArray(events)) {
+        throw new Error("events response was not an array");
       }
-    }
-    return `${events.length} persisted events replayed`;
-  });
-
-  await runCheck("sse-replay", async () => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5_000);
-    const response = await fetch(workspaceUrl(`/sessions/${sessionId}/events/stream?after=0`), {
-      headers: requestHeaders(true),
-      signal: controller.signal,
+      const types = events.map((event) => event?.type);
+      for (const required of [
+        "session.created",
+        "turn.started",
+        "agent.message.completed",
+        "turn.completed",
+      ]) {
+        if (!types.includes(required)) {
+          throw new Error(`missing event type ${required}`);
+        }
+      }
+      return `${events.length} persisted events replayed`;
     });
-    const text = await readStreamUntilAbort(response, controller.signal);
-    clearTimeout(timeout);
-    if (!text.includes("event: session.created") || !text.includes("event: turn.completed")) {
-      throw new Error("SSE replay did not include expected session and turn events");
-    }
-    return `${text.split(/\r?\n/).filter(Boolean).length} non-empty SSE lines`;
-  });
+
+    await runCheck("sse-replay", async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5_000);
+      const response = await fetchApi(
+        workspaceUrl(`/sessions/${sessionId}/events/stream?after=0`),
+        {
+          headers: requestHeaders(true),
+          signal: controller.signal,
+        },
+      );
+      const text = await readStreamUntilAbort(response, controller.signal);
+      clearTimeout(timeout);
+      if (!text.includes("event: session.created") || !text.includes("event: turn.completed")) {
+        throw new Error("SSE replay did not include expected session and turn events");
+      }
+      return `${text.split(/\r?\n/).filter(Boolean).length} non-empty SSE lines`;
+    });
+  }
 
   await runCheck("mcp-tool-session", async () => {
     const payload: Record<string, unknown> = {
       initialMessage: args.agentMessage,
       tools: [{ kind: "mcp", id: "opengeni" }],
       metadata: { conformance: true, mcpToolSession: true },
+      ...(args.model ? { model: args.model } : {}),
     };
     if (args.sandboxBackend) {
       payload.sandboxBackend = args.sandboxBackend;
@@ -191,7 +240,9 @@ if (args.skipAgent) {
     await runCheck("scheduled-task", async () => {
       const task = await postJson(workspaceUrl("/scheduled-tasks"), {
         name: `conformance-${crypto.randomUUID()}`,
-        status: "paused",
+        // The dispatch activity rejects paused tasks even for manual triggers.
+        // Keep the active once schedule far in the future and delete it below.
+        status: "active",
         schedule: {
           type: "once",
           runAt: new Date(Date.now() + 86_400_000).toISOString(),
@@ -204,12 +255,16 @@ if (args.skipAgent) {
           resources: [],
           tools: [],
           metadata: { conformance: true },
+          ...(args.model ? { model: args.model } : {}),
           ...(args.sandboxBackend ? { sandboxBackend: args.sandboxBackend } : {}),
         },
         metadata: { conformance: true },
       });
       const taskId = stringField(task, "id");
       try {
+        if (stringField(task, "status") !== "active") {
+          throw new Error(`scheduled task ${taskId} was not active`);
+        }
         await postJson(workspaceUrl(`/scheduled-tasks/${taskId}/trigger`), {});
         const deadline = Date.now() + args.timeoutSeconds * 1000;
         let runSessionId: string | null = null;
@@ -244,7 +299,9 @@ if (args.skipAgent) {
         }
         return `task ${taskId} dispatched session ${runSessionId}`;
       } finally {
-        await deleteJson(workspaceUrl(`/scheduled-tasks/${taskId}`)).catch(() => undefined);
+        // An unconfirmed cleanup must fail conformance, not leave an active
+        // future schedule behind while claiming successful verification.
+        await deleteJson(workspaceUrl(`/scheduled-tasks/${taskId}`));
       }
     });
   }
@@ -264,11 +321,15 @@ if (args.skipStorage) {
     const uploadId = stringField(upload, "uploadId");
     const fileId = stringField(upload, "fileId");
     const headers = recordField(upload, "requiredHeaders");
-    // The browser SDK is embeddable in arbitrary products. Use an unpredictable
-    // unrelated origin so a deployment cannot pass by allowlisting a fixed
-    // conformance hostname; the signed URL remains the authorization boundary.
-    const browserOrigin = `https://${crypto.randomUUID()}.sdk-conformance.invalid`;
+    // Preserve the generic embeddable-SDK probe by default. Restricted-origin
+    // deployments must explicitly select their real browser origin instead.
+    const browserOrigin =
+      args.browserOrigin ?? `https://${crypto.randomUUID()}.sdk-conformance.invalid`;
     await preflightObjectPut(putUrl, browserOrigin, Object.keys(headers), args.objectConnectTo);
+    if (args.denyForeignBrowserOrigin) {
+      const foreignOrigin = `https://${crypto.randomUUID()}.foreign-conformance.invalid`;
+      await denyForeignObjectPut(putUrl, foreignOrigin, Object.keys(headers), args.objectConnectTo);
+    }
     await putObject(putUrl, content, headers, args.objectConnectTo);
     await postJson(workspaceUrl(`/files/uploads/${uploadId}/complete`), {});
     const download = await postJson(workspaceUrl(`/files/${fileId}/download-url`), {});
@@ -277,7 +338,7 @@ if (args.skipStorage) {
       throw new Error("downloaded object did not match uploaded content");
     }
     const foreignWorkspace = crypto.randomUUID();
-    const foreignRead = await fetch(
+    const foreignRead = await fetchApi(
       new URL(`/v1/workspaces/${foreignWorkspace}/files/${fileId}`, args.baseUrl),
       { headers: requestHeaders(true) },
     );
@@ -286,7 +347,7 @@ if (args.skipStorage) {
         `cross-workspace file read returned HTTP ${foreignRead.status}, expected 403 or 404`,
       );
     }
-    return `file ${fileId} uploaded/downloaded and cross-workspace read denied`;
+    return `file ${fileId} uploaded/downloaded and cross-workspace read denied${args.denyForeignBrowserOrigin ? "; foreign browser origin denied" : ""}`;
   });
 }
 
@@ -314,7 +375,7 @@ async function runCheck(id: string, fn: () => Promise<string>): Promise<void> {
 }
 
 async function getJson(url: URL, options: { auth?: boolean } = {}): Promise<any> {
-  const response = await fetch(url, { headers: requestHeaders(options.auth !== false) });
+  const response = await fetchApi(url, { headers: requestHeaders(options.auth !== false) });
   if (!response.ok) {
     throw new Error(`${url.pathname} returned HTTP ${response.status}`);
   }
@@ -322,7 +383,7 @@ async function getJson(url: URL, options: { auth?: boolean } = {}): Promise<any>
 }
 
 async function getText(url: URL): Promise<string> {
-  const response = await fetch(url, { headers: requestHeaders(true) });
+  const response = await fetchApi(url, { headers: requestHeaders(true) });
   if (!response.ok) {
     throw new Error(`${url.pathname} returned HTTP ${response.status}`);
   }
@@ -330,23 +391,63 @@ async function getText(url: URL): Promise<string> {
 }
 
 async function postJson(url: URL, payload: unknown): Promise<any> {
-  const response = await fetch(url, {
+  requireApiContractForMutation();
+  const response = await fetchApi(url, {
     method: "POST",
     headers: requestHeaders(true, { "content-type": "application/json" }),
     body: JSON.stringify(payload),
   });
   if (!response.ok) {
-    throw new Error(`${url.pathname} returned HTTP ${response.status}: ${await response.text()}`);
+    throw await mutationResponseError(url, response);
   }
   return await response.json();
 }
 
 async function deleteJson(url: URL): Promise<any> {
-  const response = await fetch(url, { method: "DELETE", headers: requestHeaders(true) });
+  requireApiContractForMutation();
+  const response = await fetchApi(url, { method: "DELETE", headers: requestHeaders(true) });
   if (!response.ok) {
-    throw new Error(`${url.pathname} returned HTTP ${response.status}: ${await response.text()}`);
+    throw await mutationResponseError(url, response);
   }
   return await response.json();
+}
+
+async function fetchApi(url: URL, init: RequestInit): Promise<Response> {
+  const response = await fetch(url, init);
+  const revision = response.headers.get(OPENGENI_API_CONTRACT_HEADER);
+  if (revision !== null && revision !== OPENGENI_API_CONTRACT_REVISION) {
+    apiContractReady = false;
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error(
+      "API response contract does not match this conformance release; further mutations are blocked",
+    );
+  }
+  return response;
+}
+
+function requireApiContractForMutation(): void {
+  if (!apiContractReady) {
+    throw new Error("API contract handshake is not current; mutation was not attempted");
+  }
+}
+
+async function mutationResponseError(url: URL, response: Response): Promise<Error> {
+  const body = await response.text();
+  if (response.status === 409) {
+    let code: unknown;
+    try {
+      code = JSON.parse(body)?.code;
+    } catch {
+      /* Not a contract refusal. */
+    }
+    if (code === "API_CONTRACT_CHANGED") {
+      apiContractReady = false;
+      return new Error(
+        "Mutation refused by API contract fence; further mutations are blocked, never retried with an advertised revision",
+      );
+    }
+  }
+  return new Error(`${url.pathname} returned HTTP ${response.status}: ${body}`);
 }
 
 async function waitForTerminalSessionStatus(
@@ -405,6 +506,63 @@ async function preflightObjectPut(
   requiredHeaderNames: string[],
   connectTo: string | null,
 ): Promise<void> {
+  const response = await objectPutPreflight(url, origin, requiredHeaderNames, connectTo);
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`browser upload CORS preflight returned HTTP ${response.status}`);
+  }
+  const allowedOrigin = response.headers.get("access-control-allow-origin");
+  // Some object stores preserve the literal wildcard while others echo the
+  // requesting origin after matching a wildcard rule. Restricted deployments
+  // additionally prove that a foreign origin is denied.
+  if (allowedOrigin !== "*" && allowedOrigin !== origin) {
+    throw new Error("browser upload CORS preflight did not allow the selected browser origin");
+  }
+  const allowedMethods = (response.headers.get("access-control-allow-methods") ?? "")
+    .toLowerCase()
+    .split(/\s*,\s*/);
+  if (!allowedMethods.includes("put")) {
+    throw new Error("browser upload CORS preflight did not allow PUT");
+  }
+  const allowedHeaders = new Set(
+    (response.headers.get("access-control-allow-headers") ?? "")
+      .split(",")
+      .map((header) => header.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  // Signed object uploads do not use browser credentials. The noncredentialed
+  // wildcard covers other request headers, but never Authorization itself.
+  if (
+    requiredHeaderNames.some((header) => {
+      const name = header.trim().toLowerCase();
+      return !allowedHeaders.has(name) && !(name !== "authorization" && allowedHeaders.has("*"));
+    })
+  ) {
+    throw new Error("browser upload CORS preflight did not allow every required upload header");
+  }
+}
+
+async function denyForeignObjectPut(
+  url: string,
+  origin: string,
+  requiredHeaderNames: string[],
+  connectTo: string | null,
+): Promise<void> {
+  const response = await objectPutPreflight(url, origin, requiredHeaderNames, connectTo);
+  if (response.status === 0 || response.status >= 500) {
+    throw new Error("foreign-origin CORS denial was not observable");
+  }
+  const allowedOrigin = response.headers.get("access-control-allow-origin");
+  if (allowedOrigin === "*" || allowedOrigin === origin) {
+    throw new Error("browser upload CORS preflight allowed a foreign browser origin");
+  }
+}
+
+async function objectPutPreflight(
+  url: string,
+  origin: string,
+  requiredHeaderNames: string[],
+  connectTo: string | null,
+): Promise<{ status: number; headers: Headers; body: string }> {
   const accessControlHeaders = [
     ...new Set(requiredHeaderNames.map((header) => header.toLowerCase())),
   ]
@@ -415,31 +573,9 @@ async function preflightObjectPut(
     "access-control-request-method": "PUT",
     ...(accessControlHeaders ? { "access-control-request-headers": accessControlHeaders } : {}),
   };
-  const response = connectTo
+  return connectTo
     ? curlPreflight(url, preflightHeaders, connectTo)
     : await fetchPreflight(url, preflightHeaders);
-  if (response.status < 200 || response.status >= 300) {
-    throw new Error(
-      `browser upload CORS preflight returned HTTP ${response.status}: ${response.body.trim()}`,
-    );
-  }
-  const allowedOrigin = response.headers.get("access-control-allow-origin");
-  // Some object stores preserve the literal wildcard while others echo the
-  // requesting origin after matching a wildcard rule. Both are valid browser
-  // CORS responses; deployment automation separately verifies provider config.
-  if (allowedOrigin !== "*" && allowedOrigin !== origin) {
-    throw new Error(
-      `browser upload CORS preflight allowed origin ${allowedOrigin ?? "<missing>"}, expected ${origin} or * for the embeddable SDK`,
-    );
-  }
-  const allowedMethods = (response.headers.get("access-control-allow-methods") ?? "")
-    .toLowerCase()
-    .split(/\s*,\s*/);
-  if (!allowedMethods.includes("put")) {
-    throw new Error(
-      `browser upload CORS preflight did not allow PUT: ${allowedMethods.join(",") || "<missing>"}`,
-    );
-  }
 }
 
 async function fetchPreflight(
@@ -562,8 +698,11 @@ function parseArgs(values: string[]): Args {
     agentMessage:
       process.env.OPENGENI_CONFORMANCE_AGENT_MESSAGE ??
       "Reply with exactly: opengeni conformance ok",
+    model: process.env.OPENGENI_CONFORMANCE_MODEL?.trim() || null,
     sandboxBackend: process.env.OPENGENI_CONFORMANCE_SANDBOX_BACKEND ?? "none",
     objectConnectTo: process.env.OPENGENI_CONFORMANCE_OBJECT_CONNECT_TO ?? null,
+    browserOrigin: process.env.OPENGENI_CONFORMANCE_BROWSER_ORIGIN ?? null,
+    denyForeignBrowserOrigin: false,
     deploymentAccessKey:
       process.env.OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY ??
       process.env.OPENGENI_CONFORMANCE_ACCESS_KEY ??
@@ -580,7 +719,7 @@ function parseArgs(values: string[]): Args {
   };
 
   for (let index = 0; index < values.length; index += 1) {
-    const value = values[index];
+    const value = values[index]!;
     if (value === "--json") {
       out.json = true;
       continue;
@@ -595,6 +734,10 @@ function parseArgs(values: string[]): Args {
     }
     if (value === "--skip-observability") {
       out.skipObservability = true;
+      continue;
+    }
+    if (value === "--deny-foreign-browser-origin") {
+      out.denyForeignBrowserOrigin = true;
       continue;
     }
     if (value === "--skip-scheduled-tasks") {
@@ -613,6 +756,10 @@ function parseArgs(values: string[]): Args {
       out.agentMessage = requiredNext(values, ++index, value);
       continue;
     }
+    if (value === "--model") {
+      out.model = requiredNext(values, ++index, value);
+      continue;
+    }
     if (value === "--sandbox-backend") {
       const next = requiredNext(values, ++index, value);
       out.sandboxBackend = next === "default" ? null : next;
@@ -620,6 +767,10 @@ function parseArgs(values: string[]): Args {
     }
     if (value === "--object-connect-to") {
       out.objectConnectTo = requiredNext(values, ++index, value);
+      continue;
+    }
+    if (value === "--browser-origin") {
+      out.browserOrigin = requiredNext(values, ++index, value);
       continue;
     }
     if (value === "--deployment-access-key" || value === "--access-key") {
@@ -634,8 +785,16 @@ function parseArgs(values: string[]): Args {
       out.baseUrl = value.slice("--base-url=".length);
       continue;
     }
+    if (value.startsWith("--model=")) {
+      out.model = value.slice("--model=".length);
+      continue;
+    }
     if (value.startsWith("--object-connect-to=")) {
       out.objectConnectTo = value.slice("--object-connect-to=".length);
+      continue;
+    }
+    if (value.startsWith("--browser-origin=")) {
+      out.browserOrigin = value.slice("--browser-origin=".length);
       continue;
     }
     if (value.startsWith("--deployment-access-key=")) {
@@ -663,6 +822,34 @@ function parseArgs(values: string[]): Args {
   if (!Number.isFinite(out.timeoutSeconds) || out.timeoutSeconds <= 0) {
     throw new Error("--timeout-seconds must be a positive number");
   }
+  if (out.model !== null) {
+    out.model = out.model.trim();
+    if (!out.model) {
+      throw new Error("--model requires a non-empty value");
+    }
+  }
+  if (out.browserOrigin !== null) {
+    let origin: URL;
+    try {
+      origin = new URL(out.browserOrigin);
+    } catch {
+      throw new Error("--browser-origin must be an HTTP(S) origin without credentials or a path");
+    }
+    if (
+      !["http:", "https:"].includes(origin.protocol) ||
+      origin.username ||
+      origin.password ||
+      origin.search ||
+      origin.hash ||
+      origin.pathname !== "/"
+    ) {
+      throw new Error("--browser-origin must be an HTTP(S) origin without credentials or a path");
+    }
+    out.browserOrigin = origin.origin;
+  }
+  if (out.denyForeignBrowserOrigin && !out.browserOrigin) {
+    throw new Error("--deny-foreign-browser-origin requires an explicit --browser-origin");
+  }
   return out;
 }
 
@@ -673,6 +860,7 @@ function requestHeaders(auth: boolean, extra: Record<string, string> = {}): Reco
       : {}),
     ...(auth && args.productToken ? { authorization: `Bearer ${args.productToken}` } : {}),
     ...extra,
+    [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
   };
 }
 

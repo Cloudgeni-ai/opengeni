@@ -10,6 +10,7 @@ interface Args {
   productOverlay: string;
   json: boolean;
   list: boolean;
+  createAcr: boolean;
 }
 
 const args = parseArgs(process.argv.slice(2));
@@ -23,7 +24,14 @@ if (args.list) {
 
 const profileId = DeploymentProfileId.parse(args.profile);
 const overlay = ProductOverlayId.parse(args.productOverlay);
-const plan = stackPlanFor(contractForProfile(profileId, overlay), overlay, process.env);
+if (args.createAcr && profileId !== "azure-container-apps") {
+  throw new Error("--create-acr is supported only for the azure-container-apps profile");
+}
+const plan = stackPlanFor(
+  contractForProfile(profileId, overlay),
+  overlay,
+  args.createAcr ? { ...process.env, OPENGENI_ACA_CREATE_ACR: "true" } : process.env,
+);
 
 if (args.json) {
   console.log(JSON.stringify(plan, null, 2));
@@ -32,6 +40,7 @@ if (args.json) {
 
 console.log(`OpenGeni deployment stack plan: ${plan.profile}`);
 console.log("");
+if (plan.prerequisites) printList("Prerequisites", plan.prerequisites);
 printList("Creates", plan.creates);
 printPlatformDependencies();
 printList("External dependencies", plan.externalDependencies);
@@ -97,15 +106,20 @@ function parseArgs(values: string[]): Args {
     productOverlay: "none",
     json: false,
     list: false,
+    createAcr: false,
   };
   for (let index = 0; index < values.length; index += 1) {
-    const value = values[index];
+    const value = values[index]!;
     if (value === "--json") {
       out.json = true;
       continue;
     }
     if (value === "--list") {
       out.list = true;
+      continue;
+    }
+    if (value === "--create-acr") {
+      out.createAcr = true;
       continue;
     }
     if (value === "--profile") {

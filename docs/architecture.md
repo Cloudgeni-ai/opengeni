@@ -1289,6 +1289,10 @@ Canonical: [`../agent/README.md`](../agent/README.md) and
 - `deploy/helm/opengeni`: Helm services and integration resources.
 - `deploy/terraform/`: cloud infrastructure roots; `deploy/stacks/`: external
   dependency wrappers.
+- `deploy/terraform/azure-container-apps/`: the non-Kubernetes Azure target,
+  including private managed PostgreSQL, Blob, Key Vault, manual migrations,
+  continuously running application workers, and same-origin environment routing.
+  Temporal and NATS remain separately operated external services.
 - `deploy/terraform/azure-aks-capacity/`: additive AKS launch pools and adopted
   staging system-pool bounds. Production system-pool ownership stays in
   `deploy/terraform/azure/`; protected private-ops workflows own joint quota and
@@ -1942,6 +1946,16 @@ Helm owns applications/integrations; cloud Terraform roots/stack wrappers compos
 external infrastructure. Bundled Postgres/Temporal/NATS/storage templates
 serve development, CI, conformance and documented single-machine fixtures.
 They are not production defaults.
+
+The `azure-container-apps` profile is a separate runtime platform, not an AKS
+variant. Its Terraform root owns both substrate and ACA application workloads;
+it does not render Helm values or install Kubernetes platform charts. Native
+environment routing keeps API/web internal behind one public origin and workers
+unrouted. Remote sandbox ownership is enabled for durable execution/file delivery;
+the sandbox artifact runtime and native exports remain disabled. The ACA private
+observability helper verifies metrics and worker readiness, not downstream OTLP
+collector ingestion. See
+[`azure-container-apps.md`](azure-container-apps.md) for activation and limits.
 
 Procedures, provider requirements, activation and recovery: [`deployment.md`](deployment.md).
 Host ports/in-process composition: [`embedding.md`](embedding.md).

@@ -2,6 +2,7 @@ import {
   DeploymentProfileId,
   ProductOverlayId,
   contractForProfile,
+  assertRuntimeArtifactsSupported,
   generateRuntimeArtifacts,
   type TerraformOutputs,
 } from "@opengeni/deployment";
@@ -20,6 +21,8 @@ const args = parseArgs(process.argv.slice(2));
 const profileId = DeploymentProfileId.parse(args.profile);
 const overlay = ProductOverlayId.parse(args.productOverlay);
 const contract = contractForProfile(profileId, overlay);
+assertRuntimeArtifactsSupported(contract);
+if (!args.terraformOutput) throw new Error("--terraform-output is required");
 const terraformOutputs = await readTerraformOutputs(args.terraformOutput);
 const artifacts = generateRuntimeArtifacts(contract, terraformOutputs, process.env);
 
@@ -88,7 +91,7 @@ function parseArgs(values: string[]): Args {
     allowMissing: false,
   };
   for (let index = 0; index < values.length; index += 1) {
-    const value = values[index];
+    const value = values[index]!;
     if (value === "--json") {
       out.json = true;
       continue;
@@ -134,9 +137,6 @@ function parseArgs(values: string[]): Args {
       continue;
     }
     throw new Error(`Unknown argument: ${value}`);
-  }
-  if (!out.terraformOutput) {
-    throw new Error("--terraform-output is required");
   }
   return out;
 }

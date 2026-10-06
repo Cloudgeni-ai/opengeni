@@ -47,6 +47,24 @@ bun run deployment:stack -- --profile gcp-managed
 
 The plan lists the resources, dependencies, required secrets, and the deploy, verify, and destroy commands.
 
+### Azure Container Apps
+
+Use `azure-container-apps` for Azure without Kubernetes. Its dedicated Terraform
+root provisions the ACA environment, private managed PostgreSQL, Blob storage,
+Key Vault, same-origin HTTPS routing, migration job, API, console, and both
+Temporal worker roles. Temporal and NATS remain externally operated services;
+use a real remote sandbox such as Modal.
+
+```bash
+bun run deployment:stack -- --profile azure-container-apps
+```
+
+Apply the substrate first, wait for the exact migration job execution to succeed,
+then activate the applications. Follow the [ACA operator
+guide](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/azure-container-apps.md)
+for the supported export boundary, stream/reconnect validation, upgrades, and
+teardown. The existing `azure-managed` profile still targets AKS.
+
 ## Access modes
 
 `OPENGENI_PRODUCT_ACCESS_MODE` sets how callers are identified:
@@ -74,6 +92,10 @@ Put the deployment behind a gateway with:
 - Rate and request-size limits sized for sessions, files, and SSE
 - SSE support: buffering off, read and send timeouts of at least 3600 seconds
 - Access logs
+
+For ACA's default ingress, verify durable SSE reconnect and cursor replay across
+its request timeout rather than assuming an unlimited connection. See the ACA
+operator guide for the extended streaming acceptance checks.
 
 Review sandbox preparation profiles and environment allowlists: they decide which host credentials reach a sandbox.
 

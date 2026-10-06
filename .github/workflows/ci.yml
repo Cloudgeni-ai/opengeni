@@ -1355,12 +1355,15 @@ jobs:
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.13.3
 
       - name: Validate deployment profiles
         run: |
           bun run deployment:profiles
           bun run deployment:preflight -- --profile azure-existing-services --json
           bun run deployment:preflight -- --profile azure-managed --json
+          bun run deployment:preflight -- --profile azure-container-apps --json
           bun run deployment:preflight -- --profile aws-existing-services --json
           bun run deployment:preflight -- --profile aws-managed --json
           bun run deployment:preflight -- --profile gcp-existing-services --json
@@ -1553,6 +1556,10 @@ jobs:
           terraform -chdir=deploy/terraform/azure init -backend=false
           terraform -chdir=deploy/terraform/azure validate
           terraform -chdir=deploy/terraform/azure test
+          terraform -chdir=deploy/terraform/azure-container-apps fmt -check -recursive
+          terraform -chdir=deploy/terraform/azure-container-apps init -backend=false -input=false
+          terraform -chdir=deploy/terraform/azure-container-apps validate
+          terraform -chdir=deploy/terraform/azure-container-apps test
           terraform -chdir=deploy/terraform/aws fmt -check
           terraform -chdir=deploy/terraform/aws init -backend=false
           terraform -chdir=deploy/terraform/aws validate
