@@ -382,6 +382,202 @@ describe("Bun canary publication boundary", () => {
     ).rejects.toThrow("archive integrity differs");
   });
 
+  test("settles a delayed registry receipt without relaxing latest, integrity, or provenance", async () => {
+    const version = "1.0.1-canary.4";
+    const packed = Buffer.from("synthetic-tarball");
+    const integrity = `sha512-${createHash("sha512").update(packed).digest("base64")}`;
+    const attestation = {
+      url: "https://example.test/attestation",
+      provenance: { predicateType: "https://slsa.dev/provenance/v1" },
+    };
+    let elapsed = 0;
+    let reads = 0;
+    await confirmCanaryPublication(
+      "@example/package",
+      version,
+      "1.0.0",
+      packed,
+      async (_name, _request, _base, options) => {
+        reads++;
+        expect(options?.revalidate).toBe(true);
+        expect(options?.signal).toBeInstanceOf(AbortSignal);
+        if (reads === 1) return { "dist-tags": { latest: "1.0.0" }, versions: {} };
+        if (reads === 2) {
+          return { "dist-tags": { latest: "1.0.0" }, versions: { [version]: {} } };
+        }
+        if (reads === 3) {
+          return {
+            "dist-tags": { latest: "1.0.0", canary: version },
+            versions: { [version]: { dist: {} } },
+          };
+        }
+        if (reads === 4) {
+          return {
+            "dist-tags": { latest: "1.0.0", canary: version },
+            versions: { [version]: { dist: { integrity } } },
+          };
+        }
+        if (reads === 5) {
+          return {
+            "dist-tags": { latest: "1.0.0", canary: version },
+            versions: {
+              [version]: {
+                dist: {
+                  integrity,
+                  attestations: {
+                    ...attestation,
+                    provenance: { predicateType: "https://example.test/other" },
+                  },
+                },
+              },
+            },
+          };
+        }
+        return {
+          "dist-tags": { latest: "1.0.0", canary: version },
+          versions: { [version]: { dist: { integrity, attestations: attestation } } },
+        };
+      },
+      {
+        now: () => elapsed,
+        sleep: async (ms) => {
+          elapsed += ms;
+        },
+        timeoutMs: 6_000,
+        pollIntervalMs: 1_000,
+      },
+    );
+    expect(reads).toBe(6);
+    expect(elapsed).toBe(5_000);
+  });
+
+  test("bounds receipt polling and reports only the missing evidence category", async () => {
+    let elapsed = 0;
+    let reads = 0;
+    await expect(
+      confirmCanaryPublication(
+        "@example/package",
+        "1.0.1-canary.4",
+        "1.0.0",
+        Buffer.from("synthetic-tarball"),
+        async () => {
+          reads++;
+          return { "dist-tags": { latest: "1.0.0" }, versions: {} };
+        },
+        {
+          now: () => elapsed,
+          sleep: async (ms) => {
+            elapsed += ms;
+          },
+          timeoutMs: 2_500,
+          pollIntervalMs: 1_000,
+        },
+      ),
+    ).rejects.toThrow("after 3 reads (version_pending)");
+    expect(reads).toBe(3);
+    expect(elapsed).toBe(2_500);
+  });
+
+  test("refuses a valid receipt returned after the monotonic deadline", async () => {
+    const version = "1.0.1-canary.4";
+    const packed = Buffer.from("synthetic-tarball");
+    const integrity = `sha512-${createHash("sha512").update(packed).digest("base64")}`;
+    let elapsed = 0;
+    let reads = 0;
+    await expect(
+      confirmCanaryPublication(
+        "@example/package",
+        version,
+        "1.0.0",
+        packed,
+        async () => {
+          reads++;
+          elapsed = 1_500;
+          return {
+            "dist-tags": { latest: "1.0.0", canary: version },
+            versions: {
+              [version]: {
+                dist: {
+                  integrity,
+                  attestations: {
+                    url: "https://example.test/attestation",
+                    provenance: { predicateType: "https://slsa.dev/provenance/v1" },
+                  },
+                },
+              },
+            },
+          };
+        },
+        { now: () => elapsed, timeoutMs: 1_000 },
+      ),
+    ).rejects.toThrow("after 1 reads (read_exceeded_deadline)");
+    expect(reads).toBe(1);
+  });
+
+  test("retries only timed-out receipt reads and fails closed on invalid metadata", async () => {
+    const version = "1.0.1-canary.4";
+    const packed = Buffer.from("synthetic-tarball");
+    const integrity = `sha512-${createHash("sha512").update(packed).digest("base64")}`;
+    let elapsed = 0;
+    let reads = 0;
+    await confirmCanaryPublication(
+      "@example/package",
+      version,
+      "1.0.0",
+      packed,
+      async () => {
+        reads++;
+        if (reads === 1) throw new DOMException("synthetic read timeout", "TimeoutError");
+        return {
+          "dist-tags": { latest: "1.0.0", canary: version },
+          versions: {
+            [version]: {
+              dist: {
+                integrity,
+                attestations: {
+                  url: "https://example.test/attestation",
+                  provenance: { predicateType: "https://slsa.dev/provenance/v1" },
+                },
+              },
+            },
+          },
+        };
+      },
+      {
+        now: () => elapsed,
+        sleep: async (ms) => {
+          elapsed += ms;
+        },
+        timeoutMs: 2_500,
+        pollIntervalMs: 1_000,
+      },
+    );
+    expect(reads).toBe(2);
+    await expect(
+      confirmCanaryPublication("@example/package", version, "1.0.0", packed, async () => {
+        throw new Error("synthetic malformed metadata");
+      }),
+    ).rejects.toThrow("synthetic malformed metadata");
+  });
+
+  test("requests fresh metadata for post-publication reads", async () => {
+    const signal = AbortSignal.timeout(1_000);
+    await readRegistryPackage(
+      "@example/package",
+      async (_url, init) => {
+        expect(init?.cache).toBe("no-store");
+        expect(init?.signal).toBe(signal);
+        expect(init?.headers).toEqual({
+          accept: "application/vnd.npm.install-v1+json",
+          "cache-control": "no-cache",
+        });
+        return Response.json({ "dist-tags": {}, versions: {} });
+      },
+      "https://example.test",
+      { signal, revalidate: true },
+    );
+  });
+
   test("official publisher's synthetic auth and provenance boundary is isolated from CI", () => {
     const result = spawnSync(
       process.execPath,

@@ -116,6 +116,17 @@ type RegistryPackage = {
 };
 type RegistryRequest = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 const registry = "https://registry.npmjs.org";
+const CANARY_RECEIPT_TIMEOUT_MS = 180_000;
+const CANARY_RECEIPT_REQUEST_TIMEOUT_MS = 10_000;
+const CANARY_RECEIPT_POLL_INTERVAL_MS = 1_000;
+
+type RegistryReadOptions = { signal?: AbortSignal; revalidate?: boolean };
+type ReceiptPollOptions = {
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+};
 
 export function verifyCanarySourceBinding(
   env: Record<string, string | undefined>,
@@ -153,10 +164,15 @@ export async function readRegistryPackage(
   name: string,
   request: RegistryRequest = fetch,
   base = registry,
+  options: RegistryReadOptions = {},
 ): Promise<RegistryPackage> {
   const response = await request(`${base}/${encodeURIComponent(name)}`, {
     cache: "no-store",
-    headers: { accept: "application/vnd.npm.install-v1+json" },
+    headers: {
+      accept: "application/vnd.npm.install-v1+json",
+      ...(options.revalidate ? { "cache-control": "no-cache" } : {}),
+    },
+    signal: options.signal,
   });
   if (response.status === 404) return { "dist-tags": {}, versions: {} };
   if (!response.ok) throw new Error(`Registry metadata for ${name} failed: ${response.status}`);
@@ -230,29 +246,75 @@ export async function confirmCanaryPublication(
   previousLatest: string | undefined,
   tarball: Buffer,
   read: typeof readRegistryPackage = readRegistryPackage,
+  options: ReceiptPollOptions = {},
 ): Promise<void> {
   const integrity = `sha512-${createHash("sha512").update(tarball).digest("base64")}`;
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const current = await read(name);
+  const now = options.now ?? performance.now.bind(performance);
+  const sleep = options.sleep ?? Bun.sleep;
+  const timeoutMs = options.timeoutMs ?? CANARY_RECEIPT_TIMEOUT_MS;
+  const pollIntervalMs = options.pollIntervalMs ?? CANARY_RECEIPT_POLL_INTERVAL_MS;
+  if (
+    !Number.isFinite(timeoutMs) ||
+    timeoutMs <= 0 ||
+    !Number.isFinite(pollIntervalMs) ||
+    pollIntervalMs <= 0
+  ) {
+    throw new Error("Canary receipt polling interval or deadline is invalid");
+  }
+  const deadline = now() + timeoutMs;
+  let reads = 0;
+  let lastObservation = "not_observed";
+  while (now() < deadline) {
+    const remaining = deadline - now();
+    const signal = AbortSignal.timeout(
+      Math.max(1, Math.ceil(Math.min(CANARY_RECEIPT_REQUEST_TIMEOUT_MS, remaining))),
+    );
+    let current: RegistryPackage;
+    try {
+      current = await read(name, fetch, registry, { signal, revalidate: true });
+      reads++;
+    } catch (error) {
+      if (!(error instanceof Error) || !["AbortError", "TimeoutError"].includes(error.name)) {
+        throw error;
+      }
+      reads++;
+      lastObservation = "request_timeout";
+      const wait = Math.min(pollIntervalMs, deadline - now());
+      if (wait > 0) await sleep(wait);
+      continue;
+    }
     if (current["dist-tags"].latest !== previousLatest) {
       throw new Error(`Stable tag changed during canary publication for ${name}`);
     }
-    if (current["dist-tags"].canary === version && Object.hasOwn(current.versions, version)) {
+    if (!Object.hasOwn(current.versions, version)) {
+      lastObservation = "version_pending";
+    } else if (current["dist-tags"].canary !== version) {
+      lastObservation = "canary_tag_pending";
+    } else {
       const dist = current.versions[version]?.dist;
       if (dist?.integrity && dist.integrity !== integrity) {
         throw new Error(`Canary archive integrity differs for ${name}`);
       }
-      if (
-        dist?.integrity === integrity &&
-        typeof dist.attestations?.url === "string" &&
-        dist.attestations.provenance?.predicateType === "https://slsa.dev/provenance/v1"
-      ) {
+      if (!dist?.integrity) {
+        lastObservation = "integrity_pending";
+      } else if (typeof dist.attestations?.url !== "string") {
+        lastObservation = "attestation_pending";
+      } else if (dist.attestations.provenance?.predicateType !== "https://slsa.dev/provenance/v1") {
+        lastObservation = "provenance_pending";
+      } else {
+        if (now() >= deadline) {
+          lastObservation = "read_exceeded_deadline";
+          break;
+        }
         return;
       }
     }
-    await Bun.sleep(1000);
+    const wait = Math.min(pollIntervalMs, deadline - now());
+    if (wait > 0) await sleep(wait);
   }
-  throw new Error(`Canary registry receipt is unavailable for ${name}`);
+  throw new Error(
+    `Canary registry receipt is unavailable for ${name} after ${reads} reads (${lastObservation})`,
+  );
 }
 
 function writeVersion(pkg: WorkspacePackage, version: string): void {
