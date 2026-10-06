@@ -6,6 +6,7 @@ import { StartupDispatchDetails } from "./startup-dispatch-details";
 import { useStartupDetails } from "./startup-preference";
 import { ArrowRightIcon, BotIcon, BrainCircuitIcon, MessageSquareTextIcon } from "lucide-react";
 import {
+  Component,
   createContext,
   lazy,
   Suspense,
@@ -308,13 +309,15 @@ export function renderActivity(
     case "tool-call": {
       const Renderer = toolRegistry.resolve(item);
       return (
-        <ToolCallTruncationProvider value={item.truncation ?? null}>
-          <Renderer
-            item={item}
-            loadRetainedScreenshot={loadRetainedScreenshot}
-            loadRetainedArtifact={loadRetainedArtifact}
-          />
-        </ToolCallTruncationProvider>
+        <ToolRowBoundary name={toolDisplayName(item.name)} resetKeys={[item.status, Renderer]}>
+          <ToolCallTruncationProvider value={item.truncation ?? null}>
+            <Renderer
+              item={item}
+              loadRetainedScreenshot={loadRetainedScreenshot}
+              loadRetainedArtifact={loadRetainedArtifact}
+            />
+          </ToolCallTruncationProvider>
+        </ToolRowBoundary>
       );
     }
     case "worker":
@@ -547,4 +550,43 @@ function WorkerRow({
     );
   }
   return <div className="flex items-start gap-2 px-1.5 py-1.5">{inner}</div>;
+}
+
+/**
+ * One tool row that fails to render shows a one-line note in its place, so the
+ * rest of the work group (and the live preview) keeps reading normally.
+ */
+class ToolRowBoundary extends Component<
+  { name: string; resetKeys: readonly unknown[]; children: ReactNode },
+  { failed: boolean; resetKeys: readonly unknown[] }
+> {
+  state = { failed: false, resetKeys: this.props.resetKeys };
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+
+  /** A new status or renderer for the row gets a fresh attempt. */
+  static getDerivedStateFromProps(
+    props: { resetKeys: readonly unknown[] },
+    state: { failed: boolean; resetKeys: readonly unknown[] },
+  ): { failed: boolean; resetKeys: readonly unknown[] } | null {
+    const same =
+      props.resetKeys.length === state.resetKeys.length &&
+      props.resetKeys.every((key, index) => Object.is(key, state.resetKeys[index]));
+    return same ? null : { failed: false, resetKeys: props.resetKeys };
+  }
+
+  render(): ReactNode {
+    if (!this.state.failed) return this.props.children;
+    return (
+      <div
+        data-testid="tool-row-render-error"
+        role="status"
+        className="px-1.5 py-1.5 text-og-menu text-og-fg-subtle"
+      >
+        {this.props.name} · couldn't be displayed
+      </div>
+    );
+  }
 }

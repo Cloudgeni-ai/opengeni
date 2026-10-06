@@ -160,29 +160,58 @@ function PathPreview({
    presentation model in ./tool-presentation, which non-DOM renderers share.
    -------------------------------------------------------------------------- */
 
-const TOOL_ICONS: Record<ToolIconKind, LucideIcon> = {
-  terminal: TerminalIcon,
-  keyboard: KeyboardIcon,
-  "file-diff": FileDiffIcon,
-  search: SearchIcon,
-  question: MessageCircleQuestionIcon,
-  target: TargetIcon,
-  brain: BrainCircuitIcon,
-  sessions: MessagesSquareIcon,
-  server: ServerIcon,
-  "server-cog": ServerCogIcon,
-  calendar: CalendarClockIcon,
-  panels: PanelsTopLeftIcon,
-  share: Share2Icon,
-  message: MessageSquareIcon,
-  git: FolderGitIcon,
-  box: BoxIcon,
-  key: KeyRoundIcon,
-  "file-search": FileSearchIcon,
-  "package-search": PackageSearchIcon,
-  plug: PlugIcon,
-  wrench: WrenchIcon,
-};
+/**
+ * The icon for a presentation kind, looked up when a row renders. A module-level
+ * table would capture the icons at load time; in a bundle where this module and
+ * the icon library's chunk import each other, an icon can still be undefined
+ * then, and the row would render an undefined component (React #130).
+ */
+function toolIcon(kind: ToolIconKind): LucideIcon {
+  switch (kind) {
+    case "terminal":
+      return TerminalIcon;
+    case "keyboard":
+      return KeyboardIcon;
+    case "file-diff":
+      return FileDiffIcon;
+    case "search":
+      return SearchIcon;
+    case "question":
+      return MessageCircleQuestionIcon;
+    case "target":
+      return TargetIcon;
+    case "brain":
+      return BrainCircuitIcon;
+    case "sessions":
+      return MessagesSquareIcon;
+    case "server":
+      return ServerIcon;
+    case "server-cog":
+      return ServerCogIcon;
+    case "calendar":
+      return CalendarClockIcon;
+    case "panels":
+      return PanelsTopLeftIcon;
+    case "share":
+      return Share2Icon;
+    case "message":
+      return MessageSquareIcon;
+    case "git":
+      return FolderGitIcon;
+    case "box":
+      return BoxIcon;
+    case "key":
+      return KeyRoundIcon;
+    case "file-search":
+      return FileSearchIcon;
+    case "package-search":
+      return PackageSearchIcon;
+    case "plug":
+      return PlugIcon;
+    case "wrench":
+      return WrenchIcon;
+  }
+}
 
 function presentedPreviewNode(preview: ToolPreview): ReactNode {
   switch (preview.kind) {
@@ -297,7 +326,7 @@ function WebSearchResults({ results }: { results: WebSearchResult[] | null }) {
 
 /** Draw one shared-model row with the web disclosure primitives. */
 function PresentedToolRow({ presentation: p }: { presentation: ToolRowPresentation }) {
-  const Icon = TOOL_ICONS[p.icon];
+  const Icon = toolIcon(p.icon);
   return (
     <ActivityDisclosure
       icon={<Icon className={ICON_SIZE} />}
@@ -1746,7 +1775,7 @@ const REVIEW_CHIP: Partial<Record<ToolReviewStatus, DisclosureChip>> = {
 function ReviewedGenericRenderer({ item }: ToolRendererProps) {
   const { review, onViewDetails } = useRecordedToolReview(item.callId);
   if (!review) return <UnreviewedGenericRenderer item={item} />;
-  const ReviewIcon = TOOL_ICONS[genericToolIconKind(item.name)];
+  const ReviewIcon = toolIcon(genericToolIconKind(item.name));
   const icon = <ReviewIcon className={ICON_SIZE} />;
   const waiting = review.status === "pending";
   const running =
