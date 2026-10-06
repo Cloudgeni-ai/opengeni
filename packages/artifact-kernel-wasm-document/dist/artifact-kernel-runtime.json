@@ -26,9 +26,9 @@
   "files": [
     {
       "path": "artifact_kernel_document_bg.wasm",
-      "bytes": 296739,
-      "sha256": "sha256:dcf956f6c9a7b07c09122c4bf663844f202077c336da11e340fea647a97649fb",
-      "gzipBytes": 99102
+      "bytes": 296577,
+      "sha256": "sha256:782a14d61a9e364ed724247d32086adf583916a362af5b6074fe7abb8b3f42a2",
+      "gzipBytes": 99081
     },
     {
       "path": "artifact_kernel_document_bg.wasm.d.ts",
