@@ -195,7 +195,7 @@ test("rolling migration retains the exact read capability metadata", async () =>
   // Exercise owner execution against a historical definition in a rollback-only
   // transaction, including its ACL and hardened embedded-schema search_path.
   const migration = await readFile(
-    new URL("../drizzle/0638_knowledge_entry_created_since.sql", import.meta.url),
+    new URL("../drizzle/0639_knowledge_entry_created_since.sql", import.meta.url),
     "utf8",
   );
   const rollback = new Error("rollback creation-date migration metadata test");

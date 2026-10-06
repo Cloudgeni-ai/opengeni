@@ -2407,10 +2407,15 @@ describe("release schema contract", () => {
       "0635_organization_admin_workspace_member_management.sql",
       "0636_opper_model_providers.sql",
       "0637_retained_process_background_owner_inventory.sql",
-      "0638_knowledge_entry_created_since.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
+    const knowledgeCreatedSinceMigration = "0639_knowledge_entry_created_since.sql";
+    if (
+      unfilteredSourceContract.migrations.some(
+        (migration) => migration.path === knowledgeCreatedSinceMigration,
+      )
+    ) appendedMigrationPaths.push(knowledgeCreatedSinceMigration);
     // The shared complete-contract assertion intentionally excludes these
     // branch-local migrations, but the governed hash must exclude them too.
     appendedMigrationPaths.unshift(
