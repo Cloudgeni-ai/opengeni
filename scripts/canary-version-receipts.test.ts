@@ -214,6 +214,102 @@ test("a new package keeps its absent latest tag through both qualification passe
   expect(requests).toBe(4);
 });
 
+test("a large cohort can become visible late without spending its final read reserve", async () => {
+  const packages = Array.from({ length: 30 }, (_, index) => archive(`@example/package-${index}`));
+  let elapsed = 0;
+  const requests: number[] = [];
+  const read: typeof readRegistryPackage = (name, _request, _base, options) =>
+    readRegistryPackage(
+      name,
+      async (url) => {
+        requests.push(elapsed);
+        return String(url).includes("/dist-tags")
+          ? Response.json({ latest: "1.0.0", canary: version })
+          : elapsed < 150_000
+            ? new Response(null, { status: 404 })
+            : Response.json({ name, version, dist });
+      },
+      "https://registry.example.test",
+      options,
+    );
+  await confirmCanaryCohort(packages, read, {
+    now: () => elapsed,
+    sleep: async (ms) => {
+      elapsed += ms;
+    },
+  });
+  expect(requests.some((time) => time >= 150_000)).toBe(true);
+  expect(requests.length).toBeLessThanOrEqual(256);
+  expect(elapsed).toBeLessThan(180_000);
+});
+
+test("early matches are rechecked after delayed packages appear", async () => {
+  const packages = Array.from({ length: 30 }, (_, index) => archive(`@example/package-${index}`));
+  let elapsed = 0,
+    requests = 0,
+    firstPackageReads = 0;
+  const read: typeof readRegistryPackage = (name, _request, _base, options) =>
+    readRegistryPackage(
+      name,
+      async (url) => {
+        requests++;
+        if (String(url).includes("/dist-tags")) {
+          if (name === packages[0]!.name) firstPackageReads++;
+          return Response.json({
+            latest: firstPackageReads > 1 && name === packages[0]!.name ? "2.0.0" : "1.0.0",
+            canary: version,
+          });
+        }
+        return name !== packages[0]!.name && elapsed < 150_000
+          ? new Response(null, { status: 404 })
+          : Response.json({ name, version, dist });
+      },
+      "https://registry.example.test",
+      options,
+    );
+  await expect(
+    confirmCanaryCohort(packages, read, {
+      now: () => elapsed,
+      sleep: async (ms) => {
+        elapsed += ms;
+      },
+    }),
+  ).rejects.toThrow("Stable tag changed");
+  expect(firstPackageReads).toBe(2);
+  expect(elapsed).toBeGreaterThanOrEqual(150_000);
+  expect(elapsed).toBeLessThan(180_000);
+  expect(requests).toBeLessThanOrEqual(256);
+});
+
+test("a hidden large cohort fails within the original deadline and read quota", async () => {
+  const packages = Array.from({ length: 30 }, (_, index) => archive(`@example/package-${index}`));
+  let elapsed = 0,
+    requests = 0;
+  const read: typeof readRegistryPackage = (name, _request, _base, options) =>
+    readRegistryPackage(
+      name,
+      async (url) => {
+        requests++;
+        return String(url).includes("/dist-tags")
+          ? Response.json({ latest: "1.0.0", canary: version })
+          : new Response(null, { status: 404 });
+      },
+      "https://registry.example.test",
+      options,
+    );
+  await expect(
+    confirmCanaryCohort(packages, read, {
+      now: () => elapsed,
+      sleep: async (ms) => {
+        elapsed += ms;
+      },
+    }),
+  ).rejects.toThrow("read_limit");
+  expect(elapsed).toBeGreaterThanOrEqual(150_000);
+  expect(elapsed).toBeLessThanOrEqual(180_000);
+  expect(requests).toBeLessThanOrEqual(256);
+});
+
 test("invalid selected version paths fail before any registry request", async () => {
   let requests = 0;
   await expect(

@@ -680,7 +680,21 @@ export async function confirmCanaryCohort(
         break;
       }
     }
-    const wait = Math.min(pollIntervalMs, deadline - now());
+    const remaining = deadline - now();
+    if (remaining <= 0) break;
+    // Each receipt reads tags and its selected version. Keep a complete fresh
+    // cohort in reserve, and spread the remaining polls across the deadline.
+    const finalReads = packages.length * 2;
+    const remainingPolls = Math.floor((maxReads - reads - finalReads) / (pending.size * 2));
+    if (remainingPolls <= 0) {
+      lastObservation = "read_limit";
+      break;
+    }
+    const finalTime = Math.min(CANARY_RECEIPT_REQUEST_TIMEOUT_MS, remaining / 2);
+    const wait = Math.min(
+      remaining,
+      Math.max(pollIntervalMs, (remaining - finalTime) / remainingPolls),
+    );
     if (wait > 0 && reads < maxReads) await sleep(wait);
   }
   const category = reads >= maxReads && now() < deadline ? "read_limit" : lastObservation;
