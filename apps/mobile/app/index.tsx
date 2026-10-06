@@ -152,8 +152,15 @@ function Home() {
     (preset && preset.model === model ? preset.reasoningEffort : null) ??
     ((config?.defaultReasoningEffort ?? null) as ReasoningEffort | null);
   const latencyMode = ownPick?.latencyMode ?? "standard";
+  // One choice reports model, effort and latency in a row: each patch builds
+  // on the previous one, or a later patch would restore the old model.
   const pick = (patch: Partial<Omit<typeof picked, "workspaceId">>) =>
-    setPicked({ workspaceId, model, effort, latencyMode, ...patch });
+    setPicked((current) => ({
+      ...(current.workspaceId === workspaceId
+        ? current
+        : { workspaceId, model, effort, latencyMode }),
+      ...patch,
+    }));
   const pill = model ? compactModelPill(models, model, effort) : null;
   const recent = useMemo(() => {
     const { pinned } = partitionPinnedSessions(sessions);
@@ -329,7 +336,8 @@ function Home() {
             options={
               pill ? (
                 <ComposerPill
-                  label={pill.effort ? `${pill.name} · ${pill.effort}` : pill.name}
+                  label={pill.name}
+                  detail={pill.effort}
                   leading={<ModelMark model={model ?? ""} size={14} color={c.fg} />}
                   onPress={() => {
                     catalog.refresh();
