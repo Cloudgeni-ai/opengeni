@@ -91,6 +91,14 @@ their existing authority checks. Explicit `includeEvidence: true` searches or
 the browser's **Include supporting evidence** control expose supporting sources.
 Collection membership does not change source purpose or access.
 
+Entry listing and search accept optional `createdSince`, a timezone-qualified ISO
+datetime (for example `2026-10-01T00:00:00Z`). It includes entries whose original
+`createdAt` is at or after the cutoff; editing, revising or publishing an older
+entry does not make it newly created. Rolling migration **0638** applies this
+filter in the authorized database candidate set before keyword/vector ranking
+and pagination, for every view and scope. It grants no access. Omission preserves
+existing behavior, and changing the cutoff invalidates an existing search cursor.
+
 Historical agent-prepared file sources and non-migrated conversation sources are
 classified by typed preparation/provenance identity; migrated reference records
 are preserved. No source body, original file, decision or evidence link is

@@ -80,6 +80,7 @@ test("hybrid fallback keeps lexical recall and passes the exact scope and cursor
     {
       query: "Acme renewal renew contract expiration renewal date",
       scope: "workspace",
+      createdSince: "2026-10-01T00:00:00Z",
       cursor: "page-2",
     },
     unavailable,
@@ -90,6 +91,7 @@ test("hybrid fallback keeps lexical recall and passes the exact scope and cursor
     query: '"Acme" OR "renewal" OR "renew" OR "contract" OR "expiration" OR "date"',
     mode: "keyword",
     scope: "workspace",
+    createdSince: "2026-10-01T00:00:00Z",
     cursor: "page-2",
   });
 });
