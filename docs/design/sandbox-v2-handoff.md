@@ -29,7 +29,36 @@ net reduction in production complexity has been established.
 
 The product goal is a persistent computer for each workspace that feels instantly
 available and costs very little when unused. Evaluate every provider and design
-against these seven priorities; they are targets, not guarantees of this prototype.
+against these seven priorities; they are tradeoffs, not an ordered checklist or
+guarantees of this prototype. A provider need not maximize every dimension.
+
+### Weight the decision toward ultra-light workflow economics
+
+Cost is a central selection criterion, especially the cost of keeping an
+ultra-light workflow available while it does little work or waits on a model or
+network. Evaluate a synthetic planning scenario with **95% or more ultra-light
+workflows** and a small heavy tail. This is an unvalidated workload assumption,
+not measured usage; vary the mix before choosing a provider.
+
+Elasticity matters because the common light case should not pay for the rare
+peak. Measure both CPU and RAM billing floors, actual use, automatic growth,
+post-burst reclamation and suspension. Cheap sleep alone does not solve the cost
+of a lightly active workspace that cannot yet sleep.
+
+Disk and process continuity are separate benefits to weigh alongside cost,
+elasticity, latency and operational complexity. Neither automatically outranks
+the other, and full process continuity is not a universal provider admission
+requirement. A cheaper option with safe, acceptable process restart behavior can
+beat a more persistent option; continuity can also justify its cost when avoiding
+lost in-memory work, repeated setup or disruptive restarts matters to a workload.
+State the tradeoff explicitly rather than rejecting every imperfect candidate.
+
+Compare total cost per completed workflow and across the workload mix: active and
+waiting time, retained memory/storage, wake/setup/restart work, and operating
+burden. Weight by duration and consumption as well as workflow count: a 5% heavy
+tail can still dominate spend. Keep isolation, authorization, durable-work
+correctness and uncertainty handling as safety constraints; restarting services
+must never mean blindly replaying an operation with an unknown outcome.
 
 | Priority | Desired outcome |
 | --- | --- |
@@ -46,8 +75,9 @@ against these seven priorities; they are targets, not guarantees of this prototy
 - **Disk persistence:** files and installed tools survive, but programs may need
   to restart. A retained disk alone does not preserve a running workspace.
 - **Process continuity:** running terminals, servers and other programs resume
-  with their in-memory state intact. The target for a planned pause is to freeze
-  the workspace and continue it on resume, rather than reconstruct its processes.
+  with their in-memory state intact. This is the preferred continuity experience
+  where its benefits justify the resource cost; process reconstruction is a
+  tradeoff to evaluate for workloads that can tolerate it.
 - **Connection recovery:** open network connections may still break across a
   pause; clients and services must reconnect. Resuming memory does not guarantee
   that external systems retained the connection or that credentials remain valid.
@@ -59,17 +89,21 @@ disk and process guarantees; success in one does not establish the others.
 Restarting a command from a journal is not process continuity.
 
 **Full process continuity across provider pause/resume remains unproven by this
-prototype.** Qualification must demonstrate memory, process-tree and terminal
-continuity separately from filesystem retention, and document any weaker modes
-and required recovery behavior. No provider is selected or qualified here.
+prototype.** Qualification must establish which memory, process-tree, terminal
+and filesystem guarantees an option actually provides, then assess any restart
+or recovery behavior against the selected workload's needs and cost. It need not
+demonstrate full process continuity for every workload. No provider is selected
+or qualified here.
 
 ## Working thesis and boundaries
 
-Prefer a provider that preserves the whole mutable Linux filesystem, including
-installed tools and home directories, while charging close to actual CPU/RAM
-consumption. Small active work should not reserve every workspace's possible
+The working hypothesis is that persistent machines with billing close to actual
+CPU/RAM consumption can reduce total cost and repeated setup. Whole-filesystem
+and process retention are benefits to price, not reasons to ignore a cheaper
+alternative. Small active work should not reserve every workspace's possible
 peak. Automatic growth, billable floors, host headroom and post-burst reclamation
-must be evaluated separately. Auto-suspend is a different property.
+must be evaluated separately. Auto-suspend is a different property. The prototype
+explores one architecture; the weighted comparison may justify revising it.
 
 Persistent storage and command recovery solve different problems. A command
 journal on an ephemeral disk does not make that disk durable. A snapshot API does
@@ -164,8 +198,9 @@ old-writer fencing, isolation, browser compatibility and operating cost all rema
 qualification work. A single-daemon Docker adapter does not establish those facts.
 
 No provider is selected or production-qualified by this branch. The next useful
-decision is which existing complete platform can satisfy the required contracts
-with the least application-owned lifecycle machinery.
+decision is which existing complete platform offers the best weighted outcome
+for the intended workload mix, including light-workflow cost, continuity and
+application-owned lifecycle machinery. Do not select on one feature alone.
 
 ## Validation and reproduction
 
@@ -211,8 +246,10 @@ production credential policy, guest isolation or fleet economics.
 
 ## Handoff order and merge gates
 
-1. Review this map, the design and the journal contract. Decide whether the
-   provider can remove routine application archive/rotation responsibilities.
+1. Review this map, the design and the journal contract. Compare the weighted
+   workload economics and continuity tradeoffs, including whether reduced
+   application archive/rotation work offsets any extra resource cost. Revisit
+   the prototype's architecture if another tradeoff is better.
 2. Reconcile the prototype with current `main` before attempting a merge. This
    branch preserves an older base. Shared runtime, worker, database and release
    contract files have changed upstream. In particular, preserve current-main
@@ -221,10 +258,11 @@ production credential policy, guest isolation or fleet economics.
    observed collision; recheck the ledger and validate the merged schema.
 3. Qualify one managed provider or existing complete self-operated platform,
    including exact lifecycle dispatch/recovery, real billable units, useful work,
-   growth and shrinkage, root retention, process/memory continuity across
-   pause/resume, connection recovery, host loss and isolation. Adapt the lifecycle interface
-   to that provider's native automatic states rather than forcing false stop/wake
-   semantics onto it.
+   growth and shrinkage, root retention, available process/memory guarantees,
+   acceptable restart behavior, connection recovery, host loss and isolation.
+   Assess cost during ultra-light active/waiting periods as well as heavy bursts
+   and sleep. Adapt the lifecycle interface to that provider's native automatic
+   states rather than forcing false stop/wake semantics onto it.
 4. Finish rig scripts/images/checks/hooks and remaining resource/manifest kinds;
    install production credential, resource and background/MCP authority owners.
    Cross-attempt unfinished preparation adoption is not implemented.

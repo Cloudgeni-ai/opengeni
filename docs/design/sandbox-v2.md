@@ -10,9 +10,15 @@ the code map, provider comparison, validation instructions and remaining work.
 
 One group owns one durable provider machine. The machine is the workspace;
 OpenGeni does not build another routine backup, archive or rotation subsystem.
-Providers may preserve processes when suspended; disk continuity is required,
-process continuity must be observed. Connected Machines keep their existing
-ownership and execution path.
+The current prototype assumes durable disk lineage for command recovery; this
+is an implementation contract, not a ranking of disk above process continuity.
+Provider selection weighs both against ultra-light workflow cost, CPU/RAM
+elasticity, latency and operating burden, as described in the
+[handoff priorities](sandbox-v2-handoff.md#what-we-care-about). Full process
+continuity is a benefit to price, not a universal admission requirement. A better
+tradeoff may require revising this architecture without weakening durable-work
+or authorization correctness. Connected Machines keep their existing ownership
+and execution path.
 
 The control plane owns session authorization, accepted work, exact attempts,
 machine demand, transition identity and operation receipts. The provider owns
@@ -480,9 +486,11 @@ RAM restoration must not revive revoked credentials.
 Compare the same useful workload, not an equal nominal VM size. Most work can
 remain small while bursts need substantially more CPU or RAM. Record minimum
 billable floors, actual-versus-reserved billing, burst limits/pressure, and changes
-requiring restart. A tiny initial reservation with automatic growth is the primary
-requirement: lightweight active work must not reserve every machine's possible
-peak. Shrink and memory reclamation after a peak are useful secondary properties.
+requiring restart. Evaluate low initial reservations, automatic growth and
+post-burst shrink/reclamation together against total workload cost. Lightweight
+active work should not keep paying for every machine's possible or previous
+peak. Do not assign growth and reclamation a fixed primary/secondary ranking;
+their value depends on the workload's duration, resource use and waiting periods.
 An explicit resize endpoint or selecting a larger size at creation does not
 establish automatic growth. Verify each resource and provider class separately.
 Suspend and scale-to-zero are separate properties from resource elasticity.
