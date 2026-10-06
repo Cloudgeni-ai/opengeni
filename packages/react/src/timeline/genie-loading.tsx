@@ -40,9 +40,6 @@ export type GenieLoadingOptions = {
 };
 export const GenieLoadingOptionsContext = createContext<GenieLoadingOptions | undefined>(undefined);
 
-const PHRASES = GENIE_PREPARING_PHRASES;
-const WAITING_PHRASES = GENIE_WAITING_PHRASES;
-
 /**
  * Neutral defaults for conversations embedded in another product
  * (`SessionConversation`, `OpenGeniChat`), which should not carry Opengeni's
@@ -70,7 +67,11 @@ export function GenieLoading({
 }) {
   const options = useContext(GenieLoadingOptionsContext);
   const waiting = phase === "waiting";
-  const phrases = options?.phrases?.length ? options.phrases : waiting ? WAITING_PHRASES : PHRASES;
+  const phrases = options?.phrases?.length
+    ? options.phrases
+    : waiting
+      ? GENIE_WAITING_PHRASES
+      : GENIE_PREPARING_PHRASES;
   const theme = useThemeType(undefined);
   const [phrase, setPhrase] = useState(0);
   const [showDetails, setShowDetails] = useState(false);
