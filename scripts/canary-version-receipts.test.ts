@@ -310,6 +310,71 @@ test("a hidden large cohort fails within the original deadline and read quota", 
   expect(requests).toBeLessThanOrEqual(256);
 });
 
+test.each([
+  { count: 30, delayMs: 375, maxReads: 256 },
+  { count: 30, delayMs: 500, maxReads: 256 },
+  { count: 1, delayMs: 4500, maxReads: 6 },
+])("late visibility leaves time for both passes with response latency: %j", async (scenario) => {
+  let elapsed = 0,
+    requests = 0,
+    active = 0,
+    peak = 0;
+  const timers: { at: number; resolve: () => void }[] = [];
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve) => {
+      timers.push({ at: elapsed + ms, resolve });
+    });
+  const packages = Array.from({ length: scenario.count }, (_, index) =>
+    archive(`@example/package-${index}`),
+  );
+  const read: typeof readRegistryPackage = (name, _request, _base, options) =>
+    readRegistryPackage(
+      name,
+      async (url) => {
+        requests++;
+        active++;
+        peak = Math.max(peak, active);
+        try {
+          await sleep(scenario.delayMs);
+          return String(url).includes("/dist-tags")
+            ? Response.json({ latest: "1.0.0", canary: version })
+            : elapsed < 150_000
+              ? new Response(null, { status: 404 })
+              : Response.json({ name, version, dist });
+        } finally {
+          active--;
+        }
+      },
+      "https://registry.example.test",
+      options,
+    );
+  let settled = false;
+  const confirmation = confirmCanaryCohort(packages, read, {
+    now: () => elapsed,
+    sleep,
+    maxReads: scenario.maxReads,
+  });
+  confirmation.then(
+    () => { settled = true; },
+    () => { settled = true; },
+  );
+  for (let steps = 0; steps < 5000; steps++) {
+    if (settled) break;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    if (settled) break;
+    expect(timers.length).toBeGreaterThan(0);
+    timers.sort((a, b) => a.at - b.at);
+    elapsed = timers[0]!.at;
+    while (timers[0]?.at === elapsed) timers.shift()!.resolve();
+  }
+  expect(settled).toBe(true);
+  await confirmation;
+  expect(elapsed).toBeGreaterThanOrEqual(150_000);
+  expect(elapsed).toBeLessThan(180_000);
+  expect(requests).toBeLessThanOrEqual(scenario.maxReads);
+  expect(peak).toBeLessThanOrEqual(4);
+});
+
 test("invalid selected version paths fail before any registry request", async () => {
   let requests = 0;
   await expect(
