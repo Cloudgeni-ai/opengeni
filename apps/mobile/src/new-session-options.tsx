@@ -1,6 +1,13 @@
 import { NativeMenu, type MenuAction } from "@/native-menu";
 import { defaultRepositoryMountPath, normalizeRepositoryTransportUri } from "@opengeni/contracts";
-import type { GitHubRepository, MachineView, ResourceRef, SessionVisibility } from "@opengeni/sdk";
+import type {
+  Channel,
+  GitHubRepository,
+  MachineView,
+  ResourceRef,
+  SessionVisibility,
+  VariableSet,
+} from "@opengeni/sdk";
 import {
   fontStyle,
   Icon,
@@ -32,6 +39,35 @@ function selectableMachine(machine: MachineView): boolean {
   return machine.kind === "selfhosted" && !machine.isSessionGroup;
 }
 
+/** Built-in tool servers the workspace manages; the composer lists connectors only. */
+const BUILT_IN_TOOL_SERVERS = new Set(["opengeni", "files", "docs"]);
+
+export interface NewSessionConnector {
+  id: string;
+  name: string;
+}
+
+/** The choices a new chat carries, as the server-synced draft stores them. */
+export interface NewSessionChoices {
+  visibility: SessionVisibility;
+  repositoryIds: number[];
+  targetSandboxId: string | null;
+  /** The project (workspace channel); null is Default. */
+  channelId: string | null;
+  variableSetIds: string[];
+  /** Connectors turned off for this chat; the rest follow the workspace defaults. */
+  excludedConnectorIds: string[];
+}
+
+const EMPTY_CHOICES: NewSessionChoices = {
+  visibility: "workspace",
+  repositoryIds: [],
+  targetSandboxId: null,
+  channelId: null,
+  variableSetIds: [],
+  excludedConnectorIds: [],
+};
+
 export interface NewSessionOptions {
   visibility: SessionVisibility;
   canCreatePrivate: boolean;
@@ -43,38 +79,68 @@ export interface NewSessionOptions {
   /** Null runs on the workspace's managed sandbox. */
   targetSandboxId: string | null;
   setTargetSandboxId(next: string | null): void;
+  projects: Channel[];
+  channelId: string | null;
+  setChannelId(next: string | null): void;
+  variableSets: VariableSet[];
+  selectedVariableSetIds: string[];
+  toggleVariableSet(id: string): void;
+  connectors: NewSessionConnector[];
+  excludedConnectorIds: string[];
+  toggleConnector(id: string): void;
+  /** True once this workspace's lists have loaded (a restored draft can apply). */
+  ready: boolean;
+  /** The current choices, for the synced draft. */
+  choices: NewSessionChoices;
+  /** Apply choices restored from the synced draft. */
+  apply(next: Partial<NewSessionChoices>): void;
   /** Fields for `createSession` (resources excludes attachments). */
   request(): {
     visibility?: SessionVisibility;
     targetSandboxId?: string;
+    channelId?: string;
+    variableSetIds?: string[];
+    excludedMcpServerIds?: string[];
     resources: ResourceRef[];
   };
   reset(): void;
 }
 
 /**
- * The new chat's options behind the composer's +: who can see it, which
- * repositories it opens, and where it runs. Choices reset with the workspace.
+ * The new chat's options behind the composer's +: its project, who can see
+ * it, which repositories, variable sets and connectors it uses, and where it
+ * runs. A list without entries is simply not offered. Choices reset with the
+ * workspace.
  */
 export function useNewSessionOptions(workspaceId: string | null): NewSessionOptions {
   const { client } = useAccount();
-  const [state, setState] = useState<{
-    workspaceId: string | null;
-    visibility: SessionVisibility;
-    repositoryIds: number[];
-    targetSandboxId: string | null;
-  }>({ workspaceId, visibility: "workspace", repositoryIds: [], targetSandboxId: null });
+  const [state, setState] = useState<NewSessionChoices & { workspaceId: string | null }>({
+    workspaceId,
+    ...EMPTY_CHOICES,
+  });
   const [catalog, setCatalog] = useState<{
     workspaceId: string | null;
     canCreatePrivate: boolean;
     repositories: GitHubRepository[];
     machines: MachineView[];
-  }>({ workspaceId: null, canCreatePrivate: false, repositories: [], machines: [] });
+    projects: Channel[];
+    variableSets: VariableSet[];
+    connectors: NewSessionConnector[];
+  }>({
+    workspaceId: null,
+    canCreatePrivate: false,
+    repositories: [],
+    machines: [],
+    projects: [],
+    variableSets: [],
+    connectors: [],
+  });
 
   useEffect(() => {
     if (!workspaceId) return;
     let current = true;
-    // Each list is optional: a deployment without GitHub or machines simply omits it.
+    // Each list is optional: a deployment without GitHub, machines, projects,
+    // variable sets or connectors simply omits that choice.
     void Promise.all([
       client
         .getSessionTenancyCreateCapabilities(workspaceId)
@@ -88,28 +154,55 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
         .listMachines(workspaceId)
         .then((response) => response.machines.filter(selectableMachine))
         .catch(() => [] as MachineView[]),
-    ]).then(([canCreatePrivate, repositories, machines]) => {
-      if (current) setCatalog({ workspaceId, canCreatePrivate, repositories, machines });
+      client.listChannels(workspaceId).catch(() => [] as Channel[]),
+      client
+        .listVariableSets(workspaceId)
+        .then((sets) => sets.filter((set) => set.status === "active"))
+        .catch(() => [] as VariableSet[]),
+      client
+        .listCapabilities(workspaceId)
+        .then((catalog) =>
+          catalog.items.flatMap((item) =>
+            item.kind === "mcp" &&
+            item.enabled &&
+            item.runtime.available &&
+            item.runtime.mcpServerId &&
+            !BUILT_IN_TOOL_SERVERS.has(item.runtime.mcpServerId)
+              ? [{ id: item.runtime.mcpServerId, name: item.name }]
+              : [],
+          ),
+        )
+        .catch(() => [] as NewSessionConnector[]),
+    ]).then(([canCreatePrivate, repositories, machines, projects, variableSets, connectors]) => {
+      if (current) {
+        setCatalog({
+          workspaceId,
+          canCreatePrivate,
+          repositories,
+          machines,
+          projects,
+          variableSets,
+          connectors,
+        });
+      }
     });
     return () => {
       current = false;
     };
   }, [client, workspaceId]);
 
-  const own =
-    state.workspaceId === workspaceId
-      ? state
-      : { workspaceId, visibility: "workspace" as const, repositoryIds: [], targetSandboxId: null };
+  const own = state.workspaceId === workspaceId ? state : { workspaceId, ...EMPTY_CHOICES };
   const ready = catalog.workspaceId === workspaceId;
   const repositories = ready ? catalog.repositories : [];
   const machines = ready ? catalog.machines : [];
+  const projects = ready ? catalog.projects : [];
+  const variableSets = ready ? catalog.variableSets : [];
+  const connectors = ready ? catalog.connectors : [];
   const canCreatePrivate = ready && catalog.canCreatePrivate;
   const patch = useCallback(
-    (next: Partial<typeof state>) =>
+    (next: Partial<NewSessionChoices>) =>
       setState((current) => ({
-        ...(current.workspaceId === workspaceId
-          ? current
-          : { workspaceId, visibility: "workspace", repositoryIds: [], targetSandboxId: null }),
+        ...(current.workspaceId === workspaceId ? current : { workspaceId, ...EMPTY_CHOICES }),
         ...next,
         workspaceId,
       })),
@@ -122,6 +215,25 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
   const selectedRepositoryIds = own.repositoryIds.filter((id) =>
     repositories.some((repo) => repo.id === id),
   );
+  const channelId = projects.some((project) => project.id === own.channelId) ? own.channelId : null;
+  const selectedVariableSetIds = own.variableSetIds.filter((id) =>
+    variableSets.some((set) => set.id === id),
+  );
+  const excludedConnectorIds = own.excludedConnectorIds.filter((id) =>
+    connectors.some((connector) => connector.id === id),
+  );
+  const toggle = <T,>(list: T[], value: T) =>
+    list.includes(value) ? list.filter((each) => each !== value) : [...list, value];
+  const choices: NewSessionChoices = ready
+    ? {
+        visibility,
+        repositoryIds: selectedRepositoryIds,
+        targetSandboxId,
+        channelId,
+        variableSetIds: selectedVariableSetIds,
+        excludedConnectorIds,
+      }
+    : own;
 
   return {
     visibility,
@@ -129,23 +241,41 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
     setVisibility: (next) => patch({ visibility: next }),
     repositories,
     selectedRepositoryIds,
-    toggleRepository: (id) =>
-      patch({
-        repositoryIds: own.repositoryIds.includes(id)
-          ? own.repositoryIds.filter((each) => each !== id)
-          : [...own.repositoryIds, id],
-      }),
+    toggleRepository: (id) => patch({ repositoryIds: toggle(own.repositoryIds, id) }),
     machines,
     targetSandboxId,
     setTargetSandboxId: (next) => patch({ targetSandboxId: next }),
+    projects,
+    channelId,
+    setChannelId: (next) => patch({ channelId: next }),
+    variableSets,
+    selectedVariableSetIds,
+    toggleVariableSet: (id) => patch({ variableSetIds: toggle(own.variableSetIds, id) }),
+    connectors,
+    excludedConnectorIds,
+    toggleConnector: (id) =>
+      patch({ excludedConnectorIds: toggle(own.excludedConnectorIds, id).sort() }),
+    ready,
+    choices,
+    apply: (next) => patch(next),
     request: () => ({
       ...(visibility === "private" ? { visibility } : {}),
       ...(targetSandboxId ? { targetSandboxId } : {}),
+      ...(channelId ? { channelId } : {}),
+      ...(selectedVariableSetIds.length > 0 ? { variableSetIds: selectedVariableSetIds } : {}),
+      ...(excludedConnectorIds.length > 0 ? { excludedMcpServerIds: excludedConnectorIds } : {}),
       resources: repositories
         .filter((repo) => selectedRepositoryIds.includes(repo.id))
         .map(gitHubRepositoryResource),
     }),
-    reset: () => patch({ repositoryIds: [] }),
+    // A new chat starts in the same project, as web keeps the selected project.
+    reset: () =>
+      patch({
+        repositoryIds: [],
+        variableSetIds: [],
+        excludedConnectorIds: [],
+        visibility: "workspace",
+      }),
   };
 }
 
@@ -175,6 +305,26 @@ export function ComposerPlusMenu(props: {
   ];
   if (options) {
     const sessionActions: MenuAction[] = [];
+    if (options.projects.length > 0) {
+      const project = options.projects.find((each) => each.id === options.channelId);
+      sessionActions.push({
+        id: "project",
+        title: `Project · ${project?.name ?? "Default"}`,
+        image: "folder",
+        subactions: [
+          {
+            id: "project:default",
+            title: "Default",
+            state: options.channelId === null ? "on" : "off",
+          },
+          ...options.projects.map((each) => ({
+            id: `project:${each.id}`,
+            title: each.name,
+            state: each.id === options.channelId ? ("on" as const) : ("off" as const),
+          })),
+        ],
+      });
+    }
     if (options.repositories.length > 0) {
       sessionActions.push({
         id: "repositories",
@@ -209,6 +359,38 @@ export function ComposerPlusMenu(props: {
             attributes: { disabled: each.state !== "online" },
           })),
         ],
+      });
+    }
+    if (options.connectors.length > 0) {
+      const off = options.excludedConnectorIds.length;
+      sessionActions.push({
+        id: "connectors",
+        title: off > 0 ? `Connectors · ${off} off` : "Connectors",
+        image: "puzzlepiece.extension",
+        subactions: options.connectors.map((each) => ({
+          id: `connector:${each.id}`,
+          title: each.name,
+          state: options.excludedConnectorIds.includes(each.id)
+            ? ("off" as const)
+            : ("on" as const),
+        })),
+      });
+    }
+    if (options.variableSets.length > 0) {
+      sessionActions.push({
+        id: "variable-sets",
+        title:
+          options.selectedVariableSetIds.length > 0
+            ? `Variable sets · ${options.selectedVariableSetIds.length}`
+            : "Variable sets",
+        image: "key",
+        subactions: options.variableSets.map((each) => ({
+          id: `variable-set:${each.id}`,
+          title: each.name,
+          state: options.selectedVariableSetIds.includes(each.id)
+            ? ("on" as const)
+            : ("off" as const),
+        })),
       });
     }
     if (options.canCreatePrivate) {
@@ -248,6 +430,10 @@ export function ComposerPlusMenu(props: {
         if (event === "photos") props.onPickImages();
         else if (event === "files") props.onPickFiles();
         else if (kind === "repository" && value) options?.toggleRepository(Number(value));
+        else if (kind === "project" && value)
+          options?.setChannelId(value === "default" ? null : value);
+        else if (kind === "connector" && value) options?.toggleConnector(value);
+        else if (kind === "variable-set" && value) options?.toggleVariableSet(value);
         else if (kind === "runs-on" && value)
           options?.setTargetSandboxId(value === "managed" ? null : value);
         else if (kind === "visibility" && (value === "private" || value === "workspace"))
@@ -317,13 +503,33 @@ export function NewSessionOptionChips({ options }: { options: NewSessionOptions 
     () => options.repositories.filter((repo) => options.selectedRepositoryIds.includes(repo.id)),
     [options.repositories, options.selectedRepositoryIds],
   );
-  if (repos.length === 0 && !machine && options.visibility !== "private") return null;
+  const project = options.projects.find((each) => each.id === options.channelId);
+  const sets = options.variableSets.filter((set) =>
+    options.selectedVariableSetIds.includes(set.id),
+  );
+  const off = options.excludedConnectorIds.length;
+  if (
+    repos.length === 0 &&
+    !machine &&
+    !project &&
+    sets.length === 0 &&
+    off === 0 &&
+    options.visibility !== "private"
+  )
+    return null;
   return (
     <ScrollView
       horizontal
       showsHorizontalScrollIndicator={false}
       contentContainerStyle={{ gap: 6, paddingHorizontal: 12, paddingTop: 12 }}
     >
+      {project ? (
+        <OptionChip
+          icon="folder"
+          label={project.name}
+          onRemove={() => options.setChannelId(null)}
+        />
+      ) : null}
       {options.visibility === "private" ? (
         <OptionChip
           icon="lock"
@@ -337,6 +543,17 @@ export function NewSessionOptionChips({ options }: { options: NewSessionOptions 
           label={machine.name}
           onRemove={() => options.setTargetSandboxId(null)}
         />
+      ) : null}
+      {sets.map((set) => (
+        <OptionChip
+          key={set.id}
+          icon="key-round"
+          label={set.name}
+          onRemove={() => options.toggleVariableSet(set.id)}
+        />
+      ))}
+      {off > 0 ? (
+        <OptionChip icon="plug" label={`${off} connector${off === 1 ? "" : "s"} off`} />
       ) : null}
       {repos.map((repo) => (
         <OptionChip

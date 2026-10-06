@@ -32,6 +32,8 @@ export interface NativeFileAttachmentsResult {
   remove(id: string): void;
   clear(): void;
   clearError(): void;
+  /** Show already-uploaded files (a restored draft) as ready attachments. */
+  restoreReady(files: Iterable<FileAsset>): void;
 }
 
 export interface NativeAttachmentScope {
@@ -340,6 +342,26 @@ export function useNativeFileAttachments(input: {
     setError(null);
   }, []);
   const clearError = useCallback(() => setError(null), []);
+  const restoreReady = useCallback((files: Iterable<FileAsset>) => {
+    const restored = [...files];
+    setAttachments((current) => {
+      const kept = current.filter((entry) => entry.status !== "ready");
+      return [
+        ...restored.map(
+          (file): NativeAttachment => ({
+            id: `restored:${file.id}`,
+            name: file.filename,
+            contentType: file.contentType,
+            sizeBytes: file.sizeBytes,
+            kind: file.contentType.startsWith("image/") ? "image" : "document",
+            status: "ready",
+            file,
+          }),
+        ),
+        ...kept,
+      ];
+    });
+  }, []);
 
   const visibleState = projectNativeAttachmentScopeState(scopeMatches, attachments, error);
   const visibleAttachments = visibleState.attachments;
@@ -369,5 +391,6 @@ export function useNativeFileAttachments(input: {
     remove,
     clear,
     clearError,
+    restoreReady,
   };
 }

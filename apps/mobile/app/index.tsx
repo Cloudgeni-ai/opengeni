@@ -37,6 +37,7 @@ import {
   NewSessionOptionChips,
   useNewSessionOptions,
 } from "@/new-session-options";
+import { useHomeDraftSync } from "@/new-session-draft-sync";
 import { SignInScreen } from "@/sign-in-screen";
 import { AppThemeProvider } from "@/theme";
 import { useComposerVoice } from "@/voice";
@@ -176,6 +177,28 @@ function Home() {
     crypto: adapters.crypto,
   });
   const options = useNewSessionOptions(workspaceId);
+  // The draft is saved to the server as web's is, so it survives leaving the
+  // screen, relaunching, and continues on another device or the web.
+  const draftSync = useHomeDraftSync({
+    client,
+    workspaceId,
+    text: draft,
+    setText: setDraft,
+    model,
+    effort,
+    latencyMode,
+    modelProvided: ownPick !== null,
+    applyModel: (nextModel, nextEffort, nextLatency) =>
+      setPicked({
+        workspaceId,
+        model: nextModel,
+        effort: nextEffort,
+        latencyMode: nextLatency,
+      }),
+    options,
+    attachments,
+    suspend: creating,
+  });
   const voice = useComposerVoice({ workspaceId, value: draft, setValue: setDraft, scope: "home" });
   const attached = attachments.readyResources.length > 0;
   const canCreate =
@@ -190,6 +213,8 @@ function Home() {
     if (!workspaceId || !canCreate) return;
     setCreating(true);
     try {
+      // The exact snapshot being sent; acknowledged once the session exists.
+      const flushed = await draftSync.flushForSend().catch(() => null);
       const chosen = options.request();
       const created = await client.createSession(workspaceId, {
         // A file-only message still says what it carries, as the web composer does.
@@ -199,8 +224,14 @@ function Home() {
         ...(latencyMode !== "standard" ? { latencyMode } : {}),
         ...(chosen.visibility ? { visibility: chosen.visibility } : {}),
         ...(chosen.targetSandboxId ? { targetSandboxId: chosen.targetSandboxId } : {}),
+        ...(chosen.channelId ? { channelId: chosen.channelId } : {}),
+        ...(chosen.variableSetIds ? { variableSetIds: chosen.variableSetIds } : {}),
+        ...(chosen.excludedMcpServerIds
+          ? { excludedMcpServerIds: chosen.excludedMcpServerIds }
+          : {}),
         resources: [...chosen.resources, ...attachments.readyResources],
       });
+      if (flushed) await draftSync.acknowledgeConsumed(flushed).catch(() => null);
       setDraft("");
       attachments.clear();
       options.reset();
