@@ -91,7 +91,7 @@ Release and publishing guidance starts here; executable truth lives in [`package
 
 **Staging:** dispatch `staging-canary-dispatch.yml` with any `main` SHA whose `canary-sha-*` tags already exist. Pending changesets are allowed. Missing tags fail closed; do not rebuild unsigned `:ci` images.
 
-**Canary npm:** dispatch `publish-canary.yml` to publish `{next-patch}-canary.N` with dist-tag `canary` (committed `1.0.0` publishes `1.0.2-canary.N`, skipping a retired patch), so canaries sort after the committed release. This does not consume changeset files or move `latest`.
+**Canary packages:** dispatch `publish-canary.yml` on `main` with `source_sha` equal to that workflow run's exact `main` commit. The workflow, checked-out source, and publisher must all be that commit; an older ancestor is rejected. The workflow uses pinned Bun to build and pack, then the official publishing library under Bun with registry-token authentication and GitHub OIDC provenance. It publishes `{next-patch}-canary.N` with dist-tag `canary` (committed `1.0.0` publishes `1.0.2-canary.N`, skipping a retired patch), so canaries sort after the committed release. It does not consume changeset files or move `latest`; a new package with no `latest` tag remains without one.
 
 In GitHub Actions, `N` has a floor derived from the workflow run ID and attempt
 (`run ID * 1000 + attempt`), so retries do not reuse versions hidden by stale
