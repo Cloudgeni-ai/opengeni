@@ -32,8 +32,7 @@ import {
 } from "./decisions";
 import { QueueDock } from "./queue-dock";
 import { SessionCommandsList, SessionSignals } from "./session-signals";
-import { useSessionBackgroundCommands } from "@opengeni/react/session";
-import type { ClientModel, OpenGeniClient } from "@opengeni/sdk";
+import type { ClientModel, OpenGeniClient, SessionBackgroundCommand } from "@opengeni/sdk";
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 
@@ -442,10 +441,32 @@ function NativeSessionCommands(props: {
   workspaceId: string;
   sessionId: string;
 }) {
-  const commands = useSessionBackgroundCommands(props.sessionId, {
-    client: props.client,
-    workspaceId: props.workspaceId,
-    pollIntervalMs: 3_000,
-  });
-  return <SessionCommandsList commands={commands} />;
+  const { client, workspaceId, sessionId } = props;
+  const [commands, setCommands] = useState<SessionBackgroundCommand[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  const load = useCallback(async () => {
+    try {
+      const response = await client.listSessionBackgroundCommands(workspaceId, sessionId);
+      setCommands(response.commands);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause : new Error(String(cause)));
+    } finally {
+      setLoading(false);
+    }
+  }, [client, sessionId, workspaceId]);
+  useEffect(() => {
+    void load();
+    const timer = setInterval(() => void load(), 3_000);
+    return () => clearInterval(timer);
+  }, [load]);
+  const cancel = useCallback(
+    async (commandId: string) => {
+      await client.cancelSessionBackgroundCommand(workspaceId, sessionId, commandId);
+      await load();
+    },
+    [client, load, sessionId, workspaceId],
+  );
+  return <SessionCommandsList commands={{ commands, loading, error, cancel }} />;
 }
