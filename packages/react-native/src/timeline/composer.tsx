@@ -119,8 +119,11 @@ export function ComposerSurface({
   if (glass) {
     // Hosts must keep this surface's ancestors free of animated opacity: iOS
     // does not render glass that was mounted beneath a fading parent.
+    // The glass keeps the appearance it was created with, so a change of
+    // light or dark mounts a fresh one.
     return (
       <GlassView
+        key={theme.scheme}
         glassEffectStyle="regular"
         colorScheme={theme.scheme}
         style={[{ borderRadius: radius }, style]}
