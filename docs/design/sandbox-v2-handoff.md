@@ -25,6 +25,44 @@ This is substantial prototype code, not just research notes. It currently adds a
 parallel implementation: **no legacy sandbox subsystem has been removed** and no
 net reduction in production complexity has been established.
 
+## What we care about
+
+The product goal is a persistent computer for each workspace that feels instantly
+available and costs very little when unused. Evaluate every provider and design
+against these seven priorities; they are targets, not guarantees of this prototype.
+
+| Priority | Desired outcome |
+| --- | --- |
+| Continuity | Preserve the full mutable filesystem, installed tools and work, plus running processes and their memory across supported pause/resume transitions. |
+| Elasticity | CPU and RAM grow with demand and shrink after a burst; unused compute is released and idle cost approaches zero. Evaluate CPU, RAM, billing floors and reclamation separately. |
+| Speed | Fast first startup, wake, reconnection and command execution, including after a long idle period. |
+| Reliability | Recover from crashes, disconnects and lost replies without losing durable work or blindly repeating commands whose outcome is uncertain. |
+| Isolation | Separate customers and workspaces; protect secrets and infrastructure from sandbox code, and preserve current authorization through recovery. |
+| Capability | Support real development: terminals, background processes, networking, previews, installed tools and large projects. |
+| Cost and simplicity | Low total cost at fleet scale, little operational burden and minimal provider-specific application machinery. Include storage, idle charges and operations, not just active compute. |
+
+### Continuity includes processes, not just disk
+
+- **Disk persistence:** files and installed tools survive, but programs may need
+  to restart. A retained disk alone does not preserve a running workspace.
+- **Process continuity:** running terminals, servers and other programs resume
+  with their in-memory state intact. The target for a planned pause is to freeze
+  the workspace and continue it on resume, rather than reconstruct its processes.
+- **Connection recovery:** open network connections may still break across a
+  pause; clients and services must reconnect. Resuming memory does not guarantee
+  that external systems retained the connection or that credentials remain valid.
+
+A paused process makes no progress. Background work that must keep running must
+retain active compute demand instead of allowing the workspace to suspend.
+Planned pause/resume, cold wake, restart and host failure must each have explicit
+disk and process guarantees; success in one does not establish the others.
+Restarting a command from a journal is not process continuity.
+
+**Full process continuity across provider pause/resume remains unproven by this
+prototype.** Qualification must demonstrate memory, process-tree and terminal
+continuity separately from filesystem retention, and document any weaker modes
+and required recovery behavior. No provider is selected or qualified here.
+
 ## Working thesis and boundaries
 
 Prefer a provider that preserves the whole mutable Linux filesystem, including
@@ -183,7 +221,8 @@ production credential policy, guest isolation or fleet economics.
    observed collision; recheck the ledger and validate the merged schema.
 3. Qualify one managed provider or existing complete self-operated platform,
    including exact lifecycle dispatch/recovery, real billable units, useful work,
-   growth, root retention, host loss and isolation. Adapt the lifecycle interface
+   growth and shrinkage, root retention, process/memory continuity across
+   pause/resume, connection recovery, host loss and isolation. Adapt the lifecycle interface
    to that provider's native automatic states rather than forcing false stop/wake
    semantics onto it.
 4. Finish rig scripts/images/checks/hooks and remaining resource/manifest kinds;
