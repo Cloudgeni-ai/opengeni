@@ -291,7 +291,7 @@ export type FailSessionAttemptInput = {
 export type FailSessionAttemptResult =
   | { action: "blocked" }
   | { action: "failed" }
-  | { action: "recovering" }
+  | { action: "recovering"; continueDelayMs?: number }
   | { action: "unclaimed" }
   | { action: "terminal" }
   | { action: "stale" };
@@ -323,6 +323,8 @@ export type PostClaimDatabaseRecoveryDetail = {
   providerRecoveryCount?: number;
   /** Safe classified provider cause paired with providerRecoveryCount. */
   providerFailureCode?: string;
+  /** Preserve a confirmed-overload Retry-After through checkpoint DB outages. */
+  providerRecoveryContinueDelayMs?: number;
   /** Persist the no-replay setup marker, not a new provider/setup attempt. */
   sandboxSetupOutcomeUnknown?: true;
   /** Preserve the exhausted budget for a command proven not dispatched. */
