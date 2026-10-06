@@ -576,6 +576,17 @@ export async function confirmCanaryCohort(
   const deadline = now() + timeoutMs;
   const pending = new Map(packages.map((pkg) => [pkg.name, pkg]));
   let reads = 0;
+  const receiptDurations = new Map<string, number>();
+  const estimatePassMs = (cohort: readonly CanaryArchive[]) => {
+    let duration = 0;
+    for (let offset = 0; offset < cohort.length; offset += 4) {
+      duration += Math.max(
+        0,
+        ...cohort.slice(offset, offset + 4).map((pkg) => receiptDurations.get(pkg.name) ?? 0),
+      );
+    }
+    return duration;
+  };
   const beforeAdditionalRequest = () => {
     if (reads >= maxReads) throw new Error("Canary receipt read quota exhausted");
     reads++;
@@ -593,6 +604,7 @@ export async function confirmCanaryCohort(
       const results = await Promise.allSettled(
         batch.map(async (pkg) => {
           let observation: string;
+          const startedAt = now();
           try {
             const remaining = deadline - now();
             if (remaining <= 0) return { pkg, observation: "read_exceeded_deadline" };
@@ -607,6 +619,7 @@ export async function confirmCanaryCohort(
             });
             observation =
               now() >= deadline ? "read_exceeded_deadline" : receiptObservation(pkg, current);
+            receiptDurations.set(pkg.name, now() - startedAt);
           } catch (error) {
             if (canaryErrorCategory(error) !== "request_timeout") throw error;
             observation = "request_timeout";
@@ -680,7 +693,26 @@ export async function confirmCanaryCohort(
         break;
       }
     }
-    const wait = Math.min(pollIntervalMs, deadline - now());
+    const remaining = deadline - now();
+    if (remaining <= 0) break;
+    // Each receipt reads tags and its selected version. Keep a complete fresh
+    // cohort in reserve, and spread the remaining polls across the deadline.
+    const finalReads = packages.length * 2;
+    const remainingPolls = Math.floor((maxReads - reads - finalReads) / (pending.size * 2));
+    if (remainingPolls <= 0) {
+      lastObservation = "read_limit";
+      break;
+    }
+    // Reserve the last pending pass and the complete final pass, using each
+    // batch's slowest completed duration and one scheduling margin.
+    const completionTime = Math.max(
+      CANARY_RECEIPT_REQUEST_TIMEOUT_MS,
+      estimatePassMs([...pending.values()]) + estimatePassMs(packages) + pollIntervalMs,
+    );
+    const wait = Math.min(
+      remaining,
+      Math.max(pollIntervalMs, (remaining - completionTime) / remainingPolls),
+    );
     if (wait > 0 && reads < maxReads) await sleep(wait);
   }
   const category = reads >= maxReads && now() < deadline ? "read_limit" : lastObservation;

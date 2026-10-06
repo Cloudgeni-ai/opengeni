@@ -214,6 +214,251 @@ test("a new package keeps its absent latest tag through both qualification passe
   expect(requests).toBe(4);
 });
 
+test("a large cohort can become visible late without spending its final read reserve", async () => {
+  const packages = Array.from({ length: 30 }, (_, index) => archive(`@example/package-${index}`));
+  let elapsed = 0;
+  const requests: number[] = [];
+  const read: typeof readRegistryPackage = (name, _request, _base, options) =>
+    readRegistryPackage(
+      name,
+      async (url) => {
+        requests.push(elapsed);
+        return String(url).includes("/dist-tags")
+          ? Response.json({ latest: "1.0.0", canary: version })
+          : elapsed < 150_000
+            ? new Response(null, { status: 404 })
+            : Response.json({ name, version, dist });
+      },
+      "https://registry.example.test",
+      options,
+    );
+  await confirmCanaryCohort(packages, read, {
+    now: () => elapsed,
+    sleep: async (ms) => {
+      elapsed += ms;
+    },
+  });
+  expect(requests.some((time) => time >= 150_000)).toBe(true);
+  expect(requests.length).toBeLessThanOrEqual(256);
+  expect(elapsed).toBeLessThan(180_000);
+});
+
+test("early matches are rechecked after delayed packages appear", async () => {
+  const packages = Array.from({ length: 30 }, (_, index) => archive(`@example/package-${index}`));
+  let elapsed = 0,
+    requests = 0,
+    firstPackageReads = 0;
+  const read: typeof readRegistryPackage = (name, _request, _base, options) =>
+    readRegistryPackage(
+      name,
+      async (url) => {
+        requests++;
+        if (String(url).includes("/dist-tags")) {
+          if (name === packages[0]!.name) firstPackageReads++;
+          return Response.json({
+            latest: firstPackageReads > 1 && name === packages[0]!.name ? "2.0.0" : "1.0.0",
+            canary: version,
+          });
+        }
+        return name !== packages[0]!.name && elapsed < 150_000
+          ? new Response(null, { status: 404 })
+          : Response.json({ name, version, dist });
+      },
+      "https://registry.example.test",
+      options,
+    );
+  await expect(
+    confirmCanaryCohort(packages, read, {
+      now: () => elapsed,
+      sleep: async (ms) => {
+        elapsed += ms;
+      },
+    }),
+  ).rejects.toThrow("Stable tag changed");
+  expect(firstPackageReads).toBe(2);
+  expect(elapsed).toBeGreaterThanOrEqual(150_000);
+  expect(elapsed).toBeLessThan(180_000);
+  expect(requests).toBeLessThanOrEqual(256);
+});
+
+test("a hidden large cohort fails within the original deadline and read quota", async () => {
+  const packages = Array.from({ length: 30 }, (_, index) => archive(`@example/package-${index}`));
+  let elapsed = 0,
+    requests = 0;
+  const read: typeof readRegistryPackage = (name, _request, _base, options) =>
+    readRegistryPackage(
+      name,
+      async (url) => {
+        requests++;
+        return String(url).includes("/dist-tags")
+          ? Response.json({ latest: "1.0.0", canary: version })
+          : new Response(null, { status: 404 });
+      },
+      "https://registry.example.test",
+      options,
+    );
+  await expect(
+    confirmCanaryCohort(packages, read, {
+      now: () => elapsed,
+      sleep: async (ms) => {
+        elapsed += ms;
+      },
+    }),
+  ).rejects.toThrow("read_limit");
+  expect(elapsed).toBeGreaterThanOrEqual(150_000);
+  expect(elapsed).toBeLessThanOrEqual(180_000);
+  expect(requests).toBeLessThanOrEqual(256);
+});
+
+test.each(
+  [
+    { count: 30, delayMs: 375, maxReads: 256, timeoutRequest: null },
+    { count: 30, delayMs: 500, maxReads: 256, timeoutRequest: null },
+    { count: 1, delayMs: 4500, maxReads: 6, timeoutRequest: null },
+    { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: "tags" },
+    { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: "version" },
+    { count: 30, delayMs: 375, maxReads: 256, timeoutRequest: "tags" },
+    { count: 30, delayMs: 375, maxReads: 256, timeoutRequest: "version" },
+    {
+      count: 30,
+      delayMs: 0,
+      maxReads: 256,
+      timeoutRequest: null,
+      slowRequest: "tags",
+      slowMs: 9000,
+    },
+    {
+      count: 30,
+      delayMs: 0,
+      maxReads: 256,
+      timeoutRequest: null,
+      slowRequest: "version",
+      slowMs: 9000,
+    },
+    {
+      count: 30,
+      delayMs: 375,
+      maxReads: 256,
+      timeoutRequest: null,
+      slowRequest: "tags",
+      slowMs: 9000,
+    },
+    {
+      count: 30,
+      delayMs: 0,
+      maxReads: 256,
+      timeoutRequest: null,
+      slowRequest: "tags",
+      slowMs: 9000,
+      repeatSlow: true,
+    },
+    {
+      count: 30,
+      delayMs: 0,
+      maxReads: 256,
+      timeoutRequest: null,
+      slowRequest: "version",
+      slowMs: 9000,
+      repeatSlow: true,
+    },
+    {
+      count: 30,
+      delayMs: 0,
+      maxReads: 256,
+      timeoutRequest: null,
+      slowRequest: "tags",
+      slowMs: 9000,
+      repeatSlow: true,
+      earlySlowMatch: true,
+    },
+  ].map((scenario) => ({
+    slowRequest: null as string | null,
+    slowMs: 0,
+    repeatSlow: false,
+    earlySlowMatch: false,
+    ...scenario,
+  })),
+)("late visibility survives response latency and transient timeouts: %j", async (scenario) => {
+  let elapsed = 0,
+    requests = 0,
+    timeouts = 0,
+    slowReads = 0,
+    active = 0,
+    peak = 0;
+  const timers: { at: number; resolve: () => void }[] = [];
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve) => {
+      timers.push({ at: elapsed + ms, resolve });
+    });
+  const packages = Array.from({ length: scenario.count }, (_, index) =>
+    archive(`@example/package-${index}`),
+  );
+  const read: typeof readRegistryPackage = (name, _request, _base, options) =>
+    readRegistryPackage(
+      name,
+      async (url) => {
+        requests++;
+        active++;
+        peak = Math.max(peak, active);
+        try {
+          const requestKind = String(url).includes("/dist-tags") ? "tags" : "version";
+          if (scenario.timeoutRequest === requestKind && timeouts === 0) {
+            timeouts++;
+            await sleep(10_000 - (requestKind === "version" ? scenario.delayMs : 0));
+            throw new DOMException("Synthetic receipt timeout", "TimeoutError");
+          }
+          const isSlow =
+            name === packages[0]!.name &&
+            scenario.slowRequest === requestKind &&
+            (scenario.repeatSlow || slowReads === 0);
+          if (isSlow) slowReads++;
+          await sleep(isSlow ? scenario.slowMs : scenario.delayMs);
+          return String(url).includes("/dist-tags")
+            ? Response.json({ latest: "1.0.0", canary: version })
+            : elapsed < 150_000 && !(scenario.earlySlowMatch && name === packages[0]!.name)
+              ? new Response(null, { status: 404 })
+              : Response.json({ name, version, dist });
+        } finally {
+          active--;
+        }
+      },
+      "https://registry.example.test",
+      options,
+    );
+  let settled = false;
+  const confirmation = confirmCanaryCohort(packages, read, {
+    now: () => elapsed,
+    sleep,
+    maxReads: scenario.maxReads,
+  });
+  confirmation.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  for (let steps = 0; steps < 5000; steps++) {
+    if (settled) break;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    if (settled) break;
+    expect(timers.length).toBeGreaterThan(0);
+    timers.sort((a, b) => a.at - b.at);
+    elapsed = timers[0]!.at;
+    while (timers[0]?.at === elapsed) timers.shift()!.resolve();
+  }
+  expect(settled).toBe(true);
+  await confirmation;
+  expect(elapsed).toBeGreaterThanOrEqual(150_000);
+  expect(elapsed).toBeLessThan(180_000);
+  expect(requests).toBeLessThanOrEqual(scenario.maxReads);
+  expect(peak).toBeLessThanOrEqual(4);
+  expect(timeouts).toBe(scenario.timeoutRequest === null ? 0 : 1);
+  if (scenario.slowRequest !== null) expect(slowReads).toBeGreaterThan(0);
+  if (scenario.earlySlowMatch) expect(slowReads).toBeGreaterThanOrEqual(2);
+});
+
 test("invalid selected version paths fail before any registry request", async () => {
   let requests = 0;
   await expect(
