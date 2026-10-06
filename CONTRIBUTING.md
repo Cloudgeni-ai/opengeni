@@ -103,6 +103,11 @@ write stops without replay. Bounded safe receipts survive ordinary workflow fail
 a lost runner can still lose its artifact. Existing versions are never repaired in place.
 The final gate rereads the complete cohort within the original shared deadline,
 read quota and custody caps. These reads do not claim an atomic registry snapshot.
+Post-write receipt polling selects the current dist-tags document and the exact
+immutable version manifest rather than unrelated historical versions. Both GETs
+count toward the same 256-request budget and share one per-observation signal;
+the 180-second deadline and existing byte limits are unchanged. Pre-write discovery
+and occupied-version/stable-tag guards still use their existing metadata path.
 
 In GitHub Actions, `N` has a floor derived from the workflow run ID and attempt
 (`run ID * 1000 + attempt`), so retries do not reuse versions hidden by stale

@@ -508,6 +508,9 @@ runtime becomes healthy; it does not wait for later acceptance. See
 
 Canary publication freezes all archives before writing, retains each intent and
 HTTP acknowledgement, then checks the cohort with bounded read-only receipts.
+Receipt polling reads current tags and the selected immutable version, not full
+package history; both requests share the original deadline, GET quota and custody
+caps, including the final complete-cohort pass. Pre-write discovery stays unchanged.
 Unknown writes never replay automatically. Site pins and independent signed-byte
 acceptance remain separate gates; see `CONTRIBUTING.md`.
 
