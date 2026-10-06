@@ -201,7 +201,7 @@ jobs:
     needs: automation-admission
     if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 17
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
       unit_count: ${{ steps.plan.outputs.unit_count }}
@@ -931,7 +931,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.browser_lane_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 70
+    timeout-minutes: 71
     strategy:
       fail-fast: false
       matrix:

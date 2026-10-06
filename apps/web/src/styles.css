@@ -75,6 +75,10 @@
   --color-status-cancelled: var(--og-color-status-cancelled);
   --color-danger: var(--og-color-danger);
 
+  /* Chat updates are not lifecycle states. Keep unread and following-up
+     markers teal without recoloring neutral navigation or other statuses. */
+  --color-session-update: light-dark(#0f766e, #5ad4c5);
+
   /* Data visualization (Insights). Token classes, then series in fixed order.
      Validated with the dataviz palette checks against both canvases. */
   --color-chart-input: var(--og-chart-input);

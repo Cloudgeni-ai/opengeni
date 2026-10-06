@@ -63,14 +63,13 @@ export async function agentRunAdmissionDenial(
       if (balance.balanceMicros <= 0) return "insufficient_credits";
     }
   }
-  if (!externallyBilled) {
-    const refusal = await checkWorkspaceAllowance(services.db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      subjectId: input.initiatingHumanSubjectId ?? null,
-    });
-    if (refusal) return refusal.code;
-  }
+  const refusal = await checkWorkspaceAllowance(services.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.initiatingHumanSubjectId ?? null,
+    ...(externallyBilled ? { fundedWithoutCredits: true } : {}),
+  });
+  if (refusal) return refusal.code;
   if (
     services.settings.usageLimitsMode !== "static" &&
     services.settings.usageLimitsMode !== "managed"
