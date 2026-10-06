@@ -2415,7 +2415,8 @@ describe("release schema contract", () => {
       unfilteredSourceContract.migrations.some(
         (migration) => migration.path === knowledgeCreatedSinceMigration,
       )
-    ) appendedMigrationPaths.push(knowledgeCreatedSinceMigration);
+    )
+      appendedMigrationPaths.push(knowledgeCreatedSinceMigration);
     // The shared complete-contract assertion intentionally excludes these
     // branch-local migrations, but the governed hash must exclude them too.
     appendedMigrationPaths.unshift(
