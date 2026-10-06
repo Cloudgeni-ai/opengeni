@@ -44,7 +44,7 @@ Server configuration:
 | Variable | Purpose |
 | --- | --- |
 | `OPENGENI_NATIVE_APP_SCHEMES` | Callback schemes for sign-in (default `opengeni`). |
-| `OPENGENI_NATIVE_APP_IDS` | Bundle IDs / package names that may register for push (default `dev.opengeni.app`). |
+| `OPENGENI_NATIVE_APP_IDS` | Bundle IDs / package names that may register for push (default `ai.opengeni.app`). |
 | `OPENGENI_APNS_KEY_ID`, `OPENGENI_APNS_TEAM_ID`, `OPENGENI_APNS_PRIVATE_KEY` | APNs token auth (.p8). The bundle ID must be an App ID with Push Notifications in that team. Development builds use the APNs sandbox. |
 | `OPENGENI_FCM_SERVICE_ACCOUNT_JSON` | Firebase service account with the Cloud Messaging role. The Android build also needs that project's `google-services.json` (`android.googleServicesFile`). |
 

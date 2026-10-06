@@ -7,11 +7,11 @@
     "orientation": "default",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "bundleIdentifier": "dev.opengeni.app",
+      "bundleIdentifier": "ai.opengeni.app",
       "supportsTablet": true
     },
     "android": {
-      "package": "dev.opengeni.app",
+      "package": "ai.opengeni.app",
       "edgeToEdgeEnabled": true,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",

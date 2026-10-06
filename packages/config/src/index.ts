@@ -1538,7 +1538,7 @@ const SettingsSchema = z.object({
   nativeAppIds: z
     .array(z.string().regex(/^[A-Za-z0-9._-]{1,255}$/u))
     .min(1)
-    .default(["dev.opengeni.app"]),
+    .default(["ai.opengeni.app"]),
   apnsKeyId: z
     .string()
     .regex(/^[A-Z0-9]{10}$/u)

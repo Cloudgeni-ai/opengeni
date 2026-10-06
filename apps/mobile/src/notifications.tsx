@@ -33,7 +33,7 @@ function appId(): string {
   return (
     (Platform.OS === "ios"
       ? Constants.expoConfig?.ios?.bundleIdentifier
-      : Constants.expoConfig?.android?.package) ?? "dev.opengeni.app"
+      : Constants.expoConfig?.android?.package) ?? "ai.opengeni.app"
   );
 }
 

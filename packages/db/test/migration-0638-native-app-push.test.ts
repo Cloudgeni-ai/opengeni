@@ -161,7 +161,7 @@ describe("0638 native app push", () => {
     const device = await registerNativePushDevice(db(), {
       authSessionId: person.authSessionId,
       platform: "ios",
-      appId: "dev.opengeni.app",
+      appId: "ai.opengeni.app",
       environment: "development",
       token: "a".repeat(64),
       rules: ["needs_input", "failed", "needs_input"],
@@ -175,7 +175,7 @@ describe("0638 native app push", () => {
       registerNativePushDevice(db(), {
         authSessionId: crypto.randomUUID(),
         platform: "ios",
-        appId: "dev.opengeni.app",
+        appId: "ai.opengeni.app",
         environment: "development",
         token: "b".repeat(64),
         rules: ["failed"],
@@ -192,7 +192,7 @@ describe("0638 native app push", () => {
     await registerNativePushDevice(db(), {
       authSessionId: person.authSessionId,
       platform: "ios",
-      appId: "dev.opengeni.app",
+      appId: "ai.opengeni.app",
       environment: "development",
       token: "c".repeat(64),
       rules: ["needs_input", "failed"],
@@ -200,7 +200,7 @@ describe("0638 native app push", () => {
     await registerNativePushDevice(db(), {
       authSessionId: other.authSessionId,
       platform: "android",
-      appId: "dev.opengeni.app",
+      appId: "ai.opengeni.app",
       environment: "production",
       token: "d".repeat(64),
       rules: ["needs_input", "reply_ready", "failed"],
@@ -231,7 +231,7 @@ describe("0638 native app push", () => {
     await registerNativePushDevice(db(), {
       authSessionId: person.authSessionId,
       platform: "ios",
-      appId: "dev.opengeni.app",
+      appId: "ai.opengeni.app",
       environment: "development",
       token: "e".repeat(64),
       rules: ["agent"],
@@ -292,7 +292,7 @@ describe("0638 native app push", () => {
     await registerNativePushDevice(db(), {
       authSessionId: person.authSessionId,
       platform: "ios",
-      appId: "dev.opengeni.app",
+      appId: "ai.opengeni.app",
       environment: "development",
       token: "f".repeat(64),
       rules: ["failed"],
