@@ -22,6 +22,10 @@ import type { ActionCatalogEntry } from "../../apps/api/src/mcp/action-catalog-t
  */
 export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
   { pattern: /^\/v1\/auth\//, reason: "Opengeni sign-in itself" },
+  {
+    pattern: /^\/v1\/native-app\//,
+    reason: "signing the native app in and out, and its push device: the app's own credential",
+  },
   { pattern: /^\/v1\/identity(\/|$)/, reason: "sign-in methods and account recovery" },
   { pattern: /^\/v1\/mcp-connections\//, reason: "approving an agent sign-in" },
   {

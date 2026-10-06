@@ -15,6 +15,7 @@ import {
   allAgentCapabilities,
   legacyEffectiveAgentCapabilities,
   noneAgentCapabilities,
+  agentCapabilityEnabled,
   projectAgentEffectiveTools,
   resolveAgentConfig,
   resolveAgentToolFamilies,
@@ -271,10 +272,13 @@ describe("write-through", () => {
     ).toEqual({ tools, toolPolicy: policy });
   });
 
-  test('"none" keeps only runtime mechanics', () => {
+  test('"none" keeps runtime mechanics and reaching the person', () => {
+    // "none" still lets the agent ask the person, so humanInput's tools stay.
     expect(
       agentConfigFirstPartyMcpTools(none, DEFAULT_FIRST_PARTY_MCP_TOOLS).sort() as string[],
-    ).toEqual(["command_read", "command_wait", "set_session_title", "wait_for_input"].sort());
+    ).toEqual(
+      ["command_read", "command_wait", "notify_user", "set_session_title", "wait_for_input"].sort(),
+    );
   });
 
   test("each capability keeps exactly its tools", () => {
@@ -284,7 +288,11 @@ describe("write-through", () => {
       const kept = agentConfigFirstPartyMcpTools(config, FIRST_PARTY_MCP_TOOL_NAMES);
       for (const tool of FIRST_PARTY_MCP_TOOL_NAMES) {
         const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
-        const expected = owner === "runtime" || owner === "sandbox" || owner === id;
+        const expected =
+          owner === "runtime" ||
+          owner === "sandbox" ||
+          owner === id ||
+          agentCapabilityEnabled(noneAgentCapabilities(), owner);
         expect({ tool, kept: kept.includes(tool) }).toEqual({ tool, kept: expected });
       }
     }

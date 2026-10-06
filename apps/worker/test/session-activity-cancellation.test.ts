@@ -221,6 +221,33 @@ describe("post-claim database recovery wire classification", () => {
     expect(postClaimDatabaseRecoveryDetail(activityFailure(failure))).toEqual(providerDetail);
   });
 
+  test("the confirmed-overload checkpoint wire preserves only a valid bounded delay", () => {
+    const parse = (value: unknown) =>
+      postClaimDatabaseRecoveryDetail(
+        activityFailure(
+          ApplicationFailure.create({
+            message: POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
+            type: POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
+            details: [value],
+          }),
+        ),
+      );
+    const wire = {
+      ...detail,
+      providerFailureCode: "provider_overloaded",
+      providerRecoveryCount: 6,
+      providerRecoveryContinueDelayMs: 85_000,
+    };
+    expect(parse(wire)).toEqual(wire);
+    for (const delta of [
+      { providerRecoveryContinueDelayMs: undefined },
+      { providerRecoveryContinueDelayMs: -1 },
+      { providerRecoveryContinueDelayMs: 900_000 },
+      { providerFailureCode: "provider_unavailable" },
+    ])
+      expect(parse({ ...wire, ...delta })).toBeNull();
+  });
+
   test("accepts the setup no-replay checkpoint without new provider retry authority", () => {
     const setupDetail = { ...detail, sandboxSetupOutcomeUnknown: true };
     const failure = ApplicationFailure.create({

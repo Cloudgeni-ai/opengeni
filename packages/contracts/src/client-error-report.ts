@@ -143,6 +143,7 @@ export const CLIENT_PAGES = [
   "integration-return",
   "device",
   "connect-agent",
+  "native-sign-in",
   "reset-password",
   "setup-account",
   "account-auth",

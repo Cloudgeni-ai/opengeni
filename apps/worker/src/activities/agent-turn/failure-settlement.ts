@@ -67,9 +67,11 @@ import { BudgetExhaustedError } from "./admission";
 import {
   providerRecoveryExhaustedFailure,
   withModelRoutePresentation,
-  MAX_AUTOMATIC_PROVIDER_RECOVERIES,
   postClaimDatabaseRecoveryFailure,
   providerRecoveryResult,
+  providerRecoveryCode,
+  providerRecoveryLimit,
+  PROVIDER_OVERLOAD_RECOVERY_CODE,
   providerRetryAfterMs,
   escapedMcpTimeoutRecoveryFailure,
   preClaimAdmissionFailure,
@@ -2003,9 +2005,12 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       (failure.retryable && eventing.publish && eventing.turnStartedPublished))
   ) {
     const nextProviderRecoveryCount = attempt.providerRecoveryCount + 1;
+    const recoveryCode = providerRecoveryCode(error, failure);
     const recoveryResult = providerRecoveryResult({
-      failureCode: failure.code,
+      failureCode: recoveryCode,
       attemptNumber: nextProviderRecoveryCount,
+      recoveryStartedAt:
+        attempt.providerRecoveryCount > 0 ? attempt.providerRecoveryStartedAt : undefined,
       retryAfterMs: providerRetryAfterMs(error),
       jitterSample: Math.random(),
     });
@@ -2058,13 +2063,13 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
           turnId: attempt.turnId,
           triggerEventId: attempt.triggerEventId!,
           attemptId: input.attemptId,
-          reason: failure.code ?? "provider_unavailable",
+          reason: recoveryCode ?? "provider_unavailable",
           providerRecoveryCount: nextProviderRecoveryCount,
           detail: {
             ...agentRunRecoveryFailurePayload(error, failure),
             continueDelayMs: recoveryResult.continueDelayMs,
             providerRecoveryCount: nextProviderRecoveryCount,
-            maxProviderRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+            maxProviderRecoveryCount: providerRecoveryLimit(recoveryCode),
           },
         });
         if (recovery.action === "stale") {
@@ -2146,8 +2151,11 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
               triggerEventId: attempt.triggerEventId!,
               executionGeneration: attempt.executionGeneration,
               providerRecovery: {
-                failureCode: failure.code ?? "provider_unavailable",
+                failureCode: recoveryCode ?? "provider_unavailable",
                 providerRecoveryCount: nextProviderRecoveryCount,
+                ...(recoveryCode === PROVIDER_OVERLOAD_RECOVERY_CODE
+                  ? { continueDelayMs: recoveryResult.continueDelayMs }
+                  : {}),
               },
             })
           : setupRecoveryExhausted

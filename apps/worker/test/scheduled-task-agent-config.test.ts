@@ -268,6 +268,7 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
         "goal_resume",
         "goal_set",
         "goal_update",
+        "notify_user",
         "set_session_title",
         "wait_for_input",
       ].filter((tool) => DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(tool as never)),
