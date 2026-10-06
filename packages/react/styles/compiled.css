@@ -2024,6 +2024,9 @@
 :where(.og-root).h-1\.5,:where(.og-root) .h-1\.5 {
     height: calc(var(--spacing) * 1.5);
   }
+:where(.og-root).h-2,:where(.og-root) .h-2 {
+    height: calc(var(--spacing) * 2);
+  }
 :where(.og-root).h-2\.5,:where(.og-root) .h-2\.5 {
     height: calc(var(--spacing) * 2.5);
   }
@@ -2209,6 +2212,9 @@
   }
 :where(.og-root).w-1\/2,:where(.og-root) .w-1\/2 {
     width: calc(1 / 2 * 100%);
+  }
+:where(.og-root).w-2,:where(.og-root) .w-2 {
+    width: calc(var(--spacing) * 2);
   }
 :where(.og-root).w-3,:where(.og-root) .w-3 {
     width: calc(var(--spacing) * 3);
@@ -5105,6 +5111,16 @@
         background-color: var(--og-color-accent);
         @supports (color: color-mix(in lab, red, red)) {
           background-color: color-mix(in oklab, var(--og-color-accent) 10%, transparent);
+        }
+      }
+    }
+  }
+:where(.og-root).hover\:bg-og-accent\/20,:where(.og-root) .hover\:bg-og-accent\/20 {
+    &:hover {
+      @media (hover: hover) {
+        background-color: var(--og-color-accent);
+        @supports (color: color-mix(in lab, red, red)) {
+          background-color: color-mix(in oklab, var(--og-color-accent) 20%, transparent);
         }
       }
     }

@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import {
   assertCanonicalArtifactKernelWasmRebuildHost,
   buildArtifactKernelWasmPackages,
+  checkArtifactKernelWasmPackages,
   refreshArtifactKernelWasmPackageIdentities,
 } from "./build-artifact-kernel-wasm-packages";
 
@@ -246,6 +247,134 @@ test("restricts exact Rust byte regeneration to the canonical builder host", () 
   expect(() => assertCanonicalArtifactKernelWasmRebuildHost("linux", "x64", repoRoot)).toThrow(
     canonicalRoot,
   );
+});
+
+test("retains executable rebuild evidence for every modality and still fails the byte gate", async () => {
+  const rebuilt = await fixture();
+  const committed = await fixture();
+  const builds = await buildArtifactKernelWasmPackages({
+    assetRoot: rebuilt.assetRoot,
+    outputPackagesRoot: rebuilt.packagesRoot,
+  });
+  await buildArtifactKernelWasmPackages({
+    assetRoot: committed.assetRoot,
+    outputPackagesRoot: committed.packagesRoot,
+  });
+  const changed = join(committed.packagesRoot, "artifact-kernel-wasm-spreadsheet/dist/index.js");
+  await writeFile(changed, `${await readFile(changed, "utf8")}\n`);
+  const before = await digestTree(
+    join(committed.packagesRoot, "artifact-kernel-wasm-spreadsheet/dist"),
+  );
+  const diagnosticOutput = join(committed.root, "diagnostics");
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      `import { checkArtifactKernelWasmPackages } from ${JSON.stringify(join(repoRoot, "scripts/build-artifact-kernel-wasm-packages.ts"))};
+await checkArtifactKernelWasmPackages(${JSON.stringify(builds)}, ${JSON.stringify({
+        committedPackagesRoot: committed.packagesRoot,
+        rebuilt: true,
+        assetRoot: rebuilt.assetRoot,
+        diagnosticOutput,
+      })});`,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const stderr = await new Response(child.stderr).text();
+  expect(await child.exited).not.toBe(0);
+  expect(stderr).toContain("committed package differs from a clean Rust rebuild");
+  expect(
+    await digestTree(join(committed.packagesRoot, "artifact-kernel-wasm-spreadsheet/dist")),
+  ).toEqual(before);
+  const comparison = JSON.parse(
+    await readFile(join(diagnosticOutput, "comparison.json"), "utf8"),
+  ) as {
+    schemaVersion: number;
+    packages: Array<{
+      identity: unknown;
+      matches: boolean;
+      files: Array<{
+        path: string;
+        matches: boolean;
+        rebuiltSha256: string;
+        committedSha256: string;
+      }>;
+    }>;
+  };
+  expect(comparison.schemaVersion).toBe(1);
+  expect(comparison.packages.map(({ matches }) => matches)).toEqual([false, true, true]);
+  expect(
+    comparison.packages[0]!.files.filter(({ matches }) => !matches).map(({ path }) => path),
+  ).toEqual(["index.js"]);
+  for (const [index, build] of builds.entries()) {
+    expect(comparison.packages[index]!.identity).toEqual(build.identity);
+    expect(
+      await digestTree(
+        join(diagnosticOutput, "packages", `artifact-kernel-wasm-${build.modality}`, "dist"),
+      ),
+    ).toEqual(await digestTree(build.outputRoot));
+    const name = `artifact_kernel_${build.modality}_bg.wasm`;
+    expect(await readFile(join(diagnosticOutput, "bindings", name))).toEqual(
+      await readFile(join(rebuilt.assetRoot, name)),
+    );
+  }
+  await rm(rebuilt.root, { recursive: true, force: true });
+  expect(await readdir(join(diagnosticOutput, "bindings"))).toHaveLength(12);
+  expect(await readFile(join(diagnosticOutput, "comparison.json"), "utf8")).toContain(
+    "rebuiltSha256",
+  );
+});
+
+test("successful byte checks do not retain diagnostics or accept non-rebuild diagnostic requests", async () => {
+  const candidate = await fixture();
+  const builds = await buildArtifactKernelWasmPackages({
+    assetRoot: candidate.assetRoot,
+    outputPackagesRoot: candidate.packagesRoot,
+  });
+  const diagnosticOutput = join(candidate.root, "diagnostics");
+  await checkArtifactKernelWasmPackages(builds, {
+    committedPackagesRoot: candidate.packagesRoot,
+    rebuilt: true,
+    assetRoot: candidate.assetRoot,
+    diagnosticOutput,
+  });
+  expect(await Bun.file(join(diagnosticOutput, "comparison.json")).exists()).toBe(false);
+  await expect(checkArtifactKernelWasmPackages(builds, { diagnosticOutput })).rejects.toThrow(
+    "clean Rust rebuild",
+  );
+});
+
+test("diagnostic retention refuses source destinations and never overwrites existing evidence", async () => {
+  const candidate = await fixture();
+  const committed = await fixture();
+  const builds = await buildArtifactKernelWasmPackages({
+    assetRoot: candidate.assetRoot,
+    outputPackagesRoot: candidate.packagesRoot,
+  });
+  await buildArtifactKernelWasmPackages({
+    assetRoot: committed.assetRoot,
+    outputPackagesRoot: committed.packagesRoot,
+  });
+  await writeFile(
+    join(committed.packagesRoot, "artifact-kernel-wasm-document/dist/index.js"),
+    "mismatch",
+  );
+  const options = {
+    committedPackagesRoot: committed.packagesRoot,
+    rebuilt: true,
+    assetRoot: candidate.assetRoot,
+  };
+  await expect(
+    checkArtifactKernelWasmPackages(builds, { ...options, diagnosticOutput: candidate.assetRoot }),
+  ).rejects.toThrow("outside the source and build");
+  const diagnosticOutput = join(committed.root, "diagnostics");
+  await mkdir(diagnosticOutput);
+  await writeFile(join(diagnosticOutput, "keep.txt"), "prior evidence");
+  await expect(
+    checkArtifactKernelWasmPackages(builds, { ...options, diagnosticOutput }),
+  ).rejects.toThrow("must be empty");
+  expect(await readFile(join(diagnosticOutput, "keep.txt"), "utf8")).toBe("prior evidence");
+  expect(await readdir(diagnosticOutput)).toEqual(["keep.txt"]);
 });
 
 async function fixture(version?: string): Promise<{

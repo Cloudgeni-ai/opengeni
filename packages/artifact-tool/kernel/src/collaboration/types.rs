@@ -1,7 +1,7 @@
 use core::fmt;
 use std::collections::BTreeMap;
 
-use crate::{CellBlock, CellCoord, CellRange, StableId};
+use crate::{CellBlock, CellCoord, CellRange, DimensionAxis, StableId};
 
 pub const MAX_OPERATIONS_PER_TRANSACTION: usize = 4_096;
 pub const MAX_CELLS_PER_TRANSACTION: usize = 1_000_000;
@@ -227,6 +227,12 @@ pub enum CollaborationCommand {
     Undo {
         target: OperationId,
     },
+    SetDimension {
+        sheet: SheetGeneration,
+        axis: DimensionAxis,
+        index: u32,
+        pixels: Option<u32>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -323,6 +329,7 @@ pub struct RejectedTransaction {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CollaborationError {
+    InvalidDimension,
     ZeroReplica,
     ZeroCounter,
     ZeroTransactionId,
@@ -496,6 +503,7 @@ impl fmt::Display for CollaborationError {
             Self::InternalInvariant(message) => {
                 write!(formatter, "collaboration invariant failed: {message}")
             }
+            Self::InvalidDimension => formatter.write_str("dimension pixels are noncanonical or outside 1 through 4096"),
         }
     }
 }
