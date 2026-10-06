@@ -17,10 +17,19 @@ import {
 } from "@opengeni/react-native/timeline";
 import { Stack, router, useFocusEffect } from "expo-router";
 import { useCallback, useMemo, useState } from "react";
-import { ActivityIndicator, Pressable, RefreshControl, ScrollView, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Platform,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  Text,
+  View,
+} from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
 import { useAccount } from "@/account";
+import { serverLabel } from "@/account-store";
 import { BrandMark } from "@/brand-mark";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
 import {
@@ -82,6 +91,8 @@ function Home() {
   const insets = useSafeAreaInsets();
   const {
     account,
+    accounts,
+    switchAccount,
     adapters,
     client,
     config,
@@ -195,6 +206,7 @@ function Home() {
   };
 
   const problem = error?.message ?? listError;
+  const servers = new Set(accounts.map((each) => each.baseUrl)).size;
   return (
     <>
       <Stack.Screen
@@ -206,6 +218,61 @@ function Home() {
           headerTitleAlign: "center",
           headerLeft: HeaderMenuButton,
           headerRight: HeaderAccountButton,
+          // iOS: real bar button items, so the system draws its own glass in
+          // light and dark (custom views get a tinted capsule that reads wrong).
+          ...(Platform.OS === "ios"
+            ? {
+                unstable_headerLeftItems: () => [
+                  {
+                    type: "button" as const,
+                    label: "Sessions",
+                    accessibilityLabel: "Open sessions",
+                    icon: { type: "sfSymbol" as const, name: "line.3.horizontal" },
+                    onPress: () => router.push("/sessions"),
+                  },
+                ],
+                unstable_headerRightItems: () => [
+                  {
+                    type: "menu" as const,
+                    label: "Account",
+                    accessibilityLabel: account
+                      ? `Accounts and settings, signed in as ${account.email}`
+                      : "Accounts and settings",
+                    icon: { type: "sfSymbol" as const, name: "person.crop.circle" },
+                    menu: {
+                      items: [
+                        {
+                          type: "submenu" as const,
+                          label: "Accounts",
+                          inline: true,
+                          items: accounts.map((each) => ({
+                            type: "action" as const,
+                            label:
+                              servers > 1
+                                ? `${each.email} · ${serverLabel(each.baseUrl)}`
+                                : each.email,
+                            state: each.id === account?.id ? ("on" as const) : ("off" as const),
+                            onPress: () => switchAccount(each.id),
+                          })),
+                        },
+                        {
+                          type: "action" as const,
+                          label: "Add account",
+                          icon: { type: "sfSymbol" as const, name: "person.badge.plus" },
+                          onPress: () => router.push("/add-account"),
+                        },
+                        {
+                          type: "action" as const,
+                          label: "Settings",
+                          icon: { type: "sfSymbol" as const, name: "gearshape" },
+                          onPress: () => router.push("/settings"),
+                        },
+                      ],
+                    },
+                  },
+                ],
+              }
+            : {}),
         }}
       />
       <ScrollView
