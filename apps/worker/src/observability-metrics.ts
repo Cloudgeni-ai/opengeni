@@ -22,6 +22,11 @@ import {
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
 import type { CompanyBrainContributionReceipt } from "./model-context-contributions";
 import {
+  telemetryInterval,
+  telemetryScheduler,
+  type TelemetryScheduler,
+} from "./telemetry-scheduler";
+import {
   OPENSANDBOX_BATCHSANDBOX_PHASES,
   OPENSANDBOX_WORKLOAD_POD_CONDITIONS,
   type OpenSandboxKubernetesInventory,
@@ -49,6 +54,12 @@ export type TurnTaskQueueStats = {
   tasksAddRate: number;
   tasksDispatchRate: number;
 };
+export type TurnTaskQueueIdentity = { temporalNamespace: string; taskQueue: string };
+export type TurnTaskQueueReadOptions = { signal: AbortSignal; deadline: number };
+
+export function turnTaskQueueMetricLabels(identity: TurnTaskQueueIdentity) {
+  return { temporal_namespace: identity.temporalNamespace, task_queue: identity.taskQueue };
+}
 export type SessionRecoveryBacklogStateSummary = {
   /** Every durable recovering session in this state with no active attempt. */
   count: number;
@@ -716,7 +727,7 @@ export function recordTurnsQueuedGauge(observability: Observability, value: numb
 }
 
 /**
- * Record the authoritative turn activity queue rather than aggregate Postgres
+ * Record the approximate shared turn-worker activity queue rather than Postgres
  * prompts. A paused human prompt is durable queue truth but is not runnable and
  * never reaches this Temporal task queue. DescribeTaskQueue's approximate
  * backlog count and age are explicitly documented by Temporal as autoscaling
@@ -725,26 +736,40 @@ export function recordTurnsQueuedGauge(observability: Observability, value: numb
 export function recordTurnTaskQueueStats(
   observability: Observability,
   stats: TurnTaskQueueStats,
+  identity: TurnTaskQueueIdentity,
 ): void {
+  const labels = turnTaskQueueMetricLabels(identity);
+  // Invalid observations are failures, not a fabricated fresh zero. Validate
+  // every field before publishing any portion of a new observation.
+  const values = {
+    backlog: requiredTemporalNumber(stats.eligibleBacklog, "eligibleBacklog", { integer: true }),
+    age: requiredTemporalNumber(stats.oldestBacklogAgeSeconds, "oldestBacklogAgeSeconds"),
+    add: requiredTemporalNumber(stats.tasksAddRate, "tasksAddRate"),
+    dispatch: requiredTemporalNumber(stats.tasksDispatchRate, "tasksDispatchRate"),
+  };
   observability.setGauge({
     name: "opengeni_turn_eligible_backlog",
-    help: "Temporal runAgentTurn activity tasks eligible for immediate worker admission.",
-    value: nonnegativeFinite(stats.eligibleBacklog),
+    help: "Approximate Temporal activity backlog on the shared turn-worker queue, including video and retries.",
+    labels,
+    value: values.backlog,
   });
   observability.setGauge({
     name: "opengeni_turn_eligible_backlog_oldest_age_seconds",
-    help: "Approximate age of the oldest eligible runAgentTurn activity task.",
-    value: nonnegativeFinite(stats.oldestBacklogAgeSeconds),
+    help: "Approximate age of the oldest eligible activity task on the shared turn-worker queue.",
+    labels,
+    value: values.age,
   });
   observability.setGauge({
     name: "opengeni_turn_eligible_tasks_add_rate",
-    help: "Temporal runAgentTurn tasks added per second over its rolling window.",
-    value: nonnegativeFinite(stats.tasksAddRate),
+    help: "Temporal activities added per second to the shared turn-worker queue over its rolling window.",
+    labels,
+    value: values.add,
   });
   observability.setGauge({
     name: "opengeni_turn_eligible_tasks_dispatch_rate",
-    help: "Temporal runAgentTurn tasks dispatched per second over its rolling window.",
-    value: nonnegativeFinite(stats.tasksDispatchRate),
+    help: "Temporal activities dispatched per second from the shared turn-worker queue over its rolling window.",
+    labels,
+    value: values.dispatch,
   });
 }
 
@@ -754,13 +779,22 @@ export function normalizeTurnTaskQueueStats(
   if (!stats) {
     throw new Error("Temporal DescribeTaskQueue response omitted required stats");
   }
+  if (typeof stats !== "object" || Array.isArray(stats)) {
+    throw new Error("Temporal DescribeTaskQueue returned malformed stats");
+  }
   const eligibleBacklog = requiredTemporalNumber(
     stats.approximateBacklogCount,
     "approximateBacklogCount",
     { integer: true },
   );
   let oldestBacklogAgeSeconds = 0;
-  if (stats.approximateBacklogAge) {
+  if (stats.approximateBacklogAge !== null && stats.approximateBacklogAge !== undefined) {
+    if (
+      typeof stats.approximateBacklogAge !== "object" ||
+      Array.isArray(stats.approximateBacklogAge)
+    ) {
+      throw new Error("Temporal stats returned invalid approximateBacklogAge");
+    }
     const seconds = optionalTemporalNumber(
       stats.approximateBacklogAge.seconds,
       "approximateBacklogAge.seconds",
@@ -788,22 +822,48 @@ export function normalizeTurnTaskQueueStats(
 
 export function startTurnCapacityMonitor(input: {
   observability: Observability;
-  read: () => Promise<TurnTaskQueueStats>;
+  identity: TurnTaskQueueIdentity;
+  read: (options: TurnTaskQueueReadOptions) => Promise<TurnTaskQueueStats>;
   intervalMs?: number;
+  readTimeoutMs?: number;
+  closeTimeoutMs?: number;
   now?: () => number;
+  scheduler?: TelemetryScheduler;
 }): { close: () => Promise<void> } {
-  const intervalMs = input.intervalMs ?? 15_000;
+  const intervalMs = telemetryInterval(input.intervalMs ?? 15_000, "queue monitor intervalMs");
+  const readTimeoutMs = telemetryInterval(
+    input.readTimeoutMs ?? 5_000,
+    "queue monitor readTimeoutMs",
+  );
+  const closeTimeoutMs = telemetryInterval(
+    input.closeTimeoutMs ?? 1_000,
+    "queue monitor closeTimeoutMs",
+  );
+  const scheduler = input.scheduler ?? telemetryScheduler;
+  const labels = turnTaskQueueMetricLabels(input.identity);
   const now = input.now ?? Date.now;
   const startedAt = now();
   let lastSuccessAt: number | null = null;
   let lastReadSucceeded = false;
   let stopped = false;
-  let running: Promise<void> | null = null;
+  let running: {
+    controller: AbortController;
+    done: Promise<void>;
+    cancelTimeout: () => void;
+  } | null = null;
+  let closePromise: Promise<void> | undefined;
+  const safely = (action: () => void) => {
+    try {
+      action();
+    } catch {
+      /* Telemetry must not break the worker. */
+    }
+  };
   const recordStatus = () => {
     const observedAt = now();
     const successAgeMs = observedAt - (lastSuccessAt ?? startedAt);
     const set = (name: string, help: string, value: number) =>
-      input.observability.setGauge({ name, help, value });
+      safely(() => input.observability.setGauge({ name, help, labels, value }));
     set(
       "opengeni_turn_capacity_monitor_last_read_success",
       "Whether the latest Temporal turn-queue capacity read completed successfully.",
@@ -821,42 +881,80 @@ export function startTurnCapacityMonitor(input: {
     );
     set(
       "opengeni_turn_capacity_monitor_fresh",
-      "Whether eligible-backlog gauges have a successful Temporal read within three monitor intervals.",
+      "Whether the latest read succeeded and the shared activity-queue gauges are within three monitor intervals.",
       lastReadSucceeded && lastSuccessAt !== null && successAgeMs <= intervalMs * 3 ? 1 : 0,
     );
   };
   const refresh = () => {
     // Advance freshness age even while a Temporal read is hung. Old backlog
     // values remain observable for diagnosis but cease to be authoritative.
+    if (stopped) return;
     recordStatus();
-    if (stopped || running) return;
-    running = input
-      .read()
+    if (running) return;
+    const controller = new AbortController();
+    const attempt = { controller, done: Promise.resolve(), cancelTimeout: () => {} };
+    running = attempt;
+    attempt.cancelTimeout = scheduler.timeout(() => {
+      if (stopped || running !== attempt) return;
+      lastReadSucceeded = false;
+      recordStatus();
+      controller.abort();
+      // Keep the attempt owned until its native call settles. A misbehaving
+      // reader ignoring cancellation must not cause overlapping RPCs.
+    }, readTimeoutMs);
+    let read: Promise<TurnTaskQueueStats>;
+    try {
+      read = input.read({ signal: controller.signal, deadline: now() + readTimeoutMs });
+    } catch (error) {
+      read = Promise.reject(error);
+    }
+    attempt.done = read
       .then((stats) => {
-        recordTurnTaskQueueStats(input.observability, stats);
+        if (stopped || controller.signal.aborted || running !== attempt) return;
+        recordTurnTaskQueueStats(input.observability, stats, input.identity);
         lastSuccessAt = now();
         lastReadSucceeded = true;
         recordStatus();
       })
-      .catch((error) => {
+      .catch(() => {
+        if (stopped || controller.signal.aborted || running !== attempt) return;
         lastReadSucceeded = false;
         recordStatus();
-        input.observability.warn("turn capacity monitor: Temporal task-queue stats failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
+        safely(() =>
+          input.observability.warn("turn capacity monitor: Temporal task-queue stats failed", {
+            // Do not export arbitrary server errors or credentials.
+            errorClass: "WorkerTelemetryReadError",
+            origin: "turn-capacity-monitor",
+          }),
+        );
       })
       .finally(() => {
-        running = null;
+        attempt.cancelTimeout();
+        if (running === attempt) running = null;
       });
   };
   refresh();
-  const timer = setInterval(refresh, intervalMs);
-  timer.unref?.();
+  const stopTimer = scheduler.interval(refresh, intervalMs);
   return {
-    close: async () => {
+    close: () => {
+      if (closePromise) return closePromise;
       stopped = true;
-      clearInterval(timer);
-      await running;
+      stopTimer();
+      lastReadSucceeded = false;
+      recordStatus();
+      const attempt = running;
+      attempt?.cancelTimeout();
+      attempt?.controller.abort();
+      closePromise = attempt
+        ? new Promise<void>((resolve) => {
+            const cancel = scheduler.timeout(resolve, closeTimeoutMs);
+            void attempt.done.then(() => {
+              cancel();
+              resolve();
+            });
+          })
+        : Promise.resolve();
+      return closePromise;
     },
   };
 }
@@ -2753,13 +2851,26 @@ function requiredTemporalNumber(
   if (value === null || value === undefined) {
     throw new Error(`Temporal stats omitted required ${field}`);
   }
-  const parsed = Number(value);
+  // protobuf Long is supported through its string representation. Refuse JS
+  // coercions (booleans, arrays, blanks) and hostile toString implementations.
+  let raw: unknown = value;
+  try {
+    if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) raw = raw.toString();
+  } catch {
+    throw new Error(`Temporal stats returned invalid ${field}`);
+  }
+  const parsed =
+    typeof raw === "number"
+      ? raw
+      : typeof raw === "string" && /^\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(raw)
+        ? Number(raw)
+        : Number.NaN;
   if (
     !Number.isFinite(parsed) ||
     parsed < 0 ||
     (options.integer && !Number.isSafeInteger(parsed))
   ) {
-    throw new Error(`Temporal stats returned invalid ${field}: ${String(value)}`);
+    throw new Error(`Temporal stats returned invalid ${field}`);
   }
   return parsed;
 }

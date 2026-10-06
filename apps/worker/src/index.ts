@@ -50,6 +50,12 @@ import type {
   WakeSessionWorkflowSignal,
 } from "./activities/types";
 import { turnTaskQueue } from "./workflows/activities";
+import { createTurnTaskQueueStatsReader } from "./turn-task-queue-reader";
+import {
+  closeWorkerHttpAfterActivityExecution,
+  withTurnWorkerActivityTelemetry,
+  type TurnWorkerActivityTelemetry,
+} from "./turn-worker-activity-telemetry";
 import {
   dbReadyCheck,
   natsReadyCheck,
@@ -60,12 +66,13 @@ import {
 import {
   initializeContextCompactionMetrics,
   initializeWorkerOutcomeMetrics,
-  normalizeTurnTaskQueueStats,
   observabilityEventBusOptions,
   startContextCompactionPendingMonitor,
   startSessionRecoveryMonitor,
   startTurnCapacityMonitor,
   type TurnTaskQueueStats,
+  type TurnTaskQueueReadOptions,
+  type TurnTaskQueueIdentity,
 } from "./observability-metrics";
 import {
   resolveCatalogSettings,
@@ -227,6 +234,8 @@ export function turnCancellationHeartbeatThrottleOptions() {
 export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
   worker: WorkerRunTarget;
   connection: NativeConnection;
+  activityTelemetry?: TurnWorkerActivityTelemetry;
+  turnQueueIdentity?: TurnTaskQueueIdentity;
 }> {
   const settings = options.settings ?? getSettings();
   if (options.role === "control") {
@@ -336,7 +345,21 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
       if (options.role !== "control") {
         turnWorker = worker;
         turnConcurrency?.admission?.finalizeStartupBaseline();
-        return { worker, connection };
+        const turnQueueIdentity = {
+          temporalNamespace: worker.options.namespace,
+          taskQueue: worker.options.taskQueue,
+        };
+        return {
+          ...withTurnWorkerActivityTelemetry(worker, {
+            observability,
+            identity: turnQueueIdentity,
+            // No invented identity when running outside Kubernetes. Scaler
+            // consumers must reject empty/missing UID coverage.
+            podUid: process.env.OPENGENI_POD_UID ?? "",
+          }),
+          connection,
+          turnQueueIdentity,
+        };
       }
 
       const ownedWorkers = [worker];
@@ -393,7 +416,10 @@ export async function createWorkerWorkflowSignaler(
   signalSessionAttemptQuiesced: SignalSessionAttemptQuiesced;
   inspectSessionAttemptActivity: InspectSessionAttemptActivity;
   signalCodexCapacityWorkflow: SignalCodexCapacityWorkflow;
-  getTurnTaskQueueStats: () => Promise<TurnTaskQueueStats>;
+  getTurnTaskQueueStats: (
+    options?: TurnTaskQueueReadOptions,
+    identity?: TurnTaskQueueIdentity,
+  ) => Promise<TurnTaskQueueStats>;
   startSandboxReaperWorkflow: StartSandboxReaperWorkflow;
   startVideoGenerationWorkflow: StartVideoGenerationWorkflow;
   check: () => Promise<void>;
@@ -492,18 +518,13 @@ export async function createWorkerWorkflowSignaler(
       // another producer may have advanced it with a Pause/Steer that requires
       // sessionControl. The global dispatcher owns that acknowledgement.
     },
-    getTurnTaskQueueStats: async () => {
-      const response = await connection.workflowService.describeTaskQueue({
-        namespace: settings.temporalNamespace,
-        taskQueue: { name: turnTaskQueue(settings.temporalTaskQueue) },
-        // temporal.api.enums.v1.TASK_QUEUE_TYPE_ACTIVITY. Keep this request in
-        // the supported DEFAULT mode; `stats.approximateBacklogCount` is the
-        // server-documented scaling signal.
-        taskQueueType: 2,
-        reportStats: true,
-      });
-      return normalizeTurnTaskQueueStats(response.stats);
-    },
+    getTurnTaskQueueStats: (
+      readOptions = { signal: new AbortController().signal, deadline: Date.now() + 5_000 },
+      identity = {
+        temporalNamespace: settings.temporalNamespace,
+        taskQueue: turnTaskQueue(settings.temporalTaskQueue),
+      },
+    ) => createTurnTaskQueueStatsReader(connection, identity)(readOptions),
     startSandboxReaperWorkflow: async () => {
       // Same backend tick, no additional schedule. A bounded independent
       // inventory cannot prevent the existing per-box drain from starting.
@@ -984,9 +1005,14 @@ export async function createOpenGeniWorkerService(
       if (!signaler) {
         throw new Error("Turn worker capacity monitor could not resolve its Temporal stats client");
       }
+      const statsClient = signaler;
+      const identity = workerBundle.turnQueueIdentity;
+      if (!identity)
+        throw new Error("Turn worker did not expose its actual Temporal queue identity");
       turnCapacityMonitor = startTurnCapacityMonitor({
         observability,
-        read: signaler.getTurnTaskQueueStats,
+        read: (readOptions) => statsClient.getTurnTaskQueueStats(readOptions, identity),
+        identity,
       });
     } else {
       sessionRecoveryMonitor = startSessionRecoveryMonitor({
@@ -1055,6 +1081,7 @@ export async function createOpenGeniWorkerService(
       });
     }
   } catch (error) {
+    workerBundle?.activityTelemetry?.closeIfNeverRun();
     httpServer?.stop(true);
     await Promise.allSettled([
       turnCapacityMonitor?.close(),
@@ -1091,7 +1118,9 @@ export async function createOpenGeniWorkerService(
     observability,
     closeOwnedResources: async () => {
       memoryPressureGuard?.close();
-      httpServer?.stop(true);
+      closeWorkerHttpAfterActivityExecution(activeWorkerBundle.activityTelemetry, () =>
+        httpServer?.stop(true),
+      );
       await Promise.allSettled([
         turnCapacityMonitor?.close(),
         sessionRecoveryMonitor?.close(),
