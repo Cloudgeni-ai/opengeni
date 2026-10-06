@@ -310,27 +310,75 @@ test("a hidden large cohort fails within the original deadline and read quota", 
   expect(requests).toBeLessThanOrEqual(256);
 });
 
-test.each([
-  { count: 30, delayMs: 375, maxReads: 256, timeoutRequest: null },
-  { count: 30, delayMs: 500, maxReads: 256, timeoutRequest: null },
-  { count: 1, delayMs: 4500, maxReads: 6, timeoutRequest: null },
-  { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: "tags" },
-  { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: "version" },
-  { count: 30, delayMs: 375, maxReads: 256, timeoutRequest: "tags" },
-  { count: 30, delayMs: 375, maxReads: 256, timeoutRequest: "version" },
-  { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: null, slowRequest: "tags", slowMs: 9000 },
-  { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: null, slowRequest: "version", slowMs: 9000 },
-  { count: 30, delayMs: 375, maxReads: 256, timeoutRequest: null, slowRequest: "tags", slowMs: 9000 },
-  { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: null, slowRequest: "tags", slowMs: 9000, repeatSlow: true },
-  { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: null, slowRequest: "version", slowMs: 9000, repeatSlow: true },
-  { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: null, slowRequest: "tags", slowMs: 9000, repeatSlow: true, earlySlowMatch: true },
-].map((scenario) => ({
-  slowRequest: null as string | null,
-  slowMs: 0,
-  repeatSlow: false,
-  earlySlowMatch: false,
-  ...scenario,
-})))("late visibility survives response latency and transient timeouts: %j", async (scenario) => {
+test.each(
+  [
+    { count: 30, delayMs: 375, maxReads: 256, timeoutRequest: null },
+    { count: 30, delayMs: 500, maxReads: 256, timeoutRequest: null },
+    { count: 1, delayMs: 4500, maxReads: 6, timeoutRequest: null },
+    { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: "tags" },
+    { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: "version" },
+    { count: 30, delayMs: 375, maxReads: 256, timeoutRequest: "tags" },
+    { count: 30, delayMs: 375, maxReads: 256, timeoutRequest: "version" },
+    {
+      count: 30,
+      delayMs: 0,
+      maxReads: 256,
+      timeoutRequest: null,
+      slowRequest: "tags",
+      slowMs: 9000,
+    },
+    {
+      count: 30,
+      delayMs: 0,
+      maxReads: 256,
+      timeoutRequest: null,
+      slowRequest: "version",
+      slowMs: 9000,
+    },
+    {
+      count: 30,
+      delayMs: 375,
+      maxReads: 256,
+      timeoutRequest: null,
+      slowRequest: "tags",
+      slowMs: 9000,
+    },
+    {
+      count: 30,
+      delayMs: 0,
+      maxReads: 256,
+      timeoutRequest: null,
+      slowRequest: "tags",
+      slowMs: 9000,
+      repeatSlow: true,
+    },
+    {
+      count: 30,
+      delayMs: 0,
+      maxReads: 256,
+      timeoutRequest: null,
+      slowRequest: "version",
+      slowMs: 9000,
+      repeatSlow: true,
+    },
+    {
+      count: 30,
+      delayMs: 0,
+      maxReads: 256,
+      timeoutRequest: null,
+      slowRequest: "tags",
+      slowMs: 9000,
+      repeatSlow: true,
+      earlySlowMatch: true,
+    },
+  ].map((scenario) => ({
+    slowRequest: null as string | null,
+    slowMs: 0,
+    repeatSlow: false,
+    earlySlowMatch: false,
+    ...scenario,
+  })),
+)("late visibility survives response latency and transient timeouts: %j", async (scenario) => {
   let elapsed = 0,
     requests = 0,
     timeouts = 0,
@@ -359,7 +407,9 @@ test.each([
             await sleep(10_000 - (requestKind === "version" ? scenario.delayMs : 0));
             throw new DOMException("Synthetic receipt timeout", "TimeoutError");
           }
-          const isSlow = name === packages[0]!.name && scenario.slowRequest === requestKind &&
+          const isSlow =
+            name === packages[0]!.name &&
+            scenario.slowRequest === requestKind &&
             (scenario.repeatSlow || slowReads === 0);
           if (isSlow) slowReads++;
           await sleep(isSlow ? scenario.slowMs : scenario.delayMs);
@@ -382,8 +432,12 @@ test.each([
     maxReads: scenario.maxReads,
   });
   confirmation.then(
-    () => { settled = true; },
-    () => { settled = true; },
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
   );
   for (let steps = 0; steps < 5000; steps++) {
     if (settled) break;
