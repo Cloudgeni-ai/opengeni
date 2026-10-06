@@ -166,13 +166,16 @@ export async function readRegistryPackage(
   base = registry,
   options: RegistryReadOptions = {},
 ): Promise<RegistryPackage> {
-  const response = await request(`${base}/${encodeURIComponent(name)}`, {
+  // The registry revalidates its cache for this query; the request remains a GET.
+  const suffix = options.revalidate ? "?write=true" : "";
+  const response = await request(`${base}/${encodeURIComponent(name)}${suffix}`, {
+    method: "GET",
     cache: "no-store",
     headers: {
-      accept: "application/vnd.npm.install-v1+json",
+      accept: options.revalidate ? "application/json" : "application/vnd.npm.install-v1+json",
       ...(options.revalidate ? { "cache-control": "no-cache" } : {}),
     },
-    signal: options.signal,
+    ...(options.signal ? { signal: options.signal } : {}),
   });
   if (response.status === 404) return { "dist-tags": {}, versions: {} };
   if (!response.ok) throw new Error(`Registry metadata for ${name} failed: ${response.status}`);
