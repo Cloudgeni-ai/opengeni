@@ -2410,7 +2410,7 @@ describe("release schema contract", () => {
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
-    const knowledgeCreatedSinceMigration = "0639_knowledge_entry_created_since.sql";
+    const knowledgeCreatedSinceMigration = "0640_knowledge_entry_created_since.sql";
     if (
       unfilteredSourceContract.migrations.some(
         (migration) => migration.path === knowledgeCreatedSinceMigration,
