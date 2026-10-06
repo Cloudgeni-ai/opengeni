@@ -95,7 +95,7 @@ spyOn(Worker, "create").mockImplementation(async (options) => {
   return worker;
 });
 let closeResult = "not attempted";
-let pollIssuedBeforeShutdown: boolean | undefined;
+let sdkPollOutstandingBeforeShutdown: boolean | undefined;
 let serviceState: string | undefined;
 try {
   if (mode === "initialized" || mode === "immediate-shutdown") {
@@ -113,11 +113,13 @@ try {
       closeResult = "initialized ownership retained";
     } else {
       const running = worker.run();
-      pollIssuedBeforeShutdown = worker.getStatus().hasOutstandingActivityPoll;
+      // SDK-reported outstanding-poll state only. Server RPC counts in `polls`
+      // are separate observations; this flag does not prove RPCs/task admission.
+      sdkPollOutstandingBeforeShutdown = worker.getStatus().hasOutstandingActivityPoll;
       worker.shutdown();
       await running;
       await connection.close();
-      closeResult = "closed after starting native polling";
+      closeResult = "closed after run and immediate shutdown";
     }
   } else {
     if (mode === "startup-failure") {
@@ -175,7 +177,7 @@ try {
     nativeCloses,
     errors,
     serviceState,
-    pollIssuedBeforeShutdown,
+    sdkPollOutstandingBeforeShutdown,
   }));
   server.forceShutdown();
   // Reclaim this fixture's unresolved native worker at the OS process boundary.

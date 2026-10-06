@@ -68,12 +68,15 @@ describe("pinned native initialized-worker cleanup limitation", () => {
     expect(result.closeResult).toBe("startup error suppressed native close failure");
   }, 15_000);
 
-  test("run then immediate shutdown already issues a native poll, so is not a no-poll disposal API", async () => {
+  test("run then immediate shutdown reports SDK outstanding-poll state, not server RPC or admission proof", async () => {
     const result = await probe("immediate-shutdown");
-    expect(result.pollIssuedBeforeShutdown).toBe(true);
+    // Neither SDK status nor one server-counter snapshot guarantees no polling.
+    expect(result.sdkPollOutstandingBeforeShutdown).toBe(true);
+    expect(Number.isSafeInteger(result.polls.activity) && result.polls.activity >= 0).toBe(true);
+    expect(result.polls.workflow).toBe(0);
     expect(result.workerStates).toEqual(["STOPPED"]);
     expect(result.errors).toEqual([]);
-    expect(result.closeResult).toBe("closed after starting native polling");
+    expect(result.closeResult).toBe("closed after run and immediate shutdown");
     expect(result.nativeCloses).toBe(1);
   }, 15_000);
 });
