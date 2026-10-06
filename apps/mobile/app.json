@@ -1,0 +1,44 @@
+{
+  "expo": {
+    "name": "Opengeni",
+    "slug": "opengeni",
+    "scheme": "opengeni",
+    "version": "0.1.0",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "bundleIdentifier": "ai.opengeni.app",
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "ai.opengeni.app",
+      "edgeToEdgeEnabled": true,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#FFFFFF"
+      }
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-web-browser",
+      [
+        "expo-notifications",
+        {
+          "mode": "development"
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Opengeni uses the microphone to dictate your messages.",
+          "recordAudioAndroid": true
+        }
+      ]
+    ],
+    "experiments": {
+      "tsconfigPaths": false
+    },
+    "icon": "./assets/icon.png"
+  }
+}

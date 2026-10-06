@@ -99,12 +99,28 @@ import {
   providerRecoveryExhaustedMessage,
   type ProviderCondition,
 } from "./provider-recovery-copy";
+import {
+  PROVIDER_OVERLOAD_RECOVERY_CODE,
+  MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES,
+  PROVIDER_OVERLOAD_RECOVERY_WINDOW_MS,
+  validProviderOverloadRecoveryDelay,
+} from "./provider-recovery-policy";
+export {
+  PROVIDER_OVERLOAD_RECOVERY_CODE,
+  MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES,
+  PROVIDER_OVERLOAD_RECOVERY_WINDOW_MS,
+} from "./provider-recovery-policy";
 
 // Retryable provider connectivity/5xx failures start quickly and back off to
 // this ceiling. Explicit rate limits retain the minute-granular fallback.
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 export const PROVIDER_CONNECTIVITY_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
 export const MAX_AUTOMATIC_PROVIDER_RECOVERIES = PROVIDER_CONNECTIVITY_BACKOFF_MS.length;
+export function providerRecoveryLimit(failureCode: unknown): number {
+  return failureCode === PROVIDER_OVERLOAD_RECOVERY_CODE
+    ? MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES
+    : MAX_AUTOMATIC_PROVIDER_RECOVERIES;
+}
 /**
  * Minimum wait per rate-limited recovery. Providers such as Azure OpenAI often
  * answer a per-minute token limit with a `retry-after` of about a second, which
@@ -131,11 +147,13 @@ export type ProviderRecoveryResult =
   | {
       status: "recovering";
       continueDelayMs: number;
+      maxProviderRecoveryCount?: number;
     }
   | {
       status: "exhausted";
       providerRecoveryCount: number;
       maxProviderRecoveryCount: number;
+      providerRecoveryExhaustedReason?: "deadline" | "retry_limit" | "invalid_clock";
     };
 
 export function providerRecoveryResult(input: {
@@ -143,13 +161,32 @@ export function providerRecoveryResult(input: {
   attemptNumber: number;
   retryAfterMs?: number | null;
   jitterSample?: number;
+  /** Durable first-failure clock, never a new clock on each replacement attempt. */
+  recoveryStartedAt?: number | undefined;
+  now?: number;
 }): ProviderRecoveryResult {
-  if (input.attemptNumber > MAX_AUTOMATIC_PROVIDER_RECOVERIES) {
+  const overload = input.failureCode === PROVIDER_OVERLOAD_RECOVERY_CODE;
+  const limit = providerRecoveryLimit(input.failureCode);
+  const exhausted = (
+    reason: "deadline" | "retry_limit" | "invalid_clock",
+  ): Extract<ProviderRecoveryResult, { status: "exhausted" }> => ({
+    status: "exhausted",
+    providerRecoveryCount: Math.min(Math.max(input.attemptNumber - 1, 0), limit),
+    maxProviderRecoveryCount: limit,
+    providerRecoveryExhaustedReason: reason,
+  });
+  if (input.attemptNumber > limit) {
+    if (overload) return exhausted("retry_limit");
     return {
       status: "exhausted",
       providerRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
       maxProviderRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
     };
+  }
+  const now = input.now ?? Date.now();
+  const startedAt = input.recoveryStartedAt ?? (input.attemptNumber === 1 ? now : NaN);
+  if (overload && (!Number.isFinite(startedAt) || !Number.isFinite(now) || startedAt > now)) {
+    return exhausted("invalid_clock");
   }
   const providerDelay =
     input.retryAfterMs !== null &&
@@ -169,7 +206,8 @@ export function providerRecoveryResult(input: {
             )
           ]!,
         )
-      : input.failureCode === "provider_unavailable" ||
+      : overload ||
+          input.failureCode === "provider_unavailable" ||
           input.failureCode === "upstream_connectivity_unavailable" ||
           input.failureCode === "sandbox_command_start_unavailable" ||
           input.failureCode === "mcp_transport_timeout" ||
@@ -186,16 +224,77 @@ export function providerRecoveryResult(input: {
             ]!,
           )
         : PROVIDER_BACKPRESSURE_DELAY_MS;
+  const delayMs =
+    continueDelayMs +
+    (overload ||
+    input.failureCode === "provider_rate_limited" ||
+    input.failureCode === "provider_unavailable" ||
+    input.failureCode === "upstream_connectivity_unavailable"
+      ? providerRecoveryJitterMs(continueDelayMs, input.jitterSample ?? 0)
+      : 0);
+  // Do not shorten Retry-After, or schedule a replacement outside the window.
+  if (overload && now + delayMs >= startedAt + PROVIDER_OVERLOAD_RECOVERY_WINDOW_MS) {
+    return exhausted("deadline");
+  }
   return {
     status: "recovering",
-    continueDelayMs:
-      continueDelayMs +
-      (input.failureCode === "provider_rate_limited" ||
-      input.failureCode === "provider_unavailable" ||
-      input.failureCode === "upstream_connectivity_unavailable"
-        ? providerRecoveryJitterMs(continueDelayMs, input.jitterSample ?? 0)
-        : 0),
+    continueDelayMs: delayMs,
+    ...(overload ? { maxProviderRecoveryCount: limit } : {}),
   };
+}
+
+/** A timer/queue delay cannot authorize a provider call after the recovery window. */
+export class ProviderOverloadRecoveryExpiredError extends Error {
+  readonly failure;
+
+  constructor(count: number, reason: "deadline" | "retry_limit" | "invalid_clock") {
+    super("Confirmed provider overload recovery window expired before dispatch");
+    this.name = "ProviderOverloadRecoveryExpiredError";
+    this.failure = providerRecoveryExhaustedFailure(
+      {
+        error: this.message,
+        code: "provider_unavailable",
+        providerCondition: "overloaded" as const,
+      },
+      {
+        status: "exhausted",
+        // The queued replacement has not dispatched; count only prior retries.
+        providerRecoveryCount: Math.min(
+          MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES,
+          Math.max(0, count - 1),
+        ),
+        maxProviderRecoveryCount: MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES,
+        providerRecoveryExhaustedReason: reason,
+      },
+    );
+  }
+}
+
+export function assertProviderOverloadRecoveryActive(input: {
+  failureCode: unknown;
+  providerRecoveryCount: number;
+  recoveryStartedAt?: number | undefined;
+  now?: number;
+}): void {
+  if (input.failureCode !== PROVIDER_OVERLOAD_RECOVERY_CODE || input.providerRecoveryCount === 0) {
+    return;
+  }
+  if (input.providerRecoveryCount > MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES) {
+    throw new ProviderOverloadRecoveryExpiredError(input.providerRecoveryCount, "retry_limit");
+  }
+  const now = input.now ?? Date.now();
+  const startedAt = input.recoveryStartedAt;
+  if (
+    startedAt === undefined ||
+    !Number.isFinite(startedAt) ||
+    !Number.isFinite(now) ||
+    startedAt > now
+  ) {
+    throw new ProviderOverloadRecoveryExpiredError(input.providerRecoveryCount, "invalid_clock");
+  }
+  if (now >= startedAt + PROVIDER_OVERLOAD_RECOVERY_WINDOW_MS) {
+    throw new ProviderOverloadRecoveryExpiredError(input.providerRecoveryCount, "deadline");
+  }
 }
 
 export function providerRecoveryExhaustedFailure<
@@ -209,6 +308,7 @@ export function providerRecoveryExhaustedFailure<
   providerRecoveryCount: number;
   maxProviderRecoveryCount: number;
   lastRetryableError: string;
+  providerRecoveryExhaustedReason?: "deadline" | "retry_limit" | "invalid_clock";
 } {
   return {
     ...failure,
@@ -225,6 +325,9 @@ export function providerRecoveryExhaustedFailure<
     recoveryExhausted: true,
     providerRecoveryCount: recovery.providerRecoveryCount,
     maxProviderRecoveryCount: recovery.maxProviderRecoveryCount,
+    ...(recovery.providerRecoveryExhaustedReason
+      ? { providerRecoveryExhaustedReason: recovery.providerRecoveryExhaustedReason }
+      : {}),
     lastRetryableError: failure.error,
   };
 }
@@ -646,6 +749,7 @@ export function postClaimDatabaseRecoveryFailure(input: {
   providerRecovery?: {
     failureCode: string;
     providerRecoveryCount: number;
+    continueDelayMs?: number;
   };
 }): ApplicationFailure | null {
   const code = retryableDatabaseFailureCode(input.error, input.requireDatabaseProvenance);
@@ -661,8 +765,13 @@ export function postClaimDatabaseRecoveryFailure(input: {
     input.providerRecovery &&
     (!Number.isSafeInteger(input.providerRecovery.providerRecoveryCount) ||
       input.providerRecovery.providerRecoveryCount <= 0 ||
-      input.providerRecovery.providerRecoveryCount > MAX_AUTOMATIC_PROVIDER_RECOVERIES ||
-      !/^[a-z][a-z0-9_]{0,63}$/.test(input.providerRecovery.failureCode))
+      input.providerRecovery.providerRecoveryCount >
+        providerRecoveryLimit(input.providerRecovery.failureCode) ||
+      !/^[a-z][a-z0-9_]{0,63}$/.test(input.providerRecovery.failureCode) ||
+      !validProviderOverloadRecoveryDelay(
+        input.providerRecovery.failureCode,
+        input.providerRecovery.continueDelayMs,
+      ))
   ) {
     return null;
   }
@@ -677,6 +786,9 @@ export function postClaimDatabaseRecoveryFailure(input: {
       ? {
           providerFailureCode: input.providerRecovery.failureCode,
           providerRecoveryCount: input.providerRecovery.providerRecoveryCount,
+          ...(input.providerRecovery.continueDelayMs !== undefined
+            ? { providerRecoveryContinueDelayMs: input.providerRecovery.continueDelayMs }
+            : {}),
         }
       : {}),
   };
@@ -1432,6 +1544,32 @@ export function isProviderOverloadError(
   );
 }
 
+/** Retry authority must not depend on the looser presentation-only overload label. */
+export function providerRecoveryCode(
+  error: unknown,
+  failure: { code?: string; retryable?: boolean },
+): string | undefined {
+  if (failure.code !== "provider_unavailable" || !failure.retryable) return failure.code;
+  const status = providerHttpStatus(error);
+  let current = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    if (
+      current instanceof AnthropicRequestError &&
+      status !== undefined &&
+      status >= 500 &&
+      status < 600 &&
+      (status === 529 || current.errorType === "overloaded_error")
+    ) {
+      return PROVIDER_OVERLOAD_RECOVERY_CODE;
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return failure.code;
+}
+
 function classifyAgentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
@@ -1456,6 +1594,8 @@ function classifyAgentRunFailurePayload(
       retryable: false,
     };
   }
+  const expired = nodes.find((node) => node instanceof ProviderOverloadRecoveryExpiredError);
+  if (expired instanceof ProviderOverloadRecoveryExpiredError) return expired.failure;
   const failure = baseAgentRunFailurePayload(error, options);
   const diagnostic = materializationVerificationDiagnostic(error);
   const anthropic = anthropicRequestDiagnostic(error);
@@ -1523,6 +1663,10 @@ function baseAgentRunFailurePayload(
   providerLabel?: string;
   /** Closed transient provider condition on `provider_unavailable` / `provider_rate_limited`. */
   providerCondition?: ProviderCondition;
+  recoveryExhausted?: boolean;
+  providerRecoveryCount?: number;
+  maxProviderRecoveryCount?: number;
+  providerRecoveryExhaustedReason?: "deadline" | "retry_limit" | "invalid_clock";
 } {
   if (error instanceof SandboxMaterializationVerificationError) {
     return {

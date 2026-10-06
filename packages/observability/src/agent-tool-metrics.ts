@@ -53,6 +53,7 @@ const EXACT: Record<string, AgentToolMetricFamily> = {
   get_video_generation_capabilities: "video",
   web_fetch: "web",
   set_session_title: "session",
+  notify_user: "session",
   set_other_session_title: "session",
   sessions_list: "session",
   sandboxes_list: "machine",

@@ -1107,8 +1107,10 @@ the accepted route's public display labels (`model`, `modelLabel`,
 a closed `providerCondition` (`overloaded` for HTTP 529, Anthropic
 `overloaded_error` or provider "overloaded" wording; `unresponsive` for stream
 or transport timeouts; otherwise `unavailable` / `rate_limited`), and every
-recovery event carries `maxProviderRecoveryCount`. None of these fields changes
-retryability, pacing or the five-retry budget. The exhausted `error` names the
+recovery event carries `maxProviderRecoveryCount`. These presentation fields never
+grant retry authority. Free-text overload wording alone retains the default
+five-retry budget; only the structured Claude overload policy below changes
+pacing and the maximum count. The exhausted `error` names the
 model and condition, for example "Claude Opus 5.5 is overloaded at the provider
 (Amazon Bedrock). Opengeni retried 5 times without success. Try again in a few
 minutes, or switch to another model." `@opengeni/react`
@@ -1169,7 +1171,7 @@ own socket idle timeout) classify as retryable `provider_unavailable` and use
 the recovery below. Codex, SuperGrok, and Anthropic Messages keep their own
 transport timers and classification.
 
-Automatic same-turn provider/MCP recovery is finite: five
+Default automatic same-turn provider/MCP recovery is finite: five
 consecutive replacement attempts may be scheduled, and a sixth retryable failure settles the
 same logical turn as failed with the original typed cause plus explicit recovery-
 exhaustion evidence. This is an infrastructure retry budget, not a goal,
@@ -1180,6 +1182,47 @@ turn identity, classified provider cause, and exact next recovery count into the
 DB-only control lane. That lane accepts the checkpoint only when the identity
 still owns the attempt and the count is exactly one beyond durable turn metadata;
 ambiguous commits and stale replays therefore cannot reset the retry budget.
+
+**Confirmed Claude overload has a longer, still finite window.** A retryable
+`provider_unavailable` failure must retain a typed `AnthropicRequestError` and
+either an authoritative HTTP 529 or the structured `error.type` exactly
+`overloaded_error` with a 5xx status. A definitive outer client status wins over
+an inner server error. Keyword-only overload labels, unknown types, invalid
+requests, authentication/permission failures, account quota, other providers,
+generic 5xx and transport failures do not gain this policy. Their existing
+classification, capacity-wait semantics and recovery budgets remain unchanged.
+
+The internal durable reason `provider_overloaded` selects at most **15
+consecutive replacement attempts within 15 minutes** of the first durable
+recovery checkpoint. The original same-turn `providerRecoveryCount` and
+`providerRecoveryStartedAt` survive worker replacement; a missing, invalid or
+future clock fails closed, never starts another window. The first five delays
+remain 2 s / 5 s / 15 s / 30 s / 60 s; later delays use 60 s. Positive jitter and
+Retry-After can lengthen these waits but cannot push a replacement to or beyond
+the deadline. Such a hint stops automatic recovery instead of being shortened.
+Claim and the final pre-provider-dispatch checkpoint also reject a retry whose
+timer, queue or preparation outlasted the window. A queued retry rejected before
+dispatch is not counted as an executed retry. Exhaustion retains the public
+`provider_unavailable` classification, selected maximum, actual retry count and
+`providerRecoveryExhaustedReason` (`deadline`, `retry_limit` or `invalid_clock`).
+
+The DB-only checkpoint-outage wire preserves the exact next overload count and
+bounded delay (including Retry-After); it cannot promote another cause to the
+larger budget. Legacy wire results without a delay preserve their prior workflow
+timer behavior. A completed, exact-attempt model response or committed compaction
+clears the durable streak and clock; first bytes, failed requests, waiting,
+claims and process restarts do not. This is not a healthy-turn run-length cap.
+Pause, Cancel, authority, quiescence and attempt fences are unchanged. Recovery
+uses saved conversation/tool receipts, not another prompt, mutation replay,
+account rotation or model switching.
+
+**Release boundary:** ship the runtime's structured error-type accessor and the
+turn/control workers plus their workflow bundle from the same source release.
+An older worker may conservatively exhaust at five rather than continue the new
+overload policy; mixed versions do not provide the new guarantee. There is no
+database migration or configuration change. Source merge is not publication,
+deployment or live recovery proof.
+
 An accepted-model definition mismatch during mixed-version rollout uses that
 same finite budget and backoff only for the typed configuration mismatch before
 `turn.started` and before any model request. It reclaims the exact accepted turn

@@ -64,6 +64,7 @@ import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { SecureContextWarning } from "@/components/secure-context-warning";
 import { Button } from "@/components/ui/button";
 import { SignInCallbackNotice } from "@/components/sign-in-callback-notice";
+import { NativeSignInProvider } from "@/lib/native-sign-in-context";
 import { PersonalSecurityProvider } from "@/lib/personal-security-context";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -2940,6 +2941,19 @@ export function RootRouteComponent() {
         )}
       </SignedOutPage>
     </Suspense>
+  ) : /^\/native-sign-in\/?$/.test(pathname) &&
+    managedAuthRequired &&
+    authSession &&
+    clientConfig ? (
+    // A phone app is signed in by the person, not by a workspace grant, so
+    // approval renders before the access and onboarding gates.
+    browserAccountsConfigured && !browserAccountsEnabled ? (
+      <LoadingPanel />
+    ) : (
+      <NativeSignInProvider value={{ client, email: authSession.user.email, handleManagedSignOut }}>
+        <Outlet />
+      </NativeSignInProvider>
+    )
   ) : /^\/settings\/security\/?$/.test(pathname) &&
     managedAuthRequired &&
     authSession &&

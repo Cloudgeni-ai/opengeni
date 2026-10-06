@@ -27,6 +27,7 @@ function mockZeroBalance(): () => void {
 describe("worker ensureRunAllowed — codex bypass", () => {
   test("(a) codex turn with 0 credits does NOT throw (credit gate skipped, balance never read)", async () => {
     let balanceRead = false;
+    const allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue(null);
     const spy = spyOn(opengeniDb, "getBillingBalance").mockImplementation(async () => {
       balanceRead = true;
       return {
@@ -41,6 +42,7 @@ describe("worker ensureRunAllowed — codex bypass", () => {
       expect(balanceRead).toBe(false); // short-circuited before any balance read
     } finally {
       spy.mockRestore();
+      allowance.mockRestore();
     }
   });
 
@@ -56,6 +58,7 @@ describe("worker ensureRunAllowed — codex bypass", () => {
   });
 
   test("a deployment-funded free turn skips credits but still enforces the token cap", async () => {
+    const allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue(null);
     const balanceSpy = spyOn(opengeniDb, "getBillingBalance").mockImplementation(async () => {
       throw new Error("free turns must not read the credit balance");
     });
@@ -82,6 +85,7 @@ describe("worker ensureRunAllowed — codex bypass", () => {
     } finally {
       balanceSpy.mockRestore();
       usageSpy.mockRestore();
+      allowance.mockRestore();
     }
   });
 });

@@ -1,4 +1,5 @@
 import { Permission } from "@opengeni/contracts";
+import { organizationAdministrationAccountIds } from "@opengeni/react/organization-model";
 
 import type { AccessContext } from "@/types";
 import type { Workspace } from "@/types";
@@ -429,13 +430,4 @@ export function canManageWorkspaceMembers(
   );
 }
 
-export function organizationAdministrationAccountIds(accessContext: AccessContext): string[] {
-  return accessContext.accountGrants
-    .filter(
-      (grant) =>
-        grant.subjectId === accessContext.subjectId &&
-        (grant.role === "owner" || grant.role === "admin"),
-    )
-    .map((grant) => grant.accountId)
-    .sort();
-}
+export { organizationAdministrationAccountIds };

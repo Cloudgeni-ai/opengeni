@@ -26,7 +26,7 @@ export function ActiveWorkMark({ className }: { className?: string }) {
     <svg
       aria-hidden="true"
       viewBox="0 0 108 108"
-      className={cn("size-2.5 shrink-0 text-brand", className)}
+      className={cn("size-2.5 shrink-0 text-session-update", className)}
     >
       <defs>
         <mask id={maskId} maskUnits="userSpaceOnUse" x="0" y="0" width="108" height="108">
@@ -71,7 +71,7 @@ function RailAggregateDot({ summary }: { summary: RailAggregateStatus }) {
       ? "bg-status-waiting"
       : summary.kind === "failed"
         ? "bg-status-failed"
-        : "bg-brand";
+        : "bg-session-update";
   return (
     <span
       aria-hidden="true"

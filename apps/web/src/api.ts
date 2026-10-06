@@ -1011,7 +1011,8 @@ export async function signInEmail(input: {
  */
 function authReturnBase(): string {
   if (typeof window === "undefined") return "/";
-  return window.location.pathname === "/connect-agent"
+  return window.location.pathname === "/connect-agent" ||
+    window.location.pathname === "/native-sign-in"
     ? `${window.location.pathname}${window.location.search}`
     : "/";
 }

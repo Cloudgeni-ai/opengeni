@@ -116,6 +116,7 @@ import {
   ensureRunAllowedBetweenModelCalls,
 } from "./admission";
 import {
+  assertProviderOverloadRecoveryActive,
   compactionFailureReason,
   safeErrorDiagnostic,
   compactionFailureReasonFromError,
@@ -749,6 +750,13 @@ export async function runTurnStreamAttempt(
           count: turnTools.length,
         });
       }
+      // The required audit itself may have consumed the remaining window.
+      // This awaited observer still owns the literal pre-fetch boundary.
+      assertProviderOverloadRecoveryActive({
+        failureCode: attempt.providerRecoveryPolicyCode,
+        providerRecoveryCount: attempt.providerRecoveryCount,
+        recoveryStartedAt: attempt.providerRecoveryStartedAt,
+      });
     };
     const ownedEstablished = ownedTurnSandboxForAgent(sandboxState);
     const runStreamOnce = async (): ReturnType<OpenGeniRuntime["runStream"]> => {

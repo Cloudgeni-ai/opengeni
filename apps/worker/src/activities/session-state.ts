@@ -33,7 +33,12 @@ import { recordTurnsQueuedGauge, recordWorkerDeathRecoveryMetrics } from "../obs
 import {
   MAX_AUTOMATIC_PROVIDER_RECOVERIES,
   providerRecoveryCountFromMetadata,
+  providerRecoveryLimit,
 } from "./agent-turn/errors";
+import {
+  PROVIDER_OVERLOAD_RECOVERY_CODE,
+  validProviderOverloadRecoveryDelay,
+} from "./agent-turn/provider-recovery-policy";
 import type {
   ControlActivityServices,
   ExpireSessionHumanInputInput,
@@ -254,7 +259,9 @@ export function createSessionStateActivities(
       turn.triggerEventId === postClaimRecovery.triggerEventId &&
       turn.executionGeneration === postClaimRecovery.executionGeneration,
     );
-    if (postClaimRecovery?.sandboxSetupRecoveryExhausted && !postClaimIdentityMatches) {
+    // A typed checkpoint belongs to one exact turn/generation. A stale wire
+    // cannot recover or terminally fail a different current attempt.
+    if (postClaimRecovery && !postClaimIdentityMatches) {
       return { action: "stale" };
     }
     const providerRecoveryCount = postClaimIdentityMatches
@@ -265,6 +272,9 @@ export function createSessionStateActivities(
       : undefined;
     const hasProviderRecoveryCount = providerRecoveryCount !== undefined;
     const hasProviderFailureCode = providerFailureCode !== undefined;
+    const providerRecoveryContinueDelayMs = postClaimIdentityMatches
+      ? postClaimRecovery?.providerRecoveryContinueDelayMs
+      : undefined;
     const setupOutcomeUnknown =
       postClaimIdentityMatches && postClaimRecovery?.sandboxSetupOutcomeUnknown === true;
     const setupRecoveryExhausted =
@@ -281,12 +291,15 @@ export function createSessionStateActivities(
     if (hasProviderRecoveryCount !== hasProviderFailureCode) {
       return { action: "stale" };
     }
+    if (!validProviderOverloadRecoveryDelay(providerFailureCode, providerRecoveryContinueDelayMs)) {
+      return { action: "stale" };
+    }
     if (
       providerRecoveryCount !== undefined &&
       (!Number.isSafeInteger(providerRecoveryCount) ||
         providerRecoveryCount <= 0 ||
         providerRecoveryCount !== providerRecoveryCountFromMetadata(turn.metadata ?? {}) + 1 ||
-        providerRecoveryCount > MAX_AUTOMATIC_PROVIDER_RECOVERIES ||
+        providerRecoveryCount > providerRecoveryLimit(providerFailureCode) ||
         typeof providerFailureCode !== "string" ||
         !/^[a-z][a-z0-9_]{0,63}$/.test(providerFailureCode))
     ) {
@@ -319,7 +332,9 @@ export function createSessionStateActivities(
             ? "sandbox_command_start_outcome_unknown"
             : setupRecoveryExhausted
               ? "sandbox_command_start_recovery_exhausted"
-              : (providerFailureCode ?? recoveredClaimCode),
+              : providerFailureCode === PROVIDER_OVERLOAD_RECOVERY_CODE
+                ? "provider_unavailable"
+                : (providerFailureCode ?? recoveredClaimCode),
           retryable: !setupOutcomeUnknown && !setupRecoveryExhausted,
           ...(setupOutcomeUnknown ? { setupOutcome: "unknown", replay: "blocked" } : {}),
           ...(setupRecoveryExhausted
@@ -334,6 +349,13 @@ export function createSessionStateActivities(
             ? {
                 databaseFailureCode: recoveredClaimCode,
                 providerRecoveryCount,
+                ...(providerFailureCode === PROVIDER_OVERLOAD_RECOVERY_CODE
+                  ? {
+                      providerCondition: "overloaded",
+                      maxProviderRecoveryCount: providerRecoveryLimit(providerFailureCode),
+                      continueDelayMs: providerRecoveryContinueDelayMs,
+                    }
+                  : {}),
               }
             : {}),
           recoverySource: "workflow_activity_failure",
@@ -348,7 +370,12 @@ export function createSessionStateActivities(
         countQueuedTurnsFn,
         recordTurnsQueuedGaugeFn,
       );
-      return { action: "recovering" };
+      return {
+        action: "recovering",
+        ...(providerRecoveryContinueDelayMs !== undefined
+          ? { continueDelayMs: providerRecoveryContinueDelayMs }
+          : {}),
+      };
     }
     const trigger = await getSessionEventFn(db, input.workspaceId, turn.triggerEventId);
     const result = await applySessionTurnSettlementFn(db, input.workspaceId, {

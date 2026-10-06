@@ -121,11 +121,12 @@ export async function checkLimit(
   if (!creditDecision.allowed) {
     return creditDecision;
   }
-  if (!fundedWithoutCredits && isCostlyAction(input.action) && input.workspaceId) {
+  if (isCostlyAction(input.action) && input.workspaceId) {
     const refusal = await checkWorkspaceAllowance(deps.db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       subjectId: input.initiatingHumanSubjectId ?? null,
+      ...(fundedWithoutCredits ? { fundedWithoutCredits: true } : {}),
     });
     if (refusal) return { allowed: false, ...refusal };
   }

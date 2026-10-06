@@ -1,4 +1,15 @@
+import { QUESTION_NAV_MARGIN_PX, questionNavTarget } from "../timeline/question-nav-model";
 import { RollingActivity } from "../timeline/rolling-activity";
+import {
+  clusterIsSettled,
+  compactedLandmarkCount,
+  durationBetween,
+  flattenActivityItems,
+  isPreparingWork,
+  readableWorkDefaultOpen,
+  readableWorkShowsPreview,
+  readableWorkStatus,
+} from "../timeline/work-presentation";
 import { useErrorMessage } from "../lib/error-message";
 import { formatElapsed } from "../timeline/turn-summary";
 import { ActivityNoteTextContext } from "../timeline/activity-rail";
@@ -143,6 +154,11 @@ import {
   readableMachineInputSource,
 } from "./machine-input-display";
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
+import {
+  noticeDisplayText,
+  noticeIsResolvedApproval,
+  noticeTone,
+} from "../timeline/notice-presentation";
 import { TimelineComputeLabelProvider } from "../timeline/compute-label";
 import { EntranceAnimationProvider, useEntranceAnimation } from "../timeline/entrance";
 import {
@@ -338,8 +354,6 @@ const PIN_THRESHOLD_PX = 48;
  * line-sized streaming movement.
  */
 const JUMP_TO_LATEST_CATCHUP_DEBT_PX = 240;
-/** Breathing room above the question when following stops at an answer. */
-const QUESTION_NAV_MARGIN_PX = 12;
 /**
  * Floating timeline navigation: two identical small round arrow buttons at fixed
  * spots, centered on the conversation. Back to your message floats 12px below
@@ -505,25 +519,16 @@ function contentTopOf(node: HTMLElement, groupKey: string): number | null {
  */
 type QuestionNav = { key: string; belowHeader: boolean };
 
-/** How far a question's start must be above the viewport before navigation shows. */
-const QUESTION_NAV_HIDDEN_PX = 24;
-
 function readQuestionNav(node: HTMLElement): QuestionNav | null {
   const view = node.getBoundingClientRect();
-  const prompts = [...node.querySelectorAll<HTMLElement>("[data-og-prompt]")];
-  // The last prompt before the reading position owns the response/work in view.
-  // A newer prompt farther down the conversation is not a navigation target.
-  const middle = view.top + view.height / 2;
-  const prompt = prompts
-    .reverse()
-    .find((candidate) => candidate.getBoundingClientRect().top <= middle);
-  const key = prompt?.dataset.ogGroupKey;
-  if (!prompt || !key) return null;
-  const bounds = prompt.getBoundingClientRect();
-  if (bounds.top >= view.top - QUESTION_NAV_HIDDEN_PX || bounds.bottom > view.top) {
-    return null;
-  }
-  return { key, belowHeader: workHeaderPinned(node, view) };
+  const prompts = [...node.querySelectorAll<HTMLElement>("[data-og-prompt]")].flatMap((prompt) => {
+    const key = prompt.dataset.ogGroupKey;
+    if (!key) return [];
+    const bounds = prompt.getBoundingClientRect();
+    return [{ key, top: bounds.top, bottom: bounds.bottom }];
+  });
+  const key = questionNavTarget(prompts, { top: view.top, height: view.height });
+  return key ? { key, belowHeader: workHeaderPinned(node, view) } : null;
 }
 
 /** True while an expanded outer work header is stuck to the scrollport's top edge. */
@@ -3402,18 +3407,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   switch (group.kind) {
     case "activity":
       if (group.work) {
-        const phases = group.items.filter((item) => item.kind === "startup-phase");
-        const preparing =
-          !startupDetails &&
-          !startupDismissed &&
-          !group.work.endedAt &&
-          !group.work.waiting &&
-          phases.length > 0 &&
-          group.items.every(
-            (item) =>
-              item.kind === "startup-phase" || (item.kind === "reasoning" && !item.text.trim()),
-          ) &&
-          !phases.some((item) => item.status === "failed" || item.status === "cancelled");
+        const preparing = isPreparingWork(group, { startupDetails, startupDismissed });
         if (preparing) {
           // Preparation is primary, never hidden in an activity disclosure.
           // Keep work.startedAt unchanged for the handoff and settled duration.
@@ -3430,22 +3424,20 @@ const TimelineGroupView = memo(function TimelineGroupView({
             />
           );
         }
-        const end = group.work.endedAt;
-        const status: TurnSummaryStatus = end
-          ? { kind: "worked", durationMs: durationBetween(group.work.startedAt, end) }
-          : group.work.waiting
-            ? { kind: "waiting", ...group.work.waiting }
-            : {
-                kind: "working",
-                since: group.work.startedAt,
-                preview: containsPresentedImage ? undefined : (
+        const workStatus = readableWorkStatus({ ...group, work: group.work });
+        const status: TurnSummaryStatus =
+          workStatus.kind === "working"
+            ? {
+                ...workStatus,
+                preview: readableWorkShowsPreview(group) ? (
                   <RollingActivity
                     items={group.items}
                     toolRegistry={toolRegistry}
                     showCount={false}
                   />
-                ),
-              };
+                ) : undefined,
+              }
+            : workStatus;
         return (
           // Marks this work row for the live-note fold (list keys can be carried
           // over from an earlier row, so they are not the work id).
@@ -3457,13 +3449,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               outcome={group.outcome}
               failureText={group.failureText}
               foldKey={group.id}
-              defaultOpen={
-                containsPresentedImage ||
-                group.outcome === "failed" ||
-                phases.some((item) => item.status === "failed" || item.status === "cancelled")
-                  ? true
-                  : undefined
-              }
+              defaultOpen={readableWorkDefaultOpen(group)}
               facets={turnSummary?.facets}
               contextCompactionCount={compactedLandmarkCount(group.work.details)}
               onOpenStateChange={
@@ -3784,15 +3770,6 @@ function renderFoldedGroups(
   ));
 }
 
-function compactedLandmarkCount(groups: readonly TimelineGroup[]): number {
-  return groups.filter(
-    (group) =>
-      group.kind === "item" &&
-      group.item.kind === "context-compaction" &&
-      group.item.phase === "compacted",
-  ).length;
-}
-
 /**
  * Body under a turn/activity chip. Remount flashes are gated by the timeline
  * seen-activity-id map (not by killing entrance): FoldBody used to force
@@ -3893,18 +3870,6 @@ function isAgentProgress(next: TimelineGroup | undefined): boolean {
 /** No item still running or streaming — the only state safe to fold live.
     Position alone is a broken proxy: a pending queued message (or any trailing
     item) can sit after the ACTIVE cluster, which must never fold mid-work. */
-function clusterIsSettled(group: Extract<TimelineGroup, { kind: "activity" }>): boolean {
-  return group.items.every((item) => {
-    if (item.kind === "reasoning" || item.kind === "agent-message") {
-      return !item.streaming;
-    }
-    // Memory writes and fleet observations are discrete, already-settled events.
-    if (item.kind === "memory" || item.kind === "fleet-decision") {
-      return true;
-    }
-    return item.status !== "running";
-  });
-}
 
 /** Settled activity clusters that could become nested chips under a turn. */
 function foldableActivityClusterCount(groups: readonly TimelineGroup[]): number {
@@ -3915,18 +3880,6 @@ function foldableActivityClusterCount(groups: readonly TimelineGroup[]): number 
     }
   }
   return count;
-}
-
-function flattenActivityItems(groups: readonly TimelineGroup[]): ActivityItem[] {
-  const items: ActivityItem[] = [];
-  for (const group of groups) {
-    if (group.kind === "activity") {
-      items.push(...flattenActivityItems(group.work?.details ?? []), ...group.items);
-    } else if (group.kind === "turn") {
-      items.push(...flattenActivityItems(group.groups));
-    }
-  }
-  return items;
 }
 
 /** Assistant prose inside a turn fold (mid-turn narration), joined for copy. */
@@ -4025,15 +3978,6 @@ function collectTurnCopyText(
     return undefined;
   }
   return parts.join("\n\n");
-}
-
-function durationBetween(startedAt: string, endedAt: string): number | undefined {
-  const started = Date.parse(startedAt);
-  const ended = Date.parse(endedAt);
-  if (!Number.isFinite(started) || !Number.isFinite(ended) || ended < started) {
-    return undefined;
-  }
-  return ended - started;
 }
 
 /* --- single rows ------------------------------------------------------------ */
@@ -4937,11 +4881,12 @@ function NoticeRow({ item }: { item: NoticeItem }) {
       </details>
     );
   }
-  const resolvedApproval = Boolean(item.resolvedAt && item.text.startsWith("Approval needed"));
+  const presentedTone = noticeTone(item);
+  const resolvedApproval = noticeIsResolvedApproval(item);
   const tone =
-    item.tone === "failed"
+    presentedTone === "failed"
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
-      : item.tone === "waiting" && !item.resolvedAt
+      : presentedTone === "waiting"
         ? WAITING_PILL_CLASS
         : NEUTRAL_PILL;
   return (
@@ -4961,9 +4906,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
         />
       )}
       <div className="min-w-0 flex-1">
-        <span className="whitespace-pre-wrap break-words">
-          {resolvedApproval ? "You responded to this approval." : item.text}
-        </span>
+        <span className="whitespace-pre-wrap break-words">{noticeDisplayText(item)}</span>
         {item.details ? (
           <details className="mt-2 text-og-control">
             <summary className="cursor-pointer font-medium">{item.details.label}</summary>

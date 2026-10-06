@@ -233,6 +233,8 @@ export function isDerivedAgentToolOwner(
 export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   set_session_title: "runtime",
   wait_for_input: "runtime",
+  // Reaching the person: a push to the phones of whoever started the session.
+  notify_user: "humanInput",
   command_wait: "sandbox",
   command_read: "sandbox",
 
@@ -638,7 +640,7 @@ export const AGENT_CAPABILITY_DESCRIPTIONS: Readonly<
   webSearch: { label: "Web search", description: "Search the public web for current information." },
   humanInput: {
     label: "Ask questions",
-    description: "Pause and ask the person for a decision or missing detail.",
+    description: "Ask the person for a decision or missing detail, and notify their phone.",
   },
   skills: {
     label: "Skills",

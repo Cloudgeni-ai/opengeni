@@ -76,6 +76,20 @@ connection owner's accepted human revision authority.
 
 ## Selective retention and discovery
 
+Learning is part of ordinary work under the accepted destination policy. A user
+need not say "remember" or separately approve useful retention in Automatic mode,
+including Slack tasks. Direct user corrections, accepted decisions, product
+preferences, constraints and their reasoning can be learning signals; task-only
+tweaks and unaccepted assistant proposals are not settled reusable decisions.
+Explicit requests not to retain particular information remain authoritative.
+Standing behavioral preferences still follow Instructions/Skills routing and their
+own settings, tools and writable scope.
+
+Retrieve relevant published Knowledge before work that relies on prior decisions
+or requirements; unrelated turns do not require a search. Update one conclusion
+entry per experiment rather than saving every round. For incidents retain settled
+impact, cause, fix/workaround and outcome when known, rather than live status.
+
 A saved entry should help answer a plausible future question. Routine approvals,
 acknowledgments, temporary task instructions and status chatter stay in the
 conversation. Agents inspect screenshots visually and retain a supported
@@ -307,7 +321,12 @@ same owner layer the task actually uses, otherwise the write is rejected.
 
 `agent_learning_revisions` stores immutable policy history.
 `agent_learning_snapshots` freezes the effective categories, owner and producer
-context for an accepted logical turn. Scheduled work resolves against its accepted
+context for an accepted logical turn.
+The worker presents the effective modes and Knowledge destination to the agent
+through the governance prompt. It renders stable mode/scope facts, without
+attempt identifiers or personal identities; the database snapshot remains the
+enforcement authority.
+Scheduled work resolves against its accepted
 run time. Child work and recovery preserve their accepted producer policy; changing
 settings affects subsequent accepted work, not an already running turn.
 

@@ -859,6 +859,7 @@ export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
  */
 export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "set_session_title",
+  "notify_user",
   "goal_set",
   "goal_update",
   "goal_progress",

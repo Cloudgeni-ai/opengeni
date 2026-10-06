@@ -4,12 +4,20 @@ import { currentCreditDebitAttribution } from "./credit-debit-attribution";
 
 /** All amounts are integer USD micros, never dollars or floating-point credits. */
 export type MemberAllowanceRule = { share: number } | { credits: number } | null;
+/**
+ * How model calls that spend no Opengeni credits (subscription connections,
+ * workspace keys, deployments without credit billing) count. "ignore" (the
+ * default) keeps the allowance credit-only; "list_price" counts them at the
+ * configured list-price estimate and admits their turns against it.
+ */
+export type UnbilledUsageMetering = "ignore" | "list_price";
 export type WorkspaceAllowanceConfig = {
   includedCredits: number;
   period: "monthly" | "none";
   anchorDay?: number;
   memberDefault?: "none" | "equal_share" | Exclude<MemberAllowanceRule, null>;
   thresholds?: { workspace?: number[]; member?: number[] };
+  unbilledUsage?: UnbilledUsageMetering;
 };
 export type WorkspaceAllowance = WorkspaceAllowanceConfig & { version: number };
 export type WorkspaceAllowanceState = { version: number; config: WorkspaceAllowance | null };
@@ -85,6 +93,13 @@ export function validateWorkspaceAllowanceConfig(config: WorkspaceAllowanceConfi
     (!Number.isInteger(config.anchorDay) || config.anchorDay < 1 || config.anchorDay > 31)
   ) {
     throw new Error("anchorDay must be an integer from 1 to 31");
+  }
+  if (
+    config.unbilledUsage !== undefined &&
+    config.unbilledUsage !== "ignore" &&
+    config.unbilledUsage !== "list_price"
+  ) {
+    throw new Error('unbilledUsage must be "ignore" or "list_price"');
   }
   if (
     config.memberDefault !== undefined &&
@@ -183,6 +198,7 @@ export async function setWorkspaceAllowance(
     ...(input.anchorDay === undefined ? {} : { anchorDay: input.anchorDay }),
     ...(input.memberDefault === undefined ? {} : { memberDefault: input.memberDefault }),
     ...(input.thresholds === undefined ? {} : { thresholds: input.thresholds }),
+    ...(input.unbilledUsage === undefined ? {} : { unbilledUsage: input.unbilledUsage }),
   };
   version(expectedVersion);
   validateWorkspaceAllowanceConfig(config);
@@ -345,7 +361,14 @@ function projectUsage(raw: RawUsage, pageSize: number): WorkspaceUsage {
 
 export async function checkWorkspaceAllowance(
   db: Database,
-  input: Scope & { subjectId?: string | null },
+  input: Scope & {
+    subjectId?: string | null;
+    /**
+     * The work spends no Opengeni credits. It is admitted against the allowance
+     * only when the allowance opts into `unbilledUsage: "list_price"`.
+     */
+    fundedWithoutCredits?: boolean;
+  },
 ): Promise<AllowanceExhausted | null> {
   const raw = await command<RawUsage>(db, {
     accountId: input.accountId,
@@ -354,6 +377,7 @@ export async function checkWorkspaceAllowance(
     limit: 1,
     action: "check",
   });
+  if (input.fundedWithoutCredits && raw.config?.unbilledUsage !== "list_price") return null;
   const usage = projectUsage(raw, 1);
   if (usage.workspace.status === "exhausted") {
     return {
