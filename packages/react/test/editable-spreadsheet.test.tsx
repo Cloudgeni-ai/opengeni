@@ -8,7 +8,11 @@ import type {
   EditableSpreadsheetViewportListener,
   EditableSpreadsheetViewportQuery,
 } from "@opengeni/sdk/editable-artifacts";
-import type { SpreadsheetArtifactCommandBatch } from "@opengeni/sdk/editable-artifacts";
+import {
+  editableArtifactStableId,
+  spreadsheetSheetId,
+  type SpreadsheetArtifactCommandBatch,
+} from "@opengeni/sdk/editable-artifacts";
 
 import {
   EditableSpreadsheetArtifactSurface,
@@ -19,8 +23,8 @@ import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 registerDom();
 
 const ARTIFACT_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const SHEET_ID = "00000000000000010000000000000001";
-const GENERATION_ID = "11111111111111111111111111111111";
+const SHEET_ID = spreadsheetSheetId("00000000000000010000000000000001");
+const GENERATION_ID = editableArtifactStableId("11111111111111111111111111111111");
 
 function replaceInputValue(input: HTMLInputElement, value: string): void {
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
@@ -60,6 +64,9 @@ class FakeEditableSpreadsheetSession {
   private revision = 1n;
   private value = "from Worker";
   private projectedDate: string | null = null;
+  private readonly rowHeights = new Map<number, number>();
+  private readonly columnWidths = new Map<number, number>();
+  private readonly metadataListeners = new Set<EditableSpreadsheetMetadataListener>();
   private view: EditableArtifactSyncView = {
     artifactId: ARTIFACT_ID,
     modality: "spreadsheet",
@@ -107,6 +114,12 @@ class FakeEditableSpreadsheetSession {
             : String(cell);
     } else if (command?.kind === "range.clear") {
       this.value = "";
+    } else if (command?.kind === "column.width.set") {
+      if (command.width === null) this.columnWidths.delete(command.column);
+      else this.columnWidths.set(command.column, command.width);
+    } else if (command?.kind === "row.height.set") {
+      if (command.height === null) this.rowHeights.delete(command.row);
+      else this.rowHeights.set(command.row, command.height);
     }
     this.revision += 1n;
     this.publishViewports();
@@ -136,18 +149,29 @@ class FakeEditableSpreadsheetSession {
     return () => this.viewportListeners.delete(entry);
   }
   async querySpreadsheetMetadata() {
-    return metadata();
+    return this.metadata();
   }
   subscribeSpreadsheetMetadata(
     _query: Record<string, never>,
     listener: EditableSpreadsheetMetadataListener,
   ): () => void {
-    listener(metadata());
-    return () => {};
+    this.metadataListeners.add(listener);
+    listener(this.metadata());
+    return () => this.metadataListeners.delete(listener);
   }
 
   setWritable(writable: boolean): void {
     this.view = { ...this.view, writable };
+    for (const listener of this.viewListeners) listener(this.view);
+  }
+
+  setPendingTransactions(pendingTransactions: number): void {
+    this.view = { ...this.view, pendingTransactions };
+    for (const listener of this.viewListeners) listener(this.view);
+  }
+
+  setAuthoringBlocked(blocked: boolean): void {
+    this.view = { ...this.view, authoringBlockedReason: blocked ? "prior_writer" : undefined };
     for (const listener of this.viewListeners) listener(this.view);
   }
 
@@ -198,11 +222,53 @@ class FakeEditableSpreadsheetSession {
   }
 
   private publishViewports(): void {
+    for (const listener of this.metadataListeners) listener(this.metadata());
     for (const { query, listener } of this.viewportListeners) listener(this.viewport(query));
+  }
+  private metadata() {
+    return metadata(this.revision, [...this.rowHeights], [...this.columnWidths]);
   }
 }
 
 describe("SDK-backed editable spreadsheet", () => {
+  test("direct grids honor session write authority and server pending state", async () => {
+    const fake = new FakeEditableSpreadsheetSession();
+    const sheet = metadata().sheets[0]!;
+    const rendered = await renderComponent(
+      <EditableSpreadsheetGrid
+        session={fake as unknown as EditableArtifactSession}
+        sheet={sheet}
+        metadataRevision={1n}
+      />,
+    );
+    await actRun(() => fake.setPendingTransactions(1));
+    expect(
+      rendered.container.querySelector('[aria-label="Spreadsheet sync status"]')?.textContent,
+    ).toBe("Saving…");
+    await actRun(() => fake.setAuthoringBlocked(true));
+    expect(
+      rendered.container.querySelector<HTMLInputElement>('[aria-label="Formula or value"]')
+        ?.readOnly,
+    ).toBe(true);
+    expect(
+      rendered.container.querySelector('[aria-label="Spreadsheet sync status"]')?.textContent,
+    ).toBe("Waiting for earlier edits…");
+    await actRun(() => fake.setAuthoringBlocked(false));
+    await actRun(() => fake.setWritable(false));
+    expect(
+      rendered.container.querySelector<HTMLInputElement>('[aria-label="Formula or value"]')
+        ?.readOnly,
+    ).toBe(true);
+    expect(rendered.container.querySelector('[aria-label="Resize column A"]')).toBeNull();
+    await actRun(() => fake.setPendingTransactions(0));
+    expect(
+      rendered.container.querySelector('[aria-label="Spreadsheet sync status"]')?.textContent,
+    ).toBe("Read only");
+    await actRun(() => fake.revokeReadAccess());
+    expect(rendered.container.textContent).not.toContain("from Worker");
+    expect(rendered.container.querySelector('[role="grid"]')).toBeNull();
+    await rendered.unmount();
+  });
   test("hides cached cells and sheet names after read access is revoked", async () => {
     const fake = new FakeEditableSpreadsheetSession();
     const rendered = await renderComponent(
@@ -368,18 +434,94 @@ describe("SDK-backed editable spreadsheet", () => {
     expect(grid.getAttribute("aria-activedescendant")).toContain("cell-1-1");
     await rendered.unmount();
   });
+
+  test("commits dimensions through generation-pinned commands and reconciles metadata", async () => {
+    const fake = new FakeEditableSpreadsheetSession();
+    const rendered = await renderComponent(
+      <EditableSpreadsheetArtifactSurface session={fake as unknown as EditableArtifactSession} />,
+    );
+    await flush();
+    const column = rendered.container.querySelector<HTMLElement>('[aria-label="Resize column A"]')!;
+    await actRun(() => {
+      column.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+      column.dispatchEvent(new KeyboardEvent("keyup", { key: "ArrowRight", bubbles: true }));
+    });
+    await flush();
+    expect(fake.applied[0]?.commands).toEqual([
+      {
+        kind: "column.width.set",
+        sheet: { kind: "generation", sheetId: SHEET_ID, creationOperationId: GENERATION_ID },
+        column: 0,
+        width: 104,
+      },
+    ]);
+    expect(column.getAttribute("aria-valuenow")).toBe("104");
+    await actRun(() => {
+      column.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+      column.dispatchEvent(new KeyboardEvent("keyup", { key: "Home", bubbles: true }));
+    });
+    await flush();
+    expect(fake.applied[1]?.commands[0]).toMatchObject({ kind: "column.width.set", width: null });
+    expect(column.getAttribute("aria-valuenow")).toBe("96");
+
+    const row = rendered.container.querySelector<HTMLElement>('[aria-label="Resize row 1"]')!;
+    await actRun(() => {
+      row.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+      row.dispatchEvent(new KeyboardEvent("keyup", { key: "ArrowDown", bubbles: true }));
+    });
+    await flush();
+    expect(fake.applied[2]?.commands[0]).toMatchObject({
+      kind: "row.height.set",
+      row: 0,
+      height: 32,
+    });
+    expect(row.getAttribute("aria-valuenow")).toBe("32");
+    await rendered.unmount();
+  });
+
+  test("does not offer resize controls for a kernel without dimension projections", async () => {
+    const fake = new FakeEditableSpreadsheetSession();
+    const sheet = metadata().sheets[0]!;
+    const rendered = await renderComponent(
+      <EditableSpreadsheetGrid
+        session={fake as unknown as EditableArtifactSession}
+        sheet={{
+          sheetId: sheet.sheetId,
+          generationId: sheet.generationId,
+          name: sheet.name,
+          usedBounds: sheet.usedBounds,
+        }}
+        metadataRevision={1n}
+      />,
+    );
+    await flush();
+    expect(rendered.container.querySelector('[role="separator"]')).toBeNull();
+    expect(
+      rendered.container.querySelector<HTMLInputElement>('[aria-label="Formula or value"]')
+        ?.readOnly,
+    ).toBe(false);
+    await rendered.unmount();
+  });
 });
 
-function metadata() {
+function metadata(
+  revision = 1n,
+  rowHeights: readonly (readonly [number, number])[] = [],
+  columnWidths: readonly (readonly [number, number])[] = [],
+) {
   return {
-    revision: 1n,
-    modeledFeatures: { dimensions: false, hidden: false, merges: false },
+    revision,
+    modeledFeatures: { dimensions: true, hidden: false, merges: false },
     sheets: [
       {
         sheetId: SHEET_ID,
         generationId: GENERATION_ID,
         name: "Data",
         usedBounds: { startRow: 0, startColumn: 0, endRow: 0, endColumn: 0 },
+        defaultRowHeight: 24,
+        defaultColumnWidth: 96,
+        rowHeights,
+        columnWidths,
       },
     ],
   } as const;

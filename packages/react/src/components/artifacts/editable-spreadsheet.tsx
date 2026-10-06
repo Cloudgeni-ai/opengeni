@@ -26,6 +26,7 @@ import { SparseSpreadsheetCellIndex } from "./spreadsheet-canvas";
 import {
   SpreadsheetProjectionGrid,
   type SpreadsheetCommit,
+  type SpreadsheetDimensionCommit,
   type SpreadsheetGridProjection,
   type SpreadsheetRangeCommit,
   type SpreadsheetSelection,
@@ -52,6 +53,7 @@ export type EditableSpreadsheetGridProps = {
   overscanColumns?: number | undefined;
   onSelectionChange?: ((selection: SpreadsheetSelection) => void) | undefined;
   onCommit?: ((commit: SpreadsheetCommit) => void) | undefined;
+  onResize?: ((change: SpreadsheetDimensionCommit) => void) | undefined;
   onCommandError?: ((error: Error) => void) | undefined;
   onViewportChange?: ((viewport: SpreadsheetViewport) => void) | undefined;
   className?: string | undefined;
@@ -90,10 +92,12 @@ export function EditableSpreadsheetGrid({
   overscanColumns = 2,
   onSelectionChange,
   onCommit,
+  onResize,
   onCommandError,
   onViewportChange,
   className,
 }: EditableSpreadsheetGridProps) {
+  const view = useEditableArtifactView(session);
   const rowCount = boundedSheetCount(requestedRowCount, EXCEL_MAX_ROWS, sheet.usedBounds?.endRow);
   const columnCount = boundedSheetCount(
     requestedColumnCount,
@@ -161,7 +165,21 @@ export function EditableSpreadsheetGrid({
     [columnCount, metadataRevision, rowCount, sheet, state.projection, state.query],
   );
   const generation = useMemo(() => sheetGeneration(sheet), [sheet]);
-  const editable = !readOnly && generation !== null;
+  const editable =
+    !readOnly && view.writable && !view.authoringBlockedReason && generation !== null;
+  const syncStatus = view.authoringBlockedReason
+    ? "Waiting for earlier edits…"
+    : view.state === "live"
+      ? editable
+        ? "Saved"
+        : "Read only"
+      : editableArtifactStatusLabel(view);
+  const syncError =
+    view.blockedPending.length > 0
+      ? "Some earlier changes could not sync."
+      : view.lastError?.message;
+  const resizable =
+    editable && sheet.defaultRowHeight !== undefined && sheet.defaultColumnWidth !== undefined;
 
   const handleCommit = useCallback(
     async (commit: SpreadsheetCommit) => {
@@ -230,6 +248,31 @@ export function EditableSpreadsheetGrid({
     },
     [generation, session],
   );
+  const handleResize = useCallback(
+    async (change: SpreadsheetDimensionCommit) => {
+      if (!generation) throw new Error("This sheet generation is not writable yet");
+      await session.applySpreadsheetCommands({
+        version: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+        commands: [
+          change.axis === "column"
+            ? {
+                kind: "column.width.set",
+                sheet: generation,
+                column: change.index,
+                width: change.size === sheet.defaultColumnWidth ? null : change.size,
+              }
+            : {
+                kind: "row.height.set",
+                sheet: generation,
+                row: change.index,
+                height: change.size === sheet.defaultRowHeight ? null : change.size,
+              },
+        ],
+      });
+      onResize?.(change);
+    },
+    [generation, onResize, session, sheet.defaultColumnWidth, sheet.defaultRowHeight],
+  );
 
   const handleSelection = useCallback(
     (selection: SpreadsheetSelection) => {
@@ -281,6 +324,15 @@ export function EditableSpreadsheetGrid({
     [columnCount, onViewportChange, rowCount, sheet.sheetId],
   );
 
+  if (editableArtifactAccessRevoked(view)) {
+    return (
+      <EditableArtifactMessage
+        title="Spreadsheet unavailable"
+        detail="You no longer have access to this artifact"
+      />
+    );
+  }
+
   return (
     <div className={cn("relative h-full min-h-0", className)}>
       <SpreadsheetProjectionGrid
@@ -292,6 +344,10 @@ export function EditableSpreadsheetGrid({
         commit={editable ? handleCommit : undefined}
         commitRange={editable ? handleCommitRange : undefined}
         clear={editable ? handleClear : undefined}
+        resize={resizable ? handleResize : undefined}
+        pendingTransactions={view.pendingTransactions}
+        syncStatus={syncStatus}
+        syncError={syncError}
         onCommandError={onCommandError}
         onViewportChange={handleViewport}
       />
@@ -331,7 +387,7 @@ export function EditableSpreadsheetArtifactSurface({
     (initialSheetId ? sheets.find((sheet) => sheet.sheetId === initialSheetId) : undefined) ??
     sheets[0] ??
     null;
-  const writable = !readOnly && view.writable;
+  const writable = !readOnly && view.writable && !view.authoringBlockedReason;
   const accessRevoked = editableArtifactAccessRevoked(view);
 
   const addSheet = useCallback(async () => {
@@ -492,8 +548,12 @@ function projectSdkViewport(
     sheetId: sheet.sheetId,
     sheetName: sheet.name,
     generationId: current?.generationId ?? sheet.generationId,
-    revision: `${metadataRevision}:${current?.revision ?? "loading"}`,
+    revision: current?.revision.toString() ?? "loading",
     dimensionRevision: metadataRevision.toString(),
+    defaultRowHeight: sheet.defaultRowHeight,
+    defaultColumnWidth: sheet.defaultColumnWidth,
+    rowHeights: sheet.rowHeights,
+    columnWidths: sheet.columnWidths,
     rowCount,
     columnCount,
     usedRange: used

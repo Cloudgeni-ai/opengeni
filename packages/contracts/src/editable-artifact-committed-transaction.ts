@@ -8,6 +8,11 @@
  */
 
 import { COMMITTED_TRANSACTION_PROTOCOL_VERSION } from "./editable-artifact-versions";
+import {
+  SPREADSHEET_DEFAULT_ROW_HEIGHT,
+  SPREADSHEET_DEFAULT_COLUMN_WIDTH,
+  SPREADSHEET_MAX_DIMENSION_PIXELS,
+} from "./spreadsheet-artifact-commands";
 
 export { COMMITTED_TRANSACTION_PROTOCOL_VERSION } from "./editable-artifact-versions";
 export const MAX_COMMITTED_TRANSACTION_BYTES = 8 * 1024 * 1024;
@@ -281,6 +286,18 @@ class Reader {
       case 5:
         this.stableId("selective undo target");
         return totalCells;
+      case 6:
+      case 7: {
+        this.skipGeneration("dimension sheet generation");
+        this.u32("dimension index");
+        const pixels = this.u32("dimension pixels");
+        const defaultPixels =
+          tag === 6 ? SPREADSHEET_DEFAULT_ROW_HEIGHT : SPREADSHEET_DEFAULT_COLUMN_WIDTH;
+        if (pixels > SPREADSHEET_MAX_DIMENSION_PIXELS || pixels === defaultPixels) {
+          throw new TypeError("OGACO002 dimension pixels are noncanonical or outside bounds");
+        }
+        return totalCells;
+      }
       default:
         throw new TypeError(`invalid OGACO002 collaboration command tag: ${tag}`);
     }

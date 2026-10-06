@@ -157,6 +157,24 @@ describe("public editable-artifact browser composition", () => {
       const grid = page.getByRole("grid", { name: /spreadsheet$/u });
       await grid.waitFor();
       await waitForEditorIdle(page, "spreadsheet");
+      const columnBoundary = page.getByRole("separator", { name: "Resize column A", exact: true });
+      const columnBox = await columnBoundary.boundingBox();
+      if (!columnBox) throw new Error("Column boundary is not visible");
+      await page.mouse.move(columnBox.x + columnBox.width / 2, columnBox.y + columnBox.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(
+        columnBox.x + columnBox.width / 2 + 48,
+        columnBox.y + columnBox.height / 2,
+        { steps: 6 },
+      );
+      await page.mouse.up();
+      await waitForEditorIdle(page, "spreadsheet");
+      expect(await columnBoundary.getAttribute("aria-valuenow")).toBe("144");
+      const rowBoundary = page.getByRole("separator", { name: "Resize row 1", exact: true });
+      await rowBoundary.focus();
+      await rowBoundary.press("ArrowDown");
+      await waitForEditorIdle(page, "spreadsheet");
+      expect(await rowBoundary.getAttribute("aria-valuenow")).toBe("32");
       const formula = page.getByLabel("Formula or value");
       await formula.fill("=1+1");
       await formula.press("Enter");
@@ -171,6 +189,8 @@ describe("public editable-artifact browser composition", () => {
       );
       await page.reload();
       await page.getByRole("grid", { name: /spreadsheet$/u }).waitFor({ timeout: 30_000 });
+      expect(await columnBoundary.getAttribute("aria-valuenow")).toBe("144");
+      expect(await rowBoundary.getAttribute("aria-valuenow")).toBe("32");
       await waitFor(
         async () =>
           (await page.locator('[data-og-cell="A1"]').getAttribute("aria-label")) === "A1, 2",

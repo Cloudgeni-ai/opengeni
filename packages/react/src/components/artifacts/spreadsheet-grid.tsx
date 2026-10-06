@@ -18,6 +18,10 @@ import {
 import { cn } from "../../lib/cn";
 import { ArtifactSurface } from "./artifact-surface";
 import {
+  useSpreadsheetCommandQueue,
+  type SpreadsheetCommandTarget,
+} from "./spreadsheet-command-queue";
+import {
   SparseSpreadsheetCellIndex,
   SpreadsheetCanvasRenderer,
   spreadsheetCanvasDevicePixelRatio,
@@ -30,6 +34,13 @@ import {
   formatSpreadsheetGeneralDisplay,
   spreadsheetCellEditSource,
 } from "./spreadsheet-general-display";
+import {
+  SpreadsheetResizeHandle,
+  useSpreadsheetResizing,
+  type SpreadsheetDimensionCommit,
+} from "./spreadsheet-resize";
+
+export type { SpreadsheetDimensionCommit } from "./spreadsheet-resize";
 
 const MAX_ROWS = 1_048_576;
 const MAX_COLUMNS = 16_384;
@@ -49,6 +60,7 @@ const MAX_MOUNTED_AXIS_ITEMS = 512;
 const MAX_MOUNTED_GRID_CELLS = 2_048;
 const MAX_CLIPBOARD_INPUT_BYTES = 4 * 1024 * 1024;
 const MAX_CLIPBOARD_CELLS = 65_536;
+const EMPTY_DIMENSIONS: readonly (readonly [number, number])[] = [];
 
 type CellCoordinate = { row: number; col: number };
 
@@ -103,6 +115,7 @@ export type SpreadsheetGridProps = {
   overscanColumns?: number | undefined;
   onSelectionChange?: ((selection: SpreadsheetSelection) => void) | undefined;
   onCommit?: ((commit: SpreadsheetCommit) => void) | undefined;
+  onResize?: ((change: SpreadsheetDimensionCommit) => void) | undefined;
   onViewportChange?: ((viewport: SpreadsheetViewport) => void) | undefined;
   className?: string | undefined;
 };
@@ -140,6 +153,11 @@ export type SpreadsheetProjectionGridProps = {
   commit?: ((commit: SpreadsheetCommit) => void | Promise<void>) | undefined;
   commitRange?: ((commit: SpreadsheetRangeCommit) => void | Promise<void>) | undefined;
   clear?: ((selection: SpreadsheetSelection) => void | Promise<void>) | undefined;
+  resize?: ((change: SpreadsheetDimensionCommit) => void | Promise<void>) | undefined;
+  /** Server-unacknowledged changes, distinct from local command acceptance. */
+  pendingTransactions?: number | undefined;
+  syncStatus?: string | undefined;
+  syncError?: string | undefined;
   onCommandError?: ((error: Error) => void) | undefined;
   onViewportChange?: ((viewport: SpreadsheetViewport) => void) | undefined;
   className?: string | undefined;
@@ -835,6 +853,7 @@ export function SpreadsheetGrid({
   overscanColumns = 2,
   onSelectionChange,
   onCommit,
+  onResize,
   onViewportChange,
   className,
 }: SpreadsheetGridProps) {
@@ -965,6 +984,14 @@ export function SpreadsheetGrid({
     },
     [worksheet],
   );
+  const resize = useCallback(
+    (change: SpreadsheetDimensionCommit) => {
+      if (change.axis === "column") worksheet.setColumnWidth(change.index, change.size);
+      else worksheet.setRowHeight(change.index, change.size);
+      onResize?.(change);
+    },
+    [onResize, worksheet],
+  );
 
   return (
     <SpreadsheetProjectionGrid
@@ -976,6 +1003,7 @@ export function SpreadsheetGrid({
       commit={commit}
       commitRange={commitRange}
       clear={clear}
+      resize={resize}
       onViewportChange={onViewportChange}
       className={className}
     />
@@ -995,25 +1023,50 @@ export function SpreadsheetProjectionGrid({
   commit,
   commitRange,
   clear,
+  resize,
+  pendingTransactions = 0,
+  syncStatus,
+  syncError,
   onCommandError,
   onViewportChange,
   className,
 }: SpreadsheetProjectionGridProps) {
   const { revision, rowCount, columnCount } = projection;
-  const dimensionRevision = projection.dimensionRevision ?? 0;
   const editable = !readOnly && commit !== undefined;
+  const commandQueue = useSpreadsheetCommandQueue({
+    scopeKey: `${projection.sheetId}:${projection.generationId ?? "none"}`,
+    enabled: editable,
+    onCommandError,
+  });
+  const [commandFailure, setCommandFailure] = useState<{
+    message: string;
+    retry?: (() => void) | undefined;
+  } | null>(null);
+  const clearPreflightFailure = commandQueue.clearPreflightFailure;
+  const clearCommandFailure = useCallback(() => {
+    setCommandFailure(null);
+    clearPreflightFailure();
+  }, [clearPreflightFailure]);
+  const resizing = useSpreadsheetResizing({
+    sheetId: projection.sheetId,
+    generationId: projection.generationId,
+    revision: projection.dimensionRevision ?? revision,
+    rowHeights: projection.rowHeights ?? EMPTY_DIMENSIONS,
+    columnWidths: projection.columnWidths ?? EMPTY_DIMENSIONS,
+    defaultRowHeight: projection.defaultRowHeight ?? 24,
+    defaultColumnWidth: projection.defaultColumnWidth ?? 96,
+    enabled: !readOnly && resize !== undefined,
+    commit: resize,
+    onCommandError,
+    onStart: clearCommandFailure,
+  });
+  const dimensionRevision = `${projection.dimensionRevision ?? 0}:${resizing.previewKey}`;
   const rows = useMemo(() => {
-    void dimensionRevision;
-    return buildAxis(rowCount, projection.defaultRowHeight ?? 24, projection.rowHeights ?? []);
-  }, [dimensionRevision, projection.defaultRowHeight, projection.rowHeights, rowCount]);
+    return buildAxis(rowCount, projection.defaultRowHeight ?? 24, resizing.rowHeights);
+  }, [projection.defaultRowHeight, resizing.rowHeights, rowCount]);
   const columns = useMemo(() => {
-    void dimensionRevision;
-    return buildAxis(
-      columnCount,
-      projection.defaultColumnWidth ?? 96,
-      projection.columnWidths ?? [],
-    );
-  }, [columnCount, dimensionRevision, projection.columnWidths, projection.defaultColumnWidth]);
+    return buildAxis(columnCount, projection.defaultColumnWidth ?? 96, resizing.columnWidths);
+  }, [columnCount, resizing.columnWidths, projection.defaultColumnWidth]);
   const canvasRows = useMemo(() => canvasAxis(rows), [rows]);
   const canvasColumns = useMemo(() => canvasAxis(columns), [columns]);
   const [selection, setSelection] = useState<SpreadsheetSelection>(() => ({
@@ -1025,11 +1078,18 @@ export function SpreadsheetProjectionGrid({
   const [draft, setDraft] = useState(
     () => projection.readCell(selection.focus.row, selection.focus.col)?.input ?? "",
   );
-  const [pendingCommands, setPendingCommands] = useState(0);
-  const [commandFailure, setCommandFailure] = useState<{
-    message: string;
-    retry?: (() => void) | undefined;
-  } | null>(null);
+  const visibleCommandFailure =
+    resizing.error ??
+    commandQueue.error ??
+    commandFailure ??
+    (syncError ? { message: syncError, retry: undefined } : null);
+  const pendingCommandCount =
+    commandQueue.pendingCount + resizing.pendingCount + pendingTransactions;
+  const visibleSyncStatus =
+    pendingCommandCount > 0 && (!syncStatus || syncStatus === "Saved" || syncStatus === "Read only")
+      ? "Saving…"
+      : syncStatus;
+  const runQueuedCommand = commandQueue.run;
   const [viewport, setViewport] = useState<ViewportState>({
     width: FALLBACK_VIEWPORT_WIDTH,
     height: FALLBACK_VIEWPORT_HEIGHT,
@@ -1049,19 +1109,45 @@ export function SpreadsheetProjectionGrid({
   const commitAfterCompositionRef = useRef(false);
   const selectDraftOnFocusRef = useRef(true);
   const initialDraftRef = useRef(draft);
-  const optimisticInputRef = useRef<{
-    sheetId: string;
-    row: number;
-    col: number;
-    input: string;
-    baseRevision: string | number;
-  } | null>(null);
-  const mountedRef = useRef(true);
-  const commandScopeRef = useRef(0);
-  const latestCommandRef = useRef(0);
+  const optimisticInputsRef = useRef(
+    new Map<
+      string,
+      {
+        row: number;
+        col: number;
+        input: string;
+        baseRevision: string | number;
+        commandId: number;
+        pending: boolean;
+      }
+    >(),
+  );
+  const projectionRef = useRef(projection);
+  projectionRef.current = projection;
+  const editModeRef = useRef(editMode);
+  editModeRef.current = editMode;
   const canvasRendererRef = useRef<SpreadsheetCanvasRenderer | null>(null);
   if (!canvasRendererRef.current) canvasRendererRef.current = new SpreadsheetCanvasRenderer();
   const reactId = useId().replaceAll(":", "");
+  const readEditInput = useCallback(
+    (cell: CellCoordinate) =>
+      optimisticInputsRef.current.get(`${cell.row}:${cell.col}`)?.input ??
+      projectionRef.current.readCell(cell.row, cell.col)?.input ??
+      "",
+    [],
+  );
+  const forgetOptimisticInputs = useCallback((target: SpreadsheetCommandTarget) => {
+    for (const [key, entry] of optimisticInputsRef.current) {
+      if (
+        entry.row >= target.top &&
+        entry.row <= target.bottom &&
+        entry.col >= target.left &&
+        entry.col <= target.right
+      ) {
+        optimisticInputsRef.current.delete(key);
+      }
+    }
+  }, []);
 
   const updateSelection = useCallback(
     (next: SpreadsheetSelection) => {
@@ -1074,44 +1160,41 @@ export function SpreadsheetProjectionGrid({
 
   useEffect(() => {
     if (selection.sheetId === projection.sheetId) return;
-    commandScopeRef.current += 1;
-    latestCommandRef.current += 1;
     const next = {
       sheetId: projection.sheetId,
       anchor: { row: 0, col: 0 },
       focus: { row: 0, col: 0 },
     };
-    optimisticInputRef.current = null;
-    setPendingCommands(0);
+    optimisticInputsRef.current.clear();
     setCommandFailure(null);
     setEditMode(null);
     updateSelection(next);
   }, [projection.sheetId, selection.sheetId, updateSelection]);
 
   useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      commandScopeRef.current += 1;
-      latestCommandRef.current += 1;
-    };
-  }, []);
+    optimisticInputsRef.current.clear();
+  }, [projection.generationId, projection.sheetId]);
 
   useEffect(() => {
     if (editMode !== null) return;
-    const optimistic = optimisticInputRef.current;
-    if (
-      optimistic?.sheetId === projection.sheetId &&
-      optimistic.row === selection.focus.row &&
-      optimistic.col === selection.focus.col &&
-      optimistic.baseRevision === revision
-    ) {
-      setDraft(optimistic.input);
-      return;
+    for (const [key, optimistic] of optimisticInputsRef.current) {
+      const coverage = projection.coverage;
+      const covered =
+        !coverage ||
+        (optimistic.row >= coverage.rowStart &&
+          optimistic.row < coverage.rowEnd &&
+          optimistic.col >= coverage.columnStart &&
+          optimistic.col < coverage.columnEnd);
+      if (
+        !optimistic.pending &&
+        covered &&
+        (projection.readCell(optimistic.row, optimistic.col)?.input === optimistic.input ||
+          revision !== optimistic.baseRevision)
+      )
+        optimisticInputsRef.current.delete(key);
     }
-    if (optimistic && optimistic.baseRevision !== revision) optimisticInputRef.current = null;
-    setDraft(projection.readCell(selection.focus.row, selection.focus.col)?.input ?? "");
-  }, [editMode, projection, revision, selection.focus.col, selection.focus.row]);
+    setDraft(readEditInput(selection.focus));
+  }, [commandQueue.pendingCount, editMode, projection, readEditInput, revision, selection.focus]);
 
   useClientLayoutEffect(() => {
     const element = viewportRef.current;
@@ -1229,46 +1312,17 @@ export function SpreadsheetProjectionGrid({
   );
 
   const runCommand = useCallback(
-    (invoke: () => void | Promise<void>, retry: () => void, rollback: () => void) => {
-      const commandId = latestCommandRef.current + 1;
-      latestCommandRef.current = commandId;
-      const scope = commandScopeRef.current;
+    (
+      invoke: (id: number) => void | Promise<void>,
+      retry: () => void,
+      rollback: (id: number) => void,
+      target?: SpreadsheetCommandTarget | (() => SpreadsheetCommandTarget),
+      accepted?: (id: number) => void,
+    ) => {
       setCommandFailure(null);
-      const fail = (cause: unknown) => {
-        if (
-          !mountedRef.current ||
-          commandScopeRef.current !== scope ||
-          latestCommandRef.current !== commandId
-        ) {
-          return;
-        }
-        const error = cause instanceof Error ? cause : new Error(String(cause));
-        rollback();
-        setCommandFailure({ message: error.message || "Spreadsheet change failed", retry });
-        onCommandError?.(error);
-      };
-      let result: void | Promise<void>;
-      try {
-        result = invoke();
-      } catch (cause) {
-        fail(cause);
-        return;
-      }
-      if (!result || typeof result.then !== "function") return;
-      setPendingCommands((current) => current + 1);
-      void Promise.resolve(result).then(
-        () => {
-          if (!mountedRef.current || commandScopeRef.current !== scope) return;
-          setPendingCommands((current) => Math.max(0, current - 1));
-        },
-        (cause) => {
-          if (!mountedRef.current || commandScopeRef.current !== scope) return;
-          setPendingCommands((current) => Math.max(0, current - 1));
-          fail(cause);
-        },
-      );
+      runQueuedCommand(invoke, retry, rollback, target, accepted);
     },
-    [onCommandError],
+    [runQueuedCommand],
   );
 
   const reportCommandFailure = useCallback(
@@ -1306,21 +1360,46 @@ export function SpreadsheetProjectionGrid({
         kind: input.startsWith("=") ? "formula" : "value",
       } satisfies SpreadsheetCommit;
       const execute = () => {
-        optimisticInputRef.current = {
-          sheetId: projection.sheetId,
-          row: selection.focus.row,
-          col: selection.focus.col,
-          input,
-          baseRevision: revision,
-        };
-        setDraft(input);
+        const retryFocus = selectionRef.current.focus;
+        if (
+          editModeRef.current === null &&
+          retryFocus.row === next.cell.row &&
+          retryFocus.col === next.cell.col
+        ) {
+          setDraft(input);
+        }
+        const key = `${next.cell.row}:${next.cell.col}`;
         runCommand(
-          () => commit(next),
+          (commandId) => {
+            optimisticInputsRef.current.set(key, {
+              ...next.cell,
+              input,
+              baseRevision: revision,
+              commandId,
+              pending: true,
+            });
+            return commit(next);
+          },
           execute,
-          () => {
-            optimisticInputRef.current = null;
+          (commandId) => {
+            if (optimisticInputsRef.current.get(key)?.commandId !== commandId) return;
+            optimisticInputsRef.current.delete(key);
             const current = selectionRef.current.focus;
-            setDraft(projection.readCell(current.row, current.col)?.input ?? "");
+            if (
+              editModeRef.current === null &&
+              current.row === next.cell.row &&
+              current.col === next.cell.col
+            ) {
+              setDraft(readEditInput(current));
+            }
+          },
+          { top: next.cell.row, bottom: next.cell.row, left: next.cell.col, right: next.cell.col },
+          (commandId) => {
+            const optimistic = optimisticInputsRef.current.get(key);
+            if (optimistic?.commandId === commandId) {
+              optimistic.pending = false;
+              optimistic.baseRevision = projectionRef.current.revision;
+            }
           },
         );
       };
@@ -1332,20 +1411,25 @@ export function SpreadsheetProjectionGrid({
         committingRef.current = false;
       });
     },
-    [commit, draft, editable, projection, revision, runCommand, selection.focus],
+    [commit, draft, editable, projection, readEditInput, revision, runCommand, selection.focus],
   );
 
   const clearSelection = useCallback(() => {
     if (!editable || !clear) return;
     const current = selection;
+    const target = normalizeSelection(current);
     const execute = () =>
       runCommand(
-        () => clear(current),
+        () => {
+          forgetOptimisticInputs(target);
+          return clear(current);
+        },
         execute,
         () => {},
+        target,
       );
     execute();
-  }, [clear, editable, runCommand, selection]);
+  }, [clear, editable, forgetOptimisticInputs, runCommand, selection]);
 
   const pasteClipboard = useCallback(
     (event: ReactClipboardEvent<HTMLDivElement>) => {
@@ -1353,17 +1437,33 @@ export function SpreadsheetProjectionGrid({
       const clipboardText = event.clipboardData.getData("text/plain");
       if (!clipboardText && !event.clipboardData.types.includes("text/plain")) return;
       event.preventDefault();
+      const previousSelection = selectionRef.current;
+      const anchor = previousSelection.focus;
       const execute = () => {
-        const previousSelection = selectionRef.current;
-        const invoke = () => {
-          const parsed = parseSpreadsheetClipboard(clipboardText);
-          const anchor = previousSelection.focus;
-          if (anchor.row + parsed.rows > rowCount || anchor.col + parsed.columns > columnCount) {
+        let prepared: ReturnType<typeof parseSpreadsheetClipboard>;
+        let target: SpreadsheetCommandTarget;
+        const prepare = () => {
+          prepared = parseSpreadsheetClipboard(clipboardText);
+          if (
+            anchor.row + prepared.rows > rowCount ||
+            anchor.col + prepared.columns > columnCount
+          ) {
             throw new Error("Clipboard range does not fit in this worksheet");
           }
-          if (!commitRange && parsed.inputs.length !== 1) {
+          if (!commitRange && prepared.inputs.length !== 1) {
             throw new Error("This spreadsheet adapter does not support rectangular paste");
           }
+          target = {
+            top: anchor.row,
+            left: anchor.col,
+            bottom: anchor.row + prepared.rows - 1,
+            right: anchor.col + prepared.columns - 1,
+          };
+          return target;
+        };
+        const invoke = () => {
+          const parsed = prepared;
+          forgetOptimisticInputs(target);
           const bottomRight = {
             row: anchor.row + parsed.rows - 1,
             col: anchor.col + parsed.columns - 1,
@@ -1391,7 +1491,23 @@ export function SpreadsheetProjectionGrid({
             kind: input.startsWith("=") ? "formula" : "value",
           });
         };
-        runCommand(invoke, execute, () => updateSelection(previousSelection));
+        runCommand(
+          invoke,
+          execute,
+          () => {
+            const current = selectionRef.current;
+            if (
+              target &&
+              current.anchor.row === anchor.row &&
+              current.anchor.col === anchor.col &&
+              current.focus.row === target.bottom &&
+              current.focus.col === target.right
+            ) {
+              updateSelection(previousSelection);
+            }
+          },
+          prepare,
+        );
       };
       execute();
     },
@@ -1402,6 +1518,7 @@ export function SpreadsheetProjectionGrid({
       editMode,
       editable,
       ensureVisible,
+      forgetOptimisticInputs,
       projection.sheetId,
       rowCount,
       runCommand,
@@ -1451,13 +1568,13 @@ export function SpreadsheetProjectionGrid({
     (initial?: string, cell: CellCoordinate = selectionRef.current.focus) => {
       if (!editable) return;
       ensureVisible(cell);
-      const current = projection.readCell(cell.row, cell.col)?.input ?? "";
+      const current = readEditInput(cell);
       initialDraftRef.current = current;
       selectDraftOnFocusRef.current = initial === undefined;
       setDraft(initial ?? current);
       setEditMode("cell");
     },
-    [editable, ensureVisible, projection],
+    [editable, ensureVisible, readEditInput],
   );
 
   const onGridKeyDown = useCallback(
@@ -1550,7 +1667,7 @@ export function SpreadsheetProjectionGrid({
       } else if (event.key === "Escape") {
         event.preventDefault();
         committingRef.current = true;
-        setDraft(projection.readCell(selection.focus.row, selection.focus.col)?.input ?? "");
+        setDraft(readEditInput(selection.focus));
         setEditMode(null);
         viewportRef.current?.focus();
         queueMicrotask(() => {
@@ -1558,7 +1675,7 @@ export function SpreadsheetProjectionGrid({
         });
       }
     },
-    [commitDraft, projection, selection.focus.col, selection.focus.row],
+    [commitDraft, readEditInput, selection.focus],
   );
 
   const onEditorCompositionStart = useCallback(() => {
@@ -1854,7 +1971,9 @@ export function SpreadsheetProjectionGrid({
   return (
     <div
       className={cn("relative flex h-full min-w-0 flex-col bg-og-bg", className)}
-      data-og-command-state={commandFailure ? "error" : pendingCommands > 0 ? "pending" : "idle"}
+      data-og-command-state={
+        visibleCommandFailure ? "error" : pendingCommandCount > 0 ? "pending" : "idle"
+      }
       style={{ minHeight: 256 }}
     >
       <div className="flex min-h-9 shrink-0 items-center border-b border-og-border bg-og-surface-1">
@@ -1871,12 +1990,11 @@ export function SpreadsheetProjectionGrid({
         <input
           aria-label="Formula or value"
           readOnly={!editable}
-          aria-invalid={commandFailure ? "true" : undefined}
+          aria-invalid={visibleCommandFailure ? "true" : undefined}
           value={draft}
           onFocus={() => {
             if (editable) {
-              const current =
-                projection.readCell(selection.focus.row, selection.focus.col)?.input ?? "";
+              const current = readEditInput(selection.focus);
               initialDraftRef.current = current;
               setDraft(current);
               setEditMode("formula");
@@ -1889,21 +2007,30 @@ export function SpreadsheetProjectionGrid({
           onBlur={(event) => commitEditorOnBlur("formula", event.currentTarget.value)}
           className="h-8 min-w-0 flex-1 bg-transparent px-1 font-mono text-og-sm text-og-fg outline-hidden placeholder:text-og-fg-subtle"
         />
+        {visibleSyncStatus ? (
+          <output
+            aria-label="Spreadsheet sync status"
+            className="shrink-0 px-2 text-og-xs text-og-fg-muted"
+          >
+            {visibleCommandFailure ? "Not saved" : visibleSyncStatus}
+          </output>
+        ) : null}
       </div>
       <div role="status" aria-live="polite" className="sr-only">
-        {commandFailure?.message ?? (pendingCommands > 0 ? "Saving spreadsheet changes" : "")}
+        {visibleCommandFailure?.message ??
+          (pendingCommandCount > 0 ? "Saving spreadsheet changes" : "")}
       </div>
-      {commandFailure ? (
+      {visibleCommandFailure ? (
         <div
           role="alert"
           className="absolute bottom-2 left-2 z-50 flex items-center gap-2 rounded-og-sm border border-og-status-failed/30 bg-og-surface-1/95 px-2 py-1 text-og-xs text-og-status-failed shadow-og-sm"
           style={{ maxWidth: "calc(100% - 1rem)" }}
         >
-          <span className="truncate">{commandFailure.message}</span>
-          {commandFailure.retry ? (
+          <span className="truncate">{visibleCommandFailure.message}</span>
+          {visibleCommandFailure.retry ? (
             <button
               type="button"
-              onClick={commandFailure.retry}
+              onClick={visibleCommandFailure.retry}
               className="shrink-0 rounded-og-xs px-1.5 py-0.5 font-medium outline-hidden hover:bg-og-surface-3 focus-visible:ring-2 focus-visible:ring-og-accent"
             >
               Retry
@@ -1921,7 +2048,7 @@ export function SpreadsheetProjectionGrid({
         aria-colcount={columnCount}
         aria-multiselectable="true"
         aria-readonly={!editable}
-        aria-busy={pendingCommands > 0 ? "true" : undefined}
+        aria-busy={pendingCommandCount > 0 ? "true" : undefined}
         aria-activedescendant={activeCellId}
         onKeyDown={onGridKeyDown}
         onCopy={copySelection}
@@ -2004,6 +2131,14 @@ export function SpreadsheetProjectionGrid({
                 }}
               >
                 {columnName(col)}
+                {!readOnly && resize ? (
+                  <SpreadsheetResizeHandle
+                    axis="column"
+                    label={`Resize column ${columnName(col)}`}
+                    size={width}
+                    {...resizing.handleProps("column", col)}
+                  />
+                ) : null}
               </div>
             ))}
           </div>
@@ -2036,6 +2171,14 @@ export function SpreadsheetProjectionGrid({
                   }}
                 >
                   {row + 1}
+                  {!readOnly && resize ? (
+                    <SpreadsheetResizeHandle
+                      axis="row"
+                      label={`Resize row ${row + 1}`}
+                      size={height}
+                      {...resizing.handleProps("row", row)}
+                    />
+                  ) : null}
                 </div>
 
                 {columnLayout.map(({ col, left, width }) => {

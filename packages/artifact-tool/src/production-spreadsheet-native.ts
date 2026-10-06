@@ -1,7 +1,11 @@
 import {
   SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+  SPREADSHEET_ARTIFACT_COMMAND_MAX_COMMANDS,
   SPREADSHEET_ARTIFACT_PROJECTION_MAX_BYTES,
   SPREADSHEET_ARTIFACT_VIEWPORT_MAX_CELLS,
+  SPREADSHEET_MAX_DIMENSION_PIXELS,
+  SPREADSHEET_DEFAULT_ROW_HEIGHT,
+  SPREADSHEET_DEFAULT_COLUMN_WIDTH,
   decodeSpreadsheetMetadataKernelProjection,
   decodeSpreadsheetViewportKernelProjection,
   editableArtifactStableId,
@@ -25,6 +29,7 @@ import type {
 import type { ArtifactKernelRuntime } from "./runtime";
 import {
   Workbook as ReferenceWorkbook,
+  Worksheet as ReferenceWorksheet,
   type SerializedWorkbook,
   type Workbook,
 } from "./spreadsheet";
@@ -103,6 +108,16 @@ export function reconcileSpreadsheetProjection(
       const generation = generations.get(worksheet.id);
       if (!generation) throw new Error(`Missing native generation for worksheet ${worksheet.id}`);
       for (const command of cellCommands(worksheet, generation)) batch.add(command);
+      for (const [row, height] of worksheet.rowHeights) {
+        if (height !== SPREADSHEET_DEFAULT_ROW_HEIGHT) {
+          batch.add(dimensionCommand(generation, "row", row, height));
+        }
+      }
+      for (const [column, width] of worksheet.columnWidths) {
+        if (width !== SPREADSHEET_DEFAULT_COLUMN_WIDTH) {
+          batch.add(dimensionCommand(generation, "column", column, width));
+        }
+      }
     }
     batch.finish();
     return {
@@ -154,6 +169,7 @@ export const prepareSpreadsheetMutation: CompositeMutationPreparer<Workbook> = (
           }),
         );
         data.metadata = null;
+        installWorksheetDimensions(result as ReferenceWorksheet, state);
         return true;
       },
     };
@@ -163,6 +179,49 @@ export const prepareSpreadsheetMutation: CompositeMutationPreparer<Workbook> = (
     const generation = requiredGeneration(data, mutation.owner.id);
     const name = normalizedSheetName(mutation.arguments?.[0]);
     return commitSpreadsheetCommands(data, [{ kind: "sheet.rename", sheet: generation, name }]);
+  }
+
+  if (
+    isWorksheet(mutation.owner) &&
+    (mutation.member === "setRowHeight" || mutation.member === "setColumnWidth")
+  ) {
+    return commitSpreadsheetCommands(data, [
+      dimensionCommand(
+        requiredGeneration(data, mutation.owner.id),
+        mutation.member === "setRowHeight" ? "row" : "column",
+        mutation.arguments?.[0],
+        mutation.arguments?.[1],
+      ),
+    ]);
+  }
+
+  const formatRange = (mutation.owner as { range?: unknown } | null)?.range;
+  if (
+    isRange(formatRange) &&
+    ["columnWidth", "columnWidthPx", "rowHeight", "rowHeightPx"].includes(String(mutation.member))
+  ) {
+    const row = mutation.member === "rowHeight" || mutation.member === "rowHeightPx";
+    const value = mutation.arguments?.[0];
+    const scale =
+      mutation.member === "columnWidth" ? 7 : mutation.member === "rowHeight" ? 4 / 3 : 1;
+    const pixels = typeof value === "number" ? value * scale : value;
+    const start = row ? formatRange.address.row : formatRange.address.col;
+    const count = row ? formatRange.address.rowCount : formatRange.address.colCount;
+    const generation = requiredGeneration(data, formatRange.worksheet.id);
+    dimensionCommand(generation, row ? "row" : "column", start, pixels);
+    // Large facade range mutations retain the existing atomic reconciliation
+    // path, whose batcher respects native command limits.
+    if (
+      count >
+      Math.min(SPREADSHEET_ARTIFACT_COMMAND_MAX_COMMANDS, state.native.capabilities.maxCommands)
+    ) {
+      return null;
+    }
+    const commands: SpreadsheetArtifactCommand[] = [];
+    for (let offset = 0; offset < count; offset += 1) {
+      commands.push(dimensionCommand(generation, row ? "row" : "column", start + offset, pixels));
+    }
+    return commitSpreadsheetCommands(data, commands);
   }
 
   if (!isRange(mutation.owner)) return null;
@@ -208,6 +267,28 @@ export const prepareSpreadsheetMutation: CompositeMutationPreparer<Workbook> = (
   }
   return null;
 };
+
+function dimensionCommand(
+  sheet: SpreadsheetSheetGeneration,
+  axis: "row" | "column",
+  index: unknown,
+  pixels: unknown,
+): SpreadsheetArtifactCommand {
+  if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index > 0xffff_ffff) {
+    throw new RangeError("Spreadsheet dimension index must be a zero-based u32");
+  }
+  if (
+    typeof pixels !== "number" ||
+    !Number.isInteger(pixels) ||
+    pixels < 1 ||
+    pixels > SPREADSHEET_MAX_DIMENSION_PIXELS
+  ) {
+    throw new RangeError("Spreadsheet dimensions require integer pixels from 1 through 4096");
+  }
+  return axis === "row"
+    ? { kind: "row.height.set", sheet, row: index, height: pixels }
+    : { kind: "column.width.set", sheet, column: index, width: pixels };
+}
 
 function commitSpreadsheetCommands(
   data: SpreadsheetNativeData,
@@ -309,6 +390,7 @@ export function installSpreadsheetProjection(
   workbook: Workbook,
   state: CompositeArtifactState<Workbook>,
 ): void {
+  for (const worksheet of workbook.worksheets.items) installWorksheetDimensions(worksheet, state);
   Object.defineProperty(workbook, "valueAt", {
     configurable: true,
     writable: true,
@@ -325,6 +407,66 @@ export function installSpreadsheetProjection(
         rowCount: 1,
         colCount: 1,
       }).values[0]![0]!;
+    },
+  });
+}
+
+function installWorksheetDimensions(
+  worksheet: ReferenceWorksheet,
+  state: CompositeArtifactState<Workbook>,
+): void {
+  const metadata = (): SpreadsheetArtifactSheetMetadata => {
+    const sheet = spreadsheetMetadata(state).get(worksheet.id);
+    if (!sheet) throw new Error(`Native worksheet is missing: ${worksheet.id}`);
+    return sheet;
+  };
+  for (const [method, field, fallback] of [
+    ["rowHeight", "rowHeights", "defaultRowHeight"],
+    ["columnWidth", "columnWidths", "defaultColumnWidth"],
+  ] as const) {
+    Object.defineProperty(worksheet, method, {
+      configurable: true,
+      writable: true,
+      value: (index: number): number => {
+        if (state.inMutation) return ReferenceWorksheet.prototype[method].call(worksheet, index);
+        const sheet = metadata();
+        const entries = sheet[field] ?? [];
+        let low = 0;
+        let high = entries.length;
+        while (low < high) {
+          const middle = Math.floor((low + high) / 2);
+          if (entries[middle]![0] < index) low = middle + 1;
+          else high = middle;
+        }
+        return entries[low]?.[0] === index ? entries[low]![1] : sheet[fallback]!;
+      },
+    });
+  }
+  for (const [method, field] of [
+    ["rowHeightEntries", "rowHeights"],
+    ["columnWidthEntries", "columnWidths"],
+  ] as const) {
+    Object.defineProperty(worksheet, method, {
+      configurable: true,
+      writable: true,
+      value: function* (): IterableIterator<readonly [number, number]> {
+        if (state.inMutation) yield* ReferenceWorksheet.prototype[method].call(worksheet);
+        else yield* metadata()[field] ?? [];
+      },
+    });
+  }
+  Object.defineProperty(worksheet, "serialize", {
+    configurable: true,
+    writable: true,
+    value: (): SerializedWorksheet => {
+      const serialized = ReferenceWorksheet.prototype.serialize.call(worksheet);
+      if (state.inMutation) return serialized;
+      const sheet = metadata();
+      return {
+        ...serialized,
+        rowHeights: (sheet.rowHeights ?? []).map(([index, pixels]) => [index, pixels]),
+        columnWidths: (sheet.columnWidths ?? []).map(([index, pixels]) => [index, pixels]),
+      };
     },
   });
 }

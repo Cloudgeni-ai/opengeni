@@ -99,6 +99,19 @@ head. A tool inspection reports the exact `headSequence` and `stateHash` it
 read; a successful mutation reports the new receipt. Live clients reconcile
 through the existing durable outbox and binary protocol.
 
+Spreadsheet editing stays usable while commands are accepted locally and await
+server acknowledgement. The grid shows pending sync separately from local
+acceptance, retains pending cell input when refocused, and keeps independent
+failed edits visible. Retry never replays an older range over newer overlapping
+edits. Read-only authority removes both editing and resize controls.
+
+Row and column header boundaries resize the same canonical spreadsheet used in
+the dock, full-page route, and embedded workbench. Dragging updates only a
+frame-coalesced preview; releasing writes one generation-pinned command. Focus a
+boundary to resize with arrow keys (8 px, or 1 px with Shift), Home to reset to
+the default, and Escape to cancel. Resizes use sparse per-dimension causal
+registers, not browser storage or an XLSX shadow.
+
 ## Modality parity
 
 The agent surface exposes only commands already implemented by the durable
@@ -107,7 +120,7 @@ excuse to switch mutable truth back to an Office file.
 
 | Modality | Durable agent edits now | Explicit gaps |
 | --- | --- | --- |
-| Spreadsheet | sheet create/rename/delete, rectangular value/formula write, range clear; workbook metadata and bounded viewport inspection | styles, merges, dimensions, validation, comments, charts, drawings |
+| Spreadsheet | sheet create/rename/delete, rectangular value/formula write, range clear, row height/column width set/reset; workbook metadata and bounded viewport inspection with sparse dimensions | styles, merges, validation, comments, charts, drawings |
 | Document | document flags; paragraph add/edit/format/style; table add/style; page breaks; sections/page geometry; comments/replies/resolution; tracked changes; summary/body/story/section/review inspection | fields, notes, figures/media, footnotes/endnotes, arbitrary block deletion/reordering |
 | Presentation | masters/layouts/slides; titles/layout/notes; shape/group/connector/chart/table node insert/delete/move/bounds/transform/content; slide size; metadata/catalog/editor/resolved-slide/viewport inspection | new media upload, animation/timing, executable media, arbitrary OOXML relationship editing |
 

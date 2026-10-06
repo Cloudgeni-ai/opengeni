@@ -426,6 +426,60 @@ describe("artifact spreadsheet retained canvas", () => {
       }
     }, 60_000);
 
+    test(`${engineName}: spreadsheet resize previews, cancellation and keyboard reset use native input`, async () => {
+      const browser = await engine.launch({ headless: true });
+      const context = await browser.newContext({ viewport: { width: 1_200, height: 800 } });
+      try {
+        const page = await context.newPage();
+        await mountGeneralDisplayFixture(page, baseUrl);
+        const grid = page.getByRole("grid", { name: "General spreadsheet" });
+        await grid.focus();
+        const boundary = page.getByRole("separator", { name: "Resize column A", exact: true });
+        const box = await boundary.boundingBox();
+        if (!box) throw new Error("Column resize boundary is not visible");
+        const before = await readGeneralDisplayProof(page);
+        const x = box.x + box.width / 2;
+        const y = box.y + box.height / 2;
+        await page.mouse.move(x, y);
+        await page.mouse.down();
+        await page.mouse.move(x + 48, y, { steps: 6 });
+        await page.waitForFunction(
+          () =>
+            document
+              .querySelector('[aria-label="Resize column A"]')
+              ?.getAttribute("aria-valuenow") === "144",
+          undefined,
+          { timeout: 2_000 },
+        );
+        expect(await boundary.getAttribute("aria-valuenow")).toBe("144");
+        expect((await readGeneralDisplayProof(page)).revision).toBe(before.revision);
+        await page.keyboard.press("Escape");
+        await page.mouse.up();
+        expect(await boundary.getAttribute("aria-valuenow")).toBe("96");
+        expect(await readGeneralDisplayProof(page)).toEqual(before);
+
+        await page.mouse.move(x, y);
+        await page.mouse.down();
+        await page.mouse.move(x + 48, y, { steps: 6 });
+        await page.mouse.up();
+        expect(await boundary.getAttribute("aria-valuenow")).toBe("144");
+        expect((await readGeneralDisplayProof(page)).revision).not.toBe(before.revision);
+        await boundary.focus();
+        await boundary.press("Home");
+        expect(await boundary.getAttribute("aria-valuenow")).toBe("96");
+        const row = page.getByRole("separator", { name: "Resize row 1", exact: true });
+        await row.focus();
+        await row.press("Shift+ArrowDown");
+        expect(await row.getAttribute("aria-valuenow")).toBe("25");
+        await row.press("Home");
+        expect(await row.getAttribute("aria-valuenow")).toBe("24");
+        expect((await readGeneralDisplayProof(page)).a1Value).toBe(before.a1Value);
+      } finally {
+        await context.close();
+        await browser.close();
+      }
+    }, 60_000);
+
     test(`${engineName}: spreadsheet General display is display-only`, async () => {
       const browser = await engine.launch({ headless: true });
       let context: BrowserContext | undefined;
