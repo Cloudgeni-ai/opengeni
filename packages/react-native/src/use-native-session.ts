@@ -115,6 +115,10 @@ export function useOpenGeniNativeSession(input: {
     workspaceId: input.workspaceId,
     events: events.events,
     effectiveControl: queue.effectiveControl,
+    // As on web: while a turn runs or prompts wait, a Send shows in the queue
+    // at once instead of flashing as a chat bubble before it is queued.
+    sendDestination: () =>
+      (session.session?.activeTurnId ?? null) !== null || queue.queue.length > 0 ? "queue" : "chat",
     sendExtras: () => ({ resources: attachments.readyResources }),
     sendBlocked: () => attachments.hasUnresolved,
     onSent: () => attachments.clear(),
