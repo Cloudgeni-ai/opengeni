@@ -1,7 +1,7 @@
 import { useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import Constants from "expo-constants";
 import { Stack, router } from "expo-router";
-import { Alert, Platform } from "react-native";
+import { Alert } from "react-native";
 import { useAccount } from "@/account";
 import { setAppearance, useAppearancePreference, type AppearancePreference } from "@/appearance";
 import { serverLabel } from "@/account-store";
@@ -156,13 +156,8 @@ function Settings() {
           title: "Settings",
           headerTintColor: c.fg,
           headerShadowVisible: false,
-          // The native grouped list owns the page color; the bar matches it.
-          // The grouped list's page color for this theme. (A dynamic system
-          // color here resolved light in the navigation bar even in dark mode.)
-          headerStyle: {
-            backgroundColor:
-              Platform.OS === "ios" ? (theme.scheme === "dark" ? "#000000" : "#F2F2F7") : c.bg,
-          },
+          // The list paints the app canvas, so the bar matches every other screen.
+          headerStyle: { backgroundColor: c.bg },
         }}
       />
       <SettingsList sections={sections} />

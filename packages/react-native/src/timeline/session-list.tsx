@@ -11,7 +11,7 @@ import {
   type SessionStatusTone,
 } from "@opengeni/react/session-list-model";
 import { useEffect, useMemo } from "react";
-import { Platform, Pressable, Text, View } from "react-native";
+import { Platform, Pressable, Text, useWindowDimensions, View } from "react-native";
 import Animated, {
   cancelAnimation,
   Easing,
@@ -287,6 +287,7 @@ export function SessionHeaderTitle({
 }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
+  const viewport = useWindowDimensions();
   const presentation = status ? SESSION_STATUS_PRESENTATION[status] : null;
   // A settled, idle session needs no status line: the title stands alone, as in
   // native messaging apps. Running, waiting, paused and failed states still say so.
@@ -301,7 +302,14 @@ export function SessionHeaderTitle({
       accessible
       accessibilityRole="header"
       accessibilityLabel={label ? `${title}, ${label}` : title}
-      style={{ alignItems: align === "center" ? "center" : "flex-start", maxWidth: 240 }}
+      // iOS sizes a custom title view once, often before the session (and its
+      // title) has loaded; a fixed width keeps a late title from collapsing to
+      // "H…". The bar's back and actions buttons take about 150pt.
+      style={
+        align === "center"
+          ? { alignItems: "center", width: Math.max(120, Math.min(260, viewport.width - 150)) }
+          : { alignItems: "flex-start", maxWidth: 240 }
+      }
     >
       <Text
         numberOfLines={1}
