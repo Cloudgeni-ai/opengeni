@@ -1,4 +1,3 @@
-import { stableJson } from "@opengeni/contracts";
 import type {
   FileAsset,
   NewSessionDraft,
@@ -772,7 +771,20 @@ function normalizeLegacyNewSessionDraft(remote: NewSessionDraft): NewSessionDraf
 }
 
 function draftSignature(value: NewSessionDraftEditable): string {
-  return stableJson(value);
+  return JSON.stringify(sortedJson(value));
+}
+
+/** Key-sorted copy so equal drafts compare equal regardless of key order. */
+function sortedJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortedJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, nested]) => [key, sortedJson(nested)]),
+    );
+  }
+  return value;
 }
 
 function clientIdentity(client: object): number {
