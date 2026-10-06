@@ -38,6 +38,16 @@ export default function RootLayout() {
               <Stack.Screen name="session/[id]" options={{ title: "" }} />
               <Stack.Screen name="settings" options={{ title: "Settings" }} />
               <Stack.Screen
+                name="workspaces"
+                options={{
+                  title: "Workspaces",
+                  headerShown: false,
+                  presentation: "formSheet",
+                  sheetAllowedDetents: [0.55, 1],
+                  sheetGrabberVisible: true,
+                }}
+              />
+              <Stack.Screen
                 name="add-account"
                 options={{ headerShown: false, presentation: "modal" }}
               />

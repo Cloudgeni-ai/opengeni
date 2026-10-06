@@ -1,10 +1,10 @@
-import { MenuView, type MenuAction } from "@expo/ui/community/menu";
+import { NativeMenu, type MenuAction } from "@/native-menu";
 import { workspacesInOrg } from "@opengeni/react/organization-model";
 import { fontStyle, Icon, useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
 import { useState } from "react";
-import { Text, View, useColorScheme } from "react-native";
+import { Platform, Pressable, Text, View } from "react-native";
 import { useAccount } from "@/account";
 import { serverLabel } from "@/account-store";
 import { InitialTile } from "@/ui";
@@ -76,14 +76,13 @@ function useWorkspaceMenu() {
 export function WorkspaceSwitcherBlock() {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
-  const scheme = useColorScheme();
   const { actions, onPressAction, workspace, org, personal } = useWorkspaceMenu();
   const [width, setWidth] = useState(0);
 
   return (
     // A SwiftUI menu sizes to its trigger: measure the row so it spans it.
     <View onLayout={(event) => setWidth(Math.round(event.nativeEvent.layout.width))}>
-      <MenuView actions={actions} colorScheme={scheme} onPressAction={onPressAction}>
+      <NativeMenu actions={actions} onPressAction={onPressAction}>
         <View
           accessible
           accessibilityRole="button"
@@ -129,59 +128,66 @@ export function WorkspaceSwitcherBlock() {
           </View>
           <Icon name="chevrons-up-down" size={16} color={c["fg-subtle"]} />
         </View>
-      </MenuView>
+      </NativeMenu>
     </View>
   );
 }
 
 /**
  * The header title: the current workspace with its organization beneath, as the
- * web phone header names where a new chat goes; tapping opens the workspace menu.
+ * web phone header names where a new chat goes. Tapping opens the workspace
+ * sheet on iOS (a SwiftUI menu hosted in the navigation bar ignores the dark
+ * appearance) and the workspace menu on Android.
  */
 export function WorkspaceSwitcherTitle() {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
-  const scheme = useColorScheme();
   const { actions, onPressAction, workspace, org, personal } = useWorkspaceMenu();
-  return (
-    <MenuView actions={actions} colorScheme={scheme} onPressAction={onPressAction}>
-      <View
-        accessible
-        accessibilityRole="button"
-        accessibilityLabel={`${workspace?.name ?? "Select workspace"}${org ? `, ${org.label}` : ""}. Switch workspace`}
-        style={{ alignItems: "center", paddingHorizontal: 8, paddingVertical: 2, maxWidth: 240 }}
-      >
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
-          {personal ? <Icon name="lock" size={13} color={c.fg} /> : null}
-          <Text
-            numberOfLines={1}
-            style={{
-              ...fontStyle(theme, 600),
-              fontSize: 16,
-              lineHeight: 20,
-              color: c.fg,
-              flexShrink: 1,
-            }}
-          >
-            {workspace?.name ?? "Opengeni"}
-          </Text>
-          <Icon name="chevron-down" size={14} color={c["fg-subtle"]} />
-        </View>
-        {org ? (
-          <Text
-            numberOfLines={1}
-            style={{
-              ...fontStyle(theme, 500),
-              fontSize: 12,
-              lineHeight: 15,
-              color: c["fg-subtle"],
-            }}
-          >
-            {org.label}
-          </Text>
-        ) : null}
+  const label = (
+    <View
+      accessible
+      accessibilityRole="button"
+      accessibilityLabel={`${workspace?.name ?? "Select workspace"}${org ? `, ${org.label}` : ""}. Switch workspace`}
+      style={{ alignItems: "center", paddingHorizontal: 8, paddingVertical: 2, maxWidth: 240 }}
+    >
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+        {personal ? <Icon name="lock" size={13} color={c.fg} /> : null}
+        <Text
+          numberOfLines={1}
+          style={{
+            ...fontStyle(theme, 600),
+            fontSize: 16,
+            lineHeight: 20,
+            color: c.fg,
+            flexShrink: 1,
+          }}
+        >
+          {workspace?.name ?? "Opengeni"}
+        </Text>
+        <Icon name="chevron-down" size={14} color={c["fg-subtle"]} />
       </View>
-    </MenuView>
+      {org ? (
+        <Text
+          numberOfLines={1}
+          style={{
+            ...fontStyle(theme, 500),
+            fontSize: 12,
+            lineHeight: 15,
+            color: c["fg-subtle"],
+          }}
+        >
+          {org.label}
+        </Text>
+      ) : null}
+    </View>
+  );
+  if (Platform.OS === "ios") {
+    return <Pressable onPress={() => router.push("/workspaces")}>{label}</Pressable>;
+  }
+  return (
+    <NativeMenu actions={actions} onPressAction={onPressAction}>
+      {label}
+    </NativeMenu>
   );
 }
 
@@ -190,7 +196,6 @@ export function WorkspaceSwitcherTitle() {
  * server when there are several), Add account and Settings.
  */
 export function AccountMenuButton() {
-  const scheme = useColorScheme();
   const { accounts, account, switchAccount } = useAccount();
   const servers = new Set(accounts.map((each) => each.baseUrl)).size;
   const actions: MenuAction[] = [
@@ -208,9 +213,8 @@ export function AccountMenuButton() {
     { id: "settings", title: "Settings", image: "gearshape" },
   ];
   return (
-    <MenuView
+    <NativeMenu
       actions={actions}
-      colorScheme={scheme}
       onPressAction={({ nativeEvent }) => {
         const event = nativeEvent.event;
         if (event.startsWith("account:")) switchAccount(event.slice("account:".length));
@@ -226,6 +230,6 @@ export function AccountMenuButton() {
       >
         <InitialTile label={account?.email ?? "?"} size={28} tone="accent" />
       </View>
-    </MenuView>
+    </NativeMenu>
   );
 }

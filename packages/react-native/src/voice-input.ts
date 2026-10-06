@@ -139,9 +139,10 @@ export function useNativeVoiceInput(input: {
         }
         latest.current.onFeedback?.("start");
         update("recording");
-      } catch (cause) {
+      } catch {
         if (ticket !== generation.current) return;
-        setError(cause instanceof Error ? cause.message : String(cause));
+        // The platform's reason (no input device, audio session busy) is not actionable.
+        setError("Couldn't start the microphone. Try again.");
         update("error");
       }
     })();

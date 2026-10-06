@@ -1,4 +1,4 @@
-import { MenuView, type MenuAction } from "@expo/ui/community/menu";
+import { NativeMenu, type MenuAction } from "@/native-menu";
 import { defaultRepositoryMountPath, normalizeRepositoryTransportUri } from "@opengeni/contracts";
 import type { GitHubRepository, MachineView, ResourceRef, SessionVisibility } from "@opengeni/sdk";
 import {
@@ -9,7 +9,7 @@ import {
 } from "@opengeni/react-native/timeline";
 import * as Haptics from "expo-haptics";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Pressable, ScrollView, Text, View, useColorScheme } from "react-native";
+import { Pressable, ScrollView, Text, View } from "react-native";
 import { useAccount } from "@/account";
 import { openOnWeb, webPaths } from "@/web-links";
 
@@ -160,7 +160,6 @@ export function ComposerPlusMenu(props: {
   options?: NewSessionOptions | undefined;
 }) {
   const theme = useNativeTimelineTheme();
-  const scheme = useColorScheme();
   const { account, workspace } = useAccount();
   const options = props.options;
   const actions: MenuAction[] = [
@@ -240,9 +239,8 @@ export function ComposerPlusMenu(props: {
     actions.push({ id: "session", title: "", displayInline: true, subactions: sessionActions });
   }
   return (
-    <MenuView
+    <NativeMenu
       actions={actions}
-      colorScheme={scheme}
       onPressAction={({ nativeEvent }) => {
         const event = nativeEvent.event;
         const [kind, value] = event.split(/:(.*)/su);
@@ -272,7 +270,7 @@ export function ComposerPlusMenu(props: {
       >
         <Icon name="plus" size={20} color={theme.colors["fg-muted"]} />
       </View>
-    </MenuView>
+    </NativeMenu>
   );
 }
 
