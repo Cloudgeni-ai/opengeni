@@ -318,10 +318,23 @@ test.each([
   { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: "version" },
   { count: 30, delayMs: 375, maxReads: 256, timeoutRequest: "tags" },
   { count: 30, delayMs: 375, maxReads: 256, timeoutRequest: "version" },
-])("late visibility survives response latency and transient timeouts: %j", async (scenario) => {
+  { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: null, slowRequest: "tags", slowMs: 9000 },
+  { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: null, slowRequest: "version", slowMs: 9000 },
+  { count: 30, delayMs: 375, maxReads: 256, timeoutRequest: null, slowRequest: "tags", slowMs: 9000 },
+  { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: null, slowRequest: "tags", slowMs: 9000, repeatSlow: true },
+  { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: null, slowRequest: "version", slowMs: 9000, repeatSlow: true },
+  { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: null, slowRequest: "tags", slowMs: 9000, repeatSlow: true, earlySlowMatch: true },
+].map((scenario) => ({
+  slowRequest: null as string | null,
+  slowMs: 0,
+  repeatSlow: false,
+  earlySlowMatch: false,
+  ...scenario,
+})))("late visibility survives response latency and transient timeouts: %j", async (scenario) => {
   let elapsed = 0,
     requests = 0,
     timeouts = 0,
+    slowReads = 0,
     active = 0,
     peak = 0;
   const timers: { at: number; resolve: () => void }[] = [];
@@ -346,10 +359,13 @@ test.each([
             await sleep(10_000 - (requestKind === "version" ? scenario.delayMs : 0));
             throw new DOMException("Synthetic receipt timeout", "TimeoutError");
           }
-          await sleep(scenario.delayMs);
+          const isSlow = name === packages[0]!.name && scenario.slowRequest === requestKind &&
+            (scenario.repeatSlow || slowReads === 0);
+          if (isSlow) slowReads++;
+          await sleep(isSlow ? scenario.slowMs : scenario.delayMs);
           return String(url).includes("/dist-tags")
             ? Response.json({ latest: "1.0.0", canary: version })
-            : elapsed < 150_000
+            : elapsed < 150_000 && !(scenario.earlySlowMatch && name === packages[0]!.name)
               ? new Response(null, { status: 404 })
               : Response.json({ name, version, dist });
         } finally {
@@ -385,6 +401,8 @@ test.each([
   expect(requests).toBeLessThanOrEqual(scenario.maxReads);
   expect(peak).toBeLessThanOrEqual(4);
   expect(timeouts).toBe(scenario.timeoutRequest === null ? 0 : 1);
+  if (scenario.slowRequest !== null) expect(slowReads).toBeGreaterThan(0);
+  if (scenario.earlySlowMatch) expect(slowReads).toBeGreaterThanOrEqual(2);
 });
 
 test("invalid selected version paths fail before any registry request", async () => {

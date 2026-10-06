@@ -576,7 +576,17 @@ export async function confirmCanaryCohort(
   const deadline = now() + timeoutMs;
   const pending = new Map(packages.map((pkg) => [pkg.name, pkg]));
   let reads = 0;
-  let longestReceiptMs = 0;
+  const receiptDurations = new Map<string, number>();
+  const estimatePassMs = (cohort: readonly CanaryArchive[]) => {
+    let duration = 0;
+    for (let offset = 0; offset < cohort.length; offset += 4) {
+      duration += Math.max(
+        0,
+        ...cohort.slice(offset, offset + 4).map((pkg) => receiptDurations.get(pkg.name) ?? 0),
+      );
+    }
+    return duration;
+  };
   const beforeAdditionalRequest = () => {
     if (reads >= maxReads) throw new Error("Canary receipt read quota exhausted");
     reads++;
@@ -609,7 +619,7 @@ export async function confirmCanaryCohort(
             });
             observation =
               now() >= deadline ? "read_exceeded_deadline" : receiptObservation(pkg, current);
-            longestReceiptMs = Math.max(longestReceiptMs, now() - startedAt);
+            receiptDurations.set(pkg.name, now() - startedAt);
           } catch (error) {
             if (canaryErrorCategory(error) !== "request_timeout") throw error;
             observation = "request_timeout";
@@ -693,12 +703,11 @@ export async function confirmCanaryCohort(
       lastObservation = "read_limit";
       break;
     }
-    // Leave time for the last pending poll and the entire final reread, using
-    // the slowest observed receipt plus one interval of scheduling margin.
-    const completionBatches = Math.ceil(pending.size / 4) + Math.ceil(packages.length / 4);
+    // Reserve the last pending pass and the complete final pass, using each
+    // batch's slowest completed duration and one scheduling margin.
     const completionTime = Math.max(
       CANARY_RECEIPT_REQUEST_TIMEOUT_MS,
-      longestReceiptMs * completionBatches + pollIntervalMs,
+      estimatePassMs([...pending.values()]) + estimatePassMs(packages) + pollIntervalMs,
     );
     const wait = Math.min(
       remaining,
