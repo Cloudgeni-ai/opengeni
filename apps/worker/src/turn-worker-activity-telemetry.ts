@@ -53,7 +53,10 @@ type SdkActivityWorker = Pick<Worker, "run" | "shutdown"> & {
 };
 
 /** Only public SDK1.22 hooks. Never count agent claims/slots, poll reservations,
- * heartbeat activity counts, or cancellation intent as executing occupancy. */
+ * heartbeat activity counts, or cancellation intent as executing occupancy.
+ * Requires a fresh metric registry/schema and one SDK turn-worker owner per
+ * registry + namespace + queue + physical UID. This bridge does not aggregate
+ * multiple workers or migrate legacy pre-registered unlabelled gauges. */
 export function withTurnWorkerActivityTelemetry(
   sdkWorker: SdkActivityWorker,
   input: {
@@ -147,7 +150,7 @@ export function withTurnWorkerActivityTelemetry(
     } catch {
       invalidate();
     }
-    // ForceShutdownError alone is not activity quiescence. SDK counters remain
+    // SDK force-shutdown rejection alone is not activity quiescence. Counters remain
     // live until the underlying JS promises settle, including after run rejects.
     if (runSettled && idle) dispose();
   };

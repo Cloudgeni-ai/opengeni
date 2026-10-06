@@ -821,6 +821,8 @@ export function normalizeTurnTaskQueueStats(
   };
 }
 
+/** Requires a fresh metric registry/schema; pre-registered legacy unlabelled
+ * queue gauges are not migrated in place. Each collector owns its native read. */
 export function startTurnCapacityMonitor(input: {
   observability: Observability;
   identity: TurnTaskQueueIdentity;

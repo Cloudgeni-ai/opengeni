@@ -50,7 +50,7 @@ import type {
   WakeSessionWorkflowSignal,
 } from "./activities/types";
 import { turnTaskQueue } from "./workflows/activities";
-import { createTurnTaskQueueStatsReader } from "./turn-task-queue-reader";
+import { createTurnTaskQueueStatsClient } from "./turn-task-queue-reader";
 import {
   closeWorkerHttpAfterActivityExecution,
   withTurnWorkerActivityTelemetry,
@@ -425,7 +425,9 @@ export async function createWorkerWorkflowSignaler(
   check: () => Promise<void>;
   close: () => Promise<void>;
 }> {
-  const connection = await Connection.connect(temporalConnectionOptions(settings));
+  const connectionOptions = temporalConnectionOptions(settings);
+  const connection = await Connection.connect(connectionOptions);
+  const statsClient = createTurnTaskQueueStatsClient(connectionOptions);
   const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
   return {
     wakeSessionWorkflow: async ({
@@ -524,7 +526,7 @@ export async function createWorkerWorkflowSignaler(
         temporalNamespace: settings.temporalNamespace,
         taskQueue: turnTaskQueue(settings.temporalTaskQueue),
       },
-    ) => createTurnTaskQueueStatsReader(connection, identity)(readOptions),
+    ) => statsClient.read(readOptions, identity),
     startSandboxReaperWorkflow: async () => {
       // Same backend tick, no additional schedule. A bounded independent
       // inventory cannot prevent the existing per-box drain from starting.
@@ -585,7 +587,7 @@ export async function createWorkerWorkflowSignaler(
       await connection.workflowService.getSystemInfo({});
     },
     close: async () => {
-      await connection.close();
+      await Promise.all([statsClient.close(), connection.close()]);
     },
   };
 }

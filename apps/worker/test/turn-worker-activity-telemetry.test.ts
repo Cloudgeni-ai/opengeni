@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
-import { NativeConnection, Worker } from "@temporalio/worker";
+import { GracefulShutdownPeriodExpiredError, NativeConnection, Worker } from "@temporalio/worker";
 import { createOpenGeniWorker } from "../src";
 import { TurnLifecycleMetrics } from "../src/observability-metrics";
 import { createWorkerHttpHandler } from "../src/http";
@@ -238,8 +238,8 @@ describe("SDK all-activity occupancy bridge", () => {
     const running = f.worker.run();
     f.startNonlocal();
     await flushTelemetry();
-    f.execution.reject(Error("ForceShutdownError"));
-    await expect(running).rejects.toThrow("ForceShutdownError");
+    f.execution.reject(new GracefulShutdownPeriodExpiredError("fixture shutdown period expired"));
+    await expect(running).rejects.toBeInstanceOf(GracefulShutdownPeriodExpiredError);
     expect(f.activityTelemetry.isSettled()).toBe(false);
     f.advance(4_000);
     expect(await value(f, names.inflight)).toBe(1);
@@ -446,8 +446,8 @@ describe("SDK all-activity occupancy bridge", () => {
       lifecycle.drain();
       expect((await fetch(`${baseUrl}/readyz`)).status).toBe(503);
       expect((await fetch(`${baseUrl}/metrics`)).status).toBe(200);
-      f.execution.reject(Error("ForceShutdownError"));
-      await expect(running).rejects.toThrow("ForceShutdownError");
+      f.execution.reject(new GracefulShutdownPeriodExpiredError("fixture shutdown period expired"));
+      await expect(running).rejects.toBeInstanceOf(GracefulShutdownPeriodExpiredError);
       await lifecycle.close();
       expect(resourceCloses).toBe(1);
       expect(httpCloses).toBe(0);
