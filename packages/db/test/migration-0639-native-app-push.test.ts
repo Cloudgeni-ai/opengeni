@@ -26,7 +26,7 @@ import {
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
-const MIGRATION = "0638_native_app_push.sql";
+const MIGRATION = "0639_native_app_push.sql";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 setDefaultTimeout(60_000);
@@ -86,10 +86,10 @@ async function personWithAppSession(label: string) {
       ${binding.id}, ${binding.revision}
     )`;
   const access = await bootstrapWorkspace(db(), {
-    accountExternalSource: "migration-0638",
+    accountExternalSource: "migration-0639",
     accountExternalId: `account:${label}:${crypto.randomUUID()}`,
     accountName: `Push ${label}`,
-    workspaceExternalSource: "migration-0638",
+    workspaceExternalSource: "migration-0639",
     workspaceExternalId: `workspace:${label}:${crypto.randomUUID()}`,
     workspaceName: `Push ${label}`,
     subjectId,
@@ -118,7 +118,7 @@ async function pendingFor(authSessionId: string) {
     order by created_at`;
 }
 
-describe("0638 native app push", () => {
+describe("0639 native app push", () => {
   test("is a rolling, additive migration with private, owner-run storage", async () => {
     if (!client) return;
     const source = await Bun.file(new URL(`../drizzle/${MIGRATION}`, import.meta.url)).text();

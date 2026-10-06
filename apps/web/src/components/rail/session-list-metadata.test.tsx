@@ -44,6 +44,38 @@ describe("RailTrailingMetadata", () => {
     expect(markup).toContain("motion-reduce:animate-none");
   });
 
+  test("uses the dedicated teal token for unread chats and following up", () => {
+    const unread = renderToStaticMarkup(
+      <RailTrailingMetadata summary={{ kind: "unread", count: 1, total: 1, label: "1 unread" }} />,
+    );
+    const followingUp = renderToStaticMarkup(<RailTrailingMetadata summary={activeWork} />);
+
+    expect(unread).toContain("bg-session-update");
+    expect(unread).not.toContain("bg-brand");
+    expect(followingUp).toContain("text-session-update");
+    expect(followingUp).not.toContain("text-brand");
+  });
+
+  test.each([
+    ["active", "text-fg-subtle"],
+    ["queued", "text-fg-subtle"],
+    ["needs_attention", "bg-status-waiting"],
+    ["failed", "bg-status-failed"],
+    ["send_failed", "text-status-failed"],
+  ] as const)("keeps the existing %s marker color", (kind, color) => {
+    const markup = renderToStaticMarkup(
+      <RailTrailingMetadata summary={{ kind, count: 1, total: 1, label: kind }} />,
+    );
+    expect(markup).toContain(color);
+    expect(markup).not.toContain("session-update");
+  });
+
+  test("defines the approved teal shades separately from neutral brand colors", async () => {
+    const styles = await Bun.file(new URL("../../styles.css", import.meta.url)).text();
+    expect(styles).toContain("--color-session-update: light-dark(#0f766e, #5ad4c5)");
+    expect(styles).toContain("--color-brand: var(--og-color-accent)");
+  });
+
   test("reserves no trailing rail width when a row has no metadata", () => {
     expect(renderToStaticMarkup(<RailTrailingMetadata summary={neutral} />)).toBe("");
   });
@@ -62,7 +94,7 @@ describe("RailTrailingMetadata", () => {
     const markup = renderToStaticMarkup(<ActiveWorkMark className="size-4" />);
 
     expect(markup).toContain("size-4");
-    expect(markup).toContain("text-brand");
+    expect(markup).toContain("text-session-update");
     expect(markup).toContain('d="M-8 43 C35 40 71 29 116 16"');
     expect(markup).toContain('d="M-8 86 C35 83 71 72 116 59"');
   });

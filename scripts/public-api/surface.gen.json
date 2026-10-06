@@ -22137,7 +22137,8 @@
         "$.thresholds.member": "array?",
         "$.thresholds.member[]": "number",
         "$.thresholds.workspace": "array?",
-        "$.thresholds.workspace[]": "number"
+        "$.thresholds.workspace[]": "number",
+        "$.unbilledUsage": "ref(UnbilledUsageMetering)?"
       }
     },
     "SetWorkspaceArtifactStatusRequest": {
@@ -23447,6 +23448,15 @@
         "$.kind": "enum!=[\"\\\"service\\\"\",\"\\\"subject\\\"\"]",
         "$.label": "string?",
         "$.subjectId": "string!"
+      }
+    },
+    "UnbilledUsageMetering": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"ignore\\\"\",\"\\\"list_price\\\"\"]"
       }
     },
     "UninstallApiIntegrationRequest": {
@@ -24831,6 +24841,7 @@
         "$.thresholds.member[]": "number",
         "$.thresholds.workspace": "array?",
         "$.thresholds.workspace[]": "number",
+        "$.unbilledUsage": "ref(UnbilledUsageMetering)?",
         "$.version": "integer!"
       }
     },

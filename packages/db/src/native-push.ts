@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { rawRows, type Database, withRlsContext } from "./database";
 
-// Native app push storage (0638). Every access goes through the owner-run
+// Native app push storage (0639). Every access goes through the owner-run
 // functions; the application role never reads the tables directly.
 
 export const NATIVE_PUSH_RULES = ["needs_input", "reply_ready", "failed", "agent"] as const;

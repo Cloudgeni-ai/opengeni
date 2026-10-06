@@ -1,7 +1,12 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import libnpmpublish from "libnpmpublish";
 
 import { lockstepCanaryBase, retiredVersionSet } from "./release/lockstep-version";
 import {
@@ -97,13 +102,222 @@ export function planCanaryVersions(
   return versions;
 }
 
-function npmCanaryTag(name: string): string | null {
-  const result = spawnSync("npm", ["view", name, "dist-tags.canary", "--silent"], {
-    encoding: "utf8",
+type RegistryPackage = {
+  "dist-tags": { latest?: string; canary?: string };
+  versions: Record<
+    string,
+    {
+      dist?: {
+        integrity?: string;
+        attestations?: { url?: string; provenance?: { predicateType?: string } };
+      };
+    }
+  >;
+};
+type RegistryRequest = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+const registry = "https://registry.npmjs.org";
+const CANARY_RECEIPT_TIMEOUT_MS = 180_000;
+const CANARY_RECEIPT_REQUEST_TIMEOUT_MS = 10_000;
+const CANARY_RECEIPT_POLL_INTERVAL_MS = 1_000;
+
+type RegistryReadOptions = { signal?: AbortSignal; revalidate?: boolean };
+type ReceiptPollOptions = {
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+};
+
+export function verifyCanarySourceBinding(
+  env: Record<string, string | undefined>,
+  actualHead: string,
+  sourceRoot: string,
+  scriptRoot: string,
+): void {
+  const sha = env.GITHUB_SHA;
+  if (
+    env.GITHUB_ACTIONS !== "true" ||
+    env.GITHUB_EVENT_NAME !== "workflow_dispatch" ||
+    env.GITHUB_REPOSITORY !== "Cloudgeni-ai/opengeni" ||
+    env.GITHUB_SERVER_URL !== "https://github.com" ||
+    env.GITHUB_REF !== "refs/heads/main" ||
+    env.GITHUB_WORKFLOW_REF !==
+      "Cloudgeni-ai/opengeni/.github/workflows/publish-canary.yml@refs/heads/main" ||
+    !sha ||
+    !/^[0-9a-f]{40}$/.test(sha) ||
+    sha !== env.GITHUB_WORKFLOW_SHA ||
+    sha !== env.SOURCE_SHA ||
+    sha !== actualHead ||
+    resolve(sourceRoot) !== resolve(scriptRoot) ||
+    !env.GITHUB_RUN_ID ||
+    !env.GITHUB_RUN_ATTEMPT ||
+    !env.ACTIONS_ID_TOKEN_REQUEST_URL ||
+    !env.ACTIONS_ID_TOKEN_REQUEST_TOKEN ||
+    !env.NODE_AUTH_TOKEN
+  ) {
+    throw new Error("Canary source, workflow, registry auth, and provenance identity must agree");
+  }
+  workflowCanarySequence(env.GITHUB_RUN_ID, env.GITHUB_RUN_ATTEMPT);
+}
+
+export async function readRegistryPackage(
+  name: string,
+  request: RegistryRequest = fetch,
+  base = registry,
+  options: RegistryReadOptions = {},
+): Promise<RegistryPackage> {
+  // The registry revalidates its cache for this query; the request remains a GET.
+  const suffix = options.revalidate ? "?write=true" : "";
+  const response = await request(`${base}/${encodeURIComponent(name)}${suffix}`, {
+    method: "GET",
+    cache: "no-store",
+    headers: {
+      accept: options.revalidate ? "application/json" : "application/vnd.npm.install-v1+json",
+      ...(options.revalidate ? { "cache-control": "no-cache" } : {}),
+    },
+    ...(options.signal ? { signal: options.signal } : {}),
   });
-  const text = (result.stdout ?? "").trim();
-  if (result.status !== 0 || text.length === 0 || text === "undefined") return null;
-  return text;
+  if (response.status === 404) return { "dist-tags": {}, versions: {} };
+  if (!response.ok) throw new Error(`Registry metadata for ${name} failed: ${response.status}`);
+  const json = (await response.json()) as Partial<RegistryPackage>;
+  if (
+    !json["dist-tags"] ||
+    typeof json["dist-tags"] !== "object" ||
+    Array.isArray(json["dist-tags"]) ||
+    (json["dist-tags"].latest !== undefined && typeof json["dist-tags"].latest !== "string") ||
+    (json["dist-tags"].canary !== undefined && typeof json["dist-tags"].canary !== "string") ||
+    !json.versions ||
+    typeof json.versions !== "object" ||
+    Array.isArray(json.versions)
+  ) {
+    throw new Error(`Registry metadata for ${name} is incomplete`);
+  }
+  return json as RegistryPackage;
+}
+
+export function assertCanaryPlan(
+  packages: readonly { name: string }[],
+  versions: ReadonlyMap<string, string>,
+  metadata: ReadonlyMap<string, RegistryPackage>,
+): void {
+  for (const pkg of packages) {
+    const selected = versions.get(pkg.name);
+    const existing = metadata.get(pkg.name);
+    if (!selected || !existing) throw new Error(`Missing canary plan for ${pkg.name}`);
+    if (Object.hasOwn(existing.versions, selected)) {
+      throw new Error(`Canary version already exists for ${pkg.name}`);
+    }
+  }
+}
+
+export async function publishCanaryArtifact(
+  manifest: Record<string, unknown>,
+  tarball: Buffer,
+  token: string,
+  publish: typeof libnpmpublish.publish = libnpmpublish.publish,
+  targetRegistry = registry,
+): Promise<void> {
+  if (
+    typeof manifest.name !== "string" ||
+    typeof manifest.version !== "string" ||
+    !/^\d+\.\d+\.\d+-canary\.(0|[1-9]\d*)$/.test(manifest.version) ||
+    (manifest.tag !== undefined && manifest.tag !== "canary") ||
+    (manifest.publishConfig as Record<string, unknown> | undefined)?.access !== "public" ||
+    (manifest.publishConfig as Record<string, unknown> | undefined)?.provenance !== true ||
+    ((manifest.publishConfig as Record<string, unknown> | undefined)?.tag !== undefined &&
+      (manifest.publishConfig as Record<string, unknown>).tag !== "canary") ||
+    !token ||
+    tarball.length === 0
+  ) {
+    throw new Error("Canary package, archive, or registry auth is invalid");
+  }
+  const response = await publish(manifest, tarball, {
+    registry: targetRegistry,
+    forceAuth: { token },
+    defaultTag: "canary",
+    access: "public",
+    provenance: true,
+  });
+  if (!response.ok || !response.transparencyLogUrl) {
+    throw new Error(`Canary provenance publication was not confirmed for ${manifest.name}`);
+  }
+}
+
+export async function confirmCanaryPublication(
+  name: string,
+  version: string,
+  previousLatest: string | undefined,
+  tarball: Buffer,
+  read: typeof readRegistryPackage = readRegistryPackage,
+  options: ReceiptPollOptions = {},
+): Promise<void> {
+  const integrity = `sha512-${createHash("sha512").update(tarball).digest("base64")}`;
+  const now = options.now ?? performance.now.bind(performance);
+  const sleep = options.sleep ?? Bun.sleep;
+  const timeoutMs = options.timeoutMs ?? CANARY_RECEIPT_TIMEOUT_MS;
+  const pollIntervalMs = options.pollIntervalMs ?? CANARY_RECEIPT_POLL_INTERVAL_MS;
+  if (
+    !Number.isFinite(timeoutMs) ||
+    timeoutMs <= 0 ||
+    !Number.isFinite(pollIntervalMs) ||
+    pollIntervalMs <= 0
+  ) {
+    throw new Error("Canary receipt polling interval or deadline is invalid");
+  }
+  const deadline = now() + timeoutMs;
+  let reads = 0;
+  let lastObservation = "not_observed";
+  while (now() < deadline) {
+    const remaining = deadline - now();
+    const signal = AbortSignal.timeout(
+      Math.max(1, Math.ceil(Math.min(CANARY_RECEIPT_REQUEST_TIMEOUT_MS, remaining))),
+    );
+    let current: RegistryPackage;
+    try {
+      current = await read(name, fetch, registry, { signal, revalidate: true });
+      reads++;
+    } catch (error) {
+      if (!(error instanceof Error) || !["AbortError", "TimeoutError"].includes(error.name)) {
+        throw error;
+      }
+      reads++;
+      lastObservation = "request_timeout";
+      const wait = Math.min(pollIntervalMs, deadline - now());
+      if (wait > 0) await sleep(wait);
+      continue;
+    }
+    if (current["dist-tags"].latest !== previousLatest) {
+      throw new Error(`Stable tag changed during canary publication for ${name}`);
+    }
+    if (!Object.hasOwn(current.versions, version)) {
+      lastObservation = "version_pending";
+    } else if (current["dist-tags"].canary !== version) {
+      lastObservation = "canary_tag_pending";
+    } else {
+      const dist = current.versions[version]?.dist;
+      if (dist?.integrity && dist.integrity !== integrity) {
+        throw new Error(`Canary archive integrity differs for ${name}`);
+      }
+      if (!dist?.integrity) {
+        lastObservation = "integrity_pending";
+      } else if (typeof dist.attestations?.url !== "string") {
+        lastObservation = "attestation_pending";
+      } else if (dist.attestations.provenance?.predicateType !== "https://slsa.dev/provenance/v1") {
+        lastObservation = "provenance_pending";
+      } else {
+        if (now() >= deadline) {
+          lastObservation = "read_exceeded_deadline";
+          break;
+        }
+        return;
+      }
+    }
+    const wait = Math.min(pollIntervalMs, deadline - now());
+    if (wait > 0) await sleep(wait);
+  }
+  throw new Error(
+    `Canary registry receipt is unavailable for ${name} after ${reads} reads (${lastObservation})`,
+  );
 }
 
 function writeVersion(pkg: WorkspacePackage, version: string): void {
@@ -119,37 +333,78 @@ function run(command: string, args: string[], cwd?: string): void {
   }
 }
 
-export function main(): void {
-  if (!process.env.NODE_AUTH_TOKEN) {
-    throw new Error("NODE_AUTH_TOKEN is required to publish canary packages");
-  }
+export async function main(): Promise<void> {
+  const scriptRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const head = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  if (head.status !== 0) throw new Error("Canary source HEAD cannot be resolved");
+  verifyCanarySourceBinding(process.env, head.stdout.trim(), repoRoot, scriptRoot);
   const packages = topologicallySortedPackages(publishableWorkspacePackages());
   const config = JSON.parse(readFileSync(join(repoRoot, ".changeset/config.json"), "utf8")) as {
     fixed?: string[][];
   };
+  const metadata = new Map(
+    await Promise.all(
+      packages.map(async (pkg) => [pkg.name, await readRegistryPackage(pkg.name)] as const),
+    ),
+  );
   const versions = planCanaryVersions(
     canaryBasePackages(packages),
-    new Map(packages.map((pkg) => [pkg.name, npmCanaryTag(pkg.name)])),
+    new Map(packages.map((pkg) => [pkg.name, metadata.get(pkg.name)!["dist-tags"].canary ?? null])),
     config.fixed ?? [],
     // Registry tags can lag reserved/staged versions. Each workflow attempt
     // therefore starts in a fresh range without guessing or overwriting them.
     workflowCanarySequence(process.env.GITHUB_RUN_ID, process.env.GITHUB_RUN_ATTEMPT),
   );
+  assertCanaryPlan(packages, versions, metadata);
   for (const pkg of packages) {
     const next = versions.get(pkg.name)!;
     writeVersion(pkg, next);
     process.stdout.write(`${pkg.name}@${next}\n`);
   }
-  run("bun", ["run", "build:packages"]);
-  run("bun", ["scripts/publish-closure-guard.ts"]);
-  run("bun", ["scripts/rewrite-workspace-deps.ts", "--strip-dev-dependencies"]);
-  run("bun", ["scripts/rewrite-entry-points.ts"]);
-  for (const pkg of packages) {
-    run("npm", ["publish", "--tag", "canary", "--access", "public"], pkg.dir);
+  run("bun", ["run", "build:packages"], repoRoot);
+  run("bun", ["scripts/publish-closure-guard.ts"], repoRoot);
+  run("bun", ["scripts/rewrite-workspace-deps.ts", "--strip-dev-dependencies"], repoRoot);
+  run("bun", ["scripts/rewrite-entry-points.ts"], repoRoot);
+  const packDir = mkdtempSync(join(tmpdir(), "opengeni-canary-pack-"));
+  try {
+    for (const pkg of packages) {
+      run("bun", ["run", "prepublishOnly"], join(repoRoot, pkg.dir));
+      const result = spawnSync(
+        "bun",
+        ["pm", "pack", "--ignore-scripts", "--quiet", "--destination", packDir],
+        { cwd: join(repoRoot, pkg.dir), encoding: "utf8", env: process.env },
+      );
+      if (result.status !== 0) throw new Error(`Bun pack failed for ${pkg.name}`);
+      const tarballPath = resolve(packDir, result.stdout.trim());
+      if (
+        dirname(tarballPath) !== packDir ||
+        !/^[a-z0-9][a-z0-9._-]*\.tgz$/.test(basename(tarballPath))
+      ) {
+        throw new Error(`Bun pack returned an invalid archive name for ${pkg.name}`);
+      }
+      const manifest = JSON.parse(readFileSync(pkg.packagePath, "utf8")) as Record<string, unknown>;
+      if (manifest.name !== pkg.name || manifest.version !== versions.get(pkg.name)) {
+        throw new Error(`Canary package metadata is invalid for ${pkg.name}`);
+      }
+      const packed = readFileSync(tarballPath);
+      await publishCanaryArtifact(manifest, packed, process.env.NODE_AUTH_TOKEN!);
+      await confirmCanaryPublication(
+        pkg.name,
+        versions.get(pkg.name)!,
+        metadata.get(pkg.name)!["dist-tags"].latest,
+        packed,
+      );
+      process.stdout.write(`${pkg.name}@${versions.get(pkg.name)} published with provenance\n`);
+    }
+  } finally {
+    rmSync(packDir, { recursive: true, force: true });
   }
-  mkdirSync(".release", { recursive: true });
+  mkdirSync(join(repoRoot, ".release"), { recursive: true });
   writeFileSync(
-    ".release/site-package-versions.json",
+    join(repoRoot, ".release/site-package-versions.json"),
     JSON.stringify(
       Object.fromEntries(
         packages
@@ -166,4 +421,4 @@ export function main(): void {
   );
 }
 
-if (import.meta.main) main();
+if (import.meta.main) await main();

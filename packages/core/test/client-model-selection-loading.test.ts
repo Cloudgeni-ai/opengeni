@@ -53,12 +53,19 @@ describe("fresh model admission versus live discovery", () => {
       currency: "usd",
       updatedAt: "2026-10-01T00:00:00.000Z",
     });
-    allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue({
-      code: "allowance_exhausted",
-      scope: "workspace",
-      resetsAt: "2026-11-01T00:00:00.000Z",
-      message: "The workspace usage allowance is exhausted.",
-    });
+    // The real check admits credit-free work unless the allowance opts into
+    // counting unbilled usage.
+    allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockImplementation(
+      async (_db, check) =>
+        check.fundedWithoutCredits
+          ? null
+          : {
+              code: "allowance_exhausted",
+              scope: "workspace",
+              resetsAt: "2026-11-01T00:00:00.000Z",
+              message: "The workspace usage allowance is exhausted.",
+            },
+    );
     mocks = [
       spyOn(
         opengeniDb,
@@ -112,7 +119,10 @@ describe("fresh model admission versus live discovery", () => {
     expect(active).toBe(true);
     expect(availability).not.toHaveBeenCalled();
     expect(balance).not.toHaveBeenCalled();
-    expect(allowance).not.toHaveBeenCalled();
+    expect(allowance).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({ fundedWithoutCredits: true }),
+    );
   });
 
   test("catalog discovery and automatic defaults retain exact live support filtering", async () => {
