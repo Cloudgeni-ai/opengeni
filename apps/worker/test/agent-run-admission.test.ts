@@ -215,15 +215,21 @@ describe("worker agent-run admission funding", () => {
     { model: "codex/gpt-5.6-sol", active: true, codexSubscriptionEnabled: true },
     { model: "supergrok/grok-4.7", active: false, supergrokSubscriptionEnabled: true },
   ])(
-    "exempts externally funded $model from exhausted allowances",
+    "admits externally funded $model unless the allowance counts unbilled usage",
     async ({ model, active, ...overrides }) => {
       const restoreCodex = mockCodexBilled(active);
-      allowance.mockResolvedValue({
-        code: "allowance_exhausted",
-        scope: "workspace",
-        resetsAt: null,
-        message: "Exhausted",
-      });
+      // The real check admits credit-free work unless the allowance opts into
+      // counting unbilled usage.
+      allowance.mockImplementation(async (_db, check) =>
+        check.fundedWithoutCredits
+          ? null
+          : {
+              code: "allowance_exhausted",
+              scope: "workspace",
+              resetsAt: null,
+              message: "Exhausted",
+            },
+      );
       try {
         expect(
           await agentRunAdmissionDenial(
@@ -245,7 +251,12 @@ describe("worker agent-run admission funding", () => {
             },
           ),
         ).toBeNull();
-        expect(allowance).not.toHaveBeenCalled();
+        expect(allowance).toHaveBeenCalledWith(expect.anything(), {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          subjectId: "user:schedule-creator",
+          fundedWithoutCredits: true,
+        });
       } finally {
         restoreCodex();
       }
