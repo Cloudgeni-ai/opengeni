@@ -909,6 +909,10 @@ failures. An exact-current-attempt model completion atomically clears that strea
 with its timeline event; only then does the worker clear its in-memory copy.
 Late attempt evidence cannot replenish the retry budget. See
 [`run-lifecycle.md`](run-lifecycle.md) for pacing and exhaustion semantics.
+Confirmed, structured Claude overload uses that same durable count and clock,
+with at most 15 retries inside a 15-minute recovery window and a pre-dispatch
+deadline check. Display labels or overload keywords do not grant this policy;
+other failure classes keep their existing budgets and capacity semantics.
 
 ### 5.3 Goals, schedules, automations, and child work
 

@@ -68,6 +68,9 @@ export type AttemptIdentityState = {
   triggerEventId: string | undefined;
   executionGeneration: number;
   providerRecoveryCount: number;
+  /** Durable recovery policy reason; never inferred from display wording. */
+  providerRecoveryPolicyCode?: string | undefined;
+  providerRecoveryStartedAt?: number | undefined;
   providerRecoveryObservation?:
     | import("./provider-recovery-metrics").ProviderRecoveryObservation
     | undefined;

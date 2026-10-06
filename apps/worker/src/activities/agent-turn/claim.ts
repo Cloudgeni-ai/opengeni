@@ -62,6 +62,7 @@ import { createTurnMediaArtifacts } from "./media-artifacts";
 import { readTurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { turnCredentialRestriction } from "./credential-restriction";
 import { readProviderRecoveryObservation } from "./provider-recovery-metrics";
+import { readProviderRecoveryStartedAt } from "./provider-recovery-policy";
 
 import {
   credentialSubjectIdForTurnInitiator,
@@ -239,7 +240,12 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   attempt.dispatchId = dispatchId;
   attempt.executionGeneration = turn.executionGeneration;
   attempt.providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
+  attempt.providerRecoveryPolicyCode =
+    typeof turn.metadata.providerRecoveryReason === "string"
+      ? turn.metadata.providerRecoveryReason
+      : undefined;
   attempt.providerRecoveryObservation = readProviderRecoveryObservation(turn.metadata ?? {});
+  attempt.providerRecoveryStartedAt = readProviderRecoveryStartedAt(turn.metadata);
   const authRecovery = turn.metadata?.claudeAuthRecovery;
   attempt.claudeAuthRecovery =
     authRecovery &&
