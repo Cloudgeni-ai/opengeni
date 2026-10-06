@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { testSettings } from "@opengeni/testing";
 import { allAgentCapabilities } from "@opengeni/contracts";
 import { buildOpenGeniAgent, coreInstructions } from "../src";
+import { KNOWLEDGE_GUIDANCE } from "../src/agent-instructions/modules/knowledge";
 
 test.each([undefined, "CUSTOM PERSONA", "CUSTOM {{core}} PERSONA"])(
   "behavior storage routing is present without existing governance (template=%s)",
@@ -13,13 +14,12 @@ test.each([undefined, "CUSTOM PERSONA", "CUSTOM {{core}} PERSONA"])(
     const prompt = agent.instructions;
     expect(typeof prompt).toBe("string");
     for (const guidance of [
-      "for future sessions",
+      "Knowledge for reusable facts",
       "instruction_policy_get",
       "instruction_policy_save",
-      "Keep replies concise",
       "Do not save behavioral preferences as Knowledge",
       "Skill description",
-      "personal Skill",
+      "widen personal guidance",
       "pending review",
       "Do not bypass",
     ]) {
@@ -116,17 +116,21 @@ test.each([false, true])(
       "the user need not say remember",
       "adopted choices",
       "only for the current task",
-      "not an unaccepted assistant proposal",
-      "explicit requests not to remember",
-      "one useful conclusion entry per experiment",
-      "settled impact",
-      "not a running live-status log",
-      "retrieve the relevant published Knowledge and apply it",
-      "do not search on every turn",
-      "changes to learning settings",
-      "Off prevents authoring while permitting retrieval",
+      "not unaccepted assistant proposals",
+      "Respect requests not to remember",
+      "one updated conclusion per experiment",
+      "settled incident lessons",
+      "live status and interim rounds",
+      "before work that depends on prior decisions",
+      "skip unrelated searches",
+      "settings permission",
+      "Off prevents authoring but allows retrieval",
     ])
       expect(prompt).toContain(concept);
     expect(prompt.split("Choose durable storage by purpose")).toHaveLength(2);
   },
 );
+
+test("standing Knowledge guidance stays within its reviewed prompt budget", () => {
+  expect(KNOWLEDGE_GUIDANCE.join(" ").length).toBeLessThan(2600);
+});

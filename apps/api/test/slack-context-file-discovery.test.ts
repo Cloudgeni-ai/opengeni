@@ -46,7 +46,7 @@ test("a design-system reply exposes the earlier PDF's exact Slack identity witho
   expect(prompt).toContain("New design system (Slack file ID: F_DESIGN_GUIDE)");
   expect(prompt).toContain("Slack channel ID for authorized file reads: C_DESIGN");
   expect(prompt).toContain("not imported workspace files");
-  expect(prompt).toContain("do not infer its contents from its name");
+  expect(prompt).toContain("do not infer contents from filenames");
   expect(prompt).toContain("ask the user to attach the file to this chat");
   expect(prompt).not.toContain("Imported invocation attachments");
   expect(prompt).not.toContain("<@U_BOT>");
