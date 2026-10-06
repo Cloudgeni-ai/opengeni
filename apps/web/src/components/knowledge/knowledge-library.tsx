@@ -281,7 +281,14 @@ export function EntryRow({
           </StatusBadge>
         ) : undefined
       }
-      cells={{ updated: <RelativeTime date={added ? entry.createdAt : entry.updatedAt} /> }}
+      cells={{
+        updated: (
+          <RelativeTime
+            date={added ? entry.createdAt : entry.updatedAt}
+            prefix={!added && entry.revision.kind === "group" ? "Edited" : undefined}
+          />
+        ),
+      }}
       onOpen={() => actions.onOpen(entry)}
       menu={
         <>

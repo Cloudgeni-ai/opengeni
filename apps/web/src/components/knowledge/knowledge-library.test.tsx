@@ -47,7 +47,7 @@ function treeEntries(request: KnowledgeEntryListRequest) {
     return request.kind === "group" ? [payments] : [rollback, payments];
   if (request.groupId === PAYMENTS) return [];
   if (request.rootOnly) return request.kind === "group" ? [runbooks] : [runbooks, loose];
-  return [];
+  return [runbooks, payments, rollback, loose];
 }
 
 const listKnowledgeEntries = mock(
@@ -201,6 +201,32 @@ test("Added is server-side, survives pagination and scope changes, and can be re
   }
 });
 
+test("Added collection dates use creation time without an Edited label", async () => {
+  tree = true;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<Harness added="week" />));
+    await settle();
+    const date = () => container.querySelector("[data-slot=relative-time]")!;
+    expect(container.textContent).toContain("Runbooks");
+    expect(date().getAttribute("datetime")).toBe("2026-09-01T00:00:00.000Z");
+    expect(date().textContent).not.toStartWith("Edited ");
+    const remove = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Remove filter Added: Last 7 days"]',
+    )!;
+    await act(async () => remove.click());
+    await settle();
+    expect(date().getAttribute("datetime")).toBe("2026-09-20T00:00:00.000Z");
+    expect(date().textContent).toStartWith("Edited ");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    tree = false;
+  }
+});
+
 test("rows open the entry's page and show a scope only when it isn't the workspace", async () => {
   const container = document.createElement("div");
   document.body.append(container);
@@ -284,6 +310,12 @@ test("By collection shows only top-level collections, sub-collections first as r
     expect(tile(rowsInRunbooks[1]!)).not.toBe(tile(rowsInRunbooks[0]!));
     expect(rowsInRunbooks[1]!.textContent).toContain("Decision");
     expect(rowsInRunbooks[1]!.querySelector("[data-slot=relative-time]")).not.toBeNull();
+    expect(rowsInRunbooks[0]!.querySelector("[data-slot=relative-time]")?.textContent).toStartWith(
+      "Edited ",
+    );
+    expect(
+      rowsInRunbooks[1]!.querySelector("[data-slot=relative-time]")?.textContent,
+    ).not.toStartWith("Edited ");
     expect(
       listKnowledgeEntries.mock.calls.some(
         ([, request]) => request.kind === "group" && request.rootOnly === true,
