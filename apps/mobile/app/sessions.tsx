@@ -1,5 +1,5 @@
-import { groupSessionsForRail, sessionDisplayTitle } from "@opengeni/react/session-list-model";
-import type { Session } from "@opengeni/sdk";
+import { groupSessionsByProject, sessionDisplayTitle } from "@opengeni/react/session-list-model";
+import type { Channel, Session } from "@opengeni/sdk";
 import {
   fontStyle,
   Icon,
@@ -22,14 +22,16 @@ export default function SessionsScreen() {
   );
 }
 
-/* The web rail's session list at phone width: search, running sessions on top,
-   then Today / Yesterday / Previous 7 days / Older (shared grouping rules). */
+/* The web rail's session list at phone width: search, then the workspace's
+   projects in their server order (running sessions first in each), then
+   Default for unfiled sessions (shared grouping rules). */
 function Sessions() {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();
   const { client, models, workspaceId } = useAccount();
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [projects, setProjects] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("");
 
@@ -37,7 +39,12 @@ function Sessions() {
     if (!workspaceId) return;
     setLoading(true);
     try {
-      setSessions(await client.listSessions(workspaceId, { limit: 100 }));
+      const [list, channels] = await Promise.all([
+        client.listSessions(workspaceId, { limit: 100 }),
+        client.listChannels(workspaceId).catch(() => [] as Channel[]),
+      ]);
+      setSessions(list);
+      setProjects(channels);
     } finally {
       setLoading(false);
     }
@@ -49,13 +56,14 @@ function Sessions() {
     }, [load]),
   );
 
-  const groups = useMemo(() => {
+  const sections = useMemo(() => {
     const needle = query.trim().toLowerCase();
     const visible = needle
       ? sessions.filter((session) => sessionDisplayTitle(session).toLowerCase().includes(needle))
       : sessions;
-    return groupSessionsForRail(visible);
-  }, [query, sessions]);
+    // As on web, projects show even when empty, so a new one is visible at once.
+    return groupSessionsByProject(visible, projects, { keepEmpty: !needle });
+  }, [projects, query, sessions]);
   const open = (sessionId: string) => router.push(`/session/${sessionId}`);
 
   return (
@@ -104,28 +112,39 @@ function Sessions() {
             style={{ ...fontStyle(theme), flex: 1, fontSize: 14, color: c.fg }}
           />
         </View>
-        {groups.running.length > 0 ? (
-          <SessionRowList sessions={groups.running} models={models} onOpen={open} />
-        ) : null}
-        {groups.grouped.map((bucket) => (
-          <View key={bucket.group} style={{ marginTop: 16 }}>
-            <Text
-              accessibilityRole="header"
+        {sections.map((section) => (
+          <View key={section.key} style={{ marginTop: 16 }}>
+            <View
               style={{
-                ...fontStyle(theme, 500),
-                fontSize: 11,
-                lineHeight: 16,
-                color: c["fg-subtle"],
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 6,
                 paddingHorizontal: 4,
                 marginBottom: 2,
               }}
             >
-              {bucket.label}
-            </Text>
-            <SessionRowList sessions={bucket.sessions} models={models} onOpen={open} />
+              <Icon name="folder" size={13} color={c["fg-subtle"]} />
+              <Text
+                accessibilityRole="header"
+                numberOfLines={1}
+                style={{
+                  ...fontStyle(theme, 600),
+                  fontSize: 12,
+                  lineHeight: 16,
+                  color: c["fg-muted"],
+                  flexShrink: 1,
+                }}
+              >
+                {section.name}
+              </Text>
+              <Text style={{ ...fontStyle(theme), fontSize: 11, color: c["fg-subtle"] }}>
+                {section.sessions.length}
+              </Text>
+            </View>
+            <SessionRowList sessions={section.sessions} models={models} onOpen={open} />
           </View>
         ))}
-        {!loading && groups.running.length === 0 && groups.grouped.length === 0 ? (
+        {!loading && sections.length === 0 ? (
           <Text
             style={{
               ...fontStyle(theme),

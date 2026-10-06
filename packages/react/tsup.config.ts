@@ -43,6 +43,8 @@ export default defineConfig({
     "src/model-mark-paths.ts",
     "src/timeline-model.ts",
     "src/organization-model.ts",
+    "src/session-agents-model.ts",
+    "src/new-session-draft.ts",
     "src/session-list-model.ts",
     "src/session-feedback-model.ts",
     "src/session-attention-model.ts",

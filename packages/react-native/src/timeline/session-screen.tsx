@@ -31,6 +31,8 @@ import {
   type HumanInputCardProps,
 } from "./decisions";
 import { QueueDock } from "./queue-dock";
+import { SessionCommandsList, SessionSignals } from "./session-signals";
+import type { ClientModel, OpenGeniClient, SessionBackgroundCommand } from "@opengeni/sdk";
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 
@@ -74,6 +76,10 @@ export interface NativeSessionScreenProps extends Omit<
   humanInputMessages?: HumanInputCardProps["messages"];
   /** Translations for the approval strip. */
   approvalMessages?: ApprovalStripProps["messages"];
+  /** Reads the commands panel (the full client; omit to hide command details). */
+  client?: OpenGeniClient | undefined;
+  /** Model catalog for the agents panel rows. */
+  models?: readonly ClientModel[] | undefined;
 }
 
 export function NativeSessionScreen({
@@ -86,6 +92,8 @@ export function NativeSessionScreen({
   feedback,
   humanInputMessages,
   approvalMessages,
+  client,
+  models,
   renderMessageActions: hostMessageActions,
   ...timelineProps
 }: NativeSessionScreenProps) {
@@ -210,6 +218,23 @@ export function NativeSessionScreen({
         }
         above={
           <>
+            <SessionSignals
+              goal={controller.goal}
+              agents={controller.lineage.lineage?.children ?? []}
+              commandsCount={controller.session.session?.backgroundCommandActivity?.count ?? 0}
+              onOpenSession={timelineProps.onOpenSession}
+              models={models}
+              readOnly={status === "failed" || status === "cancelled"}
+              renderCommands={() =>
+                client ? (
+                  <NativeSessionCommands
+                    client={client}
+                    workspaceId={controller.workspaceId}
+                    sessionId={controller.sessionId}
+                  />
+                ) : null
+              }
+            />
             <QueueDock
               queue={queue}
               composer={composer}
@@ -408,4 +433,40 @@ function DraftConflictStrip(props: {
       </Pressable>
     </View>
   );
+}
+
+/** Polls the session's commands only while the panel is open, as web does. */
+function NativeSessionCommands(props: {
+  client: OpenGeniClient;
+  workspaceId: string;
+  sessionId: string;
+}) {
+  const { client, workspaceId, sessionId } = props;
+  const [commands, setCommands] = useState<SessionBackgroundCommand[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  const load = useCallback(async () => {
+    try {
+      const response = await client.listSessionBackgroundCommands(workspaceId, sessionId);
+      setCommands(response.commands);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause : new Error(String(cause)));
+    } finally {
+      setLoading(false);
+    }
+  }, [client, sessionId, workspaceId]);
+  useEffect(() => {
+    void load();
+    const timer = setInterval(() => void load(), 3_000);
+    return () => clearInterval(timer);
+  }, [load]);
+  const cancel = useCallback(
+    async (commandId: string) => {
+      await client.cancelSessionBackgroundCommand(workspaceId, sessionId, commandId);
+      await load();
+    },
+    [client, load, sessionId, workspaceId],
+  );
+  return <SessionCommandsList commands={{ commands, loading, error, cancel }} />;
 }

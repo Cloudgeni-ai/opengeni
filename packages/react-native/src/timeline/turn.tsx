@@ -22,6 +22,7 @@ import {
 import { Platform, Pressable, Text, View, type TextStyle } from "react-native";
 import Animated, { FadeIn, FadeInDown, FadeOut, FadeOutUp } from "react-native-reanimated";
 import { ActivityRow } from "./activity";
+import { ThinkingOrb } from "./thinking-orb";
 import { Icon } from "./icon";
 import { PulseDot, ShimmerText, ROW_MIN_HEIGHT, useReleaseFollow } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
@@ -489,7 +490,7 @@ export function PreparingState({
         paddingVertical: 12,
       }}
     >
-      <Orb />
+      <ThinkingOrb />
       <Animated.Text
         key={phrase}
         entering={FadeIn.duration(650)}
@@ -502,27 +503,6 @@ export function PreparingState({
       >
         {phrase}
       </Animated.Text>
-    </View>
-  );
-}
-
-/** A calm native stand-in for the web canvas orb. */
-function Orb() {
-  const theme = useNativeTimelineTheme();
-  return (
-    <View style={{ width: 64, height: 64, alignItems: "center", justifyContent: "center" }}>
-      <View
-        style={{
-          width: 40,
-          height: 40,
-          borderRadius: 20,
-          backgroundColor: theme.colors["surface-3"],
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        <PulseDot color={theme.colors["fg-subtle"]} size={10} />
-      </View>
     </View>
   );
 }

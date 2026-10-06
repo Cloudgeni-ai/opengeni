@@ -130,6 +130,8 @@ function LiveSession(props: {
       />
       <NativeSessionScreen
         controller={controller}
+        client={props.client}
+        models={props.models}
         renderMarkdown={renderMarkdown}
         onCopy={(text) => void copyText(text)}
         onOpenSession={(sessionId) => router.push(`/session/${sessionId}`)}
