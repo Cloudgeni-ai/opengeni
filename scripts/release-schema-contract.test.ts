@@ -2407,6 +2407,7 @@ describe("release schema contract", () => {
       "0635_organization_admin_workspace_member_management.sql",
       "0636_opper_model_providers.sql",
       "0637_retained_process_background_owner_inventory.sql",
+      "0638_allowance_unbilled_usage_metering.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

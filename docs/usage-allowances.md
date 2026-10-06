@@ -90,9 +90,10 @@ Allowances are ceilings, not reservations or a second prepaid wallet:
   there is no aggregate overshoot bound of one call. Already incurred cost is
   not reversed. The next admission is refused once the applicable ceiling is
   exhausted.
-- Externally funded work, including connected subscriptions and BYOK calls
-  without an OpenGeni credit debit, does not consume this allowance. Zero
-  OpenGeni credit charge does not imply zero upstream expense.
+- By default, externally funded work, including connected subscriptions and
+  BYOK calls without an OpenGeni credit debit, does not consume this
+  allowance. Zero OpenGeni credit charge does not imply zero upstream expense.
+  Set `unbilledUsage: "list_price"` to count that work too (see below).
 - Exhaustion does not revoke membership or read access. Preserve conversation
   history and other authorized read/export paths.
 
@@ -121,6 +122,7 @@ The configuration is:
   anchorDay?: number; // integer 1..31, UTC
   memberDefault?: "none" | "equal_share" | { share: number } | { credits: number };
   thresholds?: { workspace?: number[]; member?: number[] };
+  unbilledUsage?: "ignore" | "list_price";
 }
 ```
 
@@ -137,6 +139,24 @@ Omitted `anchorDay` uses day 1; omitted `memberDefault` uses `"none"`.
 Omitted workspace/member threshold lists default to `[0.8, 1]`; configured
 thresholds must be greater than zero and at most one, with at most 16 values
 per list.
+
+### Counting usage that spends no credits
+
+`unbilledUsage` decides how model calls that debit no OpenGeni credits count:
+calls on a connected subscription, workspace- or organization-owned provider
+keys, and deployments that run without credit billing.
+
+- `"ignore"` (the default) keeps the allowance credit-only, as described above.
+- `"list_price"` counts each such call at its configured list-price estimate,
+  in the same USD micros, and admits those turns against the workspace and
+  member ceilings exactly like credit-funded turns. Use this when your product
+  sells usage to its own customers while the model calls run on your own
+  subscription or keys.
+
+A call without a configured list price for its model is not counted; check
+that every model your workspace can select has list pricing before relying on
+the ceiling. Credit-funded calls are always counted from their actual debit,
+so one call is never counted twice.
 
 | Operation | Required authority |
 | --- | --- |
