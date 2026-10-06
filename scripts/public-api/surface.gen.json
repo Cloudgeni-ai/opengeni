@@ -16334,6 +16334,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.createdSince": "string?",
         "$.cursor": "string?",
         "$.fileId": "string?",
         "$.groupId": "string?",

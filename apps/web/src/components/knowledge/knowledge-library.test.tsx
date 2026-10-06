@@ -7,6 +7,7 @@ import { createRoot } from "react-dom/client";
 const workspaceId = "00000000-0000-4000-8000-000000000001";
 let rows = true;
 let tree = false;
+let nextCursor: string | null = null;
 
 const RUNBOOKS = "00000000-0000-4000-8000-000000000020";
 const PAYMENTS = "00000000-0000-4000-8000-000000000021";
@@ -46,7 +47,7 @@ function treeEntries(request: KnowledgeEntryListRequest) {
     return request.kind === "group" ? [payments] : [rollback, payments];
   if (request.groupId === PAYMENTS) return [];
   if (request.rootOnly) return request.kind === "group" ? [runbooks] : [runbooks, loose];
-  return [];
+  return [runbooks, payments, rollback, loose];
 }
 
 const listKnowledgeEntries = mock(
@@ -76,7 +77,7 @@ const listKnowledgeEntries = mock(
             },
           ]
         : [],
-    nextCursor: null,
+    nextCursor,
   }),
 );
 const context = {
@@ -85,7 +86,7 @@ const context = {
   ownsWorkspaceInvocation: () => true,
 };
 mock.module("@/context", () => ({ useAppContext: () => context }));
-const { LibraryTab, initialLibraryView } = await import("./knowledge-library");
+const { LibraryTab, initialLibraryView, knowledgeAddedSince } = await import("./knowledge-library");
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -97,10 +98,19 @@ afterAll(() => {
 });
 
 const opened: string[] = [];
-function Harness({ fileId, collections }: { fileId?: string; collections?: boolean }) {
+function Harness({
+  fileId,
+  collections,
+  added,
+}: {
+  fileId?: string;
+  collections?: boolean;
+  added?: string;
+}) {
   const [view, setView] = useState({
     ...initialLibraryView(false),
     ...(collections ? { layout: "collections" as const } : {}),
+    ...(added ? { filters: { added: [added] } } : {}),
   });
   return (
     <LibraryTab
@@ -132,6 +142,90 @@ async function settle() {
     });
   }
 }
+
+test("Added windows use exact elapsed days and ignore unknown options", () => {
+  const now = Date.parse("2026-10-06T08:15:00.000Z");
+  expect(knowledgeAddedSince("day", now)).toBe("2026-10-05T08:15:00.000Z");
+  expect(knowledgeAddedSince("week", now)).toBe("2026-09-29T08:15:00.000Z");
+  expect(knowledgeAddedSince("month", now)).toBe("2026-09-06T08:15:00.000Z");
+  expect(knowledgeAddedSince(undefined, now)).toBeUndefined();
+  expect(knowledgeAddedSince("unknown", now)).toBeUndefined();
+});
+
+test("Added is server-side, survives pagination and scope changes, and can be removed", async () => {
+  nextCursor = "next-page";
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const started = Date.now();
+  try {
+    await act(async () => root.render(<Harness collections added="week" />));
+    await settle();
+    const first = listKnowledgeEntries.mock.calls.at(-1)![1];
+    expect(first.view).toBe("published");
+    expect(first.limit).toBe(50);
+    expect(first.rootOnly).toBeUndefined();
+    expect(first.createdSince).toBeDefined();
+    const cutoff = Date.parse(first.createdSince!);
+    expect(cutoff).toBeGreaterThanOrEqual(started - 7 * 86400000);
+    expect(cutoff).toBeLessThanOrEqual(Date.now() - 7 * 86400000);
+    expect(container.textContent).toContain("Added:Last 7 days");
+    expect(container.querySelector("time")?.getAttribute("datetime")).toBe(
+      "2026-09-01T00:00:00.000Z",
+    );
+    const button = (text: string) =>
+      [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (node) => node.textContent === text,
+      )!;
+    await act(async () => button("Load more").click());
+    await settle();
+    expect(listKnowledgeEntries.mock.calls.at(-1)![1]).toEqual({
+      ...first,
+      cursor: "next-page",
+    });
+    await act(async () => button("Workspace").click());
+    await settle();
+    expect(listKnowledgeEntries.mock.calls.at(-1)![1]).toEqual({ ...first, scope: "workspace" });
+    const remove = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Remove filter Added: Last 7 days"]',
+    )!;
+    await act(async () => remove.click());
+    await settle();
+    // Removing the only filter restores the requested collection layout.
+    expect(listKnowledgeEntries.mock.calls.at(-1)![1].createdSince).toBeUndefined();
+    expect(container.textContent).not.toContain("Added:Last 7 days");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    nextCursor = null;
+  }
+});
+
+test("Added collection dates use creation time without an Edited label", async () => {
+  tree = true;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<Harness added="week" />));
+    await settle();
+    const date = () => container.querySelector("[data-slot=relative-time]")!;
+    expect(container.textContent).toContain("Runbooks");
+    expect(date().getAttribute("datetime")).toBe("2026-09-01T00:00:00.000Z");
+    expect(date().textContent).not.toStartWith("Edited ");
+    const remove = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Remove filter Added: Last 7 days"]',
+    )!;
+    await act(async () => remove.click());
+    await settle();
+    expect(date().getAttribute("datetime")).toBe("2026-09-20T00:00:00.000Z");
+    expect(date().textContent).toStartWith("Edited ");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    tree = false;
+  }
+});
 
 test("rows open the entry's page and show a scope only when it isn't the workspace", async () => {
   const container = document.createElement("div");
