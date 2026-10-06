@@ -236,6 +236,14 @@ describe("Bun canary publication boundary", () => {
       readRegistryPackage("@example/package", async () => new Response(null, { status: 403 })),
     ).rejects.toThrow("403");
     await expect(
+      readRegistryPackage(
+        "@example/package",
+        async () => new Response(null, { status: 406 }),
+        "https://registry.example.test",
+        { revalidate: true },
+      ),
+    ).rejects.toThrow("406");
+    await expect(
       readRegistryPackage("@example/package", async () => new Response(null, { status: 503 })),
     ).rejects.toThrow("503");
     await expect(
@@ -564,18 +572,84 @@ describe("Bun canary publication boundary", () => {
     const signal = AbortSignal.timeout(1_000);
     await readRegistryPackage(
       "@example/package",
-      async (_url, init) => {
+      async (url, init) => {
+        expect(String(url)).toBe("https://registry.example.test/%40example%2Fpackage?write=true");
+        expect(init?.method).toBe("GET");
         expect(init?.cache).toBe("no-store");
         expect(init?.signal).toBe(signal);
         expect(init?.headers).toEqual({
-          accept: "application/vnd.npm.install-v1+json",
+          accept: "application/json",
           "cache-control": "no-cache",
         });
+        expect(init?.body).toBeUndefined();
         return Response.json({ "dist-tags": {}, versions: {} });
       },
-      "https://example.test",
+      "https://registry.example.test",
       { signal, revalidate: true },
     );
+  });
+
+  test("keeps ordinary metadata reads on the abbreviated registry path", async () => {
+    await readRegistryPackage(
+      "@example/package",
+      async (url, init) => {
+        expect(String(url)).toBe("https://registry.example.test/%40example%2Fpackage");
+        expect(init?.method).toBe("GET");
+        expect(init?.cache).toBe("no-store");
+        expect(init?.headers).toEqual({ accept: "application/vnd.npm.install-v1+json" });
+        expect(init?.body).toBeUndefined();
+        return Response.json({ "dist-tags": {}, versions: {} });
+      },
+      "https://registry.example.test",
+    );
+  });
+
+  test("confirms the archive through a fresh full-metadata response when the ordinary read is stale", async () => {
+    const version = "1.0.1-canary.4";
+    const packed = Buffer.from("synthetic-tarball");
+    const integrity = `sha512-${createHash("sha512").update(packed).digest("base64")}`;
+    let reads = 0;
+    const request = async (url: string | URL | Request, init?: RequestInit) => {
+      reads++;
+      const fresh = String(url).endsWith("?write=true");
+      expect(init?.method).toBe("GET");
+      expect(init?.headers).toEqual(
+        fresh
+          ? { accept: "application/json", "cache-control": "no-cache" }
+          : { accept: "application/vnd.npm.install-v1+json" },
+      );
+      return Response.json({
+        "dist-tags": { latest: "1.0.0", ...(fresh ? { canary: version } : {}) },
+        versions: fresh
+          ? {
+              [version]: {
+                dist: {
+                  integrity,
+                  attestations: {
+                    url: "https://registry.example.test/attestation",
+                    provenance: { predicateType: "https://slsa.dev/provenance/v1" },
+                  },
+                },
+              },
+            }
+          : {},
+      });
+    };
+    const baseline = await readRegistryPackage(
+      "@example/package",
+      request,
+      "https://registry.example.test",
+    );
+    expect(baseline.versions).toEqual({});
+    await confirmCanaryPublication(
+      "@example/package",
+      version,
+      baseline["dist-tags"].latest,
+      packed,
+      (name, _request, _base, options) =>
+        readRegistryPackage(name, request, "https://registry.example.test", options),
+    );
+    expect(reads).toBe(2);
   });
 
   test("official publisher's synthetic auth and provenance boundary is isolated from CI", () => {
