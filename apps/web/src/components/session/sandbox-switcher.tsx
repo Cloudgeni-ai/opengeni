@@ -28,30 +28,14 @@ import {
   type MenuBodyPresentation,
 } from "./composer-menu-radio";
 
-export const CLOUD_SANDBOX_LABEL = "Cloud sandbox";
-export const NO_SANDBOX_LABEL = "No sandbox";
-
-export const LOCAL_SANDBOX_LABEL = "Local sandbox";
-
-/**
- * User-facing name for a session's own managed box. Hosting vendors (Modal,
- * Daytona, ...) are deployment detail, not something a user chose, so hosted
- * providers read as the neutral "Cloud sandbox" and the local-dev Docker box as
- * "Local sandbox". The local backend runs directly on the host, so it keeps the
- * honest "this computer" instead of implying isolation. Connected Machines keep
- * their own names.
- */
-export function sessionSandboxLabel(backend: SandboxBackend | string): string {
-  if (backend === "none") return NO_SANDBOX_LABEL;
-  if (backend === "local") return "this computer";
-  if (backend === "docker") return LOCAL_SANDBOX_LABEL;
-  return CLOUD_SANDBOX_LABEL;
-}
-
-/** Display name for a fleet row: the session's own box never shows its vendor. */
-export function machineDisplayName(machine: Pick<MachineView, "isSessionGroup" | "kind" | "name">) {
-  return machine.isSessionGroup ? sessionSandboxLabel(machine.kind) : machine.name;
-}
+export {
+  CLOUD_SANDBOX_LABEL,
+  LOCAL_SANDBOX_LABEL,
+  machineDisplayName,
+  NO_SANDBOX_LABEL,
+  sessionSandboxLabel,
+} from "@opengeni/react/sandbox-label-model";
+import { machineDisplayName, sessionSandboxLabel } from "@opengeni/react/sandbox-label-model";
 
 function SandboxMark({
   kind,

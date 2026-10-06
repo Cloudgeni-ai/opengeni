@@ -1,4 +1,5 @@
 import { KnowledgeReceiptRow } from "./knowledge-receipt";
+import { workerRowTitle } from "./platform-activity-presentation";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { GenieLoading } from "./genie-loading";
 import { StartupDispatchDetails } from "./startup-dispatch-details";
@@ -459,22 +460,7 @@ function WorkerRow({
   const running = item.status === "running";
   const failed = item.status === "failed";
   const cancelled = item.status === "cancelled";
-  const title =
-    item.action === "spawn"
-      ? running
-        ? "Spawning worker"
-        : failed
-          ? "Worker spawn failed"
-          : cancelled
-            ? "Worker interrupted"
-            : "Worker spawned"
-      : running
-        ? "Messaging worker"
-        : failed
-          ? "Worker message failed"
-          : cancelled
-            ? "Worker interrupted"
-            : "Worker messaged";
+  const title = workerRowTitle(item);
   if (compact) {
     return (
       <ActivityDisclosure

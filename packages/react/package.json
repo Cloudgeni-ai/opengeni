@@ -78,6 +78,22 @@
       "types": "./src/machines.ts",
       "default": "./src/machines.ts"
     },
+    "./queue-presentation-model": {
+      "types": "./src/queue-presentation-model.ts",
+      "default": "./src/queue-presentation-model.ts"
+    },
+    "./composer-messages": {
+      "types": "./src/composer-messages.ts",
+      "default": "./src/composer-messages.ts"
+    },
+    "./sandbox-label-model": {
+      "types": "./src/sandbox-label-model.ts",
+      "default": "./src/sandbox-label-model.ts"
+    },
+    "./model-picker-model": {
+      "types": "./src/model-picker-model.ts",
+      "default": "./src/model-picker-model.ts"
+    },
     "./model-policy": {
       "types": "./src/model-policy.ts",
       "import": "./src/model-policy.ts",
@@ -130,6 +146,34 @@
       "types": "./styles/tokens.d.ts",
       "style": "./styles/tokens.css",
       "default": "./styles/tokens.css"
+    },
+    "./testing": {
+      "types": "./src/testing/session-scenarios.ts",
+      "default": "./src/testing/session-scenarios.ts"
+    },
+    "./timeline-model": {
+      "types": "./src/timeline-model.ts",
+      "default": "./src/timeline-model.ts"
+    },
+    "./organization-model": {
+      "types": "./src/organization-model.ts",
+      "default": "./src/organization-model.ts"
+    },
+    "./session-list-model": {
+      "types": "./src/session-list-model.ts",
+      "default": "./src/session-list-model.ts"
+    },
+    "./model-mark-paths": {
+      "types": "./src/model-mark-paths.ts",
+      "default": "./src/model-mark-paths.ts"
+    },
+    "./session-feedback-model": {
+      "types": "./src/session-feedback-model.ts",
+      "default": "./src/session-feedback-model.ts"
+    },
+    "./session-attention-model": {
+      "types": "./src/session-attention-model.ts",
+      "default": "./src/session-attention-model.ts"
     }
   },
   "publishConfig": {

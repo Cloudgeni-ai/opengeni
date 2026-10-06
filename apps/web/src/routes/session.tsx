@@ -17,6 +17,7 @@ import {
   completeSessionCapabilityOAuth,
 } from "@/components/capabilities/attach-session-capability";
 import { loadSessionFeedback } from "../lib/session-feedback";
+import { turnRatingsFromFeedback } from "@opengeni/react/session-feedback-model";
 import { PersonalResourceAttachmentSurface } from "@/components/personal-resource-attachment-surface";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
@@ -120,7 +121,7 @@ import {
   UserMessageBody,
 } from "@/components/session/banners";
 import { useRail } from "@/components/rail/rail-context";
-import { CLOUD_SANDBOX_LABEL, machineDisplayName } from "@/components/session/sandbox-switcher";
+import { sessionComputeLabel } from "@opengeni/react/sandbox-label-model";
 import { useBackgroundAttentionTitle } from "@/lib/background-attention-title";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
@@ -1856,8 +1857,7 @@ function SessionChatPane(props: {
     sessionId: props.session.id,
     pollIntervalMs: MACHINES_SESSION_POLL_MS,
   });
-  const activeMachine = fleet.machines.find((machine) => machine.active);
-  const computeLabel = activeMachine ? machineDisplayName(activeMachine) : CLOUD_SANDBOX_LABEL;
+  const computeLabel = sessionComputeLabel(fleet.machines);
   const loadRetainedScreenshot = useMemo(
     () =>
       createSessionRetainedScreenshotLoader(
@@ -2798,11 +2798,7 @@ function SessionChatPane(props: {
       props.session.workspaceId,
       props.session.id,
       ({ feedback }) => {
-        const ratings: Record<string, "positive" | "negative"> = {};
-        for (const entry of feedback) {
-          if (entry.turnId && entry.sentiment && !ratings[entry.turnId])
-            ratings[entry.turnId] = entry.sentiment;
-        }
+        const ratings = turnRatingsFromFeedback(feedback);
         setTurnRatings((saved) => ({ ...ratings, ...saved }));
       },
     );

@@ -1525,6 +1525,32 @@ const SettingsSchema = z.object({
     .min(1)
     .optional(),
   managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
+  // URL schemes the native app may receive its sign-in code on
+  // (`<scheme>://auth/callback`). A host shipping its own build of the app
+  // adds its scheme here.
+  nativeAppSchemes: z
+    .array(z.string().regex(/^[a-z][a-z0-9+.-]{1,63}$/u))
+    .min(1)
+    .default(["opengeni"]),
+  // Bundle identifiers / package names of native app builds allowed to
+  // register for push, and the provider credentials that push to them. Push
+  // stays off for a platform until its credentials are set.
+  nativeAppIds: z
+    .array(z.string().regex(/^[A-Za-z0-9._-]{1,255}$/u))
+    .min(1)
+    .default(["ai.opengeni.app"]),
+  apnsKeyId: z
+    .string()
+    .regex(/^[A-Z0-9]{10}$/u)
+    .optional(),
+  apnsTeamId: z
+    .string()
+    .regex(/^[A-Z0-9]{10}$/u)
+    .optional(),
+  // The APNs auth key (.p8 PEM). Literal "\n" sequences are accepted.
+  apnsPrivateKey: z.string().min(1).optional(),
+  // A Firebase service account JSON with the Cloud Messaging API role.
+  fcmServiceAccountJson: z.string().min(1).optional(),
   // Deployment ceiling for new managed accounts. When false, managed auth
   // refuses every new Better Auth account (email/password sign-up and implicit
   // Google/GitHub sign-up) while existing sign-in, sessions, password reset,
@@ -4760,6 +4786,22 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
         ? undefined
         : source.OPENGENI_ALLOWED_USER_EMAILS.split(",").map((email) => email.trim()),
     managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
+    nativeAppSchemes:
+      source.OPENGENI_NATIVE_APP_SCHEMES === undefined
+        ? undefined
+        : source.OPENGENI_NATIVE_APP_SCHEMES.split(",")
+            .map((scheme) => scheme.trim())
+            .filter(Boolean),
+    nativeAppIds:
+      source.OPENGENI_NATIVE_APP_IDS === undefined
+        ? undefined
+        : source.OPENGENI_NATIVE_APP_IDS.split(",")
+            .map((id) => id.trim())
+            .filter(Boolean),
+    apnsKeyId: optional("OPENGENI_APNS_KEY_ID"),
+    apnsTeamId: optional("OPENGENI_APNS_TEAM_ID"),
+    apnsPrivateKey: optional("OPENGENI_APNS_PRIVATE_KEY"),
+    fcmServiceAccountJson: optional("OPENGENI_FCM_SERVICE_ACCOUNT_JSON"),
     managedAuthNewSignupsEnabled: optional("OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED"),
     organizationUserSetupEmailTokenTransport: optional(
       "OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT",

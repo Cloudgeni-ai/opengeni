@@ -78,6 +78,7 @@ export function unavailableSessionMcpServerIds(
 
 const FIRST_PARTY_ACTION_LABELS: Partial<Record<FirstPartyMcpToolName, string>> = {
   set_session_title: "Rename this session",
+  notify_user: "Notify you on your phone",
   set_other_session_title: "Rename another session",
   run_on: "Choose where work runs",
 };
