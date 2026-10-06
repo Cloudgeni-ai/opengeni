@@ -14,7 +14,7 @@ import {
 } from "@opengeni/react/artifacts";
 import { loadSiteSnapshot } from "@opengeni/react/sites";
 import { SiteConversations } from "@/components/artifacts/site-conversations";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
@@ -32,7 +32,7 @@ import {
   ArtifactKindTile,
   useArtifactsBackLink,
 } from "@/components/artifacts/artifact-page-chrome";
-import { artifactKinds, defaultArtifactFilters, type ArtifactKind } from "@/lib/artifact-catalog";
+import { artifactKinds, type ArtifactKind } from "@/lib/artifact-catalog";
 import { invalidateArtifactCatalog, useArtifactCatalog } from "@/lib/use-artifact-catalog";
 import { useArtifactCatalogMutationInvalidation } from "@/lib/use-artifact-catalog-mutation-invalidation";
 import { Button } from "@/components/ui/button";
@@ -59,6 +59,14 @@ import { useAppContext } from "@/context";
 import { ARTIFACT_ACCESS_REQUIRED, isArtifactReadDenied } from "@/lib/artifact-access";
 import { createSiteToolBridge } from "@/lib/site-tool-bridge";
 import { hasWorkspacePermission, lacksWorkspacePermission } from "@/lib/permissions";
+import {
+  artifactLibraryFilters,
+  artifactLibraryPositionKey,
+  artifactLibrarySearch,
+  readArtifactLibraryPosition,
+  useArtifactLibraryPosition,
+} from "@/lib/artifact-library-navigation";
+import type { ArtifactCatalogFilters } from "@/lib/artifact-catalog";
 
 const NO_SITE_TOOLS: readonly ToolGatewayIdentity[] = [];
 
@@ -110,7 +118,11 @@ export function ArtifactsRoute({
   fromSession?: string | undefined;
 }) {
   return artifactId ? (
-    <ArtifactSessionPage workspaceId={workspaceId} fromSession={fromSession}>
+    <ArtifactSessionPage
+      workspaceId={workspaceId}
+      artifactId={artifactId}
+      fromSession={fromSession}
+    >
       <ArtifactDetailRoute
         key={`${workspaceId}:${artifactId}`}
         workspaceId={workspaceId}
@@ -120,21 +132,63 @@ export function ArtifactsRoute({
     </ArtifactSessionPage>
   ) : (
     <ArtifactSessionPage workspaceId={workspaceId} fromSession={fromSession}>
-      <ArtifactListRoute key={workspaceId} workspaceId={workspaceId} />
+      <ArtifactListRoute key={workspaceId} workspaceId={workspaceId} fromSession={fromSession} />
     </ArtifactSessionPage>
   );
 }
 
-function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
+function ArtifactListRoute({
+  workspaceId,
+  fromSession,
+}: {
+  workspaceId: string;
+  fromSession?: string;
+}) {
   const context = useAppContext();
   const navigate = useNavigate();
-  const [filters, setFilters] = useState(defaultArtifactFilters);
+  const search = useSearch({ strict: false });
+  const filters = artifactLibraryFilters(search);
+  const setFilters = (next: ArtifactCatalogFilters) => {
+    void navigate({
+      to: "/workspaces/$workspaceId/artifacts",
+      params: { workspaceId },
+      search: artifactLibrarySearch(next, fromSession),
+      replace: true,
+      resetScroll: false,
+    });
+  };
+  const positionKey = artifactLibraryPositionKey(workspaceId, context.accessKeyVersion, filters);
+  // Freeze the restore count for this query; loading another page must not
+  // recreate the catalog's request lifecycle.
+  const retained = useRef({
+    key: positionKey,
+    client: context.client,
+    pages: readArtifactLibraryPosition(context.client, positionKey).pages,
+  });
+  if (retained.current.key !== positionKey || retained.current.client !== context.client)
+    retained.current = {
+      key: positionKey,
+      client: context.client,
+      pages: readArtifactLibraryPosition(context.client, positionKey).pages,
+    };
   const [empty, setEmpty] = useState(false);
   const catalog = useArtifactCatalog(
     context.client,
     workspaceId,
     filters,
     context.accessKeyVersion,
+    retained.current.pages,
+  );
+  const position = useArtifactLibraryPosition(
+    context.client,
+    positionKey,
+    // The viewer may have repopulated an invalidated cache with only its first
+    // page. Do not consume scroll restoration before the retained pages reload.
+    catalog.loading ||
+      Boolean(catalog.error) ||
+      Boolean(catalog.nextCursor && catalog.pages < retained.current.pages),
+    catalog.items.length,
+    catalog.pages,
   );
   const invalidateAfterMutation = useArtifactCatalogMutationInvalidation(
     context.client,
@@ -174,7 +228,7 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
     </Button>
   ) : null;
   return (
-    <ContentPage width="standard" className="pt-6">
+    <ContentPage width="standard" className="pt-6" {...position}>
       <LineTabs
         value={filters.kind}
         onValueChange={(kind) => setFilters({ ...filters, kind: kind as ArtifactKind | "all" })}
@@ -198,6 +252,8 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
         <LineTabsContent value={filters.kind} className="pt-6">
           <ArtifactLibrary
             workspaceId={workspaceId}
+            sessionId={fromSession}
+            browseSearch={artifactLibrarySearch(filters, fromSession, true)}
             items={catalog.items}
             filters={filters}
             onFiltersChange={setFilters}

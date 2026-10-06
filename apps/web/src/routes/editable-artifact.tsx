@@ -40,6 +40,7 @@ export function EditableArtifactRoute({
   return (
     <ArtifactSessionPage
       workspaceId={params.workspaceId}
+      artifactId={params.artifactId}
       fromSession={fromSession}
       showAllArtifacts
     >
