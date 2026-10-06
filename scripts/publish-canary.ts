@@ -609,11 +609,11 @@ export async function confirmCanaryCohort(
             });
             observation =
               now() >= deadline ? "read_exceeded_deadline" : receiptObservation(pkg, current);
+            longestReceiptMs = Math.max(longestReceiptMs, now() - startedAt);
           } catch (error) {
             if (canaryErrorCategory(error) !== "request_timeout") throw error;
             observation = "request_timeout";
           }
-          longestReceiptMs = Math.max(longestReceiptMs, now() - startedAt);
           options.custody?.record("READ_OBSERVATION", {
             package: pkg.name,
             version: pkg.version,

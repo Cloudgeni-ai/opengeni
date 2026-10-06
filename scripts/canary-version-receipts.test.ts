@@ -311,12 +311,17 @@ test("a hidden large cohort fails within the original deadline and read quota", 
 });
 
 test.each([
-  { count: 30, delayMs: 375, maxReads: 256 },
-  { count: 30, delayMs: 500, maxReads: 256 },
-  { count: 1, delayMs: 4500, maxReads: 6 },
-])("late visibility leaves time for both passes with response latency: %j", async (scenario) => {
+  { count: 30, delayMs: 375, maxReads: 256, timeoutRequest: null },
+  { count: 30, delayMs: 500, maxReads: 256, timeoutRequest: null },
+  { count: 1, delayMs: 4500, maxReads: 6, timeoutRequest: null },
+  { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: "tags" },
+  { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: "version" },
+  { count: 30, delayMs: 375, maxReads: 256, timeoutRequest: "tags" },
+  { count: 30, delayMs: 375, maxReads: 256, timeoutRequest: "version" },
+])("late visibility survives response latency and transient timeouts: %j", async (scenario) => {
   let elapsed = 0,
     requests = 0,
+    timeouts = 0,
     active = 0,
     peak = 0;
   const timers: { at: number; resolve: () => void }[] = [];
@@ -335,6 +340,12 @@ test.each([
         active++;
         peak = Math.max(peak, active);
         try {
+          const requestKind = String(url).includes("/dist-tags") ? "tags" : "version";
+          if (scenario.timeoutRequest === requestKind && timeouts === 0) {
+            timeouts++;
+            await sleep(10_000 - (requestKind === "version" ? scenario.delayMs : 0));
+            throw new DOMException("Synthetic receipt timeout", "TimeoutError");
+          }
           await sleep(scenario.delayMs);
           return String(url).includes("/dist-tags")
             ? Response.json({ latest: "1.0.0", canary: version })
@@ -373,6 +384,7 @@ test.each([
   expect(elapsed).toBeLessThan(180_000);
   expect(requests).toBeLessThanOrEqual(scenario.maxReads);
   expect(peak).toBeLessThanOrEqual(4);
+  expect(timeouts).toBe(scenario.timeoutRequest === null ? 0 : 1);
 });
 
 test("invalid selected version paths fail before any registry request", async () => {
