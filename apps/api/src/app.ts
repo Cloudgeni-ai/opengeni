@@ -1406,7 +1406,10 @@ export function createAppComposition(deps: AppDependencies): {
           name: server.name ?? server.id,
         })),
         firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings),
-        codeSearch: codeSearchDeploymentPolicy(deps.settings),
+        codeSearch: {
+          ...codeSearchDeploymentPolicy(deps.settings),
+          funding: deps.settings.codeSearchFunding,
+        },
         agentConfig: clientAgentConfig(deps.settings),
         fileUploads: {
           enabled: objectStorage !== null,

@@ -9,7 +9,7 @@
  *  - no counting, math or dates asked of Jev; code combines answers
  * A Jev failure is not replaced by lexical scores: it propagates and the whole search fails.
  */
-import { noul, type JevAnswer, type JevClient, type JevNoulQuestion } from "../client";
+import { noul, type CodeSearchJudgeClient, type JevAnswer, type JevNoulQuestion } from "../client";
 import type { CodeSearchConfig } from "./config";
 
 export interface JudgeContext {
@@ -328,10 +328,11 @@ function orLex(p: number, lex: number): number {
 export class JevJudge {
   private readonly stageStats: Record<string, StageStats> = {};
   private jevModel: string | null = null;
+  private everyCostReported = true;
 
   constructor(
     private readonly o: {
-      client: JevClient;
+      client: CodeSearchJudgeClient;
       config: CodeSearchConfig;
       signal: AbortSignal;
       onEvent?: JudgeEvent | undefined;
@@ -344,6 +345,11 @@ export class JevJudge {
 
   model(): string | null {
     return this.jevModel;
+  }
+
+  /** `provider_reported` only when every request so far reported its own cost. */
+  costSource(): "provider_reported" | "list_price" {
+    return this.everyCostReported ? "provider_reported" : "list_price";
   }
 
   private stat(stage: string): StageStats {
@@ -365,6 +371,7 @@ export class JevJudge {
     st.requests += r.requests;
     st.inputTokens += r.usage.inputTokens;
     st.costUsd += r.costUsd;
+    if (r.costSource !== "provider_reported") this.everyCostReported = false;
     this.jevModel = r.model || this.jevModel;
     this.o.onEvent?.("jev", {
       jevStage: stage,

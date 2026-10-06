@@ -1,5 +1,6 @@
 import type { AttemptToolDefinition } from "@opengeni/codemode";
-import { usableJevApiKey, type Settings } from "@opengeni/config";
+import { codeSearchDeploymentJudge, type Settings } from "@opengeni/config";
+import type { CodeSearchJudgeRoute } from "@opengeni/contracts/code-search";
 import {
   CODE_SEARCH_TOOL_DESCRIPTION,
   CODE_SEARCH_TOOL_NAME,
@@ -14,6 +15,7 @@ import {
   parseCodeSearchArguments,
   renderCodeSearchError,
   runCodeSearch,
+  type CodeSearchJudgeClient,
   type CodeSearchWorkspace,
   type JevCircuitLease,
 } from "@opengeni/jev";
@@ -29,14 +31,29 @@ import {
 import { recordCodeSearchCall, type CodeSearchCallOutcome } from "../../observability-metrics";
 
 /**
- * One breaker per worker process. Repeated Jev outages (including an exhausted
- * account) make `code_search` calls on this worker fail at once for a cooldown
- * instead of each running a full retry cycle. The breaker never changes which
- * tools a turn is offered: the tool list and instructions are the start of the
- * model's cached prompt, and sessions move between workers whose breakers
- * disagree.
+ * One breaker per deployment judge provider per worker process. Repeated
+ * outages of the deployment's judge (including an exhausted account) make
+ * `code_search` calls on this worker fail at once for a cooldown instead of
+ * each running a full retry cycle. A customer's own connection never shares
+ * these: its bad key must not pause searches for everyone else. No breaker
+ * changes which tools a turn is offered: the tool list and instructions are
+ * the start of the model's cached prompt, and sessions move between workers
+ * whose breakers disagree.
  */
-export const codeSearchCircuitBreaker = new JevCircuitBreaker();
+const deploymentJudgeBreakers = {
+  typesafe: new JevCircuitBreaker(),
+  openrouter: new JevCircuitBreaker(),
+  vercel_gateway: new JevCircuitBreaker(),
+} as const;
+
+/** The TypeSafe deployment breaker (the default judge). */
+export const codeSearchCircuitBreaker = deploymentJudgeBreakers.typesafe;
+
+export function deploymentCodeSearchCircuitBreaker(
+  provider: CodeSearchJudgeRoute["provider"],
+): JevCircuitBreaker {
+  return deploymentJudgeBreakers[provider];
+}
 
 /** Ripgrep output kept on the box per call before framing. */
 const CODE_SEARCH_RIPGREP_MAX_BYTES = 32 * 1024 * 1024;
@@ -80,42 +97,98 @@ export function codeSearchWorkspaceFromChannel(channel: CodeSearchChannel): Code
   };
 }
 
-/** Jev work done by one completed `code_search` call, for per-workspace usage records. */
+/** Judge work done by one completed `code_search` call, for per-workspace usage records. */
 export type CodeSearchUsage = {
   operationId: string;
+  /** Who paid the judge and with which key. */
+  route: CodeSearchJudgeRoute;
   jevRequests: number;
   jevInputTokens: number;
+  /** Provider-reported cost when every request reported one, else Jev's list price. */
   jevCostUsd: number;
+  costSource: "provider_reported" | "list_price";
 };
+
+/**
+ * The judge for one turn's route. The client is built at call time: a
+ * customer's key is read only when a search runs, and null means it can no
+ * longer be read (the connection was revoked or its key cannot be decrypted).
+ */
+export type CodeSearchJudgeBinding = {
+  route: CodeSearchJudgeRoute;
+  /** Synchronous for the deployment's judge; a customer's key is read on first use. */
+  client: () => CodeSearchJudgeClient | null | Promise<CodeSearchJudgeClient | null>;
+};
+
+type JudgeSettings = Pick<Settings, "jevRequestTimeoutMs"> &
+  Parameters<typeof codeSearchDeploymentJudge>[0];
+
+/**
+ * The judge a route uses: the deployment's own judge for `credits` and
+ * `deployment` routes (null when its key is missing), or Jev on the customer's
+ * OpenRouter or Gateway connection with its own key and that provider's Jev
+ * model for `external` routes.
+ */
+export function codeSearchJudgeBinding(input: {
+  route: CodeSearchJudgeRoute;
+  settings: JudgeSettings;
+  /** Reads the customer's key for an `external` route; null when unavailable. */
+  loadCustomerKey?: (route: CodeSearchJudgeRoute) => Promise<string | null>;
+  fetch?: typeof fetch;
+}): CodeSearchJudgeBinding | null {
+  const { route, settings } = input;
+  const transport = {
+    timeoutMs: settings.jevRequestTimeoutMs,
+    ...(input.fetch ? { fetch: input.fetch } : {}),
+  };
+  if (route.keySource === "deployment") {
+    const deployment = codeSearchDeploymentJudge(settings);
+    if (!deployment || deployment.provider !== route.provider) return null;
+    const client = new JevClient({ ...deployment, ...transport });
+    return { route, client: () => client };
+  }
+  const loadCustomerKey = input.loadCustomerKey;
+  if (!loadCustomerKey) return null;
+  // Only a key that was read is kept; a missing one is retried on the next call.
+  let cached: CodeSearchJudgeClient | null = null;
+  return {
+    route,
+    client: async () => {
+      if (cached) return cached;
+      const apiKey = await loadCustomerKey(route);
+      if (!apiKey) return null;
+      cached = new JevClient({ provider: route.provider, apiKey, ...transport });
+      return cached;
+    },
+  };
+}
 
 function textResult(text: string, isError: boolean) {
   return { isError, content: [{ type: "text" as const, text }] };
 }
 
 /**
- * The model-facing `code_search` tool. Jev scores candidates inside the worker;
- * the sandbox only runs read-only ripgrep and file reads, so the Jev key never
- * leaves this process. A Jev failure is reported to the model instead of
- * degrading to keyword-only ranking, which lowered answer quality in testing.
+ * The model-facing `code_search` tool. The judge scores candidates inside the
+ * worker; the sandbox only runs read-only ripgrep and file reads, so no judge
+ * key ever leaves this process. A judge failure is reported to the model
+ * instead of degrading to keyword-only ranking, which lowered answer quality
+ * in testing.
  */
 export function createCodeSearchAttemptToolDefinition(input: {
-  settings: Pick<Settings, "jevApiKey" | "jevBaseUrl" | "jevModel" | "jevRequestTimeoutMs">;
-  apiKey: string;
+  judge: CodeSearchJudgeBinding;
   workspace: () => Promise<CodeSearchWorkspace>;
   observability: Observability;
-  /** Records Jev usage against the workspace. Failures are logged, never surfaced. */
+  /** Records judge usage against the workspace. Failures are logged, never surfaced. */
   recordUsage?: (usage: CodeSearchUsage) => Promise<void>;
+  /** Defaults to the deployment provider's breaker, or a breaker of this tool's own for a customer key. */
   breaker?: JevCircuitBreaker;
-  fetch?: typeof fetch;
 }): AttemptToolDefinition {
-  const breaker = input.breaker ?? codeSearchCircuitBreaker;
-  const jev = new JevClient({
-    apiKey: input.apiKey,
-    baseUrl: input.settings.jevBaseUrl,
-    model: input.settings.jevModel,
-    timeoutMs: input.settings.jevRequestTimeoutMs,
-    ...(input.fetch ? { fetch: input.fetch } : {}),
-  });
+  const { route } = input.judge;
+  const breaker =
+    input.breaker ??
+    (route.keySource === "deployment"
+      ? deploymentCodeSearchCircuitBreaker(route.provider)
+      : new JevCircuitBreaker());
   return {
     identity: { serverId: "opengeni", toolName: CODE_SEARCH_TOOL_NAME },
     modelName: CODE_SEARCH_TOOL_NAME,
@@ -153,6 +226,29 @@ export function createCodeSearchAttemptToolDefinition(input: {
             true,
           );
         }
+        // A missing customer key never reached the judge, so the finally block
+        // releases the lease without judging the provider.
+        const pending = input.judge.client();
+        const jev =
+          pending instanceof Promise
+            ? await pending.catch((error: unknown) => {
+                input.observability.warn("code_search judge key could not be read", {
+                  error: error instanceof Error ? error.message : String(error),
+                });
+                return null;
+              })
+            : pending;
+        if (!jev) {
+          outcome = "judge_key_unavailable";
+          return textResult(
+            renderCodeSearchError(
+              new JevUnavailableError(
+                "the workspace's OpenRouter or Vercel AI Gateway connection is no longer usable",
+              ),
+            ),
+            true,
+          );
+        }
         const workspace = await input.workspace();
         const result = await runCodeSearch({
           ...request,
@@ -177,9 +273,11 @@ export function createCodeSearchAttemptToolDefinition(input: {
           await input
             .recordUsage({
               operationId: context.operationId,
+              route,
               jevRequests,
               jevInputTokens: result.stats.jev.inputTokens,
               jevCostUsd,
+              costSource: result.stats.jev.costSource,
             })
             .catch((error: unknown) => {
               input.observability.warn("code_search usage record failed", {
@@ -231,6 +329,8 @@ export function createCodeSearchAttemptToolDefinition(input: {
           durationSeconds: (performance.now() - startedAt) / 1_000,
           jevRequests,
           jevCostUsd,
+          funding: route.funding,
+          provider: route.provider,
         });
       }
     },
@@ -239,37 +339,45 @@ export function createCodeSearchAttemptToolDefinition(input: {
 
 /**
  * The `code_search` definition for one turn, or none. It is offered only when
- * the session's frozen decision and the deployment enable it, a usable Jev key
- * exists, and the turn has compute that can run its POSIX shell commands (not
- * a Windows Connected Machine). Every input is durable, so the tool list stays
- * the same from turn to turn and on every worker. Transient Jev health never
- * hides the tool; the breaker only refuses calls.
+ * the turn has a judge route (the session's frozen decision, the deployment
+ * and the workspace enable it, and someone may pay for the judge), the route's
+ * judge is configured, and the turn has compute that can run its POSIX shell
+ * commands (not a Windows Connected Machine). Every input is durable, so the
+ * tool list stays the same from turn to turn and on every worker. Transient
+ * judge health never hides the tool; the breaker only refuses calls.
  */
 export function codeSearchToolDefinitions(input: {
-  enabled: boolean;
-  settings: Pick<Settings, "jevApiKey" | "jevBaseUrl" | "jevModel" | "jevRequestTimeoutMs">;
+  route: CodeSearchJudgeRoute | null;
+  settings: JudgeSettings;
   backend: Settings["sandboxBackend"];
   /** The turn's Connected Machine workspace root, when a machine is primary. */
   machineWorkspaceRoot?: string | null;
   observability: Observability;
   workspace: () => Promise<CodeSearchWorkspace>;
   recordUsage?: (usage: CodeSearchUsage) => Promise<void>;
+  /** Reads the customer's key for an `external` route; null when unavailable. */
+  loadCustomerKey?: (route: CodeSearchJudgeRoute) => Promise<string | null>;
   breaker?: JevCircuitBreaker;
+  fetch?: typeof fetch;
 }): AttemptToolDefinition[] {
-  const apiKey = usableJevApiKey(input.settings);
-  const breaker = input.breaker ?? codeSearchCircuitBreaker;
-  if (!input.enabled || !apiKey || input.backend === "none") return [];
+  if (!input.route || input.backend === "none") return [];
   if (input.machineWorkspaceRoot && isWindowsConnectedMachinePath(input.machineWorkspaceRoot)) {
     return [];
   }
+  const judge = codeSearchJudgeBinding({
+    route: input.route,
+    settings: input.settings,
+    ...(input.loadCustomerKey ? { loadCustomerKey: input.loadCustomerKey } : {}),
+    ...(input.fetch ? { fetch: input.fetch } : {}),
+  });
+  if (!judge) return [];
   return [
     createCodeSearchAttemptToolDefinition({
-      settings: input.settings,
-      apiKey,
+      judge,
       workspace: input.workspace,
       observability: input.observability,
       ...(input.recordUsage ? { recordUsage: input.recordUsage } : {}),
-      breaker,
+      ...(input.breaker ? { breaker: input.breaker } : {}),
     }),
   ];
 }

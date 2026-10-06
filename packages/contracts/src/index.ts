@@ -18483,9 +18483,16 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       capabilities: [],
     }),
     // Whether this deployment offers the Jev-backed code_search agent tool and
-    // whether workspaces without their own setting get it.
+    // whether workspaces without their own setting get it. `funding` (absent
+    // from older servers, meaning `all`) is `credits_only` when only turns paid
+    // with OpenGeni credits, or a workspace's own OpenRouter or Vercel AI
+    // Gateway connection, can use it.
     codeSearch: z
-      .object({ available: z.boolean(), workspaceDefault: z.enum(["off", "on", "split"]) })
+      .object({
+        available: z.boolean(),
+        workspaceDefault: z.enum(["off", "on", "split"]),
+        funding: z.enum(["all", "credits_only"]).optional(),
+      })
       .default({ available: false, workspaceDefault: "off" }),
     productAccessMode: ProductAccessMode,
     billingMode: BillingMode.default("disabled"),

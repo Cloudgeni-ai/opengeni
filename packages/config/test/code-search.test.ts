@@ -1,10 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { codeSearchDeploymentPolicy, getSettings, usableJevApiKey } from "../src";
+import {
+  codeSearchDeploymentJudge,
+  codeSearchDeploymentPolicy,
+  getSettings,
+  usableJevApiKey,
+} from "../src";
 
 describe("Jev and code_search settings", () => {
   test("default to off with the native Jev endpoint", () => {
     const settings = withEnv({}, getSettings);
     expect(settings.codeSearchMode).toBe("off");
+    expect(settings.codeSearchFunding).toBe("all");
     expect(settings.jevApiKey).toBeUndefined();
     expect(settings.jevBaseUrl).toBe("https://api.typesafe.ai");
     expect(settings.jevModel).toBe("jev-latest");
@@ -50,6 +56,53 @@ describe("Jev and code_search settings", () => {
 
   test("rejects an unknown mode", () => {
     expect(() => withEnv({ OPENGENI_CODE_SEARCH_MODE: "sometimes" }, getSettings)).toThrow();
+  });
+
+  test("funding defaults to all and accepts credits_only", () => {
+    const creditsOnly = withEnv({ OPENGENI_CODE_SEARCH_FUNDING: "credits_only" }, getSettings);
+    expect(creditsOnly.codeSearchFunding).toBe("credits_only");
+    expect(() => withEnv({ OPENGENI_CODE_SEARCH_FUNDING: "credits" }, getSettings)).toThrow();
+  });
+
+  test("the judge defaults to TypeSafe on the Jev key", () => {
+    const settings = withEnv({ OPENGENI_JEV_API_KEY: "jev_live_example_1234567890" }, getSettings);
+    expect(codeSearchDeploymentJudge(settings)).toEqual({
+      provider: "typesafe",
+      apiKey: "jev_live_example_1234567890",
+      baseUrl: "https://api.typesafe.ai",
+      model: "jev-latest",
+    });
+  });
+
+  test("an OpenRouter or Gateway judge uses that provider's deployment key", () => {
+    const openrouter = withEnv(
+      {
+        OPENGENI_CODE_SEARCH_MODE: "opt_in",
+        OPENGENI_CODE_SEARCH_JUDGE_PROVIDER: "openrouter",
+        OPENGENI_OPENROUTER_API_KEY: "sk-or-v1-example-1234567890",
+      },
+      getSettings,
+    );
+    expect(codeSearchDeploymentJudge(openrouter)).toEqual({
+      provider: "openrouter",
+      apiKey: "sk-or-v1-example-1234567890",
+    });
+    expect(codeSearchDeploymentPolicy(openrouter).available).toBe(true);
+    const gateway = withEnv(
+      {
+        OPENGENI_CODE_SEARCH_MODE: "opt_in",
+        OPENGENI_CODE_SEARCH_JUDGE_PROVIDER: "vercel_gateway",
+        OPENGENI_CODE_SEARCH_JUDGE_MODEL: "typesafe-ai/jev",
+        OPENGENI_JEV_API_KEY: "jev_live_example_1234567890",
+      },
+      getSettings,
+    );
+    // The Jev key does not pay for a Gateway judge.
+    expect(codeSearchDeploymentJudge(gateway)).toBeUndefined();
+    expect(codeSearchDeploymentPolicy(gateway).available).toBe(false);
+    expect(() =>
+      withEnv({ OPENGENI_CODE_SEARCH_JUDGE_PROVIDER: "anthropic" }, getSettings),
+    ).toThrow();
   });
 });
 

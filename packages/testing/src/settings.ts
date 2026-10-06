@@ -245,6 +245,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     jevModel: "jev-latest",
     jevRequestTimeoutMs: 10_000,
     codeSearchMode: "off",
+    codeSearchFunding: "all",
+    codeSearchJudgeProvider: "typesafe",
     agentInstructionsTemplate: DEFAULT_AGENT_INSTRUCTIONS,
     azureOpenaiBaseUrl: undefined,
     azureOpenaiEndpoint: undefined,

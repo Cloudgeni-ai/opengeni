@@ -399,7 +399,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       routingOn: false,
       credentialSubjectId: null,
       interactionInterventionResume: null,
-      codeSearchEnabled: false,
+      codeSearchRoute: null,
       throwIfWorkerShuttingDown: () => {},
       throwIfTurnCancelled: () => {},
     } as PrepareTurnToolRuntimeDeps);

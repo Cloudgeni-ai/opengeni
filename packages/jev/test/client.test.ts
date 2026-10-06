@@ -5,6 +5,7 @@ import {
   JevLimiter,
   JevRequestError,
   JevUnavailableError,
+  SYSTEM_ONE_PROVIDERS,
   estimateJevTokens,
   jevCostUsd,
   noul,
@@ -341,5 +342,110 @@ describe("warm-up", () => {
     c.warmUp(3);
     await new Promise((r) => setTimeout(r, 5));
     expect(urls).toEqual(Array(3).fill("GET http://jev.local/healthz"));
+  });
+});
+
+describe("System One providers", () => {
+  const nouls = { a: noul("Is it urgent?"), b: noul("Is it billing?") };
+
+  test("each provider defaults to its own host and Jev model id", () => {
+    const fetchImpl: JevFetch = async () => Response.json({});
+    const typesafe = new JevClient({ apiKey: "k", fetch: fetchImpl });
+    expect([typesafe.provider, typesafe.baseUrl, typesafe.model]).toEqual([
+      "typesafe",
+      "https://api.typesafe.ai",
+      "jev-latest",
+    ]);
+    const openrouter = new JevClient({ apiKey: "k", provider: "openrouter", fetch: fetchImpl });
+    expect([openrouter.baseUrl, openrouter.model]).toEqual([
+      "https://openrouter.ai/api",
+      "~typesafe/jev-latest",
+    ]);
+    const gateway = new JevClient({ apiKey: "k", provider: "vercel_gateway", fetch: fetchImpl });
+    expect([gateway.baseUrl, gateway.model]).toEqual([
+      "https://ai-gateway.vercel.sh/typesafe",
+      "typesafe-ai/jev",
+    ]);
+    expect(SYSTEM_ONE_PROVIDERS.typesafe.warmUp).toBe(true);
+  });
+
+  test("OpenRouter: posts to /api/v1/systemone and uses the reported usage.cost", async () => {
+    const { calls, fetchImpl } = recording((call) =>
+      Response.json({
+        model: "typesafe/jev-1.13",
+        answers: Object.fromEntries(
+          Object.keys(call.body.questions).map((id) => [id, { type: "noul", noul: 0.6 }]),
+        ),
+        usage: { input_tokens: 1000, output_tokens: 0, cost: 0.0001234 },
+      }),
+    );
+    const r = await new JevClient({
+      apiKey: "sk-or",
+      provider: "openrouter",
+      fetch: fetchImpl,
+    }).ask("s", nouls);
+    expect(calls[0]!.url).toBe("https://openrouter.ai/api/v1/systemone");
+    expect(calls[0]!.body.model).toBe("~typesafe/jev-latest");
+    expect(r.answers.a).toEqual({ type: "noul", probability: 0.6 });
+    expect(r.costUsd).toBeCloseTo(0.0001234, 12);
+    expect(r.costSource).toBe("provider_reported");
+  });
+
+  test("Vercel AI Gateway: reads provider_metadata.gateway.cost", async () => {
+    const { calls, fetchImpl } = recording((call) =>
+      Response.json({
+        model: "typesafe-ai/jev",
+        answers: Object.fromEntries(
+          Object.keys(call.body.questions).map((id) => [id, { type: "noul", noul: 0.9 }]),
+        ),
+        usage: { input_tokens: 275, output_tokens: 20 },
+        provider_metadata: { gateway: { cost: "0.00001155" } },
+      }),
+    );
+    const r = await new JevClient({
+      apiKey: "vck",
+      provider: "vercel_gateway",
+      fetch: fetchImpl,
+    }).ask("s", nouls);
+    expect(calls[0]!.url).toBe("https://ai-gateway.vercel.sh/typesafe/v1/systemone");
+    expect(r.costUsd).toBeCloseTo(0.00001155, 12);
+    expect(r.costSource).toBe("provider_reported");
+  });
+
+  test("a routing provider without a reported cost falls back to Jev's list price", async () => {
+    const { fetchImpl } = recording(okAnswers);
+    const r = await new JevClient({ apiKey: "k", provider: "openrouter", fetch: fetchImpl }).ask(
+      "s",
+      nouls,
+    );
+    expect(r.costSource).toBe("list_price");
+    expect(r.costUsd).toBeCloseTo(jevCostUsd(1000), 12);
+  });
+
+  test("TypeSafe ignores any cost field and prices tokens at list price", async () => {
+    const { fetchImpl } = recording((call) =>
+      Response.json({
+        answers: Object.fromEntries(
+          Object.keys(call.body.questions).map((id) => [id, { type: "noul", noul: 0.5 }]),
+        ),
+        usage: { input_tokens: 1000, cost: 99 },
+      }),
+    );
+    const r = await client(fetchImpl).ask("s", nouls);
+    expect(r.costSource).toBe("list_price");
+    expect(r.costUsd).toBeCloseTo(jevCostUsd(1000), 12);
+  });
+
+  test("only TypeSafe is warmed through /healthz", () => {
+    const urls: string[] = [];
+    const fetchImpl: JevFetch = async (url) => {
+      urls.push(url);
+      return new Response("ok");
+    };
+    new JevClient({ apiKey: "k", provider: "openrouter", fetch: fetchImpl }).warmUp(2);
+    new JevClient({ apiKey: "k", provider: "vercel_gateway", fetch: fetchImpl }).warmUp(2);
+    expect(urls).toEqual([]);
+    new JevClient({ apiKey: "k", fetch: fetchImpl }).warmUp(1);
+    expect(urls).toEqual(["https://api.typesafe.ai/healthz"]);
   });
 });

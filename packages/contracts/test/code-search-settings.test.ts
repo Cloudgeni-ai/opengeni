@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { UpdateWorkspaceSettingsRequest, WorkspaceSettingsSchema } from "../src/index";
 import {
   codeSearchEnabledForTurn,
+  resolveCodeSearchJudgeRoute,
   codeSearchSessionInExperiment,
   resolveSessionCodeSearchEnabled,
   resolveWorkspaceCodeSearchMode,
@@ -132,5 +133,75 @@ describe("code_search per-turn gate over the frozen session decision", () => {
     expect(codeSearchEnabledForTurn(true, {}, OFF)).toBe(false);
     expect(codeSearchEnabledForTurn(true, {}, DEFAULT_ON)).toBe(true);
     expect(codeSearchEnabledForTurn(false, { codeSearchEnabled: null }, DEFAULT_ON)).toBe(false);
+  });
+});
+
+describe("code_search judge route", () => {
+  const none = () => ({ workspace: [], organization: [] });
+  const base = { deploymentProvider: "typesafe" as const };
+
+  test("a credits turn always runs on the deployment's key", () => {
+    for (const funding of ["all", "credits_only"] as const) {
+      expect(
+        resolveCodeSearchJudgeRoute({
+          ...base,
+          funding,
+          turnPaidWithOpenGeniCredits: true,
+          customerConnections: () => ({ workspace: ["openrouter"], organization: [] }),
+        }),
+      ).toEqual({ funding: "credits", keySource: "deployment", provider: "typesafe" });
+    }
+  });
+
+  test("all keeps every other turn on the deployment's key, without reading connections", () => {
+    expect(
+      resolveCodeSearchJudgeRoute({
+        ...base,
+        funding: "all",
+        turnPaidWithOpenGeniCredits: false,
+        customerConnections: () => {
+          throw new Error("not read");
+        },
+      }),
+    ).toEqual({ funding: "deployment", keySource: "deployment", provider: "typesafe" });
+  });
+
+  test("credits_only sends other turns to the customer's own connection", () => {
+    const route = (workspace: string[], organization: string[]) =>
+      resolveCodeSearchJudgeRoute({
+        ...base,
+        funding: "credits_only",
+        turnPaidWithOpenGeniCredits: false,
+        customerConnections: () => ({
+          workspace: workspace as ("openrouter" | "vercel_gateway")[],
+          organization: organization as ("openrouter" | "vercel_gateway")[],
+        }),
+      });
+    expect(route(["openrouter"], ["vercel_gateway"])).toEqual({
+      funding: "external",
+      keySource: "workspace_connection",
+      provider: "openrouter",
+    });
+    expect(route(["openrouter", "vercel_gateway"], [])).toEqual({
+      funding: "external",
+      keySource: "workspace_connection",
+      provider: "vercel_gateway",
+    });
+    expect(route([], ["openrouter"])).toEqual({
+      funding: "external",
+      keySource: "organization_connection",
+      provider: "openrouter",
+    });
+  });
+
+  test("credits_only without credits or a connection offers nothing", () => {
+    expect(
+      resolveCodeSearchJudgeRoute({
+        ...base,
+        funding: "credits_only",
+        turnPaidWithOpenGeniCredits: false,
+        customerConnections: none,
+      }),
+    ).toBeNull();
   });
 });

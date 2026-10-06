@@ -17,6 +17,8 @@ import {
 } from "@opengeni/runtime/sandbox";
 import { testSettings } from "@opengeni/testing";
 import {
+  codeSearchCircuitBreaker,
+  codeSearchJudgeBinding,
   codeSearchToolDefinitions,
   codeSearchWorkspaceFromChannel,
   createCodeSearchAttemptToolDefinition,
@@ -36,6 +38,23 @@ const jevSettings = {
   jevRequestTimeoutMs: 5_000,
 };
 const hasRipgrep = Bun.which("rg") !== null;
+const DEPLOYMENT_ROUTE = {
+  funding: "deployment",
+  keySource: "deployment",
+  provider: "typesafe",
+} as const;
+const judgeSettings = { ...jevSettings, codeSearchJudgeProvider: "typesafe" as const };
+
+/** The deployment's TypeSafe judge, answering through a fake fetch. */
+function deploymentJudge(fetchImpl: typeof fetch) {
+  const judge = codeSearchJudgeBinding({
+    route: DEPLOYMENT_ROUTE,
+    settings: judgeSettings,
+    fetch: fetchImpl,
+  });
+  if (!judge) throw new Error("deployment judge is not configured");
+  return judge;
+}
 
 /** Runs the exact generated sandbox command in a host shell rooted at `root`. */
 function hostShellSession(root: string): ChannelASession {
@@ -151,37 +170,37 @@ function trialDefinition(
   overrides: { workspace?: () => Promise<CodeSearchWorkspace>; fetch?: typeof fetch } = {},
 ) {
   return createCodeSearchAttemptToolDefinition({
-    settings: jevSettings,
-    apiKey: jevSettings.jevApiKey,
     workspace: overrides.workspace ?? (async () => fixtureWorkspace()),
     observability,
     breaker,
-    fetch: overrides.fetch ?? fakeJevFetch({ count: 0 }),
+    judge: deploymentJudge(overrides.fetch ?? fakeJevFetch({ count: 0 })),
   });
 }
 
 describe("codeSearchToolDefinitions", () => {
   const base = {
-    settings: jevSettings,
+    settings: judgeSettings,
     backend: "docker" as const,
     observability,
     workspace: async () => fixtureWorkspace(),
   };
 
   test("offers the tool only when enabled, keyed, and with compute", () => {
-    expect(codeSearchToolDefinitions({ ...base, enabled: false })).toEqual([]);
+    expect(codeSearchToolDefinitions({ ...base, route: null })).toEqual([]);
     expect(
       codeSearchToolDefinitions({
         ...base,
-        enabled: true,
-        settings: { ...jevSettings, jevApiKey: undefined },
+        route: DEPLOYMENT_ROUTE,
+        settings: { ...judgeSettings, jevApiKey: undefined },
       }),
     ).toEqual([]);
-    expect(codeSearchToolDefinitions({ ...base, enabled: true, backend: "none" })).toEqual([]);
+    expect(
+      codeSearchToolDefinitions({ ...base, route: DEPLOYMENT_ROUTE, backend: "none" }),
+    ).toEqual([]);
 
     const [definition] = codeSearchToolDefinitions({
       ...base,
-      enabled: true,
+      route: DEPLOYMENT_ROUTE,
       breaker: new JevCircuitBreaker(),
     });
     expect(definition?.modelName).toBe("code_search");
@@ -194,7 +213,7 @@ describe("codeSearchToolDefinitions", () => {
     // between workers whose breakers disagree, so Jev health must not change it.
     const closed = codeSearchToolDefinitions({
       ...base,
-      enabled: true,
+      route: DEPLOYMENT_ROUTE,
       breaker: new JevCircuitBreaker(),
     });
     const tripped = new JevCircuitBreaker({ failureThreshold: 1, cooldownMs: 60_000 });
@@ -203,7 +222,7 @@ describe("codeSearchToolDefinitions", () => {
     const calls = { workspace: 0, jev: 0 };
     const whileOpen = codeSearchToolDefinitions({
       ...base,
-      enabled: true,
+      route: DEPLOYMENT_ROUTE,
       breaker: tripped,
       workspace: async () => {
         calls.workspace += 1;
@@ -232,7 +251,7 @@ describe("codeSearchToolDefinitions", () => {
   test("is not offered on a Windows Connected Machine, whose shell cannot run the search", () => {
     const enabled = {
       ...base,
-      enabled: true,
+      route: DEPLOYMENT_ROUTE,
       backend: "selfhosted" as const,
       breaker: new JevCircuitBreaker(),
     };
@@ -252,15 +271,13 @@ describe("code_search tool execution", () => {
     const calls = { count: 0 };
     const usage: CodeSearchUsage[] = [];
     const definition = createCodeSearchAttemptToolDefinition({
-      settings: jevSettings,
-      apiKey: jevSettings.jevApiKey,
       workspace: async () => fixtureWorkspace(),
       observability,
       recordUsage: async (entry) => {
         usage.push(entry);
       },
       breaker: new JevCircuitBreaker(),
-      fetch: fakeJevFetch(calls),
+      judge: deploymentJudge(fakeJevFetch(calls)),
     });
     const result = await definition.execute(
       {
@@ -284,15 +301,13 @@ describe("code_search tool execution", () => {
 
   test.skipIf(!hasRipgrep)("still returns the result when recording usage fails", async () => {
     const definition = createCodeSearchAttemptToolDefinition({
-      settings: jevSettings,
-      apiKey: jevSettings.jevApiKey,
       workspace: async () => fixtureWorkspace(),
       observability,
       recordUsage: async () => {
         throw new Error("database unavailable");
       },
       breaker: new JevCircuitBreaker(),
-      fetch: fakeJevFetch({ count: 0 }),
+      judge: deploymentJudge(fakeJevFetch({ count: 0 })),
     });
     const result = await definition.execute(
       { question: "Where is the approval policy?", keywords: ["approvalMode"] },
@@ -304,12 +319,10 @@ describe("code_search tool execution", () => {
   test("reports invalid arguments to the model without calling Jev", async () => {
     const calls = { count: 0 };
     const definition = createCodeSearchAttemptToolDefinition({
-      settings: jevSettings,
-      apiKey: jevSettings.jevApiKey,
       workspace: async () => fixtureWorkspace(),
       observability,
       breaker: new JevCircuitBreaker(),
-      fetch: fakeJevFetch(calls),
+      judge: deploymentJudge(fakeJevFetch(calls)),
     });
     const result = await definition.execute({ keywords: ["x"] }, context);
     expect(result.isError).toBe(true);
@@ -321,12 +334,10 @@ describe("code_search tool execution", () => {
     async () => {
       const breaker = new JevCircuitBreaker({ failureThreshold: 1 });
       const definition = createCodeSearchAttemptToolDefinition({
-        settings: jevSettings,
-        apiKey: jevSettings.jevApiKey,
         workspace: async () => fixtureWorkspace(),
         observability,
         breaker,
-        fetch: fakeJevFetch({ count: 0 }, 503),
+        judge: deploymentJudge(fakeJevFetch({ count: 0 }, 503)),
       });
       const result = await definition.execute(
         { question: "Where is the approval policy?", keywords: ["approvalMode"] },
@@ -343,12 +354,10 @@ describe("code_search tool execution", () => {
     async () => {
       const breaker = new JevCircuitBreaker({ failureThreshold: 1 });
       const definition = createCodeSearchAttemptToolDefinition({
-        settings: jevSettings,
-        apiKey: jevSettings.jevApiKey,
         workspace: async () => fixtureWorkspace(),
         observability,
         breaker,
-        fetch: fakeJevFetch({ count: 0 }, 200, 503),
+        judge: deploymentJudge(fakeJevFetch({ count: 0 }, 200, 503)),
       });
       const result = await definition.execute(
         {
@@ -370,12 +379,10 @@ describe("code_search tool execution", () => {
     const breaker = halfOpenBreaker();
     const calls = { count: 0 };
     const definition = createCodeSearchAttemptToolDefinition({
-      settings: jevSettings,
-      apiKey: jevSettings.jevApiKey,
       workspace: async () => emptyWorkspace,
       observability,
       breaker,
-      fetch: fakeJevFetch(calls),
+      judge: deploymentJudge(fakeJevFetch(calls)),
     });
     const result = await definition.execute(
       { question: "Where is the approval policy?", keywords: ["approvalMode"] },
@@ -396,8 +403,6 @@ describe("code_search tool execution", () => {
     });
     let workspaceCalls = 0;
     const definition = createCodeSearchAttemptToolDefinition({
-      settings: jevSettings,
-      apiKey: jevSettings.jevApiKey,
       workspace: async () => {
         workspaceCalls++;
         await workspaceGate;
@@ -405,7 +410,7 @@ describe("code_search tool execution", () => {
       },
       observability,
       breaker,
-      fetch: fakeJevFetch({ count: 0 }),
+      judge: deploymentJudge(fakeJevFetch({ count: 0 })),
     });
     const args = { question: "Where is the approval policy?", keywords: ["approvalMode"] };
     const trial = definition.execute(args, context);
@@ -422,8 +427,6 @@ describe("code_search tool execution", () => {
 
   test("reports a workspace without ripgrep", async () => {
     const definition = createCodeSearchAttemptToolDefinition({
-      settings: jevSettings,
-      apiKey: jevSettings.jevApiKey,
       workspace: async () =>
         codeSearchWorkspaceFromChannel(
           new SandboxChannelAService({
@@ -438,7 +441,7 @@ describe("code_search tool execution", () => {
         ),
       observability,
       breaker: new JevCircuitBreaker(),
-      fetch: fakeJevFetch({ count: 0 }),
+      judge: deploymentJudge(fakeJevFetch({ count: 0 })),
     });
     const result = await definition.execute(
       { question: "Where is the approval policy?", keywords: ["approvalMode"] },
@@ -577,5 +580,120 @@ describe("credential directories", () => {
   test("the engine and the sandbox channel exclude the same directories", () => {
     // @opengeni/jev is published standalone, so it keeps its own copy of the list
     expect(CODE_SEARCH_CREDENTIAL_DIRS).toEqual(CHANNEL_CREDENTIAL_DIRS);
+  });
+});
+
+describe("code_search on a customer's own connection", () => {
+  const CUSTOMER_ROUTE = {
+    funding: "external",
+    keySource: "workspace_connection",
+    provider: "openrouter",
+  } as const;
+
+  function openRouterFetch(urls: string[], authorizations: string[]): typeof fetch {
+    const answer = fakeJevFetch({ count: 0 });
+    return (async (input: RequestInfo | URL, init?: RequestInit) => {
+      urls.push(String(input));
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      authorizations.push(headers.authorization ?? "");
+      const response = await answer(input, init);
+      const body = (await response.json()) as Record<string, unknown>;
+      return Response.json({ ...body, usage: { input_tokens: 1_000, cost: 0.00005 } });
+    }) as typeof fetch;
+  }
+
+  test.skipIf(!hasRipgrep)(
+    "runs Jev on the customer's provider with their key and records it as external",
+    async () => {
+      const urls: string[] = [];
+      const authorizations: string[] = [];
+      const usage: CodeSearchUsage[] = [];
+      const [definition] = codeSearchToolDefinitions({
+        route: CUSTOMER_ROUTE,
+        settings: judgeSettings,
+        backend: "docker",
+        observability,
+        workspace: async () => fixtureWorkspace(),
+        loadCustomerKey: async (route) => {
+          expect(route).toEqual(CUSTOMER_ROUTE);
+          return "sk-or-customer-key";
+        },
+        recordUsage: async (entry) => {
+          usage.push(entry);
+        },
+        fetch: openRouterFetch(urls, authorizations),
+      });
+      const result = await definition!.execute(trialArgs, context);
+      expect(result.isError).toBe(false);
+      expect(urls.length).toBeGreaterThan(0);
+      expect(urls.every((url) => url === "https://openrouter.ai/api/v1/systemone")).toBe(true);
+      expect(authorizations.every((value) => value === "Bearer sk-or-customer-key")).toBe(true);
+      expect(usage).toHaveLength(1);
+      expect(usage[0]!.route).toEqual(CUSTOMER_ROUTE);
+      expect(usage[0]!.costSource).toBe("provider_reported");
+      expect(usage[0]!.jevCostUsd).toBeCloseTo(0.00005 * usage[0]!.jevRequests, 12);
+    },
+  );
+
+  test("reports an unreadable customer key without touching the sandbox or a shared breaker", async () => {
+    let workspaceCalls = 0;
+    const [definition] = codeSearchToolDefinitions({
+      route: CUSTOMER_ROUTE,
+      settings: judgeSettings,
+      backend: "docker",
+      observability,
+      workspace: async () => {
+        workspaceCalls++;
+        return fixtureWorkspace();
+      },
+      loadCustomerKey: async () => null,
+    });
+    const result = await definition!.execute(trialArgs, context);
+    expect(result.isError).toBe(true);
+    expect((result.content[0] as { text: string }).text).toContain("no longer usable");
+    expect(workspaceCalls).toBe(0);
+  });
+
+  test.skipIf(!hasRipgrep)("a customer's outage never pauses the deployment's judge", async () => {
+    const calls = { count: 0 };
+    const [definition] = codeSearchToolDefinitions({
+      route: CUSTOMER_ROUTE,
+      settings: judgeSettings,
+      backend: "docker",
+      observability,
+      workspace: async () => fixtureWorkspace(),
+      loadCustomerKey: async () => "sk-or-revoked",
+      fetch: fakeJevFetch(calls, 401),
+    });
+    const before = codeSearchCircuitBreaker.status();
+    const results = [];
+    for (let index = 0; index < 4; index++) {
+      results.push(await definition!.execute(trialArgs, context));
+    }
+    // The tool's own breaker opened after three failures; the shared one did not move.
+    expect(results.every((result) => result.isError)).toBe(true);
+    expect(calls.count).toBe(3);
+    expect(codeSearchCircuitBreaker.status()).toEqual(before);
+  });
+
+  test("a route without a configured judge offers no tool", () => {
+    expect(
+      codeSearchToolDefinitions({
+        route: CUSTOMER_ROUTE,
+        settings: judgeSettings,
+        backend: "docker",
+        observability,
+        workspace: async () => fixtureWorkspace(),
+      }),
+    ).toEqual([]);
+    expect(
+      codeSearchToolDefinitions({
+        route: { funding: "credits", keySource: "deployment", provider: "vercel_gateway" },
+        settings: judgeSettings,
+        backend: "docker",
+        observability,
+        workspace: async () => fixtureWorkspace(),
+      }),
+    ).toEqual([]);
   });
 });

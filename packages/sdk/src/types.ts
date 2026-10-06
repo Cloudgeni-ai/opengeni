@@ -4367,7 +4367,14 @@ export type ClientConfig = {
    * Whether the deployment offers the Jev-backed code_search agent tool and
    * what workspaces without their own setting get (`split` = half of sessions).
    */
-  codeSearch?: { available: boolean; workspaceDefault: "off" | "on" | "split" } | undefined;
+  codeSearch?:
+    | {
+        available: boolean;
+        workspaceDefault: "off" | "on" | "split";
+        /** `credits_only`: only turns paid with OpenGeni credits, or a workspace's own OpenRouter or Vercel AI Gateway connection. Absent means `all`. */
+        funding?: "all" | "credits_only" | undefined;
+      }
+    | undefined;
   /** Agent configuration rollout and per-capability availability. */
   agentConfig?: ClientAgentConfig | undefined;
   productAccessMode: ProductAccessMode;
