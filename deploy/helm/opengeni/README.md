@@ -109,3 +109,33 @@ its live replica count on `helm upgrade` (via `lookup`) and omits `replicas`
 when rendered offline (fresh install, `helm template`, GitOps), so an upgrade
 never scales a Deployment back to `replicaCount` and kills pods with in-flight
 turns. `replicaCount` applies only when autoscaling is off.
+
+`worker.turns.autoscaling.queueDemand` is an explicit, default-off schema-v1
+source contract, not a production acceptance flag. It adds Namespace demand,
+queue-only and busy-pod metrics to CPU, memory and agent-only inflight. The
+initial policy disables downscale. See
+[`worker-autoscaling.md`](../../../docs/worker-autoscaling.md) for prerequisites,
+exact semantics, adapter freshness fencing and recovery gates. Its dedicated
+`worker-scaler-prometheusrule.yaml` does not alter the accepted legacy alerts.
+All Object metrics bind namespace/release/environment/Temporal namespace/queue;
+the adapter example must be rebound to that exact rendered source identity.
+Atomic completion evidence rejects empty-but-failed classification stages;
+queue producer observations expire at 45 seconds, other raw/activity TTLs at 60.
+Identity is declared per recording rule, tested with Prometheus 2.55.1 and 3.5.0.
+The adapter pairs each value with its same-evaluation expiry on all labels
+except the metric name before MAX aggregation, including HA cohorts.
+
+Run real Helm/schema and Prometheus rule fixtures with:
+
+```sh
+bun test ./deploy/helm/opengeni/test/queue-demand.test.ts
+# All chart tests isolated, all example values linted, upgrade contracts:
+bun scripts/check-worker-queue-demand.ts
+```
+
+The focused suite requires real binaries: `OPENGENI_HELM` and
+`OPENGENI_PROMTOOL` (or `PATH`) override the test tools. On Linux x64 it downloads
+official Helm 3.19.0 and Prometheus 3.5.0 into a temporary cache, verifies their
+official archive checksums and checks cached binary hashes. It fails rather
+than silently skipping when tooling is unavailable. Application dependencies
+and the lockfile are untouched.

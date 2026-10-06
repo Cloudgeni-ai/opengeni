@@ -367,9 +367,8 @@ worker:
         memory: 4Gi
     podDisruptionBudget:
       enabled: true
-      # Bound voluntary node drains to one turn pod. At the 16-turn hard
-      # density this limits simultaneous graceful checkpoint pressure to 16
-      # logical turns regardless of current HPA replica count.
+      # Bound voluntary eviction to one turn pod. This does not govern HPA or
+      # Deployment deletion and does not guarantee checkpoint completion.
       maxUnavailable: 1
     autoscaling:
       enabled: false
@@ -384,6 +383,15 @@ worker:
         enabled: false
         name: opengeni_turn_slot_saturation_ratio
         targetAverageValue: "750m"
+      # Schema-v1 source contract. Requires the new SDK all-activity producer,
+      # Prometheus Operator, UID-complete kube-state-metrics and a verified
+      # Namespace custom.metrics adapter. Adds demand8/queued8/busy1 alongside
+      # CPU70/memory80/agent-inflight8; fixes up0,+4/30s and disables downscale.
+      # This target is experimental, not demonstrated mixed-activity capacity.
+      queueDemand:
+        enabled: false
+        schemaVersion: 1
+        targetAverageValue: "8"
       customMetrics: []
       behavior: {}
   podSecurityContext:
@@ -398,14 +406,11 @@ worker:
         - ALL
   podAnnotations: {}
   priorityClassName: ""
-  # Worker pods checkpoint in-flight agent turns on SIGTERM (graceful
-  # preemption: final conversation-truth reconcile, sandbox envelope,
-  # turn requeue). The Temporal worker cancels in-flight activities
-  # immediately on shutdown and then waits for them to finish, so this pod
-  # grace period is the only bound on the checkpoint window — give it real
-  # room. A SIGKILL after this period surfaces as a heartbeat-timeout
-  # activity failure, which the session workflow survives by re-dispatching
-  # the turn (bounded), but the graceful path loses less.
+  # Worker shutdown starts a recoverable checkpoint path, but does not prove
+  # writer quiescence. The SDK currently allows 5s natural completion before
+  # cancellation and forces shutdown at 100s, inside this 120s Kube grace.
+  # Forced termination may leave uncertain writers and delayed receipt-gated
+  # recovery. See docs/worker-autoscaling.md before enabling downscale.
   terminationGracePeriodSeconds: 120
   topologySpreadConstraints:
     enabled: true

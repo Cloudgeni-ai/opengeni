@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "worker": {
+      "type": "object",
+      "properties": {
+        "turns": {
+          "type": "object",
+          "properties": {
+            "autoscaling": {
+              "type": "object",
+              "properties": {
+                "minReplicas": { "type": "integer", "minimum": 1 },
+                "maxReplicas": { "type": "integer", "minimum": 1 },
+                "queueDemand": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["enabled", "schemaVersion", "targetAverageValue"],
+                  "properties": {
+                    "enabled": { "type": "boolean" },
+                    "schemaVersion": { "type": "integer", "const": 1 },
+                    "targetAverageValue": { "type": "string", "const": "8" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

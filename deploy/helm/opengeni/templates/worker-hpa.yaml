@@ -1,5 +1,6 @@
 {{- range $role := list "control" "turns" }}
 {{- $config := index $.Values.worker $role }}
+{{- $queueDemand := and (eq $role "turns") $config.autoscaling.queueDemand.enabled }}
 {{- if and $.Values.worker.enabled $config.autoscaling.enabled }}
 {{- if ne $role "control" }}
 ---
@@ -24,14 +25,14 @@ spec:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: {{ $config.autoscaling.targetCPUUtilizationPercentage }}
-    {{- if $config.autoscaling.targetMemoryUtilizationPercentage }}
+          averageUtilization: {{ if $queueDemand }}70{{ else }}{{ $config.autoscaling.targetCPUUtilizationPercentage }}{{ end }}
+    {{- if or $queueDemand $config.autoscaling.targetMemoryUtilizationPercentage }}
     - type: Resource
       resource:
         name: memory
         target:
           type: Utilization
-          averageUtilization: {{ $config.autoscaling.targetMemoryUtilizationPercentage }}
+          averageUtilization: {{ if $queueDemand }}80{{ else }}{{ $config.autoscaling.targetMemoryUtilizationPercentage }}{{ end }}
     {{- end }}
     {{- if eq $role "turns" }}
     {{- with $config.autoscaling.slotSaturationMetric }}
@@ -46,6 +47,46 @@ spec:
     {{- end }}
     {{- end }}
     {{- end }}
+    {{- if $queueDemand }}
+    - type: Pods
+      pods:
+        metric:
+          name: opengeni_turns_inflight
+        target:
+          type: AverageValue
+          averageValue: "8"
+    {{- range $metric := list "opengeni_turn_worker_demand" "opengeni_turn_worker_queued" "opengeni_turn_worker_busy" }}
+    - type: Object
+      object:
+        describedObject:
+          apiVersion: v1
+          kind: Namespace
+          name: {{ $.Release.Namespace }}
+        metric:
+          name: {{ $metric }}
+          selector:
+            matchLabels:
+              {{- include "opengeni.workerScaler.identity" $ | fromJson | toYaml | nindent 14 }}
+        target:
+          type: AverageValue
+          averageValue: {{ if eq $metric "opengeni_turn_worker_busy" }}"1"{{ else }}{{ $config.autoscaling.queueDemand.targetAverageValue | quote }}{{ end }}
+    {{- end }}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      selectPolicy: Max
+      policies:
+        - type: Pods
+          value: 4
+          periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      selectPolicy: Disabled
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 300
+    {{- else }}
     {{- with $config.autoscaling.customMetrics }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
@@ -53,5 +94,6 @@ spec:
   behavior:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+    {{- end }}
 {{- end }}
 {{- end }}
