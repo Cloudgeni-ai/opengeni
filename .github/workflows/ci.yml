@@ -1103,7 +1103,20 @@ jobs:
         run: bun run test:react-native-hermes-bundle
 
       - name: Reproduce committed modality WASM packages from clean Rust sources
-        run: bun scripts/rebuild-artifact-kernel-wasm-packages.ts --check
+        id: modality-wasm-rebuild
+        run: >-
+          bun scripts/rebuild-artifact-kernel-wasm-packages.ts --check
+          --diagnostic-output .opengeni/ci-canonical-modality-wasm
+
+      - name: Retain failed canonical modality WASM rebuild
+        if: ${{ failure() && steps.modality-wasm-rebuild.outcome == 'failure' }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ci-canonical-modality-wasm-${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
+          path: .opengeni/ci-canonical-modality-wasm
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Stabilize Ubuntu package downloads
         run: |

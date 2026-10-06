@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "01a0dc3e954b2dc10f2c2e17ea899b7f08e833d8e1dae654e43aaa8627bb3eae"
+      "sha256": "1273a34544d7f7a41928889d53825e579e6c870ead9c00dce0ae126bb1e04410"
     },
     {
       "path": ".github/workflows/deprecate-pre-1.0.yml",
@@ -763,7 +763,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "package-contracts",
       "step": "Reproduce committed modality WASM packages from clean Rust sources",
-      "sha256": "ed8b4ba80431f552affb1ca65fc46621d50c3c222fb8be82a8b707c445b34002"
+      "sha256": "52e07f2bef568f75c422f43a29ff9df8427be0304dedac2714bbd0ce58367c99"
     },
     {
       "workflow": ".github/workflows/ci.yml",
