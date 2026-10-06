@@ -416,7 +416,10 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
         aria-label={messages.label}
         aria-description={selectedDescription}
         className={cn(
-          "og-root og-model-policy-trigger inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border px-2.5 text-og-control outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-11 max-sm:max-w-[7.5rem] max-sm:px-2",
+          // Phone: the composer row also carries attach, dictate, voice, pause
+          // and send, so the pill drops its chevron and tightens its padding
+          // to keep the model's short name readable.
+          "og-root og-model-policy-trigger inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border px-2.5 text-og-control outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-11 max-sm:max-w-[7.5rem] max-sm:gap-0.5 max-sm:px-1.5",
           // With no usable model the pill is the one thing that unblocks the
           // composer, so it takes the primary wash.
           needsModel
@@ -428,7 +431,9 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
         {needsModel ? (
           <SparklesIcon className="size-3.5 shrink-0" aria-hidden />
         ) : (
-          <SelectedModelMark props={props} selected={selected} />
+          <span className="og-model-policy-mark inline-flex shrink-0">
+            <SelectedModelMark props={props} selected={selected} />
+          </span>
         )}
         <span className="og-model-policy-label-full min-w-0 truncate font-medium text-og-fg max-sm:hidden @max-[20rem]/model-controls:hidden">
           {needsModel ? messages.connectTitle : (selected?.label ?? fallbackName(props))}
@@ -453,7 +458,7 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
             data-testid="model-picker-fast-icon"
           />
         ) : null}
-        <ChevronDownIcon className="size-3 shrink-0" />
+        <ChevronDownIcon className="og-model-policy-chevron size-3 shrink-0 max-sm:hidden" />
       </button>
 
       {open ? (

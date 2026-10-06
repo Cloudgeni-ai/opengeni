@@ -19,6 +19,8 @@
   --og-model-policy-label-full-display: inline;
   --og-model-policy-label-short-display: none;
   --og-model-policy-effort-display: inline;
+  --og-model-policy-chevron-display: inline;
+  --og-model-policy-mark-display: inline-flex;
 }
 
 [data-og-responsive-basis="container"] .og-composer-input {
@@ -69,6 +71,14 @@
   display: var(--og-model-policy-effort-display);
 }
 
+[data-og-responsive-basis="container"] .og-model-policy-chevron {
+  display: var(--og-model-policy-chevron-display);
+}
+
+[data-og-responsive-basis="container"] .og-model-policy-mark {
+  display: var(--og-model-policy-mark-display);
+}
+
 [data-og-responsive-basis="container"] .og-model-picker-native {
   max-width: var(--_og-c-native-max);
 }
@@ -112,19 +122,23 @@
 
 @container og-composer (max-width: 39.999rem) {
   [data-og-responsive-basis="container"] :where(*) {
-    --_og-c-gap: 0.25rem;
+    /* The phone row carries attach, dictate, model, voice, Pause and Send;
+       44px targets space themselves, so tight gaps and a chevron-free model
+       pill leave room for the model's short name. */
+    --_og-c-gap: 0.125rem;
     --_og-c-footer-x: 0.5rem;
     --_og-c-footer-b: 0.5rem;
     --_og-c-controls-wrap: nowrap;
     --_og-c-hint-display: none;
     --_og-c-model-max: 7.5rem;
-    --_og-c-model-x: 0.5rem;
+    --_og-c-model-x: 0.375rem;
     --_og-c-native-max: 7.5rem;
     --_og-c-recovered-max: 8rem;
     --_og-c-error-max: 8rem;
     --og-model-policy-label-full-display: none;
     --og-model-policy-label-short-display: inline;
     --og-model-policy-effort-display: none;
+    --og-model-policy-chevron-display: none;
   }
 
   [data-og-responsive-basis="container"] .og-composer-footer {
@@ -226,6 +240,15 @@
 
   .og-composer[data-og-responsive-basis="container"] .og-composer-resume-label-short {
     display: inline;
+  }
+}
+
+/* The narrowest phones (about 375px): the model's name matters more than its
+   maker's mark, which the open menu still shows. */
+@container og-composer (max-width: 21.999rem) {
+  [data-og-responsive-basis="container"] :where(*) {
+    --_og-c-footer-x: 0.375rem;
+    --og-model-policy-mark-display: none;
   }
 }
 
