@@ -10,12 +10,13 @@ assert.equal(process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN, undefined);
 
 const { default: libnpmpublish } = await import("libnpmpublish");
 const requests: { auth: string | null; body: unknown }[] = [];
+let rejectWrite = false;
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
   async fetch(request) {
     requests.push({ auth: request.headers.get("authorization"), body: await request.json() });
-    return Response.json({ ok: true }, { status: 201 });
+    return Response.json({ ok: !rejectWrite }, { status: rejectWrite ? 503 : 201 });
   },
 });
 
@@ -27,6 +28,7 @@ try {
     forceAuth: { token: "synthetic-token" },
     defaultTag: "canary" as const,
     access: "public" as const,
+    retry: { retries: 0 as const },
   };
   const response = await libnpmpublish.publish(manifest, tarball, {
     ...options,
@@ -43,6 +45,16 @@ try {
     /Automatic provenance generation not supported/,
   );
   assert.equal(requests.length, 1);
+  rejectWrite = true;
+  await assert.rejects(
+    libnpmpublish.publish(
+      { ...manifest, name: "@example/unsettled-package" },
+      tarball,
+      { ...options, provenance: false },
+    ),
+    /503/,
+  );
+  assert.equal(requests.length, 2, "zero write retries must issue one failed request");
   process.stdout.write("synthetic publisher boundary passed\n");
 } finally {
   server.stop(true);
