@@ -30109,6 +30109,21 @@
       "scopedBillingClassLabel": "value",
       "sortPickerRows": "value"
     },
+    "@opengeni/react/new-session-draft": {
+      "AcknowledgeConsumedNewSessionDraftResult": "type",
+      "FlushedNewSessionDraft": "type",
+      "isNewSessionDraftConflict": "value",
+      "isTransientServiceFailure": "value",
+      "NewSessionDraftEditable": "type",
+      "OPENGENI_UPDATING_NOTICE": "value",
+      "retryTransient": "value",
+      "RetryTransientOptions": "type",
+      "TRANSIENT_RECONNECT_INTERVAL_MS": "value",
+      "TRANSIENT_RETRY_DELAYS_MS": "value",
+      "useNewSessionDraft": "value",
+      "UseNewSessionDraftOptions": "type",
+      "UseNewSessionDraftResult": "type"
+    },
     "@opengeni/react/organization-model": {
       "organizationAdministrationAccountIds": "value",
       "organizationLandingWorkspaceId": "value",
@@ -30255,6 +30270,9 @@
       "UseHumanInputRequestsResult": "type",
       "UserMessageItem": "type",
       "useSession": "value",
+      "useSessionBackgroundCommands": "value",
+      "UseSessionBackgroundCommandsOptions": "type",
+      "UseSessionBackgroundCommandsResult": "type",
       "useSessionControl": "value",
       "UseSessionControlOptions": "type",
       "UseSessionControlResult": "type",
@@ -30275,6 +30293,11 @@
       "WorkerCompletionItem": "type",
       "WorkerItem": "type"
     },
+    "@opengeni/react/session-agents-model": {
+      "sessionAgentsSignal": "value",
+      "SessionAgentsSignal": "type",
+      "sessionGoalStateLabel": "value"
+    },
     "@opengeni/react/session-attention-model": {
       "SESSION_ATTENTION_EVENT_TYPES": "value",
       "sessionAttentionReadThroughSequence": "value"
@@ -30293,6 +30316,7 @@
       "compareSessionPins": "value",
       "findPickerRow": "value",
       "GroupedSessions": "type",
+      "groupSessionsByProject": "value",
       "groupSessionsForRail": "value",
       "hasActiveEffectiveControl": "value",
       "isCodexProductModel": "value",
@@ -30313,6 +30337,7 @@
       "sessionDisplayTitle": "value",
       "sessionInputWait": "value",
       "SessionListRow": "type",
+      "SessionProjectSection": "type",
       "SessionRecencyBucket": "type",
       "SessionRecencyGroup": "type",
       "sessionRenameSeed": "value",
