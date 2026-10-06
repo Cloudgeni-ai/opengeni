@@ -12,7 +12,16 @@ import {
   type SpreadsheetSheetGeneration,
 } from "@opengeni/sdk/editable-artifacts";
 import { PlusIcon } from "lucide-react";
-import { type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { cn } from "../../lib/cn";
 import { ArtifactSurface } from "./artifact-surface";
@@ -41,6 +50,11 @@ const MAX_INTERACTIVE_QUERY_CELLS = 65_536;
 const MAX_INTERACTIVE_QUERY_BYTES = 8 * 1024 * 1024;
 const EMPTY_FORMAT = Object.freeze({});
 const EMPTY_SHEETS: readonly EditableSpreadsheetSheetMetadata[] = [];
+const useClientLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+// Identity only: a replacement SDK object is a new authoring lifetime, even
+// when artifact, sheet, and generation IDs are unchanged. No model data lives here.
+const SESSION_KEYS = new WeakMap<EditableArtifactSession, number>();
+let nextSessionKey = 0;
 
 export type EditableSpreadsheetGridProps = {
   session: EditableArtifactSession;
@@ -83,7 +97,16 @@ type ProjectionState = {
  * Durable spreadsheet editor over one SDK session. Canonical state remains in
  * the dedicated Worker; React receives one bounded immutable viewport only.
  */
-export function EditableSpreadsheetGrid({
+export function EditableSpreadsheetGrid(props: EditableSpreadsheetGridProps) {
+  return (
+    <EditableSpreadsheetGridSession
+      key={`${spreadsheetSessionKey(props.session)}:${props.sheet.sheetId}:${props.sheet.generationId ?? "pending"}`}
+      {...props}
+    />
+  );
+}
+
+function EditableSpreadsheetGridSession({
   session,
   sheet,
   metadataRevision,
@@ -99,6 +122,7 @@ export function EditableSpreadsheetGrid({
   onViewportChange,
   className,
 }: EditableSpreadsheetGridProps) {
+  const authoringLifetime = useSpreadsheetAuthoringLifetime();
   const view = useEditableArtifactView(session);
   const rowCount = boundedSheetCount(requestedRowCount, EXCEL_MAX_ROWS, sheet.usedBounds?.endRow);
   const columnCount = boundedSheetCount(
@@ -205,6 +229,7 @@ export function EditableSpreadsheetGrid({
 
   const handleCommit = useCallback(
     async (commit: SpreadsheetCommit) => {
+      const lifetime = requireSpreadsheetAuthoringLifetime(authoringLifetime);
       if (!generation) throw new Error("This sheet generation is not writable yet");
       const input = spreadsheetCellInput(commit.input, commit.kind);
       await session.applySpreadsheetCommands({
@@ -220,13 +245,14 @@ export function EditableSpreadsheetGrid({
           },
         ],
       });
-      onCommit?.(commit);
+      if (authoringLifetime.current === lifetime) onCommit?.(commit);
     },
-    [generation, onCommit, session],
+    [authoringLifetime, generation, onCommit, session],
   );
 
   const handleClear = useCallback(
     async (selection: SpreadsheetSelection) => {
+      requireSpreadsheetAuthoringLifetime(authoringLifetime);
       if (!generation) throw new Error("This sheet generation is not writable yet");
       const top = Math.min(selection.anchor.row, selection.focus.row);
       const bottom = Math.max(selection.anchor.row, selection.focus.row);
@@ -246,11 +272,12 @@ export function EditableSpreadsheetGrid({
         ],
       });
     },
-    [generation, session],
+    [authoringLifetime, generation, session],
   );
 
   const handleCommitRange = useCallback(
     async (commit: SpreadsheetRangeCommit) => {
+      requireSpreadsheetAuthoringLifetime(authoringLifetime);
       if (!generation) throw new Error("This sheet generation is not writable yet");
       await session.applySpreadsheetCommands({
         version: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
@@ -268,10 +295,11 @@ export function EditableSpreadsheetGrid({
         ],
       });
     },
-    [generation, session],
+    [authoringLifetime, generation, session],
   );
   const handleResize = useCallback(
     async (change: SpreadsheetDimensionCommit) => {
+      const lifetime = requireSpreadsheetAuthoringLifetime(authoringLifetime);
       if (!generation) throw new Error("This sheet generation is not writable yet");
       await session.applySpreadsheetCommands({
         version: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
@@ -291,9 +319,16 @@ export function EditableSpreadsheetGrid({
               },
         ],
       });
-      onResize?.(change);
+      if (authoringLifetime.current === lifetime) onResize?.(change);
     },
-    [generation, onResize, session, sheet.defaultColumnWidth, sheet.defaultRowHeight],
+    [
+      authoringLifetime,
+      generation,
+      onResize,
+      session,
+      sheet.defaultColumnWidth,
+      sheet.defaultRowHeight,
+    ],
   );
 
   const handleSelection = useCallback(
@@ -386,7 +421,16 @@ export function EditableSpreadsheetGrid({
 }
 
 /** Artifact chrome, sheet navigation, and one Worker-backed spreadsheet grid. */
-export function EditableSpreadsheetArtifactSurface({
+export function EditableSpreadsheetArtifactSurface(props: EditableSpreadsheetArtifactSurfaceProps) {
+  return (
+    <EditableSpreadsheetArtifactSurfaceSession
+      key={spreadsheetSessionKey(props.session)}
+      {...props}
+    />
+  );
+}
+
+function EditableSpreadsheetArtifactSurfaceSession({
   session,
   title = "Workbook",
   showHeader,
@@ -397,6 +441,7 @@ export function EditableSpreadsheetArtifactSurface({
   readOnly = false,
   ...gridProps
 }: EditableSpreadsheetArtifactSurfaceProps) {
+  const authoringLifetime = useSpreadsheetAuthoringLifetime();
   const { metadata, error: metadataError } = useSpreadsheetMetadata(session);
   const view = useEditableArtifactView(session);
   const [activeSheetId, setActiveSheetId] = useState<string | null>(initialSheetId ?? null);
@@ -413,6 +458,7 @@ export function EditableSpreadsheetArtifactSurface({
 
   const addSheet = useCallback(async () => {
     if (!writable || creatingSheet) return;
+    const lifetime = requireSpreadsheetAuthoringLifetime(authoringLifetime);
     setCreatingSheet(true);
     setSurfaceError(null);
     try {
@@ -421,13 +467,13 @@ export function EditableSpreadsheetArtifactSurface({
         name: nextAvailableSheetName(sheets),
         after,
       });
-      setActiveSheetId(created.sheetId);
+      if (authoringLifetime.current === lifetime) setActiveSheetId(created.sheetId);
     } catch (cause) {
-      setSurfaceError(asError(cause));
+      if (authoringLifetime.current === lifetime) setSurfaceError(asError(cause));
     } finally {
-      setCreatingSheet(false);
+      if (authoringLifetime.current === lifetime) setCreatingSheet(false);
     }
-  }, [activeSheet, creatingSheet, session, sheets, writable]);
+  }, [activeSheet, authoringLifetime, creatingSheet, session, sheets, writable]);
 
   const footer = (
     <div
@@ -755,6 +801,31 @@ function EditableWorksheetTab({
   ) : (
     tab
   );
+}
+
+function spreadsheetSessionKey(session: EditableArtifactSession): number {
+  let key = SESSION_KEYS.get(session);
+  if (key === undefined) {
+    key = ++nextSessionKey;
+    SESSION_KEYS.set(session, key);
+  }
+  return key;
+}
+
+function useSpreadsheetAuthoringLifetime() {
+  const lifetime = useRef<object | null>({});
+  useClientLayoutEffect(() => {
+    lifetime.current = {};
+    return () => {
+      lifetime.current = null;
+    };
+  }, []);
+  return lifetime;
+}
+
+function requireSpreadsheetAuthoringLifetime(lifetime: { current: object | null }): object {
+  if (!lifetime.current) throw new Error("Spreadsheet authoring session changed");
+  return lifetime.current;
 }
 
 function useSpreadsheetMetadata(session: EditableArtifactSession): {

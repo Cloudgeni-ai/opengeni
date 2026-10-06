@@ -2122,6 +2122,10 @@ export function SpreadsheetProjectionGrid({
           style={{
             width: horizontalProjection.physicalTotal,
             height: verticalProjection.physicalTotal,
+            // Centered boundary handles must not enlarge the bounded scroll
+            // extent at the final row/column. Unlike hidden, clip does not
+            // create another scroll container for the sticky headers.
+            overflow: "clip",
           }}
         >
           <canvas

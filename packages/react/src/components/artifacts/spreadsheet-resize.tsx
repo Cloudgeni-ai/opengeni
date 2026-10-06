@@ -409,11 +409,12 @@ export function SpreadsheetResizeHandle({
       aria-valuenow={size}
       aria-valuetext={`${size} pixels`}
       data-og-resize-axis={axis}
+      style={{ [axis === "column" ? "right" : "bottom"]: "calc(var(--spacing) * -1)" }}
       className={cn(
-        "pointer-events-auto absolute z-40 touch-none outline-hidden hover:bg-og-accent/20 focus-visible:bg-og-accent/20 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent",
+        "pointer-events-auto absolute z-40 touch-none outline-hidden hover:bg-og-accent/20 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent",
         axis === "column"
-          ? "-right-1 top-0 h-full w-2 cursor-col-resize"
-          : "-bottom-1 left-0 h-2 w-full cursor-row-resize",
+          ? "top-0 h-full w-2 cursor-col-resize"
+          : "left-0 h-2 w-full cursor-row-resize",
       )}
     />
   );

@@ -33,6 +33,25 @@ function replaceInputValue(input: HTMLInputElement, value: string): void {
   input.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
+function deferredAcceptance() {
+  let resolve!: () => void;
+  let reject!: (cause: unknown) => void;
+  const promise = new Promise<void>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+async function enterCell(container: HTMLElement, value: string): Promise<void> {
+  const input = container.querySelector<HTMLInputElement>('[aria-label="Formula or value"]')!;
+  await actRun(() => input.focus());
+  await actRun(() => replaceInputValue(input, value));
+  await actRun(() =>
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })),
+  );
+}
+
 function pasteEvent(plainText: string): Event {
   const event = new Event("paste", { bubbles: true, cancelable: true });
   Object.defineProperty(event, "clipboardData", {
@@ -65,6 +84,7 @@ class FakeEditableSpreadsheetSession {
   deferViewport = false;
   sheetName = "Data";
   renameResult: Promise<void> | null = null;
+  applyResult: Promise<void> | null = null;
   private revision = 1n;
   private value = "from Worker";
   private projectedDate: string | null = null;
@@ -107,6 +127,7 @@ class FakeEditableSpreadsheetSession {
     batch: SpreadsheetArtifactCommandBatch,
   ): Promise<EditableArtifactPendingTransaction> {
     this.applied.push(batch);
+    if (this.applyResult) await this.applyResult;
     const command = batch.commands[0];
     if (command?.kind === "cells.set") {
       const cell = command.cells[0];
@@ -171,6 +192,11 @@ class FakeEditableSpreadsheetSession {
   setWritable(writable: boolean): void {
     this.view = { ...this.view, writable };
     for (const listener of this.viewListeners) listener(this.view);
+  }
+
+  setProjectedValue(value: string): void {
+    this.value = value;
+    this.publishViewports();
   }
 
   setPendingTransactions(pendingTransactions: number): void {
@@ -243,6 +269,160 @@ class FakeEditableSpreadsheetSession {
 }
 
 describe("SDK-backed editable spreadsheet", () => {
+  for (const outcome of ["accepted", "rejected"] as const) {
+    test(`session replacement discards old cell intent and ignores ${outcome} callbacks with identical sheet IDs`, async () => {
+      const oldSession = new FakeEditableSpreadsheetSession();
+      const replacement = new FakeEditableSpreadsheetSession();
+      replacement.setProjectedValue("replacement canonical value");
+      const oldAcceptance = deferredAcceptance();
+      oldSession.applyResult = oldAcceptance.promise;
+      const notifications: string[] = [];
+      const sheet = metadata().sheets[0]!;
+      const rendered = await renderComponent(
+        <EditableSpreadsheetGrid
+          session={oldSession as unknown as EditableArtifactSession}
+          sheet={sheet}
+          metadataRevision={1n}
+          onCommit={() => notifications.push("old accepted")}
+          onCommandError={() => notifications.push("old failed")}
+        />,
+      );
+      await enterCell(rendered.container, "old session intent");
+      expect(rendered.container.querySelector('[data-og-cell="A1"]')?.textContent).toBe(
+        "old session intent",
+      );
+      await rendered.rerender(
+        <EditableSpreadsheetGrid
+          session={replacement as unknown as EditableArtifactSession}
+          sheet={sheet}
+          metadataRevision={1n}
+        />,
+      );
+      expect(rendered.container.querySelector('[data-og-cell="A1"]')?.textContent).toBe(
+        "replacement canonical value",
+      );
+      await actRun(() =>
+        outcome === "accepted"
+          ? oldAcceptance.resolve()
+          : oldAcceptance.reject(new Error("old session rejected")),
+      );
+      expect(rendered.container.querySelector('[role="alert"]')).toBeNull();
+      expect(rendered.container.querySelector('[data-og-pending-input="true"]')).toBeNull();
+      expect(
+        rendered.container.querySelector('[role="grid"]')?.getAttribute("aria-busy"),
+      ).toBeNull();
+      expect(notifications).toEqual([]);
+      expect(oldSession.applied).toHaveLength(1);
+      expect(replacement.applied).toHaveLength(0);
+      await enterCell(rendered.container, "new session intent");
+      expect(replacement.applied).toHaveLength(1);
+      expect(oldSession.applied).toHaveLength(1);
+      await rendered.unmount();
+    });
+
+    for (const axis of ["column", "row"] as const) {
+      test(`session replacement discards pending ${axis} resizing and ignores ${outcome} old callbacks`, async () => {
+        const oldSession = new FakeEditableSpreadsheetSession();
+        const replacement = new FakeEditableSpreadsheetSession();
+        const oldAcceptance = deferredAcceptance();
+        oldSession.applyResult = oldAcceptance.promise;
+        const notifications: string[] = [];
+        const sheet = metadata().sheets[0]!;
+        const rendered = await renderComponent(
+          <EditableSpreadsheetGrid
+            session={oldSession as unknown as EditableArtifactSession}
+            sheet={sheet}
+            metadataRevision={1n}
+            onResize={() => notifications.push("old accepted")}
+            onCommandError={() => notifications.push("old failed")}
+          />,
+        );
+        const label = axis === "column" ? "Resize column A" : "Resize row 1";
+        const arrow = axis === "column" ? "ArrowRight" : "ArrowDown";
+        const handle = rendered.container.querySelector(`[aria-label="${label}"]`)!;
+        await actRun(() => {
+          handle.dispatchEvent(new KeyboardEvent("keydown", { key: arrow, bubbles: true }));
+          handle.dispatchEvent(new KeyboardEvent("keyup", { key: arrow, bubbles: true }));
+        });
+        expect(oldSession.applied).toHaveLength(1);
+        await rendered.rerender(
+          <EditableSpreadsheetGrid
+            session={replacement as unknown as EditableArtifactSession}
+            sheet={sheet}
+            metadataRevision={1n}
+          />,
+        );
+        expect(
+          rendered.container
+            .querySelector(`[aria-label="${label}"]`)
+            ?.getAttribute("aria-valuenow"),
+        ).toBe(axis === "column" ? "96" : "24");
+        await actRun(() =>
+          outcome === "accepted"
+            ? oldAcceptance.resolve()
+            : oldAcceptance.reject(new Error("old resize rejected")),
+        );
+        expect(rendered.container.querySelector('[role="alert"]')).toBeNull();
+        expect(
+          rendered.container.querySelector('[role="grid"]')?.getAttribute("aria-busy"),
+        ).toBeNull();
+        expect(notifications).toEqual([]);
+        expect(replacement.applied).toHaveLength(0);
+        expect(oldSession.applied).toHaveLength(1);
+        await rendered.unmount();
+      });
+    }
+
+    test(`session replacement ignores ${outcome} old rename and uses replacement authority`, async () => {
+      const oldSession = new FakeEditableSpreadsheetSession();
+      const replacement = new FakeEditableSpreadsheetSession();
+      replacement.sheetName = "Replacement";
+      replacement.setWritable(false);
+      const oldAcceptance = deferredAcceptance();
+      oldSession.renameResult = oldAcceptance.promise;
+      const notifications: string[] = [];
+      const rendered = await renderComponent(
+        <EditableSpreadsheetArtifactSurface
+          session={oldSession as unknown as EditableArtifactSession}
+          onCommandError={() => notifications.push("old failed")}
+        />,
+      );
+      await actRun(() =>
+        rendered.container
+          .querySelector('[role="tab"]')!
+          .dispatchEvent(new MouseEvent("dblclick", { bubbles: true })),
+      );
+      const input = rendered.container.querySelector<HTMLInputElement>(
+        '[aria-label="Worksheet name"]',
+      )!;
+      await actRun(() => replaceInputValue(input, "Old rename"));
+      await actRun(() =>
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })),
+      );
+      expect(oldSession.applied).toHaveLength(1);
+      await rendered.rerender(
+        <EditableSpreadsheetArtifactSurface
+          session={replacement as unknown as EditableArtifactSession}
+        />,
+      );
+      expect(rendered.container.querySelector('[aria-label="Worksheet name"]')).toBeNull();
+      expect(rendered.container.querySelector('[role="tab"]')?.textContent).toBe("Replacement");
+      expect(
+        rendered.container.querySelector('[role="tab"]')?.hasAttribute("aria-keyshortcuts"),
+      ).toBe(false);
+      await actRun(() =>
+        outcome === "accepted"
+          ? oldAcceptance.resolve()
+          : oldAcceptance.reject(new Error("old rename rejected")),
+      );
+      expect(rendered.container.querySelector('[role="alert"]')).toBeNull();
+      expect(rendered.container.querySelector('[role="tab"]')?.textContent).toBe("Replacement");
+      expect(notifications).toEqual([]);
+      expect(replacement.applied).toHaveLength(0);
+      await rendered.unmount();
+    });
+  }
+
   test("viewport replacement keeps covered cells visible while the Worker query is pending", async () => {
     const fake = new FakeEditableSpreadsheetSession();
     const sheet = metadata().sheets[0]!;

@@ -8,7 +8,7 @@ import type {
 } from "@opengeni/sdk/editable-artifacts";
 import { createRoot } from "react-dom/client";
 
-import { EditableSpreadsheetArtifactSurface } from "../src/artifacts-spreadsheet";
+import { EditableSpreadsheetArtifactSurface } from "@opengeni/react/artifacts/spreadsheet";
 
 const sheetId = "00000000000000010000000000000001";
 const generationId = "11111111111111111111111111111111";

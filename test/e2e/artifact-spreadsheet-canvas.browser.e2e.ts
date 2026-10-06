@@ -154,6 +154,10 @@ describe("artifact spreadsheet retained canvas", () => {
         await page.waitForFunction(
           () => (globalThis as SpreadsheetUxWindow).__ogSpreadsheetUx.calls.length === 2,
         );
+        expect(await handle.evaluate((element) => getComputedStyle(element).boxShadow)).not.toBe(
+          "none",
+        );
+        await screenshot("desktop-resize-keyboard");
         const frames = await page.evaluate(() => {
           const stats = (globalThis as SpreadsheetUxWindow).__ogResizeFrames;
           stats.active = false;
