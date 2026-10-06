@@ -70,23 +70,41 @@ function metadata(pkg: { integrity: string }, ready = true) {
   };
 }
 function reader(response: (name: string) => Response): typeof readRegistryPackage {
-  return (name, _request, _base, options) =>
-    readRegistryPackage(
+  return (name, _request, _base, options) => {
+    let snapshot: ReturnType<typeof metadata> | undefined;
+    return readRegistryPackage(
       name,
       async (url, init) => {
-        expect(String(url)).toBe(
-          `https://registry.example.test/${encodeURIComponent(name)}?write=true`,
-        );
         expect(init?.method).toBe("GET");
         expect(init?.redirect).toBe("manual");
         expect(init?.credentials).toBe("omit");
         expect(init?.headers).toEqual({ accept: "application/json", "cache-control": "no-cache" });
         expect(init?.signal).toBeInstanceOf(AbortSignal);
-        return response(name);
+        if (options?.receiptVersion === undefined) {
+          expect(String(url)).toBe(
+            `https://registry.example.test/${encodeURIComponent(name)}?write=true`,
+          );
+          return response(name);
+        }
+        if (String(url).includes("/dist-tags")) {
+          expect(String(url)).toBe(
+            `https://registry.example.test/-/package/${encodeURIComponent(name)}/dist-tags?write=true`,
+          );
+          snapshot = await response(name).json();
+          return Response.json(snapshot!["dist-tags"]);
+        }
+        expect(String(url)).toBe(
+          `https://registry.example.test/${encodeURIComponent(name)}/${version}?write=true`,
+        );
+        const selected = snapshot!.versions[version];
+        return selected
+          ? Response.json({ name, version, ...selected })
+          : new Response(null, { status: 404 });
       },
       "https://registry.example.test",
       options,
     );
+  };
 }
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -346,8 +364,9 @@ describe("strict raw receipt acceptance", () => {
         }),
         { custody: f.store, maxReads: 3 },
       ),
-    ).rejects.toThrow("read_limit");
+    ).rejects.toThrow("read quota");
     expect(reads).toBe(3);
+    expect(f.events().filter((event) => event.kind === "READ_RESPONSE")).toHaveLength(3);
   });
 
   test.each(["latest", "integrity", "tag", "attestation", "predicate"] as const)(
@@ -385,7 +404,7 @@ describe("strict raw receipt acceptance", () => {
     },
   );
 
-  test("a valid full response cannot settle after its custody passes the deadline", async () => {
+  test("valid selected responses cannot settle after their custody passes the deadline", async () => {
     const f = fixture();
     const cohort = freezeCanaryCohort(f.packages, f.store).slice(0, 1);
     let elapsed = 0;
@@ -398,7 +417,7 @@ describe("strict raw receipt acceptance", () => {
       confirmCanaryCohort(cohort, read, { custody: f.store, now: () => elapsed, timeoutMs: 1000 }),
     ).rejects.toThrow("read_exceeded_deadline");
     expect(f.events().filter((event) => event.kind === "READ_BODY" && event.complete)).toHaveLength(
-      1,
+      2,
     );
     expect(f.events().filter((event) => event.kind === "COHORT_READS_MATCHED")).toHaveLength(0);
   });
@@ -577,7 +596,7 @@ describe("fresh complete-cohort qualification", () => {
           if (final) receiptReads++;
           return Response.json(metadata(cohort.find((pkg) => pkg.name === name)!, final));
         }),
-        maxReads: 7,
+        maxReads: 11,
       }),
     ).rejects.toThrow("Final canary cohort");
     expect(writes).toBe(4);
@@ -659,12 +678,12 @@ describe("fresh complete-cohort qualification", () => {
         if (final) receiptReads.set(name, (receiptReads.get(name) ?? 0) + 1);
         return Response.json(metadata(cohort.find((pkg) => pkg.name === name)!, final));
       }),
-      maxReads: 8,
+      maxReads: 16,
     });
     expect(pins).toEqual(Object.fromEntries(names.map((name) => [name, version])));
     expect([...receiptReads.entries()]).toEqual(names.map((name) => [name, 2]));
     const matched = f.events().find((event) => event.kind === "COHORT_READS_MATCHED");
-    expect(matched.reads).toBe(8);
+    expect(matched.reads).toBe(16);
     expect(matched.freshCompleteCohort).toBe(true);
   });
 });

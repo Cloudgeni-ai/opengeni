@@ -1931,6 +1931,9 @@ Manifests/Changesets/CI/release scripts govern evidence-bound npm/image/Helm/Rus
 publication, retaining source identity. Web builds target both CPUs.
 Canary packages prepack the complete cohort, retain write acknowledgements, then
 perform bounded strict read-only verification before producing Site pins.
+Post-write verification selects current tags and one immutable version manifest;
+each actual GET shares the original request quota, deadline and custody limits,
+including final complete-cohort qualification. Pre-write discovery is unchanged.
 An uncertain publication never automatically replays; signed-byte acceptance remains separate.
 `reconcile-production-packages.yml` reconciles npm availability independently of acceptance.
 
