@@ -1122,6 +1122,14 @@ export function SpreadsheetProjectionGrid({
       }
     >(),
   );
+  const [optimisticEpoch, setOptimisticEpoch] = useState(0);
+  const refreshOptimisticInputs = useCallback(() => setOptimisticEpoch((value) => value + 1), []);
+  const optimisticScope = `${projection.sheetId}:${projection.generationId ?? "none"}`;
+  const optimisticScopeRef = useRef(optimisticScope);
+  if (optimisticScopeRef.current !== optimisticScope) {
+    optimisticScopeRef.current = optimisticScope;
+    optimisticInputsRef.current.clear();
+  }
   const projectionRef = useRef(projection);
   projectionRef.current = projection;
   const editModeRef = useRef(editMode);
@@ -1136,18 +1144,24 @@ export function SpreadsheetProjectionGrid({
       "",
     [],
   );
-  const forgetOptimisticInputs = useCallback((target: SpreadsheetCommandTarget) => {
-    for (const [key, entry] of optimisticInputsRef.current) {
-      if (
-        entry.row >= target.top &&
-        entry.row <= target.bottom &&
-        entry.col >= target.left &&
-        entry.col <= target.right
-      ) {
-        optimisticInputsRef.current.delete(key);
+  const forgetOptimisticInputs = useCallback(
+    (target: SpreadsheetCommandTarget) => {
+      let changed = false;
+      for (const [key, entry] of optimisticInputsRef.current) {
+        if (
+          entry.row >= target.top &&
+          entry.row <= target.bottom &&
+          entry.col >= target.left &&
+          entry.col <= target.right
+        ) {
+          optimisticInputsRef.current.delete(key);
+          changed = true;
+        }
       }
-    }
-  }, []);
+      if (changed) refreshOptimisticInputs();
+    },
+    [refreshOptimisticInputs],
+  );
 
   const updateSelection = useCallback(
     (next: SpreadsheetSelection) => {
@@ -1173,10 +1187,11 @@ export function SpreadsheetProjectionGrid({
 
   useEffect(() => {
     optimisticInputsRef.current.clear();
-  }, [projection.generationId, projection.sheetId]);
+    refreshOptimisticInputs();
+  }, [projection.generationId, projection.sheetId, refreshOptimisticInputs]);
 
-  useEffect(() => {
-    if (editMode !== null) return;
+  useClientLayoutEffect(() => {
+    let changed = false;
     for (const [key, optimistic] of optimisticInputsRef.current) {
       const coverage = projection.coverage;
       const covered =
@@ -1190,11 +1205,23 @@ export function SpreadsheetProjectionGrid({
         covered &&
         (projection.readCell(optimistic.row, optimistic.col)?.input === optimistic.input ||
           revision !== optimistic.baseRevision)
-      )
+      ) {
         optimisticInputsRef.current.delete(key);
+        changed = true;
+      }
     }
-    setDraft(readEditInput(selection.focus));
-  }, [commandQueue.pendingCount, editMode, projection, readEditInput, revision, selection.focus]);
+    if (changed) refreshOptimisticInputs();
+    if (editMode === null) setDraft(readEditInput(selection.focus));
+  }, [
+    commandQueue.pendingCount,
+    editMode,
+    projection,
+    readEditInput,
+    revision,
+    selection.focus,
+    refreshOptimisticInputs,
+    optimisticEpoch,
+  ]);
 
   useClientLayoutEffect(() => {
     const element = viewportRef.current;
@@ -1378,12 +1405,14 @@ export function SpreadsheetProjectionGrid({
               commandId,
               pending: true,
             });
+            refreshOptimisticInputs();
             return commit(next);
           },
           execute,
           (commandId) => {
             if (optimisticInputsRef.current.get(key)?.commandId !== commandId) return;
             optimisticInputsRef.current.delete(key);
+            refreshOptimisticInputs();
             const current = selectionRef.current.focus;
             if (
               editModeRef.current === null &&
@@ -1399,6 +1428,7 @@ export function SpreadsheetProjectionGrid({
             if (optimistic?.commandId === commandId) {
               optimistic.pending = false;
               optimistic.baseRevision = projectionRef.current.revision;
+              refreshOptimisticInputs();
             }
           },
         );
@@ -1411,7 +1441,17 @@ export function SpreadsheetProjectionGrid({
         committingRef.current = false;
       });
     },
-    [commit, draft, editable, projection, readEditInput, revision, runCommand, selection.focus],
+    [
+      commit,
+      draft,
+      editable,
+      projection,
+      readEditInput,
+      revision,
+      runCommand,
+      selection.focus,
+      refreshOptimisticInputs,
+    ],
   );
 
   const clearSelection = useCallback(() => {
@@ -2114,7 +2154,7 @@ export function SpreadsheetProjectionGrid({
                 key={`header-${col}`}
                 role="columnheader"
                 aria-colindex={col + 1}
-                className="sticky top-0 z-30 grid select-none place-items-center overflow-hidden border-b border-r border-og-border bg-og-surface-2 text-og-xs font-medium text-og-fg-muted"
+                className="pointer-events-none sticky top-0 z-30 grid select-none place-items-center border-b border-r border-og-border bg-og-surface-2 text-og-xs font-medium text-og-fg-muted"
                 style={{
                   position: "absolute",
                   left,
@@ -2130,7 +2170,7 @@ export function SpreadsheetProjectionGrid({
                     : undefined),
                 }}
               >
-                {columnName(col)}
+                <span className="max-w-full overflow-hidden">{columnName(col)}</span>
                 {!readOnly && resize ? (
                   <SpreadsheetResizeHandle
                     axis="column"
@@ -2158,7 +2198,7 @@ export function SpreadsheetProjectionGrid({
               >
                 <div
                   role="rowheader"
-                  className="sticky left-0 z-20 grid h-full select-none place-items-center border-b border-r border-og-border bg-og-surface-2 text-og-xs text-og-fg-muted"
+                  className="pointer-events-none sticky left-0 z-20 grid h-full select-none place-items-center border-b border-r border-og-border bg-og-surface-2 text-og-xs text-og-fg-muted"
                   style={{
                     width: ROW_HEADER_WIDTH,
                     ...(canvasReady
@@ -2190,6 +2230,13 @@ export function SpreadsheetProjectionGrid({
                     format: {},
                   };
                   const value = data.value;
+                  // Submitted input is a transient overlay, not a calculated or saved value.
+                  const optimistic = editable
+                    ? optimisticInputsRef.current.get(`${row}:${col}`)
+                    : undefined;
+                  const display = optimistic
+                    ? optimistic.input
+                    : formatSpreadsheetGeneralDisplay(value);
                   const address = cellName({ row, col });
                   const error = typeof value === "string" && value.startsWith("#");
                   return (
@@ -2199,12 +2246,13 @@ export function SpreadsheetProjectionGrid({
                       role="gridcell"
                       aria-colindex={col + 1}
                       aria-selected={selected}
-                      aria-label={`${address}${value === null ? "" : `, ${formatSpreadsheetGeneralDisplay(value)}`}`}
+                      aria-label={`${address}${display ? `, ${display}` : ""}${optimistic ? (optimistic.input.startsWith("=") ? ", pending formula, awaiting calculation" : ", pending edit") : ""}`}
+                      data-og-pending-input={optimistic ? "true" : undefined}
                       data-og-cell={address}
                       className={cn(
                         "pointer-events-none absolute top-0 flex h-full min-w-0 overflow-hidden border-b border-r border-og-border px-1.5 text-og-fg",
-                        !canvasReady && selected && !active && "bg-og-accent/10",
-                        !canvasReady &&
+                        (!canvasReady || optimistic) && selected && !active && "bg-og-accent/10",
+                        (!canvasReady || optimistic) &&
                           active &&
                           "z-10 bg-og-accent/10 ring-2 ring-inset ring-og-accent",
                         !canvasReady && error && "text-og-status-failed",
@@ -2213,11 +2261,17 @@ export function SpreadsheetProjectionGrid({
                         left,
                         width,
                         ...cellStyle(data.format),
-                        ...(canvasReady
+                        ...(canvasReady && !optimistic
                           ? {
                               background: "transparent",
                               borderColor: "transparent",
                               color: "transparent",
+                            }
+                          : undefined),
+                        ...(optimistic
+                          ? {
+                              background: data.format.fill ?? "var(--og-color-surface-1)",
+                              zIndex: 10,
                             }
                           : undefined),
                       }}
@@ -2239,7 +2293,7 @@ export function SpreadsheetProjectionGrid({
                         />
                       ) : (
                         <span className="block min-w-0 overflow-hidden text-ellipsis">
-                          {formatSpreadsheetGeneralDisplay(value)}
+                          {display}
                         </span>
                       )}
                     </div>

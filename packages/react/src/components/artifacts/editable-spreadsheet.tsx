@@ -12,7 +12,7 @@ import {
   type SpreadsheetSheetGeneration,
 } from "@opengeni/sdk/editable-artifacts";
 import { PlusIcon } from "lucide-react";
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { cn } from "../../lib/cn";
 import { ArtifactSurface } from "./artifact-surface";
@@ -72,6 +72,8 @@ export type EditableSpreadsheetArtifactSurfaceProps = Omit<
 };
 
 type ProjectionState = {
+  session: EditableArtifactSession;
+  generationId: string | null;
   query: EditableSpreadsheetViewportQuery;
   projection: EditableSpreadsheetViewportProjection | null;
   error: Error | null;
@@ -105,6 +107,8 @@ export function EditableSpreadsheetGrid({
     sheet.usedBounds?.endColumn,
   );
   const [state, setState] = useState<ProjectionState>(() => ({
+    session,
+    generationId: sheet.generationId,
     query: initialViewportQuery(sheet.sheetId, rowCount, columnCount),
     projection: null,
     error: null,
@@ -112,23 +116,36 @@ export function EditableSpreadsheetGrid({
   const activeCellRef = useRef({ row: 0, column: 0 });
 
   useEffect(() => {
-    setState({
-      query: initialViewportQuery(sheet.sheetId, rowCount, columnCount),
-      projection: null,
-      error: null,
-    });
+    setState((current) =>
+      current.session === session &&
+      current.generationId === sheet.generationId &&
+      current.query.sheetId === sheet.sheetId
+        ? current
+        : {
+            session,
+            generationId: sheet.generationId,
+            query: initialViewportQuery(sheet.sheetId, rowCount, columnCount),
+            projection: null,
+            error: null,
+          },
+    );
     activeCellRef.current = { row: 0, column: 0 };
-  }, [columnCount, rowCount, session, sheet.sheetId]);
+  }, [columnCount, rowCount, session, sheet.generationId, sheet.sheetId]);
 
   useEffect(() => {
     const query = state.query;
-    return session.subscribeSpreadsheetViewport(
+    const matchesScope = (current: ProjectionState) =>
+      current.session === session &&
+      current.generationId === sheet.generationId &&
+      sameViewportQuery(current.query, query);
+    let active = true;
+    const unsubscribe = session.subscribeSpreadsheetViewport(
       query,
       (projection) => {
-        if (!sameViewport(projection, query)) return;
+        if (!active || !sameViewport(projection, query)) return;
         if (sheet.generationId !== null && projection.generationId !== sheet.generationId) {
           setState((current) =>
-            sameViewportQuery(current.query, query)
+            matchesScope(current)
               ? {
                   ...current,
                   projection: null,
@@ -139,17 +156,20 @@ export function EditableSpreadsheetGrid({
           return;
         }
         setState((current) =>
-          sameViewportQuery(current.query, query) ? { query, projection, error: null } : current,
+          matchesScope(current) ? { ...current, projection, error: null } : current,
         );
       },
       {
         onError(error) {
-          setState((current) =>
-            sameViewportQuery(current.query, query) ? { ...current, error } : current,
-          );
+          if (!active) return;
+          setState((current) => (matchesScope(current) ? { ...current, error } : current));
         },
       },
     );
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, [session, sheet.generationId, state.query]);
 
   const projection = useMemo(
@@ -158,11 +178,13 @@ export function EditableSpreadsheetGrid({
         sheet,
         metadataRevision,
         state.query,
-        state.projection,
+        state.session === session && state.generationId === sheet.generationId
+          ? state.projection
+          : null,
         rowCount,
         columnCount,
       ),
-    [columnCount, metadataRevision, rowCount, sheet, state.projection, state.query],
+    [columnCount, metadataRevision, rowCount, session, sheet, state],
   );
   const generation = useMemo(() => sheetGeneration(sheet), [sheet]);
   const editable =
@@ -283,6 +305,7 @@ export function EditableSpreadsheetGrid({
       setState((current) => {
         if (queryContains(current.query, selection.focus.row, selection.focus.col)) return current;
         return {
+          ...current,
           query: boundedViewportQuery(
             sheet.sheetId,
             selection.focus.row,
@@ -315,9 +338,7 @@ export function EditableSpreadsheetGrid({
         activeCellRef.current,
       );
       setState((current) =>
-        sameViewportQuery(current.query, next)
-          ? current
-          : { query: next, projection: current.projection, error: null },
+        sameViewportQuery(current.query, next) ? current : { ...current, query: next, error: null },
       );
       onViewportChange?.(viewport);
     },
@@ -351,7 +372,7 @@ export function EditableSpreadsheetGrid({
         onCommandError={onCommandError}
         onViewportChange={handleViewport}
       />
-      {state.error ? (
+      {state.error && state.session === session && state.generationId === sheet.generationId ? (
         <output
           role="status"
           className="pointer-events-none absolute bottom-2 left-2 z-50 rounded-og-sm border border-og-status-failed/30 bg-og-surface-1/95 px-2 py-1 text-og-xs text-og-status-failed shadow-og-sm"
@@ -415,21 +436,16 @@ export function EditableSpreadsheetArtifactSurface({
       aria-label="Worksheets"
     >
       {sheets.map((sheet) => (
-        <button
+        <EditableWorksheetTab
           key={`${sheet.sheetId}:${sheet.generationId ?? "pending"}`}
-          type="button"
-          role="tab"
-          aria-selected={sheet.sheetId === activeSheet?.sheetId}
-          onClick={() => setActiveSheetId(sheet.sheetId)}
-          className={cn(
-            "h-7 shrink-0 rounded-og-sm px-2.5 text-og-sm outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-og-accent",
-            sheet.sheetId === activeSheet?.sheetId
-              ? "bg-og-surface-3 font-medium text-og-fg"
-              : "text-og-fg-muted hover:bg-og-surface-3 hover:text-og-fg",
-          )}
-        >
-          {sheet.name}
-        </button>
+          session={session}
+          sheet={sheet}
+          sheets={sheets}
+          selected={sheet.sheetId === activeSheet?.sheetId}
+          writable={writable}
+          onSelect={() => setActiveSheetId(sheet.sheetId)}
+          onCommandError={gridProps.onCommandError}
+        />
       ))}
       {writable && allowAddSheet ? (
         <button
@@ -505,22 +521,275 @@ export function EditableSpreadsheetArtifactSurface({
   );
 }
 
+/** Inline authoring state only; the tab label always comes from canonical metadata. */
+function EditableWorksheetTab({
+  session,
+  sheet,
+  sheets,
+  selected,
+  writable,
+  onSelect,
+  onCommandError,
+}: {
+  session: EditableArtifactSession;
+  sheet: EditableSpreadsheetSheetMetadata;
+  sheets: readonly EditableSpreadsheetSheetMetadata[];
+  selected: boolean;
+  writable: boolean;
+  onSelect: () => void;
+  onCommandError?: ((error: Error) => void) | undefined;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(sheet.name);
+  const [saving, setSaving] = useState(false);
+  const [accepted, setAccepted] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const tabRef = useRef<HTMLButtonElement>(null);
+  const busyRef = useRef(false);
+  const mountedRef = useRef(true);
+  const latestRef = useRef({ session, sheet, writable });
+  latestRef.current = { session, sheet, writable };
+  const errorId = useId();
+  const canRename = writable && sheet.generationId !== null;
+  const scopeRef = useRef({
+    session,
+    sheetId: sheet.sheetId,
+    generationId: sheet.generationId,
+    canRename,
+  });
+  if (
+    scopeRef.current.session !== session ||
+    scopeRef.current.sheetId !== sheet.sheetId ||
+    scopeRef.current.generationId !== sheet.generationId ||
+    scopeRef.current.canRename !== canRename
+  ) {
+    scopeRef.current = {
+      session,
+      sheetId: sheet.sheetId,
+      generationId: sheet.generationId,
+      canRename,
+    };
+  }
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    setEditing(false);
+    setSaving(false);
+    setAccepted(false);
+    setError(null);
+    busyRef.current = false;
+  }, [session, sheet.generationId, sheet.sheetId, canRename]);
+  useEffect(() => {
+    if (!editing) return;
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, [editing]);
+  useEffect(() => {
+    if (!accepted || !editing || sheet.name !== name) return;
+    const restoreFocus =
+      document.activeElement === document.body || document.activeElement === inputRef.current;
+    setEditing(false);
+    setSaving(false);
+    setAccepted(false);
+    busyRef.current = false;
+    if (restoreFocus) queueMicrotask(() => tabRef.current?.focus({ preventScroll: true }));
+  }, [accepted, editing, name, sheet.name]);
+
+  const start = () => {
+    if (!canRename || busyRef.current) return;
+    onSelect();
+    setName(sheet.name);
+    setError(null);
+    setAccepted(false);
+    setEditing(true);
+  };
+  const cancel = () => {
+    if (busyRef.current) return;
+    setEditing(false);
+    setError(null);
+    queueMicrotask(() => tabRef.current?.focus({ preventScroll: true }));
+  };
+  const rename = async () => {
+    if (!canRename || busyRef.current) return;
+    const generation = sheetGeneration(sheet);
+    if (!generation) return;
+    const next = name.trim();
+    if (!next || next.length > 31 || /[\\/?*[\]:\0]/u.test(next)) {
+      setError("Use 1–31 characters without \\ / ? * [ ] :.");
+      return;
+    }
+    if (sheets.some((other) => other.sheetId !== sheet.sheetId && other.name === next)) {
+      setError("A worksheet already has this name.");
+      return;
+    }
+    if (next === sheet.name) {
+      cancel();
+      return;
+    }
+    setName(next);
+    setError(null);
+    setSaving(true);
+    busyRef.current = true;
+    const scope = scopeRef.current;
+    const current = () =>
+      mountedRef.current && scopeRef.current === scope && latestRef.current.writable;
+    try {
+      await session.applySpreadsheetCommands({
+        version: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+        commands: [{ kind: "sheet.rename", sheet: generation, name: next }],
+      });
+      if (current()) setAccepted(true);
+    } catch (cause) {
+      if (!current()) return;
+      const failure = asError(cause);
+      busyRef.current = false;
+      setSaving(false);
+      setError(failure.message || "Could not rename worksheet. Try again.");
+      onCommandError?.(failure);
+      queueMicrotask(() => inputRef.current?.focus());
+    }
+  };
+
+  const tab = (
+    <button
+      ref={tabRef}
+      type="button"
+      role="tab"
+      tabIndex={editing && canRename ? -1 : undefined}
+      aria-selected={selected}
+      aria-keyshortcuts={canRename ? "F2" : undefined}
+      title={canRename ? "Double-click or press F2 to rename" : undefined}
+      onClick={onSelect}
+      onDoubleClick={start}
+      onKeyDown={(event) => {
+        if (event.key === "F2") {
+          event.preventDefault();
+          start();
+        }
+      }}
+      className={cn(
+        "h-7 shrink-0 rounded-og-sm px-2.5 text-og-sm outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-og-accent",
+        selected
+          ? "bg-og-surface-3 font-medium text-og-fg"
+          : "text-og-fg-muted hover:bg-og-surface-3 hover:text-og-fg",
+      )}
+    >
+      {sheet.name}
+    </button>
+  );
+
+  return editing && canRename ? (
+    <>
+      <span className="sr-only">{tab}</span>
+      <form
+        className="flex min-w-0 flex-wrap items-center gap-1 py-1"
+        style={{ width: "min(18rem, 100%)" }}
+        onSubmit={(event) => {
+          event.preventDefault();
+          void rename();
+        }}
+      >
+        <input
+          ref={inputRef}
+          aria-label="Worksheet name"
+          aria-invalid={error ? "true" : undefined}
+          aria-describedby={error ? errorId : undefined}
+          disabled={saving}
+          value={name}
+          onInput={(event) => {
+            setName(event.currentTarget.value);
+            setError(null);
+          }}
+          onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+            if (event.key === "Escape") {
+              event.preventDefault();
+              cancel();
+            }
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void rename();
+            }
+          }}
+          className="h-7 w-40 rounded-og-sm border border-og-border bg-og-surface-1 px-2 text-og-sm text-og-fg outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50"
+        />
+        {saving ? (
+          <span role="status" className="text-og-xs text-og-fg-muted">
+            Renaming…
+          </span>
+        ) : (
+          <>
+            <button
+              type="submit"
+              className="rounded-og-sm px-2 py-1 text-og-xs text-og-fg outline-hidden hover:bg-og-surface-3 focus-visible:ring-2 focus-visible:ring-og-accent"
+            >
+              Save
+            </button>
+            <button
+              type="button"
+              onClick={cancel}
+              className="rounded-og-sm px-2 py-1 text-og-xs text-og-fg-muted outline-hidden hover:bg-og-surface-3 focus-visible:ring-2 focus-visible:ring-og-accent"
+            >
+              Cancel
+            </button>
+          </>
+        )}
+        {error ? (
+          <span
+            id={errorId}
+            role="alert"
+            className="text-og-xs text-og-status-failed"
+            style={{ flexBasis: "100%", overflowWrap: "anywhere" }}
+          >
+            {error}
+          </span>
+        ) : null}
+      </form>
+    </>
+  ) : (
+    tab
+  );
+}
+
 function useSpreadsheetMetadata(session: EditableArtifactSession): {
   metadata: EditableSpreadsheetMetadataProjection | null;
   error: Error | null;
 } {
   const [state, setState] = useState<{
+    session: EditableArtifactSession;
     metadata: EditableSpreadsheetMetadataProjection | null;
     error: Error | null;
-  }>({ metadata: null, error: null });
-  useEffect(
-    () =>
-      session.subscribeSpreadsheetMetadata({}, (metadata) => setState({ metadata, error: null }), {
-        onError: (error) => setState((current) => ({ ...current, error })),
-      }),
-    [session],
-  );
-  return state;
+  }>({ session, metadata: null, error: null });
+  useEffect(() => {
+    let active = true;
+    const unsubscribe = session.subscribeSpreadsheetMetadata(
+      {},
+      (metadata) => {
+        if (active) setState({ session, metadata, error: null });
+      },
+      {
+        onError: (error) => {
+          if (active)
+            setState((current) =>
+              current.session === session
+                ? { ...current, error }
+                : { session, metadata: null, error },
+            );
+        },
+      },
+    );
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [session]);
+  return state.session === session ? state : { metadata: null, error: null };
 }
 
 function projectSdkViewport(
@@ -531,7 +800,12 @@ function projectSdkViewport(
   rowCount: number,
   columnCount: number,
 ): SpreadsheetGridProjection {
-  const current = viewport && sameViewport(viewport, query) ? viewport : null;
+  // Keep the last valid bounded coverage while a resize/scroll query is replaced.
+  // Never carry cells across a session, sheet, or generation boundary.
+  const current =
+    viewport && viewport.sheetId === sheet.sheetId && viewport.generationId === sheet.generationId
+      ? viewport
+      : null;
   const projectedCells = (current?.cells ?? []).map((cell) => ({
     row: cell.row,
     col: cell.column,

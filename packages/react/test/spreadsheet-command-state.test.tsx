@@ -69,6 +69,45 @@ function paste(target: Element, text: string) {
 }
 
 describe("spreadsheet command state", () => {
+  test("Enter displays the submitted input immediately, then rolls back a rejected edit", async () => {
+    const save = deferred();
+    const rendered = await renderComponent(
+      <SpreadsheetProjectionGrid projection={projection()} commit={() => save.promise} />,
+    );
+    await enter(rendered.container, "after");
+    const cell = rendered.container.querySelector('[data-og-cell="A1"]')!;
+    expect(cell.textContent).toBe("after");
+    expect(cell.getAttribute("aria-label")).toContain("pending");
+    await actRun(() => save.reject(new Error("Not accepted")));
+    expect(cell.textContent).toBe("before");
+    expect(cell.getAttribute("aria-label")).not.toContain("pending");
+    await rendered.unmount();
+  });
+
+  test("a pending formula shows its input, never the previous computed value", async () => {
+    const save = deferred();
+    const rendered = await renderComponent(
+      <SpreadsheetProjectionGrid projection={projection()} commit={() => save.promise} />,
+    );
+    await enter(rendered.container, "=1+2");
+    expect(rendered.container.querySelector('[data-og-cell="A1"]')?.textContent).toBe("=1+2");
+    expect(
+      rendered.container.querySelector('[data-og-cell="A1"]')?.getAttribute("aria-label"),
+    ).toContain("awaiting calculation");
+    await actRun(() => save.resolve());
+    await rendered.rerender(
+      <SpreadsheetProjectionGrid
+        projection={{
+          ...projection(2, ["3"]),
+          readCell: () => ({ value: 3, input: "=1+2", format: {} }),
+        }}
+        commit={() => {}}
+      />,
+    );
+    expect(rendered.container.querySelector('[data-og-cell="A1"]')?.textContent).toBe("3");
+    await rendered.unmount();
+  });
+
   test("refocusing pending input preserves the newest draft until the canonical projection catches up", async () => {
     const save = deferred();
     const rendered = await renderComponent(
@@ -137,8 +176,10 @@ describe("spreadsheet command state", () => {
     );
     await enter(rendered.container, "old intent");
     await enter(rendered.container, "new intent");
+    expect(rendered.container.querySelector('[data-og-cell="A1"]')?.textContent).toBe("new intent");
     await actRun(() => first.reject(new Error("old failure")));
     expect(rendered.container.querySelector('[role="alert"]')).toBeNull();
+    expect(rendered.container.querySelector('[data-og-cell="A1"]')?.textContent).toBe("new intent");
     const input = rendered.container.querySelector<HTMLInputElement>(
       '[aria-label="Formula or value"]',
     )!;

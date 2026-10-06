@@ -60,7 +60,11 @@ class FakeEditableSpreadsheetSession {
   readonly modality = "spreadsheet" as const;
   readonly applied: SpreadsheetArtifactCommandBatch[] = [];
   readonly viewportQueries: EditableSpreadsheetViewportQuery[] = [];
+  readonly viewportCallbacks: EditableSpreadsheetViewportListener[] = [];
   createCalls = 0;
+  deferViewport = false;
+  sheetName = "Data";
+  renameResult: Promise<void> | null = null;
   private revision = 1n;
   private value = "from Worker";
   private projectedDate: string | null = null;
@@ -120,6 +124,9 @@ class FakeEditableSpreadsheetSession {
     } else if (command?.kind === "row.height.set") {
       if (command.height === null) this.rowHeights.delete(command.row);
       else this.rowHeights.set(command.row, command.height);
+    } else if (command?.kind === "sheet.rename") {
+      await this.renameResult;
+      this.sheetName = command.name;
     }
     this.revision += 1n;
     this.publishViewports();
@@ -143,9 +150,10 @@ class FakeEditableSpreadsheetSession {
     listener: EditableSpreadsheetViewportListener,
   ): () => void {
     this.viewportQueries.push(query);
+    this.viewportCallbacks.push(listener);
     const entry = { query, listener };
     this.viewportListeners.add(entry);
-    listener(this.viewport(query));
+    if (!this.deferViewport) listener(this.viewport(query));
     return () => this.viewportListeners.delete(entry);
   }
   async querySpreadsheetMetadata() {
@@ -226,11 +234,186 @@ class FakeEditableSpreadsheetSession {
     for (const { query, listener } of this.viewportListeners) listener(this.viewport(query));
   }
   private metadata() {
-    return metadata(this.revision, [...this.rowHeights], [...this.columnWidths]);
+    const result = metadata(this.revision, [...this.rowHeights], [...this.columnWidths]);
+    return {
+      ...result,
+      sheets: result.sheets.map((sheet) => ({ ...sheet, name: this.sheetName })),
+    };
   }
 }
 
 describe("SDK-backed editable spreadsheet", () => {
+  test("viewport replacement keeps covered cells visible while the Worker query is pending", async () => {
+    const fake = new FakeEditableSpreadsheetSession();
+    const sheet = metadata().sheets[0]!;
+    const rendered = await renderComponent(
+      <EditableSpreadsheetGrid
+        session={fake as unknown as EditableArtifactSession}
+        sheet={sheet}
+        metadataRevision={1n}
+      />,
+    );
+    await flush();
+    fake.deferViewport = true;
+    const grid = rendered.container.querySelector<HTMLElement>('[role="grid"]')!;
+    const queries = fake.viewportQueries.length;
+    await actRun(() => {
+      Object.defineProperty(grid, "clientWidth", { configurable: true, value: 300 });
+      window.dispatchEvent(new Event("resize"));
+    });
+    await flush(30);
+    expect(fake.viewportQueries.length).toBeGreaterThan(queries);
+    expect(rendered.container.querySelector('[data-og-cell="A1"]')?.textContent).toBe(
+      "from Worker",
+    );
+    await rendered.unmount();
+  });
+
+  test("a retained viewport never crosses sessions or sheet generations, even with late callbacks", async () => {
+    const fake = new FakeEditableSpreadsheetSession();
+    const sheet = metadata().sheets[0]!;
+    const rendered = await renderComponent(
+      <EditableSpreadsheetGrid
+        session={fake as unknown as EditableArtifactSession}
+        sheet={sheet}
+        metadataRevision={1n}
+      />,
+    );
+    const oldCallback = fake.viewportCallbacks.at(-1)!;
+    const oldProjection = await fake.querySpreadsheetViewport(fake.viewportQueries.at(-1)!);
+    fake.deferViewport = true;
+    await rendered.rerender(
+      <EditableSpreadsheetGrid
+        session={fake as unknown as EditableArtifactSession}
+        sheet={{ ...sheet, generationId: "22222222222222222222222222222222" }}
+        metadataRevision={2n}
+      />,
+    );
+    await actRun(() => oldCallback(oldProjection));
+    expect(rendered.container.querySelector('[data-og-cell="A1"]')?.textContent).toBe("");
+    const replacement = new FakeEditableSpreadsheetSession();
+    replacement.deferViewport = true;
+    await rendered.rerender(
+      <EditableSpreadsheetGrid
+        session={replacement as unknown as EditableArtifactSession}
+        sheet={sheet}
+        metadataRevision={1n}
+      />,
+    );
+    await actRun(() => oldCallback(oldProjection));
+    expect(rendered.container.querySelector('[data-og-cell="A1"]')?.textContent).toBe("");
+    await rendered.unmount();
+  });
+
+  test("double-click renames through the canonical generation-pinned command", async () => {
+    const fake = new FakeEditableSpreadsheetSession();
+    let accept!: () => void;
+    fake.renameResult = new Promise<void>((resolve) => {
+      accept = resolve;
+    });
+    const rendered = await renderComponent(
+      <EditableSpreadsheetArtifactSurface session={fake as unknown as EditableArtifactSession} />,
+    );
+    const tab = rendered.container.querySelector<HTMLButtonElement>('[role="tab"]')!;
+    await actRun(() => tab.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+    const input = rendered.container.querySelector<HTMLInputElement>(
+      '[aria-label="Worksheet name"]',
+    )!;
+    expect(input).not.toBeNull();
+    expect(
+      rendered.container.querySelector('[role="tab"][aria-selected="true"]')?.textContent,
+    ).toBe("Data");
+    await actRun(() => replaceInputValue(input, "Forecast"));
+    await actRun(() =>
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })),
+    );
+    expect(fake.applied[0]?.commands).toEqual([
+      {
+        kind: "sheet.rename",
+        sheet: { kind: "generation", sheetId: SHEET_ID, creationOperationId: GENERATION_ID },
+        name: "Forecast",
+      },
+    ]);
+    expect(input.disabled).toBe(true);
+    expect(rendered.container.textContent).toContain("Renaming");
+    await actRun(() => accept());
+    expect(rendered.container.querySelector('[role="tab"]')?.textContent).toBe("Forecast");
+    expect(rendered.container.querySelector('[aria-label="Worksheet name"]')).toBeNull();
+    await rendered.unmount();
+  });
+
+  test("F2 rename validates, Escape cancels, and failures preserve the proposed name for retry", async () => {
+    const fake = new FakeEditableSpreadsheetSession();
+    const rendered = await renderComponent(
+      <EditableSpreadsheetArtifactSurface session={fake as unknown as EditableArtifactSession} />,
+    );
+    const tab = () => rendered.container.querySelector<HTMLButtonElement>('[role="tab"]')!;
+    const input = () =>
+      rendered.container.querySelector<HTMLInputElement>('[aria-label="Worksheet name"]')!;
+    const press = (target: Element, key: string) =>
+      target.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+    await actRun(() => press(tab(), "F2"));
+    expect(document.activeElement).toBe(input());
+    for (const invalid of ["", "bad/name", "x".repeat(32)]) {
+      await actRun(() => replaceInputValue(input(), invalid));
+      await actRun(() => press(input(), "Enter"));
+      expect(fake.applied).toHaveLength(0);
+      expect(input().getAttribute("aria-invalid")).toBe("true");
+      expect(rendered.container.querySelector('[role="alert"]')).not.toBeNull();
+    }
+    await actRun(() => press(input(), "Escape"));
+    expect(tab().textContent).toBe("Data");
+    expect(document.activeElement).toBe(tab());
+    await actRun(() => press(tab(), "F2"));
+    await actRun(() => replaceInputValue(input(), "Forecast"));
+    fake.renameResult = Promise.reject(new Error("Rename not accepted"));
+    // Keep the rejected promise observed until the fake is invoked by the editor.
+    void fake.renameResult.catch(() => {});
+    await actRun(() => press(input(), "Enter"));
+    expect(input().value).toBe("Forecast");
+    expect(input().disabled).toBe(false);
+    expect(rendered.container.querySelector('[role="alert"]')?.textContent).toContain(
+      "Rename not accepted",
+    );
+    fake.renameResult = null;
+    await actRun(() => press(input(), "Enter"));
+    expect(fake.applied).toHaveLength(2);
+    expect(tab().textContent).toBe("Forecast");
+    await rendered.unmount();
+  });
+
+  test("rename is unavailable without write authority and late failures cannot affect a restored editor", async () => {
+    const fake = new FakeEditableSpreadsheetSession();
+    let reject!: (cause: unknown) => void;
+    fake.renameResult = new Promise<void>((_resolve, no) => {
+      reject = no;
+    });
+    const rendered = await renderComponent(
+      <EditableSpreadsheetArtifactSurface session={fake as unknown as EditableArtifactSession} />,
+    );
+    const press = (target: Element, key: string) =>
+      target.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+    const tab = () => rendered.container.querySelector<HTMLButtonElement>('[role="tab"]')!;
+    await actRun(() => press(tab(), "F2"));
+    const input = rendered.container.querySelector<HTMLInputElement>(
+      '[aria-label="Worksheet name"]',
+    )!;
+    await actRun(() => replaceInputValue(input, "Old request"));
+    await actRun(() => press(input, "Enter"));
+    await actRun(() => fake.setWritable(false));
+    await actRun(() => press(tab(), "F2"));
+    expect(rendered.container.querySelector('[aria-label="Worksheet name"]')).toBeNull();
+    expect(tab().hasAttribute("aria-keyshortcuts")).toBe(false);
+    await actRun(() => fake.setWritable(true));
+    await actRun(() => press(tab(), "F2"));
+    await actRun(() => reject(new Error("Late old failure")));
+    expect(rendered.container.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      rendered.container.querySelector<HTMLInputElement>('[aria-label="Worksheet name"]')?.value,
+    ).toBe("Data");
+    await rendered.unmount();
+  });
+
   test("direct grids honor session write authority and server pending state", async () => {
     const fake = new FakeEditableSpreadsheetSession();
     const sheet = metadata().sheets[0]!;

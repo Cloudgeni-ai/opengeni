@@ -1622,6 +1622,9 @@
 :where(.og-root).-right-0\.5,:where(.og-root) .-right-0\.5 {
     right: calc(var(--spacing) * -0.5);
   }
+:where(.og-root).-right-1,:where(.og-root) .-right-1 {
+    right: calc(var(--spacing) * -1);
+  }
 :where(.og-root).-right-3,:where(.og-root) .-right-3 {
     right: calc(var(--spacing) * -3);
   }
@@ -1642,6 +1645,9 @@
   }
 :where(.og-root).right-3,:where(.og-root) .right-3 {
     right: calc(var(--spacing) * 3);
+  }
+:where(.og-root).-bottom-1,:where(.og-root) .-bottom-1 {
+    bottom: calc(var(--spacing) * -1);
   }
 :where(.og-root).bottom-0,:where(.og-root) .bottom-0 {
     bottom: calc(var(--spacing) * 0);

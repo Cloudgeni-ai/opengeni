@@ -21,3 +21,8 @@ kernel distributions together to retain their shared build identity.
 Keep spreadsheet input responsive during delayed saves, retain pending cell
 drafts when refocused, surface independent failures without unsafe overlapping
 retries, and show server sync state separately from local command acceptance.
+
+Center resize targets on header borders and retain valid covered cells while
+viewport queries change. Show submitted cell input immediately without inventing
+formula results. Support canonical worksheet renaming by double-click or F2,
+with validated Enter/Save, Escape/Cancel, and readable pending/failure feedback.
