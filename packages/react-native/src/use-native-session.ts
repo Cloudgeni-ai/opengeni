@@ -4,17 +4,21 @@ import {
   groupTimeline,
   projectPendingApprovals,
   useComposer,
+  useGoal,
   useHumanInputRequests,
   useSession,
   useSessionControl,
   useSessionEvents,
+  useSessionLineage,
   useSessionMcpApprovalPolicy,
   useTurnQueue,
   type FileAttachmentClientLike,
+  type GoalClientLike,
   type HumanInputSessionClientLike,
   type PendingApproval,
   type SessionClientLike,
   type SessionMcpApprovalPolicyClientLike,
+  type SessionLineageClientLike,
   type SessionReadClientLike,
   type TimelineGroup,
   type TimelineItem,
@@ -31,7 +35,9 @@ export type OpenGeniNativeSessionClient = SessionClientLike &
   HumanInputSessionClientLike &
   SessionMcpApprovalPolicyClientLike &
   FileAttachmentClientLike &
-  SessionAttentionClientLike;
+  SessionAttentionClientLike &
+  GoalClientLike &
+  SessionLineageClientLike;
 
 export interface OpenGeniNativeSessionController {
   sessionId: string;
@@ -53,6 +59,10 @@ export interface OpenGeniNativeSessionController {
   control: ReturnType<typeof useSessionControl>;
   humanInput: ReturnType<typeof useHumanInputRequests>;
   mcpApprovalPolicy: ReturnType<typeof useSessionMcpApprovalPolicy>;
+  /** The session goal and its pause/resume control (web session chrome). */
+  goal: ReturnType<typeof useGoal>;
+  /** Spawned sub-agent sessions, refreshed by spawn and completion events. */
+  lineage: ReturnType<typeof useSessionLineage>;
   active: boolean;
   runActive: boolean;
   error: Error | null;
@@ -119,6 +129,21 @@ export function useOpenGeniNativeSession(input: {
     enabled: environment.active,
     events: events.events,
   });
+  const goal = useGoal(input.sessionId, {
+    client: input.client,
+    workspaceId: input.workspaceId,
+    enabled: environment.active,
+    events: events.events,
+  });
+  // As on web: events refresh on spawn and completion; the poll catches a
+  // child's own status changes, which emit nothing on this feed.
+  const lineage = useSessionLineage(input.sessionId, {
+    client: input.client,
+    workspaceId: input.workspaceId,
+    enabled: environment.active,
+    events: events.events,
+    pollIntervalMs: 30_000,
+  });
   const approvals = useMemo(() => projectPendingApprovals(events.events), [events.events]);
   const timelineGroups = useMemo(() => groupTimeline(events.timeline), [events.timeline]);
   useNativeReadAcknowledgement({
@@ -170,6 +195,8 @@ export function useOpenGeniNativeSession(input: {
     control,
     humanInput,
     mcpApprovalPolicy,
+    goal,
+    lineage,
     active: environment.active,
     runActive: sessionRunActive(events.sessionStatus ?? session.session?.status ?? null),
     error:

@@ -159,6 +159,10 @@
       "types": "./src/organization-model.ts",
       "default": "./src/organization-model.ts"
     },
+    "./session-agents-model": {
+      "types": "./src/session-agents-model.ts",
+      "default": "./src/session-agents-model.ts"
+    },
     "./session-list-model": {
       "types": "./src/session-list-model.ts",
       "default": "./src/session-list-model.ts"
