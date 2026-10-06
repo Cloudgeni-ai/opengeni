@@ -31,6 +31,22 @@ workspaces, settings and notifications.
 - Administration stays on the web: Settings links to workspace, organization
   and security settings.
 
+## Composer
+
+The new-chat and follow-up composers follow the web composer:
+
+- **Dictation.** The mic records with expo-audio and sends the clip to the
+  workspace's transcription API (`POST /v1/workspaces/:id/transcriptions`); the
+  text is appended to the draft. It shows only where the deployment offers
+  voice input for that workspace (`voiceInput` in the client config).
+- **Attachments** from the photo library or files, through the **+** menu.
+- **New-chat options** in the same menu: visibility, a GitHub repository and a
+  self-hosted machine when the workspace has them, with the rest on the web.
+- **Model and reasoning** from the workspace's model catalog.
+
+The home header names the current workspace and organization; tapping it opens
+the workspace switcher.
+
 ## Notifications
 
 When a session the person started asks a question or needs an approval, a turn
