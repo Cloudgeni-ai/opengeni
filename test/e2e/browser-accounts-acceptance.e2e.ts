@@ -41,6 +41,7 @@ import {
 import { createApp } from "../../apps/api/src/app";
 import { withAccountMenuAxeDiagnostics } from "./browser-account-axe-diagnostics";
 import { createAccountReadDiagnostics } from "./browser-account-read-diagnostics";
+import { createAccountBootstrapDiagnostics } from "./browser-account-bootstrap-diagnostics";
 import { observeReloadCapabilities } from "./browser-account-reload-barrier";
 import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
 import {
@@ -2762,6 +2763,7 @@ const pendingAccountApiRequests = new Map<
   Request,
   { method: string; pathname: string; actorEpoch: string | null; authorityHash: string | null }
 >();
+const accountBootstrapDiagnostics = createAccountBootstrapDiagnostics();
 const selectAdmissionDiagnostics: Array<{
   authorityHash: string | null;
   pending: Array<{
@@ -2832,6 +2834,7 @@ async function observeAccountApiRequest(
   request: Request,
   dispatch: () => Response | Promise<Response>,
 ) {
+  accountBootstrapDiagnostics.receive(request, request.method, new URL(request.url).pathname);
   const readDiagnostics = companionReadDiagnostics?.ledger;
   readDiagnostics?.start("server", request, request.method, new URL(request.url).pathname);
   const metadata = sanitizeRaceRequest({
@@ -2855,11 +2858,14 @@ async function observeAccountApiRequest(
   }
   pendingAccountApiRequests.set(request, metadata);
   try {
+    accountBootstrapDiagnostics.dispatch(request);
     const response = await dispatch();
+    accountBootstrapDiagnostics.settle(request, "resolved", response.status);
     readDiagnostics?.response("server", request, response.status);
     readDiagnostics?.finish("server", request, "handler-resolved");
     return response;
   } catch (failure) {
+    accountBootstrapDiagnostics.settle(request, "rejected", null);
     readDiagnostics?.finish("server", request, "handler-rejected");
     throw failure;
   } finally {
@@ -3121,6 +3127,10 @@ async function captureAccountConvergenceFailure(input: {
   // session-set authority here: that probe can itself change the observation.
   const evidence = {
     runId: RUN_ID,
+    // A browser request without a response may still be waiting before the
+    // edge, in the handler, or after handler completion. Keep server evidence
+    // alongside the browser ledger; an evicted history is never absence proof.
+    bootstrapServerReads: accountBootstrapDiagnostics.snapshot(),
     engine,
     capturedAt: performance.now(),
     url: page.url(),
