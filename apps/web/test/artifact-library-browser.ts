@@ -433,6 +433,28 @@ try {
       "paginated filtered query restores its place",
     );
     await page.screenshot({ path: `${output}/restored-${suffix}.png`, fullPage: true });
+    // A viewer can repopulate an invalidated catalog with fewer pages than the
+    // library retained. Back must wait for all retained rows before scrolling.
+    await page.getByRole("link", { name: "Gallery image 40", exact: true }).click();
+    await page.getByRole("heading", { name: "Gallery image 40.svg", exact: true }).waitFor();
+    await page.evaluate(async () => {
+      const router = Reflect.get(window, "artifactLibraryRouter");
+      const search = router.state.location.search;
+      await router.navigate({ search: { ...search, browse: undefined }, replace: true });
+      Reflect.get(window, "resetArtifactLibraryCatalog")();
+      await router.navigate({ search, replace: true });
+    });
+    await page.getByRole("status").filter({ hasText: "40 of 40 loaded" }).waitFor();
+    await page.getByRole("link", { name: "Artifacts", exact: true }).click();
+    await page.getByRole("link", { name: "Gallery image 60", exact: true }).waitFor();
+    assert.ok(
+      Math.abs(
+        (await page
+          .locator('[data-slot="content-page"]')
+          .evaluate((element) => element.scrollTop)) - loadedTop,
+      ) <= 1,
+      "a partial viewer cache does not consume the retained library scroll position",
+    );
     assert.deepEqual(errors, []);
     await context.close();
     console.log(

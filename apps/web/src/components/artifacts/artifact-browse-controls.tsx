@@ -104,8 +104,18 @@ function BrowseControls({
   );
   const previous = index > 0 ? catalog.items[index - 1] : undefined;
   const next = index >= 0 ? catalog.items[index + 1] : undefined;
+  const locate = useRef({ contextKey, client, cursors: [] as string[] });
+  if (locate.current.contextKey !== contextKey || locate.current.client !== client)
+    locate.current = { contextKey, client, cursors: [] };
+  const locating = Boolean(
+    index < 0 &&
+    location.pathname.replace(/\/$/, "").endsWith(`/${encodeURIComponent(artifactId)}`) &&
+    nextCursor &&
+    !catalog.error &&
+    !locate.current.cursors.includes(nextCursor),
+  );
   const waiting = pendingNext?.contextKey === contextKey && pendingNext.client === client;
-  const busy = catalog.loading || waiting;
+  const busy = catalog.loading || waiting || locating;
   const navigateTo = useCallback(
     (item: ArtifactCatalogItem) =>
       void navigate({
@@ -116,6 +126,14 @@ function BrowseControls({
       }),
     [navigate, workspaceId, search],
   );
+
+  // Reloads and new tabs do not have the library's in-memory pages. Locate a
+  // later-page artifact before declaring it absent; empty pages are not EOF.
+  useEffect(() => {
+    if (!locating || catalog.loading || !nextCursor) return;
+    locate.current.cursors.push(nextCursor);
+    loadMore();
+  }, [locating, catalog.loading, nextCursor, loadMore]);
 
   // loadMore returns void: navigate from the committed list, never an async
   // closure. Unmounting removes this effect; route/filter/authority changes
@@ -218,7 +236,7 @@ function BrowseControls({
   const position =
     index >= 0
       ? `${index + 1} of ${catalog.items.length}${catalog.nextCursor ? " loaded" : ""}`
-      : catalog.loading
+      : busy
         ? "Loading artifacts…"
         : catalog.error
           ? "List unavailable"

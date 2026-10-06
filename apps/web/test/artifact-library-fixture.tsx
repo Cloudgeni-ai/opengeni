@@ -12,11 +12,13 @@ import { ArtifactsRoute } from "../src/routes/artifacts";
 import { RetainedArtifactRoute } from "../src/routes/retained-artifact";
 import { SessionEditableArtifactsWorkspace } from "../src/components/session/editable-artifacts-workspace";
 import { artifactReturnSearch } from "../src/lib/routes";
+import { invalidateArtifactCatalog } from "../src/lib/use-artifact-catalog";
 import {
   workspaceId,
   sessionId,
   items,
   updateFixtureArtifactPin,
+  client,
 } from "./artifact-library-context";
 import "../src/styles.css";
 
@@ -72,4 +74,7 @@ const router = createRouter({
   history: createMemoryHistory({ initialEntries: [start] }),
 });
 Reflect.set(window, "artifactLibraryRouter", router);
+Reflect.set(window, "resetArtifactLibraryCatalog", () =>
+  invalidateArtifactCatalog(client, workspaceId),
+);
 createRoot(document.getElementById("root")!).render(<RouterProvider router={router} />);

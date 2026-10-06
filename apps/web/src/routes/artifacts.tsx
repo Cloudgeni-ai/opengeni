@@ -162,11 +162,13 @@ function ArtifactListRoute({
   // recreate the catalog's request lifecycle.
   const retained = useRef({
     key: positionKey,
+    client: context.client,
     pages: readArtifactLibraryPosition(context.client, positionKey).pages,
   });
-  if (retained.current.key !== positionKey)
+  if (retained.current.key !== positionKey || retained.current.client !== context.client)
     retained.current = {
       key: positionKey,
+      client: context.client,
       pages: readArtifactLibraryPosition(context.client, positionKey).pages,
     };
   const [empty, setEmpty] = useState(false);
@@ -180,7 +182,11 @@ function ArtifactListRoute({
   const position = useArtifactLibraryPosition(
     context.client,
     positionKey,
-    catalog.loading,
+    // The viewer may have repopulated an invalidated cache with only its first
+    // page. Do not consume scroll restoration before the retained pages reload.
+    catalog.loading ||
+      Boolean(catalog.error) ||
+      Boolean(catalog.nextCursor && catalog.pages < retained.current.pages),
     catalog.items.length,
     catalog.pages,
   );

@@ -79,13 +79,19 @@ function Probe({
   return <div>{catalog.items.map((entry) => entry.title).join(",")}</div>;
 }
 
-test("a returning library reloads its retained page count after cache invalidation", async () => {
+test("a returning library reloads retained pages even with a fresh partial viewer cache", async () => {
   requests = [];
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   try {
+    await act(async () => root.render(<Probe workspaceId="retained-pages" />));
+    await act(async () => requests[0]!.resolve({ items: [item("Cached")], nextCursor: "two" }));
+    expect(catalog.pages).toBe(1);
+    await act(async () => root.render(null));
+    requests = [];
     await act(async () => root.render(<Probe workspaceId="retained-pages" retainedPages={3} />));
+    expect(requests).toHaveLength(1);
     await act(async () => requests[0]!.resolve({ items: [item("First")], nextCursor: "two" }));
     expect(requests[1]!.cursor).toBe("two");
     await act(async () => requests[1]!.resolve({ items: [], nextCursor: "three" }));

@@ -504,6 +504,42 @@ test("a repeated empty cursor never starts an automatic fetch loop", async () =>
   }
 });
 
+test("a cold later-page viewer follows empty pages until its artifact is found", async () => {
+  const view = await mount(item("three"));
+  try {
+    await view.resolve([item("one")], "page-2");
+    expect(view.requests).toHaveLength(2);
+    expect(view.container.textContent).toContain("Loading artifacts…");
+    expect(view.control("Next").hasAttribute("disabled")).toBe(true);
+    await view.resolve([], "page-3");
+    expect(view.requests).toHaveLength(3);
+    await view.resolve([item("two"), item("three"), item("four")]);
+    expect(view.container.textContent).toContain("3 of 4");
+    expect(view.router.state.location.pathname).toBe(path(item("three")));
+    await act(async () => view.control("Previous").click());
+    expect(view.router.state.location.pathname).toBe(path(item("two")));
+    expect(view.history.length).toBe(2);
+  } finally {
+    await view.dispose();
+  }
+});
+
+test("a missing artifact stops locating at EOF or a repeated cursor", async () => {
+  for (const finalCursor of [null, "page-2"]) {
+    const view = await mount(item("missing"));
+    try {
+      await view.resolve([item("one")], "page-2");
+      await view.resolve([], finalCursor);
+      expect(view.requests).toHaveLength(2);
+      expect(view.container.textContent).toContain("Not in loaded list");
+      expect(view.control("Previous").hasAttribute("disabled")).toBe(true);
+      expect(view.control("Next").hasAttribute("disabled")).toBe(true);
+    } finally {
+      await view.dispose();
+    }
+  }
+});
+
 test("a delayed page cannot navigate after unmount", async () => {
   const view = await mount();
   try {

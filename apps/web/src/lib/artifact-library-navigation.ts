@@ -62,7 +62,7 @@ export function rememberArtifactLibraryPosition(
   if (cache.size > MAX_POSITIONS) cache.delete(cache.keys().next().value!);
 }
 
-/** Restore only after rows exist, not while an empty loading frame would clamp scrollTop. */
+/** Restore only after retained pages are ready, so a partial list cannot clamp scrollTop. */
 export function useArtifactLibraryPosition(
   client: object,
   key: string,
@@ -71,20 +71,32 @@ export function useArtifactLibraryPosition(
   pages: number,
 ) {
   const ref = useRef<HTMLDivElement>(null);
-  const restored = useRef<string | null>(null);
+  const restored = useRef<{ client: object; key: string } | null>(null);
+  const isRestored = restored.current?.client === client && restored.current.key === key;
   useLayoutEffect(() => {
     const element = ref.current;
-    if (!element || restored.current === key || (loading && itemCount === 0)) return;
+    if (!element || isRestored || loading) return;
     element.scrollTop = readArtifactLibraryPosition(client, key).top;
-    restored.current = key;
-  }, [client, key, loading, itemCount]);
+    restored.current = { client, key };
+  }, [client, key, loading, itemCount, isRestored]);
   const remember = () => {
-    if (restored.current !== key || !ref.current) return;
+    if (
+      loading ||
+      restored.current?.client !== client ||
+      restored.current.key !== key ||
+      !ref.current
+    )
+      return;
     rememberArtifactLibraryPosition(client, key, { top: ref.current.scrollTop, pages });
   };
   useLayoutEffect(() => {
     // Keep pagination even if appending a page does not cause a scroll event.
-    if (restored.current === key && ref.current)
+    if (
+      !loading &&
+      restored.current?.client === client &&
+      restored.current.key === key &&
+      ref.current
+    )
       rememberArtifactLibraryPosition(client, key, { top: ref.current.scrollTop, pages });
   }, [client, key, pages, loading, itemCount]);
   return { ref, onScroll: remember };

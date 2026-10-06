@@ -107,6 +107,9 @@ current browser app session. Gallery/List remains the remembered browser choice.
 Previous/Next and Left/Right browse that filtered catalog order without wrapping;
 Next loads another catalog page when needed. Sibling navigation replaces the
 viewer history entry, so browser Back still returns directly to the library.
+Cold-cache viewers load cursor pages until the current artifact is found or the
+catalog ends. Returning libraries wait for retained pages and successful loads
+before restoring their saved scroll position.
 Shortcuts leave editors, dialogs, menus and embedded content alone. Direct links
 without library context and embedded session viewers do not acquire a workspace
 browsing sequence. A full reload preserves URL filters, not in-memory positions.

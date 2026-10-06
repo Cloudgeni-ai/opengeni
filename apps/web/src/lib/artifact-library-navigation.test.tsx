@@ -122,3 +122,76 @@ test("restoration waits for rows, happens once per query and retains pagination"
     host.remove();
   }
 });
+
+test("restoration does not consume the saved position while retained pages are loading", async () => {
+  const client = {};
+  const key = "partial-cache";
+  rememberArtifactLibraryPosition(client, key, { top: 2550, pages: 3 });
+  function View({ loading, pages }: { loading: boolean; pages: number }) {
+    return <div {...useArtifactLibraryPosition(client, key, loading, pages * 60, pages)} />;
+  }
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  try {
+    await act(async () => root.render(<View loading pages={1} />));
+    expect(host.firstElementChild!.scrollTop).toBe(0);
+    expect(readArtifactLibraryPosition(client, key)).toEqual({ top: 2550, pages: 3 });
+    await act(async () => root.render(<View loading={false} pages={3} />));
+    expect(host.firstElementChild!.scrollTop).toBe(2550);
+    expect(readArtifactLibraryPosition(client, key)).toEqual({ top: 2550, pages: 3 });
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});
+
+test("changing clients resets restoration even with the same workspace and credential generation", async () => {
+  const firstClient = {};
+  const secondClient = {};
+  const key = artifactLibraryPositionKey("same-workspace", 0, defaultArtifactFilters);
+  rememberArtifactLibraryPosition(firstClient, key, { top: 550, pages: 3 });
+  function View({ client }: { client: object }) {
+    return <div {...useArtifactLibraryPosition(client, key, false, 180, 3)} />;
+  }
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  try {
+    await act(async () => root.render(<View client={firstClient} />));
+    expect(host.firstElementChild!.scrollTop).toBe(550);
+    await act(async () => root.render(<View client={secondClient} />));
+    expect(host.firstElementChild!.scrollTop).toBe(0);
+    expect(readArtifactLibraryPosition(secondClient, key).top).toBe(0);
+    expect(readArtifactLibraryPosition(firstClient, key).top).toBe(550);
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});
+
+test("an error view preserves saved position and pages until retry succeeds", async () => {
+  const client = {};
+  const key = "failed-return";
+  rememberArtifactLibraryPosition(client, key, { top: 1550, pages: 3 });
+  function View({ error }: { error: boolean }) {
+    return (
+      <div {...useArtifactLibraryPosition(client, key, error, error ? 0 : 180, error ? 0 : 3)} />
+    );
+  }
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  try {
+    await act(async () => root.render(<View error />));
+    await act(async () => host.firstElementChild!.dispatchEvent(new Event("scroll")));
+    expect(readArtifactLibraryPosition(client, key)).toEqual({ top: 1550, pages: 3 });
+    await act(async () => root.render(<View error={false} />));
+    expect(host.firstElementChild!.scrollTop).toBe(1550);
+    await act(async () => root.render(<View error />));
+    expect(readArtifactLibraryPosition(client, key)).toEqual({ top: 1550, pages: 3 });
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});

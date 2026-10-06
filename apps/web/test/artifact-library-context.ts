@@ -83,7 +83,7 @@ const siteVersion = {
   revision: 3,
   requestedTools: [],
 };
-const client = {
+export const client = {
   tools: { forWorkspace: () => ({}) },
   async updateArtifactPin(
     _workspaceId: string,
