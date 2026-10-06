@@ -68,13 +68,15 @@ Use the Tailwind semantic names only. No raw hex, no `var(--og-x, #fallback)`, n
 | `status-waiting` | Peach: Needs you, Needs reconnect, Pending review |
 | `status-running` | Amber: Running, Syncing |
 | `danger` | Red: Failed, Expired, destructive actions |
+| `session-update` | Teal: unread-chat dots and Following up markers only. Not a lifecycle color or navigation accent |
 
 **Titles are never grey.** Every title, heading, row title, notice title, empty-state title,
 card title, form label and legend is `fg`. `fg-muted` and `fg-subtle` are only for descriptions,
 meta, placeholders and counts.
 
 The palette is neutral grey everywhere (no blue or slate tint). Color appears only in the
-primary button's teal wash, the soft teal/peach glow and the status hues.
+primary button's teal wash, the soft teal/peach glow, the status hues, and the
+unread-chat / Following up markers (`session-update`: light `#0f766e`, dark `#5ad4c5`).
 
 | | Light | Dark ("graphite") |
 | --- | --- | --- |
