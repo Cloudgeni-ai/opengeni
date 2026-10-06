@@ -6653,7 +6653,6 @@
   --og-model-policy-label-short-display: none;
   --og-model-policy-effort-display: inline;
   --og-model-policy-chevron-display: inline;
-  --og-model-policy-mark-display: inline-flex;
 }
 :where(.og-root)[data-og-responsive-basis="container"] .og-composer-input,:where(.og-root) [data-og-responsive-basis="container"] .og-composer-input {
   padding-inline: var(--_og-c-input-x);
@@ -6693,9 +6692,6 @@
 }
 :where(.og-root)[data-og-responsive-basis="container"] .og-model-policy-chevron,:where(.og-root) [data-og-responsive-basis="container"] .og-model-policy-chevron {
   display: var(--og-model-policy-chevron-display);
-}
-:where(.og-root)[data-og-responsive-basis="container"] .og-model-policy-mark,:where(.og-root) [data-og-responsive-basis="container"] .og-model-policy-mark {
-  display: var(--og-model-policy-mark-display);
 }
 :where(.og-root)[data-og-responsive-basis="container"] .og-model-picker-native,:where(.og-root) [data-og-responsive-basis="container"] .og-model-picker-native {
   max-width: var(--_og-c-native-max);
@@ -6798,12 +6794,6 @@
   }
   :where(.og-root).og-composer[data-og-responsive-basis="container"] .og-composer-resume-label-short,:where(.og-root) .og-composer[data-og-responsive-basis="container"] .og-composer-resume-label-short {
     display: inline;
-  }
-}
-@container og-composer (max-width: 21.999rem) {
-  :where(.og-root)[data-og-responsive-basis="container"] :where(*),:where(.og-root) [data-og-responsive-basis="container"] :where(*) {
-    --_og-c-footer-x: 0.375rem;
-    --og-model-policy-mark-display: none;
   }
 }
 @media (pointer: coarse) {

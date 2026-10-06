@@ -431,9 +431,7 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
         {needsModel ? (
           <SparklesIcon className="size-3.5 shrink-0" aria-hidden />
         ) : (
-          <span className="og-model-policy-mark inline-flex shrink-0">
-            <SelectedModelMark props={props} selected={selected} />
-          </span>
+          <SelectedModelMark props={props} selected={selected} />
         )}
         <span className="og-model-policy-label-full min-w-0 truncate font-medium text-og-fg max-sm:hidden @max-[20rem]/model-controls:hidden">
           {needsModel ? messages.connectTitle : (selected?.label ?? fallbackName(props))}
