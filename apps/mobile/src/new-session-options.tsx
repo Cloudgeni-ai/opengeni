@@ -161,8 +161,8 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
         .catch(() => [] as VariableSet[]),
       client
         .listCapabilities(workspaceId)
-        .then((catalog) =>
-          catalog.items.flatMap((item) =>
+        .then((capabilities) =>
+          capabilities.items.flatMap((item) =>
             item.kind === "mcp" &&
             item.enabled &&
             item.runtime.available &&

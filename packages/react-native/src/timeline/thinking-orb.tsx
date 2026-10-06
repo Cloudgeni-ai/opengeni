@@ -57,6 +57,8 @@ export function ThinkingOrb({
     <Svg width={size} height={size} accessibilityElementsHidden importantForAccessibility="no">
       {frame.lines.map((line, index) => (
         <Line
+          // Stateless drawing slots retain their keys as coordinates animate.
+          // oxlint-disable-next-line react/no-array-index-key
           key={`l${index}`}
           x1={line.x1}
           y1={line.y1}
@@ -68,6 +70,8 @@ export function ThinkingOrb({
       ))}
       {frame.dots.map((dot, index) => (
         <Circle
+          // Stateless drawing slots retain their keys as coordinates animate.
+          // oxlint-disable-next-line react/no-array-index-key
           key={`d${index}`}
           cx={dot.x}
           cy={dot.y}
