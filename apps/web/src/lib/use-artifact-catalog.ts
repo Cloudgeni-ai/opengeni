@@ -50,6 +50,7 @@ export function useArtifactCatalog(
   workspaceId: string,
   filters: ArtifactCatalogFilters,
   accessKeyVersion: number,
+  retainedPages = 1,
 ) {
   const q = filters.q.trim();
   const { kind, sort, status } = filters;
@@ -120,7 +121,7 @@ export function useArtifactCatalog(
             items.push(...page.items);
             nextCursor = page.nextCursor;
             pages++;
-          } while (nextCursor && pages < (shown?.pages ?? 1));
+          } while (nextCursor && pages < Math.max(shown?.pages ?? 1, retainedPages));
           next = { items: uniqueItems(items), nextCursor, pages };
         }
         if (requests.generation !== request) return;
@@ -152,14 +153,14 @@ export function useArtifactCatalog(
         if (requests.generation === request) requests.active = false;
       }
     },
-    [client, workspaceId, key, requests, q, kind, sort, status],
+    [client, workspaceId, key, requests, q, kind, sort, status, retainedPages],
   );
   useEffect(() => {
     requests.view = { key, client };
     requests.refresh = load;
     const cached = artifactCatalogs.get(client)?.get(key);
     requests.shown = cached ? { key, client, ...cached } : null;
-    if (cached && isFresh(cached)) {
+    if (cached && isFresh(cached) && (cached.pages >= retainedPages || !cached.nextCursor)) {
       setState({ key, client, ...cached, loading: false, error: null });
     } else {
       void load();
@@ -178,7 +179,7 @@ export function useArtifactCatalog(
       requests.view = null;
       requests.refresh = null;
     };
-  }, [client, key, load, requests]);
+  }, [client, key, load, requests, retainedPages]);
   // Before the effect runs for a new view, show its cached rows instead of a spinner.
   const cached = artifactCatalogs.get(client)?.get(key);
   const current =
@@ -192,6 +193,7 @@ export function useArtifactCatalog(
     loading: current?.loading ?? true,
     error: current?.error ?? null,
     nextCursor: current?.nextCursor ?? null,
+    pages: current?.pages ?? 0,
     retry: () => void load(),
     /** Saved mutations refresh the latest mounted view, not a pre-save closure. */
     refresh: async () => {

@@ -30,7 +30,8 @@ const root = createRootRoute({
 const library = createRoute({
   getParentRoute: () => root,
   path: "/workspaces/$workspaceId/artifacts",
-  component: () => <ArtifactsRoute workspaceId={workspaceId} />,
+  validateSearch: artifactReturnSearch,
+  component: () => <ArtifactsRoute workspaceId={workspaceId} {...library.useSearch()} />,
 });
 const file = createRoute({
   getParentRoute: () => root,
@@ -70,4 +71,5 @@ const router = createRouter({
   routeTree: root.addChildren([library, file, session]),
   history: createMemoryHistory({ initialEntries: [start] }),
 });
+Reflect.set(window, "artifactLibraryRouter", router);
 createRoot(document.getElementById("root")!).render(<RouterProvider router={router} />);

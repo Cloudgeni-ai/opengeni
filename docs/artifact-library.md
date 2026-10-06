@@ -100,6 +100,17 @@ search, and a Filter menu for archived items and sorting. The session panel
 uses the same catalog with a source-session filter. Both open the existing
 type-specific viewers. Published files use `/workspaces/:workspaceId/artifacts/files/:artifactId`.
 
+Workspace-library tabs, search, sorting and archive filters travel in the URL
+when opening a viewer. The Artifacts back link and browser Back return to that
+same query, with the library's scroll position and loaded pages restored in the
+current browser app session. Gallery/List remains the remembered browser choice.
+Previous/Next and Left/Right browse that filtered catalog order without wrapping;
+Next loads another catalog page when needed. Sibling navigation replaces the
+viewer history entry, so browser Back still returns directly to the library.
+Shortcuts leave editors, dialogs, menus and embedded content alone. Direct links
+without library context and embedded session viewers do not acquire a workspace
+browsing sequence. A full reload preserves URL filters, not in-memory positions.
+
 Images load from retained storage, not the compute filesystem. Image publication
 results are primary chat output and reuse the retained-image viewer/lightbox.
 Agents should still include `![Description](artifact:<artifactId>)` in their

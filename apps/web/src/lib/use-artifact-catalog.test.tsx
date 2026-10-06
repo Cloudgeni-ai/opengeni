@@ -55,18 +55,21 @@ function Probe({
   kind = "all",
   catalogClient = client,
   invalidate = invalidateArtifactCatalog,
+  retainedPages = 1,
 }: {
   workspaceId: string;
   q?: string;
   kind?: "all" | "site";
   catalogClient?: typeof client;
   invalidate?: typeof invalidateArtifactCatalog;
+  retainedPages?: number;
 }) {
   catalog = useArtifactCatalog(
     catalogClient,
     workspaceId,
     { ...defaultArtifactFilters, q, kind },
     accessKeyVersion,
+    retainedPages,
   );
   invalidateAfterMutation = useArtifactCatalogMutationInvalidation(
     catalogClient,
@@ -75,6 +78,28 @@ function Probe({
   );
   return <div>{catalog.items.map((entry) => entry.title).join(",")}</div>;
 }
+
+test("a returning library reloads its retained page count after cache invalidation", async () => {
+  requests = [];
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<Probe workspaceId="retained-pages" retainedPages={3} />));
+    await act(async () => requests[0]!.resolve({ items: [item("First")], nextCursor: "two" }));
+    expect(requests[1]!.cursor).toBe("two");
+    await act(async () => requests[1]!.resolve({ items: [], nextCursor: "three" }));
+    expect(requests[2]!.cursor).toBe("three");
+    await act(async () => requests[2]!.resolve({ items: [item("Third")], nextCursor: "four" }));
+    expect(catalog.items.map((entry) => entry.title)).toEqual(["First", "Third"]);
+    expect(catalog.pages).toBe(3);
+    expect(catalog.nextCursor).toBe("four");
+    expect(requests).toHaveLength(3);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
 
 test("mutation refresh can be awaited while retry remains a non-blocking event handler", async () => {
   requests = [];
