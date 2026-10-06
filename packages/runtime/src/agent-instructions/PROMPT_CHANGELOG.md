@@ -23,8 +23,8 @@ scope in governance. These changes preserve destination authority and do not add
 permission for external actions or settings changes. New Slack sessions follow
 the same policy; old stored Slack session instructions remain unchanged.
 
-Prompt-size review condensed Knowledge guidance from 941 to 314 words (6,686 to
-2,351 characters), keeping workflow details in tool descriptions. The accepted
+Prompt-size review condensed Knowledge guidance from 941 to 317 words (6,686 to
+2,372 characters), keeping workflow details in tool descriptions. The accepted
 learning block supplies modes/scope without repeating the doctrine. Slack file
 guidance appears only when context contains files. Intentional legacy locks and
 the independent default-persona fixture are updated with this shared revision.

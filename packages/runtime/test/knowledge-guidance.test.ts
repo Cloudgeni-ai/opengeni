@@ -116,7 +116,7 @@ test.each([false, true])(
       "the user need not say remember",
       "adopted choices",
       "only for the current task",
-      "not unaccepted assistant proposals",
+      "not unaccepted assistant proposals as adopted decisions",
       "Respect requests not to remember",
       "one updated conclusion per experiment",
       "settled incident lessons",
