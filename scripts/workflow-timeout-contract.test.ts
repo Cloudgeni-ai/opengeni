@@ -52,6 +52,109 @@ const EXPECTED_CAPS = [
     8,
     "run",
   ],
+  [
+    "ci.yml",
+    "automation-admission",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  ["ci.yml", "plan", "Restore complete checkout history without listing refs", 5, "run"],
+  [
+    "ci.yml",
+    "source-contracts",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  ["ci.yml", "unit-shards", "Restore complete checkout history without listing refs", 5, "run"],
+  ["ci.yml", "test-suite", "Restore complete checkout history without listing refs", 5, "run"],
+  [
+    "ci.yml",
+    "browser-acceptance",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "ci.yml",
+    "package-contracts",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "open-version-pr.yml",
+    "version",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "publish-canary.yml",
+    "publish",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "publish-packages.yml",
+    "publish",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "publish-stable.yml",
+    "publish",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "release-acceptance.yml",
+    "acceptance",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "release-candidate.yml",
+    "candidate",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "release-embedded.yml",
+    "source-verification",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "release-embedded.yml",
+    "release",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  [
+    "release-publication-admission.yml",
+    "verify",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
+  ["release.yml", "version", "Restore complete checkout history without listing refs", 5, "run"],
+  ["release.yml", "publish", "Restore complete checkout history without listing refs", 5, "run"],
+  [
+    "staging-canary-dispatch.yml",
+    "receipt",
+    "Restore complete checkout history without listing refs",
+    5,
+    "run",
+  ],
   ["ci.yml", "plan", "Install exact dependency tree", 11, "run"],
   ["ci.yml", "source-contracts", "Profile impacted TypeScript 7 projects", 11, "run"],
   ["ci.yml", "source-contracts", "Run exactly the explained source guards", 16, "run"],
@@ -93,14 +196,14 @@ const EXPECTED_JOB_BUDGETS = {
   "local-startup.yml:docker": { stepCaps: 88, needed: 89, jobCap: 90 },
   "local-startup.yml:platform-preflight": { stepCaps: 2, needed: 3, jobCap: 5 },
   "publish-artifact-runtime.yml:publish": { stepCaps: 12, needed: 13, jobCap: 15 },
-  "ci.yml:plan": { stepCaps: 11, needed: 12, jobCap: 15 },
-  "ci.yml:source-contracts": { stepCaps: 27, needed: 28, jobCap: 35 },
-  "ci.yml:unit-shards": { stepCaps: 21, needed: 22, jobCap: 30 },
+  "ci.yml:plan": { stepCaps: 16, needed: 17, jobCap: 17 },
+  "ci.yml:source-contracts": { stepCaps: 32, needed: 33, jobCap: 35 },
+  "ci.yml:unit-shards": { stepCaps: 26, needed: 27, jobCap: 30 },
   "ci.yml:integration-shards": { stepCaps: 31, needed: 32, jobCap: 40 },
   "ci.yml:e2e-shards": { stepCaps: 30, needed: 31, jobCap: 35 },
-  "ci.yml:test-suite": { stepCaps: 18, needed: 19, jobCap: 30 },
-  "ci.yml:browser-acceptance": { stepCaps: 65, needed: 66, jobCap: 70 },
-  "ci.yml:package-contracts": { stepCaps: 38, needed: 39, jobCap: 55 },
+  "ci.yml:test-suite": { stepCaps: 23, needed: 24, jobCap: 30 },
+  "ci.yml:browser-acceptance": { stepCaps: 70, needed: 71, jobCap: 71 },
+  "ci.yml:package-contracts": { stepCaps: 43, needed: 44, jobCap: 55 },
   "ci.yml:browserd-real-e2e": { stepCaps: 23, needed: 24, jobCap: 25 },
   "desktop-e2e.yml:desktop-image": { stepCaps: 36, needed: 37, jobCap: 45 },
   "publish-desktop-image.yml:ghcr-mirror": { stepCaps: 5, needed: 6, jobCap: 10 },
@@ -123,7 +226,7 @@ function numericCap(value: unknown): number | null {
 }
 
 describe("workflow timeout contract", () => {
-  test("all jobs and the exact 27 run plus 5 action steps use static native caps", async () => {
+  test("all jobs and the exact 46 run plus 5 action steps use static native caps", async () => {
     const workflows = await loadWorkflows();
     const capped: Array<readonly [string, string, string, number, "run" | "action"]> = [];
     const budgets: Record<string, { stepCaps: number; needed: number; jobCap: number }> = {};
@@ -163,7 +266,7 @@ describe("workflow timeout contract", () => {
       right: readonly [string, string, string, number, "run" | "action"],
     ) => left.slice(0, 3).join("\0").localeCompare(right.slice(0, 3).join("\0"));
     expect(capped.toSorted(byIdentity)).toEqual(EXPECTED_CAPS.toSorted(byIdentity));
-    expect(capped.filter((row) => row[4] === "run")).toHaveLength(27);
+    expect(capped.filter((row) => row[4] === "run")).toHaveLength(46);
     expect(capped.filter((row) => row[4] === "action")).toHaveLength(5);
     for (const [job, expected] of Object.entries(EXPECTED_JOB_BUDGETS)) {
       expect(budgets[job], job).toEqual(expected);

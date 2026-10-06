@@ -1060,6 +1060,13 @@ if (receipt.state === "outcome_unknown") {
 tree. `browser.readDom(targetId, request)` returns a bounded element or count
 query using those fences; sensitive values are redacted.
 
+The flat `client.openBrowserTargetWithInventory(workspaceId, browserSessionId,
+{ url })` explicitly opens a tab and returns the owned tab inventory and its
+generation fences without a page observation. The default
+`client.openBrowserTarget(...)` and `browser.tabs.open(...)` still return page
+observations. Older controllers can refuse the inventory method; do not retry an
+uncertain creation through another tab-open method.
+
 Browser identities are immutable version graphs: live browser state stays
 private until `browser.publishRevision(...)` explicitly creates a new revision.
 Protected auth fills resolve connection secrets only inside the broker/controller

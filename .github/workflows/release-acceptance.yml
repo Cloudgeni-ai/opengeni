@@ -57,9 +57,56 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ inputs.source_sha }}
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
+      - name: Restore complete checkout history without listing refs
+        shell: bash
+        timeout-minutes: 5
+        env:
+          EXPECTED_CHECKOUT_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
+          fetch_args=()
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+            fetch_args+=(--unshallow)
+          fi
+          selected_fetch="$checked_out_sha"
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
+            if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
+              echo "::error::Selected checkout identity changed"
+              exit 1
+            fi
+            selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
+          fi
+          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/tags/*:refs/tags/*' \
+            "$selected_fetch" >/dev/null 2>&1; then
+            echo "::error::Could not restore complete repository history"
+            exit 1
+          fi
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" != false ] ||
+             [ "$(git rev-parse HEAD 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Repository history or source identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ] &&
+             [ "$(git rev-parse refs/remotes/origin/selected-pull 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_SHA:-}" ] &&
+             [ "$checked_out_sha" != "$EXPECTED_CHECKOUT_SHA" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_REF:-}" ] &&
+             [ "$(git rev-parse "$EXPECTED_CHECKOUT_REF" 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
       - name: Check out exact retained release controller
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:

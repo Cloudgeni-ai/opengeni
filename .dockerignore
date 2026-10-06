@@ -2,6 +2,7 @@
 .github
 .agent
 .release/controller
+.changeset
 .env
 .env.*
 !.env.example

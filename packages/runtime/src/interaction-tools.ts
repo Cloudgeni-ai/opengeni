@@ -1733,8 +1733,27 @@ async function openBrowser(
     !created &&
     !targets.some((target) => sameBrowserUrl(target.url, value.initialUrl!))
   ) {
-    await transport.openBrowserTarget(workspaceId, session.id, { url: value.initialUrl });
-    targets = (await transport.listBrowserTargets(workspaceId, session.id)).targets;
+    if (!transport.openBrowserTargetWithInventory) {
+      throw new Error("browser transport does not support metadata-only tab opening");
+    }
+    const inventory = BrowserTargetListResponse.parse(
+      await transport.openBrowserTargetWithInventory(workspaceId, session.id, {
+        url: value.initialUrl,
+      }),
+    );
+    const controllerGeneration = session.controller?.controllerGeneration;
+    if (
+      inventory.browserSessionId !== session.id ||
+      inventory.controllerGeneration !== controllerGeneration ||
+      inventory.targets.some(
+        (target) =>
+          target.browserSessionId !== session.id ||
+          target.controllerGeneration !== controllerGeneration,
+      )
+    ) {
+      throw new Error("browser transport returned inventory for another session binding");
+    }
+    targets = inventory.targets;
   }
   return { session, targets };
 }
