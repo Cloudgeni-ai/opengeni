@@ -740,7 +740,7 @@ export function buildTimeline(
         }
         const open = last();
         if (open?.kind === "reasoning" && open.streaming && open.turnId === turnId) {
-          open.text += text;
+          open.text += reasoningDeltaJoiner(open.text, text) + text;
           break;
         }
         closeStreamingTail();
@@ -3299,6 +3299,17 @@ function stringList(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
     : [];
+}
+
+/**
+ * Some providers stream each reasoning summary part as its own delta
+ * ("**Checking the workspace**", then "**Inspecting guidance**"). Joined
+ * as-is the parts run together and their bold markers collide ("****"), so a
+ * new part that opens bold right after one that closed bold starts a new
+ * paragraph. Ordinary token deltas are joined unchanged.
+ */
+function reasoningDeltaJoiner(previous: string, next: string): string {
+  return previous.endsWith("**") && next.startsWith("**") ? "\n\n" : "";
 }
 
 function reasoningText(payload: unknown): string {
