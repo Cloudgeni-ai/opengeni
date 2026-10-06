@@ -143,6 +143,13 @@ authority additionally opens/selects/closes targets and submits the same fenced
 lists, and ends sessions. Browser origins are deny-by-default and explicitly
 allowlisted; non-browser placement clients omit `Origin`.
 
+Control clients can explicitly open a tab through
+`POST /v1/browser-sessions/:id/targets/open-with-inventory`. It returns the owned
+tab inventory with session/controller and target/document generations after
+navigation, without collecting an accessibility tree. The ordinary tab-open
+route still returns its page observation. An unsupported controller refuses the
+inventory route; a failed or uncertain open is never replayed on another route.
+
 Both canonical sandbox images compile the service from this package, copy the
 exact `agent-browser` 0.33.2 native binary for the target architecture, verify its
 hard-coded SHA-256 digest, and install an exact Chromium/Chrome package version.

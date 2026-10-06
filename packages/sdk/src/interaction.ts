@@ -1516,6 +1516,13 @@ export interface InteractionTransport {
     request?: BrowserOpenTargetRequest,
     options?: OpenGeniRequestOptions,
   ): Promise<BrowserObservation>;
+  /** Optional for custom transports predating metadata-only tab opening. */
+  openBrowserTargetWithInventory?(
+    workspaceId: string,
+    browserSessionId: string,
+    request?: BrowserOpenTargetRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<BrowserTargetListResponse>;
   selectBrowserTarget(
     workspaceId: string,
     browserSessionId: string,

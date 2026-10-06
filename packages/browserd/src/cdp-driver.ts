@@ -531,6 +531,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   async openTarget(url = "about:blank"): Promise<BrowserObservationValue> {
+    const state = await this.createTarget(url);
+    return await this.observe(state.targetId);
+  }
+
+  /** Open a tab when the caller needs inventory rather than page content. */
+  async openTargetWithInventory(url = "about:blank"): Promise<BrowserTargetValue[]> {
+    const state = await this.createTarget(url);
+    if (!state.dialog) await this.refreshFrame(state);
+    const targets = await this.listTargets();
+    this.assertCurrentTargetState(state);
+    return targets;
+  }
+
+  private async createTarget(url: string): Promise<TargetState> {
     if (!this.tabControl) {
       throw new InteractionDefiniteDriverError(
         "unsupported",
@@ -554,7 +568,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (deferNavigation) {
       await this.navigate(createdState, url);
     }
-    return await this.observe(result.targetId);
+    return createdState;
   }
 
   async selectTarget(targetId: string): Promise<BrowserObservationValue> {

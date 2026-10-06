@@ -4254,6 +4254,22 @@ export class OpenGeniClient {
     );
   }
 
+  /** Opens a tab and returns inventory without collecting page content. */
+  async openBrowserTargetWithInventory(
+    workspaceId: string,
+    browserSessionId: string,
+    request: BrowserOpenTargetRequest = {},
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserTargetListResponse> {
+    return await this.requestJson<BrowserTargetListResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets/open-with-inventory`,
+      request,
+      {},
+      options,
+    );
+  }
+
   async selectBrowserTarget(
     workspaceId: string,
     browserSessionId: string,

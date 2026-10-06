@@ -35,6 +35,76 @@ afterEach(async () => {
 });
 
 describe("BrowserControlClient", () => {
+  test.each(["exact", "session", "controller", "target", "extra", "legacy", "unknown"] as const)(
+    "metadata-only tab opening validates binding and never replays (%s)",
+    async (scenario) => {
+      const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+      const target = browserTarget(reference.browserSessionId, reference.controllerGeneration);
+      const routes: string[] = [];
+      const server = Bun.serve({
+        port: 0,
+        async fetch(request) {
+          routes.push(`${request.method} ${new URL(request.url).pathname}`);
+          expect(request.headers.get("authorization")).toBe(`Bearer ${controlToken}`);
+          expect(await request.json()).toEqual({ url: "https://new.example.test/" });
+          if (scenario === "legacy" || scenario === "unknown")
+            return Response.json(
+              {
+                protocolVersion: 1,
+                ok: false,
+                error: {
+                  code: scenario === "legacy" ? "resource_not_found" : "outcome_unknown",
+                  message: scenario === "legacy" ? "route not found" : "synthetic uncertain open",
+                  retryable: false,
+                },
+              },
+              { status: scenario === "legacy" ? 404 : 409 },
+            );
+          return success({
+            browserSessionId: scenario === "session" ? randomUUID() : reference.browserSessionId,
+            controllerGeneration:
+              scenario === "controller" ? "other-controller" : reference.controllerGeneration,
+            targets: [
+              {
+                ...target,
+                controllerGeneration:
+                  scenario === "target" ? "other-controller" : target.controllerGeneration,
+              },
+            ],
+            ...(scenario === "extra" ? { observation: {} } : {}),
+          });
+        },
+      });
+      const placement = await localPlacement();
+      try {
+        const client = new BrowserControlClient(placement.session, {
+          adminToken,
+          port: server.port,
+        });
+        const browser = client.sessionClient({ reference, controlToken, viewToken });
+        const pending = browser.openTargetWithInventory("https://new.example.test/");
+        if (scenario === "exact")
+          expect(await pending).toEqual({ ...reference, targets: [target] });
+        else if (scenario === "legacy")
+          await expect(pending).rejects.toMatchObject({
+            status: 409,
+            error: { code: "unsupported", retryable: false },
+          });
+        else if (scenario === "unknown")
+          await expect(pending).rejects.toMatchObject({
+            status: 409,
+            error: { code: "outcome_unknown", retryable: false },
+          });
+        else await expect(pending).rejects.toThrow();
+        expect(routes).toEqual([
+          `POST /v1/browser-sessions/${reference.browserSessionId}/targets/open-with-inventory`,
+        ]);
+      } finally {
+        await server.stop(true);
+      }
+    },
+  );
+
   test.each([undefined, false, true, "true"])(
     "negotiates explicit server-enforced RFB scope capability (%p)",
     async (capability) => {

@@ -86,7 +86,12 @@ const legacyBrowserUnusedMethods = [
 // The agent's browser still capture uses the same authenticated, bounded SDK
 // response transport as the existing computer capture method. It is intentionally
 // available to runtime callers even though the web UI does not call it.
-const agentInteractionMethods = ["captureBrowserTarget", "getBrowserTargetState", "readBrowserDom"];
+const agentInteractionMethods = [
+  "captureBrowserTarget",
+  "getBrowserTargetState",
+  "readBrowserDom",
+  "openBrowserTargetWithInventory",
+];
 
 // #3470 retired the preference editor and learning/onboarding hooks, not their
 // public SDK contracts. Preserve these existing browser methods for old bundles

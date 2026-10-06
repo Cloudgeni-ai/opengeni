@@ -122,6 +122,135 @@ describe("interaction attempt tools", () => {
     }
   });
 
+  test.each([false, true])(
+    "browser_open reuse consumes authoritative inventory once (explicit=%s)",
+    async (explicit) => {
+      const session = discoveredBrowserSession(browserSessionId, sessionId);
+      session.lifecycle = "active";
+      session.controller = {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      };
+      const prior = { ...browserTarget(), selected: false };
+      const opened = {
+        ...browserTarget(),
+        id: "new-tab",
+        url: "https://redirect.example.test/final",
+      };
+      let lists = 0,
+        opens = 0;
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          getBrowserSession: async () => session,
+          listBrowserSessions: async () => ({ revision: 1, sessions: [session] }),
+          listBrowserTargets: async () => {
+            lists++;
+            return { browserSessionId, controllerGeneration: "controller-1", targets: [prior] };
+          },
+          openBrowserTargetWithInventory: async (workspace, id, request) => {
+            opens++;
+            expect([workspace, id, request?.url]).toEqual([
+              workspaceId,
+              browserSessionId,
+              "https://new.example.test/",
+            ]);
+            return {
+              browserSessionId,
+              controllerGeneration: "controller-1",
+              targets: [prior, opened],
+            };
+          },
+          openBrowserTarget: async () => {
+            throw new Error("full observation must not be discarded");
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        { ...(explicit ? { browserSessionId } : {}), initialUrl: "https://new.example.test/" },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      expect(result.structuredContent).toEqual({ session, targets: [prior, opened] });
+      expect(lists).toBe(1);
+      expect(opens).toBe(1);
+    },
+  );
+
+  test.each(["matching", "missing", "unknown", "session", "generation", "target"] as const)(
+    "browser_open reuse preserves no-op, refusal and unknown boundaries (%s)",
+    async (scenario) => {
+      const session = discoveredBrowserSession(browserSessionId, sessionId);
+      session.lifecycle = "active";
+      session.controller = {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      };
+      const target = browserTarget();
+      let lists = 0,
+        opens = 0;
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          getBrowserSession: async () => session,
+          listBrowserTargets: async () => {
+            lists++;
+            return { browserSessionId, controllerGeneration: "controller-1", targets: [target] };
+          },
+          ...(scenario === "missing"
+            ? {}
+            : {
+                openBrowserTargetWithInventory: async () => {
+                  opens++;
+                  if (scenario === "unknown") throw new Error("synthetic outcome unknown");
+                  return {
+                    browserSessionId: scenario === "session" ? randomUUID() : browserSessionId,
+                    controllerGeneration:
+                      scenario === "generation" ? "other-controller" : "controller-1",
+                    targets: [
+                      {
+                        ...target,
+                        controllerGeneration:
+                          scenario === "target" ? "other-controller" : "controller-1",
+                      },
+                    ],
+                  };
+                },
+              }),
+          openBrowserTarget: async () => {
+            throw new Error("must not fall back to an observation mutation");
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+      });
+      const pending = definitions[0]!.execute(
+        {
+          browserSessionId,
+          initialUrl: scenario === "matching" ? target.url : "https://new.example.test/",
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      if (scenario === "matching")
+        expect((await pending).structuredContent).toEqual({ session, targets: [target] });
+      else
+        await expect(pending).rejects.toThrow(
+          scenario === "missing"
+            ? "does not support metadata-only"
+            : scenario === "unknown"
+              ? "synthetic outcome unknown"
+              : "another session binding",
+        );
+      expect(lists).toBe(1);
+      expect(opens).toBe(["matching", "missing"].includes(scenario) ? 0 : 1);
+    },
+  );
+
   test("explicit browser selection rejects a storage-mode mismatch before using targets", async () => {
     const session = discoveredBrowserSession(browserSessionId, sessionId);
     const definitions = createInteractionAttemptToolDefinitions({

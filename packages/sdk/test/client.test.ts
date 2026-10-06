@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient, type OpenGeniClientOptions } from "../src/client";
 import { OpenGeniDocumentAuthorityClient } from "../src/document-authority-client";
+import type { BrowserObservation, BrowserTargetListResponse } from "../src/interaction";
 import {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
@@ -69,6 +70,71 @@ function makeClient(
   });
   return { client, requests };
 }
+
+test("metadata-only tab opening opts into inventory while default opening still returns observation", async () => {
+  const browserSessionId = "11111111-1111-4111-8111-111111111111";
+  const target: BrowserObservation["target"] = {
+    id: "synthetic-target",
+    browserSessionId,
+    controllerGeneration: "controller-1",
+    targetGeneration: "target-1-generation",
+    documentGeneration: "document-1",
+    kind: "page",
+    title: "Synthetic page",
+    url: "https://new.example.test/",
+    selected: true,
+    attached: true,
+    createdAt: "2026-01-01T00:00:00.000Z",
+  };
+  const inventory: BrowserTargetListResponse = {
+    browserSessionId,
+    controllerGeneration: "controller-1",
+    targets: [target],
+  };
+  const observation: BrowserObservation = {
+    protocolVersion: 1,
+    observationId: "synthetic-observation",
+    browserSessionId,
+    target,
+    frameId: "frame-1",
+    semantic: { kind: "snapshot", roots: [], nodeCount: 0 },
+    screenshot: null,
+    focusedRef: null,
+    changedRegions: [],
+    diagnostics: {
+      consoleErrorCount: 0,
+      failedRequestCount: 0,
+      downloadCount: 0,
+      pageErrorCount: 0,
+    },
+    dialog: null,
+    observedAt: "2026-01-01T00:00:00.000Z",
+  };
+  const { client, requests } = makeClient((request) =>
+    jsonResponse(request.url.endsWith("/open-with-inventory") ? inventory : observation, 201),
+  );
+  expect(
+    await client.openBrowserTargetWithInventory(WORKSPACE_ID, browserSessionId, {
+      url: "https://new.example.test/",
+    }),
+  ).toEqual(inventory);
+  expect(
+    await client.openBrowserTarget(WORKSPACE_ID, browserSessionId, {
+      url: "https://new.example.test/",
+    }),
+  ).toEqual(observation);
+  expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
+    `/v1/workspaces/${WORKSPACE_ID}/browser-sessions/${browserSessionId}/targets/open-with-inventory`,
+    `/v1/workspaces/${WORKSPACE_ID}/browser-sessions/${browserSessionId}/targets`,
+  ]);
+  expect(
+    requests.every(
+      (request) =>
+        request.method === "POST" &&
+        request.body === JSON.stringify({ url: "https://new.example.test/" }),
+    ),
+  ).toBe(true);
+});
 
 test("account settings opt into inactive inventory without changing the execution picker default", async () => {
   const { client, requests } = makeClient(() => jsonResponse({ connections: [] }));
