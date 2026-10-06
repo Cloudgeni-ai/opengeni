@@ -1,0 +1,39 @@
+# Fragment for the official prometheus-community/prometheus-adapter chart
+# (5.3.0 / adapter v0.12.0). Merge with your existing authenticated Prometheus
+# connection and APIService/TLS values; this file installs nothing itself.
+rules:
+  default: false
+  custom:
+    # Keep the existing agent-only Pods metric during the initial opt-in.
+    - seriesQuery: 'opengeni_turns_inflight{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: {resource: namespace}
+          pod: {resource: pod}
+      name:
+        as: opengeni_turns_inflight
+      metricsQuery: 'max(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
+    # Namespace Object metrics. The HPA's release selector becomes an exact
+    # LabelMatcher; do not drop it or SUM multiple releases/Temporal queues.
+    - seriesQuery: '{__name__=~"opengeni_turn_worker_(demand|queued|busy)",namespace!="",release!="",temporal_namespace!="",task_queue!=""}'
+      resources:
+        overrides:
+          namespace: {resource: namespace}
+      name:
+        matches: '^(opengeni_turn_worker_(demand|queued|busy))$'
+        as: '${1}'
+      # No lookback resurrection on stalled/evaluation-error rule groups.
+      # An empty/error result must remain missing at custom.metrics, not zero.
+      metricsQuery: |
+        max(
+          <<.Series>>{<<.LabelMatchers>>} >= 0
+          and <<.Series>>{<<.LabelMatchers>>} < +Inf
+          and (time() - timestamp(<<.Series>>{<<.LabelMatchers>>}) < 30)
+          and (time() - timestamp(<<.Series>>{<<.LabelMatchers>>}) >= -5)
+          and ignoring (__name__) (
+            <<.Series>>_valid_until_timestamp_seconds{<<.LabelMatchers>>} > time()
+            and <<.Series>>_valid_until_timestamp_seconds{<<.LabelMatchers>>} <= time() + 65
+            and (time() - timestamp(<<.Series>>_valid_until_timestamp_seconds{<<.LabelMatchers>>}) < 30)
+            and (time() - timestamp(<<.Series>>_valid_until_timestamp_seconds{<<.LabelMatchers>>}) >= -5)
+          )
+        ) by (<<.GroupBy>>)

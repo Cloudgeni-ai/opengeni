@@ -1,5 +1,5 @@
 {{- if .Values.worker.enabled }}
-{{- $extraEnv := include "opengeni.extraEnv" (dict "root" . "entries" .Values.worker.extraEnv "reserved" (list "OPENGENI_WORKER_ROLE" "OPENGENI_WORKER_HTTP_PORT" "OPENGENI_OPENSANDBOX_KUBERNETES_INVENTORY_NAMESPACE")) }}
+{{- $extraEnv := include "opengeni.extraEnv" (dict "root" . "entries" .Values.worker.extraEnv "reserved" (list "OPENGENI_WORKER_ROLE" "OPENGENI_WORKER_HTTP_PORT" "OPENGENI_POD_UID" "OPENGENI_OPENSANDBOX_KUBERNETES_INVENTORY_NAMESPACE")) }}
 {{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" (.Values.worker.turns.priorityClassName | default .Values.worker.priorityClassName) "tier" "execution") }}
 apiVersion: apps/v1
 kind: Deployment
@@ -72,6 +72,10 @@ spec:
               value: {{ .Values.worker.containerPort | quote }}
             - name: OPENGENI_WORKER_ROLE
               value: turn
+            - name: OPENGENI_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
             {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled }}
             {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.objectStorageInternalEndpoint" .)) | nindent 12 }}
             {{- end }}
