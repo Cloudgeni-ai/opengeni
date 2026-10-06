@@ -4,7 +4,7 @@
    attaches/swaps the session's active sandbox + refetches. Dual-consumer safe —
    it reads only the structural client, so an adapter works in any frontend.
    -------------------------------------------------------------------------- */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import { actRun, registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, WORKSPACE_ID } from "./fake-client";
 import { useMachines, type MachinesClientLike } from "../src/hooks/use-machines";
@@ -437,20 +437,44 @@ describe("useMachines", () => {
       await flush();
       expect(lists).toBe(1);
       expect(hook.result.current.error?.message).toBe(`OpenGeni API ${status}`);
-      // Many poll intervals later: no repeated refused read.
-      await actRun(() => new Promise((resolve) => setTimeout(resolve, 40)));
-      expect(lists).toBe(1);
-      // A permission/workspace change (the host disables then re-enables the
-      // read) forgets the refusal and reads again immediately.
-      refuse = false;
-      await hook.rerender({ enabled: false });
-      await flush();
-      expect(hook.result.current.error).toBeNull();
-      await hook.rerender({ enabled: true });
-      await flush();
-      expect(lists).toBe(2);
-      expect(hook.result.current.machines.length).toBe(2);
-      await hook.unmount();
+
+      // Successful reads resume polling. Control the clock so a legitimate
+      // 5 ms poll cannot race the immediate re-enable assertion on a busy host.
+      jest.useFakeTimers();
+      try {
+        // Many poll intervals later: no repeated refused read.
+        await actRun(() => jest.advanceTimersByTime(40));
+        expect(lists).toBe(1);
+        // A permission/workspace change (the host disables then re-enables the
+        // read) forgets the refusal and reads again immediately.
+        refuse = false;
+        await hook.rerender({ enabled: false });
+        expect(hook.result.current.error).toBeNull();
+        await hook.rerender({ enabled: true });
+        expect(lists).toBe(2);
+        expect(hook.result.current.machines.length).toBe(2);
+
+        await actRun(() => jest.advanceTimersByTime(4));
+        expect(lists).toBe(2);
+        await actRun(() => jest.advanceTimersByTime(1));
+        expect(lists).toBe(3);
+        expect(hook.result.current.error).toBeNull();
+
+        // A later refusal halts the resumed poll, too.
+        refuse = true;
+        await actRun(() => jest.advanceTimersByTime(5));
+        expect(lists).toBe(4);
+        expect(hook.result.current.error?.message).toBe(`OpenGeni API ${status}`);
+        await actRun(() => jest.advanceTimersByTime(40));
+        expect(lists).toBe(4);
+      } finally {
+        try {
+          await hook.unmount();
+          jest.advanceTimersByTime(0);
+        } finally {
+          jest.useRealTimers();
+        }
+      }
     });
   }
 
