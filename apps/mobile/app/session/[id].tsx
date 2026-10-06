@@ -142,7 +142,8 @@ function LiveSession(props: {
           renderLeading: () => attachMenu,
           options: pill ? (
             <ComposerPill
-              label={pill.effort ? `${pill.name} · ${pill.effort}` : pill.name}
+              label={pill.name}
+              detail={pill.effort}
               leading={<ModelMark model={model ?? ""} size={14} color={theme.colors.fg} />}
               onPress={
                 policy
