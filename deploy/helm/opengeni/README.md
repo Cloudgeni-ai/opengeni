@@ -117,6 +117,10 @@ initial policy disables downscale. See
 [`worker-autoscaling.md`](../../../docs/worker-autoscaling.md) for prerequisites,
 exact semantics, adapter freshness fencing and recovery gates. Its dedicated
 `worker-scaler-prometheusrule.yaml` does not alter the accepted legacy alerts.
+All Object metrics bind namespace/release/environment/Temporal namespace/queue;
+the adapter example must be rebound to that exact rendered source identity.
+Atomic completion evidence rejects empty-but-failed classification stages;
+queue producer observations expire at 45 seconds, other raw/activity TTLs at 60.
 
 Run real Helm/schema and Prometheus rule fixtures with:
 

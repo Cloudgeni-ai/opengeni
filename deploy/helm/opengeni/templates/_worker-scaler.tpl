@@ -12,6 +12,19 @@
 )
 {{- end -}}
 
+{{/* Exact source identity shared by rules and all three Object selectors. */}}
+{{- define "opengeni.workerScaler.identity" -}}
+{{- toJson (dict "namespace" .Release.Namespace "release" .Release.Name "environment" (.Values.config.OPENGENI_ENVIRONMENT | default "production") "temporal_namespace" (.Values.config.OPENGENI_TEMPORAL_NAMESPACE | default "default") "task_queue" (printf "%s-turns" (.Values.config.OPENGENI_TEMPORAL_TASK_QUEUE | default "opengeni-runs-ts"))) -}}
+{{- end -}}
+
+{{/* Atomic completion evidence in the SAME rule as its data. Empty deletion
+or mismatch vectors are legitimate, but never evidence that a failed stage
+evaluated. This marker is not a pod observation and every data selector excludes
+it. It cannot manufacture queue/occupancy zeros. */}}
+{{- define "opengeni.workerScaler.stageComplete" -}}
+or label_replace(vector(1), "scaler_stage_complete", "true", "__name__", ".*")
+{{- end -}}
+
 {{/* Carry ORIGINAL expiry, never time()+TTL from a recorded intermediate.
 All four app clocks share the raw cohort labels. The fifth uses discovery up,
 joined back onto that same cohort so the minimum keeps the complete identity. */}}
@@ -20,7 +33,7 @@ min without (deadline_source) (
   {{- range $index, $series := list .value .valid .observed }}
   {{ if $index }}or{{ end }} label_replace(timestamp({{ $series }}) + 60, "deadline_source", "sample{{ $index }}", "__name__", ".*")
   {{- end }}
-  or label_replace({{ .observed }} + 60, "deadline_source", "producer", "__name__", ".*")
+  or label_replace({{ .observed }} + {{ .producerAge | default 60 }}, "deadline_source", "producer", "__name__", ".*")
   or label_replace(
     0 * {{ .value }} + on (namespace, pod, pod_uid, job, instance) group_left ()
       (max by (namespace, pod, pod_uid, job, instance) (timestamp({{ .up }})) + 60),

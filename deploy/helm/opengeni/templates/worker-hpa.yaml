@@ -66,7 +66,7 @@ spec:
           name: {{ $metric }}
           selector:
             matchLabels:
-              release: {{ $.Release.Name | quote }}
+              {{- include "opengeni.workerScaler.identity" $ | fromJson | toYaml | nindent 14 }}
         target:
           type: AverageValue
           averageValue: {{ if eq $metric "opengeni_turn_worker_busy" }}"1"{{ else }}{{ $config.autoscaling.queueDemand.targetAverageValue | quote }}{{ end }}

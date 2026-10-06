@@ -1,6 +1,11 @@
 # Fragment for the official prometheus-community/prometheus-adapter chart
 # (5.3.0 / adapter v0.12.0). Merge with your existing authenticated Prometheus
 # connection and APIService/TLS values; this file installs nothing itself.
+# SOURCE-BOUND example identity: namespace/release opengeni, production,
+# Temporal default, opengeni-runs-ts-turns. Replace ALL five literals in discovery
+# and EVERY query selector with the actual rendered worker-scaler group.labels.
+# Do not replace this fence with request-only LabelMatchers: partial API queries
+# must never select another environment/Temporal namespace/queue.
 rules:
   default: false
   custom:
@@ -13,9 +18,9 @@ rules:
       name:
         as: opengeni_turns_inflight
       metricsQuery: 'max(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
-    # Namespace Object metrics. The HPA's release selector becomes an exact
-    # LabelMatcher; do not drop it or SUM multiple releases/Temporal queues.
-    - seriesQuery: '{__name__=~"opengeni_turn_worker_(demand|queued|busy)",namespace!="",release!="",temporal_namespace!="",task_queue!=""}'
+    # Namespace Object metrics: discovery AND queries bind the source identity.
+    # The HPA also supplies all five labels as exact request LabelMatchers.
+    - seriesQuery: '{__name__=~"opengeni_turn_worker_(demand|queued|busy)",namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns"}'
       resources:
         overrides:
           namespace: {resource: namespace}
@@ -26,14 +31,14 @@ rules:
       # An empty/error result must remain missing at custom.metrics, not zero.
       metricsQuery: |
         max(
-          <<.Series>>{<<.LabelMatchers>>} >= 0
-          and <<.Series>>{<<.LabelMatchers>>} < +Inf
-          and (time() - timestamp(<<.Series>>{<<.LabelMatchers>>}) < 30)
-          and (time() - timestamp(<<.Series>>{<<.LabelMatchers>>}) >= -5)
+          <<.Series>>{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>} >= 0
+          and <<.Series>>{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>} < +Inf
+          and (time() - timestamp(<<.Series>>{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>}) < 30)
+          and (time() - timestamp(<<.Series>>{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>}) >= -5)
           and ignoring (__name__) (
-            <<.Series>>_valid_until_timestamp_seconds{<<.LabelMatchers>>} > time()
-            and <<.Series>>_valid_until_timestamp_seconds{<<.LabelMatchers>>} <= time() + 65
-            and (time() - timestamp(<<.Series>>_valid_until_timestamp_seconds{<<.LabelMatchers>>}) < 30)
-            and (time() - timestamp(<<.Series>>_valid_until_timestamp_seconds{<<.LabelMatchers>>}) >= -5)
+            <<.Series>>_valid_until_timestamp_seconds{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>} > time()
+            and <<.Series>>_valid_until_timestamp_seconds{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>} <= time() + 65
+            and (time() - timestamp(<<.Series>>_valid_until_timestamp_seconds{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>}) < 30)
+            and (time() - timestamp(<<.Series>>_valid_until_timestamp_seconds{namespace="opengeni",release="opengeni",environment="production",temporal_namespace="default",task_queue="opengeni-runs-ts-turns",<<.LabelMatchers>>}) >= -5)
           )
         ) by (<<.GroupBy>>)

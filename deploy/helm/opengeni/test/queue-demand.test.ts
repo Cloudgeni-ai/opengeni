@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { run, testTool } from "./queue-demand-tooling";
@@ -14,8 +14,27 @@ const enabled = {
 };
 type Manifest = { kind: string; metadata: { name: string }; spec: any };
 type Input = { series: string; values: string };
+const identity = {
+  namespace: "fixture",
+  release: "fixture",
+  environment: "fixture",
+  temporal_namespace: "default",
+  task_queue: "opengeni-runs-ts-turns",
+};
+const labelSet = Object.entries(identity)
+  .map(([key, value]) => `${key}="${value}"`)
+  .join(",");
 
-async function render(values: object = {}, capabilities = true) {
+// Bind the SOURCE fence in the shipped example to this actual rendered fixture.
+// Request matchers alone are intentionally insufficient to set that identity.
+function bindAdapterSource(expression: string) {
+  return expression
+    .replaceAll('namespace="opengeni"', 'namespace="fixture"')
+    .replaceAll('release="opengeni"', 'release="fixture"')
+    .replaceAll('environment="production"', 'environment="fixture"');
+}
+
+async function render(values: object = {}, capabilities = true, profiles: string[] = []) {
   const [helm] = await tools;
   const dir = await mkdtemp(join(tmpdir(), "opengeni-queue-render-"));
   try {
@@ -28,6 +47,7 @@ async function render(values: object = {}, capabilities = true) {
       chart,
       "--namespace",
       "fixture",
+      ...profiles.flatMap((profile) => ["-f", join(chart, profile)]),
       "-f",
       path,
       ...(capabilities ? ["--api-versions", "monitoring.coreos.com/v1"] : []),
@@ -53,6 +73,20 @@ function find(manifests: Manifest[], kind: string, name: string) {
 }
 
 describe("queue demand schema v1 actual Helm rendering", () => {
+  test("every shipped profile renders the opt-in with source-bound Object selectors", async () => {
+    for (const profile of (await readdir(chart)).filter(
+      (name) => name.startsWith("values.") && name.endsWith(".yaml"),
+    )) {
+      const result = await render(enabled, true, [profile]);
+      expect(result.code, `${profile}: ${result.stderr}`).toBe(0);
+      const group = find(result.manifests, "PrometheusRule", "fixture-worker-scaler").spec
+        .groups[0];
+      const hpa = find(result.manifests, "HorizontalPodAutoscaler", "fixture-worker-turns").spec;
+      for (const metric of hpa.metrics.filter((m: any) => m.type === "Object"))
+        expect(metric.object.metric.selector.matchLabels).toEqual(group.labels);
+      expect(hpa.behavior.scaleDown.selectPolicy).toBe("Disabled");
+    }
+  }, 180_000);
   test("defaults off, preserves historical policies and only adds real UID identity", async () => {
     const defaults = await render();
     expect(defaults.code).toBe(0);
@@ -82,7 +116,7 @@ describe("queue demand schema v1 actual Helm rendering", () => {
     ).toEqual({ name: "OPENGENI_POD_UID", valueFrom: { fieldRef: { fieldPath: "metadata.uid" } } });
   }, 180_000);
 
-  test("renders one HPA, six exact metrics, release isolation and the frozen recovery gate", async () => {
+  test("renders one HPA, six exact metrics, full identity isolation and the frozen recovery gate", async () => {
     const result = await render(enabled);
     expect(result.code, result.stderr).toBe(0);
     const hpas = result.manifests.filter((m) => m.kind === "HorizontalPodAutoscaler");
@@ -116,7 +150,7 @@ describe("queue demand schema v1 actual Helm rendering", () => {
         type: "Object",
         object: {
           describedObject: { apiVersion: "v1", kind: "Namespace", name: "fixture" },
-          metric: { name, selector: { matchLabels: { release: "fixture" } } },
+          metric: { name, selector: { matchLabels: identity } },
           target: { type: "AverageValue", averageValue: name.endsWith("busy") ? "1" : "8" },
         },
       })),
@@ -356,7 +390,7 @@ test("actual rendered promtool fixtures: complete identity, MAX, failure, rollou
     r?: number,
     busy?: number,
     evalTime = "2m",
-    deadlines = { queue: 180, busy: 180, demand: 180 },
+    deadlines = { queue: 165, busy: 180, demand: 165 },
   ) {
     const values: Record<string, number | undefined> = {
       opengeni_turn_worker_queued: q,
@@ -415,7 +449,7 @@ test("actual rendered promtool fixtures: complete identity, MAX, failure, rollou
     3,
     1,
     "45s",
-    { queue: 105, busy: 60, demand: 60 },
+    { queue: 90, busy: 60, demand: 60 },
   );
   scenario(
     "original KSM sample deadline does not slide at sixty seconds",
@@ -424,7 +458,7 @@ test("actual rendered promtool fixtures: complete identity, MAX, failure, rollou
     undefined,
     undefined,
     "60s",
-    { queue: 120, busy: 60, demand: 60 },
+    { queue: 105, busy: 60, demand: 60 },
   );
   const ksmDuplicate = inputs()
     .filter((i) => i.series.startsWith("kube_") || i.series.startsWith('up{job="ksm"'))
@@ -747,12 +781,62 @@ test("actual rendered promtool fixtures: complete identity, MAX, failure, rollou
     11,
     3,
     1,
+    "2m",
+    { queue: 170, busy: 180, demand: 170 },
   );
   scenario(
     "sixty second observation boundary remains absent",
     inputs({
       mutate: (i) => (i.series.includes("timestamp_seconds") ? { ...i, values: "60+0x30" } : i),
     }),
+  );
+  for (const [age, observed] of [
+    [44, 76],
+    [45, 75],
+    [46, 74],
+  ] as const) {
+    scenario(
+      `queue producer age ${age} seconds: strict 45-second budget`,
+      inputs({
+        mutate: (i) =>
+          i.series.startsWith("opengeni_turn_capacity_monitor_last_success")
+            ? { ...i, values: `${observed}+0x30` }
+            : i,
+      }),
+      age < 45 ? 11 : undefined,
+      3,
+      1,
+      "2m",
+      { queue: observed + 45, busy: 180, demand: observed + 45 },
+    );
+  }
+  scenario(
+    "occupancy retains its separate sixty-second producer budget",
+    inputs({
+      mutate: (i) =>
+        i.series.startsWith("opengeni_turn_worker_activities_last_observed")
+          ? { ...i, values: "61+0x30" }
+          : i,
+    }),
+    11,
+    3,
+    1,
+    "2m",
+    { queue: 165, busy: 121, demand: 121 },
+  );
+  scenario(
+    "queue raw sample retains sixty-second TTL despite 45-second producer budget",
+    inputs({
+      mutate: (i) =>
+        i.series.startsWith("opengeni_turn_eligible_backlog")
+          ? { ...i, values: `${i.values.split("+")[0]}+0x5 _ _ _ _ _` }
+          : i,
+    }),
+    11,
+    3,
+    1,
+    "2m",
+    { queue: 135, busy: 180, demand: 135 },
   );
   const pending = inputs({
     mutate: (i) =>
@@ -795,6 +879,48 @@ test("actual rendered promtool fixtures: complete identity, MAX, failure, rollou
     values: "30+0x30",
   });
   scenario("deleting pod with executing activity remains in physical fleet", draining, 11, 7, 2);
+  for (const value of ["NaN", "-1", "+Inf", "-Inf", "0", "500"]) {
+    scenario(
+      `present invalid deletion ${value} cannot be treated as nondeleting during controller lag`,
+      inputs({
+        activities: [3, 7],
+        mutate: (i) =>
+          i.series.startsWith("kube_pod_status_phase") && i.series.includes('uid="uid-b"')
+            ? { ...i, series: i.series.replace('phase="Running"', 'phase="Failed"') }
+            : i,
+      }).concat({
+        series:
+          'kube_pod_deletion_timestamp{namespace="fixture",pod="fixture-worker-turns-b",uid="uid-b",job="ksm",instance="ksm"}',
+        values: Array(31).fill(value).join(" "),
+      }),
+      11,
+    );
+  }
+  scenario(
+    "stale present deletion cannot become legitimate absence",
+    draining.map((i) =>
+      i.series.startsWith("kube_pod_deletion_timestamp")
+        ? { ...i, values: "30 _ _ _ _ _ _ _ _ _" }
+        : i,
+    ),
+    11,
+  );
+  scenario(
+    "bounded future deletion event is valid and retains the draining UID",
+    draining.map((i) =>
+      i.series.startsWith("kube_pod_deletion_timestamp") ? { ...i, values: "5+15x30" } : i,
+    ),
+    11,
+    7,
+    2,
+  );
+  scenario(
+    "future deletion event beyond allowance invalidates fleet completeness",
+    draining.map((i) =>
+      i.series.startsWith("kube_pod_deletion_timestamp") ? { ...i, values: "6+15x30" } : i,
+    ),
+    11,
+  );
   scenario(
     "drain removed from service endpoints blocks R/B, never hides execution",
     draining.filter(
@@ -859,6 +985,144 @@ test("actual rendered promtool fixtures: complete identity, MAX, failure, rollou
   }
 }, 240_000);
 
+test("atomic positive stage completion and exact intermediate identity resist independent review counterexamples", async () => {
+  const [, promtool] = await tools;
+  const rendered = await render(enabled);
+  expect(rendered.code, rendered.stderr).toBe(0);
+  const group = find(rendered.manifests, "PrometheusRule", "fixture-worker-scaler").spec.groups[0];
+  // Assert EVERY recorded-series selector binds the same full source identity,
+  // including final consumers. Raw KSM/discovery lack those app labels and are
+  // independently bounded by namespace/Deployment/pod/release/component.
+  for (const rule of group.rules) {
+    for (const match of rule.expr.matchAll(
+      /(opengeni(?::worker_scaler:|_turn_worker_)[a-z_]+)\{([^}]+)\}/gu,
+    )) {
+      for (const [key, value] of Object.entries(identity))
+        expect(match[2], `${rule.record} selecting ${match[1]}`).toContain(`${key}="${value}"`);
+    }
+  }
+  const scope = Object.entries(identity)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}="${value}"`)
+    .join(",");
+  const expected = (name: string, value?: number, evalTime = "2m") => ({
+    expr: `${name}{${labelSet},scaler_stage_complete=""}`,
+    eval_time: evalTime,
+    exp_samples: value === undefined ? [] : [{ labels: `{__name__="${name}",${scope}}`, value }],
+  });
+  const checks = (complete = false, time = "2m") => [
+    expected("opengeni_turn_worker_queued", 11, time),
+    expected("opengeni:worker_scaler:executing", complete ? 3 : undefined, time),
+    expected("opengeni_turn_worker_busy", complete ? 1 : undefined, time),
+    expected("opengeni_turn_worker_demand", complete ? 14 : undefined, time),
+  ];
+  const partial = inputs({
+    activities: [3, 7],
+    mutate: (i) =>
+      i.series.startsWith("kube_pod_labels") && i.series.includes('uid="uid-b"') ? null : i,
+  });
+  const drain = inputs({
+    activities: [3, 7],
+    mutate: (i) =>
+      i.series.startsWith("kube_pod_status_phase") && i.series.includes('uid="uid-b"')
+        ? { ...i, series: i.series.replace('phase="Running"', 'phase="Failed"') }
+        : i,
+  });
+  drain.push({
+    series:
+      'kube_pod_deletion_timestamp{namespace="fixture",pod="fixture-worker-turns-b",uid="uid-b",job="ksm",instance="ksm"}',
+    values: "30+0x30",
+  });
+  const dir = await mkdtemp(join(tmpdir(), "opengeni-queue-review-"));
+  let omissionCases = 0;
+  try {
+    const stages = group.rules
+      .filter((rule: any) => rule.expr.includes('"scaler_stage_complete", "true"'))
+      .map((rule: any) => rule.record);
+    expect(stages).toHaveLength(11);
+    stages.push("opengeni:worker_scaler:inventory_stages_complete");
+    for (const [index, stage] of stages.entries()) {
+      const ruleFile = `omitted-${index}.json`;
+      await Bun.write(
+        join(dir, ruleFile),
+        JSON.stringify({
+          groups: [{ ...group, rules: group.rules.filter((rule: any) => rule.record !== stage) }],
+        }),
+      );
+      const tests = [inputs(), partial, drain].flatMap((input, variant) =>
+        [false, true].map((stale) => ({
+          name: `${stage} ${stale ? "stalled old completion" : "never evaluated"} variant${variant}`,
+          input_series: [
+            ...input,
+            ...(stale
+              ? [
+                  {
+                    series: `${stage}{${labelSet}${stage.endsWith("inventory_stages_complete") ? "" : ',scaler_stage_complete="true"'}}`,
+                    values: "1 _ _ _ _ _ _ _ _ _",
+                  },
+                ]
+              : []),
+          ],
+          promql_expr_test: [...checks(false, "15s"), ...checks()],
+        })),
+      );
+      omissionCases += tests.length;
+      const fixture = join(dir, `omission-${index}.json`);
+      await Bun.write(
+        fixture,
+        JSON.stringify({ rule_files: [ruleFile], evaluation_interval: "15s", tests }),
+      );
+      const result = await run([promtool, "test", "rules", fixture]);
+      expect(result.code, result.stdout + result.stderr).toBe(0);
+    }
+    await Bun.write(join(dir, "rules.json"), JSON.stringify({ groups: [group] }));
+    const foreignTests = Object.keys(identity).flatMap((key) =>
+      [0, 1, 999].map((value) => ({
+        name: `foreign ${key} intermediate/final records ${value} never rebind identity`,
+        input_series: [
+          ...inputs(),
+          ...group.rules.flatMap((rule: any) => {
+            const foreign = labelSet.replace(
+              `${key}="${identity[key as keyof typeof identity]}"`,
+              `${key}="foreign"`,
+            );
+            // Supply both physical data and a fleet-shaped sample. Nonnegative
+            // counters, stale-looking deadlines and valid-looking markers all
+            // challenge selectors, not just raw producer identity.
+            return [
+              {
+                series: `${rule.record}{${foreign},pod="fixture-worker-turns-b",uid="uid-b",pod_uid="uid-b",worker_pod_uid="uid-b",component="worker-turn",job="worker",instance="b",phase="Running"}`,
+                values: `${value}+0x30`,
+              },
+              { series: `${rule.record}{${foreign}}`, values: `${value}+0x30` },
+              {
+                series: `${rule.record}{${foreign},scaler_stage_complete="true"}`,
+                values: "1+0x30",
+              },
+            ];
+          }),
+        ],
+        promql_expr_test: checks(true),
+      })),
+    );
+    await Bun.write(
+      join(dir, "foreign.json"),
+      JSON.stringify({
+        rule_files: ["rules.json"],
+        evaluation_interval: "15s",
+        tests: foreignTests,
+      }),
+    );
+    const result = await run([promtool, "test", "rules", join(dir, "foreign.json")]);
+    expect(result.code, result.stdout + result.stderr).toBe(0);
+    console.info(
+      `Validated ${omissionCases} actual stage omission/stall cases and ${foreignTests.length} foreign-record identity cases`,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 240_000);
+
 test("real adapter query and inter-stage dependency fences reject evaluation stalls, errors and future samples", async () => {
   const [, promtool] = await tools;
   const rendered = await render(enabled);
@@ -867,13 +1131,13 @@ test("real adapter query and inter-stage dependency fences reject evaluation sta
   const fragment = Bun.YAML.parse(
     await Bun.file(join(chart, "prometheus-adapter.queue-demand.example.yaml")).text(),
   ) as any;
-  const query = fragment.rules.custom[1].metricsQuery
+  const queryTemplate = bindAdapterSource(fragment.rules.custom[1].metricsQuery)
     .replaceAll("<<.Series>>", "opengeni_turn_worker_queued")
-    .replaceAll("<<.LabelMatchers>>", 'namespace="fixture",release="fixture"')
     .replaceAll("<<.GroupBy>>", "namespace");
+  const query = queryTemplate.replaceAll("<<.LabelMatchers>>", labelSet);
+  for (const [key, value] of Object.entries(identity))
+    expect(bindAdapterSource(fragment.rules.custom[1].seriesQuery)).toContain(`${key}="${value}"`);
   const dir = await mkdtemp(join(tmpdir(), "opengeni-queue-stall-"));
-  const labelSet =
-    'namespace="fixture",release="fixture",environment="fixture",temporal_namespace="default",task_queue="opengeni-runs-ts-turns"';
   const finalLabels =
     '{__name__="opengeni_turn_worker_demand",environment="fixture",namespace="fixture",release="fixture",task_queue="opengeni-runs-ts-turns",temporal_namespace="default"}';
   const queryTest = (
@@ -944,6 +1208,58 @@ test("real adapter query and inter-stage dependency fences reject evaluation sta
             ],
             promql_expr_test: [queryTest(query, "2m")],
           },
+          ...Object.keys(identity).flatMap((key) =>
+            [labelSet, 'namespace="fixture",release="fixture"', 'namespace="fixture"', ""].flatMap(
+              (request) =>
+                [true, false].map((ownPresent) => {
+                  const foreign = labelSet.replace(
+                    `${key}="${identity[key as keyof typeof identity]}"`,
+                    `${key}="foreign"`,
+                  );
+                  return {
+                    name: `adapter SOURCE fence rejects foreign ${key}, request ${request || "empty"}, own ${ownPresent}`,
+                    input_series: [
+                      ...(ownPresent
+                        ? [
+                            {
+                              series: `opengeni_turn_worker_queued{${labelSet}}`,
+                              values: "11+0x30",
+                            },
+                            deadlineInput(),
+                          ]
+                        : []),
+                      { series: `opengeni_turn_worker_queued{${foreign}}`, values: "999+0x30" },
+                      deadlineInput("60+15x30", foreign),
+                    ],
+                    promql_expr_test: [
+                      queryTest(
+                        queryTemplate.replaceAll("<<.LabelMatchers>>", request),
+                        "2m",
+                        ownPresent ? 11 : undefined,
+                      ),
+                    ],
+                  };
+                }),
+            ),
+          ),
+          ...Object.keys(identity).map((key) => {
+            const conflicting = labelSet.replace(
+              `${key}="${identity[key as keyof typeof identity]}"`,
+              `${key}="foreign"`,
+            );
+            return {
+              name: `conflicting request ${key} cannot override SOURCE identity`,
+              input_series: [
+                { series: `opengeni_turn_worker_queued{${labelSet}}`, values: "11+0x30" },
+                deadlineInput(),
+                { series: `opengeni_turn_worker_queued{${conflicting}}`, values: "999+0x30" },
+                deadlineInput("60+15x30", conflicting),
+              ],
+              promql_expr_test: [
+                queryTest(queryTemplate.replaceAll("<<.LabelMatchers>>", conflicting), "2m"),
+              ],
+            };
+          }),
           // @ exposes a sample from a later timestamp to validate the future-clock
           // predicate independently of the engine's usual instant-query selection.
           {
@@ -956,15 +1272,15 @@ test("real adapter query and inter-stage dependency fences reject evaluation sta
             promql_expr_test: [
               queryTest(
                 query.replaceAll(
-                  'opengeni_turn_worker_queued{namespace="fixture",release="fixture"}',
-                  'opengeni_turn_worker_queued{namespace="fixture",release="fixture"} @ 120',
+                  `opengeni_turn_worker_queued{${labelSet},${labelSet}}`,
+                  `opengeni_turn_worker_queued{${labelSet},${labelSet}} @ 120`,
                 ),
                 "110s",
               ),
               queryTest(
                 query.replaceAll(
-                  'opengeni_turn_worker_queued{namespace="fixture",release="fixture"}',
-                  'opengeni_turn_worker_queued{namespace="fixture",release="fixture"} @ 120',
+                  `opengeni_turn_worker_queued{${labelSet},${labelSet}}`,
+                  `opengeni_turn_worker_queued{${labelSet},${labelSet}} @ 120`,
                 ),
                 "115s",
                 9,
@@ -1030,6 +1346,84 @@ test("real adapter query and inter-stage dependency fences reject evaluation sta
     );
     const adapter = await run([promtool, "test", "rules", join(dir, "adapter.json")]);
     expect(adapter.code, adapter.stdout + adapter.stderr).toBe(0);
+    // The adapter must respect the ORIGINAL producer expiry between the 15s
+    // evaluations, even while the latest final count is still freshly recorded.
+    // Exercise real rendered raw->rules->adapter, not synthetic final records.
+    await Bun.write(join(dir, "complete-rules.json"), JSON.stringify({ groups: [group] }));
+    await Bun.write(
+      join(dir, "producer-expiry.json"),
+      JSON.stringify({
+        rule_files: ["complete-rules.json"],
+        evaluation_interval: "15s",
+        tests: [
+          {
+            name: "Q original lastSuccess+45 expires between evaluations; R/B stay independently live",
+            input_series: inputs({
+              mutate: (i) =>
+                i.series.startsWith("opengeni_turn_capacity_monitor_last_success")
+                  ? { ...i, values: "20+0x30" }
+                  : i,
+            }),
+            promql_expr_test: [
+              queryTest(query, "64s", 11),
+              queryTest(query, "65s"),
+              queryTest(query, "66s"),
+              queryTest(
+                query.replaceAll("opengeni_turn_worker_queued", "opengeni_turn_worker_busy"),
+                "65s",
+                1,
+              ),
+              queryTest(
+                query.replaceAll("opengeni_turn_worker_queued", "opengeni_turn_worker_demand"),
+                "64s",
+                14,
+              ),
+              queryTest(
+                query.replaceAll("opengeni_turn_worker_queued", "opengeni_turn_worker_demand"),
+                "65s",
+              ),
+            ],
+          },
+          {
+            name: "R/B original observation+60 expires between evaluations; Q retains independent source",
+            input_series: inputs({
+              mutate: (i) =>
+                i.series.startsWith("opengeni_turn_worker_activities_last_observed")
+                  ? { ...i, values: "20+0x30" }
+                  : i,
+            }),
+            promql_expr_test: [
+              queryTest(
+                query.replaceAll("opengeni_turn_worker_queued", "opengeni_turn_worker_busy"),
+                "79s",
+                1,
+              ),
+              queryTest(
+                query.replaceAll("opengeni_turn_worker_queued", "opengeni_turn_worker_busy"),
+                "80s",
+              ),
+              queryTest(query, "80s", 11),
+              queryTest(
+                query.replaceAll("opengeni_turn_worker_queued", "opengeni_turn_worker_demand"),
+                "79s",
+                14,
+              ),
+              queryTest(
+                query.replaceAll("opengeni_turn_worker_queued", "opengeni_turn_worker_demand"),
+                "80s",
+              ),
+            ],
+          },
+        ],
+      }),
+    );
+    const producerExpiry = await run([
+      promtool,
+      "test",
+      "rules",
+      join(dir, "producer-expiry.json"),
+    ]);
+    expect(producerExpiry.code, producerExpiry.stdout + producerExpiry.stderr).toBe(0);
     // An earlier recording stage can fail while the final stage keeps running.
     // Use the rendered final rule unchanged to prove it cannot re-timestamp an
     // expired upstream sample forever. Raw stages have the same helper fence.

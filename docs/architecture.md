@@ -1939,8 +1939,11 @@ production recovery acceptance. See [`worker-autoscaling.md`](worker-autoscaling
 Producer boundaries: `apps/worker/src/turn-task-queue-reader.ts` owns the
 native queue-read lifecycle; `apps/worker/src/turn-worker-activity-telemetry.ts`
 owns SDK all-activity count/validity through drain. Original validity deadlines
-and same-evaluation UID coverage fence the dedicated recording-rule pipeline;
-the adapter checks both final-series age and deadline companions.
+(45-second queue producer budget, 60-second raw/activity budget), atomic
+positive classification-stage completion and same-evaluation UID coverage
+fence the dedicated recording-rule pipeline. Rules, HPA selectors and adapter
+queries bind all five source identity labels; the adapter checks both
+final-series age and deadline companions, independently of request matchers.
 
 Procedures, provider requirements, activation and recovery: [`deployment.md`](deployment.md).
 Host ports/in-process composition: [`embedding.md`](embedding.md).

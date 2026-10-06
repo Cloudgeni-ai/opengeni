@@ -46,8 +46,9 @@ The feature renders exactly one autoscaling/v2 HPA for the turn Deployment:
 | `opengeni_turn_worker_busy` = B | Namespace Object AverageValue 1 |
 
 Object metrics describe the release namespace with `apiVersion: v1` and
-`kind: Namespace`; their metric selector matches the Helm release. They are
-total namespace demand with **AverageValue**, not Object Value or a per-pod
+`kind: Namespace`; their metric selector binds all five exact source labels:
+`namespace`, `release`, `environment`, `temporal_namespace`, `task_queue`.
+They are total demand for that identity with **AverageValue**, not Object Value or a per-pod
 mean. In the ideal, fully observed case their recommendations are
 `ceil((Q+R)/8)`, `ceil(Q/8)` and B, subject to native tolerance, multi-metric
 selection, bounds and rate policies. The target of 8 is an experimental
@@ -106,6 +107,11 @@ Require kube-state-metrics with UID-bearing `kube_pod_info`, `kube_pod_labels`,
 sharing `job,instance`. Allowlist pod labels
 `app.kubernetes.io/instance,app.kubernetes.io/component`. A deletion timestamp
 is absent for ordinary nondeleting pods; that absence alone is normal.
+Present deletion values must be finite, positive, no more than five seconds
+ahead, and freshly sampled from a healthy KSM target. Invalid, stale or failed
+present observations are incomplete UID evidence, never treated as absence.
+An old deletion event is valid during a long drain if its sample stays fresh;
+the event's age is not the producer-observation TTL.
 Do not relabel away KSM's `uid`. Pod inventory is scoped to this release's
 `<fullname>-worker-turns-.*` pods and exact release/component labels.
 
@@ -120,18 +126,32 @@ Operator actually selects this new object. Helm requires the
 
 Rules evaluate every 15 seconds. Every raw sample must be younger than 60
 seconds and no more than five seconds in the future relative to Prometheus.
-Queue and occupancy producer timestamps must also be positive, younger than
-60 seconds and no more than five seconds ahead. Validity must be exactly 1;
+Producer timestamps must also be positive and no more than five seconds ahead.
+The queue read must be **strictly younger than 45 seconds**, preserving the
+producer's existing default 45-second budget; at exactly 45 seconds Q is absent.
+Occupancy observations retain their separate strict 60-second budget. Do not
+extend the queue budget to 60 seconds or shorten all raw/scrape/activity TTLs
+to 45 seconds. Validity must be exactly 1;
 counts must be finite and nonnegative. Failed/latest-invalid reads are not
 rescued by a previously successful producer timestamp. Each intermediate
 record dependency is independently fenced to less than 30 seconds old and
 at most five seconds ahead, including inventory stages, and must carry the
 same evaluation timestamp as the consuming rule. An intermediate failure
 cannot combine a last-evaluation inventory with this evaluation's occupancy.
+Every inventory/classification/completeness stage emits an atomic
+`scaler_stage_complete="true"` marker in the **same recording rule** as its
+data. A positive gate requires all markers from this evaluation, including
+legitimately empty deletion and incomplete-UID vectors. Data selectors
+explicitly exclude markers, and every recorded-series selector binds the
+full five-label source identity. A missing or stalled stage cannot be
+interpreted as an empty successful result. These markers are rule-completion
+evidence, not pod observations, occupancy zeros or proof of complete raw data.
 The three final metrics also have identically scoped
 `<metric>_valid_until_timestamp_seconds` companions: minimum original raw
 sample, producer-observation and scrape-health expiries, including KSM and
-controller inventory for R/B. Recording a fresh timestamp never moves this
+controller inventory for R/B. The queue producer's original expiry is
+`lastSuccess + 45`; raw samples/scrape health and R/B expiry remain `+60`.
+Recording a fresh timestamp never moves this
 original deadline forward. Missing per-UID deadlines fail coverage too.
 
 Q requires only one individually healthy successful fresh global reader.
@@ -172,10 +192,19 @@ KEDA, a second HPA or an external metrics API. The public
 is an example fragment, not an installed adapter. It retains the existing
 Pods metric and adds the three exact names. Merge its rules with your existing
 authenticated Prometheus connection, APIService/TLS and operational values.
-Keep the HPA release selector in adapter LabelMatchers; do not combine
-different releases/queues in the same namespace. Restrict production adapter
-discovery to its exact authorized namespace/release/environment/Temporal
-identity as well. No other custom metrics are approved by this source mode.
+Keep all five HPA metric selector labels in adapter LabelMatchers. Bind
+**both discovery and every metricsQuery selector** to the exact authorized
+source identity as well; request matchers alone are not sufficient because
+clients can omit them. The public fragment explicitly selects
+`namespace="opengeni", release="opengeni", environment="production",
+temporal_namespace="default", task_queue="opengeni-runs-ts-turns"`.
+Replace all five literals in **every** selector from the actual rendered
+worker-scaler group's labels before use. A partial request must select only
+that source; a conflicting request must return absent, never another queue.
+Private source selection, maintenance capture/restore and runtime proof must
+retain those exact candidate-derived values. Do not combine different
+environments/Temporal namespaces/queues within one Helm release. No other
+custom metrics are approved by this source mode.
 
 Adapter queries must validate **both the final recording-series and companion
 sample timestamps** to less than 30 seconds old and at most five seconds
@@ -187,8 +216,8 @@ Prometheus's default lookback otherwise resurrects old demand after stalled
 or erroring rules. Empty series and Prometheus/adapter errors must stay
 missing/errors, not zero. Original-deadline checks and evaluation-stall checks
 are both required; neither substitutes for the other. Validate the real
-custom.metrics response (including release
-selector and Namespace object) and HPA readback, not discovery alone.
+custom.metrics response (including all five identity selectors and Namespace
+object) and HPA readback, not discovery alone.
 
 Source checks do not prove native HPA semantics, scheduling latency, headroom,
 recovery, or production runtime acceptance. Before any downscale/floor change,

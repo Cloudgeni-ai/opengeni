@@ -9,7 +9,10 @@
 {{- $healthy := printf "(%s == 1)" (include "opengeni.workerScaler.fresh" (dict "series" $up)) -}}
 {{- $ksmUp := printf "(%s == 1)" (include "opengeni.workerScaler.fresh" (dict "series" "up")) -}}
 {{- $podScope := printf "namespace=%s,pod=~\"%s-worker-turns-.*\",uid!=\"\"" (toJson .Release.Namespace) $name -}}
-{{- $recordScope := printf "namespace=%s,release=%s" (toJson .Release.Namespace) (toJson .Release.Name) -}}
+{{- $recordIdentity := printf "namespace=%s,release=%s,environment=%s,temporal_namespace=%s,task_queue=%s" (toJson .Release.Namespace) (toJson .Release.Name) (toJson $environment) (toJson $temporalNamespace) (toJson $taskQueue) -}}
+{{- $recordScope := printf "%s,scaler_stage_complete=\"\"" $recordIdentity -}}
+{{- $deletionSeries := printf "kube_pod_deletion_timestamp{%s}" $podScope -}}
+{{- $validDeletion := printf "(%s > 0 and %s < +Inf and time() - %s >= -5 and on (job, instance) %s)" (include "opengeni.workerScaler.fresh" (dict "series" $deletionSeries)) $deletionSeries $deletionSeries $ksmUp -}}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -44,6 +47,7 @@ spec:
                 "uid", "$1", "pod_uid", "(.+)"
               )
             )
+            {{ include "opengeni.workerScaler.stageComplete" . }}
         # KSM lists are independent of worker scrape discovery. Never infer
         # complete coverage by comparing counts of unmatched physical pods.
         {{- range $entry := list
@@ -56,11 +60,26 @@ spec:
         - record: opengeni:worker_scaler:{{ $entry.record }}
           expr: |
             max by (namespace, pod, uid{{ if eq $entry.record "phase" }}, phase{{ end }}) (
+              {{- if eq $entry.record "deleting" }}
+              {{ $validDeletion | nindent 14 }}
+              {{- else }}
               {{ include "opengeni.workerScaler.fresh" (dict "series" $series) | nindent 14 }}
               and on (job, instance)
               {{ $ksmUp | nindent 14 }}
+              {{- end }}
             )
+            {{ include "opengeni.workerScaler.stageComplete" $ }}
         {{- end }}
+        # An absent deletion timestamp is normal. A PRESENT invalid sample is
+        # not absence: preserve its UID as incomplete, even if stale/NaN/failed
+        # scrape. A deletion event may be old during drain; only its sample age
+        # is bounded, while the event must be finite, positive and not future.
+        - record: opengeni:worker_scaler:deletion_invalid
+          expr: |
+            group by (namespace, pod, uid) (
+              {{ $deletionSeries }} unless {{ $validDeletion | nindent 14 }}
+            )
+            {{ include "opengeni.workerScaler.stageComplete" . }}
         - record: opengeni:worker_scaler:replicas
           expr: |
             {{- $replicas := printf "kube_deployment_status_replicas{namespace=%s,deployment=%s}" (toJson .Release.Namespace) (toJson (printf "%s-worker-turns" $name)) }}
@@ -69,6 +88,7 @@ spec:
               and {{ $replicas }} < +Inf
               and on (job, instance) {{ $ksmUp | nindent 14 }}
             )
+            {{ include "opengeni.workerScaler.stageComplete" . }}
         - record: opengeni:worker_scaler:inventory_valid_until
           expr: |
             min by (namespace) (
@@ -96,17 +116,21 @@ spec:
                 "deadline_source", "ksm_scrape", "__name__", ".*"
               )
             )
+            {{ include "opengeni.workerScaler.stageComplete" . }}
         {{- $pods := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:pods{%s}" $recordScope) "age" 30) }}
         {{- $labels := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:labels{%s}" $recordScope) "age" 30) }}
         {{- $phase := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:phase{%s}" $recordScope) "age" 30) }}
         {{- $deleting := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:deleting{%s}" $recordScope) "age" 30) }}
         {{- $targets := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:targets{%s}" $recordScope) "age" 30) }}
+        {{- $invalidDeletion := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:deletion_invalid{%s}" $recordScope) "age" 30) }}
         - record: opengeni:worker_scaler:inventory_incomplete
           expr: |
             ({{ $pods | nindent 12 }} unless on (namespace, pod, uid) ({{ $labels | nindent 12 }} == 1))
             or ({{ $labels | nindent 12 }} unless on (namespace, pod, uid) ({{ $pods | nindent 12 }} == 1))
             or ({{ $pods | nindent 12 }} unless on (namespace, pod, uid) ({{ $phase | nindent 12 }} == 1))
             or ({{ $targets | nindent 12 }} unless on (namespace, pod, uid) ({{ $pods | nindent 12 }} == 1))
+            or {{ $invalidDeletion | nindent 12 }}
+            {{ include "opengeni.workerScaler.stageComplete" . }}
         - record: opengeni:worker_scaler:relevant
           expr: |
             ({{ $pods | nindent 12 }} == 1)
@@ -115,6 +139,7 @@ spec:
               ({{ $phase | nindent 14 }} == 1 and on (namespace, pod, uid, phase) opengeni:worker_scaler:phase{ {{ $recordScope }},phase=~"Running|Unknown"})
               or ({{ $deleting | nindent 14 }} > 0 and {{ $deleting | nindent 14 }} < +Inf)
             )
+            {{ include "opengeni.workerScaler.stageComplete" . }}
         # Supplemental cardinality is not the identity proof above. A fresh
         # controller total also detects a pod omitted by BOTH scrape/KSM lists.
         # ReplicaSet active counts exclude deleting pods; uncertain controller
@@ -124,6 +149,19 @@ spec:
             sum by (namespace) (
               (({{ $pods | nindent 14 }} == 1) unless on (namespace, pod, uid) ({{ $deleting | nindent 14 }} > 0))
               or ((0 * ({{ $pods | nindent 14 }} == 1)) and on (namespace, pod, uid) ({{ $deleting | nindent 14 }} > 0))
+            )
+            {{ include "opengeni.workerScaler.stageComplete" . }}
+        # Positive evidence for EVERY classification/completeness stage. The
+        # marker is emitted atomically by that stage, including legitimately
+        # empty deletion/mismatch vectors. A separate unconditional heartbeat
+        # would not prove the stage succeeded. All identities are exact here.
+        - record: opengeni:worker_scaler:inventory_stages_complete
+          expr: |
+            min without (scaler_stage_complete) (
+              {{- range $index, $stage := list "targets" "pods" "labels" "phase" "deleting" "deletion_invalid" "replicas" "inventory_valid_until" "inventory_incomplete" "relevant" "inventory_size" }}
+              {{ if $index }}and on (namespace, release, environment, temporal_namespace, task_queue){{ end }}
+              ({{ include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:%s{%s,scaler_stage_complete=\"true\"}" $stage $recordIdentity) "age" 30) | nindent 14 }} == 1)
+              {{- end }}
             )
         - record: opengeni:worker_scaler:queue_readers
           expr: |
@@ -136,7 +174,7 @@ spec:
               and ignoring (__name__) ({{ include "opengeni.workerScaler.fresh" (dict "series" $valid) | nindent 14 }} == 1)
               and ignoring (__name__) (
                 {{ include "opengeni.workerScaler.fresh" (dict "series" $observed) | nindent 16 }} > 0
-                and time() - {{ $observed }} < 60
+                and time() - {{ $observed }} < 45
                 and time() - {{ $observed }} >= -5
               )
               and on (namespace, pod, pod_uid, job, instance)
@@ -145,7 +183,7 @@ spec:
         - record: opengeni_turn_worker_queued_valid_until_timestamp_seconds
           expr: |
             min by (namespace) (
-              {{ include "opengeni.workerScaler.deadline" (dict "value" $queue "valid" $valid "observed" $observed "up" $up) | nindent 14 }}
+              {{ include "opengeni.workerScaler.deadline" (dict "value" $queue "valid" $valid "observed" $observed "up" $up "producerAge" 45) | nindent 14 }}
               and ignoring (__name__)
               {{ include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:queue_readers{%s}" $recordScope) "age" 30) | nindent 14 }}
             )
@@ -199,6 +237,7 @@ spec:
         {{- $incomplete := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:inventory_incomplete{%s}" $recordScope) "age" 30) }}
         {{- $size := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:inventory_size{%s}" $recordScope) "age" 30) }}
         {{- $replicas := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:replicas{%s}" $recordScope) "age" 30) }}
+        {{- $stagesComplete := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:inventory_stages_complete{%s}" $recordScope) "age" 30) }}
         - record: opengeni:worker_scaler:fleet_valid_until
           expr: |
             min by (namespace) (
@@ -215,6 +254,10 @@ spec:
             )
             and on (namespace)
             {{ include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:inventory_valid_until{%s}" $recordScope) "age" 30) | nindent 12 }}
+            # The aggregate above retains namespace only until group labels are
+            # applied; BOTH dependency selectors already bind all five labels.
+            and on (namespace)
+            ({{ $stagesComplete | nindent 12 }} == 1)
         {{- $fleetDeadline := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:fleet_valid_until{%s}" $recordScope) "age" 30) }}
         - record: opengeni:worker_scaler:executing
           expr: |
