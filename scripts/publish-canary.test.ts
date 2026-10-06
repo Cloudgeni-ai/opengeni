@@ -1,8 +1,20 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import libnpmpublish from "libnpmpublish";
+import { repoRoot } from "./publishable-workspaces";
 import {
+  assertCanaryPlan,
   canaryBasePackages,
+  confirmCanaryPublication,
   nextCanaryVersion,
   planCanaryVersions,
+  publishCanaryArtifact,
+  readRegistryPackage,
+  verifyCanarySourceBinding,
   workflowCanarySequence,
 } from "./publish-canary";
 
@@ -151,5 +163,279 @@ describe("planCanaryVersions", () => {
     expect(() => planCanaryVersions(packages.slice(1), new Map(), fixed)).toThrow(
       "not publishable",
     );
+  });
+});
+
+describe("Bun canary publication boundary", () => {
+  const sha = "a".repeat(40);
+  const env = {
+    GITHUB_ACTIONS: "true",
+    GITHUB_EVENT_NAME: "workflow_dispatch",
+    GITHUB_REPOSITORY: "Cloudgeni-ai/opengeni",
+    GITHUB_SERVER_URL: "https://github.com",
+    GITHUB_REF: "refs/heads/main",
+    GITHUB_RUN_ID: "1234",
+    GITHUB_RUN_ATTEMPT: "1",
+    GITHUB_SHA: sha,
+    GITHUB_WORKFLOW_SHA: sha,
+    SOURCE_SHA: sha,
+    GITHUB_WORKFLOW_REF:
+      "Cloudgeni-ai/opengeni/.github/workflows/publish-canary.yml@refs/heads/main",
+    ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.test/oidc",
+    ACTIONS_ID_TOKEN_REQUEST_TOKEN: "synthetic-oidc",
+    NODE_AUTH_TOKEN: "synthetic-registry-token",
+  };
+
+  test("refuses a controller/source or OIDC mismatch before any registry write", () => {
+    expect(() => verifyCanarySourceBinding(env, sha, "/source", "/source")).not.toThrow();
+    for (const changed of [
+      { GITHUB_SHA: "b".repeat(40) },
+      { GITHUB_SERVER_URL: "https://example.test" },
+      { GITHUB_WORKFLOW_SHA: "b".repeat(40) },
+      { SOURCE_SHA: "b".repeat(40) },
+      { ACTIONS_ID_TOKEN_REQUEST_URL: "" },
+      { ACTIONS_ID_TOKEN_REQUEST_TOKEN: "" },
+      { NODE_AUTH_TOKEN: "" },
+    ]) {
+      expect(() =>
+        verifyCanarySourceBinding({ ...env, ...changed }, sha, "/source", "/source"),
+      ).toThrow("must agree");
+    }
+    expect(() => verifyCanarySourceBinding(env, sha, "/older-source", "/controller")).toThrow(
+      "must agree",
+    );
+  });
+
+  test("reads synthetic registry metadata and rejects malformed or occupied existing versions", async () => {
+    const metadata = {
+      "dist-tags": { latest: "1.0.0", canary: "1.0.1-canary.3" },
+      versions: { "1.0.0": {}, "1.0.1-canary.3": {} },
+    };
+    const request = async (url: string | URL | Request) => {
+      expect(String(url)).toContain("%40example%2Fpackage");
+      return Response.json(metadata);
+    };
+    const registry = await readRegistryPackage("@example/package", request, "https://example.test");
+    expect(registry).toEqual(metadata);
+    expect(() =>
+      assertCanaryPlan(
+        [{ name: "@example/package" }],
+        new Map([["@example/package", "1.0.1-canary.3"]]),
+        new Map([["@example/package", registry]]),
+      ),
+    ).toThrow("already exists");
+    await expect(
+      readRegistryPackage("@example/package", async () => Response.json({ versions: {} })),
+    ).rejects.toThrow("incomplete");
+    await expect(
+      readRegistryPackage("@example/package", async () =>
+        Response.json({ "dist-tags": [], versions: {} }),
+      ),
+    ).rejects.toThrow("incomplete");
+    await expect(
+      readRegistryPackage("@example/package", async () => new Response(null, { status: 403 })),
+    ).rejects.toThrow("403");
+    await expect(
+      readRegistryPackage("@example/package", async () => new Response(null, { status: 503 })),
+    ).rejects.toThrow("503");
+    await expect(
+      readRegistryPackage("@example/package", async () => {
+        throw new Error("synthetic network failure");
+      }),
+    ).rejects.toThrow("synthetic network failure");
+  });
+
+  test("admits a new package and preserves an absent latest tag", async () => {
+    const absent = await readRegistryPackage(
+      "@example/new-package",
+      async () => new Response(null, { status: 404 }),
+    );
+    expect(absent).toEqual({ "dist-tags": {}, versions: {} });
+    const existingCanaryOnly = await readRegistryPackage("@example/canary-only", async () =>
+      Response.json({
+        "dist-tags": { canary: "1.0.1-canary.3" },
+        versions: { "1.0.1-canary.3": {} },
+      }),
+    );
+    const packages = [
+      { name: "@example/new-package", version: "1.0.1" },
+      { name: "@example/canary-only", version: "1.0.1" },
+    ];
+    const metadata = new Map([
+      [packages[0]!.name, absent],
+      [packages[1]!.name, existingCanaryOnly],
+    ]);
+    const plan = planCanaryVersions(
+      packages,
+      new Map(
+        packages.map((pkg) => [pkg.name, metadata.get(pkg.name)!["dist-tags"].canary ?? null]),
+      ),
+      [packages.map((pkg) => pkg.name)],
+      4,
+    );
+    expect([...plan.values()]).toEqual(["1.0.1-canary.4", "1.0.1-canary.4"]);
+    expect(() => assertCanaryPlan(packages, plan, metadata)).not.toThrow();
+
+    const packed = Buffer.from("synthetic-new-package");
+    const integrity = `sha512-${createHash("sha512").update(packed).digest("base64")}`;
+    const receipt = {
+      "dist-tags": { canary: "1.0.1-canary.4" },
+      versions: {
+        "1.0.1-canary.4": {
+          dist: {
+            integrity,
+            attestations: {
+              url: "https://example.test/attestation",
+              provenance: { predicateType: "https://slsa.dev/provenance/v1" },
+            },
+          },
+        },
+      },
+    };
+    await confirmCanaryPublication(
+      packages[0]!.name,
+      "1.0.1-canary.4",
+      undefined,
+      packed,
+      async () => receipt,
+    );
+    await expect(
+      confirmCanaryPublication(
+        packages[0]!.name,
+        "1.0.1-canary.4",
+        undefined,
+        packed,
+        async () => ({
+          ...receipt,
+          "dist-tags": { latest: "1.0.1-canary.4", canary: "1.0.1-canary.4" },
+        }),
+      ),
+    ).rejects.toThrow("Stable tag changed");
+  });
+
+  test("passes canary-only authenticated provenance options and checks the stable tag", async () => {
+    const manifest = {
+      name: "@example/package",
+      version: "1.0.1-canary.4",
+      publishConfig: { access: "public", provenance: true },
+    };
+    let calls = 0;
+    const publish = async (
+      _manifest: unknown,
+      _tarball: unknown,
+      options: Record<string, unknown>,
+    ) => {
+      calls++;
+      expect(options).toEqual({
+        registry: "https://example.test",
+        forceAuth: { token: "synthetic-token" },
+        defaultTag: "canary",
+        access: "public",
+        provenance: true,
+      });
+      return { ok: true, transparencyLogUrl: "https://example.test/transparency" };
+    };
+    await publishCanaryArtifact(
+      manifest,
+      Buffer.from("synthetic-tarball"),
+      "synthetic-token",
+      publish as typeof libnpmpublish.publish,
+      "https://example.test",
+    );
+    expect(calls).toBe(1);
+    await expect(
+      publishCanaryArtifact(
+        { ...manifest, tag: "latest" },
+        Buffer.from("x"),
+        "synthetic-token",
+        publish as typeof libnpmpublish.publish,
+      ),
+    ).rejects.toThrow("invalid");
+    expect(calls).toBe(1);
+    const packed = Buffer.from("synthetic-tarball");
+    const integrity = `sha512-${createHash("sha512").update(packed).digest("base64")}`;
+    await confirmCanaryPublication(manifest.name, manifest.version, "1.0.0", packed, async () => ({
+      "dist-tags": { latest: "1.0.0", canary: manifest.version },
+      versions: {
+        [manifest.version]: {
+          dist: {
+            integrity,
+            attestations: {
+              url: "https://example.test/attestation",
+              provenance: { predicateType: "https://slsa.dev/provenance/v1" },
+            },
+          },
+        },
+      },
+    }));
+    await expect(
+      confirmCanaryPublication(manifest.name, manifest.version, "1.0.0", packed, async () => ({
+        "dist-tags": { latest: "1.0.1", canary: manifest.version },
+        versions: { [manifest.version]: {} },
+      })),
+    ).rejects.toThrow("Stable tag changed");
+    await expect(
+      confirmCanaryPublication(manifest.name, manifest.version, "1.0.0", packed, async () => ({
+        "dist-tags": { latest: "1.0.0", canary: manifest.version },
+        versions: { [manifest.version]: { dist: { integrity: "sha512-wrong" } } },
+      })),
+    ).rejects.toThrow("archive integrity differs");
+  });
+
+  test("official publisher's synthetic auth and provenance boundary is isolated from CI", () => {
+    const result = spawnSync(
+      process.execPath,
+      [join(repoRoot, "scripts/fixtures/libnpmpublish-canary.ts")],
+      {
+        cwd: repoRoot,
+        encoding: "utf8",
+        env: { PATH: process.env.PATH ?? "" },
+      },
+    );
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("synthetic publisher boundary passed");
+    expect(result.stderr).toBe("");
+  });
+
+  test("Bun packs a synthetic workspace archive without executing package scripts", () => {
+    const directory = mkdtempSync(join(tmpdir(), "canary-pack-test-"));
+    try {
+      writeFileSync(
+        join(directory, "package.json"),
+        JSON.stringify({
+          name: "@example/package",
+          version: "1.0.1-canary.4",
+          scripts: { prepack: "exit 17" },
+          files: ["index.js"],
+        }),
+      );
+      writeFileSync(join(directory, "index.js"), "export default true;\n");
+      const result = spawnSync(
+        "bun",
+        ["pm", "pack", "--ignore-scripts", "--quiet", "--destination", directory],
+        { cwd: directory, encoding: "utf8" },
+      );
+      expect(result.stderr).toBe("");
+      expect(result.status).toBe(0);
+      expect(readFileSync(result.stdout.trim()).length).toBeGreaterThan(0);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("Bun runs the existing publish guard only for a release", () => {
+    const cwd = join(repoRoot, "packages/sdk");
+    const denied = spawnSync("bun", ["run", "prepublishOnly"], {
+      cwd,
+      env: { ...process.env, OPENGENI_RELEASE: "0" },
+      encoding: "utf8",
+    });
+    const admitted = spawnSync("bun", ["run", "prepublishOnly"], {
+      cwd,
+      env: { ...process.env, OPENGENI_RELEASE: "1" },
+      encoding: "utf8",
+    });
+    expect(denied.status).not.toBe(0);
+    expect(admitted.status).toBe(0);
   });
 });
