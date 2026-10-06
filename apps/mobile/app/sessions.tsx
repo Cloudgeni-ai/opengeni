@@ -61,7 +61,8 @@ function Sessions() {
     const visible = needle
       ? sessions.filter((session) => sessionDisplayTitle(session).toLowerCase().includes(needle))
       : sessions;
-    return groupSessionsByProject(visible, projects);
+    // As on web, projects show even when empty, so a new one is visible at once.
+    return groupSessionsByProject(visible, projects, { keepEmpty: !needle });
   }, [projects, query, sessions]);
   const open = (sessionId: string) => router.push(`/session/${sessionId}`);
 
