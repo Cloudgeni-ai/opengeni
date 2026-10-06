@@ -15,9 +15,15 @@ export type CanaryIdentity = {
 };
 
 export type RetainedCanaryFile = { file: string; bytes: number; sha256: string };
+export type CanaryReadResource = { kind: "tags" } | { kind: "version"; version: string };
 export interface CanaryCustody {
   record(kind: string, fields: Record<string, unknown>): RetainedCanaryFile;
-  capture(name: string, response: Response, signal?: AbortSignal): Promise<Buffer>;
+  capture(
+    name: string,
+    response: Response,
+    signal?: AbortSignal,
+    resource?: CanaryReadResource,
+  ): Promise<Buffer>;
 }
 
 export function withCanaryReadSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -119,9 +125,15 @@ export class CanaryReceiptStore implements CanaryCustody {
     return this.retain(file, bytes);
   }
 
-  async capture(name: string, response: Response, signal?: AbortSignal): Promise<Buffer> {
+  async capture(
+    name: string,
+    response: Response,
+    signal?: AbortSignal,
+    resource?: CanaryReadResource,
+  ): Promise<Buffer> {
     const headers = this.record("READ_RESPONSE", {
       package: name,
+      ...(resource ? { resource } : {}),
       status: response.status,
       headers: canaryResponseHeaders(response.headers),
       headersMeaning: "FETCH_VISIBLE_ALLOWLIST",

@@ -103,6 +103,10 @@ write stops without replay. Bounded safe receipts survive ordinary workflow fail
 a lost runner can still lose its artifact. Existing versions are never repaired in place.
 The final gate rereads the complete cohort within the original shared deadline,
 read quota and custody caps. These reads do not claim an atomic registry snapshot.
+Prewrite and confirmation checks fetch only the selected version and current
+distribution tags. Both HTTP reads count against the confirmation quota; at most
+four requests run concurrently. Their raw receipts identify the resource read,
+without retaining the whole version history on every poll.
 
 In GitHub Actions, `N` has a floor derived from the workflow run ID and attempt
 (`run ID * 1000 + attempt`), so retries do not reuse versions hidden by stale

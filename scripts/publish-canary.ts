@@ -23,6 +23,7 @@ import {
   CanaryReceiptStore,
   withCanaryReadSignal,
   type CanaryCustody,
+  type CanaryReadResource,
 } from "./canary-publication-receipts";
 import { lockstepCanaryBase, retiredVersionSet } from "./release/lockstep-version";
 import {
@@ -140,6 +141,7 @@ type RegistryReadOptions = {
   signal?: AbortSignal;
   revalidate?: boolean;
   custody?: CanaryCustody | undefined;
+  selectedVersion?: string;
 };
 type ReceiptPollOptions = {
   now?: () => number;
@@ -182,18 +184,20 @@ export function verifyCanarySourceBinding(
   workflowCanarySequence(env.GITHUB_RUN_ID, env.GITHUB_RUN_ATTEMPT);
 }
 
-export async function readRegistryPackage(
+async function readRegistryResponse(
   name: string,
-  request: RegistryRequest = fetch,
-  base = registry,
-  options: RegistryReadOptions = {},
-): Promise<RegistryPackage> {
+  path: string,
+  request: RegistryRequest,
+  base: string,
+  options: RegistryReadOptions,
+  resource?: CanaryReadResource,
+): Promise<unknown> {
   // The registry revalidates its cache for this query; the request remains a GET.
   const suffix = options.revalidate ? "?write=true" : "";
   let response: Response;
   try {
     response = await withCanaryReadSignal(
-      request(`${base}/${encodeURIComponent(name)}${suffix}`, {
+      request(`${base}/${path}${suffix}`, {
         method: "GET",
         cache: "no-store",
         redirect: "manual",
@@ -208,7 +212,11 @@ export async function readRegistryPackage(
     );
   } catch (error) {
     const category = canaryErrorCategory(error);
-    options.custody?.record("READ_FAILED", { package: name, category });
+    options.custody?.record("READ_FAILED", {
+      package: name,
+      ...(resource ? { resource } : {}),
+      category,
+    });
     if (category === "request_timeout")
       throw new DOMException("Canary read timed out", "TimeoutError");
     // Transport exception text is deliberately excluded from publication logs.
@@ -216,30 +224,94 @@ export async function readRegistryPackage(
     throw new Error(`Canary registry read failed for ${name}`);
   }
   const bytes = options.custody
-    ? await options.custody.capture(name, response, options.signal)
+    ? await options.custody.capture(name, response, options.signal, resource)
     : await boundedCanaryBody(response, options.signal);
-  if (response.status === 404) return { "dist-tags": {}, versions: {} };
+  if (response.status === 404) return undefined;
   if (!response.ok) throw new Error(`Registry metadata for ${name} failed: ${response.status}`);
-  let json: Partial<RegistryPackage>;
   try {
-    json = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch {
     throw new Error(`Registry metadata for ${name} is invalid JSON`);
   }
+}
+
+function registryTags(value: unknown, name: string): RegistryPackage["dist-tags"] {
+  const tags = value as RegistryPackage["dist-tags"] | null;
+  if (
+    !tags ||
+    typeof tags !== "object" ||
+    Array.isArray(tags) ||
+    (tags.latest !== undefined && typeof tags.latest !== "string") ||
+    (tags.canary !== undefined && typeof tags.canary !== "string")
+  ) {
+    throw new Error(`Registry metadata for ${name} is incomplete`);
+  }
+  return tags;
+}
+
+export async function readRegistryPackage(
+  name: string,
+  request: RegistryRequest = fetch,
+  base = registry,
+  options: RegistryReadOptions = {},
+): Promise<RegistryPackage> {
+  const encodedName = encodeURIComponent(name);
+  if (options.selectedVersion !== undefined) {
+    const version = options.selectedVersion;
+    if (version.length > 96 || !/^\d+\.\d+\.\d+-canary\.(0|[1-9]\d*)$/.test(version)) {
+      throw new Error("Canary registry version is invalid");
+    }
+    // Retain both bounded responses before accepting either result. These GETs
+    // avoid saving every historical manifest again on each confirmation poll.
+    const results = await Promise.allSettled([
+      readRegistryResponse(name, `-/package/${encodedName}/dist-tags`, request, base, options, {
+        kind: "tags",
+      }),
+      readRegistryResponse(
+        name,
+        `${encodedName}/${encodeURIComponent(version)}`,
+        request,
+        base,
+        options,
+        { kind: "version", version },
+      ),
+    ]);
+    for (const result of results) {
+      if (result.status === "rejected") throw result.reason;
+    }
+    const tags = (results[0] as PromiseFulfilledResult<unknown>).value;
+    const manifest = (results[1] as PromiseFulfilledResult<unknown>).value as
+      | (RegistryPackage["versions"][string] & { name: string; version: string })
+      | undefined;
+    if (
+      manifest !== undefined &&
+      (!manifest ||
+        typeof manifest !== "object" ||
+        Array.isArray(manifest) ||
+        manifest.name !== name ||
+        manifest.version !== version)
+    ) {
+      throw new Error(`Registry version identity for ${name} differs`);
+    }
+    return {
+      "dist-tags": tags === undefined ? {} : registryTags(tags, name),
+      versions: manifest === undefined ? {} : { [version]: manifest },
+    };
+  }
+  const json = (await readRegistryResponse(name, encodedName, request, base, options)) as
+    | Partial<RegistryPackage>
+    | undefined;
+  if (json === undefined) return { "dist-tags": {}, versions: {} };
   if (
     !json ||
     typeof json !== "object" ||
-    !json["dist-tags"] ||
-    typeof json["dist-tags"] !== "object" ||
-    Array.isArray(json["dist-tags"]) ||
-    (json["dist-tags"].latest !== undefined && typeof json["dist-tags"].latest !== "string") ||
-    (json["dist-tags"].canary !== undefined && typeof json["dist-tags"].canary !== "string") ||
     !json.versions ||
     typeof json.versions !== "object" ||
     Array.isArray(json.versions)
   ) {
     throw new Error(`Registry metadata for ${name} is incomplete`);
   }
+  registryTags(json["dist-tags"], name);
   return json as RegistryPackage;
 }
 
@@ -415,6 +487,7 @@ export async function publishPreparedCanaries(
     }
     const current = await read(pkg.name, fetch, registry, {
       revalidate: true,
+      selectedVersion: pkg.version,
       signal: AbortSignal.timeout(CANARY_RECEIPT_REQUEST_TIMEOUT_MS),
       custody,
     });
@@ -507,15 +580,17 @@ export async function confirmCanaryCohort(
   const pending = new Map(packages.map((pkg) => [pkg.name, pkg]));
   let reads = 0;
   let lastObservation = "not_observed";
-  while (now() < deadline && reads < maxReads) {
+  // Each selected-version observation makes two HTTP reads. Count both against
+  // the existing cap and keep at most four HTTP requests in flight.
+  while (now() < deadline && reads + 2 <= maxReads) {
     const round = [...pending.values()];
     for (
       let offset = 0;
-      offset < round.length && now() < deadline && reads < maxReads;
-      offset += 4
+      offset < round.length && now() < deadline && reads + 2 <= maxReads;
+      offset += 2
     ) {
-      const batch = round.slice(offset, offset + Math.min(4, maxReads - reads));
-      reads += batch.length;
+      const batch = round.slice(offset, offset + Math.min(2, Math.floor((maxReads - reads) / 2)));
+      reads += batch.length * 2;
       const results = await Promise.allSettled(
         batch.map(async (pkg) => {
           let observation: string;
@@ -524,6 +599,7 @@ export async function confirmCanaryCohort(
             if (remaining <= 0) return { pkg, observation: "read_exceeded_deadline" };
             const current = await read(pkg.name, fetch, registry, {
               revalidate: true,
+              selectedVersion: pkg.version,
               signal: AbortSignal.timeout(
                 Math.max(1, Math.ceil(Math.min(CANARY_RECEIPT_REQUEST_TIMEOUT_MS, remaining))),
               ),
@@ -555,19 +631,20 @@ export async function confirmCanaryCohort(
       }
       if (failure) throw failure;
       if (pending.size === 0) {
-        if (packages.length > maxReads - reads || now() >= deadline) {
+        if (packages.length * 2 > maxReads - reads || now() >= deadline) {
           throw new Error("Final canary cohort cannot fit the remaining read bounds");
         }
-        for (let finalOffset = 0; finalOffset < packages.length; finalOffset += 4) {
+        for (let finalOffset = 0; finalOffset < packages.length; finalOffset += 2) {
           if (now() >= deadline) throw new Error("Final canary cohort exceeded the deadline");
-          const finalBatch = packages.slice(finalOffset, finalOffset + 4);
-          reads += finalBatch.length;
+          const finalBatch = packages.slice(finalOffset, finalOffset + 2);
+          reads += finalBatch.length * 2;
           const finalResults = await Promise.allSettled(
             finalBatch.map(async (pkg) => {
               const remaining = deadline - now();
               if (remaining <= 0) throw new Error("Final canary cohort exceeded the deadline");
               const current = await read(pkg.name, fetch, registry, {
                 revalidate: true,
+                selectedVersion: pkg.version,
                 signal: AbortSignal.timeout(
                   Math.max(1, Math.ceil(Math.min(CANARY_RECEIPT_REQUEST_TIMEOUT_MS, remaining))),
                 ),
@@ -600,9 +677,9 @@ export async function confirmCanaryCohort(
       }
     }
     const wait = Math.min(pollIntervalMs, deadline - now());
-    if (wait > 0 && reads < maxReads) await sleep(wait);
+    if (wait > 0 && reads + 2 <= maxReads) await sleep(wait);
   }
-  const category = reads >= maxReads && now() < deadline ? "read_limit" : lastObservation;
+  const category = reads + 2 > maxReads && now() < deadline ? "read_limit" : lastObservation;
   throw new Error(
     `Canary registry receipt is unavailable for ${[...pending.keys()].join(", ") || "cohort"} after ${reads} reads (${category})`,
   );

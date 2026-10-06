@@ -70,23 +70,42 @@ function metadata(pkg: { integrity: string }, ready = true) {
   };
 }
 function reader(response: (name: string) => Response): typeof readRegistryPackage {
-  return (name, _request, _base, options) =>
-    readRegistryPackage(
+  return (name, _request, _base, options) => {
+    const snapshot = response(name);
+    return readRegistryPackage(
       name,
       async (url, init) => {
-        expect(String(url)).toBe(
-          `https://registry.example.test/${encodeURIComponent(name)}?write=true`,
-        );
         expect(init?.method).toBe("GET");
         expect(init?.redirect).toBe("manual");
         expect(init?.credentials).toBe("omit");
         expect(init?.headers).toEqual({ accept: "application/json", "cache-control": "no-cache" });
         expect(init?.signal).toBeInstanceOf(AbortSignal);
-        return response(name);
+        if (!options?.selectedVersion) {
+          expect(String(url)).toBe(
+            `https://registry.example.test/${encodeURIComponent(name)}?write=true`,
+          );
+          return snapshot;
+        }
+        const selected = options.selectedVersion;
+        const current = await snapshot.clone().json();
+        if (String(url).includes("/dist-tags?")) {
+          expect(String(url)).toBe(
+            `https://registry.example.test/-/package/${encodeURIComponent(name)}/dist-tags?write=true`,
+          );
+          return Response.json(current["dist-tags"]);
+        }
+        expect(String(url)).toBe(
+          `https://registry.example.test/${encodeURIComponent(name)}/${selected}?write=true`,
+        );
+        const manifest = current.versions?.[selected];
+        return manifest
+          ? Response.json({ ...manifest, name, version: selected })
+          : new Response(null, { status: 404 });
       },
       "https://registry.example.test",
       options,
     );
+  };
 }
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -333,6 +352,110 @@ describe("canary acknowledgement and receipt phases", () => {
 });
 
 describe("strict raw receipt acceptance", () => {
+  test("delayed confirmation does not retain unrelated version histories on every poll", async () => {
+    const f = fixture();
+    const cohort = freezeCanaryCohort(f.packages, f.store).slice(0, 1);
+    const pkg = cohort[0]!;
+    let fullReads = 0,
+      versionReads = 0,
+      elapsed = 0;
+    const history = Object.fromEntries(
+      Array.from({ length: 32 }, (_, index) => [
+        `0.0.${index}`,
+        { readme: "synthetic unrelated history".repeat(4096) },
+      ]),
+    );
+    const request = async (url: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.method).toBe("GET");
+      expect(init?.body).toBeUndefined();
+      if (String(url).includes("/dist-tags?")) {
+        return Response.json({ latest: pkg.previousLatest, canary: version });
+      }
+      if (String(url).includes(`/${version}?`)) {
+        if (++versionReads <= 70) return new Response(null, { status: 404 });
+        return Response.json({ name: pkg.name, version, ...metadata(pkg).versions[version] });
+      }
+      fullReads++;
+      return Response.json({ "dist-tags": { latest: pkg.previousLatest }, versions: history });
+    };
+    await readRegistryPackage(pkg.name, request, "https://registry.example.test", {
+      custody: f.store,
+    });
+    await confirmCanaryCohort(
+      cohort,
+      (name, _request, _base, options) =>
+        readRegistryPackage(name, request, "https://registry.example.test", options),
+      {
+        custody: f.store,
+        now: () => elapsed,
+        sleep: async (ms) => {
+          elapsed += ms;
+        },
+        timeoutMs: 75_000,
+      },
+    );
+    expect(fullReads).toBe(1);
+    expect(versionReads).toBe(72);
+    const retainedBytes = f
+      .events()
+      .filter((event) => event.kind === "READ_BODY")
+      .reduce((total, event) => total + event.retained, 0);
+    expect(retainedBytes).toBeLessThan(4 * 1024 * 1024);
+    expect(f.events().find((event) => event.kind === "COHORT_READS_MATCHED").reads).toBe(144);
+    const resources = f
+      .events()
+      .filter((event) => event.kind === "READ_RESPONSE" && event.resource)
+      .map((event) => event.resource.kind);
+    expect(resources.filter((kind) => kind === "tags")).toHaveLength(72);
+    expect(resources.filter((kind) => kind === "version")).toHaveLength(72);
+  });
+
+  test.each(["wrong-name", "wrong-version", "null-manifest", "null-tags"])(
+    "retains both responses but rejects a selected %s observation",
+    async (failure) => {
+      const f = fixture();
+      const name = "@example/package";
+      await expect(
+        readRegistryPackage(
+          name,
+          async (url) =>
+            String(url).includes("/dist-tags?")
+              ? Response.json(failure === "null-tags" ? null : { latest: "1.0.0", canary: version })
+              : Response.json(
+                  failure === "null-manifest"
+                    ? null
+                    : {
+                        name: failure === "wrong-name" ? "@example/other" : name,
+                        version: failure === "wrong-version" ? "1.0.1-canary.3" : version,
+                      },
+                ),
+          "https://registry.example.test",
+          { custody: f.store, selectedVersion: version, revalidate: true },
+        ),
+      ).rejects.toThrow();
+      expect(
+        f.events().filter((event) => event.kind === "READ_BODY" && event.complete),
+      ).toHaveLength(2);
+    },
+  );
+
+  test("only a 404 means an absent selected version", async () => {
+    const f = fixture();
+    const current = await readRegistryPackage(
+      "@example/package",
+      async (url) =>
+        String(url).includes("/dist-tags?")
+          ? Response.json({ latest: "1.0.0" })
+          : new Response(null, { status: 404 }),
+      "https://registry.example.test",
+      { custody: f.store, selectedVersion: version, revalidate: true },
+    );
+    expect(current).toEqual({ "dist-tags": { latest: "1.0.0" }, versions: {} });
+    await expect(
+      readRegistryPackage("@example/package", async () => Response.json(null)),
+    ).rejects.toThrow("incomplete");
+  });
+
   test("all receipt reads share one deadline and one read cap", async () => {
     const f = fixture();
     const cohort = freezeCanaryCohort(f.packages, f.store);
@@ -347,7 +470,8 @@ describe("strict raw receipt acceptance", () => {
         { custody: f.store, maxReads: 3 },
       ),
     ).rejects.toThrow("read_limit");
-    expect(reads).toBe(3);
+    expect(reads).toBe(1);
+    expect(f.events().filter((event) => event.kind === "READ_RESPONSE")).toHaveLength(2);
   });
 
   test.each(["latest", "integrity", "tag", "attestation", "predicate"] as const)(
@@ -385,7 +509,7 @@ describe("strict raw receipt acceptance", () => {
     },
   );
 
-  test("a valid full response cannot settle after its custody passes the deadline", async () => {
+  test("a valid selected response pair cannot settle after custody passes the deadline", async () => {
     const f = fixture();
     const cohort = freezeCanaryCohort(f.packages, f.store).slice(0, 1);
     let elapsed = 0;
@@ -398,7 +522,7 @@ describe("strict raw receipt acceptance", () => {
       confirmCanaryCohort(cohort, read, { custody: f.store, now: () => elapsed, timeoutMs: 1000 }),
     ).rejects.toThrow("read_exceeded_deadline");
     expect(f.events().filter((event) => event.kind === "READ_BODY" && event.complete)).toHaveLength(
-      1,
+      2,
     );
     expect(f.events().filter((event) => event.kind === "COHORT_READS_MATCHED")).toHaveLength(0);
   });
@@ -577,7 +701,7 @@ describe("fresh complete-cohort qualification", () => {
           if (final) receiptReads++;
           return Response.json(metadata(cohort.find((pkg) => pkg.name === name)!, final));
         }),
-        maxReads: 7,
+        maxReads: 15,
       }),
     ).rejects.toThrow("Final canary cohort");
     expect(writes).toBe(4);
@@ -659,12 +783,12 @@ describe("fresh complete-cohort qualification", () => {
         if (final) receiptReads.set(name, (receiptReads.get(name) ?? 0) + 1);
         return Response.json(metadata(cohort.find((pkg) => pkg.name === name)!, final));
       }),
-      maxReads: 8,
+      maxReads: 16,
     });
     expect(pins).toEqual(Object.fromEntries(names.map((name) => [name, version])));
     expect([...receiptReads.entries()]).toEqual(names.map((name) => [name, 2]));
     const matched = f.events().find((event) => event.kind === "COHORT_READS_MATCHED");
-    expect(matched.reads).toBe(8);
+    expect(matched.reads).toBe(16);
     expect(matched.freshCompleteCohort).toBe(true);
   });
 });

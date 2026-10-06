@@ -488,7 +488,7 @@ describe("Bun canary publication boundary", () => {
           pollIntervalMs: 1_000,
         },
       ),
-    ).rejects.toThrow("after 3 reads (version_pending)");
+    ).rejects.toThrow("after 6 reads (version_pending)");
     expect(reads).toBe(3);
     expect(elapsed).toBe(2_500);
   });
@@ -525,7 +525,7 @@ describe("Bun canary publication boundary", () => {
         },
         { now: () => elapsed, timeoutMs: 1_000 },
       ),
-    ).rejects.toThrow("after 1 reads (read_exceeded_deadline)");
+    ).rejects.toThrow("after 2 reads (read_exceeded_deadline)");
     expect(reads).toBe(1);
   });
 
@@ -611,7 +611,7 @@ describe("Bun canary publication boundary", () => {
     );
   });
 
-  test("confirms the archive through a fresh full-metadata response when the ordinary read is stale", async () => {
+  test("confirms the selected version and tags when ordinary package metadata is stale", async () => {
     const version = "1.0.1-canary.4";
     const packed = Buffer.from("synthetic-tarball");
     const integrity = `sha512-${createHash("sha512").update(packed).digest("base64")}`;
@@ -625,22 +625,26 @@ describe("Bun canary publication boundary", () => {
           ? { accept: "application/json", "cache-control": "no-cache" }
           : { accept: "application/vnd.npm.install-v1+json" },
       );
-      return Response.json({
-        "dist-tags": { latest: "1.0.0", ...(fresh ? { canary: version } : {}) },
-        versions: fresh
-          ? {
-              [version]: {
-                dist: {
-                  integrity,
-                  attestations: {
-                    url: "https://registry.example.test/attestation",
-                    provenance: { predicateType: "https://slsa.dev/provenance/v1" },
-                  },
-                },
-              },
-            }
-          : {},
-      });
+      if (fresh) {
+        if (String(url).includes("/dist-tags?")) {
+          return Response.json({ latest: "1.0.0", canary: version });
+        }
+        expect(String(url)).toBe(
+          `https://registry.example.test/%40example%2Fpackage/${version}?write=true`,
+        );
+        return Response.json({
+          name: "@example/package",
+          version,
+          dist: {
+            integrity,
+            attestations: {
+              url: "https://registry.example.test/attestation",
+              provenance: { predicateType: "https://slsa.dev/provenance/v1" },
+            },
+          },
+        });
+      }
+      return Response.json({ "dist-tags": { latest: "1.0.0" }, versions: {} });
     };
     const baseline = await readRegistryPackage(
       "@example/package",
@@ -656,7 +660,7 @@ describe("Bun canary publication boundary", () => {
       (name, _request, _base, options) =>
         readRegistryPackage(name, request, "https://registry.example.test", options),
     );
-    expect(reads).toBe(3);
+    expect(reads).toBe(5);
   });
 
   test("official publisher's synthetic auth and provenance boundary is isolated from CI", () => {
