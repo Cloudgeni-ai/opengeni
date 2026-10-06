@@ -2,6 +2,7 @@ import type { Observability } from "@opengeni/observability";
 import type { Worker, WorkerStatus } from "@temporalio/worker";
 import { turnTaskQueueMetricLabels, type TurnTaskQueueIdentity } from "./observability-metrics";
 import {
+  createTelemetryClock,
   telemetryInterval,
   telemetryScheduler,
   type TelemetryScheduler,
@@ -66,7 +67,7 @@ export function withTurnWorkerActivityTelemetry(
 ): { worker: WorkerRunTarget; activityTelemetry: TurnWorkerActivityTelemetry } {
   const scheduler = input.scheduler ?? telemetryScheduler;
   const intervalMs = telemetryInterval(input.intervalMs ?? 15_000, "activity telemetry intervalMs");
-  const now = input.now ?? Date.now;
+  const clock = createTelemetryClock(input.now ?? Date.now);
   const labels = { ...turnTaskQueueMetricLabels(input.identity), worker_pod_uid: input.podUid };
   let runStarted = false;
   let runSettled = false;
@@ -119,6 +120,8 @@ export function withTurnWorkerActivityTelemetry(
         throw new Error("invalid SDK executing activity state");
       }
       idle = total === 0;
+      const observedAt = clock.read();
+      if (observedAt === null) throw new Error("invalid activity observation clock");
       // Publish validity last; a partial or failed metric update cannot license
       // combining a new timestamp with old occupancy. Never invent idle zero.
       set(
@@ -134,7 +137,7 @@ export function withTurnWorkerActivityTelemetry(
       set(
         TURN_WORKER_ACTIVITY_METRICS.timestamp,
         "Unix timestamp of the latest successful SDK activity occupancy observation.",
-        now() / 1_000,
+        observedAt / 1_000,
       );
       set(
         TURN_WORKER_ACTIVITY_METRICS.valid,

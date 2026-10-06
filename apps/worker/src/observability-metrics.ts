@@ -22,6 +22,7 @@ import {
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
 import type { CompanyBrainContributionReceipt } from "./model-context-contributions";
 import {
+  createTelemetryClock,
   telemetryInterval,
   telemetryScheduler,
   type TelemetryScheduler,
@@ -828,6 +829,7 @@ export function startTurnCapacityMonitor(input: {
   readTimeoutMs?: number;
   closeTimeoutMs?: number;
   now?: () => number;
+  monotonicNow?: () => number;
   scheduler?: TelemetryScheduler;
 }): { close: () => Promise<void> } {
   const intervalMs = telemetryInterval(input.intervalMs ?? 15_000, "queue monitor intervalMs");
@@ -841,8 +843,14 @@ export function startTurnCapacityMonitor(input: {
   );
   const scheduler = input.scheduler ?? telemetryScheduler;
   const labels = turnTaskQueueMetricLabels(input.identity);
-  const now = input.now ?? Date.now;
-  const startedAt = now();
+  const wallClock = createTelemetryClock(input.now ?? Date.now);
+  const monotonicClock = createTelemetryClock(input.monotonicNow ?? (() => performance.now()));
+  let startedAt = wallClock.read();
+  const readClock = () => {
+    const wall = wallClock.read();
+    const monotonic = monotonicClock.read();
+    return wall === null || monotonic === null ? null : { wall, monotonic };
+  };
   let lastSuccessAt: number | null = null;
   let lastReadSucceeded = false;
   let stopped = false;
@@ -859,9 +867,12 @@ export function startTurnCapacityMonitor(input: {
       /* Telemetry must not break the worker. */
     }
   };
-  const recordStatus = () => {
-    const observedAt = now();
-    const successAgeMs = observedAt - (lastSuccessAt ?? startedAt);
+  const recordStatus = (observation = readClock()) => {
+    if (observation === null) lastReadSucceeded = false;
+    const observedAt = wallClock.latest();
+    startedAt ??= observedAt;
+    const successAgeMs =
+      observedAt === null ? 0 : observedAt - (lastSuccessAt ?? startedAt ?? observedAt);
     const set = (name: string, help: string, value: number) =>
       safely(() => input.observability.setGauge({ name, help, labels, value }));
     set(
@@ -889,8 +900,14 @@ export function startTurnCapacityMonitor(input: {
     // Advance freshness age even while a Temporal read is hung. Old backlog
     // values remain observable for diagnosis but cease to be authoritative.
     if (stopped) return;
-    recordStatus();
-    if (running) return;
+    const observation = readClock();
+    recordStatus(observation);
+    if (running || observation === null) return;
+    const deadline = observation.wall + readTimeoutMs;
+    if (!Number.isFinite(deadline) || deadline > Number.MAX_SAFE_INTEGER) {
+      recordStatus(null);
+      return;
+    }
     const controller = new AbortController();
     const attempt = { controller, done: Promise.resolve(), cancelTimeout: () => {} };
     running = attempt;
@@ -904,17 +921,31 @@ export function startTurnCapacityMonitor(input: {
     }, readTimeoutMs);
     let read: Promise<TurnTaskQueueStats>;
     try {
-      read = input.read({ signal: controller.signal, deadline: now() + readTimeoutMs });
+      read = input.read({ signal: controller.signal, deadline });
     } catch (error) {
       read = Promise.reject(error);
     }
     attempt.done = read
       .then((stats) => {
         if (stopped || controller.signal.aborted || running !== attempt) return;
+        const completedAt = readClock();
+        // A native RPC may settle before its deadline but its Promise callback
+        // can run after it, ahead of a delayed JS timeout. Never restamp that old
+        // response as fresh. Monotonic age also fences wall-clock adjustments.
+        if (
+          completedAt === null ||
+          completedAt.wall >= deadline ||
+          completedAt.monotonic - observation.monotonic >= readTimeoutMs
+        ) {
+          lastReadSucceeded = false;
+          recordStatus(completedAt);
+          controller.abort();
+          return;
+        }
         recordTurnTaskQueueStats(input.observability, stats, input.identity);
-        lastSuccessAt = now();
+        lastSuccessAt = completedAt.wall;
         lastReadSucceeded = true;
-        recordStatus();
+        recordStatus(completedAt);
       })
       .catch(() => {
         if (stopped || controller.signal.aborted || running !== attempt) return;

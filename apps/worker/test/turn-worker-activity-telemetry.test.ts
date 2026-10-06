@@ -24,6 +24,7 @@ function fixture(podUid = "pod-uid-1") {
   let runs = 0;
   let unsubscriptions = 0;
   let statusFails = false;
+  let observationClock: (() => number) | undefined;
   let observer: { next(value: number): void; error(error: unknown): void } | undefined;
   const sdkWorker = {
     getStatus: () => {
@@ -55,6 +56,7 @@ function fixture(podUid = "pod-uid-1") {
   };
   const bridge = withTurnWorkerActivityTelemetry(sdkWorker, {
     ...clock,
+    now: () => (observationClock ? observationClock() : clock.now()),
     observability,
     podUid,
     identity: { temporalNamespace: "actual-namespace", taskQueue: "actual-turn-queue" },
@@ -70,6 +72,9 @@ function fixture(podUid = "pod-uid-1") {
     unsubscriptions: () => unsubscriptions,
     failStatus: (fail: boolean) => {
       statusFails = fail;
+    },
+    setClock: (read: () => number) => {
+      observationClock = read;
     },
     corrupt: (count: number) => {
       nonlocal = count;
@@ -99,13 +104,16 @@ function fixture(podUid = "pod-uid-1") {
   };
 }
 
-async function value(f: ReturnType<typeof fixture>, name: string): Promise<number> {
-  const metrics = await f.observability.prometheusMetrics();
+function metricValue(metrics: string, name: string): number {
   const line = metrics.split("\n").find((candidate) => candidate.startsWith(`${name}{`));
   expect(line).toContain('temporal_namespace="actual-namespace"');
   expect(line).toContain('task_queue="actual-turn-queue"');
   expect(line).toContain("worker_pod_uid=");
   return Number(line?.split("} ")[1]);
+}
+
+async function value(f: ReturnType<typeof fixture>, name: string): Promise<number> {
+  return metricValue(await f.observability.prometheusMetrics(), name);
 }
 
 describe("SDK all-activity occupancy bridge", () => {
@@ -313,6 +321,44 @@ describe("SDK all-activity occupancy bridge", () => {
     await f.activityTelemetry.settled;
     expect(f.unsubscriptions()).toBe(1);
     expect(f.timers()).toBe(0);
+  });
+
+  test("backward/nonfinite/throwing observation clocks invalidate without replacing the last successful tuple", async () => {
+    const invalidClocks = [
+      () => 99_999,
+      () => NaN,
+      () => Infinity,
+      () => -Infinity,
+      () => -1,
+      () => Number.MAX_SAFE_INTEGER + 1,
+      () => {
+        throw Error("clock unavailable");
+      },
+    ];
+    for (const clock of invalidClocks) {
+      const f = fixture();
+      const running = f.worker.run();
+      f.startNonlocal();
+      await flushTelemetry();
+      f.setClock(clock);
+      f.startNonlocal();
+      await flushTelemetry();
+      const invalidMetrics = await f.observability.prometheusMetrics();
+      expect(metricValue(invalidMetrics, names.valid)).toBe(0);
+      expect(metricValue(invalidMetrics, names.inflight)).toBe(1);
+      expect(metricValue(invalidMetrics, names.timestamp)).toBe(100);
+      f.setClock(f.now);
+      f.advance(1_000);
+      const recoveredMetrics = await f.observability.prometheusMetrics();
+      expect(metricValue(recoveredMetrics, names.valid)).toBe(1);
+      expect(metricValue(recoveredMetrics, names.inflight)).toBe(2);
+      expect(metricValue(recoveredMetrics, names.timestamp)).toBe(101);
+      f.settleNonlocal();
+      f.settleNonlocal();
+      f.execution.resolve();
+      await running;
+      expect(f.unsubscriptions()).toBe(1);
+    }
   });
 
   test("missing Kubernetes UID never invents a physical pod identity", async () => {

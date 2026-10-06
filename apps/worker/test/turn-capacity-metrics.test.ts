@@ -19,8 +19,10 @@ const stats = {
 };
 
 function fixture() {
+  const clock = telemetryClock();
   return {
-    ...telemetryClock(),
+    ...clock,
+    monotonicNow: clock.now,
     observability: createObservability(testSettings(), { component: "worker-turn" }),
     identity,
     intervalMs: 1_000,
@@ -360,5 +362,195 @@ describe("turn capacity metrics", () => {
     hung.resolve(stats);
     await flushTelemetry();
     await monitor.close();
+  });
+
+  test("rejects an overage response even when its timeout callback has not run", async () => {
+    const f = fixture();
+    let clockJump = 0;
+    let reads = 0;
+    let signal!: AbortSignal;
+    const late = deferred<TurnTaskQueueStats>();
+    const monitor = startTurnCapacityMonitor({
+      ...f,
+      readTimeoutMs: 5_000,
+      now: () => f.now() + clockJump,
+      read: (options) => {
+        signal = options.signal;
+        return ++reads === 1 ? Promise.resolve(stats) : late.promise;
+      },
+    });
+    try {
+      await flushTelemetry();
+      f.advance(1_000);
+      expect(signal.aborted).toBe(false);
+      clockJump = 5_001; // Move time without delivering any scheduled callback.
+      late.resolve({ ...stats, eligibleBacklog: 888 });
+      await flushTelemetry();
+      const metrics = await f.observability.prometheusMetrics();
+      gauge(metrics, "opengeni_turn_eligible_backlog", 9);
+      gauge(metrics, "opengeni_turn_capacity_monitor_last_read_success", 0);
+      gauge(metrics, "opengeni_turn_capacity_monitor_fresh", 0);
+      gauge(metrics, "opengeni_turn_capacity_monitor_last_success_timestamp_seconds", 100);
+      gauge(metrics, "opengeni_turn_capacity_monitor_last_success_age_seconds", 6.001);
+    } finally {
+      await monitor.close();
+    }
+  });
+
+  test("accepts only responses strictly before the deadline boundary with timers withheld", async () => {
+    for (const elapsed of [4_999, 5_000, 5_001]) {
+      const f = fixture();
+      let observedAt = f.now();
+      const pending = deferred<TurnTaskQueueStats>();
+      const monitor = startTurnCapacityMonitor({
+        ...f,
+        now: () => observedAt,
+        readTimeoutMs: 5_000,
+        read: () => pending.promise,
+      });
+      try {
+        observedAt += elapsed;
+        pending.resolve(stats);
+        await flushTelemetry();
+        const metrics = await f.observability.prometheusMetrics();
+        gauge(metrics, "opengeni_turn_capacity_monitor_last_read_success", elapsed < 5_000 ? 1 : 0);
+        gauge(metrics, "opengeni_turn_capacity_monitor_fresh", elapsed < 5_000 ? 1 : 0);
+        if (elapsed < 5_000) {
+          gauge(metrics, "opengeni_turn_eligible_backlog", 9);
+          gauge(metrics, "opengeni_turn_capacity_monitor_last_success_timestamp_seconds", 104.999);
+        } else {
+          expect(metrics).not.toMatch(/^opengeni_turn_eligible_backlog\{/m);
+          gauge(metrics, "opengeni_turn_capacity_monitor_last_success_timestamp_seconds", 0);
+        }
+      } finally {
+        await monitor.close();
+      }
+    }
+  });
+
+  test("monotonic read age expires a response even when wall time has not reached its deadline", async () => {
+    const f = fixture();
+    let elapsedJump = 0;
+    let reads = 0;
+    const pending = deferred<TurnTaskQueueStats>();
+    const monitor = startTurnCapacityMonitor({
+      ...f,
+      readTimeoutMs: 5_000,
+      monotonicNow: () => f.now() + elapsedJump,
+      read: () => (++reads === 1 ? Promise.resolve(stats) : pending.promise),
+    });
+    try {
+      await flushTelemetry();
+      f.advance(1_000);
+      elapsedJump = 5_000; // Only elapsed time advances; neither timeout nor wall deadline fires.
+      pending.resolve({ ...stats, eligibleBacklog: 888 });
+      await flushTelemetry();
+      const metrics = await f.observability.prometheusMetrics();
+      gauge(metrics, "opengeni_turn_eligible_backlog", 9);
+      gauge(metrics, "opengeni_turn_capacity_monitor_fresh", 0);
+      gauge(metrics, "opengeni_turn_capacity_monitor_last_success_timestamp_seconds", 100);
+      gauge(metrics, "opengeni_turn_capacity_monitor_last_success_age_seconds", 1);
+    } finally {
+      await monitor.close();
+    }
+  });
+
+  test("backward/nonfinite wall or elapsed clocks reject late settlement and recover only on a new read", async () => {
+    for (const bad of [-1, Number.NaN, Infinity, -Infinity]) {
+      for (const clockKind of ["wall", "monotonic"] as const) {
+        const f = fixture();
+        let jump = 0;
+        let reads = 0;
+        const pending = deferred<TurnTaskQueueStats>();
+        const monitor = startTurnCapacityMonitor({
+          ...f,
+          readTimeoutMs: 5_000,
+          now: () => f.now() + (clockKind === "wall" ? jump : 0),
+          monotonicNow: () => f.now() + (clockKind === "monotonic" ? jump : 0),
+          read: () =>
+            ++reads === 1
+              ? Promise.resolve(stats)
+              : reads === 2
+                ? pending.promise
+                : Promise.resolve({ ...stats, eligibleBacklog: 10 }),
+        });
+        try {
+          await flushTelemetry();
+          f.advance(1_000);
+          jump = bad;
+          pending.resolve({ ...stats, eligibleBacklog: 888 });
+          await flushTelemetry();
+          const metrics = await f.observability.prometheusMetrics();
+          gauge(metrics, "opengeni_turn_eligible_backlog", 9);
+          gauge(metrics, "opengeni_turn_capacity_monitor_last_read_success", 0);
+          gauge(metrics, "opengeni_turn_capacity_monitor_fresh", 0);
+          gauge(metrics, "opengeni_turn_capacity_monitor_last_success_timestamp_seconds", 100);
+          gauge(metrics, "opengeni_turn_capacity_monitor_last_success_age_seconds", 1);
+          expect(metrics).not.toMatch(
+            /^opengeni_turn_capacity_monitor_.*\} (?:NaN|Nan|[+-]?Inf(?:inity)?)/m,
+          );
+          jump = 0;
+          f.advance(1_000);
+          await flushTelemetry();
+          expect(reads).toBe(3);
+          gauge(await f.observability.prometheusMetrics(), "opengeni_turn_eligible_backlog", 10);
+          gauge(
+            await f.observability.prometheusMetrics(),
+            "opengeni_turn_capacity_monitor_fresh",
+            1,
+          );
+        } finally {
+          await monitor.close();
+        }
+      }
+    }
+  });
+
+  test("invalid/throwing startup clocks never launch a native call or publish nonfinite status", async () => {
+    const invalidClocks = [
+      () => NaN,
+      () => Infinity,
+      () => -Infinity,
+      () => -1,
+      () => Number.MAX_SAFE_INTEGER + 1,
+      () => {
+        throw Error("clock unavailable");
+      },
+    ];
+    for (const badClock of invalidClocks) {
+      for (const clockKind of ["wall", "monotonic"] as const) {
+        const f = fixture();
+        let invalid = true;
+        const clock = () => (invalid ? badClock() : f.now());
+        const read = mock((_options: TurnTaskQueueReadOptions) => Promise.resolve(stats));
+        const monitor = startTurnCapacityMonitor({
+          ...f,
+          read,
+          ...(clockKind === "wall" ? { now: clock } : { monotonicNow: clock }),
+        });
+        try {
+          await flushTelemetry();
+          expect(read).not.toHaveBeenCalled();
+          const metrics = await f.observability.prometheusMetrics();
+          expect(metrics).not.toMatch(/^opengeni_turn_eligible_backlog\{/m);
+          gauge(metrics, "opengeni_turn_capacity_monitor_last_read_success", 0);
+          gauge(metrics, "opengeni_turn_capacity_monitor_fresh", 0);
+          gauge(metrics, "opengeni_turn_capacity_monitor_last_success_timestamp_seconds", 0);
+          gauge(metrics, "opengeni_turn_capacity_monitor_last_success_age_seconds", 0);
+          invalid = false;
+          f.advance(1_000);
+          await flushTelemetry();
+          expect(read).toHaveBeenCalledTimes(1);
+          expect(Number.isFinite(read.mock.calls[0]?.[0]?.deadline)).toBe(true);
+          gauge(
+            await f.observability.prometheusMetrics(),
+            "opengeni_turn_capacity_monitor_fresh",
+            1,
+          );
+        } finally {
+          await monitor.close();
+        }
+      }
+    }
   });
 });

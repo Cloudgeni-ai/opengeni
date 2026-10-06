@@ -25,3 +25,29 @@ export function telemetryInterval(value: number, name: string): number {
   }
   return value;
 }
+
+/** Bad/regressing clocks are unknown, not a new timestamp or a zero age.
+ * Retain the last valid high-water observation for diagnostic age reporting. */
+export function createTelemetryClock(now: () => number) {
+  let latest: number | null = null;
+  return {
+    read(): number | null {
+      let observed: number;
+      try {
+        observed = now();
+      } catch {
+        return null;
+      }
+      if (
+        !Number.isFinite(observed) ||
+        observed < 0 ||
+        observed > Number.MAX_SAFE_INTEGER ||
+        (latest !== null && observed < latest)
+      )
+        return null;
+      latest = observed;
+      return observed;
+    },
+    latest: () => latest,
+  };
+}
