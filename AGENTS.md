@@ -303,6 +303,14 @@ disabled tools or grant execution outside the current catalog.
 
 ## Run Lifecycle (read `docs/run-lifecycle.md` before changing the session workflow, the agent turn activity, or memory)
 
+Useful Knowledge retention is ordinary in-scope work under the accepted learning
+policy, including new Slack sessions; it does not require a separate "remember"
+request. Render the frozen effective modes and destination scope to the agent,
+without treating source content or conversational feedback as permission to
+change settings, scope or external-action authority. Historical stored Slack
+instructions remain explicit restrictions until deliberately migrated. See
+`docs/knowledge.md`.
+
 Claude Messages requests group retained system inputs after the user inputs in
 the same assistant-delimited phase: the system beta forbids `user → system → user`.
 This is a request-local projection; keep canonical roles/content and compaction
@@ -497,6 +505,11 @@ see `agent/TRANSACTIONAL-WRITES.md` for metadata preservation and refusal.
 Managed production package availability is reconciled automatically after the
 runtime becomes healthy; it does not wait for later acceptance. See
 `reconcile-production-packages.yml` and `docs/deployment.md`.
+
+Canary publication freezes all archives before writing, retains each intent and
+HTTP acknowledgement, then checks the cohort with bounded read-only receipts.
+Unknown writes never replay automatically. Site pins and independent signed-byte
+acceptance remain separate gates; see `CONTRIBUTING.md`.
 
 If a change alters architecture, terminology, the run lifecycle, the memory model, or a "do not" guardrail above, update this file, [`docs/architecture.md`](docs/architecture.md), and the relevant `docs/*.md` in the same change. In particular, structural changes (an app/package/sandbox backend added, removed, or renamed; a moved responsibility; a changed invariant, data-flow, or canonical source) belong in `docs/architecture.md` — see its "Keeping this current" section. An out-of-date AGENTS.md or doc is a bug, not a nicety.
 

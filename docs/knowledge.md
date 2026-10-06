@@ -76,6 +76,20 @@ connection owner's accepted human revision authority.
 
 ## Selective retention and discovery
 
+Learning is part of ordinary work under the accepted destination policy. A user
+need not say "remember" or separately approve useful retention in Automatic mode,
+including Slack tasks. Direct user corrections, accepted decisions, product
+preferences, constraints and their reasoning can be learning signals; task-only
+tweaks and unaccepted assistant proposals are not settled reusable decisions.
+Explicit requests not to retain particular information remain authoritative.
+Standing behavioral preferences still follow Instructions/Skills routing and their
+own settings, tools and writable scope.
+
+Retrieve relevant published Knowledge before work that relies on prior decisions
+or requirements; unrelated turns do not require a search. Update one conclusion
+entry per experiment rather than saving every round. For incidents retain settled
+impact, cause, fix/workaround and outcome when known, rather than live status.
+
 A saved entry should help answer a plausible future question. Routine approvals,
 acknowledgments, temporary task instructions and status chatter stay in the
 conversation. Agents inspect screenshots visually and retain a supported
@@ -90,6 +104,14 @@ Exact get, evidence traversal, Files-related inspection, history and review keep
 their existing authority checks. Explicit `includeEvidence: true` searches or
 the browser's **Include supporting evidence** control expose supporting sources.
 Collection membership does not change source purpose or access.
+
+Entry listing and search accept optional `createdSince`, a timezone-qualified ISO
+datetime (for example `2026-10-01T00:00:00Z`). It includes entries whose original
+`createdAt` is at or after the cutoff; editing, revising or publishing an older
+entry does not make it newly created. Rolling migration **0640** applies this
+filter in the authorized database candidate set before keyword/vector ranking
+and pagination, for every view and scope. It grants no access. Omission preserves
+existing behavior, and changing the cutoff invalidates an existing search cursor.
 
 Historical agent-prepared file sources and non-migrated conversation sources are
 classified by typed preparation/provenance identity; migrated reference records
@@ -299,7 +321,12 @@ same owner layer the task actually uses, otherwise the write is rejected.
 
 `agent_learning_revisions` stores immutable policy history.
 `agent_learning_snapshots` freezes the effective categories, owner and producer
-context for an accepted logical turn. Scheduled work resolves against its accepted
+context for an accepted logical turn.
+The worker presents the effective modes and Knowledge destination to the agent
+through the governance prompt. It renders stable mode/scope facts, without
+attempt identifiers or personal identities; the database snapshot remains the
+enforcement authority.
+Scheduled work resolves against its accepted
 run time. Child work and recovery preserve their accepted producer policy; changing
 settings affects subsequent accepted work, not an already running turn.
 

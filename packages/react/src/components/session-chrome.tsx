@@ -26,6 +26,8 @@ import { ChildSessionLink } from "./child-session-link";
  *
  * Inbox and queue stay separate segments. Queue hover actions wire to
  * `UseTurnQueueResult` (`editTurn` / `steerTurn` / `moveTurn` / `removeTurn`).
+ * The collapsed queue chip previews the latest queued message beside its Steer
+ * action; open queue rows keep Steer visible and reveal the rest on hover.
  * Inbox has no product dismiss API; pass `onDismissIncoming` when the host
  * wants a visible action (dev harness may use a local dummy).
  *
@@ -799,6 +801,22 @@ export function SessionChrome({
   }, [active, signals]);
 
   const open = active !== null;
+  // Collapsed queue chip shows the latest queued message so a Send that lands
+  // in the queue is visible without opening the list; Steer acts on that
+  // message once the server has confirmed it.
+  const latestOptimisticQueued = optimisticQueued[optimisticQueued.length - 1];
+  const latestQueuedTurn = queuedTurns[queuedTurns.length - 1];
+  const queuePeek: { text: string | null; turnId: string | null } | null =
+    queue.error || queue.mutationError
+      ? null
+      : latestOptimisticQueued
+        ? { text: latestOptimisticQueued.text.trim() || null, turnId: null }
+        : latestQueuedTurn
+          ? {
+              text: queuedTurnPresentation(latestQueuedTurn).text.trim() || null,
+              turnId: latestQueuedTurn.id,
+            }
+          : null;
 
   if (signals.length === 0 && !stopping) return null;
 
@@ -1024,7 +1042,14 @@ export function SessionChrome({
                         <span className={cn("shrink-0", toneClass(signal.tone, selected))}>
                           {signal.icon}
                         </span>
-                        <span className={cn("font-medium text-og-fg", "min-w-0 truncate")}>
+                        <span
+                          className={cn(
+                            "font-medium text-og-fg",
+                            signal.id === "queue" && queuePeek?.text && !selected
+                              ? "shrink-0"
+                              : "min-w-0 truncate",
+                          )}
+                        >
                           {signal.id === "goal" ? "Goal · " : null}
                           {signal.id === "goal"
                             ? goalState === "pursuing"
@@ -1036,6 +1061,21 @@ export function SessionChrome({
                                 : `${queuedTurns.length + optimisticQueued.length} queued`
                               : signal.label}
                         </span>
+                        {signal.id === "queue" && queuePeek?.text && !selected ? (
+                          <AnimatePresence initial={false} mode="popLayout">
+                            <motion.span
+                              key={queuePeek.text}
+                              data-testid="session-chrome-queue-peek"
+                              className="min-w-0 max-w-[min(24rem,60vw)] truncate text-og-fg-muted"
+                              initial={reduceMotion ? false : { opacity: 0, y: 3 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              exit={{ opacity: 0, transition: { duration: crossfadeDuration } }}
+                              transition={{ duration: crossfadeDuration, ease }}
+                            >
+                              {queuePeek.text}
+                            </motion.span>
+                          </AnimatePresence>
+                        ) : null}
                       </button>
                       {signal.id === "goal" && goal && record && !readOnly ? (
                         <div className="flex shrink-0 items-center pr-1 pl-0.5">
@@ -1069,19 +1109,27 @@ export function SessionChrome({
                             <Trash2Icon className="size-3" />
                           </IconAction>
                         </div>
-                      ) : signal.id === "queue" && canMutateQueue && queuedTurns[0] ? (
+                      ) : signal.id === "queue" && canMutateQueue && queuePeek && !selected ? (
                         <div className="flex shrink-0 items-center pr-1 pl-0.5">
                           <IconAction
-                            label="Steer first queued message"
+                            label="Steer latest queued message"
                             analyticsAction="steer"
                             text="Steer"
                             tip={QUEUE_STEER_TIP}
                             disabled={
-                              queue.mutating || Boolean(queue.mutationFor(queuedTurns[0].id))
+                              !queuePeek.turnId ||
+                              queue.mutating ||
+                              Boolean(queue.mutationFor(queuePeek.turnId))
                             }
-                            onClick={() => void queue.steerTurn(queuedTurns[0]!.id)}
+                            onClick={() => {
+                              if (queuePeek.turnId) void queue.steerTurn(queuePeek.turnId);
+                            }}
                           >
-                            <CornerDownRightIcon className="size-3" />
+                            {queuePeek.turnId && queue.mutationFor(queuePeek.turnId) === "steer" ? (
+                              <Loader2Icon className="size-3 animate-og-spin" />
+                            ) : (
+                              <CornerDownRightIcon className="size-3" />
+                            )}
                           </IconAction>
                         </div>
                       ) : null}
@@ -1420,27 +1468,59 @@ function QueuePanel({
                 annotations={turn.annotations ?? []}
               />
               {showActions ? (
-                <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">
-                  {onMove && turns.length > 1 ? (
-                    <>
+                <div className="flex shrink-0 items-center gap-0.5">
+                  {/* Reorder, edit and delete stay on hover; Steer is always visible. */}
+                  <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">
+                    {onMove && turns.length > 1 ? (
+                      <>
+                        <IconAction
+                          label={`Move queued prompt ${index + 1} up`}
+                          tip="Move up"
+                          disabled={settling || pending !== null || index === 0}
+                          onClick={() => onMove(turn.id, beforeUp)}
+                        >
+                          <ArrowUpIcon className="size-3" />
+                        </IconAction>
+                        <IconAction
+                          label={`Move queued prompt ${index + 1} down`}
+                          tip="Move down"
+                          disabled={settling || pending !== null || index >= turns.length - 1}
+                          onClick={() => onMove(turn.id, beforeDown)}
+                        >
+                          <ArrowDownIcon className="size-3" />
+                        </IconAction>
+                      </>
+                    ) : null}
+                    {onEdit ? (
                       <IconAction
-                        label={`Move queued prompt ${index + 1} up`}
-                        tip="Move up"
-                        disabled={settling || pending !== null || index === 0}
-                        onClick={() => onMove(turn.id, beforeUp)}
+                        label={`Edit queued prompt ${index + 1}`}
+                        tip={QUEUE_EDIT_TIP}
+                        disabled={settling || pending !== null}
+                        onClick={() => onEdit(turn)}
                       >
-                        <ArrowUpIcon className="size-3" />
+                        {pending === "edit" ? (
+                          <Loader2Icon className="size-3 animate-og-spin" />
+                        ) : (
+                          <PencilIcon className="size-3" />
+                        )}
                       </IconAction>
+                    ) : null}
+                    {onRemove ? (
                       <IconAction
-                        label={`Move queued prompt ${index + 1} down`}
-                        tip="Move down"
-                        disabled={settling || pending !== null || index >= turns.length - 1}
-                        onClick={() => onMove(turn.id, beforeDown)}
+                        label={`Remove queued prompt ${index + 1}`}
+                        tip={QUEUE_DELETE_TIP}
+                        disabled={settling || pending !== null}
+                        onClick={() => onRemove(turn.id)}
+                        danger
                       >
-                        <ArrowDownIcon className="size-3" />
+                        {pending === "delete" ? (
+                          <Loader2Icon className="size-3 animate-og-spin" />
+                        ) : (
+                          <Trash2Icon className="size-3" />
+                        )}
                       </IconAction>
-                    </>
-                  ) : null}
+                    ) : null}
+                  </div>
                   {onSteer ? (
                     <IconAction
                       label={`Steer queued prompt ${index + 1}`}
@@ -1454,35 +1534,6 @@ function QueuePanel({
                         <Loader2Icon className="size-3 animate-og-spin" />
                       ) : (
                         <CornerDownRightIcon className="size-3" />
-                      )}
-                    </IconAction>
-                  ) : null}
-                  {onEdit ? (
-                    <IconAction
-                      label={`Edit queued prompt ${index + 1}`}
-                      tip={QUEUE_EDIT_TIP}
-                      disabled={settling || pending !== null}
-                      onClick={() => onEdit(turn)}
-                    >
-                      {pending === "edit" ? (
-                        <Loader2Icon className="size-3 animate-og-spin" />
-                      ) : (
-                        <PencilIcon className="size-3" />
-                      )}
-                    </IconAction>
-                  ) : null}
-                  {onRemove ? (
-                    <IconAction
-                      label={`Remove queued prompt ${index + 1}`}
-                      tip={QUEUE_DELETE_TIP}
-                      disabled={settling || pending !== null}
-                      onClick={() => onRemove(turn.id)}
-                      danger
-                    >
-                      {pending === "delete" ? (
-                        <Loader2Icon className="size-3 animate-og-spin" />
-                      ) : (
-                        <Trash2Icon className="size-3" />
                       )}
                     </IconAction>
                   ) : null}

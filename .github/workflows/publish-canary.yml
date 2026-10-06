@@ -124,3 +124,12 @@ jobs:
           name: site-package-versions-${{ inputs.source_sha }}
           path: .release/site-package-versions.json
           if-no-files-found: error
+
+      - name: Retain bounded publication and registry receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: canary-publication-receipts-${{ inputs.source_sha }}
+          path: .release/canary-receipts
+          if-no-files-found: warn
+          retention-days: 7

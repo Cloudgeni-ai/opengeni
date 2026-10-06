@@ -248,8 +248,12 @@ Knowledge, preserving destination scope and review; see
 [`company-brain-write-routing.md`](company-brain-write-routing.md).
 
 Agent learning governs Knowledge/instructions/Skills: Automatic, Review first,
-Off; sparse chat/task overrides and accepted-turn policies freeze. Review first
-stages inactive changes without pausing. Pending reads support reuse/correction,
+Off; sparse chat/task overrides and accepted-turn policies freeze.
+The worker renders the frozen effective modes and Knowledge destination in the
+governance prompt, without attempt IDs or human identifiers. Useful retention is
+ordinary work under that policy, including newly created Slack sessions; Slack
+source text remains evidence rather than instruction or authorization authority.
+Review first stages inactive changes without pausing. Pending reads support reuse/correction,
 never authority; ordinary reads are published-only. Instructions/Skills retain
 native authority. Instruction edits append to exact baselines or update/remove
 unique exact-text anchors; full replacement requires explicit intent. Active-head
@@ -1925,6 +1929,9 @@ lanes declare services/credentials.
 
 Manifests/Changesets/CI/release scripts govern evidence-bound npm/image/Helm/Rust
 publication, retaining source identity. Web builds target both CPUs.
+Canary packages prepack the complete cohort, retain write acknowledgements, then
+perform bounded strict read-only verification before producing Site pins.
+An uncertain publication never automatically replays; signed-byte acceptance remains separate.
 `reconcile-production-packages.yml` reconciles npm availability independently of acceptance.
 
 Commands: [`../AGENTS.md`](../AGENTS.md), [`../CONTRIBUTING.md`](../CONTRIBUTING.md).

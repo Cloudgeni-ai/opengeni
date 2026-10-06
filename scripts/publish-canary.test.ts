@@ -250,7 +250,7 @@ describe("Bun canary publication boundary", () => {
       readRegistryPackage("@example/package", async () => {
         throw new Error("synthetic network failure");
       }),
-    ).rejects.toThrow("synthetic network failure");
+    ).rejects.toThrow("Canary registry read failed");
   });
 
   test("admits a new package and preserves an absent latest tag", async () => {
@@ -340,8 +340,15 @@ describe("Bun canary publication boundary", () => {
         defaultTag: "canary",
         access: "public",
         provenance: true,
+        retry: { retries: 0 },
+        timeout: 30_000,
+        signal: expect.any(AbortSignal),
       });
-      return { ok: true, transparencyLogUrl: "https://example.test/transparency" };
+      return {
+        ok: true,
+        status: 201,
+        transparencyLogUrl: "https://search.sigstore.dev/?logIndex=7",
+      };
     };
     await publishCanaryArtifact(
       manifest,
@@ -455,7 +462,7 @@ describe("Bun canary publication boundary", () => {
         pollIntervalMs: 1_000,
       },
     );
-    expect(reads).toBe(6);
+    expect(reads).toBe(7);
     expect(elapsed).toBe(5_000);
   });
 
@@ -560,7 +567,7 @@ describe("Bun canary publication boundary", () => {
         pollIntervalMs: 1_000,
       },
     );
-    expect(reads).toBe(2);
+    expect(reads).toBe(3);
     await expect(
       confirmCanaryPublication("@example/package", version, "1.0.0", packed, async () => {
         throw new Error("synthetic malformed metadata");
@@ -649,7 +656,7 @@ describe("Bun canary publication boundary", () => {
       (name, _request, _base, options) =>
         readRegistryPackage(name, request, "https://registry.example.test", options),
     );
-    expect(reads).toBe(2);
+    expect(reads).toBe(3);
   });
 
   test("official publisher's synthetic auth and provenance boundary is isolated from CI", () => {
