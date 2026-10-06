@@ -83,7 +83,7 @@ const siteVersion = {
   revision: 3,
   requestedTools: [],
 };
-const client = {
+export const client = {
   tools: { forWorkspace: () => ({}) },
   async updateArtifactPin(
     _workspaceId: string,
@@ -135,20 +135,23 @@ const client = {
     if (state === "loading") return new Promise<never>(() => {});
     if (state === "error")
       throw Object.assign(new Error("Unable to reach the artifact catalog."), { status: 503 });
+    const filtered =
+      state === "empty"
+        ? []
+        : filterArtifactCatalog(
+            new URLSearchParams(location.search).has("many") ? gallery : items,
+            {
+              ...defaultArtifactFilters,
+              ...options,
+              q: options.q ?? "",
+              kind: options.kind ?? "all",
+            },
+          );
+    const paginated = new URLSearchParams(location.search).has("pages");
+    const offset = Number(options.cursor ?? 0);
     return {
-      items:
-        state === "empty"
-          ? []
-          : filterArtifactCatalog(
-              new URLSearchParams(location.search).has("many") ? gallery : items,
-              {
-                ...defaultArtifactFilters,
-                ...options,
-                q: options.q ?? "",
-                kind: options.kind ?? "all",
-              },
-            ),
-      nextCursor: null,
+      items: paginated ? filtered.slice(offset, offset + 20) : filtered,
+      nextCursor: paginated && offset + 20 < filtered.length ? String(offset + 20) : null,
     };
   },
   async getRetainedArtifact(_workspaceId: string, id: string) {

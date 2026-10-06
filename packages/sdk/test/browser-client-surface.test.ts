@@ -86,7 +86,22 @@ const legacyBrowserUnusedMethods = [
 // The agent's browser still capture uses the same authenticated, bounded SDK
 // response transport as the existing computer capture method. It is intentionally
 // available to runtime callers even though the web UI does not call it.
-const agentInteractionMethods = ["captureBrowserTarget", "getBrowserTargetState", "readBrowserDom"];
+const agentInteractionMethods = [
+  "captureBrowserTarget",
+  "getBrowserTargetState",
+  "readBrowserDom",
+  "openBrowserTargetWithInventory",
+];
+
+// The native app exchanges its sign-in code, signs out and manages its push
+// device through the public client. The web app only starts the authorization.
+const nativeAppMethods = [
+  "exchangeNativeAppCode",
+  "getNativePushDevice",
+  "registerNativePushDevice",
+  "signOutNativeApp",
+  "unregisterNativePushDevice",
+];
 
 // #3470 retired the preference editor and learning/onboarding hooks, not their
 // public SDK contracts. Preserve these existing browser methods for old bundles
@@ -163,7 +178,12 @@ describe("browser client runtime surface", () => {
     expect(browserSource).toContain("@opengeni/sdk/browser");
     expect(browserSource).not.toContain("@opengeni/sdk/core");
     expect(browserUnusedMethods(clientSource, browserSource)).toEqual(
-      [...legacyBrowserUnusedMethods, ...agentInteractionMethods, ...retiredSettingsMethods].sort(),
+      [
+        ...legacyBrowserUnusedMethods,
+        ...agentInteractionMethods,
+        ...nativeAppMethods,
+        ...retiredSettingsMethods,
+      ].sort(),
     );
   });
 

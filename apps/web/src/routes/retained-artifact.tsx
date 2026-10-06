@@ -47,7 +47,11 @@ export function RetainedArtifactRoute({
   return embedded ? (
     viewer
   ) : (
-    <ArtifactSessionPage workspaceId={workspaceId} fromSession={fromSession}>
+    <ArtifactSessionPage
+      workspaceId={workspaceId}
+      artifactId={artifactId}
+      fromSession={fromSession}
+    >
       {viewer}
     </ArtifactSessionPage>
   );

@@ -128,12 +128,43 @@ describe("artifact spreadsheet full-sheet scrolling in Firefox", () => {
       const rowRect = row.getBoundingClientRect();
       return {
         atPhysicalEnd: element.scrollTop === element.scrollHeight - element.clientHeight,
+        scrollTop: element.scrollTop,
+        scrollHeight: element.scrollHeight,
+        clientHeight: element.clientHeight,
+        lastRowBottom: rowRect.bottom - gridRect.top,
         rowVisible: rowRect.bottom <= gridRect.bottom + 1 && rowRect.bottom > gridRect.top,
         mountedCells: element.querySelectorAll('[role="gridcell"]').length,
       };
     });
+    if (!terminal.atPhysicalEnd || !terminal.rowVisible)
+      console.error("Full-sheet terminal scroll diagnostics", terminal);
     expect(terminal.atPhysicalEnd).toBe(true);
+    expect(terminal.scrollHeight).toBe(initial.scrollHeight);
     expect(terminal.rowVisible).toBe(true);
     expect(terminal.mountedCells).toBeLessThan(1_000);
+
+    // The same centered-handle overflow fence applies at the final column.
+    await grid.evaluate((element) => {
+      element.scrollLeft = element.scrollWidth;
+    });
+    await page.locator('[role="columnheader"][aria-colindex="16384"]').waitFor();
+    const horizontalTerminal = await grid.evaluate((element) => {
+      const header = element.querySelector<HTMLElement>(
+        '[role="columnheader"][aria-colindex="16384"]',
+      )!;
+      const headerRect = header.getBoundingClientRect();
+      const gridRect = element.getBoundingClientRect();
+      return {
+        atPhysicalEnd: element.scrollLeft === element.scrollWidth - element.clientWidth,
+        columnVisible: headerRect.right <= gridRect.right + 1 && headerRect.right > gridRect.left,
+        mountedCells: element.querySelectorAll('[role="gridcell"]').length,
+      };
+    });
+    expect(horizontalTerminal.atPhysicalEnd).toBe(true);
+    expect(horizontalTerminal.columnVisible).toBe(true);
+    expect(horizontalTerminal.mountedCells).toBeLessThan(1_000);
+    const previewDir = process.env.OPENGENI_SPREADSHEET_UX_PREVIEW_DIR;
+    if (previewDir)
+      await page.screenshot({ path: `${previewDir}/firefox-full-sheet-terminal.png` });
   }, 30_000);
 });

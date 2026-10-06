@@ -194,6 +194,11 @@ try {
     await page.getByRole("button", { name: "Download", exact: true }).click();
     assert.equal((await download).suggestedFilename(), "Project mark.svg");
     await page.getByRole("link", { name: "Artifacts", exact: true }).click();
+    assert.equal(
+      await page.getByRole("tab", { name: "Images", exact: true }).getAttribute("aria-selected"),
+      "true",
+      "Artifacts returns to the Images tab",
+    );
     await page.getByRole("link", { name: "Generated cover", exact: true }).click();
     await page.getByRole("button", { name: "Expand Generated cover.svg", exact: true }).waitFor();
     assert.match(
@@ -203,6 +208,7 @@ try {
       /\/test\/artifact-library-image\.svg$/,
     );
     await page.getByRole("link", { name: "Artifacts", exact: true }).click();
+    await page.getByRole("tab", { name: "All", exact: true }).click();
     await page.getByRole("link", { name: "Research export.csv", exact: true }).click();
     await page
       .getByText("Preview is not available for this file. Download it to open it.")
@@ -347,10 +353,108 @@ try {
       const scrolled = await activity();
       assert.ok(scrolled.metadata.includes(lastId));
       assert.ok(scrolled.downloads.includes(lastId));
+      const beforeOpen = await page
+        .locator('[data-slot="content-page"]')
+        .evaluate((element) => element.scrollTop);
+      await page.getByRole("link", { name: "Gallery image 60", exact: true }).click();
+      await page.getByRole("heading", { name: "Gallery image 60.svg", exact: true }).waitFor();
+      await page.screenshot({ path: `${output}/browse-${view}-${suffix}.png`, fullPage: true });
+      await page.keyboard.press("ArrowLeft");
+      await page.getByRole("heading", { name: "Gallery image 59.svg", exact: true }).waitFor();
+      await page.keyboard.press("ArrowRight");
+      await page.getByRole("heading", { name: "Gallery image 60.svg", exact: true }).waitFor();
+      await page.getByRole("button", { name: "Expand Gallery image 60.svg", exact: true }).click();
+      await page.getByRole("dialog").waitFor();
+      const viewerPath = await page.evaluate(
+        () => Reflect.get(window, "artifactLibraryRouter").state.location.pathname,
+      );
+      await page.keyboard.press("ArrowLeft");
+      assert.equal(
+        await page.evaluate(
+          () => Reflect.get(window, "artifactLibraryRouter").state.location.pathname,
+        ),
+        viewerPath,
+        "lightbox arrows do not navigate the page behind it",
+      );
+      await page.keyboard.press("Escape");
+      // Sibling changes replace the viewer, so one browser Back reaches the list.
+      await page.evaluate(() => Reflect.get(window, "artifactLibraryRouter").history.back());
+      await page.getByRole("link", { name: "Gallery image 60", exact: true }).waitFor();
+      assert.ok(
+        Math.abs(
+          (await page
+            .locator('[data-slot="content-page"]')
+            .evaluate((element) => element.scrollTop)) - beforeOpen,
+        ) <= 1,
+        `${view} browser Back restores scroll position`,
+      );
       console.log(
         `${suffix}/${view}: ${initial.downloads.length} initial downloads for 60 images; offscreen last image loaded after scroll.`,
       );
     }
+    await page.goto(`${baseUrl}/test/artifact-library.html?many=1&pages=1`, {
+      waitUntil: "networkidle",
+    });
+    await page.getByRole("tab", { name: "Images", exact: true }).click();
+    await page.getByRole("searchbox", { name: "Search artifacts by title" }).fill("Gallery");
+    await page.getByRole("button", { name: "Load more", exact: true }).click();
+    await page.getByRole("link", { name: "Gallery image 40", exact: true }).waitFor();
+    await page
+      .getByRole("link", { name: "Gallery image 40", exact: true })
+      .scrollIntoViewIfNeeded();
+    const loadedTop = await page
+      .locator('[data-slot="content-page"]')
+      .evaluate((element) => element.scrollTop);
+    await page.getByRole("link", { name: "Gallery image 40", exact: true }).click();
+    await page.getByRole("heading", { name: "Gallery image 40.svg", exact: true }).waitFor();
+    await page.getByRole("button", { name: "Next artifact", exact: true }).click();
+    await page.getByRole("heading", { name: "Gallery image 41.svg", exact: true }).waitFor();
+    await page.getByRole("link", { name: "Artifacts", exact: true }).click();
+    await page.getByRole("link", { name: "Gallery image 40", exact: true }).waitFor();
+    assert.equal(
+      await page.getByRole("tab", { name: "Images", exact: true }).getAttribute("aria-selected"),
+      "true",
+    );
+    assert.equal(
+      await page.getByRole("searchbox", { name: "Search artifacts by title" }).inputValue(),
+      "Gallery",
+    );
+    assert.equal(
+      await page.locator('ul[aria-label="Search results"] > li').count(),
+      60,
+      "Next's loaded page is retained on return",
+    );
+    assert.ok(
+      Math.abs(
+        (await page
+          .locator('[data-slot="content-page"]')
+          .evaluate((element) => element.scrollTop)) - loadedTop,
+      ) <= 1,
+      "paginated filtered query restores its place",
+    );
+    await page.screenshot({ path: `${output}/restored-${suffix}.png`, fullPage: true });
+    // A viewer can repopulate an invalidated catalog with fewer pages than the
+    // library retained. Back must wait for all retained rows before scrolling.
+    await page.getByRole("link", { name: "Gallery image 40", exact: true }).click();
+    await page.getByRole("heading", { name: "Gallery image 40.svg", exact: true }).waitFor();
+    await page.evaluate(async () => {
+      const router = Reflect.get(window, "artifactLibraryRouter");
+      const search = router.state.location.search;
+      await router.navigate({ search: { ...search, browse: undefined }, replace: true });
+      Reflect.get(window, "resetArtifactLibraryCatalog")();
+      await router.navigate({ search, replace: true });
+    });
+    await page.getByRole("status").filter({ hasText: "40 of 40 loaded" }).waitFor();
+    await page.getByRole("link", { name: "Artifacts", exact: true }).click();
+    await page.getByRole("link", { name: "Gallery image 60", exact: true }).waitFor();
+    assert.ok(
+      Math.abs(
+        (await page
+          .locator('[data-slot="content-page"]')
+          .evaluate((element) => element.scrollTop)) - loadedTop,
+      ) <= 1,
+      "a partial viewer cache does not consume the retained library scroll position",
+    );
     assert.deepEqual(errors, []);
     await context.close();
     console.log(

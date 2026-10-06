@@ -6,6 +6,9 @@ import { join } from "node:path";
 
 import {
   EDITABLE_ARTIFACT_KERNEL_VERSION_MAX_BYTES,
+  decodeSpreadsheetMetadataKernelProjection,
+  editableArtifactStableId,
+  encodeSpreadsheetMetadataKernelQuery,
   spreadsheetSheetId,
 } from "@opengeni/contracts/editable-artifacts";
 
@@ -22,6 +25,7 @@ import {
   type ArtifactRuntimeTarget,
 } from "../src/runtime";
 import { SpreadsheetXlsxCodec } from "../src/spreadsheet-xlsx-codec";
+import { Workbook } from "../src/spreadsheet";
 import {
   productionTestNativeAssetPath,
   productionTestRuntime,
@@ -102,6 +106,7 @@ describe("compiled native artifact materializer", () => {
       contentHash: sha256(output.payload),
     });
     expect(output.metadata.semanticHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(output.metadata.semanticHash).toBe(dimensionFreeSemanticHash());
 
     const imported = await SpreadsheetXlsxCodec.importXlsx(output.payload, {
       unsupportedContent: "error",
@@ -137,6 +142,108 @@ describe("compiled native artifact materializer", () => {
       },
       payload: new Uint8Array(0),
     });
+  }, 60_000);
+
+  test("materializes and independently verifies dimensions outside cell bounds", async () => {
+    const resized = dimensionFixture(180);
+    const output = parseFrame(
+      (
+        await invoke(
+          fixture,
+          MATERIALIZE,
+          framed(INPUT_MAGIC, manifestFor(resized), resized.snapshot),
+        )
+      ).stdout,
+    );
+    expect(output.magic).toBe(OUTPUT_MAGIC);
+    expect(output.metadata.semanticHash).not.toBe(dimensionFreeSemanticHash());
+    const imported = await SpreadsheetXlsxCodec.importXlsx(output.payload, {
+      unsupportedContent: "error",
+    });
+    const sheet = imported.worksheets.getItem("Summary");
+    expect(sheet.columnWidth(8)).toBe(180);
+    expect(sheet.rowHeight(20)).toBe(48);
+    const verification = {
+      codecId: "opengeni.xlsx",
+      codecVersion: codecVersion(),
+      expectedSemanticHash: output.metadata.semanticHash,
+      format: "xlsx",
+      protocol: "OGAVJ001",
+    };
+    expect(
+      parseFrame(
+        (await invoke(fixture, VERIFY, framed(VERIFY_INPUT_MAGIC, verification, output.payload)))
+          .stdout,
+      ).magic,
+    ).toBe(VERIFY_OUTPUT_MAGIC);
+
+    const withoutDimensions = Workbook.fromJSON({
+      ...imported.toJSON(),
+      worksheets: imported.toJSON().worksheets.map((value) => ({
+        ...value,
+        rowHeights: [],
+        columnWidths: [],
+      })),
+    });
+    const stripped = new Uint8Array(
+      await (await SpreadsheetXlsxCodec.exportXlsx(withoutDimensions)).arrayBuffer(),
+    );
+    expect(
+      parseFrame(
+        (await invoke(fixture, VERIFY, framed(VERIFY_INPUT_MAGIC, verification, stripped))).stdout,
+      ),
+    ).toMatchObject({ magic: ERROR_MAGIC, metadata: { code: "output_verification_failed" } });
+  }, 60_000);
+
+  test("dimension resets retain the original dimension-free semantic hash", async () => {
+    const reset = dimensionFixture(180, true);
+    const output = parseFrame(
+      (await invoke(fixture, MATERIALIZE, framed(INPUT_MAGIC, manifestFor(reset), reset.snapshot)))
+        .stdout,
+    );
+    expect(output.magic).toBe(OUTPUT_MAGIC);
+    expect(output.metadata.semanticHash).toBe(dimensionFreeSemanticHash());
+    const imported = await SpreadsheetXlsxCodec.importXlsx(output.payload, {
+      unsupportedContent: "error",
+    });
+    expect(imported.worksheets.getItem("Summary").columnWidth(8)).toBe(96);
+    expect(imported.worksheets.getItem("Summary").rowHeight(20)).toBe(24);
+  }, 60_000);
+
+  test("fails closed when the Office codec cannot round-trip a tiny column width", async () => {
+    const tiny = dimensionFixture(5);
+    const output = parseFrame(
+      (await invoke(fixture, MATERIALIZE, framed(INPUT_MAGIC, manifestFor(tiny), tiny.snapshot)))
+        .stdout,
+    );
+    expect(output).toMatchObject({
+      magic: ERROR_MAGIC,
+      metadata: { code: "unsupported_semantics" },
+    });
+  }, 60_000);
+
+  test("round-trips supported integer-pixel dimension boundaries", async () => {
+    for (const [width, height] of [
+      [6, 1],
+      [4096, 4096],
+    ] as const) {
+      const resized = dimensionFixture(width, false, height);
+      const output = parseFrame(
+        (
+          await invoke(
+            fixture,
+            MATERIALIZE,
+            framed(INPUT_MAGIC, manifestFor(resized), resized.snapshot),
+          )
+        ).stdout,
+      );
+      expect(output.magic).toBe(OUTPUT_MAGIC);
+      const imported = await SpreadsheetXlsxCodec.importXlsx(output.payload, {
+        unsupportedContent: "error",
+      });
+      expect(imported.worksheets.getItem("Summary").columnWidth(8)).toBe(width);
+      expect(imported.worksheets.getItem("Summary").rowHeight(20)).toBe(height);
+    }
   }, 60_000);
 
   test("fails closed with typed build, fidelity, source-size, and output-corruption errors", async () => {
@@ -471,6 +578,78 @@ function packageManifest(
     ),
     supportFiles: [],
   };
+}
+
+function dimensionFixture(width: number, reset = false, height = 48): Fixture {
+  const source = NativeSpreadsheetSession.open(productionTestRuntime(), fixture.snapshot);
+  try {
+    const metadata = decodeSpreadsheetMetadataKernelProjection(
+      source.query(encodeSpreadsheetMetadataKernelQuery({ maxSheets: 1, maxBytes: 4096 })),
+    );
+    const value = metadata.sheets[0]!;
+    if (!value.generationId) throw new Error("Missing fixture generation");
+    const sheet = {
+      kind: "generation" as const,
+      sheetId: spreadsheetSheetId(value.sheetId),
+      creationOperationId: editableArtifactStableId(value.generationId),
+    };
+    for (let counter = 2; counter <= (reset ? 3 : 2); counter += 1) {
+      source.authorCommands({
+        intent: {
+          artifactId: "11111111111111112222222222222222",
+          clientTransactionId: `materializer.e2e.${counter}`,
+          replicaId: "0123456789abcdef",
+          replicaCounter: counter,
+          previousLocalTransactionId: `materializer.e2e.${counter - 1}`,
+          observedHeadSequence: (counter - 1) * 2,
+          causalBase: [{ replicaId: "0123456789abcdef", counter: counter - 1 }],
+          selectiveUndoOperationIds: [],
+        },
+        commands: {
+          version: 2,
+          commands: [
+            { kind: "column.width.set", sheet, column: 8, width: counter === 3 ? null : width },
+            { kind: "row.height.set", sheet, row: 20, height: counter === 3 ? null : height },
+          ],
+        },
+        resolvedBaseBytes: source.frontier(),
+      });
+    }
+    return {
+      ...fixture,
+      snapshot: source.snapshot(),
+      stateHash: source.stateHash(),
+      headSequence: reset ? 6 : 4,
+    };
+  } finally {
+    source.dispose();
+  }
+}
+
+function manifestFor(source: Fixture): Readonly<Record<string, unknown>> {
+  return manifest({
+    stateHash: source.stateHash,
+    targetHeadSequence: source.headSequence,
+    sourceByteSize: source.snapshot.byteLength,
+    sourceContentHash: sha256(source.snapshot),
+  });
+}
+
+function dimensionFreeSemanticHash(): string {
+  const rows = [
+    ["Month", "Revenue", "Double"],
+    ["Jan", 120, 240],
+    ["Feb", 140, 280],
+  ];
+  const cells = rows.flatMap((values, row) =>
+    values.map((value, column) => ({
+      row,
+      column,
+      formula: row > 0 && column === 2 ? `=B${row + 1}*2` : null,
+      value: { kind: typeof value === "number" ? "number" : "text", value },
+    })),
+  );
+  return sha256(text(JSON.stringify({ version: 1, sheets: [{ name: "Summary", cells }] })));
 }
 
 function manifest(

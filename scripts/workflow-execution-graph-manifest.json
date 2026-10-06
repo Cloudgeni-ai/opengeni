@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "01a0dc3e954b2dc10f2c2e17ea899b7f08e833d8e1dae654e43aaa8627bb3eae"
+      "sha256": "134f957dac833f321ed90ad01dde9d6a5d5007277220e5867966eb4d39b357bc"
     },
     {
       "path": ".github/workflows/deprecate-pre-1.0.yml",
@@ -34,7 +34,7 @@
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
-      "sha256": "62238197b7ad8ac2dbb1c188692d70ab658c993ef5087a491a73cd6e8e19da22"
+      "sha256": "7c61ecd027bc59bdcf196600364de9a706f6ae9cecb86185f5b376d9b4fe51b9"
     },
     {
       "path": ".github/workflows/production-pr-heads.yml",
@@ -50,7 +50,7 @@
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "4ba13d6b2f874b5e37da8ffcc4016665251a077347eac0fbd321234edb562200"
+      "sha256": "0c604969879ae54c818df46818547548dbd48165aa8fc65e8d9f3907cac0d99a"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
@@ -58,11 +58,11 @@
     },
     {
       "path": ".github/workflows/publish-packages.yml",
-      "sha256": "a1e47042ec795b4f9ebe00ebffceafa739709a41d88905bc35228eea9ea25a9b"
+      "sha256": "e9f07f7665ebdc9f841de20c361665b3fc485e8565b80a292fcbbc5b06b7ffe0"
     },
     {
       "path": ".github/workflows/publish-stable.yml",
-      "sha256": "0476ffae6b70b6d5313461fed00f4c40fc4c401dde49ee5d0ee3e680d7bdba75"
+      "sha256": "1159f5b8fa72d596ae6e5ffb9f99b5d0c147a9771a614d9a7e0a7e2f93f45743"
     },
     {
       "path": ".github/workflows/reconcile-production-packages.yml",
@@ -70,19 +70,19 @@
     },
     {
       "path": ".github/workflows/release-acceptance.yml",
-      "sha256": "3ac7c7c47aa5aa2f0176634acad4f61832435d9392520d2cc59bdf922d9ad2c0"
+      "sha256": "6edc0be8c65dae00cb30b7a708e5abba1f1c37eda3cc2a0572538045d9b2a626"
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "6a06ca719081ec2d0d4dacd4fbc0386dda3e88b746b87c4fb2a9792bc9ccc783"
+      "sha256": "a4e1ab2578db4dc490428fccb0629d52089d93e3e80bad2b3b873c1933ded91f"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
-      "sha256": "73b7039e8c1a1c98959ac06889ce29d30ec28f6e89b8fe3c69dd5f3ebadfbab3"
+      "sha256": "da5abbdaed9b9cae98ac515096a2a6fbcc116fc0de018e68b39cb9a69b6e8627"
     },
     {
       "path": ".github/workflows/release-publication-admission.yml",
-      "sha256": "3491fd64b0482ec10f70fa36d7530b07bae9fe3dd5783ae8baba8d4728655148"
+      "sha256": "10b30e252c92c1e335def7f784818114cd0f810b1f48e61e718ce0faad0b4cd6"
     },
     {
       "path": ".github/workflows/release-source-admission.yml",
@@ -90,7 +90,7 @@
     },
     {
       "path": ".github/workflows/release.yml",
-      "sha256": "374bf8dc74ce8cd3aefcc5a700f404655b00a3559d8d9f5eb7243f1644f94cfe"
+      "sha256": "0731a8d1caa945480fb340bb75d9c3b6b1d5241d8573c8f35ca56635f8ccb4a9"
     },
     {
       "path": ".github/workflows/retain-release-controller.yml",
@@ -106,7 +106,7 @@
     },
     {
       "path": ".github/workflows/staging-canary-dispatch.yml",
-      "sha256": "63024dbfb1d46c8a8f19e269556b4c575de14de8ba806637de36ae5b553b2396"
+      "sha256": "459cd722dec2939e2496c21a03daaf78b489db37f18552decff8fd65df566a0f"
     },
     {
       "path": ".github/workflows/verify-public-container-packages.yml",
@@ -763,7 +763,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "package-contracts",
       "step": "Reproduce committed modality WASM packages from clean Rust sources",
-      "sha256": "ed8b4ba80431f552affb1ca65fc46621d50c3c222fb8be82a8b707c445b34002"
+      "sha256": "52e07f2bef568f75c422f43a29ff9df8427be0304dedac2714bbd0ce58367c99"
     },
     {
       "workflow": ".github/workflows/ci.yml",

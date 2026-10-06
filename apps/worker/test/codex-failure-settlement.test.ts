@@ -9,6 +9,7 @@ import { CODEX_TRANSPORT_ERROR_HEADER } from "@opengeni/codex";
 import { ModalCommandStartPreDispatchUnavailableError } from "../../../packages/runtime/src/sandbox/providers/modal-command-router-wire";
 import {
   CompactionProviderResponseError,
+  AnthropicRequestError,
   ProviderCommandObservationUnavailableError,
   RoutingMutationOutcomeUnknownError,
   compactionProviderFailureDiagnostics,
@@ -360,6 +361,124 @@ function codexFailureDeps(
     },
   };
 }
+
+describe("confirmed Claude overload settlement", () => {
+  const overload = () =>
+    new AnthropicRequestError(
+      "Claude request failed (HTTP 529)",
+      529,
+      "anthropic_http_error",
+      { type: "overloaded_error", message: "Synthetic overload" },
+      new Headers({ "retry-after": "85", "request-id": "req_synthetic" }),
+    );
+
+  test("checkpoints the same turn after five retries with the selected finite budget", async () => {
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    } as never);
+    try {
+      for (const count of [0, 5, 14]) {
+        const { deps } = codexFailureDeps({ error: overload() });
+        deps.billingState.isCodexTurn = false;
+        Object.assign(deps.attempt, {
+          providerRecoveryCount: count,
+          providerRecoveryStartedAt: Date.now() - 60_000,
+        });
+        const history = mock(async () => undefined);
+        deps.historySink.reconcileConversationTruth = history;
+        const result = await settleTurnFailure(deps as never);
+        expect(result).toMatchObject({ status: "recovering" });
+        expect(result.continueDelayMs).toBeGreaterThanOrEqual(85_000);
+        expect(history).toHaveBeenCalledWith({ requireDurable: true });
+        expect(recovery).toHaveBeenLastCalledWith(
+          {},
+          "workspace-1",
+          expect.objectContaining({
+            turnId: "turn-1",
+            triggerEventId: "trigger-1",
+            attemptId: "attempt-1",
+            reason: "provider_overloaded",
+            providerRecoveryCount: count + 1,
+            detail: expect.objectContaining({
+              code: "provider_unavailable",
+              providerCondition: "overloaded",
+              maxProviderRecoveryCount: 15,
+              requestId: "req_synthetic",
+            }),
+          }),
+        );
+        expect((recovery.mock.calls.at(-1)![2] as any).detail).not.toHaveProperty("detail");
+      }
+    } finally {
+      recovery.mockRestore();
+    }
+  });
+
+  test("checkpoint outages retain overload count and Retry-After instead of the generic five-retry cap", async () => {
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockRejectedValue(
+      Object.assign(new Error("database connection reset"), { code: "ECONNRESET" }),
+    );
+    const { deps } = codexFailureDeps({ error: overload() });
+    deps.billingState.isCodexTurn = false;
+    Object.assign(deps.attempt, {
+      providerRecoveryCount: 5,
+      providerRecoveryStartedAt: Date.now() - 60_000,
+    });
+    try {
+      await expect(settleTurnFailure(deps as never)).rejects.toMatchObject({
+        type: "OpenGeniPostClaimDatabaseRecovery",
+        details: [
+          {
+            turnId: "turn-1",
+            triggerEventId: "trigger-1",
+            executionGeneration: 1,
+            providerFailureCode: "provider_overloaded",
+            providerRecoveryCount: 6,
+            providerRecoveryContinueDelayMs: expect.any(Number),
+          },
+        ],
+      });
+    } finally {
+      recovery.mockRestore();
+    }
+  });
+
+  test("exhaustion retains the typed cause; stale control commits never authorize another attempt", async () => {
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "stale",
+    } as never);
+    const parent = spyOn(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined);
+    const settle = mock(async (_input: unknown) => true);
+    try {
+      const { deps } = codexFailureDeps({ error: overload(), settle });
+      deps.billingState.isCodexTurn = false;
+      Object.assign(deps.attempt, {
+        providerRecoveryCount: 15,
+        providerRecoveryStartedAt: Date.now() - 60_000,
+      });
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+      expect(recovery).not.toHaveBeenCalled();
+      expect((settle.mock.calls[0]![0] as any).events[0].payload).toMatchObject({
+        code: "provider_unavailable",
+        retryable: false,
+        recoveryExhausted: true,
+        providerRecoveryCount: 15,
+        maxProviderRecoveryCount: 15,
+        providerRecoveryExhaustedReason: "retry_limit",
+        detail: "overloaded_error: Synthetic overload",
+        requestId: "req_synthetic",
+      });
+      const { deps: interrupted } = codexFailureDeps({ error: overload(), settle });
+      interrupted.billingState.isCodexTurn = false;
+      expect(await settleTurnFailure(interrupted as never)).toMatchObject({ status: "cancelled" });
+      expect(settle).toHaveBeenCalledTimes(1);
+    } finally {
+      recovery.mockRestore();
+      parent.mockRestore();
+    }
+  });
+});
 
 describe("raw database rollback settlement", () => {
   const rawFailure = (sqlState: string) =>

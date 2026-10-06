@@ -149,7 +149,7 @@ describe("public editable-artifact browser composition", () => {
       await capture(page, "editable-artifact-document-dark.png");
 
       await openArtifactStart(page);
-      await createArtifact(page, "Spreadsheet", "E2E operating model");
+      const spreadsheetArtifact = await createArtifact(page, "Spreadsheet", "E2E operating model");
       const addWorksheet = page
         .getByRole("button", { name: "Add worksheet", exact: true })
         .filter({ hasText: "Add worksheet" });
@@ -157,6 +157,34 @@ describe("public editable-artifact browser composition", () => {
       const grid = page.getByRole("grid", { name: /spreadsheet$/u });
       await grid.waitFor();
       await waitForEditorIdle(page, "spreadsheet");
+      const beforeRenameSequence = await artifactSequence(spreadsheetArtifact);
+      await page.getByRole("tab", { selected: true }).dblclick();
+      const worksheetName = "Operating forecast";
+      const worksheetNameInput = page.getByRole("textbox", { name: "Worksheet name", exact: true });
+      await worksheetNameInput.fill(worksheetName);
+      await worksheetNameInput.press("Enter");
+      await page.getByRole("tab", { name: worksheetName, exact: true }).waitFor();
+      await waitForEditorIdle(page, "spreadsheet");
+      await waitForArtifactAdvance(spreadsheetArtifact, beforeRenameSequence);
+      expect(await grid.getAttribute("aria-label")).toBe(`${worksheetName} spreadsheet`);
+      const columnBoundary = page.getByRole("separator", { name: "Resize column A", exact: true });
+      const columnBox = await columnBoundary.boundingBox();
+      if (!columnBox) throw new Error("Column boundary is not visible");
+      await page.mouse.move(columnBox.x + columnBox.width / 2, columnBox.y + columnBox.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(
+        columnBox.x + columnBox.width / 2 + 48,
+        columnBox.y + columnBox.height / 2,
+        { steps: 6 },
+      );
+      await page.mouse.up();
+      await waitForEditorIdle(page, "spreadsheet");
+      expect(await columnBoundary.getAttribute("aria-valuenow")).toBe("144");
+      const rowBoundary = page.getByRole("separator", { name: "Resize row 1", exact: true });
+      await rowBoundary.focus();
+      await rowBoundary.press("ArrowDown");
+      await waitForEditorIdle(page, "spreadsheet");
+      expect(await rowBoundary.getAttribute("aria-valuenow")).toBe("32");
       const formula = page.getByLabel("Formula or value");
       await formula.fill("=1+1");
       await formula.press("Enter");
@@ -170,7 +198,16 @@ describe("public editable-artifact browser composition", () => {
         },
       );
       await page.reload();
-      await page.getByRole("grid", { name: /spreadsheet$/u }).waitFor({ timeout: 30_000 });
+      await page
+        .getByRole("grid", { name: `${worksheetName} spreadsheet`, exact: true })
+        .waitFor({ timeout: 30_000 });
+      expect(
+        await page
+          .getByRole("tab", { name: worksheetName, exact: true })
+          .getAttribute("aria-selected"),
+      ).toBe("true");
+      expect(await columnBoundary.getAttribute("aria-valuenow")).toBe("144");
+      expect(await rowBoundary.getAttribute("aria-valuenow")).toBe("32");
       await waitFor(
         async () =>
           (await page.locator('[data-og-cell="A1"]').getAttribute("aria-label")) === "A1, 2",
@@ -192,6 +229,14 @@ describe("public editable-artifact browser composition", () => {
         },
       );
       await page.reload();
+      await page
+        .getByRole("grid", { name: `${worksheetName} spreadsheet`, exact: true })
+        .waitFor({ timeout: 30_000 });
+      expect(
+        await page
+          .getByRole("tab", { name: worksheetName, exact: true })
+          .getAttribute("aria-selected"),
+      ).toBe("true");
       await waitFor(
         async () =>
           (await page.locator('[data-og-cell="A1"]').getAttribute("aria-label")) ===
@@ -201,6 +246,7 @@ describe("public editable-artifact browser composition", () => {
           describe: () => observed.diagnostics.join("\n"),
         },
       );
+      await assertServerAdvanced(spreadsheetArtifact);
       await capture(page, "editable-artifact-spreadsheet-dark.png");
 
       await openArtifactStart(page);

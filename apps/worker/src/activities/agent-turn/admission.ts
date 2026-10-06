@@ -362,14 +362,13 @@ export async function ensureRunAllowed(
       throw new Error("insufficient Opengeni credits");
     }
   }
-  if (chargesOpenGeniCredits) {
-    const refusal = await checkWorkspaceAllowance(db, {
-      accountId,
-      workspaceId,
-      subjectId: initiatingHumanSubjectId,
-    });
-    if (refusal) throw new AllowanceExhaustedError(refusal);
-  }
+  const refusal = await checkWorkspaceAllowance(db, {
+    accountId,
+    workspaceId,
+    subjectId: initiatingHumanSubjectId,
+    ...(chargesOpenGeniCredits ? {} : { fundedWithoutCredits: true }),
+  });
+  if (refusal) throw new AllowanceExhaustedError(refusal);
   if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
     const limits = configuredStaticUsageLimits(settings);
     if (limits.maxMonthlyAgentRunsPerWorkspace) {

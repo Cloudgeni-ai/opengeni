@@ -5,6 +5,7 @@ import {
   advancedSourceSummary,
   billingClassForModel,
   coerceReasoningEffortForModel,
+  compactModelPill,
   effortOptionsForModel,
   groupPickerRowsByBillingClass,
   payerSummaryForModel,
@@ -458,6 +459,21 @@ describe("model-policy", () => {
     expect(effortOptionsForModel(model)).toEqual(["low", "high", "max"]);
     expect(coerceReasoningEffortForModel(model, "xhigh")).toBe("low");
     expect(billingClassForModel(model)).toBe("opengeni_credits");
+    // The composer pill: compact name, effort only when effort is a choice.
+    expect(compactModelPill([{ ...model, shortLabel: "5.6 Sol" }], model.id, "high")).toEqual({
+      name: "5.6 Sol",
+      effort: "High",
+    });
+    expect(compactModelPill([model], model.id, "low")).toEqual({ name: "Sol", effort: "Low" });
+    const single = {
+      ...model,
+      capabilities: {
+        ...model.capabilities!,
+        reasoning: { ...model.capabilities!.reasoning, efforts: ["low" as const] },
+      },
+    };
+    expect(compactModelPill([single], model.id, "low")).toEqual({ name: "Sol", effort: null });
+    expect(compactModelPill([], "codex/gpt-6-luna", "low").effort).toBeNull();
   });
 
   test("marks blocked models non-selectable in picker rows", () => {
@@ -524,6 +540,30 @@ describe("model display across connection scopes", () => {
   test("Claude rows get a compact family-free label for narrow triggers", () => {
     const rows = projectPickerRows([claude("organization", "claude-opus-5-5", "Claude Opus 5.5")]);
     expect(rows[0]?.shortLabel).toBe("Opus 5.5");
+  });
+
+  test("uncurated long names drop trailing access and stage qualifiers for narrow triggers", () => {
+    const rows = projectPickerRows([
+      catalogModel({
+        id: "opencode/muse-spark-1.3-contributor-free",
+        label: "Muse Spark 1.3 Contributor Free",
+      }),
+      catalogModel({ id: "google/gemini-3.1-pro-preview", label: "Gemini 3.1 Pro (Preview)" }),
+      catalogModel({ id: "plain/model", label: "Plain Model 2" }),
+      catalogModel({ id: "only/free", label: "Free" }),
+    ]);
+    const short = (id: string) => rows.find((row) => row.id === id)?.shortLabel;
+    expect(short("opencode/muse-spark-1.3-contributor-free")).toBe("Muse Spark 1.3");
+    expect(short("google/gemini-3.1-pro-preview")).toBe("Gemini 3.1 Pro");
+    expect(short("plain/model")).toBeUndefined();
+    expect(short("only/free")).toBeUndefined();
+    expect(
+      compactModelPill(
+        [catalogModel({ id: "opencode/muse", label: "Muse Spark 1.3 Contributor Free" })],
+        "opencode/muse",
+        null,
+      ).name,
+    ).toBe("Muse Spark 1.3");
   });
 
   test("deployment models with the same name stay separate choices", () => {

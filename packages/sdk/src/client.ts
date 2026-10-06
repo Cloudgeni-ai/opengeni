@@ -321,6 +321,11 @@ import type {
   UpdateOrganizationMcpConnectionRequest,
   McpConnectionRequest,
   McpConnectionDecision,
+  NativeAppAuthorizeInput,
+  NativeAppTokenInput,
+  NativeAppToken,
+  NativePushDevice,
+  RegisterNativePushDeviceInput,
   CreateCapabilityCatalogItemRequest,
   InstallSkillRequest,
   InstallLibrarySkillRequest,
@@ -4248,6 +4253,22 @@ export class OpenGeniClient {
     return await this.requestJson<BrowserObservation>(
       "POST",
       `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  /** Opens a tab and returns inventory without collecting page content. */
+  async openBrowserTargetWithInventory(
+    workspaceId: string,
+    browserSessionId: string,
+    request: BrowserOpenTargetRequest = {},
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserTargetListResponse> {
+    return await this.requestJson<BrowserTargetListResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets/open-with-inventory`,
       request,
       {},
       options,
@@ -8883,6 +8904,54 @@ export class OpenGeniClient {
       `/v1/mcp-connections/requests/${encodeURIComponent(requestToken)}`,
       decision,
     );
+  }
+
+  // --- Native app sign-in ------------------------------------------------------------------------
+
+  /**
+   * Approve a native app sign-in from the signed-in browser. Returns the app's
+   * callback (`<scheme>://auth/callback?code=…&state=…`) to navigate to.
+   */
+  async authorizeNativeApp(input: NativeAppAuthorizeInput): Promise<{ redirectUrl: string }> {
+    return await this.requestJson<{ redirectUrl: string }>(
+      "POST",
+      "/v1/native-app/authorize",
+      input,
+    );
+  }
+
+  /** Exchange a native app sign-in code and its PKCE verifier for the app's credential. */
+  async exchangeNativeAppCode(input: NativeAppTokenInput): Promise<NativeAppToken> {
+    return await this.requestJson<NativeAppToken>("POST", "/v1/native-app/token", input);
+  }
+
+  /** Revoke the native app credential this client signs in with. */
+  async signOutNativeApp(): Promise<void> {
+    await this.requestJson<unknown>("POST", "/v1/native-app/sign-out", {});
+  }
+
+  /** This app credential's push registration, or null when it gets no pushes. */
+  async getNativePushDevice(): Promise<NativePushDevice | null> {
+    const { device } = await this.requestJson<{ device: NativePushDevice | null }>(
+      "GET",
+      "/v1/native-app/push-device",
+    );
+    return device;
+  }
+
+  /** Register (or update) this device's push token and rules for this app credential. */
+  async registerNativePushDevice(input: RegisterNativePushDeviceInput): Promise<NativePushDevice> {
+    const { device } = await this.requestJson<{ device: NativePushDevice }>(
+      "PUT",
+      "/v1/native-app/push-device",
+      input,
+    );
+    return device;
+  }
+
+  /** Stop pushes to this device for this app credential. */
+  async unregisterNativePushDevice(): Promise<void> {
+    await this.requestJson<unknown>("DELETE", "/v1/native-app/push-device");
   }
 
   // --- Organization-wide sessions ----------------------------------------------------------------

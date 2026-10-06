@@ -50,6 +50,7 @@ import { startSlackInteractionPump } from "./integrations/slack-interactions";
 import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
 import { createTemporalScheduleSynchronizer } from "./temporal-schedule-sync";
+import { startNativePushDispatchPump } from "./native-push-dispatch";
 import { startWorkspaceWebhookDispatchPump } from "./workspace-webhook-dispatch";
 import { cleanupScheduledTaskConnectorAuthorization } from "./scheduled-task-deletion";
 import {
@@ -496,6 +497,11 @@ export async function startApi(
     settings,
     observability,
   });
+  const stopNativePushDispatchPump = startNativePushDispatchPump({
+    db: dbClient.db,
+    settings,
+    observability,
+  });
   const stopTemporalScheduleCleanupPump = startTemporalScheduleCleanupPump({
     db: dbClient.db,
     cleanupConnectorAuthorization: async (claim) =>
@@ -571,6 +577,7 @@ export async function startApi(
       stopHelloIngestion?.();
       await stopTemporalScheduleCleanupPump();
       await stopWorkspaceWebhookDispatchPump();
+      await stopNativePushDispatchPump();
       // Write queued presence before the database pool closes.
       await routeDeps.userPresence?.close().catch(() => undefined);
       await Promise.allSettled([

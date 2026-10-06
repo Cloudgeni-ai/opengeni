@@ -1,4 +1,4 @@
-import { useNavigate } from "@tanstack/react-router";
+import { defaultStringifySearch, useNavigate } from "@tanstack/react-router";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
 import {
   ImageIcon,
@@ -67,6 +67,7 @@ import {
   type ArtifactView,
 } from "@/lib/artifact-library-view";
 import { cn } from "@/lib/utils";
+import type { ArtifactReturnSearch } from "@/lib/routes";
 import { ArtifactKindTile, ArtifactTypeIcon } from "./artifact-page-chrome";
 
 const InlineChatImage = lazy(() =>
@@ -193,6 +194,7 @@ function useArtifactOpen(
   onSelect?: (item: ArtifactCatalogItem) => void,
   onPin?: ArtifactPinAction,
   loading = false,
+  browseSearch?: ArtifactReturnSearch,
 ) {
   const navigate = useNavigate();
   const [pinning, setPinning] = useState(false);
@@ -220,7 +222,7 @@ function useArtifactOpen(
       : void navigate({
           to: artifactRoute(item.kind),
           params: { workspaceId, artifactId: item.id },
-          search: sessionId ? { fromSession: sessionId } : {},
+          search: browseSearch ?? (sessionId ? { fromSession: sessionId } : {}),
         });
   const menu = (
     <>
@@ -268,7 +270,9 @@ function useArtifactOpen(
     link: onSelect
       ? null
       : {
-          href: artifactPath(workspaceId, item, sessionId),
+          href: browseSearch
+            ? `${artifactPath(workspaceId, item)}${defaultStringifySearch(browseSearch)}`
+            : artifactPath(workspaceId, item, sessionId),
           onClick: (event: MouseEvent<HTMLElement>) => {
             if (!isPlainClick(event)) return;
             event.preventDefault();
@@ -299,6 +303,7 @@ export function ArtifactRow({
   onSelect,
   onPin,
   loading,
+  browseSearch,
 }: {
   workspaceId: string;
   item: ArtifactCatalogItem;
@@ -306,6 +311,7 @@ export function ArtifactRow({
   onSelect?: (item: ArtifactCatalogItem) => void;
   onPin?: ArtifactPinAction;
   loading?: boolean;
+  browseSearch?: ArtifactReturnSearch;
 }) {
   const { open, menu, link } = useArtifactOpen(
     workspaceId,
@@ -314,6 +320,7 @@ export function ArtifactRow({
     onSelect,
     onPin,
     loading,
+    browseSearch,
   );
   const archived = item.status === "archived";
   return (
@@ -484,6 +491,7 @@ export function ArtifactCard({
   onSelect,
   onPin,
   loading,
+  browseSearch,
 }: {
   workspaceId: string;
   item: ArtifactCatalogItem;
@@ -491,6 +499,7 @@ export function ArtifactCard({
   onSelect?: (item: ArtifactCatalogItem) => void;
   onPin?: ArtifactPinAction;
   loading?: boolean;
+  browseSearch?: ArtifactReturnSearch;
 }) {
   const { open, menu, link } = useArtifactOpen(
     workspaceId,
@@ -499,6 +508,7 @@ export function ArtifactCard({
     onSelect,
     onPin,
     loading,
+    browseSearch,
   );
   const titleId = useId();
   const archived = item.status === "archived";
@@ -621,6 +631,7 @@ export function ArtifactLibrary({
   emptyAction,
   onEmptyChange,
   artifactKindsHidden = false,
+  browseSearch,
 }: {
   workspaceId: string;
   sessionId?: string;
@@ -649,6 +660,8 @@ export function ArtifactLibrary({
    * `artifacts:read`), so the catalog omits them: say so instead of "none yet".
    */
   artifactKindsHidden?: boolean;
+  /** Workspace library query carried into the full-page viewer, not embedded panels. */
+  browseSearch?: ArtifactReturnSearch;
 }) {
   const [view, setView] = useState<ArtifactView>(readArtifactView);
   const changeView = (next: ArtifactView) => {
@@ -790,6 +803,7 @@ export function ArtifactLibrary({
                 onSelect={onSelect}
                 onPin={onPin}
                 loading={loading}
+                browseSearch={browseSearch}
               />
             ))}
           </ul>
@@ -809,6 +823,7 @@ export function ArtifactLibrary({
                 onSelect={onSelect}
                 onPin={onPin}
                 loading={loading}
+                browseSearch={browseSearch}
               />
             ))}
           </RowList>

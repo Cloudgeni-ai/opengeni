@@ -5,6 +5,7 @@ export {
   SpreadsheetProjectionGrid,
   type SpreadsheetArtifactSurfaceProps,
   type SpreadsheetCommit,
+  type SpreadsheetDimensionCommit,
   type SpreadsheetRangeCommit,
   type SpreadsheetGridProps,
   type SpreadsheetGridProjection,

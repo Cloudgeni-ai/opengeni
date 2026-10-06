@@ -93,6 +93,22 @@ Release and publishing guidance starts here; executable truth lives in [`package
 
 **Canary packages:** dispatch `publish-canary.yml` on `main` with `source_sha` equal to that workflow run's exact `main` commit. The workflow, checked-out source, and publisher must all be that commit; an older ancestor is rejected. The workflow uses pinned Bun to build and pack, then the official publishing library under Bun with registry-token authentication and GitHub OIDC provenance. It publishes `{next-patch}-canary.N` with dist-tag `canary` (committed `1.0.0` publishes `1.0.2-canary.N`, skipping a retired patch), so canaries sort after the committed release. It does not consume changeset files or move `latest`; a new package with no `latest` tag remains without one.
 
+All archives are packed and frozen before the first write. Each topological
+publication retains an intent and a positive library HTTP acknowledgement before
+the next write; write retries are disabled. Receipt visibility is checked afterward
+in one bounded read-only phase, preserving latest, archive integrity, canary tag
+and provenance metadata checks. Site pins appear only after the complete cohort
+matches. Acknowledgements are not independent signed-byte acceptance. An uncertain
+write stops without replay. Bounded safe receipts survive ordinary workflow failure;
+a lost runner can still lose its artifact. Existing versions are never repaired in place.
+The final gate rereads the complete cohort within the original shared deadline,
+read quota and custody caps. These reads do not claim an atomic registry snapshot.
+Post-write receipt polling selects the current dist-tags document and the exact
+immutable version manifest rather than unrelated historical versions. Both GETs
+count toward the same 256-request budget and share one per-observation signal;
+the 180-second deadline and existing byte limits are unchanged. Pre-write discovery
+and occupied-version/stable-tag guards still use their existing metadata path.
+
 In GitHub Actions, `N` has a floor derived from the workflow run ID and attempt
 (`run ID * 1000 + attempt`), so retries do not reuse versions hidden by stale
 registry tags or staged publication. A visible version at or above that floor

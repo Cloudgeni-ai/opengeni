@@ -2072,6 +2072,8 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      // Exclusion membership is unordered; keep this addition away from the shared tail.
+      "0640_knowledge_entry_created_since.sql",
       "0463_host_mcp_resolver_registration.sql",
       "0461_unified_knowledge.sql",
       "0460_host_export_message_attribution.sql",
@@ -2407,6 +2409,8 @@ describe("release schema contract", () => {
       "0635_organization_admin_workspace_member_management.sql",
       "0636_opper_model_providers.sql",
       "0637_retained_process_background_owner_inventory.sql",
+      "0638_allowance_unbilled_usage_metering.sql",
+      "0639_native_app_push.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

@@ -2024,6 +2024,9 @@
 :where(.og-root).h-1\.5,:where(.og-root) .h-1\.5 {
     height: calc(var(--spacing) * 1.5);
   }
+:where(.og-root).h-2,:where(.og-root) .h-2 {
+    height: calc(var(--spacing) * 2);
+  }
 :where(.og-root).h-2\.5,:where(.og-root) .h-2\.5 {
     height: calc(var(--spacing) * 2.5);
   }
@@ -2210,6 +2213,9 @@
 :where(.og-root).w-1\/2,:where(.og-root) .w-1\/2 {
     width: calc(1 / 2 * 100%);
   }
+:where(.og-root).w-2,:where(.og-root) .w-2 {
+    width: calc(var(--spacing) * 2);
+  }
 :where(.og-root).w-3,:where(.og-root) .w-3 {
     width: calc(var(--spacing) * 3);
   }
@@ -2368,6 +2374,9 @@
   }
 :where(.og-root).max-w-\[min\(18rem\,calc\(100vw-1\.5rem\)\)\],:where(.og-root) .max-w-\[min\(18rem\,calc\(100vw-1\.5rem\)\)\] {
     max-width: min(18rem, calc(100vw - 1.5rem));
+  }
+:where(.og-root).max-w-\[min\(24rem\,60vw\)\],:where(.og-root) .max-w-\[min\(24rem\,60vw\)\] {
+    max-width: min(24rem, 60vw);
   }
 :where(.og-root).max-w-full,:where(.og-root) .max-w-full {
     max-width: 100%;
@@ -5106,6 +5115,16 @@
       }
     }
   }
+:where(.og-root).hover\:bg-og-accent\/20,:where(.og-root) .hover\:bg-og-accent\/20 {
+    &:hover {
+      @media (hover: hover) {
+        background-color: var(--og-color-accent);
+        @supports (color: color-mix(in lab, red, red)) {
+          background-color: color-mix(in oklab, var(--og-color-accent) 20%, transparent);
+        }
+      }
+    }
+  }
 :where(.og-root).hover\:bg-og-hover,:where(.og-root) .hover\:bg-og-hover {
     &:hover {
       @media (hover: hover) {
@@ -5887,14 +5906,19 @@
       align-items: center;
     }
   }
+:where(.og-root).max-sm\:gap-0\.5,:where(.og-root) .max-sm\:gap-0\.5 {
+    @media (width < 40rem) {
+      gap: calc(var(--spacing) * 0.5);
+    }
+  }
 :where(.og-root).max-sm\:gap-1,:where(.og-root) .max-sm\:gap-1 {
     @media (width < 40rem) {
       gap: calc(var(--spacing) * 1);
     }
   }
-:where(.og-root).max-sm\:px-2,:where(.og-root) .max-sm\:px-2 {
+:where(.og-root).max-sm\:px-1\.5,:where(.og-root) .max-sm\:px-1\.5 {
     @media (width < 40rem) {
-      padding-inline: calc(var(--spacing) * 2);
+      padding-inline: calc(var(--spacing) * 1.5);
     }
   }
 :where(.og-root).max-sm\:pr-10,:where(.og-root) .max-sm\:pr-10 {
@@ -6644,6 +6668,7 @@
   --og-model-policy-label-full-display: inline;
   --og-model-policy-label-short-display: none;
   --og-model-policy-effort-display: inline;
+  --og-model-policy-chevron-display: inline;
 }
 :where(.og-root)[data-og-responsive-basis="container"] .og-composer-input,:where(.og-root) [data-og-responsive-basis="container"] .og-composer-input {
   padding-inline: var(--_og-c-input-x);
@@ -6681,6 +6706,9 @@
 :where(.og-root)[data-og-responsive-basis="container"] .og-model-policy-effort,:where(.og-root) [data-og-responsive-basis="container"] .og-model-policy-effort {
   display: var(--og-model-policy-effort-display);
 }
+:where(.og-root)[data-og-responsive-basis="container"] .og-model-policy-chevron,:where(.og-root) [data-og-responsive-basis="container"] .og-model-policy-chevron {
+  display: var(--og-model-policy-chevron-display);
+}
 :where(.og-root)[data-og-responsive-basis="container"] .og-model-picker-native,:where(.og-root) [data-og-responsive-basis="container"] .og-model-picker-native {
   max-width: var(--_og-c-native-max);
 }
@@ -6713,19 +6741,20 @@
 }
 @container og-composer (max-width: 39.999rem) {
   :where(.og-root)[data-og-responsive-basis="container"] :where(*),:where(.og-root) [data-og-responsive-basis="container"] :where(*) {
-    --_og-c-gap: 0.25rem;
+    --_og-c-gap: 0.125rem;
     --_og-c-footer-x: 0.5rem;
     --_og-c-footer-b: 0.5rem;
     --_og-c-controls-wrap: nowrap;
     --_og-c-hint-display: none;
     --_og-c-model-max: 7.5rem;
-    --_og-c-model-x: 0.5rem;
+    --_og-c-model-x: 0.375rem;
     --_og-c-native-max: 7.5rem;
     --_og-c-recovered-max: 8rem;
     --_og-c-error-max: 8rem;
     --og-model-policy-label-full-display: none;
     --og-model-policy-label-short-display: inline;
     --og-model-policy-effort-display: none;
+    --og-model-policy-chevron-display: none;
   }
   :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer,:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer {
     flex-wrap: nowrap;

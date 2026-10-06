@@ -9,4 +9,6 @@ export const allowanceMigrationTail = [
   "0612_scheduled_model_unavailable_refusal.sql",
   // Extends attribution receipts introduced by withheld 0553.
   "0623_voice_transcription_attribution.sql",
+  // Counts unbilled model calls into counters introduced by withheld 0552.
+  "0638_allowance_unbilled_usage_metering.sql",
 ] as const;

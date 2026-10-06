@@ -352,6 +352,16 @@ impl BindingSession {
             self.workbook.as_ref().ok_or(BindingError::Closed)?,
             Some(&decoded.batch),
         )?;
+        // A first override can add a 16-byte sheet id, two 4-byte axis
+        // counts and an 8-byte pair to the snapshot, while its command body
+        // is only 25 bytes. The frame covers the section count; retain eight
+        // extra bytes per dimension command beyond the existing allowance.
+        let dimension_count = decoded
+            .batch
+            .commands()
+            .iter()
+            .filter(|command| matches!(command, Command::SetDimension { .. }))
+            .count();
         let growth_bound = command_envelope
             .len()
             .checked_add(
@@ -361,6 +371,7 @@ impl BindingSession {
                     .ok_or(BindingError::Limit("snapshot growth"))?,
             )
             .and_then(|value| value.checked_add(decoded.batch.commands().len() * 4))
+            .and_then(|value| value.checked_add(dimension_count.checked_mul(8)?))
             .ok_or(BindingError::Limit("snapshot growth"))?;
 
         if self
@@ -566,6 +577,25 @@ pub fn encode_command_batch(batch: &AtomicBatch) -> Result<Vec<u8>, BindingError
                 payload.u32(range.end.row)?;
                 payload.u32(range.end.column)?;
             }
+            Command::SetDimension {
+                sheet_id,
+                axis,
+                index,
+                pixels,
+            } => {
+                payload.u8(if *axis == opengeni_artifact_kernel::DimensionAxis::Row {
+                    5
+                } else {
+                    6
+                })?;
+                payload.id(*sheet_id)?;
+                payload.u32(*index)?;
+                payload.u32(
+                    pixels
+                        .filter(|value| *value != axis.default_pixels())
+                        .unwrap_or(0),
+                )?;
+            }
         }
     }
 
@@ -658,7 +688,8 @@ fn decode_command_batch_with_stats(
         .map_err(|_| BindingError::Limit("command count"))?;
     let mut cell_count = 0usize;
     for _ in 0..command_count {
-        let command = match decoder.u8()? {
+        let tag = decoder.u8()?;
+        let command = match tag {
             0 => Command::CreateSheet {
                 id: decoder.id()?,
                 name: decoder.string()?,
@@ -725,6 +756,26 @@ fn decode_command_batch_with_stats(
                 Command::ClearRange {
                     sheet_id,
                     range: CellRange::new(first, second),
+                }
+            }
+            5 | 6 => {
+                let sheet_id = decoder.id()?;
+                let axis = if tag == 5 {
+                    opengeni_artifact_kernel::DimensionAxis::Row
+                } else {
+                    opengeni_artifact_kernel::DimensionAxis::Column
+                };
+                let index = decoder.u32()?;
+                let raw = decoder.u32()?;
+                let pixels = (raw != 0).then_some(raw);
+                if !axis.valid_pixels(pixels) || pixels == Some(axis.default_pixels()) {
+                    return Err(BindingError::NonCanonical("invalid dimension pixels"));
+                }
+                Command::SetDimension {
+                    sheet_id,
+                    axis,
+                    index,
+                    pixels,
                 }
             }
             tag => return Err(BindingError::InvalidTag(tag)),
@@ -899,7 +950,7 @@ fn validate_spreadsheet_projection(
                     ));
                 }
             }
-            Command::ClearRange { .. } => {}
+            Command::ClearRange { .. } | Command::SetDimension { .. } => {}
         }
     }
     Ok(())
@@ -1326,7 +1377,7 @@ mod tests {
     };
     use opengeni_artifact_kernel::{
         decode_snapshot, encode_snapshot, AtomicBatch, Cell, CellBlock, CellCoord, CellValue,
-        Command, DateValue, Number, StableId, Workbook,
+        Command, DateValue, DimensionAxis, Number, StableId, Workbook,
     };
 
     fn example_batch(namespace: u64) -> AtomicBatch {
@@ -1543,6 +1594,82 @@ mod tests {
         ));
         assert_eq!(session.revision().expect("revision"), 0);
         assert_eq!(session.snapshot().expect("snapshot"), initial);
+    }
+
+    #[test]
+    fn dimensions_cannot_commit_an_unsnapshotable_state_at_either_runtime_boundary() {
+        let namespace = 702;
+        let ids: Vec<_> = (2..12)
+            .map(|counter| StableId::from_parts(namespace, counter))
+            .collect();
+        let mut workbook = Workbook::new(namespace).unwrap();
+        workbook
+            .apply_batch(&AtomicBatch::from_commands(
+                ids.iter()
+                    .enumerate()
+                    .map(|(index, id)| Command::CreateSheet {
+                        id: *id,
+                        name: format!("Sheet {index}"),
+                    })
+                    .collect(),
+            ))
+            .unwrap();
+        let initial = encode_snapshot(&workbook).unwrap();
+        let batch = AtomicBatch::from_commands(
+            ids.iter()
+                .map(|sheet_id| Command::SetDimension {
+                    sheet_id: *sheet_id,
+                    axis: DimensionAxis::Row,
+                    index: 0,
+                    pixels: Some(48),
+                })
+                .collect(),
+        );
+        let command = encode_command_batch(&batch).unwrap();
+        workbook.apply_batch(&batch).unwrap();
+        let resized = encode_snapshot(&workbook).unwrap();
+        // The old admission allowance misses first-override sheet overhead.
+        assert!(resized.len() > initial.len() + command.len() + ids.len() * 4);
+        for allow_boundary_probe in [false, true] {
+            let limits = BindingLimits {
+                max_command_bytes: MAX_COMMAND_ENVELOPE_BYTES,
+                max_snapshot_bytes: resized.len() - 1,
+                max_cells_per_batch: MAX_CELLS_PER_BATCH,
+                allow_boundary_probe,
+            };
+            let mut session = BindingSession::open_with_limits(&initial, limits).unwrap();
+            let before_hash = session.state_hash().unwrap();
+            assert!(matches!(
+                session.apply_commands(&command),
+                Err(BindingError::Limit(_))
+            ));
+            assert_eq!(session.revision().unwrap(), 1);
+            assert_eq!(session.snapshot().unwrap(), initial);
+            assert_eq!(session.state_hash().unwrap(), before_hash);
+
+            let mut valid = BindingSession::open_with_limits(
+                &initial,
+                BindingLimits {
+                    max_snapshot_bytes: resized.len() + 256,
+                    ..limits
+                },
+            )
+            .unwrap();
+            valid.apply_commands(&command).unwrap();
+            assert_eq!(valid.snapshot().unwrap(), resized);
+        }
+        let mut exact = BindingSession::open_with_limits(
+            &initial,
+            BindingLimits {
+                max_command_bytes: MAX_COMMAND_ENVELOPE_BYTES,
+                max_snapshot_bytes: resized.len(),
+                max_cells_per_batch: MAX_CELLS_PER_BATCH,
+                allow_boundary_probe: true,
+            },
+        )
+        .unwrap();
+        exact.apply_commands(&command).unwrap();
+        assert_eq!(exact.snapshot().unwrap(), resized);
     }
 
     #[test]

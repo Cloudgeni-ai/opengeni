@@ -1531,11 +1531,13 @@ describe("timeline renderer isolation", () => {
 
       const text = r.container.textContent ?? "";
       expect(text).toContain("Message before the broken renderer");
-      expect(text).toContain("Timeline item unavailable");
+      // Only the broken row is replaced; its work group still renders.
+      expect(text).toContain("Consumer tool with missing renderer · couldn't be displayed");
       expect(text).toContain("Message after the broken renderer");
+      expect(r.container.querySelectorAll('[data-testid="tool-row-render-error"]')).toHaveLength(1);
       expect(
         r.container.querySelectorAll('[data-testid="timeline-group-render-error"]'),
-      ).toHaveLength(1);
+      ).toHaveLength(0);
 
       await r.rerender(<MessageTimeline items={items} toolRegistry={defaultToolRegistry} />);
       await flush();
@@ -1547,6 +1549,7 @@ describe("timeline renderer isolation", () => {
       expect(
         r.container.querySelectorAll('[data-testid="timeline-group-render-error"]'),
       ).toHaveLength(0);
+      expect(r.container.querySelectorAll('[data-testid="tool-row-render-error"]')).toHaveLength(0);
 
       await r.unmount();
     } finally {

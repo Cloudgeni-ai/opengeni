@@ -340,6 +340,20 @@ import { EditablePresentationArtifactSurface } from "@opengeni/react/artifacts/p
 <EditablePresentationArtifactSurface session={presentationSession} title="Launch deck" />;
 ```
 
+The spreadsheet surface supports typing, formulas, rectangular paste, clear,
+and durable row/column resizing. Drag a header boundary for immediate visual
+feedback and one command on release. Focus a boundary and use arrows to resize
+(Shift for 1 px), Home to reset, or Escape to cancel. Pending saves do not block
+typing; the sync indicator remains pending until server acknowledgement. Failed
+independent edits stay visible, and retry cannot overwrite newer overlapping
+edits. The same component is used in the dock and full-page artifact view;
+dimensions and values remain authoritative in the SDK Worker.
+Double-click a sheet tab or focus it and press F2 to rename it. Enter/Save submits
+the canonical `sheet.rename` command; Escape/Cancel discards an unsent name.
+Validation and failed submissions keep the name editor open. Pending cell edits
+show submitted input until the Worker projection catches up; pending formulas
+show their source, not an invented result.
+
 The durable document surface composes bounded summary, body, section, and
 review queries at one native revision. Text edits become UTF-16-correct minimal
 `paragraph.edit` commands; formatting becomes `paragraph.format`. Empty

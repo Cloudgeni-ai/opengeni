@@ -124,6 +124,30 @@ export function coerceReasoningEffortForModel(
   return defaultEffortForModel(model);
 }
 
+/** Whether the composer offers (and therefore labels) a reasoning-effort choice. */
+export function modelOffersEffortChoice(model: ClientModel): boolean {
+  return (
+    effortOptionsForModel(model).length > 1 && model.capabilities?.reasoning.runnable !== false
+  );
+}
+
+/**
+ * The composer model pill at phone width: the catalog's compact name (falling
+ * back to the display name) and the effort label when effort is a choice.
+ */
+export function compactModelPill(
+  models: readonly ClientModel[],
+  modelId: string,
+  effort: ReasoningEffort | null | undefined,
+): { name: string; effort: string | null } {
+  const row = findPickerRow(projectClientModelRows([...models]), modelId);
+  return {
+    name: row?.shortLabel ?? row?.label ?? modelDisplayName(modelId),
+    effort:
+      row && effort && modelOffersEffortChoice(row.catalog) ? labelReasoningEffort(effort) : null,
+  };
+}
+
 export function runnableLatencyModesForModel(model: ClientModel): LatencyModeId[] {
   const modes = model.capabilities?.latencyModes ?? [];
   return modes.filter((mode) => mode.runnable).map((mode) => mode.id);
@@ -271,13 +295,42 @@ function organizationProviderPayerSummary(model: ClientModel): string {
 }
 
 /**
- * The curated compact label, else the family-free name for Claude models
- * ("Opus 5.5"): the maker's mark beside it already says Claude.
+ * The curated compact label, else a derived one for narrow triggers: the
+ * family-free name for Claude models ("Opus 5.5", the maker's mark beside it
+ * already says Claude), or the name without trailing access and release-stage
+ * qualifiers ("Muse Spark 1.3 Contributor Free" → "Muse Spark 1.3"), which the
+ * picker's groups and descriptions already carry.
  */
 function compactLabel(catalog: ClientModel): { shortLabel?: string } {
   if (catalog.shortLabel) return { shortLabel: catalog.shortLabel };
   const name = modelDisplayName(catalog);
-  return name.startsWith("Claude ") ? { shortLabel: name.slice("Claude ".length) } : {};
+  if (name.startsWith("Claude ")) return { shortLabel: name.slice("Claude ".length) };
+  const trimmed = withoutTrailingQualifiers(name);
+  return trimmed !== name ? { shortLabel: trimmed } : {};
+}
+
+const TRAILING_QUALIFIERS = new Set([
+  "free",
+  "contributor",
+  "preview",
+  "beta",
+  "experimental",
+  "exp",
+  "latest",
+]);
+
+/** Drops trailing qualifier words ("Free", "Preview", "(free)") while a name remains. */
+function withoutTrailingQualifiers(name: string): string {
+  const words = name.trim().split(/\s+/u);
+  while (words.length > 1) {
+    const last = words
+      .at(-1)!
+      .replace(/^[([]|[)\]]$/gu, "")
+      .toLowerCase();
+    if (!TRAILING_QUALIFIERS.has(last)) break;
+    words.pop();
+  }
+  return words.join(" ");
 }
 
 export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerModelRow[] {

@@ -203,6 +203,7 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   start(url?: string): Promise<BrowserObservation>;
   listTargets(): Promise<BrowserTarget[]>;
   openTarget(url?: string): Promise<BrowserObservation>;
+  openTargetWithInventory?(url?: string): Promise<BrowserTarget[]>;
   selectTarget(targetId: string): Promise<BrowserObservation>;
   closeTarget(targetId: string): Promise<BrowserTarget[]>;
   targetState(targetId: string): Promise<BrowserTargetState>;
@@ -617,6 +618,25 @@ export class BrowserSupervisor {
     });
     this.rememberObservation(runtime, observation);
     return observation;
+  }
+
+  async openTargetWithInventory(
+    reference: BrowserSessionReference,
+    url?: string,
+  ): Promise<BrowserTarget[]> {
+    const runtime = this.requireActive(reference);
+    const open = runtime.driver.openTargetWithInventory;
+    if (!open) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "browser driver does not support metadata-only tab opening",
+      );
+    }
+    const targets = await this.mutateWithRecovery(runtime, async () => {
+      return await open.call(runtime.driver, url);
+    });
+    this.rememberTargets(runtime, targets);
+    return targets;
   }
 
   async selectTarget(

@@ -1,7 +1,6 @@
-/** Codex subscription product ids are prefixed `codex/`. */
-export function isCodexProductModel(modelId: string): boolean {
-  return modelId.startsWith("codex/");
-}
+import { isCodexProductModel } from "@opengeni/react/session-list-model";
+
+export { isCodexProductModel };
 
 /**
  * Next-turn model for an open session.

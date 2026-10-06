@@ -1742,9 +1742,13 @@ async function transcriptionInput(request: Request): Promise<{
     reject(415, "unsupported_media_type", "Send multipart/form-data.");
   }
   const bytes = await readBoundedBytes(request, MAX_TRANSCRIPTION_BODY_BYTES);
-  let form: FormData;
+  // Only the fields this route reads; structural, so DOM and React Native
+  // typings of FormData both satisfy it.
+  let form: { get(name: string): File | string | null };
   try {
-    form = await new Response(bytes, { headers: { "Content-Type": contentType } }).formData();
+    form = (await new Response(bytes, {
+      headers: { "Content-Type": contentType },
+    }).formData()) as unknown as { get(name: string): File | string | null };
   } catch {
     reject(400, "invalid_audio", "The recording could not be read.");
   }

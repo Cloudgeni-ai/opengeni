@@ -12,6 +12,7 @@ import {
   type BrowserActionCommand as BrowserActionCommandValue,
   type BrowserExternalAuthCommand as BrowserExternalAuthCommandValue,
   BrowserProtectedAuthFillCommand,
+  BrowserTargetListResponse,
   type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
   BrowserWorkspaceFileStageRequest,
   ComputerActionCommand,
@@ -495,6 +496,22 @@ export class BrowserControlServer {
         return success(target, 201);
       }
       throw new ProtocolError("invalid_action", "method not allowed", 405);
+    }
+    if (
+      segments.length === 5 &&
+      segments[3] === "targets" &&
+      segments[4] === "open-with-inventory"
+    ) {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const body = await readJsonObject(request);
+      assertOnlyKeys(body, ["url"]);
+      const targets = await this.supervisor.openTargetWithInventory(
+        reference,
+        body.url === undefined ? undefined : requireString(body.url, "url", 16_384),
+      );
+      return success(BrowserTargetListResponse.parse({ ...reference, targets }), 201);
     }
     if (segments.length === 4 && segments[3] === "actions") {
       if (request.method !== "POST") {
@@ -2035,7 +2052,11 @@ function routeNeedsControl(segments: readonly string[], request: Request): boole
   }
   if (segments[3] !== "targets") return false;
   if (segments.length === 4) return request.method === "POST";
-  if (segments.length === 5) return request.method === "DELETE";
+  if (segments.length === 5)
+    return (
+      request.method === "DELETE" ||
+      (segments[4] === "open-with-inventory" && request.method === "POST")
+    );
   return segments[5] === "select";
 }
 

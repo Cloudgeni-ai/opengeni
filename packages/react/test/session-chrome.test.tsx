@@ -1508,7 +1508,7 @@ describe("SessionChrome compact actions", () => {
     expectChromeCollapsed(mounted.container);
   });
 
-  test("steers the first queued message without opening the panel", async () => {
+  test("steers the latest queued message without opening the panel", async () => {
     const ids: string[] = [];
     mounted = await renderComponent(
       <SessionChrome
@@ -1528,13 +1528,42 @@ describe("SessionChrome compact actions", () => {
     await act(async () => queueChip?.click());
     expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
     const action = mounted.container.querySelector<HTMLButtonElement>(
-      '[aria-label="Steer first queued message"]',
+      '[aria-label="Steer latest queued message"]',
     )!;
     expect(action.closest("button")).toBe(action);
     expect(action.getAttribute("data-analytics-action")).toBe("steer");
     await act(async () => action.click());
-    expect(ids).toEqual(["11111111-1111-4111-8111-111111111111"]);
+    expect(ids).toEqual(["22222222-2222-4222-8222-222222222222"]);
     expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
+  });
+
+  test("the collapsed queue chip previews the latest queued message", async () => {
+    mounted = await renderComponent(<SessionChrome composer={composer()} queue={queue()} />);
+    const queueChip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="queue"]',
+    );
+    // Opened by default: the list carries the text, so the chip does not repeat it.
+    expect(mounted.container.querySelector('[data-testid="session-chrome-queue-peek"]')).toBeNull();
+    expect(
+      mounted.container.querySelector('[aria-label="Steer latest queued message"]'),
+    ).toBeNull();
+    await act(async () => queueChip?.click());
+    expect(
+      mounted.container.querySelector('[data-testid="session-chrome-queue-peek"]')?.textContent,
+    ).toBe("second queued prompt");
+    expect(queueChip?.textContent).toContain("2 queued");
+  });
+
+  test("open queue rows keep Steer visible outside the hover-revealed actions", async () => {
+    mounted = await renderComponent(<SessionChrome composer={composer()} queue={queue()} />);
+    const steer = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Steer queued prompt 1"]',
+    )!;
+    const edit = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Edit queued prompt 1"]',
+    )!;
+    expect(steer.closest(".opacity-0")).toBeNull();
+    expect(edit.closest(".opacity-0")).not.toBeNull();
   });
 
   test("goal pause/resume and clear do not open the panel", async () => {

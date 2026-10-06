@@ -741,6 +741,9 @@ describe("ModelPolicyPicker", () => {
     expect(mobileLabel?.textContent).toBe("5.6 Sol");
     expect(desktopLabel?.textContent).toBe("GPT-5.6 Sol");
     expect(trigger?.className).toContain("max-sm:max-w-[7.5rem]");
+    // Phone: the crowded composer row keeps the name, not the chevron.
+    expect(trigger?.className).toContain("max-sm:px-1.5");
+    expect(trigger?.lastElementChild?.getAttribute("class")).toContain("max-sm:hidden");
   });
 
   test("the field trigger shows the model and the payer, and leaves the effort to the menu", async () => {

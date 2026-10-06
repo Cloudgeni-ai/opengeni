@@ -1,0 +1,71 @@
+{
+  "name": "@opengeni/react-native",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Native (React Native / Expo) session surfaces and adapters for OpenGeni.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./adapters": {
+      "types": "./src/adapters.ts",
+      "default": "./src/adapters.ts"
+    },
+    "./expo": {
+      "types": "./src/expo.ts",
+      "default": "./src/expo.ts"
+    },
+    "./ui": {
+      "types": "./src/ui/index.ts",
+      "default": "./src/ui/index.ts"
+    },
+    "./timeline": {
+      "types": "./src/timeline/index.ts",
+      "default": "./src/timeline/index.ts"
+    },
+    "./timeline/markdown": {
+      "types": "./src/timeline/markdown.tsx",
+      "default": "./src/timeline/markdown.tsx"
+    }
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@opengeni/contracts": "workspace:*",
+    "@opengeni/react": "workspace:*",
+    "@opengeni/sdk": "workspace:*",
+    "thinking-orbs": "^0.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "expo-audio": "~57.0.5",
+    "react-native-markdown-display": "^7.0.2",
+    "react-native-safe-area-context": "~5.7.0"
+  },
+  "peerDependencies": {
+    "expo": ">=57",
+    "expo-audio": "*",
+    "expo-crypto": "*",
+    "expo-document-picker": "*",
+    "expo-file-system": "*",
+    "expo-glass-effect": "*",
+    "expo-image-picker": "*",
+    "react": ">=19",
+    "react-native": ">=0.80",
+    "react-native-markdown-display": ">=7",
+    "react-native-reanimated": ">=4",
+    "react-native-safe-area-context": ">=5",
+    "react-native-svg": ">=15"
+  },
+  "peerDependenciesMeta": {
+    "react-native-markdown-display": {
+      "optional": true
+    }
+  }
+}

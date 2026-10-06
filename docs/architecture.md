@@ -248,8 +248,12 @@ Knowledge, preserving destination scope and review; see
 [`company-brain-write-routing.md`](company-brain-write-routing.md).
 
 Agent learning governs Knowledge/instructions/Skills: Automatic, Review first,
-Off; sparse chat/task overrides and accepted-turn policies freeze. Review first
-stages inactive changes without pausing. Pending reads support reuse/correction,
+Off; sparse chat/task overrides and accepted-turn policies freeze.
+The worker renders the frozen effective modes and Knowledge destination in the
+governance prompt, without attempt IDs or human identifiers. Useful retention is
+ordinary work under that policy, including newly created Slack sessions; Slack
+source text remains evidence rather than instruction or authorization authority.
+Review first stages inactive changes without pausing. Pending reads support reuse/correction,
 never authority; ordinary reads are published-only. Instructions/Skills retain
 native authority. Instruction edits append to exact baselines or update/remove
 unique exact-text anchors; full replacement requires explicit intent. Active-head
@@ -909,6 +913,10 @@ failures. An exact-current-attempt model completion atomically clears that strea
 with its timeline event; only then does the worker clear its in-memory copy.
 Late attempt evidence cannot replenish the retry budget. See
 [`run-lifecycle.md`](run-lifecycle.md) for pacing and exhaustion semantics.
+Confirmed, structured Claude overload uses that same durable count and clock,
+with at most 15 retries inside a 15-minute recovery window and a pre-dispatch
+deadline check. Display labels or overload keywords do not grant this policy;
+other failure classes keep their existing budgets and capacity semantics.
 
 ### 5.3 Goals, schedules, automations, and child work
 
@@ -1185,6 +1193,7 @@ Manifests and `.changeset/config.json` own publication; this map describes respo
 | `apps/worker` | `@opengeni/worker-bundle` | Temporal workflows, control/turn activities, agent execution, maintenance pumps, and worker lifecycle |
 | `apps/web` | `opengeni-web` | Stock React/Vite operator console consuming the public SDK and React packages |
 | `apps/browser-extension` | `@opengeni/browser-extension` | Browser attachment extension; a leaf client, not session authority ([README](../apps/browser-extension/README.md), [privacy](../apps/browser-extension/PRIVACY.md)) |
+| `apps/mobile` | Standalone Expo app `opengeni-mobile` (own `bun.lock`) | iOS and Android client: web sign-in for its own app credential, accounts, workspace switching, settings, and push; a leaf client ([README](../apps/mobile/README.md)) |
 
 The standalone `apps/api` entrypoint installs a one-shot fatal process
 boundary before configuration or dependency startup. Startup failures,
@@ -1240,6 +1249,7 @@ behind a generic 500, so its session lookups run through
 | `packages/agent-proto` | `@opengeni/agent-proto` | Generated TypeScript side of the Connected Machine wire protocol |
 | `packages/sdk` | `@opengeni/sdk` | Framework-neutral API client, event streaming, and transport helpers |
 | `packages/react` | `@opengeni/react` | React hooks and styled session, composer, artifact, and machine surfaces |
+| `packages/react-native` | `@opengeni/react-native` | Native session timeline, composer, and attention renderers over the renderer-neutral `@opengeni/react` models, plus Expo adapters |
 | `packages/observability` | `@opengeni/observability` | Structured logs, traces, metrics, and Prometheus exposition |
 | `packages/deployment` | `@opengeni/deployment` | Typed deployment profiles, preflight, plans, and generated runtime artifacts |
 | `packages/testing` | `@opengeni/testing` | Shared test services, fixtures, scripted models, and sandbox helpers |
@@ -1521,6 +1531,12 @@ Browser tab open/close keeps each physical outcome available to its caller.
 An older response or follow-up observation cannot replace a later selection.
 Once all pending selections settle, superseded tab mutations reconcile fresh
 inventory without replacing the selected page's admitted observation.
+
+When `browser_open` reuses an active session and needs a new URL, it requests
+tab creation with the owned inventory instead of collecting and discarding a
+page observation. The same control authority and session/controller fences
+apply; unsupported controllers refuse without replay. Default SDK tab opening
+and `browser_tabs` open/select retain their page observations.
 
 ComputerSession attachments use canonical frame streams, including relay kind 4,
 for screens and windows. The viewer paints those exact authenticated pixels and
@@ -1913,6 +1929,12 @@ lanes declare services/credentials.
 
 Manifests/Changesets/CI/release scripts govern evidence-bound npm/image/Helm/Rust
 publication, retaining source identity. Web builds target both CPUs.
+Canary packages prepack the complete cohort, retain write acknowledgements, then
+perform bounded strict read-only verification before producing Site pins.
+Post-write verification selects current tags and one immutable version manifest;
+each actual GET shares the original request quota, deadline and custody limits,
+including final complete-cohort qualification. Pre-write discovery is unchanged.
+An uncertain publication never automatically replays; signed-byte acceptance remains separate.
 `reconcile-production-packages.yml` reconciles npm availability independently of acceptance.
 
 Commands: [`../AGENTS.md`](../AGENTS.md), [`../CONTRIBUTING.md`](../CONTRIBUTING.md).

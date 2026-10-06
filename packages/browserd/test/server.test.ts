@@ -249,6 +249,85 @@ describe("BrowserControlServer", () => {
     },
   );
 
+  test("metadata-only opening keeps exact control authority and the default observation response", async () => {
+    const calls: string[] = [];
+    await withServer(
+      async ({ server, reference }) => {
+        await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        calls.length = 0;
+        const path = `/v1/browser-sessions/${reference.browserSessionId}/targets/open-with-inventory`;
+        for (const token of [undefined, viewToken]) {
+          expect(
+            (await request(server, path, { method: "POST", ...(token ? { token } : {}), body: {} }))
+              .status,
+          ).toBe(401);
+        }
+        expect(calls).toEqual([]);
+        const response = await request(server, path, {
+          method: "POST",
+          token: controlToken,
+          body: { url: "https://new.example.test/" },
+        });
+        expect(response.status).toBe(201);
+        const inventory = (await json(response)).data;
+        expect(inventory).toMatchObject({
+          ...reference,
+          targets: [{ url: "https://new.example.test/", selected: true }],
+        });
+        expect(inventory).not.toHaveProperty("observation");
+        expect(calls).toEqual(["openTargetWithInventory"]);
+        const defaultResponse = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets`,
+          { method: "POST", token: controlToken, body: {} },
+        );
+        expect(defaultResponse.status).toBe(201);
+        expect((await json(defaultResponse)).data).toHaveProperty("semantic");
+      },
+      {
+        beforeDriverOperation: (name) => {
+          calls.push(name);
+        },
+      },
+    );
+  });
+
+  test("metadata-only opening never replays a mutation whose completion is unknown", async () => {
+    let attempts = 0;
+    await withServer(
+      async ({ server, reference }) => {
+        await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        const failed = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets/open-with-inventory`,
+          { method: "POST", token: controlToken, body: { url: "https://new.example.test/" } },
+        );
+        expect(failed.status).toBe(500);
+        expect(((await failed.json()) as { error: unknown }).error).toMatchObject({
+          code: "driver_failed",
+          retryable: false,
+        });
+        expect(attempts).toBe(1);
+      },
+      {
+        beforeDriverOperation: (name) => {
+          if (name === "openTargetWithInventory") {
+            attempts++;
+            throw new CdpCommandTimeoutError("Target.getTargets");
+          }
+        },
+      },
+    );
+  });
+
   test("does not classify a CDP mutation timeout as retryable or redispatch it", async () => {
     let attempts = 0;
     await withServer(
@@ -1277,7 +1356,7 @@ async function withServer(
     failStart?: boolean;
     screenshotError?: Error;
     beforeDriverOperation?: (
-      operation: "listTargets" | "observe" | "openTarget" | "dispatch",
+      operation: "listTargets" | "observe" | "openTarget" | "openTargetWithInventory" | "dispatch",
     ) => void;
     allowedOrigins?: readonly string[];
     uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
@@ -1346,7 +1425,7 @@ function fakeDriver(
     failStart?: boolean;
     screenshotError?: Error;
     beforeDriverOperation?: (
-      operation: "listTargets" | "observe" | "openTarget" | "dispatch",
+      operation: "listTargets" | "observe" | "openTarget" | "openTargetWithInventory" | "dispatch",
     ) => void;
   },
 ): BrowserSupervisorDriver {
@@ -1401,6 +1480,11 @@ function fakeDriver(
       options.beforeDriverOperation?.("openTarget");
       target.url = url ?? "about:blank";
       return observation();
+    },
+    async openTargetWithInventory(url) {
+      options.beforeDriverOperation?.("openTargetWithInventory");
+      target.url = url ?? "about:blank";
+      return [{ ...target }];
     },
     async selectTarget() {
       return observation();
