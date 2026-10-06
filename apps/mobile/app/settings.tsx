@@ -1,8 +1,9 @@
 import { useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import Constants from "expo-constants";
 import { Stack, router } from "expo-router";
-import { Alert, Platform, PlatformColor } from "react-native";
+import { Alert, Platform } from "react-native";
 import { useAccount } from "@/account";
+import { setAppearance, useAppearancePreference, type AppearancePreference } from "@/appearance";
 import { serverLabel } from "@/account-store";
 import { useNotificationSettingsSection } from "@/notifications";
 import { SettingsList } from "@/settings-list";
@@ -22,7 +23,9 @@ export default function SettingsScreen() {
 /* Accounts on this device; the current organization and workspace, whose
    administration stays on the web; notifications; sign out. */
 function Settings() {
-  const c = useNativeTimelineTheme().colors;
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const appearance = useAppearancePreference();
   const { accounts, account, workspace, organizations, switchAccount, signOut } = useAccount();
   const notifications = useNotificationSettingsSection();
   const org = organizations.find((each) => each.accountId === workspace?.accountId);
@@ -106,6 +109,22 @@ function Settings() {
     });
   }
   if (account && notifications) sections.push(notifications);
+  const appearances: { id: AppearancePreference; title: string }[] = [
+    { id: "system", title: "System" },
+    { id: "light", title: "Light" },
+    { id: "dark", title: "Dark" },
+  ];
+  sections.push({
+    id: "appearance",
+    title: "Appearance",
+    rows: appearances.map((each) => ({
+      kind: "choice" as const,
+      id: `appearance-${each.id}`,
+      title: each.title,
+      selected: appearance === each.id,
+      onPress: () => setAppearance(each.id),
+    })),
+  });
   if (account) {
     sections.push({
       id: "you",
@@ -138,9 +157,11 @@ function Settings() {
           headerTintColor: c.fg,
           headerShadowVisible: false,
           // The native grouped list owns the page color; the bar matches it.
+          // The grouped list's page color for this theme. (A dynamic system
+          // color here resolved light in the navigation bar even in dark mode.)
           headerStyle: {
             backgroundColor:
-              Platform.OS === "ios" ? PlatformColor("systemGroupedBackground") : c.bg,
+              Platform.OS === "ios" ? (theme.scheme === "dark" ? "#000000" : "#F2F2F7") : c.bg,
           },
         }}
       />

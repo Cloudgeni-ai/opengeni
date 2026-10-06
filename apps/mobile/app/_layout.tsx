@@ -5,7 +5,10 @@ import { ActivityIndicator, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { AccountProvider, useAccount } from "@/account";
+import { restoreAppearance } from "@/appearance";
 import { NotificationRouting } from "@/notifications";
+
+void restoreAppearance();
 
 function NativeEnvironment({ children }: { children: React.ReactNode }) {
   const { adapters } = useAccount();
