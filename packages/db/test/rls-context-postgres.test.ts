@@ -8,8 +8,11 @@ import {
   rawRows,
   withRlsContext,
   withSessionRlsActorContext,
+  withWorkspaceRls,
+  withWorkspaceSubjectRls,
   type Database,
 } from "../src/database";
+import { bootstrapWorkspace } from "../src/index";
 
 type Scope = {
   accountId: string;
@@ -268,5 +271,174 @@ describe("nested RLS actor restoration on PostgreSQL", () => {
       );
       expect(capabilities).toEqual({ writer: "1", recovery: "1", output: "1", attachments: "1" });
     });
+  });
+});
+
+describe("batched RLS setup on PostgreSQL", () => {
+  function captureStatements(): { statements: string[]; stop: () => void } {
+    const driver = (client.db as unknown as { $client: { options: { debug?: unknown } } }).$client;
+    const statements: string[] = [];
+    const previous = driver.options.debug;
+    driver.options.debug = (_connection: number, query: string) => {
+      statements.push(query.replace(/\s+/gu, " ").trim());
+    };
+    return { statements, stop: () => (driver.options.debug = previous) };
+  }
+
+  test("an actor-scoped workspace transaction sets up in two statements and holds the tenancy fence", async () => {
+    const settings = scope();
+    await seed({ ...settings, resourceHuman: null, resourceActor: null }, "batched");
+    const capture = captureStatements();
+    let callbackStart = 0;
+    try {
+      await withActor(settings, async () => {
+        await withRlsContext(client.db, settings, async (scoped) => {
+          callbackStart = capture.statements.length;
+          // Every tenant and actor GUC is live and policy-effective.
+          await expectScope(
+            scoped,
+            { ...settings, resourceHuman: null, resourceActor: null },
+            "batched",
+          );
+          const [fence] = await rawRows<{ held: boolean }>(
+            scoped,
+            sql`with fence as (
+              select hashtextextended(${`session-tenancy:${settings.workspaceId}`}, 0) as lock_key
+            )
+            select exists (
+              select 1 from pg_locks held, fence
+              where held.locktype = 'advisory'
+                and held.pid = pg_backend_pid()
+                and held.granted
+                and held.mode = 'ShareLock'
+                and held.classid = (((fence.lock_key >> 32) & 4294967295)::bigint)::oid
+                and held.objid = ((fence.lock_key & 4294967295)::bigint)::oid
+                and held.objsubid = 1
+            ) as held`,
+          );
+          expect(fence?.held).toBe(true);
+        });
+      });
+    } finally {
+      capture.stop();
+    }
+    const setup = capture.statements.slice(0, callbackStart);
+    // BEGIN, one write (GUCs + shared tenancy fence), one independent read-back.
+    expect(setup).toHaveLength(3);
+    expect(setup[0]?.toLowerCase()).toStartWith("begin");
+    expect(setup[1]).toContain("set_config('opengeni.subject_id'");
+    expect(setup[1]).toContain("pg_advisory_xact_lock_shared");
+    expect(setup[2]).toContain("current_setting('opengeni.subject_id'");
+    expect(setup[2]).not.toContain("set_config");
+  });
+
+  test("the shared tenancy fence still waits behind an exclusive holder before any scoped work", async () => {
+    const settings = scope();
+    const key = `session-tenancy:${settings.workspaceId}`;
+    const holder = await shared.admin.reserve();
+    try {
+      await holder`begin`;
+      await holder`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+      let entered = false;
+      const scoped = withRlsContext(client.db, settings, async () => {
+        entered = true;
+      });
+      await Bun.sleep(200);
+      expect(entered).toBe(false);
+      await holder`commit`;
+      await scoped;
+      expect(entered).toBe(true);
+    } finally {
+      holder.release();
+    }
+  });
+
+  test("an explicit scope subject overrides the ambient actor subject and is verified", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "batched-rls-test",
+      accountExternalId: suffix,
+      accountName: "Batched RLS",
+      workspaceExternalSource: "batched-rls-test",
+      workspaceExternalId: suffix,
+      workspaceName: "Batched RLS",
+      subjectId: `user:${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const actor = scope();
+    const explicitSubject = `user:explicit-${suffix}`;
+    const capture = captureStatements();
+    let seen: Scope | undefined;
+    try {
+      await withActor(actor, async () => {
+        await withWorkspaceSubjectRls(
+          client.db,
+          grant.workspaceId,
+          explicitSubject,
+          async (scoped) => {
+            seen = await readScope(scoped);
+          },
+        );
+      });
+    } finally {
+      capture.stop();
+    }
+    expect(seen).toEqual({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: explicitSubject,
+      privateFileOwner: actor.privateFileOwner,
+      initiatingHuman: actor.initiatingHuman,
+      resourceHuman: null,
+      resourceActor: null,
+    });
+    // The explicit subject no longer needs its own set/read-back pair.
+    expect(
+      capture.statements.filter((statement) =>
+        statement.includes("set_config('opengeni.subject_id'"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("a workspace scope resolves its account inside the setup write, without a separate lookup", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "batched-rls-test",
+      accountExternalId: suffix,
+      accountName: "Batched RLS",
+      workspaceExternalSource: "batched-rls-test",
+      workspaceExternalId: suffix,
+      workspaceName: "Batched RLS",
+      subjectId: `user:${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const capture = captureStatements();
+    let seen: Scope | undefined;
+    let callbackStart = 0;
+    try {
+      await withWorkspaceRls(client.db, grant.workspaceId, async (scoped) => {
+        callbackStart = capture.statements.length;
+        seen = await readScope(scoped);
+      });
+    } finally {
+      capture.stop();
+    }
+    expect(seen).toMatchObject({ accountId: grant.accountId, workspaceId: grant.workspaceId });
+    const setup = capture.statements.slice(0, callbackStart);
+    expect(setup).toHaveLength(3);
+    expect(setup[0]?.toLowerCase()).toStartWith("begin");
+    expect(setup[1]).toContain("set_config('opengeni.account_id', workspace.account_id::text");
+    expect(setup[1]).toContain("pg_advisory_xact_lock_shared");
+  });
+
+  test("an unknown workspace still fails as not found before any scoped work", async () => {
+    const missing = crypto.randomUUID();
+    let entered = false;
+    await expect(
+      withWorkspaceRls(client.db, missing, async () => {
+        entered = true;
+      }),
+    ).rejects.toThrow(`Workspace not found: ${missing}`);
+    expect(entered).toBe(false);
   });
 });
