@@ -14,6 +14,7 @@ const COMMANDS: Readonly<Record<string, readonly string[]>> = {
   "migration-rls-backfills": ["bun", "scripts/check-migration-rls-backfills.ts"],
   "migration-schema-contract": ["bun", "scripts/check-migration-schema-contract.ts"],
   "migration-test-budgets": ["bun", "scripts/check-migration-test-budgets.ts"],
+  "subscription-contract": ["bun", "run", "check:subscription-contract"],
   "publish-closure": ["bun", "scripts/publish-closure-guard.ts"],
   "public-api": ["bun", "scripts/public-api/check.ts"],
   "sdk-compat": ["bun", "scripts/public-api/sdk-compat.ts"],
