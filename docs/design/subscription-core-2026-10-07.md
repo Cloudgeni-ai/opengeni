@@ -246,22 +246,29 @@ No provider call happens inside it.
 
 1. Read effective settings (SQL).
 2. If the binding is `explicit`, use that connection or wait
-   (`pinned_account_unavailable`).
+   (`pinned_account_unavailable`); a choice that can never serve the work
+   waits as `pinned_account_ineligible` (D-24).
 3. Candidate models: the preferred model, then the fallback order (same or
-   other providers, the latter only if cross-provider failover is on and the
-   session is not "only this model"), filtered by workspace restrictions,
+   other providers, the latter only if cross-provider failover is on), or
+   only the preferred model when the session is "only this model"
+   (SUB-FAIL-05); filtered by workspace restrictions,
    connection `allowed_model_ids`, entitlements and per-model cooldowns. A
    preferred model the workspace does not allow falls through to the allowed
-   candidates, and the session waits only if none is allowed (D-17).
+   candidates, and the session waits only if none is allowed (D-17). A
+   provider switched off for the workspace and a compaction provider lock
+   restrict models the same way (D-26).
 4. Keep the bound connection if it can still serve its model, the cache is
    warm, and no re-selection point applies (compaction completed, model
    changed, session became shared while on a personal account).
 5. Otherwise, per candidate model: shared connections that can serve it,
    ordered by rotation (the primary first, regardless of whether its quota
    is known), then by known capacity before unknown, then by a deterministic
-   hash of the session id; then, with personal fallback, the owner's
-   personal connections for the same model; then the next model.
-6. Nothing servable: arm the session waiter with the earliest known reset.
+   hash of the session and connection ids (D-21, D-23); then, with personal
+   fallback, the owner's personal connections for the same model; then the
+   next model.
+6. Nothing servable: arm the session waiter with the earliest known reset
+   (D-22), explaining a compaction lock when it is what keeps a usable model
+   away.
 
 Mid-turn failover happens only between model calls: the turn records a new
 execution-policy revision, re-runs the funding check (`ensureRunAllowed`)
@@ -270,7 +277,7 @@ copy (`historyCompatibility`), and keeps completed tools and accounting.
 Image and video operations key their idempotency on the turn and call, not
 the credential, so a failover cannot spend twice (SUB-ACCT-02).
 
-The reference model (`packages/testing/src/subscription-reference-model.ts`)
+The reference model (`packages/subscriptions/src/reference-model.ts`)
 implements this algorithm independently; conformance compares production
 decisions with `checkDecision`.
 
