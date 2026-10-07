@@ -250,4 +250,20 @@ describe("lazy markdown table observer", () => {
       globalThis.ResizeObserver = original;
     }
   });
+
+  test("puts the touch copy action under the table instead of over its header", async () => {
+    const rendered = await renderComponent(
+      <Markdown>{"| Item | Amount |\n| --- | ---: |\n| Tiles | 114 000 kr |"}</Markdown>,
+    );
+    const wrapper = rendered.container.querySelector("[data-og-table]")!;
+    const action = rendered.container.querySelector("[data-og-copy]")!.closest(".absolute")!;
+    // Coarse pointers show the action permanently at touch size: reserve room
+    // below the table and anchor the action there.
+    expect(wrapper.className).toContain("pointer-coarse:pb-11");
+    expect(action.className).toContain("pointer-coarse:top-auto");
+    expect(action.className).toContain("pointer-coarse:bottom-0");
+    // Fine pointers keep the hover-revealed corner placement.
+    expect(action.className).toContain("top-0 right-0");
+    await rendered.unmount();
+  });
 });
