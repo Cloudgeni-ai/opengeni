@@ -18,7 +18,8 @@ import {
  */
 
 export const CONTRACT_PATH = "docs/subscription-accounts.md";
-const ID_PATTERN = /SUB-[A-Z]+-\d{2}/g;
+// Bounded on both sides: SUB-SEL-012 and XSUB-SEL-01 are not SUB-SEL-01.
+const ID_PATTERN = /(?<![A-Z0-9-])SUB-[A-Z]+-\d{2}(?!\d)/g;
 const DEFINITION_PATTERN = /^- \*\*(SUB-[A-Z]+-\d{2})\*\*/;
 const PENDING_PATTERN = /^pending \(([a-z][a-z0-9-]*)\)\.?$/;
 const WORK_ITEM_ROW = /^\| `([a-z][a-z0-9-]*)` \|/;

@@ -148,3 +148,20 @@ test("an ID mentioned only outside test titles does not verify a requirement", (
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("requirement IDs match only on whole-ID boundaries", () => {
+  const root = fixtureRepository({
+    [CONTRACT_PATH]: "- **SUB-FIXTURE-01** Verification: `apps/x/test/near.test.ts`.\n",
+    "apps/x/test/near.test.ts": [
+      'test("SUB-FIXTURE-012 is a different ID", () => {});',
+      'test("XSUB-FIXTURE-01 is not an ID", () => {});',
+    ].join("\n"),
+  });
+  try {
+    expect(checkSubscriptionContract(root).map((finding) => finding.message)).toEqual([
+      "does not name SUB-FIXTURE-01 in any test title",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
