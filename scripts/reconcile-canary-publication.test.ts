@@ -920,13 +920,19 @@ describe("bounded GET-only recovery", () => {
       }
     });
   }
-  test("provider auth stays on the canonical API and never follows an automatic redirect", async () => {
+  test("provider ZIP request accepts JSON before an uncredentialed binary redirect", async () => {
     const s = setup(),
       observed: { url: string; init?: RequestInit | undefined }[] = [];
     const gets = new RecoveryGets(
       s.store,
       async (input, init) => {
         observed.push({ url: input.toString(), init });
+        if (
+          observed.length === 1 &&
+          new Headers(init?.headers).get("accept") !== "application/json"
+        ) {
+          return Response.json({ message: "Unsupported Accept header" }, { status: 415 });
+        }
         return observed.length === 1
           ? new Response(null, {
               status: 302,
@@ -946,6 +952,8 @@ describe("bounded GET-only recovery", () => {
       100,
     );
     await gets.get(first.location!, "bytes", "zip", 100);
+    expect(new Headers(observed[0]!.init?.headers).get("accept")).toBe("application/json");
+    expect(new Headers(observed[1]!.init?.headers).get("accept")).toBe("application/octet-stream");
     expect(new Headers(observed[0]!.init?.headers).get("authorization")).toBe(
       "Bearer synthetic-token",
     );

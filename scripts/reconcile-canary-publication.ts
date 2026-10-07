@@ -462,7 +462,7 @@ export class RecoveryGets {
           signal,
           headers: {
             accept:
-              kind === "zip" || kind === "archive"
+              !provider && (kind === "zip" || kind === "archive")
                 ? "application/octet-stream"
                 : "application/json",
             ...(provider
