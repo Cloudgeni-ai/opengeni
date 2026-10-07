@@ -296,6 +296,101 @@ describe("provider switches", () => {
     ).toMatchObject({ kind: "run", connectionId: "codex-shared", modelId: "codex/b" });
   });
 
+  test("automatic mode never combines model access and allocator permission across assignments", () => {
+    const mixedPolicies = connection("codex-mixed", "codex", {
+      assignmentPolicies: [
+        {
+          workspaceId: "ws-team",
+          inferencePool: "workspace",
+          allowedModelIds: ["codex/a"],
+          allocatorEnabled: true,
+        },
+        {
+          workspaceId: "ws-team",
+          inferencePool: "organization",
+          allowedModelIds: ["codex/b"],
+          allocatorEnabled: false,
+        },
+      ],
+    });
+    expect(
+      decidePlacement(
+        input({
+          connections: [mixedPolicies],
+          session: { preferredModelId: "codex/b" },
+          settings: {
+            providers: {
+              codex: { inferenceSource: "automatic", useOrganizationAccounts: true, enabled: true },
+            },
+          },
+        }),
+      ),
+    ).toMatchObject({ kind: "wait", reason: "no_eligible_capacity" });
+  });
+
+  test("an explicit automatic source overrides a conflicting compatibility boolean", () => {
+    const organizationAccount = connection("codex-org", "codex", {
+      ownership: {
+        kind: "shared",
+        scope: { kind: "organization" },
+        managedByWorkspaceId: null,
+      },
+      allocatorEnabled: true,
+    });
+    expect(
+      decidePlacement(
+        input({
+          connections: [organizationAccount],
+          settings: {
+            providers: {
+              codex: { inferenceSource: "automatic", useOrganizationAccounts: false, enabled: true },
+            },
+          },
+        }),
+      ),
+    ).toMatchObject({ kind: "run", connectionId: "codex-org" });
+  });
+
+  test("a legacy workspace opt-out overrides an inherited automatic organization source", () => {
+    const organizationOnly = effectiveSettings(
+      {
+        organization: {
+          ...SETTINGS,
+          providers: {
+            codex: { inferenceSource: "automatic", useOrganizationAccounts: false, enabled: true },
+          },
+        },
+        locked: [],
+        workspaces: {},
+      },
+      "ws-team",
+    );
+    expect(organizationOnly.values.providers.codex).toMatchObject({
+      inferenceSource: "automatic",
+      useOrganizationAccounts: true,
+    });
+
+    const resolved = effectiveSettings(
+      {
+        organization: {
+          ...SETTINGS,
+          providers: {
+            codex: { inferenceSource: "automatic", useOrganizationAccounts: true, enabled: true },
+          },
+        },
+        locked: [],
+        workspaces: {
+          "ws-team": { providers: { codex: { useOrganizationAccounts: false } } },
+        },
+      },
+      "ws-team",
+    );
+    expect(resolved.values.providers.codex).toMatchObject({
+      inferenceSource: "workspace",
+      useOrganizationAccounts: false,
+    });
+  });
+
   test("SUB-SET-06: a provider switched off for the workspace serves none of its models and is never a failover target", () => {
     const off = { codex: { useOrganizationAccounts: true, enabled: false } };
     expect(decidePlacement(input({ settings: { providers: off, fallbackOrder: {} } }))).toEqual({

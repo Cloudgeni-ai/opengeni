@@ -298,15 +298,21 @@ export function servingFailure(
         policy.workspaceId === workspace.id &&
         (source === "automatic" || policy.inferencePool === source),
     );
-    if (!matching.some((policy) => policy.allocatorEnabled)) {
+    const hasAllocatableAssignment = matching.some((policy) => policy.allocatorEnabled);
+    if (!hasAllocatableAssignment) {
       return { requirement: "SUB-ELIG-04", message: "the source assignment is excluded from allocation" };
     }
     if (
       !matching.some(
-        (policy) => policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId),
+        (policy) =>
+          policy.allocatorEnabled &&
+          (policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId)),
       )
     ) {
-      return { requirement: "SUB-ELIG-03", message: "the source assignment excludes the model" };
+      return {
+        requirement: "SUB-ELIG-03",
+        message: "no allocatable source assignment allows the model",
+      };
     }
   }
   if ((connection.modelCooldowns?.[modelId] ?? -Infinity) > now) {

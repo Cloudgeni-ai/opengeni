@@ -33,6 +33,7 @@ export type ServiceIneligibility =
   | "model_not_allowed_by_workspace"
   | "model_not_entitled"
   | "model_not_allowed_by_connection"
+  | "source_assignment_policy_mismatch"
   | "model_cooling_down"
   | "exhausted";
 
@@ -63,6 +64,7 @@ const PERMANENT_SERVICE = new Set<Ineligibility>([
   "model_not_allowed_by_workspace",
   "model_not_entitled",
   "model_not_allowed_by_connection",
+  "source_assignment_policy_mismatch",
 ]);
 
 /**
@@ -111,7 +113,7 @@ function sharedConnectionMatchesSource(input: PlacementInput, connection: Subscr
     connection.ownership.managedByWorkspaceId === input.workspace.id;
   if (source === "workspace") return managedHere;
   if (source === "organization") return !managedHere;
-  return providerSwitchesFor(input.settings, connection.provider).useOrganizationAccounts || managedHere;
+  return source === "automatic" || managedHere;
 }
 
 /** Workspace model restrictions are a ceiling on every selection (SUB-ELIG-02). */
@@ -184,10 +186,7 @@ function staticServiceIneligibility(
   const reasons: ServiceIneligibility[] = [];
   if (connection.health !== "healthy") reasons.push("unhealthy");
   const assignments = sourceAssignments(input, connection);
-  if (
-    !connection.allocatorEnabled ||
-    (assignments !== undefined && !assignments.some((policy) => policy.allocatorEnabled))
-  ) {
+  if (!connection.allocatorEnabled || (assignments !== undefined && !assignments.some((policy) => policy.allocatorEnabled))) {
     reasons.push("allocator_disabled");
   }
   const model = findModel(input, modelId);
@@ -203,13 +202,16 @@ function staticServiceIneligibility(
   if (connection.allowedModelIds !== null && !connection.allowedModelIds.includes(modelId)) {
     reasons.push("model_not_allowed_by_connection");
   }
-  if (
-    assignments !== undefined &&
-    !assignments.some(
-      (policy) => policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId),
-    )
-  ) {
-    reasons.push("model_not_allowed_by_connection");
+  if (assignments !== undefined) {
+    const hasAllocatableAssignment = assignments.some((policy) => policy.allocatorEnabled);
+    const hasServingAssignment = assignments.some(
+      (policy) =>
+        policy.allocatorEnabled &&
+        (policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId)),
+    );
+    if (hasAllocatableAssignment && !hasServingAssignment) {
+      reasons.push("source_assignment_policy_mismatch");
+    }
   }
   return reasons;
 }

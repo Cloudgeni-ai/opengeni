@@ -70,7 +70,12 @@ export function effectiveSettings(
       : (override[key] as Readonly<Record<string, unknown>> | undefined);
     const value: Record<string, unknown> = { ...base };
     const sources: Record<string, SettingSource> = {};
-    for (const entryKey of Object.keys(base)) sources[entryKey] = "organization";
+    for (const [entryKey, entry] of Object.entries(base)) {
+      if (key === "providers") {
+        value[entryKey] = mergeProviderSwitches(undefined, entry as ProviderSwitches);
+      }
+      sources[entryKey] = "organization";
+    }
     for (const [entryKey, entry] of Object.entries(entries ?? {})) {
       if (entry === undefined) continue;
       // A provider's switches override field by field (D-25).
@@ -150,9 +155,18 @@ function mergeProviderSwitches(
   base: ProviderSwitches | undefined,
   override: Partial<ProviderSwitches>,
 ): ProviderSwitches & { inferenceSource: NonNullable<ProviderSwitches["inferenceSource"]> } {
-  const raw = { ...base, ...override };
-  const merged = { ...DEFAULT_PROVIDER_SWITCHES, ...raw };
-  return raw.inferenceSource === undefined
-    ? resolveProviderSwitches(merged)
-    : resolveProviderSwitches({ ...merged, inferenceSource: raw.inferenceSource });
+  const inherited = resolveProviderSwitches({ ...DEFAULT_PROVIDER_SWITCHES, ...base });
+  const inferenceSource =
+    override.inferenceSource ??
+    (override.useOrganizationAccounts === undefined
+      ? inherited.inferenceSource
+      : override.useOrganizationAccounts
+        ? "automatic"
+        : "workspace");
+  return {
+    ...inherited,
+    ...override,
+    inferenceSource,
+    useOrganizationAccounts: inferenceSource !== "workspace",
+  };
 }

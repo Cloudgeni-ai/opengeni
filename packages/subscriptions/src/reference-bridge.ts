@@ -150,7 +150,7 @@ export function toReferenceWorld(input: PlacementInput): {
     const managedHere = connection.ownership.managedByWorkspaceId === workspace.id;
     if (source === "workspace") return managedHere;
     if (source === "organization") return !managedHere;
-    return switches(connection.provider)?.useOrganizationAccounts !== false || managedHere;
+    return source === "automatic" || managedHere;
   });
   const providers = new Set([
     ...input.models.map((model) => model.provider),
