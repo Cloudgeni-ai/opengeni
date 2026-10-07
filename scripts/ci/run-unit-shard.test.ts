@@ -304,6 +304,11 @@ describe("unit process planning", () => {
   test("recognizes only shared-container cluster-role mutations", () => {
     expect(
       sourceMutatesSharedPostgresRole(
+        "const owner = await acquireOwnerMigratedTestDatabase('x'); await owner.release();",
+      ),
+    ).toBe(true);
+    expect(
+      sourceMutatesSharedPostgresRole(
         "await sql.unsafe(`alter role opengeni_app with password 'test'`);",
       ),
     ).toBe(true);
@@ -356,9 +361,20 @@ describe("unit process planning", () => {
       "packages/db/test/migration-0120-durable-goal-wake.test.ts",
       "packages/db/test/migration-0138-sandbox-checkpoints.test.ts",
       "packages/db/test/migration-0352-session-variable-set-attachments.test.ts",
+      "packages/db/test/migration-0305-personal-resource-grant-management.test.ts",
     ]) {
       expect(sourceMutatesSharedPostgresRole(readFileSync(join(root, path), "utf8"))).toBe(true);
     }
+  });
+
+  test("runs owner-migrated role fixtures after parallel migration readers", () => {
+    const root = join(import.meta.dir, "../..");
+    const owner = "packages/db/test/migration-0305-personal-resource-grant-management.test.ts";
+    const reader =
+      "packages/db/test/migration-0381-organization-codex-subscription-inheritance.test.ts";
+    const plan = planUnitTestProcesses(root, [], [owner, reader], 1);
+    expect(plan.parallel).toEqual([{ files: [reader], isolated: true }]);
+    expect(plan.clusterRoleSensitive).toEqual([{ files: [owner], isolated: true }]);
   });
 
   test("keeps explicit concurrency, wall clocks, shared PostgreSQL, and cluster roles out of the parallel pool", () => {
