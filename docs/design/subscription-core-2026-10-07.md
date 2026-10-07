@@ -211,16 +211,31 @@ request; it marks the lease for failover at the next model-call boundary.
 
 - Only personal authority is frozen, per provider, because it is a human's
   authority. A v1 `user` snapshot for one provider maps to exactly that
-  provider; the owner membership is derived from the initiating human at
-  cutover. Shared eligibility is never frozen.
+  provider; the owner membership is derived from the exact initiating human,
+  and its `authorityGeneration` is preserved from validated resource-authority
+  evidence (not replaced with the membership's current `authorization_revision`).
+  Shared eligibility is never frozen.
 - Agent messages and Steer take the receiving session's value; non-human
   acceptance (API keys, operators, Slack, service schedules) freezes no
   personal authority (SUB-ACCESS-01).
 - The inbox execution-context fence (0608) and scheduled admission (0275,
-  0478) compare `subscription_authority` instead of the per-provider columns.
-- At each provider cutover the migration backfills v2 on all live rows,
-  including scheduled tasks, inside the owner window, so no v1 reader
-  survives.
+  0478) compare Codex against its v2 entry while continuing to compare Claude
+  and xAI against their existing provider-specific v1 columns through M4/M6.
+  M3 must not replace those deferred-provider comparisons with v2, which does
+  not encode their legacy shared-pool scope or generation.
+- Provider cutovers are additive and provider-scoped. M3 writes only the
+  Codex entry in v2 on live accepted-work rows, including scheduled tasks,
+  while preserving all existing v1 columns byte-for-byte. Claude and xAI
+  continue using their current v1 readers until their own M4/M6 cutovers;
+  neither M3 nor its matched release may remove or bypass those readers. A
+  later provider cutover uses that provider's v1 snapshot as a compatibility
+  authority for already-accepted work when its v2 entry is absent, preserving
+  the exact legacy shared-pool scope as well as personal scope. It must not
+  rewrite an already-written v2 snapshot or reconstruct old authority from
+  current settings. Keep the provider's v1 reader until every live accepted
+  turn, scheduled execution and causal continuation that depends on it is
+  terminal or has an equivalent immutable, verified authority record; moving
+  new callers alone is not sufficient.
 
 ### 3.8 Authorization and row-level security
 
@@ -236,9 +251,18 @@ request; it marks the lease for failover at the next model-call boundary.
 - Binding, lease, waiter and failure rows reference the session and inherit
   `session_visibility_isolation`. Core operations run with the acting turn's
   initiating human (`withSubscriptionPoolSessionAccess`, SUB-ACCESS-02..04).
-  Turns with no initiating human run as `service:subscription-core` with the
-  session owner as initiating human only for that session, using the same
-  capability pattern; they never get personal authority.
+  A non-human turn in an owned session runs as `service:subscription-core`
+  with the verified session owner only for that exact session; it has no
+  personal authority unless the immutable accepted authority and live resource
+  fence both allow it. A genuinely ownerless session has no substitute human:
+  M3 adds a narrowly scoped ownerless-session capability keyed to the exact
+  account, workspace, session and turn, requiring `session.owner_subject_id`
+  and `turn.initiating_human_subject_id` to remain NULL and the service actor
+  to be `service:subscription-core`. It permits shared organization/workspace
+  connections only. It cannot read or bind a personal connection, use
+  person-scoped assignments, or acquire personal fallback; it is rechecked on
+  placement, renewal, dispatch and waiter recovery. The existing non-null-owner
+  capability remains unchanged for owned sessions.
 - Membership removal (0263) learns the `subscription_connection` resource
   kind and revokes personal connections on leave (SUB-ACCESS-06).
 
@@ -329,7 +353,7 @@ refresh tokens outside the core's per-connection lock.
 | EP-T01–T05: turn claim/model policy, chat placement, credential materialization, leases and dispatch fencing | Keep the worker/activity boundary and call the provider-neutral placement/materialization API with provider `codex`, accepted personal-authority v2, current session owner, workspace policy, and the current attempt fence. One lease and generation-fenced connection refresh lock apply to Codex exactly as to other providers. Remove the Codex-only `codex-rotation.ts` selection call. |
 | EP-T06–T08: failure settlement, finalization, usage and lease release | Convert Codex refusals to core failure receipts; let core eligibility/quarantine/failover/wait rules decide. Record usage/quota against the leased `connection_id`, release through the common lease API, and retain idempotent settlement fences. |
 | EP-T09–T10: capacity wait/recovery and wakes | Store waiters in `subscription_capacity_waiters` with turn/attempt, lease generation, `wake_revision`, and reset metadata. Reconcile and signal via provider-neutral repository/outbox APIs. Preserve existing Codex outbox delivery guarantees and keep retry/peek bounded. |
-| EP-T11–T15, EP-T18: accepted authority, goals, child agents, inbox updates, schedules, model listing | All accepted-work writers/readers use immutable v2 `subscription_authority`; only personal authority is captured, shared eligibility stays live. Codex model readiness/listing calls the same core eligibility projection with explicit account context; it must not reintroduce a Codex live selector. |
+| EP-T11–T15, EP-T18: accepted authority, goals, child agents, inbox updates, schedules, model listing | Codex core reads only its immutable v2 authority entry; the migration preserves Claude/xAI v1 snapshots and their current readers until M4/M6. Only personal authority is captured, shared eligibility stays live. Codex model readiness/listing calls the same core eligibility projection with explicit account context; it must not reintroduce a Codex live selector. |
 | EP-T16 and EP-S18–S25: compaction, admission and availability | `portable` compaction uses ordinary candidate-provider eligibility and may fail over as core policy permits. Existing `remote_v2` sessions keep remote Codex compaction and their current model lock until a successful Codex compaction converts the session to portable; the lock is represented as a candidate-model/provider restriction, not a separate Codex placement branch. Compaction uses the same lease, accepted authority, wait/recovery and history-sanitization boundaries as a chat turn. New-session default behavior is unchanged in M3. |
 | EP-T17, EP-N08–N10: image generation and operation ledger | Place each Codex image operation through the core under the turn's accepted authority, with a per-operation lease and turn/call idempotency key. Resume/reconcile the existing operation ledger without reissuing an uncertain upstream write. Media placement never mutates the chat binding. |
 | EP-N01–N04: transcription service, Codex transcription and HTTP/resumable recording routes | Keep provider ordering and recording segment ledger semantics. Provider ordering selects the initial provider only; once a subscription provider operation is selected/attempted, a refusal or transport failure does not retry the same audio through another provider in M3, per D-09 and §6.5. The Codex adapter receives explicit request owner/workspace context and obtains an operation lease through core eligibility; remove active-pointer-only token loading. Subscription transcription remains non-chargeable. |
@@ -417,7 +441,8 @@ writers concurrently.
    metadata only. Map scope and workspace assignments per §5.2: workspace rows
    become workspace-scoped shared connections; Personal-workspace rows become
    the owner's personal connection and set that owner's personal-fallback
-   preference; organization rows with a NULL allowlist become organization
+   preference and the effective workspace `personal_fallback_allowed = true`
+   setting per §5.2; organization rows with a NULL allowlist become organization
    scope; non-NULL lists become the identical workspace set plus the existing
    Personal-workspace bit. `organization` mode disables local Codex inference
    through the setting but does not erase workspace scope or non-inference
@@ -458,12 +483,20 @@ writers concurrently.
    backfill; an activity whose history already contains the legacy waiter id
    must reconcile against the same id after activation.
    Collapse stale duplicate per-pool waiters deterministically and retain a
-   bounded disposition diagnostic. Backfill v2 accepted authority on all live
-   sessions, turns, scheduled-task authorities, system updates and outbox
-   rows. Legacy user scope maps only to that provider and the initiating
-   human's active organization-membership generation; unresolved/ambiguous
-   ownership aborts activation. Non-human acceptance gains no personal
-   authority. Preserve any durable Codex source/credential-policy snapshot as
+   bounded disposition diagnostic. Add the Codex entry to v2 accepted
+   authority on live sessions, turns, scheduled-task authorities, system
+   updates and outbox rows without changing deferred-provider v1 snapshots or
+   existing v2 entries. For a legacy Codex `user` snapshot, derive the owner
+   only from the exact owner-caused acceptance; preserve its frozen
+   `authorityGeneration` only when the source resource authority is verified
+   and still active, and transfer that generation to the canonical connection
+   and its resource-authority row. Never substitute the current membership
+   `authorization_revision` or mint new personal authority from current
+   membership alone. If the source authority is revoked, stale, or cannot be
+   tied unambiguously to the canonical owner/resource, backfill no personal
+   authority for that accepted work; it may proceed only on currently eligible
+   shared capacity. Ambiguous ownership aborts activation. Non-human acceptance
+   gains no personal authority. Preserve any durable Codex source/credential-policy snapshot as
    secret-safe legacy decision provenance for recovery/audit and use it only to
    initialize the migrated binding or identify a pre-cutover in-flight lease.
    The snapshot is not new authority: `explicit_choice` exists only on the
@@ -652,16 +685,16 @@ protected merge. Rerun only failed jobs for verified transient failures.
 | Legacy | New |
 | --- | --- |
 | Workspace-scoped credential in a shared workspace | Shared connection scoped to that workspace, managed by it. |
-| Workspace-scoped credential in a Personal workspace | Personal connection owned by that workspace's owner. To keep their Personal-workspace sessions working, the owner's `personal_fallback_opt_in` is set (D-18). |
+| Workspace-scoped credential in a Personal workspace | Personal connection owned by that workspace's owner. Set the owner's `personal_fallback_opt_in` and the effective workspace `personal_fallback_allowed` override (D-18); otherwise opt-in alone cannot reach the fallback candidate. An explicit organization lock of `false` remains authoritative and is recorded as a non-parity disposition, never overridden. |
 | Organization credential with `allowed_workspace_ids` / `allow_personal_workspaces` | Shared connection: `organization` scope when the list is NULL, otherwise `workspaces` scope with the same list. |
-| User-scoped credential (xAI, Claude) | Personal connection for the same membership, no longer bound to one workspace. |
+| User-scoped credential (xAI, Claude) | Remains on its existing provider-specific v1 path through M3; M4/M6 map it to a personal connection for the same membership and add that provider's v2 authority entry. |
 | Codex `automatic` | No override. Where the workspace has local accounts, the workspace's Codex rotation becomes `primary_first` with its active local account as primary, or `spread` if its rotation was on, so local accounts keep taking new work. |
 | Codex `workspace` | Workspace override `inference_source = workspace` and compatibility projection `use_organization_accounts = false` for Codex. |
 | Codex `organization` | Workspace override `inference_source = organization` and compatibility projection `use_organization_accounts = true`. The workspace's local Codex connections are excluded from inference by the source filter, but retain their workspace scope for independent consumers such as an existing Codex Apps designation and can be selected again if the source changes. Only organization-classified accounts serve inference, as today. |
 | Codex `disabled` | Workspace override `enabled = false` for Codex; the legacy source endpoint continues to project `disabled`. |
 | Rotation rows | Only the rows for the pool currently in effect are mapped (organization row to organization settings, workspace rows to workspace overrides). Rotation off maps to `primary_first` (D-13). Personal-pool rotation rows have no equivalent and are dropped (documented). |
 | Codex session pin/last columns; xAI/Claude pin rows | One chat binding per session: a manual pin becomes `explicit`; otherwise the most recent pin or last account becomes `automatic` with `last_model_call_at` from the latest model call. Several per-pool rows collapse to the one for the session's current model provider. |
-| Leases, waiters | Moved with generation and wake revision; several per-pool waiters on one session collapse to the waiting one for the blocked turn. |
+| Leases, waiters | Moved with generation and wake revision; several per-pool waiters on one session collapse to the waiting one for the blocked turn. Ownerless-session waits carry the exact session capability and remain shared-only during recovery. |
 | Codex Apps designation | `subscription_apps_designations (workspace_id, connection_id, version)`; any in-scope connection may be designated (§6.3). |
 
 When duplicate workspace copies of one upstream account collapse to one
@@ -750,6 +783,14 @@ fail over across providers in the first release.
   secret-safe provenance, manual explicit choice is represented only by the
   binding, and live shared eligibility/source/pin changes govern the next
   placement and dispatch after cutover.
+- Compatibility tests prove M3 adds Codex v2 authority without changing xAI or
+  Claude v1 snapshot bytes or breaking their existing accepted-authority
+  readers or 0608/0275/0478 admission-fence comparisons. Ownerless service
+  sessions can use shared connections but cannot observe or acquire personal
+  connections. Personal-workspace fallback needs both the migrated owner
+  opt-in and effective setting, with organization locks preserved.
+  Resource-generation transfer preserves valid queued authority while a
+  revoked/stale resource never regains personal access.
 - The contract's mutation gate.
 
 ## 8. Risks
