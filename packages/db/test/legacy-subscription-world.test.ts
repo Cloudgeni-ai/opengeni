@@ -288,6 +288,31 @@ describe("legacy subscription world", () => {
       });
       // Read only: nothing changed.
       expect(await credentialRows()).toEqual(before);
+
+      // The session state the legacy selector decided from wins over what it
+      // has written since (here the manual pin), so would-switch compares
+      // against the pre-selection binding.
+      const decidedFrom = await asTurn(setup.owner, () =>
+        loadLegacySubscriptionPlacementWorld(
+          client!.db,
+          request(
+            { accountId: setup.accountId, workspaceId, sessionId, turnId },
+            {
+              legacySession: {
+                pinnedConnectionId: null,
+                pinSource: null,
+                lastConnectionId: relogin,
+              },
+            },
+          ),
+        ),
+      );
+      if (decidedFrom.status !== "loaded") throw new Error("expected a loaded world");
+      expect(decidedFrom.legacy).toMatchObject({ pin: null, lastConnectionId: relogin });
+      expect(decidedFrom.input.session.binding).toMatchObject({
+        connectionId: relogin,
+        choice: "automatic",
+      });
     },
   );
 

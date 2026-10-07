@@ -122,12 +122,19 @@ async function selectScopedSubscriptionTurnCapacity(
     // here.
     void startSubscriptionCoreShadow({
       enabled: deps.settings.subscriptionCoreShadowEnabled,
+      provider,
       timeoutMs: deps.settings.subscriptionCoreShadowTimeoutMs,
       db,
       observability: deps.observability,
       signal: deps.cancellationSignal,
+      // The pin and last account read before the lease, not the policy pin
+      // and last account written after it.
       request: () =>
-        subscriptionCoreShadowRequest(deps, provider, turn.id, authoritySnapshot.scope),
+        subscriptionCoreShadowRequest(deps, provider, turn.id, authoritySnapshot.scope, {
+          pinnedConnectionId: sessionPin?.pinnedCredentialId ?? null,
+          pinSource: sessionPin?.pinSource ?? null,
+          lastConnectionId: sessionPin?.lastCredentialId ?? null,
+        }),
       legacy: { selectedConnectionId: providerTurn[credentialKey], reusedLease: leased.reused },
     });
     if (!providerTurn[credentialKey]) {

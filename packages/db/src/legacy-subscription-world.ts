@@ -86,6 +86,20 @@ export type LegacyPlacementWorldRequest = {
   /** Aborting stops the read before its next statement. */
   signal?: AbortSignal;
   claudeCacheTtlMs?: number;
+  /**
+   * The session's pin and last account exactly as the legacy selector read
+   * them before its own writes (it records the selected account and policy
+   * pins before the shadow runs). When given, these are used instead of
+   * re-reading the session, so would-switch compares against the state the
+   * legacy decision was made from.
+   */
+  legacySession?: LegacySessionState;
+};
+
+export type LegacySessionState = {
+  pinnedConnectionId: string | null;
+  pinSource: string | null;
+  lastConnectionId: string | null;
 };
 
 /** The caller's deadline passed before the read began. */
@@ -520,8 +534,13 @@ export async function loadLegacySubscriptionPlacementWorld(
         } else if (mode === "disabled") {
           providerSwitches = { codex: { useOrganizationAccounts: true, enabled: false } };
         }
-        pin = pinOf(session.codex_pinned_credential_id, session.codex_pin_source);
-        lastConnectionId = session.codex_last_credential_id;
+        const codexSession = request.legacySession ?? {
+          pinnedConnectionId: session.codex_pinned_credential_id,
+          pinSource: session.codex_pin_source,
+          lastConnectionId: session.codex_last_credential_id,
+        };
+        pin = pinOf(codexSession.pinnedConnectionId, codexSession.pinSource);
+        lastConnectionId = codexSession.lastConnectionId;
       } else {
         const tables = POOL_TABLES[provider];
         const scope = request.authorityScope ?? "workspace";
@@ -665,17 +684,25 @@ export async function loadLegacySubscriptionPlacementWorld(
               : organizationRotation
             : rotationRow,
         );
-        const [pinRow] = await read<PinRow>(sql`
-          select pinned_credential_id, pin_source, last_credential_id
-          from ${tables.pins}
-          where workspace_id = ${request.workspaceId}::uuid
-            and session_id = ${request.sessionId}::uuid
-            and authority_scope = ${scope}
-          order by updated_at desc
-          limit 1
-        `);
-        pin = pinOf(pinRow?.pinned_credential_id ?? null, pinRow?.pin_source ?? null);
-        lastConnectionId = pinRow?.last_credential_id ?? null;
+        let poolSession = request.legacySession;
+        if (!poolSession) {
+          const [pinRow] = await read<PinRow>(sql`
+            select pinned_credential_id, pin_source, last_credential_id
+            from ${tables.pins}
+            where workspace_id = ${request.workspaceId}::uuid
+              and session_id = ${request.sessionId}::uuid
+              and authority_scope = ${scope}
+            order by updated_at desc
+            limit 1
+          `);
+          poolSession = {
+            pinnedConnectionId: pinRow?.pinned_credential_id ?? null,
+            pinSource: pinRow?.pin_source ?? null,
+            lastConnectionId: pinRow?.last_credential_id ?? null,
+          };
+        }
+        pin = pinOf(poolSession.pinnedConnectionId, poolSession.pinSource);
+        lastConnectionId = poolSession.lastConnectionId;
       }
 
       // Frozen personal authority (design 3.7): a user-scope snapshot for this

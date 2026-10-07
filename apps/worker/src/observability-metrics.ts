@@ -1707,6 +1707,18 @@ export function recordSubscriptionCoreShadow(
   }
 }
 
+/** A shadow load that outlived its slot ceiling; its slot was given back. */
+export function recordSubscriptionCoreShadowStuckLoad(
+  observability: Pick<Observability, "incrementCounter">,
+  provider: SubscriptionCoreShadowProvider,
+): void {
+  observability.incrementCounter({
+    name: "opengeni_subscription_core_shadow_stuck_loads_total",
+    help: "Shadow world loads still unsettled at the slot ceiling; the slot was released.",
+    labels: { provider },
+  });
+}
+
 export function recordSandboxCommandContainment(
   observability: Observability,
   outcome: SandboxCommandContainmentOutcome,

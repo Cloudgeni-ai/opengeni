@@ -28,6 +28,7 @@ import {
   type LegacyPlacementInputs,
   type LegacyPlacementWorldRequest,
   type LegacyPlacementWorldResult,
+  type LegacySessionState,
 } from "@opengeni/db";
 import { createLogThrottle, type LogThrottle, type Observability } from "@opengeni/observability";
 import {
@@ -41,6 +42,7 @@ import {
 import { checkPlacementDecision } from "@opengeni/subscriptions/reference";
 import {
   recordSubscriptionCoreShadow,
+  recordSubscriptionCoreShadowStuckLoad,
   type SubscriptionCoreShadowInput,
   type SubscriptionCoreShadowObservation,
   type SubscriptionCoreShadowParity,
@@ -229,6 +231,7 @@ export function subscriptionCoreShadowRequest(
   provider: LegacyPlacementWorldRequest["provider"],
   turnId: string,
   authorityScope: LegacyPlacementWorldRequest["authorityScope"],
+  legacySession: LegacySessionState,
 ): SubscriptionCoreShadowRequest {
   const policy = deps.turnExecutionPolicy;
   return {
@@ -243,6 +246,7 @@ export function subscriptionCoreShadowRequest(
     // The same provider identity the authoritative workspace model gate uses.
     modelPolicyProviderId: policy.providerId,
     authorityScope,
+    legacySession,
   };
 }
 
@@ -251,6 +255,8 @@ export const SUBSCRIPTION_CORE_SHADOW_LOG_INTERVAL_MS = 10 * 60_000;
 export const SUBSCRIPTION_CORE_SHADOW_MAX_LOGS_PER_MINUTE = 30;
 /** Shadow comparisons running at once per process; more are skipped as `busy`. */
 export const SUBSCRIPTION_CORE_SHADOW_MAX_IN_FLIGHT = 2;
+/** A load still unsettled after this many timeouts gives its slot back. */
+export const SUBSCRIPTION_CORE_SHADOW_SLOT_CEILING_FACTOR = 10;
 const defaultLogThrottle = createLogThrottle({
   intervalMs: SUBSCRIPTION_CORE_SHADOW_LOG_INTERVAL_MS,
   maxKeys: 1_024,
@@ -283,6 +289,8 @@ export function subscriptionCoreShadowInFlight(): number {
 
 export type SubscriptionCoreShadowDeps = {
   enabled: boolean;
+  /** Fixed metric label, given outside the request so a failing builder is still attributed. */
+  provider: SubscriptionCoreShadowProvider;
   timeoutMs: number;
   db: Database;
   observability: Pick<Observability, "incrementCounter" | "observeHistogram" | "info">;
@@ -336,7 +344,7 @@ export async function runSubscriptionCoreShadow(
   deps: SubscriptionCoreShadowDeps,
 ): Promise<SubscriptionCoreShadowResult> {
   if (!deps.enabled) return { outcome: "disabled" };
-  let provider: SubscriptionCoreShadowProvider = "codex";
+  const provider = deps.provider;
   const startedAt = performance.now();
   const finish = (
     observation: SubscriptionCoreShadowObservation,
@@ -375,8 +383,7 @@ export async function runSubscriptionCoreShadow(
   // Stops the load before its next statement once the shadow stops waiting.
   const stop = new AbortController();
   try {
-    const request = deps.request();
-    provider = request.provider as SubscriptionCoreShadowProvider;
+    const request = { ...deps.request(), provider };
     if (deps.signal?.aborted) return skip("cancelled");
     if (inFlight >= maxInFlight) return skip("busy");
     inFlight += 1;
@@ -397,7 +404,6 @@ export async function runSubscriptionCoreShadow(
       };
       deps.signal?.addEventListener("abort", onAbort, { once: true });
     });
-    loadStarted = true;
     const loading = load(deps.db, {
       ...request,
       now,
@@ -406,8 +412,25 @@ export async function runSubscriptionCoreShadow(
       signal: stop.signal,
     });
     // An abandoned load still settles (its statement timeout and deadline
-    // bound it); its late failure must never surface.
-    loading.then(release, release);
+    // bound it); its late failure must never surface. A load that never
+    // settles (for example a socket hung by a partition) gives its slot back
+    // after a hard ceiling, so it cannot disable the shadow for good.
+    loadStarted = true;
+    const ceiling = setTimeout(() => {
+      if (released) return;
+      release();
+      try {
+        recordSubscriptionCoreShadowStuckLoad(deps.observability, provider);
+      } catch {
+        // Best effort.
+      }
+    }, timeoutMs * SUBSCRIPTION_CORE_SHADOW_SLOT_CEILING_FACTOR);
+    (ceiling as { unref?: () => void }).unref?.();
+    const settle = () => {
+      clearTimeout(ceiling);
+      release();
+    };
+    loading.then(settle, settle);
     const loaded = await Promise.race([loading, deadline, cancelled]);
     if (loaded === TIMED_OUT) return skip("timeout");
     if (loaded === CANCELLED) return skip("cancelled");

@@ -137,6 +137,7 @@ function deps(
   const recorder = observability();
   const value: SubscriptionCoreShadowDeps = {
     enabled: true,
+    provider: "codex",
     timeoutMs: 200,
     db: {} as Database,
     observability: recorder,
@@ -151,6 +152,7 @@ function deps(
       reasoningLevel: "high",
       modelPolicyProviderId: "codex-subscription",
       authorityScope: null,
+      legacySession: { pinnedConnectionId: null, pinSource: null, lastConnectionId: null },
     }),
     legacy: { selectedConnectionId: LOCAL_A, reusedLease: false },
     now: () => new Date(NOW),
@@ -163,6 +165,14 @@ function deps(
   };
   return { deps: value, recorder };
 }
+
+/** A slow load that, like the real one, settles once the shadow aborts it. */
+const hangUntilAborted = (request: unknown) =>
+  new Promise<LegacyPlacementWorldResult>((_resolve, reject) => {
+    (request as { signal: AbortSignal }).signal.addEventListener("abort", () =>
+      reject(new Error("aborted")),
+    );
+  });
 
 const counter = (recorded: Recorded, name: string) =>
   recorded.counters.filter((entry) => entry.name === name);
@@ -292,7 +302,7 @@ describe("subscription core shadow", () => {
   });
 
   test("SUB-COMPAT-03: a slow world load is abandoned at the deadline and placement continues", async () => {
-    const { deps: input, recorder } = deps(() => new Promise(() => undefined), { timeoutMs: 20 });
+    const { deps: input, recorder } = deps(hangUntilAborted, { timeoutMs: 20 });
     const startedAt = performance.now();
     expect(await runSubscriptionCoreShadow(input)).toEqual({
       outcome: "skipped",
@@ -321,7 +331,7 @@ describe("subscription core shadow", () => {
       });
     }
     const controller = new AbortController();
-    const pending = deps(() => new Promise(() => undefined), {
+    const pending = deps(hangUntilAborted, {
       signal: controller.signal,
       timeoutMs: 5_000,
     });
@@ -350,7 +360,7 @@ describe("subscription core shadow", () => {
     const { deps: input } = deps(
       (request) => {
         seen = request as typeof seen;
-        return new Promise(() => undefined);
+        return hangUntilAborted(request);
       },
       { timeoutMs: 20 },
     );
@@ -431,8 +441,9 @@ describe("subscription core shadow", () => {
     expect(releases).toHaveLength(2);
   });
 
-  test("SUB-COMPAT-03: a request that cannot be built is counted, not thrown", async () => {
+  test("SUB-COMPAT-03: a request that cannot be built is counted under its own provider, not thrown", async () => {
     const { deps: input, recorder } = deps(async () => ({ status: "loaded", ...world() }), {
+      provider: "xai",
       request: () => {
         throw new Error("missing execution policy");
       },
@@ -441,7 +452,44 @@ describe("subscription core shadow", () => {
       outcome: "skipped",
       reason: "error",
     });
-    expect(counter(recorder, "opengeni_subscription_core_shadow_skips_total")).toHaveLength(1);
+    expect(counter(recorder, "opengeni_subscription_core_shadow_skips_total")).toEqual([
+      {
+        name: "opengeni_subscription_core_shadow_skips_total",
+        labels: { provider: "xai", reason: "error" },
+      },
+    ]);
+  });
+
+  test("SUB-COMPAT-03: a load that throws synchronously gives its slot back", async () => {
+    const before = subscriptionCoreShadowInFlight();
+    const { deps: input } = deps(async () => ({ status: "loaded", ...world() }), {
+      load: () => {
+        throw new Error("sync");
+      },
+    });
+    expect(await startSubscriptionCoreShadow(input)).toEqual({
+      outcome: "skipped",
+      reason: "error",
+    });
+    expect(subscriptionCoreShadowInFlight()).toBe(before);
+  });
+
+  test("SUB-COMPAT-03: a load that never settles gives its slot back at the ceiling and is counted", async () => {
+    const before = subscriptionCoreShadowInFlight();
+    const { deps: input, recorder } = deps(() => new Promise(() => undefined), { timeoutMs: 2 });
+    expect(await startSubscriptionCoreShadow(input)).toEqual({
+      outcome: "skipped",
+      reason: "timeout",
+    });
+    expect(subscriptionCoreShadowInFlight()).toBe(before + 1);
+    await Bun.sleep(60);
+    expect(subscriptionCoreShadowInFlight()).toBe(before);
+    expect(counter(recorder, "opengeni_subscription_core_shadow_stuck_loads_total")).toEqual([
+      {
+        name: "opengeni_subscription_core_shadow_stuck_loads_total",
+        labels: { provider: "codex" },
+      },
+    ]);
   });
 
   test("debug events are capped per process across all throttle keys", async () => {

@@ -587,11 +587,19 @@ export async function selectCodexTurnCapacity(
       // failover decided above.
       void startSubscriptionCoreShadow({
         enabled: settings.subscriptionCoreShadowEnabled,
+        provider: "codex",
         timeoutMs: settings.subscriptionCoreShadowTimeoutMs,
         db,
         observability,
         signal: deps.cancellationSignal,
-        request: () => subscriptionCoreShadowRequest(deps, "codex", turnId, null),
+        // The session state the legacy selection was made from, not the
+        // pin and last account it has written since.
+        request: () =>
+          subscriptionCoreShadowRequest(deps, "codex", turnId, null, {
+            pinnedConnectionId: lockedSessionCodexState.pinnedCredentialId,
+            pinSource: lockedSessionCodexState.pinSource,
+            lastConnectionId: lockedSessionCodexState.lastCredentialId,
+          }),
         legacy: {
           selectedConnectionId: providerTurn.effectiveCodexCredentialId,
           reusedLease: leased.reused,
