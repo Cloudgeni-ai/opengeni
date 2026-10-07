@@ -179,6 +179,12 @@ Docker/local SDK processes expose bounded-wait, turn-scoped handles, stay
 cancellation-fenced and stop before finalization; agents can test preview
 servers without awaiting exit.
 
+Internal filesystem completion is owned by
+`packages/runtime/src/sandbox/synchronous-command.ts`: one invocation,
+complete paged output and provider terminal/EOF proof. Channel A and routing
+keep this separate from interactive/background shell execution; the worker
+reuses its turn cancellation registration for Skill filesystem commands.
+
 `wait_for_input` retains its turn/deadline until input/timeout; acknowledgment
 cannot strand eligible input/due waits. `Session.inputWait` drives working/recheck
 UI, not unread. `session_wait`/`command_wait` read in-turn; child results carry

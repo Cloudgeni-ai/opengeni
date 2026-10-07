@@ -746,6 +746,14 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       const runAs = sandboxRunAs(runSettings);
       const channel = new SandboxChannelAService({
         session: access.session,
+        commandRunner: async (commandSession, args) => {
+          const fence = eventing.toolCancellationFenceRef.current;
+          if (!fence)
+            throw new Error(
+              "Skill filesystem execution requires the active turn cancellation controller.",
+            );
+          return await fence.runSandboxCommandSynchronous(commandSession, args);
+        },
         workspaceRoot: machineRoot ?? "/workspace",
         ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
         leaseEpoch: access.leaseEpoch,

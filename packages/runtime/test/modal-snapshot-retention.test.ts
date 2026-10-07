@@ -20,6 +20,7 @@ import { SandboxChannelAService } from "../src/sandbox/channel-a";
 import { ModalProcessObservationUnavailableError } from "../src/sandbox/errors";
 import { ModalCommandStartPreDispatchUnavailableError } from "../src/sandbox/providers/modal-command-router-wire";
 import { RoutingMutationOutcomeUnknownError } from "../src/sandbox/routing/routing-session";
+import { executeSynchronousCommand } from "../src/sandbox/synchronous-command";
 
 type Persistence = "tar" | "snapshot_filesystem" | "snapshot_directory";
 const SNAPSHOT_REQUEST_ID = "11111111-1111-4111-8111-111111111111";
@@ -450,6 +451,50 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     installOpenGeniModalSnapshotPolicy(session);
 
     expect(session.listDir).toBe(listDir);
+  });
+
+  test("compatibility listing observes delayed commands through the original bound stdin and injected runner", async () => {
+    const root = await mkdtemp(join(tmpdir(), "opengeni-modal-list-pages-"));
+    try {
+      const { session } = fakeModalFilesystemSession(root);
+      const originalExec = session.execCommand.bind(session);
+      let starts = 0;
+      let reads = 0;
+      let runners = 0;
+      let terminal = "";
+      session.execCommand = async (args) => {
+        terminal = await originalExec(args);
+        starts++;
+        return "Process running with session ID 900\n\nOutput:\n";
+      };
+      const withStdin = Object.assign(session, {
+        writeStdin: async ({ sessionId, chars }: { sessionId: number; chars?: string }) => {
+          expect(sessionId).toBe(900);
+          expect(chars).toBe("");
+          reads++;
+          return terminal;
+        },
+      });
+      installOpenGeniModalSnapshotPolicy(withStdin);
+      // Later command decoration must not replace the captured matching pair.
+      withStdin.writeStdin = async () => {
+        throw new Error("decorated stdin must not observe SDK setup aliases");
+      };
+      await mkdir(join(root, "skills"));
+      const listDir = (withStdin as unknown as import("../src/sandbox/channel-a").ChannelASession)
+        .listDir!;
+      await expect(
+        listDir({ path: join(root, "skills") }, async (original, args) => {
+          runners++;
+          return await executeSynchronousCommand(original, args);
+        }),
+      ).resolves.toEqual([]);
+      expect(starts).toBeGreaterThanOrEqual(1);
+      expect(reads).toBe(starts);
+      expect(runners).toBe(starts);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test("turns Modal's exact completed-exec stdin race into an ordinary terminal poll", async () => {

@@ -4,7 +4,6 @@ import {
   type ModalSandboxSession,
   type ModalSandboxSessionState,
 } from "@openai/agents-extensions/sandbox/modal";
-import type { SandboxDirectoryEntry } from "@openai/agents/sandbox";
 import { effectiveModalIdleTimeoutSeconds } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
 import {
@@ -152,7 +151,7 @@ type MutableModalSandboxSession = {
   execCommand?: ChannelASession["execCommand"];
   cancelPendingExecCommand?: () => Promise<void>;
   readFile?: ChannelASession["readFile"];
-  listDir?: (args: { path: string; runAs?: string }) => Promise<SandboxDirectoryEntry[]>;
+  listDir?: ChannelASession["listDir"];
   persistWorkspace?: (options?: ModalWorkspaceCaptureOptions) => Promise<Uint8Array>;
   writeStdin?: (args: {
     sessionId: number;
@@ -199,19 +198,27 @@ function modalWorkspaceAbsolutePath(path: string, workspaceRoot: string): string
 function installModalListDirCompatibility(session: MutableModalSandboxSession): void {
   if (typeof session.listDir === "function") return;
   const execCommand = session.execCommand;
+  const writeStdin = session.writeStdin?.bind(session);
   if (typeof execCommand !== "function" || typeof session.readFile !== "function") return;
   const workspaceRoot = session.state?.manifest?.root;
   if (!workspaceRoot) {
     throw new Error("Modal listDir compatibility requires a manifest workspace root");
   }
-  session.listDir = async (args) => {
+  session.listDir = async (args, commandRunner) => {
     const absoluteResultPaths = args.path.startsWith("/");
     const relativePath = modalWorkspaceRelativePath(args.path, workspaceRoot);
     // This function is the provider's listDir compatibility surface. Do not
     // pass it back into Channel A as a native accelerator or fsList() recurses
     // into this shim instead of using Modal's command data plane.
     const service = new SandboxChannelAService({
-      session: { execCommand: execCommand.bind(session) },
+      session: {
+        execCommand: execCommand.bind(session),
+        ...(writeStdin ? { writeStdin } : {}),
+        ...(session.cancelPendingExecCommand
+          ? { cancelPendingExecCommand: session.cancelPendingExecCommand.bind(session) }
+          : {}),
+      },
+      ...(commandRunner ? { commandRunner } : {}),
       workspaceRoot,
       ...(args.runAs ? { runAs: args.runAs } : {}),
     });

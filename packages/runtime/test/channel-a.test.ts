@@ -748,7 +748,7 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     expect(command).toContain("__OPENGENI_FS_LIST_TRUNCATED__");
   });
 
-  test("fsListPruned fails closed when the provider command is still running", async () => {
+  test("fsListPruned reports pending when a running provider command cannot be observed", async () => {
     const svc = new SandboxChannelAService({
       session: {
         exec: async () => ({
@@ -764,7 +764,7 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
       svc.fsListPruned({ path: "", depth: 8, maxEntries: 10, includeHidden: true }, [
         "node_modules",
       ]),
-    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+    ).rejects.toMatchObject({ code: "synchronous_command_outcome_unknown", sessionId: 17 });
   });
 
   test("fsList retries one completed transient probe and uses a profile-free control shell", async () => {
