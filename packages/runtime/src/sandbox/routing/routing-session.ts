@@ -38,6 +38,8 @@ import {
 import { isDeepStrictEqual } from "node:util";
 import {
   withProviderCommandHandle,
+  admittedProviderCommandHandle,
+  withoutProviderCommandHandle,
   withCommandSupervisionReady,
   withSupervisedLaunchReservation,
   ProviderCommandStartRejectedError,
@@ -77,7 +79,14 @@ import type {
   ChannelARoutedWorkspaceImportRequest,
   ChannelASession,
   WorkspaceFileImportReceipt,
+  SynchronousCommandRunner,
 } from "../channel-a";
+import {
+  executeSynchronousCommand,
+  SynchronousCommandOutcomeUnknownError,
+  type SynchronousCommandResult,
+} from "../synchronous-command";
+import { observeSynchronousCommand, synchronousCommandPage } from "../synchronous-command";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../exec-banner";
 import { withSandboxProviderOperation } from "../provider-operation-gate";
 import { hasModalCommandStartOutcomeUnknownBoundary } from "../providers/modal-command-start-errors";
@@ -119,7 +128,7 @@ export interface RoutableBackendSession extends ProviderCommandSession {
   writePlacementPrivate?(args: unknown): Promise<unknown>;
   deletePlacementPrivate?(path: string, runAs?: string): Promise<void>;
   createEditor?(runAs?: string): unknown;
-  listDir?(args: unknown): Promise<unknown>;
+  listDir?(args: unknown, runner?: SynchronousCommandRunner): Promise<unknown>;
   pathExists?(path: string, runAs?: string): Promise<boolean>;
   viewImage?(args: unknown): Promise<unknown>;
   materializeEntry?(args: unknown): Promise<void>;
@@ -1463,9 +1472,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     return result;
   }
 
-  private async dispatchProcessControl(args: unknown, modelVisible = false): Promise<string> {
+  private async dispatchProcessControl(
+    args: unknown,
+    modelVisible = false,
+    onPage?: (session: RoutableBackendSession, result: string) => void,
+  ): Promise<string> {
     return await this.runRetainedProcessOperation(args, modelVisible, () =>
-      this.dispatchProcessControlOnce(args, modelVisible),
+      this.dispatchProcessControlOnce(args, modelVisible, onPage),
     );
   }
 
@@ -1500,7 +1513,11 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     }
   }
 
-  private async dispatchProcessControlOnce(args: unknown, modelVisible: boolean): Promise<string> {
+  private async dispatchProcessControlOnce(
+    args: unknown,
+    modelVisible: boolean,
+    onPage?: (session: RoutableBackendSession, result: string) => void,
+  ): Promise<string> {
     const providerSessionId = providerSessionIdFromArgs(args);
     if (providerSessionId === null) throw new RoutingRetainedProcessNotFoundError(-1);
     const record = this.retainedProcess(providerSessionId);
@@ -1540,6 +1557,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const result = await this.invokeProviderOperation("writeStdin", record.backend, () =>
       write.call(record.backend.session, args),
     );
+    onPage?.(record.backend.session, result);
     const proof = retainedProcessTerminalProof(result, providerSessionId, record?.backend.session);
     if (proof) record.pendingTerminal ??= { proof, result };
     await this.captureRetainedOutput(record, result);
@@ -1669,6 +1687,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     fn: (session: RoutableBackendSession, backend: ResolvedActiveBackend) => Promise<T>,
     supervisionEligible = false,
     onMutationAdmissionRefused?: (error: unknown) => void,
+    pinnedBackend?: ResolvedActiveBackend,
   ): Promise<T> {
     const firstOperationObserver = this.deps.onFirstOperation;
     if (this.firstOperationClaimed || !firstOperationObserver) {
@@ -1679,6 +1698,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         undefined,
         supervisionEligible,
         onMutationAdmissionRefused,
+        pinnedBackend,
       );
     }
     this.firstOperationClaimed = true;
@@ -1693,6 +1713,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         timing,
         supervisionEligible,
         onMutationAdmissionRefused,
+        pinnedBackend,
       );
       outcome = "completed";
       return result;
@@ -1742,6 +1763,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     firstOperationTiming?: RoutingSandboxFirstOperationTiming,
     supervisionEligible = false,
     onMutationAdmissionRefused?: (error: unknown) => void,
+    pinnedBackend?: ResolvedActiveBackend,
   ): Promise<T> {
     let attempt = 0;
     let lastError: unknown;
@@ -1751,7 +1773,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       let resolutionOutcome: RoutingSandboxPhaseOutcome = "failed";
       let backend: ResolvedActiveBackend;
       try {
-        backend = await this.resolve();
+        backend = pinnedBackend ?? (await this.resolve());
         resolutionOutcome = "completed";
       } finally {
         recordFirstOperationPhase(
@@ -1915,6 +1937,33 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           );
         }
       } catch (error) {
+        // Composite imports retain each physical shell under a fresh child
+        // admission. Their enclosing callback has stopped, but that child is
+        // still the writer. Close only the enclosing fence, never its process.
+        const child =
+          op !== "exec" && op !== "execCommand"
+            ? error instanceof RoutingMutationOutcomeUnknownError
+              ? error.retainedProcess
+              : error instanceof SynchronousCommandOutcomeUnknownError && error.sessionId !== null
+                ? this.retainedProcesses.get(error.sessionId)?.process
+                : undefined
+            : undefined;
+        if (mutatesWorkspace && child) {
+          try {
+            await this.deps.afterMutation?.({ op, backend, admission, outcome: "resolved" });
+          } catch (cause) {
+            throw new RoutingMutationOutcomeUnknownError(
+              op,
+              "Composite execution remains unknown; its original child command and enclosing settlement remain retained",
+              { cause, retainedProcess: child },
+            );
+          }
+          throw new RoutingMutationOutcomeUnknownError(
+            op,
+            "Composite execution completion is pending or unknown; its original child command remains retained and was not replayed",
+            { cause: error, retainedProcess: child },
+          );
+        }
         if (
           !reservedProcess &&
           error instanceof ProviderCommandStartOutcomeUnknownError &&
@@ -2036,6 +2085,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         // Stale-epoch fence: the active pointer moved mid-op. Drop the cache so
         // the next resolve re-reads the NEW pointer and the op lands on the new
         // active sandbox (the fenced-retry role). Bounded by maxFenceRetries.
+        if (pinnedBackend) throw error;
         lastError = error;
         attempt += 1;
         continue;
@@ -2286,6 +2336,95 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     );
   }
 
+  /** Internal filesystem execution. Keep the raw receipt through promotion
+   * and atomic output capture, then observe only its copied process route. */
+  async execSynchronous(
+    args: ChannelAExecArgs,
+    runner: SynchronousCommandRunner = executeSynchronousCommand,
+  ): Promise<SynchronousCommandResult> {
+    return await this.execSynchronousOnBackend(args, runner);
+  }
+
+  private async execSynchronousOnBackend(
+    args: ChannelAExecArgs,
+    runner: SynchronousCommandRunner,
+    pinnedBackend?: ResolvedActiveBackend,
+  ): Promise<SynchronousCommandResult> {
+    // Cancellation transport selection, pending-start control, and the launch
+    // must refer to one physical backend, even before a handle is returned.
+    const backend = pinnedBackend ?? (await this.resolve());
+    const pages = new Map<
+      unknown,
+      ReturnType<NonNullable<ProviderCommandSession["getProviderCommandOutput"]>>
+    >();
+    const snapshot = (session: RoutableBackendSession, result: unknown) => {
+      const page = session.getProviderCommandOutput?.(result);
+      if (page) pages.set(result, page);
+    };
+    const session: ChannelASession = {
+      exec: async (input) => {
+        const raw = await this.dispatch(
+          "exec",
+          true,
+          async (provider) => {
+            const result = provider.execCommand
+              ? await provider.execCommand(input)
+              : provider.exec
+                ? await provider.exec(input)
+                : (() => {
+                    throw new RoutingUnsupportedError("exec", this.cached?.kind ?? "unknown");
+                  })();
+            snapshot(provider, result);
+            return result;
+          },
+          eligibleForSupervision(input),
+          undefined,
+          backend,
+        );
+        const result =
+          typeof raw === "string"
+            ? structuredExecResultFromBanner(raw)
+            : (raw as ChannelAExecResult);
+        const page = pages.get(raw);
+        if (page) pages.set(result, page);
+        return result;
+      },
+      writeStdin: async (input) => await this.dispatchProcessControl(input, false, snapshot),
+      getProviderCommandOutput: (result) => pages.get(result) ?? null,
+      supportsPty: () => Boolean(backend.session.supportsPty?.()),
+      commandCancellationTransport: async () => {
+        if (backend.session.commandCancellationTransport)
+          return await backend.session.commandCancellationTransport();
+        return backend.session.cancelExecCommand && backend.session.supportsPty?.() === false
+          ? "remote_operation"
+          : "shell_session";
+      },
+      cancelExecCommand: async (opId) => (await backend.session.cancelExecCommand?.(opId)) ?? false,
+      cancelPendingExecCommand: async () => {
+        await backend.session.cancelPendingExecCommand?.();
+      },
+      cancelSupervisedCommand: (handle, reason) => this.cancelSupervisedCommand(handle, reason),
+      hasRetainedProcess: (handle) => this.hasRetainedProcess(handle),
+      reconcileRetainedProcess: (handle) => this.reconcileRetainedProcess(handle),
+      retainedProcessHasTypedHandleLoss: (handle) => this.retainedProcessHasTypedHandleLoss(handle),
+      writeStdinForProcessControl: (input) => this.dispatchProcessControl(input, false, snapshot),
+      execCommandForProcessControl: (handle, input) =>
+        this.execCommandForProcessControl(handle, input),
+    };
+    try {
+      return await runner(session, args);
+    } catch (error) {
+      if (
+        error instanceof SynchronousCommandOutcomeUnknownError &&
+        isRoutingMutationOutputRejectedError(error.cause)
+      )
+        throw error.cause;
+      throw error;
+    } finally {
+      pages.clear();
+    }
+  }
+
   async execCommand(args: unknown, options?: RoutingCommandDispatchOptions): Promise<string> {
     try {
       return await this.dispatch(
@@ -2313,15 +2452,14 @@ export class RoutingSandboxSession implements RoutableBackendSession {
 
   /** Channel-A control-plane reads must not contend with durable workspace
    * capture admission, but provider sessions must receive only provider args. */
-  async execReadOnly(args: ChannelAExecArgs): Promise<ChannelAExecResult> {
+  async execReadOnly(
+    args: ChannelAExecArgs,
+    runner: SynchronousCommandRunner = executeSynchronousCommand,
+  ): Promise<ChannelAExecResult> {
     return await this.dispatch("execReadOnly", false, async (s) => {
-      if (s.exec) {
-        return (await s.exec(args)) as ChannelAExecResult;
-      }
-      if (s.execCommand) {
-        return structuredExecResultFromBanner(await s.execCommand(args));
-      }
-      throw new RoutingUnsupportedError("execReadOnly", this.cached?.kind ?? "unknown");
+      // Includes SDK-local Modal setup aliases, which have no retained route.
+      // The entire wait stays on this backend before pointer validation.
+      return await withoutProviderCommandHandle(() => runner(s as ChannelASession, args));
     });
   }
 
@@ -2625,7 +2763,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   async writePlacementPrivate(args: unknown): Promise<unknown> {
     const input = placementPrivateWrite(args);
     return this.dispatch("writePlacementPrivate", false, async (session, backend) => {
-      return await writePlacementPrivateOnBackend(session, input, backend.kind);
+      return await withoutProviderCommandHandle(() =>
+        writePlacementPrivateOnBackend(session, input, backend.kind),
+      );
     });
   }
 
@@ -2634,7 +2774,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   async deletePlacementPrivate(path: string, runAs?: string): Promise<void> {
     const privatePath = placementPrivatePath(path);
     await this.dispatch("deletePlacementPrivate", false, async (session, backend) => {
-      await deletePlacementPrivateOnBackend(session, privatePath, runAs, backend.kind);
+      await withoutProviderCommandHandle(() =>
+        deletePlacementPrivateOnBackend(session, privatePath, runAs, backend.kind),
+      );
     });
   }
 
@@ -2646,7 +2788,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   ): Promise<WorkspaceFileImportReceipt> {
     return await this.dispatch("importWorkspaceFile", true, async (session, backend) => {
       const channel = new SandboxChannelAService({
-        session: withPlacementPrivateControl(session, backend.kind),
+        session: this.synchronousCompositeSession(session, backend),
         workspaceRoot: input.workspaceRoot,
         ...(backend.kind === "selfhosted"
           ? { providerPathMode: "workspace-relative" as const }
@@ -2667,7 +2809,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   ): Promise<readonly WorkspaceFileImportReceipt[]> {
     return await this.dispatch("importWorkspaceFiles", true, async (session, backend) => {
       const channel = new SandboxChannelAService({
-        session: withPlacementPrivateControl(session, backend.kind),
+        session: this.synchronousCompositeSession(session, backend),
         workspaceRoot: input.workspaceRoot,
         ...(backend.kind === "selfhosted"
           ? { providerPathMode: "workspace-relative" as const }
@@ -2679,6 +2821,31 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     });
   }
 
+  private synchronousCompositeSession(
+    session: RoutableBackendSession,
+    backend: ResolvedActiveBackend,
+  ): ChannelASession {
+    const privateSession = withPlacementPrivateControl(session, backend.kind);
+    const retainedSubcommands =
+      backend.kind === "modal" && admittedProviderCommandHandle() !== undefined;
+    return new Proxy(privateSession, {
+      get: (target, property) => {
+        if (property === "execReadOnly")
+          return (
+            args: ChannelAExecArgs,
+            runner: SynchronousCommandRunner = executeSynchronousCommand,
+          ) => withoutProviderCommandHandle(() => runner(target, args));
+        if (property === "execSynchronous" && retainedSubcommands)
+          return (
+            args: ChannelAExecArgs,
+            runner: SynchronousCommandRunner = executeSynchronousCommand,
+          ) => this.execSynchronousOnBackend(args, runner, backend);
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  }
+
   /** Inspect an exact-file envelope on one resolved backend without entering
    * mutation admission or staging private source authority. */
   async inspectWorkspaceFilesOnResolvedBackend(
@@ -2686,7 +2853,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   ): Promise<readonly WorkspaceFileImportReceipt[] | null> {
     return await this.dispatch("inspectWorkspaceFiles", false, async (session, backend) => {
       const channel = new SandboxChannelAService({
-        session: session as ChannelASession,
+        session: this.synchronousCompositeSession(session, backend),
         workspaceRoot: input.workspaceRoot,
         ...(backend.kind === "selfhosted"
           ? { providerPathMode: "workspace-relative" as const }
@@ -2698,12 +2865,12 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     });
   }
 
-  async listDir(args: unknown): Promise<unknown> {
+  async listDir(args: unknown, runner?: SynchronousCommandRunner): Promise<unknown> {
     return this.dispatch("listDir", false, async (s) => {
       if (!s.listDir) {
         throw new RoutingUnsupportedError("listDir", this.cached?.kind ?? "unknown");
       }
-      return s.listDir(args);
+      return await withoutProviderCommandHandle(() => s.listDir!(args, runner));
     });
   }
 
@@ -3006,15 +3173,14 @@ function withPlacementPrivateControl(
     get(target, property) {
       if (property === "writePlacementPrivate") {
         return async (args: unknown) =>
-          await writePlacementPrivateOnBackend(target, placementPrivateWrite(args), backendKind);
+          await withoutProviderCommandHandle(() =>
+            writePlacementPrivateOnBackend(target, placementPrivateWrite(args), backendKind),
+          );
       }
       if (property === "deletePlacementPrivate") {
         return async (path: string, runAs?: string) =>
-          await deletePlacementPrivateOnBackend(
-            target,
-            placementPrivatePath(path),
-            runAs,
-            backendKind,
+          await withoutProviderCommandHandle(() =>
+            deletePlacementPrivateOnBackend(target, placementPrivatePath(path), runAs, backendKind),
           );
       }
       const value: unknown = Reflect.get(target, property, target);
@@ -3047,24 +3213,9 @@ async function deletePlacementPrivateOnBackend(
     cmd: `rm -f ${shellSingleQuote(privatePath)}`,
     ...(runAs ? { runAs } : {}),
   };
-  if (session.exec) {
-    const result = await session.exec(args);
-    if (
-      result &&
-      typeof result === "object" &&
-      typeof (result as { exitCode?: unknown }).exitCode === "number" &&
-      (result as { exitCode: number }).exitCode !== 0
-    ) {
-      throw new Error("placement-private cleanup failed");
-    }
-    return;
-  }
-  if (session.execCommand) {
-    const result = await session.execCommand(args);
-    const exitCode = parseExecBannerExitCode(result);
-    if (exitCode !== null && exitCode !== 0) {
-      throw new Error("placement-private cleanup failed");
-    }
+  if (session.exec || session.execCommand) {
+    const result = await executeSynchronousCommand(session as ChannelASession, args);
+    if (result.exitCode !== 0) throw new Error("placement-private cleanup failed");
     return;
   }
   throw new RoutingUnsupportedError("deletePlacementPrivate", backendKind);
@@ -3087,7 +3238,7 @@ async function streamPlacementPrivateFile(
     ...(input.createParents ? [`install -d -m 0700 -- ${shellSingleQuote(parent)}`] : []),
   ];
   if (bytes.byteLength === 0) {
-    const result = await exec({
+    const result = await executeSynchronousCommand(session as ChannelASession, {
       cmd: [
         ...prelude,
         `: > ${shellSingleQuote(input.path)}`,
@@ -3098,7 +3249,7 @@ async function streamPlacementPrivateFile(
       yieldTimeMs: 30_000,
       maxOutputTokens: 1_000,
     });
-    if (!formatExecResult(result).includes(marker)) {
+    if (result.exitCode !== 0 || !result.stdout.includes(marker)) {
       throw new Error("placement-private empty-file transfer failed");
     }
     return;
@@ -3125,17 +3276,27 @@ async function streamPlacementPrivateFile(
   if (sessionId === null) {
     throw new Error("placement-private transfer did not yield an input session");
   }
-  const settled = await session.writeStdin({
+  const first = await session.writeStdin({
     sessionId,
     chars: payload,
     yieldTimeMs: 30_000,
     maxOutputTokens: 1_000,
   });
-  if (!settled.includes(marker) || parseExecBannerSessionId(settled) !== null) {
-    throw new Error("placement-private transfer did not settle successfully");
-  }
-  const exitCode = parseExecBannerExitCode(settled);
-  if (exitCode !== null && exitCode !== 0) {
+  const settled = await observeSynchronousCommand(
+    synchronousCommandPage(session as ChannelASession, first, sessionId),
+    async () =>
+      synchronousCommandPage(
+        session as ChannelASession,
+        await session.writeStdin!({
+          sessionId,
+          chars: "",
+          yieldTimeMs: 1_000,
+          maxOutputTokens: 1_000,
+        }),
+        sessionId,
+      ),
+  );
+  if (settled.exitCode !== 0 || !settled.stdout.includes(marker)) {
     throw new Error("placement-private transfer exited unsuccessfully");
   }
 }

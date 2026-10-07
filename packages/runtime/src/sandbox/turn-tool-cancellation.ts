@@ -24,6 +24,13 @@ import {
   ModalCommandStartNotDispatchedError,
   ModalCommandStartPreDispatchUnavailableError,
 } from "./providers/modal-command-router-wire";
+import {
+  observeSynchronousCommand,
+  synchronousCommandPage,
+  SynchronousCommandOutcomeUnknownError,
+  type SynchronousCommandResult,
+} from "./synchronous-command";
+import type { ChannelASession, ChannelAExecArgs } from "./channel-a";
 
 const TURN_PROVIDER_YIELD_SLICE_MS = 250;
 const TURN_DEFAULT_MODEL_WAIT_MS = 10_000;
@@ -236,6 +243,10 @@ export type TurnToolCancellationFence = {
     session: TurnSandboxCommandSession,
     args: TurnSandboxCommandArgs,
   ): Promise<TurnSandboxCommandResult>;
+  runSandboxCommandSynchronous(
+    session: ChannelASession,
+    args: ChannelAExecArgs,
+  ): Promise<SynchronousCommandResult>;
 };
 
 export type TurnToolCancellationController = TurnToolCancellationFence & {
@@ -660,6 +671,7 @@ function retainedProcessSession(
  */
 export function renderDirectToolFault(error: unknown, retainedProcessSessionId?: number): string {
   if (isRoutingMutationOutputRejectedError(error)) throw error;
+  if (error instanceof SynchronousCommandOutcomeUnknownError) return error.message;
   if (error instanceof ProviderCommandInputOutcomeUnknownError) {
     return `Command input acknowledgement unavailable${retainedProcessSessionId === undefined ? "" : ` for session ID ${retainedProcessSessionId}`}. The input may have been accepted; its outcome is unknown and it was not resent. Do not resend stdin. Inspect the existing command with write_stdin using empty chars.`;
   }
@@ -818,10 +830,36 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     return (await this.runSandboxCommandInternal(session, args, true)) as TurnSandboxCommandResult;
   }
 
+  /** Filesystem protocols need complete output and non-PTY execution. Reuse
+   * the pending-start/physical cancellation registration, not the model wait
+   * or background-adoption path, and only consume original terminal proof. */
+  async runSandboxCommandSynchronous(
+    session: ChannelASession,
+    args: ChannelAExecArgs,
+  ): Promise<SynchronousCommandResult> {
+    const definedArgs: TurnSandboxCommandArgs = {
+      cmd: args.cmd,
+      tty: false,
+      ...(args.workdir !== undefined ? { workdir: args.workdir } : {}),
+      ...(args.shell !== undefined ? { shell: args.shell } : {}),
+      ...(args.login !== undefined ? { login: args.login } : {}),
+      ...(args.runAs !== undefined ? { runAs: args.runAs } : {}),
+      ...(args.yieldTimeMs !== undefined ? { yieldTimeMs: args.yieldTimeMs } : {}),
+      ...(args.maxOutputTokens !== undefined ? { maxOutputTokens: args.maxOutputTokens } : {}),
+    };
+    return (await this.runSandboxCommandInternal(
+      session,
+      definedArgs,
+      true,
+      true,
+    )) as SynchronousCommandResult;
+  }
+
   private runSandboxCommandInternal(
     session: TurnSandboxCommandSession,
     args: TurnSandboxCommandArgs,
     structured: boolean,
+    lossless = false,
   ): Promise<unknown> {
     return this.track(async () => {
       const startedAt = performance.now();
@@ -900,7 +938,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       const correlationId = `turn_lifecycle_${crypto.randomUUID()}`;
       const useRemoteOpCancellation = await usesRemoteOperationCancellation(session);
       if (this.cancelled) throw cancellationError(this.reason);
-      const interactive = args.tty ?? true;
+      const interactive = args.tty ?? !lossless;
       const remoteExec =
         session.cancelExecCommand && useRemoteOpCancellation
           ? this.registerRemoteExec(
@@ -985,7 +1023,17 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       }
       const initial = nativeCommandBanner(initialNative);
       const initialResult = nativeCommandResult(initialNative);
+      const initialPage = lossless
+        ? synchronousCommandPage(
+            session as ChannelASession,
+            initialNative as string | import("./channel-a").ChannelAExecResult,
+          )
+        : null;
       if (useRemoteOpCancellation) {
+        if (initialPage)
+          return await observeSynchronousCommand(initialPage, async () => {
+            throw new Error("Remote command did not report terminal completion");
+          });
         if (!structured) return initial;
         if (initialResult.exitCode === null) {
           throw new Error("Sandbox command did not report a terminal exit code");
@@ -1004,6 +1052,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       const sessionId = parseExecBannerSessionId(initial);
       if (sessionId === null) {
         pendingStart?.settle();
+        if (initialPage)
+          return await observeSynchronousCommand(initialPage, async () => {
+            throw new Error("Original command has no observation handle");
+          });
         if (!structured) return initial;
         if (initialResult.exitCode === null) {
           throw new Error("Sandbox command did not report a terminal exit code");
@@ -1017,10 +1069,6 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             (performance.now() - startedAt) / 1_000,
           ),
         } satisfies TurnSandboxCommandResult;
-      }
-      if (!invokeWrite) {
-        pendingStart?.settle();
-        throw new Error("Sandbox lifecycle command yielded without stdin support");
       }
       const token = markerPath.slice(markerPath.lastIndexOf("/") + 1);
       const state: ActiveShellSession = {
@@ -1039,6 +1087,47 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       };
       this.shellSessions.set(sessionId, state);
       pendingStart?.settle(sessionId);
+      if (!invokeWrite) {
+        if (initialPage)
+          throw new SynchronousCommandOutcomeUnknownError(sessionId, {
+            stdout: initialPage.stdout,
+            stderr: initialPage.stderr,
+          });
+        throw new Error("Sandbox lifecycle command yielded without stdin support");
+      }
+      if (initialPage) {
+        let result: SynchronousCommandResult;
+        try {
+          result = await observeSynchronousCommand(initialPage, async (originalSessionId) => {
+            if (this.cancelled) throw cancellationError(this.reason);
+            const next = await invokeWrite(
+              lifecycleRunContext,
+              JSON.stringify({
+                session_id: originalSessionId,
+                chars: "",
+                yield_time_ms: TURN_PROVIDER_YIELD_SLICE_MS,
+                ...(args.maxOutputTokens !== undefined
+                  ? { max_output_tokens: args.maxOutputTokens }
+                  : {}),
+              }),
+            );
+            if (this.cancelled) throw cancellationError(this.reason);
+            if (typeof next !== "string")
+              throw new Error("Internal command observation returned an invalid result");
+            return synchronousCommandPage(session as ChannelASession, next, originalSessionId);
+          });
+        } catch (error) {
+          if (this.cancelled) throw cancellationError(this.reason);
+          if (
+            error instanceof SynchronousCommandOutcomeUnknownError &&
+            isRoutingMutationOutputRejectedError(error.cause)
+          )
+            throw error.cause;
+          throw error;
+        }
+        this.shellSessions.delete(sessionId);
+        return { ...result, wallTimeSeconds: (performance.now() - startedAt) / 1_000 };
+      }
       const maxOutputTokens = args.maxOutputTokens ?? 20_000;
       const initialOutput = execOutput(initial);
       let output = initialOutput ? appendBoundedOutput("", initialOutput, maxOutputTokens) : "";

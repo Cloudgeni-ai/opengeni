@@ -2086,6 +2086,19 @@ original tool call, while an explicitly short yield or a command still running
 after the requested window returns the retained session id. Empty internal
 polls use the exact process-control route and never create another model turn or
 workspace mutation admission.
+
+Internal synchronous filesystem commands use `sandbox/synchronous-command.ts`
+to collect complete output from the same invocation until provider terminal/EOF
+proof. Routing retains and atomically captures the raw initial receipt before
+observation; read-only setup handles stay on their resolved backend for the
+whole wait. Composite imports keep an enclosing admission and backend pin;
+admitted Modal shell subcommands receive fresh exact retained admissions rather
+than reusing the enclosing command alias. Worker Skill operations use the turn
+cancellation controller's non-PTY, lossless runner, with no background adoption.
+Markers never substitute for original exit proof. An unobservable command
+remains pending/unknown and is not replayed through another write path.
+Existing interrupted-command recovery and physical settlement gates still apply.
+
 If that process's durable row already records exit or loss, a later model-visible
 `write_stdin` remains fenced before provider dispatch but returns the stored
 terminal exit/loss banner. It never labels a permanently dead handle as a
