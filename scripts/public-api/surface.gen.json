@@ -30520,6 +30520,7 @@
       "ReadableWorkOptions": "type",
       "readableWorkShowsPreview": "value",
       "readableWorkStatus": "value",
+      "recordedWaitSummaryText": "value",
       "resolveTurnSummaryFacets": "value",
       "rollingActivityItem": "value",
       "runOnPresentation": "value",
