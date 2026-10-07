@@ -1,10 +1,89 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { link, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // GET-only Kubernetes fixture. All built-in model definitions are the unchanged
 // upstream v1.34.0 schemas, not empty/permissive substitutes for Helm validation.
 const schemaUrl =
   "https://raw.githubusercontent.com/kubernetes/kubernetes/v1.34.0/api/openapi-spec/swagger.json";
 const schemaSha256 = "d3b0cdc2fda15c753206d25ab459dc7c12df64e2fd652b6809687471ea751c37";
+const schemaBytes = 3828201;
+
+type FixtureSchemaInput = {
+  // Explicit input is authoritative: missing/invalid bytes never fall back to HTTP.
+  // null selects the cache instead of the OPENGENI_KUBERNETES_FIXTURE_SCHEMA override.
+  schemaPath?: string | null;
+  cacheDirectory?: string;
+  request?: (url: string, options: RequestInit) => Promise<Response>;
+};
+
+function verifySchemaBytes(bytes: Uint8Array): Uint8Array {
+  if (bytes.byteLength !== schemaBytes)
+    throw new Error("Pinned Kubernetes fixture schema length mismatch");
+  if (createHash("sha256").update(bytes).digest("hex") !== schemaSha256)
+    throw new Error("Pinned Kubernetes fixture schema checksum mismatch");
+  return bytes;
+}
+
+async function readSchemaFile(path: string): Promise<Uint8Array> {
+  if ((await stat(path)).size !== schemaBytes)
+    throw new Error("Pinned Kubernetes fixture schema length mismatch");
+  return verifySchemaBytes(await readFile(path));
+}
+
+async function fixtureSchemaBytes(input: FixtureSchemaInput): Promise<Uint8Array> {
+  const explicit =
+    input.schemaPath === null
+      ? undefined
+      : (input.schemaPath ?? process.env.OPENGENI_KUBERNETES_FIXTURE_SCHEMA);
+  if (explicit !== undefined) return readSchemaFile(explicit);
+  // Same temporary-root cache convention as Helm/promtool, with immutable input identity.
+  const directory =
+    input.cacheDirectory ?? join(tmpdir(), `opengeni-kubernetes-openapi-v1.34.0-${schemaSha256}`);
+  const path = join(directory, "swagger.json");
+  try {
+    return await readSchemaFile(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const response = await (input.request ?? fetch)(schemaUrl, {
+    signal: AbortSignal.timeout(10_000),
+    redirect: "error",
+  });
+  if (!response.ok) throw new Error(`Pinned Kubernetes fixture HTTP ${response.status}`);
+  if (!response.body) throw new Error("Pinned Kubernetes fixture schema body missing");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      size += part.value.byteLength;
+      if (size > schemaBytes) throw new Error("Pinned Kubernetes fixture schema length mismatch");
+      chunks.push(part.value);
+    }
+  } finally {
+    await reader.cancel();
+    reader.releaseLock();
+  }
+  const bytes = verifySchemaBytes(Buffer.concat(chunks));
+  await mkdir(directory, { recursive: true });
+  const temporary = join(directory, `.swagger-${process.pid}-${randomUUID()}.json`);
+  await writeFile(temporary, bytes, { flag: "wx" });
+  try {
+    // Publish only complete verified bytes; never overwrite another process's cache.
+    try {
+      await link(temporary, path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    return await readSchemaFile(path);
+  } finally {
+    await unlink(temporary);
+  }
+}
 
 // Protobuf field numbers follow Apache-2.0 google/gnostic-models v0.6.9,
 // openapiv2/OpenAPIv2.proto. Encode every schema field present in this pinned
@@ -61,14 +140,13 @@ function schema(value: Schema): Buffer {
   return Buffer.concat(fields);
 }
 
-let openapi: Promise<Buffer> | undefined;
-export function kubernetesFixtureOpenAPI(): Promise<Buffer> {
-  return (openapi ??= (async () => {
-    const response = await fetch(schemaUrl, { signal: AbortSignal.timeout(10_000) });
-    if (!response.ok) throw new Error(`Pinned Kubernetes fixture HTTP ${response.status}`);
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (createHash("sha256").update(bytes).digest("hex") !== schemaSha256)
-      throw new Error("Pinned Kubernetes fixture schema checksum mismatch");
+// Separate owned loaders let controls exercise cache/input failures without global env mutation.
+export function createKubernetesFixtureOpenAPI(
+  input: FixtureSchemaInput = {},
+): () => Promise<Buffer> {
+  let openapi: Promise<Buffer> | undefined;
+  const load = async () => {
+    const bytes = await fixtureSchemaBytes(input);
     const document = JSON.parse(new TextDecoder().decode(bytes));
     return Buffer.concat([
       field(1, "2.0"),
@@ -85,8 +163,16 @@ export function kubernetesFixtureOpenAPI(): Promise<Buffer> {
         ),
       ),
     ]);
-  })());
+  };
+  return () =>
+    (openapi ??= load().catch((error) => {
+      // A corrected input or a later valid fetch must be usable after a failed load.
+      openapi = undefined;
+      throw error;
+    }));
 }
+
+export const kubernetesFixtureOpenAPI = createKubernetesFixtureOpenAPI();
 
 export const kubernetesFixtureResources: Record<string, { name: string; kind: string }[]> = {
   v1: [
