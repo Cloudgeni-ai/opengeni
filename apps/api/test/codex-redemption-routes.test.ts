@@ -23,6 +23,7 @@ import {
   synchronizeCanonicalHumanLoginBindings,
   upsertCodexSubscriptionCredential,
   upsertOrganizationCodexSubscriptionCredential,
+  withCodexAppsRequestAuthorization,
   type DbClient,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
@@ -663,6 +664,16 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     );
     expect(later).toBeInstanceOf(CodexReloginRequired);
     expect(isCodexAppsCredentialUnavailable(later)).toBe(false);
+
+    // The request-time recheck classifies the same state as a relogin too.
+    const atDispatch = await rejection(
+      withCodexAppsRequestAuthorization(
+        client.db,
+        { workspaceId, credentialId: designated.id },
+        async () => "must-not-send",
+      ),
+    );
+    expect(atDispatch).toBeInstanceOf(CodexReloginRequired);
   });
 
   test("an actual Better Auth sign-in cookie can prepare its owning credential", async () => {

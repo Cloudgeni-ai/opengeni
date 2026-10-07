@@ -24826,7 +24826,7 @@ export async function withCodexAppsRequestAuthorization<T>(
       )
       .for("share")
       .limit(1);
-    if (!credential?.ownerSubjectId || credential.status !== "active") {
+    if (!credential?.ownerSubjectId) {
       throw new CodexAppsAuthorizationRevokedError();
     }
     const [membership] = await scopedDb
@@ -24842,6 +24842,10 @@ export async function withCodexAppsRequestAuthorization<T>(
       .limit(1);
     if (!canManageCodexApps(membership?.permissions)) {
       throw new CodexAppsAuthorizationRevokedError();
+    }
+    if (credential.status !== "active") {
+      // Still the authorized designation, but its sign-in must be renewed.
+      throw new CodexReloginRequired("The designated Codex Apps account must be reconnected.");
     }
     return await use();
   });
@@ -25096,8 +25100,13 @@ type CodexAppsCredentialUseAuthority = { purpose: "codex_apps" };
  * call is in flight. Dropping them would leave the row holding a refresh token
  * the provider has already spent. This is never authority to load or use a
  * credential: loading and every Apps request still require the live designation.
+ * The unexported brand keeps any other caller from constructing it.
  */
-type CodexAppsRefreshOutcomeAuthority = { purpose: "codex_apps_refresh_outcome" };
+const CODEX_APPS_REFRESH_OUTCOME_BRAND: unique symbol = Symbol("codex_apps_refresh_outcome");
+type CodexAppsRefreshOutcomeAuthority = {
+  readonly purpose: "codex_apps_refresh_outcome";
+  readonly [CODEX_APPS_REFRESH_OUTCOME_BRAND]: true;
+};
 type CodexCredentialUseAuthority =
   | CodexAcceptedCredentialAuthority
   | CodexAppsCredentialUseAuthority
@@ -25106,6 +25115,7 @@ type CodexCredentialUseAuthority =
 const CODEX_APPS_CREDENTIAL_USE: CodexAppsCredentialUseAuthority = { purpose: "codex_apps" };
 const CODEX_APPS_REFRESH_OUTCOME: CodexAppsRefreshOutcomeAuthority = {
   purpose: "codex_apps_refresh_outcome",
+  [CODEX_APPS_REFRESH_OUTCOME_BRAND]: true,
 };
 
 /**
@@ -25144,6 +25154,9 @@ async function codexCredentialUseCondition(
   if ("purpose" in authority) {
     if (authority.purpose === "codex_apps") return codexAppsCredentialUseCondition(workspaceId);
     if (authority.purpose === "codex_apps_refresh_outcome") {
+      if (authority !== CODEX_APPS_REFRESH_OUTCOME) {
+        throw new Error("Codex Apps refresh-outcome authority is internal to the Apps resolver");
+      }
       // Same workspace-owned row family the designation can name; the caller's
       // id + version CAS pins the exact row loaded under the designation.
       return and(
