@@ -3632,7 +3632,8 @@ test("SUB-ACCESS-01: Codex accepted source/policy snapshots survive recovery and
     prompt: (goal) => `Continue ${goal.text}`,
   });
   expect(materialized.action).toBe("continue");
-  if (materialized.action !== "continue") throw new Error("Codex goal continuation was not created");
+  if (materialized.action !== "continue")
+    throw new Error("Codex goal continuation was not created");
 
   const claimed = await claimSessionWorkForAttempt(clientA.db, ws!.workspaceId, {
     sessionId: identity.session_id,
@@ -3643,7 +3644,8 @@ test("SUB-ACCESS-01: Codex accepted source/policy snapshots survive recovery and
     trigger: { kind: "next" },
   });
   expect(claimed.action).toBe("claimed");
-  if (claimed.action !== "claimed") throw new Error(`Codex goal turn was not claimed: ${claimed.reason}`);
+  if (claimed.action !== "claimed")
+    throw new Error(`Codex goal turn was not claimed: ${claimed.reason}`);
   expect(claimed.turn.source).toBe("goal");
   expect(readCodexCredentialPolicySnapshotV1(claimed.turn.metadata)).toEqual(acceptedPolicy);
   const continuationLease = await lease(claimed.turn.id);

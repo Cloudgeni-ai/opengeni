@@ -336,7 +336,9 @@ test.each(["organization", "personal"] as const)(
     await notifyParentOfChildIdle(services, workspaceId, child.session.id, boundary.episodeKey);
     expect(errors).toEqual([]);
 
-    const pending = await admin<{ id: string; kind: string; claude: PoolSnapshot; xai: PoolSnapshot }[]>`
+    const pending = await admin<
+      { id: string; kind: string; claude: PoolSnapshot; xai: PoolSnapshot }[]
+    >`
       select id, kind, claude_provider_account_authority_snapshot as claude,
         xai_provider_account_authority_snapshot as xai
       from session_system_updates

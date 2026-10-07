@@ -70012,8 +70012,7 @@ export async function materializeGoalContinuation(
                     ...(claudeAuthoritySubjectId ? { claudeAuthoritySubjectId } : {}),
                     ...(causalCodexPolicy.kind === "valid"
                       ? {
-                          [CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY]:
-                            causalCodexPolicy.policy,
+                          [CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY]: causalCodexPolicy.policy,
                         }
                       : {}),
                   },
@@ -74912,10 +74911,11 @@ export async function claimSessionWorkForAttempt(
                   latencyMode,
                   sandboxBackend,
                   sandboxOs,
-                  metadata: metadataWithTurnDispatchAttempt(
-                    acceptedInternalTurnMetadata,
-                    { id: input.dispatchId, generation: 1, triggerEventId },
-                  ),
+                  metadata: metadataWithTurnDispatchAttempt(acceptedInternalTurnMetadata, {
+                    id: input.dispatchId,
+                    generation: 1,
+                    triggerEventId,
+                  }),
                   ...initiatorColumns(internalInitiator),
                   initiatingHumanSubjectId,
                   executionContextTurnId: receiverContext?.id ?? null,
