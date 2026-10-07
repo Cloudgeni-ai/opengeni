@@ -95,6 +95,7 @@ import {
   getAcceptedSubscriptionTaskAuthority,
   getAcceptedSubscriptionTurnAuthority,
   getAcceptedSubscriptionParentAuthority,
+  sharedPoolSubscriptionAuthoritySnapshotsInTransaction,
 } from "./accepted-subscription-authority";
 export { resolveClaudeAccountCredential } from "./claude-subscription-account-tokens";
 export * from "./claude-subscription-accounts";
@@ -17722,6 +17723,13 @@ export async function createScheduledTask(
       const frozenCreator = await frozenSessionCreatorForInsert(scopedDb, input);
       await setScheduledTaskAuthorityRlsContext(scopedDb, frozenCreator);
       await input.beforeCreateCommit?.(scopedDb);
+      // Low-level callers without a frozen snapshot have no exact accepting
+      // human here, so they resolve the organization or workspace pool.
+      const sharedTaskPool =
+        input.xaiProviderAccountAuthoritySnapshot === undefined ||
+        input.claudeProviderAccountAuthoritySnapshot === undefined
+          ? await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(scopedDb, input.workspaceId)
+          : null;
       const [row] = await scopedDb
         .insert(schema.scheduledTasks)
         .values({
@@ -17745,11 +17753,9 @@ export async function createScheduledTask(
           agentConfig: input.agentConfig,
           ...creatorColumns(frozenCreator),
           xaiProviderAccountAuthoritySnapshot:
-            input.xaiProviderAccountAuthoritySnapshot ??
-            WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+            input.xaiProviderAccountAuthoritySnapshot ?? sharedTaskPool!.xai,
           claudeProviderAccountAuthoritySnapshot:
-            input.claudeProviderAccountAuthoritySnapshot ??
-            WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+            input.claudeProviderAccountAuthoritySnapshot ?? sharedTaskPool!.claude,
           creatorFirstPartyMcpTools: input.creatorPolicy?.firstPartyMcpTools ?? null,
           creatorFirstPartyMcpPermissions: input.creatorPolicy?.firstPartyMcpPermissions ?? null,
           creatorSessionPolicy: scheduledTaskCreatorSessionPolicyForInsert(input.creatorPolicy),
@@ -34651,15 +34657,23 @@ async function createSessionInTransaction(
 
   // Do not run mutable creator validation before keyed denial replay above.
   const frozenCreator = await frozenSessionCreatorForInsert(tx, input);
+  // A subject creator resolves their own current pool. A creator that is not a
+  // subject (service, organization API key, bridge) has no exact human, so it
+  // resolves the organization or workspace pool and never a personal pool.
+  const subjectCreatorId =
+    frozenCreator.initiator.kind === "subject" && input.subjectId ? input.subjectId : null;
+  const sharedCreatorPool =
+    !subjectCreatorId &&
+    (input.initialXaiProviderAccountAuthoritySnapshot === undefined ||
+      input.initialClaudeProviderAccountAuthoritySnapshot === undefined)
+      ? await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(tx, input.workspaceId)
+      : null;
   let initialXaiProviderAccountAuthoritySnapshot =
     input.initialXaiProviderAccountAuthoritySnapshot ??
+    sharedCreatorPool?.xai ??
     WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
-  if (
-    input.initialXaiProviderAccountAuthoritySnapshot === undefined &&
-    frozenCreator.initiator.kind === "subject" &&
-    input.subjectId
-  ) {
-    await setSubjectRlsContext(tx, input.subjectId);
+  if (input.initialXaiProviderAccountAuthoritySnapshot === undefined && subjectCreatorId) {
+    await setSubjectRlsContext(tx, subjectCreatorId);
     initialXaiProviderAccountAuthoritySnapshot =
       await resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction(tx, {
         workspaceId: input.workspaceId,
@@ -34667,13 +34681,10 @@ async function createSessionInTransaction(
   }
   let initialClaudeProviderAccountAuthoritySnapshot =
     input.initialClaudeProviderAccountAuthoritySnapshot ??
+    sharedCreatorPool?.claude ??
     WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
-  if (
-    input.initialClaudeProviderAccountAuthoritySnapshot === undefined &&
-    frozenCreator.initiator.kind === "subject" &&
-    input.subjectId
-  ) {
-    await setSubjectRlsContext(tx, input.subjectId);
+  if (input.initialClaudeProviderAccountAuthoritySnapshot === undefined && subjectCreatorId) {
+    await setSubjectRlsContext(tx, subjectCreatorId);
     initialClaudeProviderAccountAuthoritySnapshot =
       await resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction(tx, {
         workspaceId: input.workspaceId,
@@ -69778,16 +69789,21 @@ export async function materializeGoalContinuation(
               `session_turns:${input.workspaceId}:${input.sessionId}:${causalTurn.id}`,
             )
           : [];
+        // Without a finished causal turn there is no accepted pool or human to
+        // carry, so resolve the organization or workspace pool (never personal).
+        const sharedGoalPool = causalTurn
+          ? null
+          : await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(tx, input.workspaceId);
         const xaiProviderAccountAuthoritySnapshot = causalTurn
           ? XaiProviderAccountAuthoritySnapshotV1.parse(
               causalTurn.xaiProviderAccountAuthoritySnapshot,
             )
-          : WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
+          : sharedGoalPool!.xai;
         const claudeProviderAccountAuthoritySnapshot = causalTurn
           ? ClaudeProviderAccountAuthoritySnapshotV1.parse(
               causalTurn.claudeProviderAccountAuthoritySnapshot,
             )
-          : WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
+          : sharedGoalPool!.claude;
         const xaiAuthoritySubjectId =
           causalTurn && xaiProviderAccountAuthoritySnapshot.scope === "user"
             ? (causalTurn.initiatingHumanSubjectId ??
@@ -70867,6 +70883,16 @@ export async function enqueueSessionTurn(
             )
           `);
         }
+        // Callers that froze no pool resolve the organization or workspace
+        // pool; a personal pool always requires an explicit frozen snapshot.
+        const sharedTurnPool =
+          input.xaiProviderAccountAuthoritySnapshot === undefined ||
+          input.claudeProviderAccountAuthoritySnapshot === undefined
+            ? await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(
+                tx as unknown as Database,
+                input.workspaceId,
+              )
+            : null;
         const [row] = await tx
           .insert(schema.sessionTurns)
           .values(
@@ -70902,11 +70928,9 @@ export async function enqueueSessionTurn(
                 personalConnectionDelegations: input.personalConnectionDelegations ?? [],
                 mcpAccountBindings: parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
                 xaiProviderAccountAuthoritySnapshot:
-                  input.xaiProviderAccountAuthoritySnapshot ??
-                  WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                  input.xaiProviderAccountAuthoritySnapshot ?? sharedTurnPool!.xai,
                 claudeProviderAccountAuthoritySnapshot:
-                  input.claudeProviderAccountAuthoritySnapshot ??
-                  WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                  input.claudeProviderAccountAuthoritySnapshot ?? sharedTurnPool!.claude,
                 createdAt: acceptedAt,
                 updatedAt: acceptedAt,
               },
@@ -73987,6 +74011,12 @@ export async function claimSessionWorkForAttempt(
               [session],
             );
             await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
+            const sharedCompactionPool = latestStarted
+              ? null
+              : await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(
+                  tx as unknown as Database,
+                  workspaceId,
+                );
             const [compactionTurn] = await tx
               .insert(schema.sessionTurns)
               .values(
@@ -74038,10 +74068,10 @@ export async function claimSessionWorkForAttempt(
                     mcpAccountBindings: [],
                     xaiProviderAccountAuthoritySnapshot:
                       latestStarted?.xaiProviderAccountAuthoritySnapshot ??
-                      WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                      sharedCompactionPool!.xai,
                     claudeProviderAccountAuthoritySnapshot:
                       latestStarted?.claudeProviderAccountAuthoritySnapshot ??
-                      WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                      sharedCompactionPool!.claude,
                     startedAt: now,
                     createdAt: now,
                     updatedAt: now,
@@ -77005,12 +77035,15 @@ async function settleSessionInputWaitInActivity(
           kind: "session_wait_timeout",
           personalConnectionDelegations: causalAuthority?.personalConnectionDelegations ?? [],
           mcpAccountBindings: causalAuthority?.mcpAccountBindings ?? null,
-          xaiProviderAccountAuthoritySnapshot:
-            causalAuthority?.xaiProviderAccountAuthoritySnapshot ??
-            WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
-          claudeProviderAccountAuthoritySnapshot:
-            causalAuthority?.claudeProviderAccountAuthoritySnapshot ??
-            WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+          // Missing causal authority resolves the shared pool on insert.
+          ...(causalAuthority
+            ? {
+                xaiProviderAccountAuthoritySnapshot:
+                  causalAuthority.xaiProviderAccountAuthoritySnapshot,
+                claudeProviderAccountAuthoritySnapshot:
+                  causalAuthority.claudeProviderAccountAuthoritySnapshot,
+              }
+            : {}),
           lineage: causalAuthority?.lineage ?? {},
           classification: "info",
           sourceId: input.waitTurnId,
@@ -84375,6 +84408,16 @@ export async function addSessionSystemUpdateWithSourceMutation<
             payload: input.payload,
           }));
 
+        // Producers without causal authority have no exact human: resolve the
+        // organization or workspace pool rather than assuming workspace.
+        const sharedUpdatePool =
+          input.xaiProviderAccountAuthoritySnapshot === undefined ||
+          input.claudeProviderAccountAuthoritySnapshot === undefined
+            ? await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(
+                tx as unknown as Database,
+                input.workspaceId,
+              )
+            : null;
         const [inserted] = await tx
           .insert(schema.sessionSystemUpdates)
           .values(
@@ -84394,11 +84437,9 @@ export async function addSessionSystemUpdateWithSourceMutation<
                   personalConnectionDelegations: input.personalConnectionDelegations ?? [],
                   mcpAccountBindings: parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
                   xaiProviderAccountAuthoritySnapshot:
-                    input.xaiProviderAccountAuthoritySnapshot ??
-                    WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                    input.xaiProviderAccountAuthoritySnapshot ?? sharedUpdatePool!.xai,
                   claudeProviderAccountAuthoritySnapshot:
-                    input.claudeProviderAccountAuthoritySnapshot ??
-                    WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                    input.claudeProviderAccountAuthoritySnapshot ?? sharedUpdatePool!.claude,
                   scheduledTaskRunId: input.scheduledTaskRunId ?? null,
                   state: consumedByParentRead ? "superseded" : "pending",
                 },
@@ -84949,6 +84990,12 @@ function backgroundCommandTerminalMutation(input: {
         ...input,
         commandId: command.id,
       });
+      const sharedCommandPool = causalAuthority
+        ? null
+        : await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(
+            tx as unknown as Database,
+            input.workspaceId,
+          );
       const [insertedUpdate] = await tx
         .insert(schema.sessionSystemUpdates)
         .values(
@@ -84967,11 +85014,10 @@ function backgroundCommandTerminalMutation(input: {
                 personalConnectionDelegations: causalAuthority?.personalConnectionDelegations ?? [],
                 mcpAccountBindings: causalAuthority?.mcpAccountBindings ?? null,
                 xaiProviderAccountAuthoritySnapshot:
-                  causalAuthority?.xaiProviderAccountAuthoritySnapshot ??
-                  WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                  causalAuthority?.xaiProviderAccountAuthoritySnapshot ?? sharedCommandPool!.xai,
                 claudeProviderAccountAuthoritySnapshot:
                   causalAuthority?.claudeProviderAccountAuthoritySnapshot ??
-                  WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                  sharedCommandPool!.claude,
                 lineage: {
                   commandId: command.id,
                   provider: command.provider,

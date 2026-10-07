@@ -798,37 +798,51 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
       )
       .limit(1);
     if (!row) {
-      const [local] = await db
-        .select({ id: tables.credentials.id })
-        .from(tables.credentials)
-        .where(
-          and(
-            eq(tables.credentials.workspaceId, input.workspaceId),
-            eq(tables.credentials.authorityScope, "workspace"),
-          ),
-        )
-        .limit(1);
-      if (!local) {
-        const [organization] = await db
-          .select({ id: tables.rotationSettings.id })
-          .from(tables.rotationSettings)
-          .where(
-            and(
-              isNull(tables.rotationSettings.workspaceId),
-              eq(tables.rotationSettings.authorityScope, "organization"),
-              sql`${tables.rotationSettings.activeCredentialId} is not null`,
-            ),
-          )
-          .limit(1);
-        if (organization) return { version: 1, scope: "organization" };
-      }
-      return WORKSPACE_AUTHORITY_SNAPSHOT_V1;
+      return await resolveSubscriptionSharedPoolAuthoritySnapshotInTransaction(db, input);
     }
     return SubscriptionAuthoritySnapshotV1.parse({
       version: 1,
       scope: "user",
       authorityGeneration: row.authorityGeneration,
     });
+  }
+
+  /**
+   * Shared-pool acceptance resolver for work without an exact accepting human
+   * (service/operator actors, organization API keys, bridges, non-subject
+   * creators, and internal producers without causal authority). It never reads
+   * or returns a user-scoped (personal) pool, so it cannot widen access. The
+   * caller's transaction must carry the account/workspace RLS context.
+   */
+  async function resolveSubscriptionSharedPoolAuthoritySnapshotInTransaction(
+    db: Database,
+    input: { workspaceId: string },
+  ): Promise<SubscriptionAuthoritySnapshot> {
+    const [local] = await db
+      .select({ id: tables.credentials.id })
+      .from(tables.credentials)
+      .where(
+        and(
+          eq(tables.credentials.workspaceId, input.workspaceId),
+          eq(tables.credentials.authorityScope, "workspace"),
+        ),
+      )
+      .limit(1);
+    if (!local) {
+      const [organization] = await db
+        .select({ id: tables.rotationSettings.id })
+        .from(tables.rotationSettings)
+        .where(
+          and(
+            isNull(tables.rotationSettings.workspaceId),
+            eq(tables.rotationSettings.authorityScope, "organization"),
+            sql`${tables.rotationSettings.activeCredentialId} is not null`,
+          ),
+        )
+        .limit(1);
+      if (organization) return { version: 1, scope: "organization" };
+    }
+    return WORKSPACE_AUTHORITY_SNAPSHOT_V1;
   }
 
   async function updateSubscriptionAccountSettings(
@@ -2479,6 +2493,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     getSubscriptionAccountAuthoritySnapshot,
     resolveSubscriptionProviderAccountAuthoritySnapshotForAcceptance,
     resolveSubscriptionProviderAccountAuthoritySnapshotForAcceptanceInTransaction,
+    resolveSubscriptionSharedPoolAuthoritySnapshotInTransaction,
     updateSubscriptionAccountSettings,
     updateSubscriptionAllocatorEligibility,
     renameSubscriptionAccount,
