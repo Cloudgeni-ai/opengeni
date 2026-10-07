@@ -609,6 +609,7 @@ import {
   canonicalizePersistedHistoryItem,
   CODEX_CLIENT_VERSION,
   CodexAppsCredentialUnavailable,
+  CodexReloginRequired,
   codexPlanKey,
   omitOutputOnlyHistoryItemFields,
   isCodexBilledModel,
@@ -25085,11 +25086,27 @@ type CodexAcceptedCredentialAuthority =
  * nothing else in the workspace or organization inference pool.
  */
 type CodexAppsCredentialUseAuthority = { purpose: "codex_apps" };
+/**
+ * Recording the outcome of a provider refresh that the Apps authority already
+ * admitted: the resolver loaded the row under the designation rules while
+ * holding that credential's refresh lock. The rotated tokens (or a permanent
+ * relogin status) belong to that exact row, still guarded by the id + version
+ * compare-and-set and `status = active`, so they persist even if the
+ * designation is cleared or its owner's permission removed while the provider
+ * call is in flight. Dropping them would leave the row holding a refresh token
+ * the provider has already spent. This is never authority to load or use a
+ * credential: loading and every Apps request still require the live designation.
+ */
+type CodexAppsRefreshOutcomeAuthority = { purpose: "codex_apps_refresh_outcome" };
 type CodexCredentialUseAuthority =
   | CodexAcceptedCredentialAuthority
-  | CodexAppsCredentialUseAuthority;
+  | CodexAppsCredentialUseAuthority
+  | CodexAppsRefreshOutcomeAuthority;
 
 const CODEX_APPS_CREDENTIAL_USE: CodexAppsCredentialUseAuthority = { purpose: "codex_apps" };
+const CODEX_APPS_REFRESH_OUTCOME: CodexAppsRefreshOutcomeAuthority = {
+  purpose: "codex_apps_refresh_outcome",
+};
 
 /**
  * The designated Apps credential, under the same designation and owner rules as
@@ -25126,6 +25143,14 @@ async function codexCredentialUseCondition(
   if (!authority) return (await effectiveCodexCredentialPoolCondition(tx, workspaceId)).condition;
   if ("purpose" in authority) {
     if (authority.purpose === "codex_apps") return codexAppsCredentialUseCondition(workspaceId);
+    if (authority.purpose === "codex_apps_refresh_outcome") {
+      // Same workspace-owned row family the designation can name; the caller's
+      // id + version CAS pins the exact row loaded under the designation.
+      return and(
+        eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+        inArray(schema.codexSubscriptionCredentials.authorityScope, ["workspace", "user"]),
+      )!;
+    }
     return sql`opengeni_private.codex_credential_serves_turn(
       ${schema.codexSubscriptionCredentials.accountId}, ${workspaceId}::uuid,
       ${schema.codexSubscriptionCredentials.id}, ${authority.turnId}::uuid)`;
@@ -25153,7 +25178,8 @@ export async function loadCodexCredentialForRun(
   settings: Settings,
   workspaceId: string,
   credentialId: string,
-  authority?: CodexCredentialUseAuthority,
+  // Refresh-outcome authority only records a result; it can never load a row.
+  authority?: Exclude<CodexCredentialUseAuthority, CodexAppsRefreshOutcomeAuthority>,
 ): Promise<CodexCredentialForRun | null> {
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
@@ -88495,11 +88521,13 @@ export function buildCodexTokenResolver(
 
 /**
  * Token persistence for the workspace's designated Codex Apps credential.
- * Loading, the refresh compare-and-set and relogin stamping all use the Apps
- * designation authority, never the inference routing pool, so a workspace
- * designation keeps working (and its refreshes persist) under organization
- * routing. A credential that is not the loadable, active designation is
- * `CodexAppsCredentialUnavailable`, not a refresh failure.
+ * Loading uses the Apps designation authority, never the inference routing
+ * pool, so a workspace designation keeps working (and its refreshes persist)
+ * under organization routing. A refresh admitted under that authority records
+ * its outcome on the same row even if the designation changes mid-flight (see
+ * `CodexAppsRefreshOutcomeAuthority`). A credential that is not the loadable,
+ * designation is `CodexAppsCredentialUnavailable`, not a refresh failure; a
+ * designated credential that needs relogin stays `CodexReloginRequired`.
  */
 function codexAppsAuthDeps(): CodexAuthDeps {
   return {
@@ -88511,13 +88539,17 @@ function codexAppsAuthDeps(): CodexAuthDeps {
         credentialId,
         CODEX_APPS_CREDENTIAL_USE,
       );
-      if (!credential || credential.status !== "active") {
-        throw new CodexAppsCredentialUnavailable();
+      if (!credential) throw new CodexAppsCredentialUnavailable();
+      if (credential.status !== "active") {
+        // Still the designation, but its sign-in is no longer usable: the
+        // remedy is reconnecting this account, not choosing another one.
+        throw new CodexReloginRequired("The designated Codex Apps account must be reconnected.");
       }
       return credential;
     },
+    refreshKeyScope: "codex_apps",
     recordRefresh: (db, input) =>
-      recordCodexTokenRefresh(db, { ...input, authority: CODEX_APPS_CREDENTIAL_USE }),
+      recordCodexTokenRefresh(db, { ...input, authority: CODEX_APPS_REFRESH_OUTCOME }),
     setStatus: (db, workspaceId, status, lastError, target) =>
       setCodexCredentialStatus(
         db,
@@ -88525,7 +88557,7 @@ function codexAppsAuthDeps(): CodexAuthDeps {
         status,
         lastError,
         target,
-        CODEX_APPS_CREDENTIAL_USE,
+        CODEX_APPS_REFRESH_OUTCOME,
       ),
     refresh: refreshCodexToken,
     encrypt: encryptEnvironmentValue,
@@ -88568,8 +88600,10 @@ export type CodexAppsRequestAuth = {
 
 /**
  * Runtime Apps authentication for one workspace designation: resolve (and
- * refresh) the designated credential's bearer, then hold the exact
- * designation, credential and owner authorization through the outbound request.
+ * refresh) the designated credential's bearer, then recheck the exact
+ * designation, credential and owner authorization under their locks while
+ * `use` runs. The runtime's `use` only returns the bearer, so this is a
+ * pre-dispatch check rather than a hold across the provider request.
  * Failures that mean the designation cannot be used are
  * `CodexAppsCredentialUnavailable`.
  */

@@ -4901,8 +4901,8 @@ export async function prepareAgentTools(
         // credential surfacing as a StreamableHTTP "authentication required" 401)
         // degrades to zero tools rather than throwing out of the SDK's run-time
         // getAllMcpTools and failing an unrelated turn. Codex Apps setup-time
-        // auth misses are still published as actionable state because the
-        // workspace catalog explicitly told the user that the surface existed.
+        // auth misses are logged, not published: Apps is discovered on every
+        // turn, so a setup card would repeat on each one (see codexAppsAuthFetch).
         const bestEffort = isCodexAppsMcpServer(config) || optional || !!config.connectionRef;
         // First-party bridges are ordinary in-process MCP servers selected by
         // adapter-owned matchers. Adding another provider extends this registry;
@@ -4929,7 +4929,9 @@ export async function prepareAgentTools(
                 request.toolName,
                 request.forceRefresh === true,
               ),
-            onAuthNeeded: async (payload) => await publishAuthNeeded(options, payload),
+            onAuthNeeded: async (payload) => {
+              await publishAuthNeeded(options, payload);
+            },
             onResolvedConnectionId: (connectionId) =>
               recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, connectionId),
             fetchImpl: mcpFetchImpl,
@@ -6548,12 +6550,14 @@ async function publishAuthNeededForRequest(
 async function publishAuthNeeded(
   options: PrepareToolsOptions,
   payload: ToolAuthNeededPayload,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await options.onAuthNeeded?.(payload);
+    return true;
   } catch {
     // Auth-needed events are advisory UI/audit signals; a publisher failure must
     // not turn an auth-recoverable tool condition into a failed agent turn.
+    return false;
   }
 }
 
@@ -7323,13 +7327,23 @@ function codexAppsAuthFetch(
   options: PrepareToolsOptions,
 ): FetchLike {
   let authNeededPublished = false;
+  let authNeededPublishing: Promise<boolean> | null = null;
   const publishForToolCall = async (
     request: McpRequestReplayInfo,
     reason: ToolAuthNeededPayload["reason"],
   ): Promise<void> => {
     if (!request.toolName || authNeededPublished) return;
-    authNeededPublished = true;
-    await publishCodexAppsAuthNeeded(options, request, reason);
+    if (authNeededPublishing) {
+      await authNeededPublishing;
+      return;
+    }
+    // Only a delivered card counts; a failed publish lets a later call retry.
+    authNeededPublishing = publishCodexAppsAuthNeeded(options, request, reason);
+    try {
+      authNeededPublished = await authNeededPublishing;
+    } finally {
+      authNeededPublishing = null;
+    }
   };
   return async (input, init) => {
     const request = await mcpRequestReplayInfo(input, init);
@@ -7375,8 +7389,8 @@ async function publishCodexAppsAuthNeeded(
   options: PrepareToolsOptions,
   request: McpRequestReplayInfo,
   reason: ToolAuthNeededPayload["reason"],
-): Promise<void> {
-  await publishAuthNeeded(options, {
+): Promise<boolean> {
+  return await publishAuthNeeded(options, {
     serverId: CODEX_APPS_MCP_SERVER_ID,
     toolName: request.toolName ?? null,
     providerDomain: new URL(CODEX_APPS_MCP_URL).hostname,

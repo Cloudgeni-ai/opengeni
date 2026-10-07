@@ -4,7 +4,11 @@ import {
   resolveCodexAppsCredentialIdForRun,
   stampDelegatedHumanAuthorization,
 } from "@opengeni/core";
-import { CodexAppsCredentialUnavailable, isCodexAppsCredentialUnavailable } from "@opengeni/codex";
+import {
+  CodexAppsCredentialUnavailable,
+  CodexReloginRequired,
+  isCodexAppsCredentialUnavailable,
+} from "@opengeni/codex";
 import {
   buildCodexAppsTokenResolver,
   codexAppsRequestAuth,
@@ -446,7 +450,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     });
 
     // The runtime request path uses the persisted token without another refresh
-    // and holds the designation through dispatch.
+    // and rechecks the designation before handing the bearer to dispatch.
     const requestAuth = codexAppsRequestAuth(client.db, settings, {
       workspaceId,
       credentialId: designated.id,
@@ -562,6 +566,103 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       buildCodexAppsTokenResolver(client.db, settings, workspaceId, designated.id).getToken(),
     );
     expect(isCodexAppsCredentialUnavailable(ownerRevoked)).toBe(true);
+  });
+
+  test("SUB-APPS-01: an Apps refresh persists its rotated tokens when the designation is cleared mid-refresh, and clearing works with subscriptions disabled", async () => {
+    if (!available) return;
+    const api = app();
+    const fixture = await appsRoutingFixture(api);
+    const { accountId, workspaceId } = fixture;
+    const designated = await fixture.connect("apps", new Date(Date.now() - 60_000));
+    await fixture.designate(designated.id, 0);
+    await setWorkspaceCodexSubscriptionMode(client.db, {
+      accountId,
+      workspaceId,
+      subjectId: `user:${OWNER_USER_ID}`,
+      mode: "disabled",
+    });
+    expect(
+      (await getWorkspaceCodexSubscriptionSource(client.db, workspaceId)).effectiveSource,
+    ).toBe("disabled");
+    const accounts = await api.request(`/v1/workspaces/${workspaceId}/codex/accounts`, {
+      headers: { cookie: OWNER_COOKIE },
+    });
+    expect(((await accounts.json()) as any).apps).toMatchObject({
+      credentialId: designated.id,
+      canDisable: true,
+    });
+
+    const before = await credentialRow(designated.id);
+    let clearStatus = 0;
+    const token = await buildCodexAppsTokenResolver(
+      client.db,
+      settings,
+      workspaceId,
+      designated.id,
+      {
+        // The provider has spent apps-refresh-1 by the time Apps is turned off.
+        refresh: async () => {
+          const cleared = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
+            method: "DELETE",
+            headers: browserHeaders(OWNER_COOKIE),
+            body: JSON.stringify({ expectedVersion: 1 }),
+          });
+          clearStatus = cleared.status;
+          return { accessToken: "apps-rotated-token", refreshToken: "apps-refresh-2" };
+        },
+      },
+    ).getToken();
+    expect(clearStatus).toBe(200);
+    expect(token.accessToken).toBe("apps-rotated-token");
+    const after = await credentialRow(designated.id);
+    expect(after.version).toBe(before.version + 1);
+    expect(after.status).toBe("active");
+    expect(storedTokens(after)).toMatchObject({
+      access_token: "apps-rotated-token",
+      refresh_token: "apps-refresh-2",
+    });
+
+    // The persisted rotation grants no use: the cleared designation is unavailable.
+    expect(await resolveCodexAppsCredentialIdForRun(client.db, workspaceId)).toBeNull();
+    const revoked = await rejection(
+      codexAppsRequestAuth(client.db, settings, {
+        workspaceId,
+        credentialId: designated.id,
+      }).withAuthorization(async (bearer) => bearer),
+    );
+    expect(isCodexAppsCredentialUnavailable(revoked)).toBe(true);
+  });
+
+  test("SUB-APPS-01: a permanent Apps refresh failure under organization routing stamps needs_relogin and stays a relogin, not unavailable", async () => {
+    if (!available) return;
+    const api = app();
+    const fixture = await appsRoutingFixture(api);
+    const { workspaceId } = fixture;
+    const designated = await fixture.connect("apps", new Date(Date.now() - 60_000));
+    await fixture.designate(designated.id, 0);
+    await fixture.connectOrganization();
+    await fixture.routeToOrganization();
+
+    const before = await credentialRow(designated.id);
+    const refreshFailure = await rejection(
+      buildCodexAppsTokenResolver(client.db, settings, workspaceId, designated.id, {
+        refresh: async () => {
+          throw new CodexReloginRequired("refresh token was revoked");
+        },
+      }).getToken(),
+    );
+    expect(refreshFailure).toBeInstanceOf(CodexReloginRequired);
+    expect(isCodexAppsCredentialUnavailable(refreshFailure)).toBe(false);
+    const after = await credentialRow(designated.id);
+    expect(after.status).toBe("needs_relogin");
+    expect(after.version).toBe(before.version);
+
+    // Later attempts still describe a relogin of the designated account.
+    const later = await rejection(
+      buildCodexAppsTokenResolver(client.db, settings, workspaceId, designated.id).getToken(),
+    );
+    expect(later).toBeInstanceOf(CodexReloginRequired);
+    expect(isCodexAppsCredentialUnavailable(later)).toBe(false);
   });
 
   test("an actual Better Auth sign-in cookie can prepare its owning credential", async () => {

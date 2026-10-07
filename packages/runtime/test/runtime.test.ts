@@ -10275,6 +10275,51 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("codex_apps: a failed card publish does not use up the turn's one Apps card (SUB-APPS-01)", async () => {
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer tok-123" },
+    });
+    let failure: Error | null = null;
+    const auth = makeCodexAppsAuth();
+    const authorize = auth.withAuthorization;
+    auth.withAuthorization = async (use) => {
+      if (failure) throw failure;
+      return await authorize(use);
+    };
+    const delivered: ToolAuthNeededPayload[] = [];
+    let publishAttempts = 0;
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: auth,
+        mcpFetchImpl: codexAppsTestFetch(mcp.url),
+        onAuthNeeded: (payload) => {
+          publishAttempts += 1;
+          if (publishAttempts === 1) throw new Error("event bus unavailable");
+          delivered.push(payload);
+        },
+      },
+    );
+    try {
+      await prepared.mcpServers[0]!.listTools();
+      failure = new CodexAppsCredentialUnavailable();
+      for (const query of ["first", "second", "third"]) {
+        const result = await prepared.mcpServers[0]!.callToolResult!(
+          "codex_apps__search_documents",
+          { query },
+        );
+        expect(result).toMatchObject({ isError: true });
+      }
+      expect(publishAttempts).toBe(2);
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]).toMatchObject({ reason: "designated_credential_unavailable" });
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
   test("codex_apps: a genuine token refresh failure on a tool call stays refresh_failed (SUB-APPS-01)", async () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer tok-123" },
