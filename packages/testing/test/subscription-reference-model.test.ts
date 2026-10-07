@@ -583,4 +583,46 @@ describe("reference model scenarios", () => {
     });
     expect(stayed.length).toBeGreaterThan(0);
   });
+
+  test("model:SUB-WAIT-02, model:SUB-SEL-02: the expected reset ignores a personal account the person has not opted into", () => {
+    const withPersonal = (optIn: boolean): World =>
+      exhaust(
+        exhaust(
+          exhaust(
+            {
+              ...base(),
+              people: [{ id: "person-a", active: true, personalFallbackOptIn: optIn }],
+              connections: [
+                ...base().connections,
+                {
+                  ...shared("personal-claude", "claude"),
+                  ownership: { kind: "personal", ownerId: "person-a" },
+                },
+              ],
+              sessions: base().sessions.map((session) => ({
+                ...session,
+                visibility: "private" as const,
+                onlyThisModel: true,
+              })),
+            },
+            "claude-a",
+            NOW + 60_000,
+          ),
+          "claude-b",
+          NOW + 90_000,
+        ),
+        "personal-claude",
+        NOW + 10_000,
+      );
+    expect(decide(withPersonal(false), "session-1", NOW)).toEqual({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+      earliestResetAt: NOW + 60_000,
+    });
+    expect(decide(withPersonal(true), "session-1", NOW)).toEqual({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+      earliestResetAt: NOW + 10_000,
+    });
+  });
 });

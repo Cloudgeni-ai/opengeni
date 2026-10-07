@@ -299,10 +299,20 @@ export function candidateModels(world: World, session: Session): ModelId[] {
   return [preferred, ...fallbacks];
 }
 
-function earliestReset(world: World, session: Session, models: ModelId[]): number | null {
+/**
+ * The earliest reset among accounts automatic selection could use for these
+ * models. A personal account counts only under the opt-in fallback (SUB-SEL-02).
+ */
+function earliestReset(
+  world: World,
+  session: Session,
+  models: ModelId[],
+  personalFallback: boolean,
+): number | null {
   let earliest: number | null = null;
   for (const connection of world.connections) {
     if (connection.quota.kind !== "exhausted") continue;
+    if (connection.ownership.kind === "personal" && !personalFallback) continue;
     if (!isAuthorized(world, session, connection)) continue;
     if (!models.some((modelId) => connection.entitledModels.includes(modelId))) continue;
     earliest =
@@ -391,7 +401,7 @@ export function decide(world: World, sessionId: string, now: number): Decision {
   return {
     kind: "wait",
     reason: "no_eligible_capacity",
-    earliestResetAt: earliestReset(world, session, models),
+    earliestResetAt: earliestReset(world, session, models, personalFallback),
   };
 }
 
