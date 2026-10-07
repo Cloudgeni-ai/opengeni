@@ -894,7 +894,7 @@ export async function reconcileAcknowledgedCanaries(
       .filter((row) => row.predicateType === SLSA);
     requireThat(attested.length === 1, "Expected one provenance bundle");
     const bundle = object(attested[0]!.bundle),
-      bundleFile = store.file(Buffer.from(JSON.stringify(bundle)), "bundle");
+      bundleFile = store.file(Buffer.from(JSON.stringify(bundle)));
     const verified = await (options.verify ?? verifySignature)(
       store,
       origin,
