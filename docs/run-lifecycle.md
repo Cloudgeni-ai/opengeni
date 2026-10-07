@@ -3633,6 +3633,19 @@ Authenticated session artifact routes expose sanitized metadata and one bounded
 range at a time, and the SDK verifies assembled length and SHA before React
 renders an object URL.
 
+Model-history materialization reads a retained screenshot under the current
+turn's file authority. In a shared session, a screenshot another participant
+retained privately keeps its workspace-visible lifecycle row, but its file is
+hidden from this requester. Because generic file deletion is restricted while
+that row exists, such an image is withheld, not deleted. It is replaced in the
+model view with the same neutral "not available to the current requester"
+receipt as history attachments: no bytes, no fetch instruction. The turn
+proceeds, the authority boundary is unchanged, and canonical history keeps the
+marker, so a requester with access still receives the pixels. Lifecycle failures
+are unchanged for every requester: a missing row is still `deleted`, a
+non-ready or expired row still fails as before, and bytes that do not match the
+recorded size, SHA-256 or dimensions still fail closed as `invalid_content`.
+
 Generated images have a separate permanent workspace-file lifecycle. Adapter
 provider calls first cross a durable prepared/provider-started fence; after the
 provider may have run, recovery may finish an existing deterministic upload but

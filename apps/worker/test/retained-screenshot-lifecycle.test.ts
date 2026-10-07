@@ -789,6 +789,87 @@ describe("retained screenshot lifecycle fences", () => {
     expect(String(output).startsWith("data:image/png;base64,")).toBeTrue();
   }, 180_000);
 
+  test("a shared session withholds another member's private screenshot with a neutral receipt", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const asMember = <T>(subjectId: string, fn: () => Promise<T>) =>
+      withSessionRlsActorContext({ subjectId, privateFileOwnerSubjectId: subjectId }, fn);
+    const owner = "user:screenshot-owner";
+    const participant = "user:shared-session-participant";
+    const prepared = await asMember(owner, () => prepareArtifact(fixture, memory.storage));
+    await memory.storage.putObject({
+      key: prepared.objectKey,
+      contentType: "image/png",
+      body: PNG,
+      sha256: SCREENSHOT.sha256,
+    });
+    await asMember(owner, () =>
+      settleRetainedScreenshotArtifactReady(db, {
+        ...fixture,
+        artifactId: prepared.artifactId,
+        settlementKey: prepared.settlementKey,
+      }),
+    );
+    const marker = (artifactId: string) => ({
+      type: "retained_artifact",
+      artifact: { available: false, artifactId, reason: "pending" },
+    });
+    const history = (artifactId: string) => [
+      { type: "function_call_result", callId: "call-direct", output: marker(artifactId) },
+      {
+        type: "function_call_result",
+        callId: "call-content",
+        output: [
+          { type: "input_text", text: "Image viewed" },
+          { type: "input_image", image: marker(artifactId) },
+        ],
+      },
+    ];
+    const materialize = (artifactId: string, now?: Date) =>
+      materializeRetainedScreenshotHistory({
+        db,
+        objectStorage: memory.storage,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        history: history(artifactId),
+        ...(now ? { now } : {}),
+      });
+
+    // The owner still receives the pixels.
+    const own = await asMember(owner, () => materialize(prepared.artifactId));
+    expect(String(own[0]?.output).startsWith("data:image/png;base64,")).toBeTrue();
+
+    // Another participant's turn proceeds with a neutral receipt and no bytes.
+    const participantView = await asMember(participant, () => materialize(prepared.artifactId));
+    const direct = String(participantView[0]?.output);
+    expect(direct).toContain(prepared.artifactId);
+    expect(direct).toContain("not available to the current requester");
+    expect(direct).not.toContain("deleted");
+    expect(direct).not.toContain("download_url");
+    expect(direct).not.toContain("base64");
+    expect(participantView[1]?.output).toEqual([
+      { type: "input_text", text: "Image viewed" },
+      { type: "input_text", text: direct },
+    ]);
+    // The authority boundary is unchanged.
+    expect(
+      await asMember(participant, () => getFile(db, fixture.workspaceId, prepared.artifactId)),
+    ).toBeNull();
+
+    // Lifecycle failures behave exactly as for a readable screenshot.
+    const afterExpiry = new Date(Date.now() + 120_000);
+    await expect(
+      asMember(owner, () => materialize(prepared.artifactId, afterExpiry)),
+    ).rejects.toThrow("unavailable: expired");
+    await expect(
+      asMember(participant, () => materialize(prepared.artifactId, afterExpiry)),
+    ).rejects.toThrow("unavailable: expired");
+    await expect(asMember(participant, () => materialize(crypto.randomUUID()))).rejects.toThrow(
+      "unavailable: deleted",
+    );
+  }, 180_000);
+
   test("recovers a truncated screenshot receipt by exact session and tool call", async () => {
     if (!available) return;
     const fixture = await freshTurn();
