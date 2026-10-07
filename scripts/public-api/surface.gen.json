@@ -30357,6 +30357,17 @@
       "sessionRepoLabel": "value",
       "SessionStatusTone": "type"
     },
+    "@opengeni/react/session-realtime": {
+      "CODEX_LIVE_MODEL": "value",
+      "codexRealtimeAdmissionAllowed": "value",
+      "codexRealtimeAdmissionBlocker": "value",
+      "RealtimeControllerClient": "type",
+      "RealtimeModelOption": "type",
+      "SessionRealtimeControllerFactory": "type",
+      "sessionRealtimeLifecycleIsActive": "value",
+      "useRealtimeModelSelection": "value",
+      "useSessionRealtime": "value"
+    },
     "@opengeni/react/session-ui": {
       "AllowanceLabels": "type",
       "AllowanceScope": "type",
