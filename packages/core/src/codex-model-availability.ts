@@ -31,14 +31,15 @@ type Dependencies = {
   ) => ReturnType<ReturnType<typeof buildCodexTokenResolver>["getToken"]>;
 };
 
-const defaultDependencies: Dependencies = {
+// Built per call so the live module bindings are read at call time, not frozen at load.
+const defaultDependencies = (): Dependencies => ({
   listAccounts: listCodexAccountStatuses,
   getRotation: getCodexRotationSettings,
   loadCredential: loadCodexCredentialForRun,
   fetchModels: fetchCodexModels,
   getToken: (targetDb, targetSettings, targetWorkspaceId, credentialId) =>
     buildCodexTokenResolver(targetDb, targetSettings, targetWorkspaceId, credentialId).getToken(),
-};
+});
 
 type AccountCatalog = {
   account: Awaited<ReturnType<typeof listCodexAccountStatuses>>[number];
@@ -129,7 +130,7 @@ export async function loadCodexAccountsLackingModel(
   settings: Settings,
   workspaceId: string,
   upstreamModelId: string,
-  deps: Dependencies = defaultDependencies,
+  deps: Dependencies = defaultDependencies(),
 ): Promise<Set<string>> {
   if (!settings.codexSubscriptionEnabled) return new Set();
   const live = await loadAccountCatalogs(db, settings, workspaceId, deps);
@@ -145,7 +146,7 @@ export async function loadWorkspaceCodexModelAvailability(
   db: Database,
   settings: Settings,
   workspaceId: string,
-  deps: Dependencies = defaultDependencies,
+  deps: Dependencies = defaultDependencies(),
 ): Promise<Record<string, ModelAvailabilityObservation>> {
   if (!settings.codexSubscriptionEnabled) return {};
   const live = await loadAccountCatalogs(db, settings, workspaceId, deps);
