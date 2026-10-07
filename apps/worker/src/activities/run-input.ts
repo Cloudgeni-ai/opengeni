@@ -24,6 +24,7 @@ import {
   type HistoryProviderApi,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
+import { requesterUnavailableReceiptText } from "./requester-unavailable-receipt";
 
 /** Project only artifacts explicitly rejected by the provider out of its next view. */
 export function projectRejectedProviderArtifacts(
@@ -323,11 +324,7 @@ function attachmentReceiptText(ref: FileResourceRef): string {
  * no fetch instruction, which would fail and lead the model to report the file
  * as deleted. */
 function unavailableAttachmentReceiptText(ref: FileResourceRef): string {
-  return (
-    `[Attachment: fileId=${ref.fileId}. This file is not available to the current requester: ` +
-    `it may belong to another participant, or it may no longer be available. ` +
-    `Its contents are not included and it cannot be downloaded in this turn; do not guess which.]`
-  );
+  return requesterUnavailableReceiptText(`Attachment: fileId=${ref.fileId}`, "file");
 }
 
 /**
