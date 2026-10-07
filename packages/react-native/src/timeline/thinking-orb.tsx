@@ -22,10 +22,13 @@ export function ThinkingOrb({
   state = "searching",
   size = 64,
   speed = 0.8,
+  displaySize,
 }: {
   state?: OrbState;
   size?: 64 | 20;
   speed?: number;
+  /** Draw the tuned preset larger (for example a call screen) without losing sharpness. */
+  displaySize?: number;
 }) {
   const theme = useNativeTimelineTheme();
   const dark = theme.scheme === "dark";
@@ -54,7 +57,13 @@ export function ThinkingOrb({
     preset.opts,
   );
   return (
-    <Svg width={size} height={size} accessibilityElementsHidden importantForAccessibility="no">
+    <Svg
+      width={displaySize ?? size}
+      height={displaySize ?? size}
+      viewBox={`0 0 ${size} ${size}`}
+      accessibilityElementsHidden
+      importantForAccessibility="no"
+    >
       {frame.lines.map((line, index) => (
         <Line
           // Stateless drawing slots retain their keys as coordinates animate.

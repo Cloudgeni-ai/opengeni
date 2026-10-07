@@ -4,6 +4,7 @@ import { sessionDisplayTitle } from "@opengeni/react/session-list-model";
 import { useOpenGeniNativeSession } from "@opengeni/react-native";
 import {
   ComposerPill,
+  Icon,
   ModelMark,
   ModelPickerSheet,
   NativeSessionScreen,
@@ -15,10 +16,12 @@ import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markd
 import * as Haptics from "expo-haptics";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { useCallback, useMemo, useState } from "react";
-import { Text, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
 import { BrandMark } from "@/brand-mark";
+import { useAgentCall } from "@/call";
+import { pinCallSession, unpinCallSession, useOutsideCallPreferences } from "@/call-preferences";
 import { copyText } from "@/clipboard";
 import { useSessionComputeLabel } from "@/compute-label";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
@@ -27,6 +30,9 @@ import { AppThemeProvider } from "@/theme";
 import { useComposerVoice } from "@/voice";
 
 const renderMarkdown = createWebMarkdownRenderer({ onCopy: (text) => void copyText(text) });
+
+/** The session menu item that sends outside calls (Siri, Phone, Shortcuts) to this session. */
+const CALL_PIN_ACTION = "opengeni.take-calls-here";
 
 export default function SessionScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -84,6 +90,12 @@ function LiveSession(props: {
   // Web header: the status badge beside the title (a paused workstream says so).
   const refreshSession = controller.session.refresh;
   const title = session ? sessionDisplayTitle(session) : "";
+  const agentCall = useAgentCall();
+  const onCall = agentCall.sessionId === props.sessionId;
+  const callPreferences = useOutsideCallPreferences();
+  const takesCalls =
+    callPreferences.target === "pinned" && callPreferences.pinned?.sessionId === props.sessionId;
+  const workspaceId = props.workspaceId;
   const headerTitle = useCallback(
     () => (
       <AppThemeProvider>
@@ -100,32 +112,81 @@ function LiveSession(props: {
     () =>
       session ? (
         <AppThemeProvider>
-          <SessionActionsButton
-            session={session}
-            client={props.client}
-            onChanged={() => void refreshSession()}
-            onActionFeedback={() => void Haptics.selectionAsync()}
-            renderMenu={({ actions, trigger }) => (
-              <NativeMenu
-                actions={actions.map((action) => ({
-                  id: action.key,
-                  title: action.label,
-                  ...(action.systemImage
-                    ? { image: action.systemImage as MenuAction["image"] }
-                    : {}),
-                  ...(action.destructive ? { attributes: { destructive: true } } : {}),
-                }))}
-                onPressAction={({ nativeEvent }) =>
-                  actions.find((action) => action.key === nativeEvent.event)?.onPress()
-                }
-              >
-                {trigger}
-              </NativeMenu>
-            )}
-          />
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={onCall ? "Return to call" : "Call this session"}
+              hitSlop={8}
+              onPress={() => {
+                void Haptics.selectionAsync();
+                agentCall.callSession(props.sessionId);
+              }}
+              style={({ pressed }) => ({
+                width: 36,
+                height: 36,
+                borderRadius: 18,
+                alignItems: "center",
+                justifyContent: "center",
+                opacity: pressed ? 0.6 : 1,
+                backgroundColor: onCall ? "#34C759" : "transparent",
+              })}
+            >
+              <Icon name="phone" size={20} color={onCall ? "#FFFFFF" : theme.colors.fg} />
+            </Pressable>
+            <SessionActionsButton
+              session={session}
+              client={props.client}
+              onChanged={() => void refreshSession()}
+              onActionFeedback={() => void Haptics.selectionAsync()}
+              renderMenu={({ actions, trigger }) => (
+                <NativeMenu
+                  actions={[
+                    {
+                      id: CALL_PIN_ACTION,
+                      title: takesCalls ? "Stop taking calls here" : "Take calls here",
+                      image: (takesCalls
+                        ? "phone.down"
+                        : "phone.arrow.down.left") as MenuAction["image"],
+                    },
+                    ...actions.map((action) => ({
+                      id: action.key,
+                      title: action.label,
+                      ...(action.systemImage
+                        ? { image: action.systemImage as MenuAction["image"] }
+                        : {}),
+                      ...(action.destructive ? { attributes: { destructive: true } } : {}),
+                    })),
+                  ]}
+                  onPressAction={({ nativeEvent }) => {
+                    if (nativeEvent.event === CALL_PIN_ACTION) {
+                      void Haptics.selectionAsync();
+                      if (takesCalls) unpinCallSession();
+                      else if (workspaceId)
+                        pinCallSession({ workspaceId, sessionId: props.sessionId, title });
+                      return;
+                    }
+                    actions.find((action) => action.key === nativeEvent.event)?.onPress();
+                  }}
+                >
+                  {trigger}
+                </NativeMenu>
+              )}
+            />
+          </View>
         </AppThemeProvider>
       ) : null,
-    [props.client, refreshSession, session],
+    [
+      agentCall,
+      onCall,
+      props.client,
+      props.sessionId,
+      refreshSession,
+      session,
+      takesCalls,
+      theme.colors.fg,
+      title,
+      workspaceId,
+    ],
   );
   // Photos and files, as the web composer's + offers them.
   const attachMenu = (

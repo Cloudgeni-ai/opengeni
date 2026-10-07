@@ -9,3 +9,6 @@ export * from "./settings";
 export * from "./fakes";
 export * from "./mcp";
 export * from "./screenshot";
+// Namespaced: its generic names (World, Session, Connection, decide) would
+// otherwise crowd the package's top-level exports.
+export * as subscriptionReferenceModel from "./subscription-reference-model";

@@ -44,6 +44,7 @@ export default defineConfig({
     "src/timeline-model.ts",
     "src/organization-model.ts",
     "src/session-agents-model.ts",
+    "src/session-realtime.ts",
     "src/new-session-draft.ts",
     "src/session-list-model.ts",
     "src/session-feedback-model.ts",

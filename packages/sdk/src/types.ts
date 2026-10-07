@@ -2406,7 +2406,8 @@ export type ToolAuthNeededPayload = {
     | "refresh_failed"
     | "personal_authority_unavailable"
     | "unsupported_auth"
-    | "resource_scope_unavailable";
+    | "resource_scope_unavailable"
+    | "designated_credential_unavailable";
   hostReason?:
     | "missing_connection"
     | "expired"
@@ -2415,6 +2416,7 @@ export type ToolAuthNeededPayload = {
     | "personal_authority_unavailable"
     | "unsupported_auth"
     | "resource_scope_unavailable"
+    | "designated_credential_unavailable"
     | undefined;
   scopes?: string[] | undefined;
   resource?: string | undefined;
@@ -6354,7 +6356,8 @@ export type ScheduledTaskAccessFailureReason =
   | "refresh_failed"
   | "personal_authority_unavailable"
   | "unsupported_auth"
-  | "resource_scope_unavailable";
+  | "resource_scope_unavailable"
+  | "designated_credential_unavailable";
 
 /** A connector a scheduled run's own turn could not use (a `tool.auth_needed` fact). */
 export type ScheduledTaskRunAccessFailure = {

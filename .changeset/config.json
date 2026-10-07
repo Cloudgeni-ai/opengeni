@@ -27,6 +27,7 @@
       "@opengeni/observability",
       "@opengeni/ogtool",
       "@opengeni/react",
+      "@opengeni/react-native",
       "@opengeni/runtime",
       "@opengeni/sdk",
       "@opengeni/storage",

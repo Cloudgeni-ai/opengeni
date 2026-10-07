@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { appendDictation } from "./voice-input";
+import { appendDictation } from "../src/voice-input";
 
 describe("appendDictation", () => {
   test("fills an empty draft with the trimmed transcript", () => {

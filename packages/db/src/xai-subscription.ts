@@ -65,6 +65,8 @@ export const {
     resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
   resolveSubscriptionProviderAccountAuthoritySnapshotForAcceptanceInTransaction:
     resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction,
+  resolveSubscriptionSharedPoolAuthoritySnapshotInTransaction:
+    resolveXaiSharedPoolAuthoritySnapshotInTransaction,
   updateSubscriptionAccountSettings: updateXaiSubscriptionAccountSettings,
   updateSubscriptionAllocatorEligibility: updateXaiAllocatorEligibility,
   renameSubscriptionAccount: renameXaiSubscriptionAccount,

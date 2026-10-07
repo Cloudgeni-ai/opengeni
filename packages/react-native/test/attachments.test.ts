@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { FileAttachmentClientLike } from "@opengeni/react/session";
-import type { NativeCryptoAdapter, NativeFileAdapter, NativePickedFile } from "./adapters";
+import type { NativeCryptoAdapter, NativeFileAdapter, NativePickedFile } from "../src/adapters";
 import {
   addNativeFilesForGeneration,
   prepareNativeAttachmentUpload,
@@ -8,7 +8,7 @@ import {
   runNativeAttachmentPicker,
   sameNativeAttachmentScope,
   type NativeAttachment,
-} from "./attachments";
+} from "../src/attachments";
 
 const source: NativePickedFile = {
   id: "file-1",

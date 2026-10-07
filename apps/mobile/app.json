@@ -8,7 +8,18 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "bundleIdentifier": "ai.opengeni.app",
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "UIBackgroundModes": ["audio"],
+        "NSUserActivityTypes": ["INStartCallIntent"],
+        "UIApplicationShortcutItems": [
+          {
+            "UIApplicationShortcutItemType": "ai.opengeni.app.call",
+            "UIApplicationShortcutItemTitle": "Call your agent",
+            "UIApplicationShortcutItemIconSymbolName": "phone.fill"
+          }
+        ]
+      }
     },
     "android": {
       "package": "ai.opengeni.app",
@@ -31,7 +42,7 @@
       [
         "expo-audio",
         {
-          "microphonePermission": "Opengeni uses the microphone to dictate your messages.",
+          "microphonePermission": "Opengeni uses the microphone for voice calls with your agent and to dictate your messages.",
           "recordAudioAndroid": true
         }
       ]

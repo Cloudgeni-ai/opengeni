@@ -15,7 +15,7 @@ import {
   previewConnectorActionApproval,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
-  withCodexAppsRequestAuthorization,
+  codexAppsRequestAuth,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -51,8 +51,6 @@ import { materializeGmailFile, readGmailFileFromChannel } from "../gmail-files";
 import { objectStorageForSandboxDownloads } from "./file-resources";
 import { allowedFirstPartyMcpToolsForSession, type Settings } from "@opengeni/config";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
-import { buildCodexTokenResolver } from "../codex-auth";
-import { CODEX_CLIENT_VERSION } from "@opengeni/codex";
 import { mergeResourceRefs } from "../common";
 import {
   workspaceSessionToolPolicyDefaultServerIds,
@@ -80,6 +78,7 @@ import {
 } from "../../observability-metrics";
 import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
+import { promptToolAvailabilityForTurn } from "./prompt-tool-availability";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import {
@@ -559,31 +558,10 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   });
   const localMcpServers = [...apiIntegrationMcpServers, ...githubRestMcp.localMcpServers];
   const codexAppsAuth = codexAppsCredentialId
-    ? (() => {
-        const resolver = buildCodexTokenResolver(
-          db,
-          runSettings,
-          input.workspaceId,
-          codexAppsCredentialId,
-        );
-        return {
-          clientVersion: CODEX_CLIENT_VERSION,
-          withAuthorization: async <T>(
-            use: (token: { accessToken: string; chatgptAccountId: string | null }) => Promise<T>,
-          ): Promise<T> => {
-            const snapshot = await resolver.getToken();
-
-            return await withCodexAppsRequestAuthorization(
-              db,
-              {
-                workspaceId: input.workspaceId,
-                credentialId: codexAppsCredentialId,
-              },
-              async () => await use(snapshot),
-            );
-          },
-        };
-      })()
+    ? codexAppsRequestAuth(db, runSettings, {
+        workspaceId: input.workspaceId,
+        credentialId: codexAppsCredentialId,
+      })
     : undefined;
   const linkedAuthority = await getExternalLinkTurnAuthorization(
     db,
@@ -607,6 +585,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
     allowedFirstPartyMcpToolsForSession(runSettings, session.firstPartyMcpTools),
   );
+  // Frozen with the selection and ceiling above; instructions only.
+  const promptToolAvailability = promptToolAvailabilityForTurn({
+    agentConfig: session.agent,
+    selectedFirstPartyMcpTools,
+    firstPartyPermissions: effectiveFirstPartyPermissions,
+  });
   const titleToolPlan = sessionTitleToolPlan({
     agentConfig: session.agent,
     tools: turnTools,
@@ -1280,6 +1264,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       "skill_read",
     ],
     codeSearchAvailable: codeSearchTools.length > 0,
+    promptToolAvailability,
     skillCatalog,
   };
 }

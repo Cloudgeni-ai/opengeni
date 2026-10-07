@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { FIRST_PARTY_MCP_TOOL_NAMES } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
 import { inspectPersistentAgentInstructions } from "../../src/index";
 import { LEGACY_PROMPT_CASES } from "./legacy-cases";
@@ -33,14 +34,14 @@ const LOCKED: Record<string, { chars: number; sha256: string; layers: string }> 
     layers: "operational_contract,persona_and_core",
   },
   extras_without_governance: {
-    chars: 37324,
-    sha256: "06813bf4fcdcad627caa3d9e2eab4d7bb936a9b6b4f83e81716ad9327c2dd898",
+    chars: 37528,
+    sha256: "b26170de12942ad98b78b9594f8fa38926bacf615c7984bd7acb4971e2e17ca5",
     layers:
       "operational_contract,persona_and_core,codemode,code_search,git_bindings,workspace_memory,skill_catalog,session_instructions",
   },
   extras_with_governance: {
-    chars: 36423,
-    sha256: "2a7fea6ffb0a79955f11152915731def55b8cfaf05c0bb2d79a799bcfe6177aa",
+    chars: 36627,
+    sha256: "f207c82e96827411b028810dc62ab752845058c3b78359233ff8cfd4faea1a3f",
     layers:
       "operational_contract,persona_and_core,workspace_governance,session_instructions,codemode,code_search,workspace_memory",
   },
@@ -66,5 +67,20 @@ describe("legacy prompt bytes (null agent configuration)", () => {
         expect(inspection.layers.map((layer) => layer.id).join(",")).toBe(locked.layers);
       });
     }
+  }
+
+  // Tool availability is a modular-only rendering input: even a view proving
+  // every first-party tool absent leaves the legacy bytes untouched.
+  for (const [name, options] of Object.entries(LEGACY_PROMPT_CASES)) {
+    test(`${name} ignores tool availability`, () => {
+      const inspection = inspectPersistentAgentInstructions(settings, {
+        ...options,
+        agentPromptToolAvailability: { unavailable: [...FIRST_PARTY_MCP_TOOL_NAMES] },
+      });
+      const locked = LOCKED[name]!;
+      expect(inspection.composed.length).toBe(locked.chars);
+      expect(createHash("sha256").update(inspection.composed).digest("hex")).toBe(locked.sha256);
+      expect(inspection.layers.map((layer) => layer.id).join(",")).toBe(locked.layers);
+    });
   }
 });
