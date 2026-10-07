@@ -48,6 +48,9 @@ spec:
       # Make every alert and recording rule self-identifying when one Prometheus
       # evaluates more than one OpenGeni deployment. Dashboard and Alertmanager
       # consumers can then select the exact release instead of matching globally.
+      # These output labels do not fence input series: every OpenGeni metric and
+      # record reference below must also select namespace/release/environment.
+      # Scrape-owned up has namespace/release, not exporter environment labels.
       labels:
         namespace: {{ .Release.Namespace | quote }}
         environment: {{ $environment | quote }}
@@ -60,16 +63,16 @@ spec:
         - record: opengeni:sandbox_leases:fresh_max
           expr: |
             max by (liveness) (
-              opengeni_sandbox_leases
+              opengeni_sandbox_leases{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
               and on (job, instance)
-              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="leases"} < {{ $inventoryFreshnessSeconds }})
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="leases"} < {{ $inventoryFreshnessSeconds }})
             )
         - record: opengeni:sandbox_checkpoint_artifacts:fresh_max
           expr: |
             max by (state) (
-              opengeni_sandbox_checkpoint_artifacts
+              opengeni_sandbox_checkpoint_artifacts{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
               and on (job, instance)
-              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="checkpoint_artifacts"} < {{ $inventoryFreshnessSeconds }})
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="checkpoint_artifacts"} < {{ $inventoryFreshnessSeconds }})
             )
         - record: opengeni:sandbox_recovery_observations_recent:fresh_max
           expr: |
@@ -81,37 +84,37 @@ spec:
         - record: opengeni:sandbox_rotation_backlog:fresh_max
           expr: |
             max by (kind) (
-              opengeni_sandbox_rotation_backlog
+              opengeni_sandbox_rotation_backlog{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
               and on (job, instance)
-              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="rotation_backlog"} < {{ $inventoryFreshnessSeconds }})
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="rotation_backlog"} < {{ $inventoryFreshnessSeconds }})
             )
         - record: opengeni:retained_processes_active:fresh_max
           expr: |
             max by (owner_state) (
-              opengeni_retained_processes_active
+              opengeni_retained_processes_active{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
               and on (job, instance)
-              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="retained_processes"} < {{ $inventoryFreshnessSeconds }})
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="retained_processes"} < {{ $inventoryFreshnessSeconds }})
             )
         - record: opengeni:retained_processes_terminal_owner_backlog:fresh_max
           expr: |
             max by (owner_state) (
-              opengeni_retained_processes_terminal_owner_backlog
+              opengeni_retained_processes_terminal_owner_backlog{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
               and on (job, instance)
-              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="retained_processes"} < {{ $inventoryFreshnessSeconds }})
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="retained_processes"} < {{ $inventoryFreshnessSeconds }})
             )
         - record: opengeni:sandbox_leases_interaction_only:fresh_max
           expr: |
             max by (idle_bucket) (
-              opengeni_sandbox_leases_interaction_only
+              opengeni_sandbox_leases_interaction_only{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
               and on (job, instance)
-              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="interaction_idle"} < {{ $inventoryFreshnessSeconds }})
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="interaction_idle"} < {{ $inventoryFreshnessSeconds }})
             )
         - record: opengeni:sandbox_leases_expired_draining:fresh_max
           expr: |
             max by (backend, age_bucket) (
-              opengeni_sandbox_leases_expired_draining
+              opengeni_sandbox_leases_expired_draining{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
               and on (job, instance)
-              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="expired_drains"} < {{ $inventoryFreshnessSeconds }})
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="expired_drains"} < {{ $inventoryFreshnessSeconds }})
             )
         {{- if $modalEnabled }}
         # Provider-side Modal inventory from the orphan sweep (running boxes,
@@ -119,39 +122,39 @@ spec:
         - record: opengeni:modal_sandbox_inventory:fresh_max
           expr: |
             max by (state) (
-              opengeni_modal_sandbox_inventory
+              opengeni_modal_sandbox_inventory{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
               and on (job, instance)
-              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="modal_provider"} < {{ $inventoryFreshnessSeconds }})
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="modal_provider"} < {{ $inventoryFreshnessSeconds }})
             )
         {{- end }}
         {{- if $opensandboxEnabled }}
         - record: opengeni:opensandbox_batchsandboxes:fresh_max
           expr: |
             max by (phase) (
-              opengeni_opensandbox_batchsandboxes
+              opengeni_opensandbox_batchsandboxes{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
               and on (job, instance)
-              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"} < {{ $inventoryFreshnessSeconds }})
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="opensandbox_kubernetes"} < {{ $inventoryFreshnessSeconds }})
             )
         - record: opengeni:opensandbox_workload_pods:fresh_max
           expr: |
             max by (condition) (
-              opengeni_opensandbox_workload_pods
+              opengeni_opensandbox_workload_pods{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
               and on (job, instance)
-              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"} < {{ $inventoryFreshnessSeconds }})
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="opensandbox_kubernetes"} < {{ $inventoryFreshnessSeconds }})
             )
         - record: opengeni:opensandbox_cleanup_stuck:fresh_max
           expr: |
             max(
-              opengeni_opensandbox_cleanup_stuck
+              opengeni_opensandbox_cleanup_stuck{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
               and on (job, instance)
-              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"} < {{ $inventoryFreshnessSeconds }})
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="opensandbox_kubernetes"} < {{ $inventoryFreshnessSeconds }})
             )
         - record: opengeni:opensandbox_expiration_overdue:fresh_max
           expr: |
             max(
-              opengeni_opensandbox_expiration_overdue
+              opengeni_opensandbox_expiration_overdue{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
               and on (job, instance)
-              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"} < {{ $inventoryFreshnessSeconds }})
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="opensandbox_kubernetes"} < {{ $inventoryFreshnessSeconds }})
             )
         {{- end }}
         # Node-relative protection cannot rely on a container memory limit: the
@@ -168,6 +171,8 @@ spec:
               kube_pod_info{namespace="{{ .Release.Namespace }}", pod=~"{{ $fullName }}-.*"}
               and on (namespace, pod)
               (kube_pod_status_phase{namespace="{{ .Release.Namespace }}", phase="Running"} == 1)
+              and on (namespace, pod)
+              kube_pod_labels{namespace={{ .Release.Namespace | quote }},label_app_kubernetes_io_instance={{ .Release.Name | quote }}}
             )
         - record: opengeni:node_exporter_instance:info
           expr: |
@@ -201,7 +206,7 @@ spec:
               opengeni:node_exporter_instance:info{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
             )
         - alert: OpenGeniTurnStuck
-          expr: opengeni_turn_oldest_no_progress_age_seconds > 900
+          expr: opengeni_turn_oldest_no_progress_age_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 900
           for: 5m
           labels:
             severity: critical
@@ -393,7 +398,7 @@ spec:
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniSuperGrokResponseStreamIdleTimeout
           expr: |
-            sum(increase(opengeni_model_request_phases_total{provider="supergrok-subscription",phase="terminal",outcome="timed_out"}[15m])) > 0
+            sum(increase(opengeni_model_request_phases_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="supergrok-subscription",phase="terminal",outcome="timed_out"}[15m])) > 0
           for: 1m
           labels:
             severity: warning
@@ -890,12 +895,12 @@ spec:
         - alert: OpenGeniSandboxCreateFailureRatio
           expr: |
             (
-              sum(increase(opengeni_sandbox_creates_total{outcome="failed"}[10m]))
+              sum(increase(opengeni_sandbox_creates_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed"}[10m]))
               /
-              clamp_min(sum(increase(opengeni_sandbox_creates_total[10m])), 1)
+              clamp_min(sum(increase(opengeni_sandbox_creates_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
             ) > 0.2
             and on()
-            sum(increase(opengeni_sandbox_creates_total[10m])) >= 5
+            sum(increase(opengeni_sandbox_creates_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
           for: 10m
           labels:
             severity: warning
@@ -908,12 +913,12 @@ spec:
         - alert: OpenGeniSandboxLogicalProvisionFailureRatio
           expr: |
             (
-              sum by (backend) (increase(opengeni_sandbox_provisions_total{outcome="failed"}[10m]))
+              sum by (backend) (increase(opengeni_sandbox_provisions_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed"}[10m]))
               /
-              clamp_min(sum by (backend) (increase(opengeni_sandbox_provisions_total{outcome=~"completed|failed"}[10m])), 1)
+              clamp_min(sum by (backend) (increase(opengeni_sandbox_provisions_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"completed|failed"}[10m])), 1)
             ) > 0.2
             and
-            sum by (backend) (increase(opengeni_sandbox_provisions_total{outcome=~"completed|failed"}[10m])) >= 5
+            sum by (backend) (increase(opengeni_sandbox_provisions_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"completed|failed"}[10m])) >= 5
           for: 10m
           labels:
             severity: warning
@@ -927,12 +932,12 @@ spec:
         - alert: OpenGeniSandboxUnknownProvisionFailureRatio
           expr: |
             (
-              sum by (backend) (increase(opengeni_sandbox_provisions_total{outcome="failed",category="unknown"}[30m]))
+              sum by (backend) (increase(opengeni_sandbox_provisions_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed",category="unknown"}[30m]))
               /
-              clamp_min(sum by (backend) (increase(opengeni_sandbox_provisions_total{outcome="failed"}[30m])), 1)
+              clamp_min(sum by (backend) (increase(opengeni_sandbox_provisions_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed"}[30m])), 1)
             ) >= 0.01
             and
-            sum by (backend) (increase(opengeni_sandbox_provisions_total{outcome="failed"}[30m])) >= 20
+            sum by (backend) (increase(opengeni_sandbox_provisions_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed"}[30m])) >= 20
           for: 15m
           labels:
             severity: warning
@@ -944,7 +949,7 @@ spec:
             next_step: 'Not urgent: an engineer should classify the new failure type in code.'
             description: Extend the structural taxonomy at the owning typed boundary; do not classify failures from raw message text or add ambiguous provider retries.
         - alert: OpenGeniSandboxWarmingTimeout
-          expr: sum(increase(opengeni_sandbox_warming_timeouts_total[15m])) > 0
+          expr: sum(increase(opengeni_sandbox_warming_timeouts_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[15m])) > 0
           labels:
             severity: warning
           annotations:
@@ -956,7 +961,7 @@ spec:
         {{- if $opensandboxEnabled }}
         - alert: OpenGeniOpenSandboxApiThrottled
           expr: |
-            sum(increase(opengeni_sandbox_provider_api_throttles_total{backend="opensandbox"}[10m])) > 0
+            sum(increase(opengeni_sandbox_provider_api_throttles_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="opensandbox"}[10m])) > 0
             or
             sum(increase(rest_client_requests_total{namespace="opensandbox-system",code="429"}[10m])) > 0
           for: 1m
@@ -970,7 +975,7 @@ spec:
             next_step: 'Check OpenSandbox server and Kubernetes API capacity before load increases.'
             description: Opengeni received an HTTP 429 while creating or renewing an OpenSandbox sandbox. Inspect server and Kubernetes API capacity before retry pressure grows.
         - alert: OpenGeniOpenSandboxTtlRenewalFailed
-          expr: sum(increase(opengeni_sandbox_ttl_renewals_total{backend="opensandbox",outcome="failed"}[10m])) > 0
+          expr: sum(increase(opengeni_sandbox_ttl_renewals_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="opensandbox",outcome="failed"}[10m])) > 0
           for: 1m
           labels:
             severity: critical
@@ -1007,9 +1012,9 @@ spec:
         - alert: OpenGeniOpenSandboxInventoryStale
           expr: |
             min(
-              time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"}
+              time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="opensandbox_kubernetes"}
             ) > {{ $inventoryFreshnessSeconds }}
-            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"})
+            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="opensandbox_kubernetes"})
           for: 5m
           labels:
             severity: critical
@@ -1021,7 +1026,7 @@ spec:
             description: No control replica has completed a fresh bounded Kubernetes projection. Workload threshold alerts intentionally fail closed until the list-only inventory refresh recovers.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#observability
         - alert: OpenGeniOpenSandboxPodPending
-          expr: opengeni:opensandbox_workload_pods:fresh_max{condition="pending"} > 0
+          expr: opengeni:opensandbox_workload_pods:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},condition="pending"} > 0
           for: 10m
           labels:
             severity: warning
@@ -1033,7 +1038,7 @@ spec:
             next_step: 'Check the pod''s scheduling events, node capacity and image pulls.'
             description: Inspect the matching BatchSandbox, scheduler reason, image state, node-pool capacity, Pod/IP limits, and resource requests.
         - alert: OpenGeniOpenSandboxImagePullFailed
-          expr: opengeni:opensandbox_workload_pods:fresh_max{condition="image_pull"} > 0
+          expr: opengeni:opensandbox_workload_pods:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},condition="image_pull"} > 0
           for: 5m
           labels:
             severity: warning
@@ -1064,7 +1069,7 @@ spec:
             description: The pinned controller metrics endpoint reports reconcile errors; Kubernetes readiness and restart truth remain independent backstops.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#observability
         - alert: OpenGeniOpenSandboxCapacityExhausted
-          expr: opengeni:opensandbox_workload_pods:fresh_max{condition="unschedulable"} > 0
+          expr: opengeni:opensandbox_workload_pods:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},condition="unschedulable"} > 0
           for: 5m
           labels:
             severity: critical
@@ -1077,7 +1082,7 @@ spec:
             description: Inspect node-pool maximums, Pod/IP ceilings, quota, CPU, memory, ephemeral storage, taints, and selectors before increasing create concurrency.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#observability
         - alert: OpenGeniOpenSandboxCleanupStuck
-          expr: opengeni:opensandbox_cleanup_stuck:fresh_max > 0
+          expr: opengeni:opensandbox_cleanup_stuck:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0
           for: 5m
           labels:
             severity: critical
@@ -1090,7 +1095,7 @@ spec:
             description: At least one BatchSandbox has remained deleting with finalizers past the cleanup threshold. Use Kubernetes inventory to identify the exact resource before any manual finalizer action.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#observability
         - alert: OpenGeniOpenSandboxExpirationOverdue
-          expr: opengeni:opensandbox_expiration_overdue:fresh_max > 0
+          expr: opengeni:opensandbox_expiration_overdue:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0
           for: 5m
           labels:
             severity: critical
@@ -1106,12 +1111,12 @@ spec:
         - alert: OpenGeniSandboxOperationFailureRatio
           expr: |
             (
-              sum by (backend, op) (increase(opengeni_sandbox_operations_total{outcome="failed"}[10m]))
+              sum by (backend, op) (increase(opengeni_sandbox_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed"}[10m]))
               /
-              clamp_min(sum by (backend, op) (increase(opengeni_sandbox_operations_total{outcome=~"ok|failed"}[10m])), 1)
+              clamp_min(sum by (backend, op) (increase(opengeni_sandbox_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"ok|failed"}[10m])), 1)
             ) > 0.2
             and
-            sum by (backend, op) (increase(opengeni_sandbox_operations_total{outcome=~"ok|failed"}[10m])) >= 5
+            sum by (backend, op) (increase(opengeni_sandbox_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"ok|failed"}[10m])) >= 5
           for: 10m
           labels:
             severity: warning
@@ -1122,7 +1127,7 @@ spec:
             user_impact: 'Agent commands or file operations in sandboxes fail, so tasks error or stall.'
             next_step: 'Check the provider''s status and the operation''s errors in the worker logs.'
         - alert: OpenGeniSandboxOrphansTerminatedGrowing
-          expr: sum(increase(opengeni_sandbox_orphans_terminated_total[30m])) > 0
+          expr: sum(increase(opengeni_sandbox_orphans_terminated_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[30m])) > 0
           labels:
             severity: warning
           annotations:
@@ -1132,7 +1137,7 @@ spec:
             user_impact: 'No user impact; sandboxes were leaking and have been cleaned up.'
             next_step: 'No action if rare; if it keeps firing, investigate why sandboxes lose their lease.'
         - alert: OpenGeniSandboxRotationOverdue
-          expr: opengeni:sandbox_rotation_backlog:fresh_max{kind="overdue"} > 0
+          expr: opengeni:sandbox_rotation_backlog:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},kind="overdue"} > 0
           for: 10m
           labels:
             severity: critical
@@ -1145,7 +1150,7 @@ spec:
             description: A finite-lifetime sandbox has remained past its precomputed provider deadline for 10m. Check turn, direct-operation, and retained-process blockers, checkpoint capture, reaper health, and Modal API errors before the provider kills it.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#observability
         - alert: OpenGeniSandboxDeadlineProcessBlocked
-          expr: opengeni:sandbox_rotation_backlog:fresh_max{kind="process_blocked"} > 0
+          expr: opengeni:sandbox_rotation_backlog:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},kind="process_blocked"} > 0
           for: 10m
           labels:
             severity: warning
@@ -1242,7 +1247,7 @@ spec:
             description: A definitively lost managed sandbox had no usable checkpoint, so its sessions continued on a new empty workspace after a durable decision that warned every group member. Files from before the loss are gone from the running sandbox; the previous archive and checkpoint references remain on the lease for review. Inspect why no restorable checkpoint existed (capture cadence, deadline rotation, restore failures).
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/run-lifecycle.md#empty-workspace-continuity-when-no-checkpoint-survives
         - alert: OpenGeniSandboxCheckpointDeletionFailed
-          expr: opengeni:sandbox_checkpoint_artifacts:fresh_max{state="delete_failed"} > 0
+          expr: opengeni:sandbox_checkpoint_artifacts:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},state="delete_failed"} > 0
           for: 15m
           labels:
             severity: warning
@@ -1254,7 +1259,7 @@ spec:
             next_step: 'Often expected after credential rotation; check the artifact binding and deletion error, and never delete it with other credentials.'
             description: A provider-bound checkpoint deletion has failed for 15m. Credential/workspace rotation is a common intentional fence; inspect the artifact binding and deletion error instead of deleting under ambient credentials.
         - alert: OpenGeniRetainedProcessTerminalOwnerBacklog
-          expr: sum(opengeni:retained_processes_terminal_owner_backlog:fresh_max) > 0
+          expr: sum(opengeni:retained_processes_terminal_owner_backlog:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}) > 0
           for: 15m
           labels:
             severity: warning
@@ -1266,7 +1271,7 @@ spec:
             next_step: 'Inspect provider-binding and settlement outcomes; never assume a process exited just because it is old.'
             description: A completed/failed/cancelled owner (or a background command already asked to stop) still has a physical sandbox process after 15m. Running session background commands are session-owned and excluded. Inspect provider-binding, probe, and settlement outcomes; age alone is never exit proof.
         - alert: OpenGeniSandboxesHeldByIdleInteractions
-          expr: sum(opengeni:sandbox_leases_interaction_only:fresh_max{idle_bucket=~"2h_6h|gte_6h"}) > 5
+          expr: sum(opengeni:sandbox_leases_interaction_only:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},idle_bucket=~"2h_6h|gte_6h"}) > 5
           for: 30m
           labels:
             severity: warning
@@ -1278,7 +1283,7 @@ spec:
             next_step: 'Check whether users are leaving Browser/Computer sessions open; end abandoned ones if cost matters.'
             description: Interaction holders never expire by timestamp, so a box whose only holders are Browser/Computer sessions stays warm (and billed by the provider) until the session is ended or the provider deadline rotates it. Check opengeni:sandbox_leases_interaction_only:fresh_max by idle_bucket and whether sessions are being left open.
         - alert: OpenGeniSandboxDrainExpired
-          expr: sum(opengeni:sandbox_leases_expired_draining:fresh_max{age_bucket=~"5m_1h|1h_1d|gte_1d"}) > 0
+          expr: sum(opengeni:sandbox_leases_expired_draining:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},age_bucket=~"5m_1h|1h_1d|gte_1d"}) > 0
           for: 10m
           labels:
             severity: warning
@@ -1291,7 +1296,7 @@ spec:
             description: A refcount-zero sandbox has exceeded its drain deadline. Check archive capture, provider termination, checkpoint publication, and reaper errors.
         {{- if $modalEnabled }}
         - alert: OpenGeniModalSandboxesWithoutLease
-          expr: opengeni:modal_sandbox_inventory:fresh_max{state="unleased"} > 0
+          expr: opengeni:modal_sandbox_inventory:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},state="unleased"} > 0
           for: 15m
           labels:
             severity: warning
@@ -1303,7 +1308,7 @@ spec:
             next_step: 'Check the reaper''s orphan-sweep warnings and Modal API errors.'
             description: The orphan sweep keeps finding running Modal boxes that no warming/warm/draining lease owns, so it is either failing to terminate them or new orphans keep appearing. Check "sandbox reaper" orphan-sweep warnings, Modal API errors, and warming leases without an instance id (they postpone every orphan termination).
         - alert: OpenGeniModalLeaseInstanceMissing
-          expr: opengeni:modal_sandbox_inventory:fresh_max{state="lease_missing_instance"} > 0
+          expr: opengeni:modal_sandbox_inventory:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},state="lease_missing_instance"} > 0
           for: 15m
           labels:
             severity: warning
@@ -1317,9 +1322,9 @@ spec:
         - alert: OpenGeniModalInventoryStale
           expr: |
             min(
-              time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="modal_provider"}
+              time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="modal_provider"}
             ) > {{ $inventoryFreshnessSeconds }}
-            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="modal_provider"})
+            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="modal_provider"})
           for: 15m
           labels:
             severity: warning
@@ -1333,13 +1338,13 @@ spec:
         - alert: OpenGeniSandboxInventoryProjectionStale
           expr: |
             min by (domain) (
-              time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain!~"opensandbox_kubernetes|modal_provider|interaction_idle"}
+              time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain!~"opensandbox_kubernetes|modal_provider|interaction_idle"}
             ) > {{ $inventoryFreshnessSeconds }}
-            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="leases"})
-            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="checkpoint_artifacts"})
-            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="rotation_backlog"})
-            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="retained_processes"})
-            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="expired_drains"})
+            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="leases"})
+            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="checkpoint_artifacts"})
+            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="rotation_backlog"})
+            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="retained_processes"})
+            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="expired_drains"})
           for: 5m
           labels:
             severity: critical
@@ -1385,7 +1390,7 @@ spec:
             description: Workspace pool {{ "{{ $labels.workspace_key }}" }} observed exactly one eligible subscription credential. Add or restore a second allocator-enabled credential to remove the single-account failure domain.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/codex-subscription-rotation.md#same-turn-capacity-recovery
         - alert: OpenGeniServiceDown
-          expr: up{job=~".*opengeni.*"} == 0
+          expr: up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},job=~".*opengeni.*"} == 0
           for: 5m
           labels:
             severity: critical
@@ -1398,9 +1403,9 @@ spec:
         # ── Worker memory headroom ───────────────────────────────────────────
         - alert: OpenGeniTurnWorkerMemoryHeadroomLow
           expr: |
-            max by (instance, scope) (opengeni_turn_worker_memory_guard_utilization_ratio)
+            max by (instance, scope) (opengeni_turn_worker_memory_guard_utilization_ratio{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}})
             >= on (instance, scope)
-            max by (instance, scope) (opengeni_turn_worker_memory_guard_target_ratio)
+            max by (instance, scope) (opengeni_turn_worker_memory_guard_target_ratio{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}})
           for: 30s
           labels:
             severity: warning
@@ -1413,9 +1418,9 @@ spec:
             description: Temporal should stop admitting more work while HPA or queued capacity absorbs load. This is backpressure, not a restart condition.
         - alert: OpenGeniTurnWorkerMemoryEmergency
           expr: |
-            max by (instance, scope) (opengeni_turn_worker_memory_guard_utilization_ratio)
+            max by (instance, scope) (opengeni_turn_worker_memory_guard_utilization_ratio{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}})
             >= on (instance, scope)
-            max by (instance, scope) (opengeni_turn_worker_memory_guard_emergency_ratio)
+            max by (instance, scope) (opengeni_turn_worker_memory_guard_emergency_ratio{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}})
           for: 30s
           labels:
             severity: critical
@@ -1429,10 +1434,10 @@ spec:
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnWorkerMemoryConsumesReserve
           expr: |
-            max by (instance, scope) (opengeni_turn_worker_memory_guard_process_rss_ratio)
+            max by (instance, scope) (opengeni_turn_worker_memory_guard_process_rss_ratio{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}})
             > on (instance, scope)
             clamp_min(
-              1 - max by (instance, scope) (opengeni_turn_worker_memory_guard_target_ratio),
+              1 - max by (instance, scope) (opengeni_turn_worker_memory_guard_target_ratio{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}),
               0
             )
           for: 5m
@@ -1446,7 +1451,7 @@ spec:
             next_step: 'Look for a memory-heavy turn on that worker; an engineer may need to reduce per-turn memory.'
             description: The worker process alone is larger than the headroom reserved above ordinary admission. Reduce per-turn retention or isolate the worker before pressure reaches the emergency threshold.
         - alert: OpenGeniTurnWorkerMemoryGuardDraining
-          expr: sum(increase(opengeni_turn_worker_memory_guard_drains_total[10m])) > 0
+          expr: sum(increase(opengeni_turn_worker_memory_guard_drains_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) > 0
           labels:
             severity: warning
           annotations:
@@ -1458,9 +1463,9 @@ spec:
             description: Sustained host or finite-cgroup memory pressure triggered the normal graceful worker shutdown/checkpoint path. Inspect long-running turns and retained external memory before replacement capacity repeats the event.
         - alert: OpenGeniTurnWorkerMemoryGuardFailure
           expr: |
-            (sum(increase(opengeni_turn_worker_memory_guard_sample_failures_total[10m])) or vector(0))
+            (sum(increase(opengeni_turn_worker_memory_guard_sample_failures_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) or vector(0))
             +
-            (sum(increase(opengeni_turn_worker_memory_guard_drain_failures_total[10m])) or vector(0))
+            (sum(increase(opengeni_turn_worker_memory_guard_drain_failures_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) or vector(0))
             > 0
           labels:
             severity: critical
@@ -1691,9 +1696,9 @@ spec:
           # Needs at least 50 calls in 30m: a new chat's first request can never hit the cache, so at
           # low volume the median is dominated by fresh chats and means nothing.
           expr: |
-            histogram_quantile(0.5, sum by (le) (rate(opengeni_model_cache_hit_ratio_bucket{provider="codex-subscription"}[30m]))) < 0.4
+            histogram_quantile(0.5, sum by (le) (rate(opengeni_model_cache_hit_ratio_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="codex-subscription"}[30m]))) < 0.4
             and on()
-            (sum(increase(opengeni_model_cache_hit_ratio_count{provider="codex-subscription"}[30m])) or vector(0)) >= 50
+            (sum(increase(opengeni_model_cache_hit_ratio_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="codex-subscription"}[30m])) or vector(0)) >= 50
           for: 30m
           labels:
             severity: warning
@@ -1712,12 +1717,12 @@ spec:
           # Absent usage needs at least 20 completed calls in 30m: after a worker restart the first
           # increment of a new counter is invisible to rate(), so a handful of calls looks missing.
           expr: |
-            (sum(rate(opengeni_model_cache_read_telemetry_total{provider="codex-subscription",status="missing"}[30m])) or vector(0)) > 0
+            (sum(rate(opengeni_model_cache_read_telemetry_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="codex-subscription",status="missing"}[30m])) or vector(0)) > 0
             or
             (
-              sum(increase(opengeni_model_calls_total{provider="codex-subscription",outcome="completed"}[30m])) >= 20
+              sum(increase(opengeni_model_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="codex-subscription",outcome="completed"}[30m])) >= 20
               and on()
-              (sum(rate(opengeni_model_cache_read_telemetry_total{provider="codex-subscription"}[30m])) or vector(0)) == 0
+              (sum(rate(opengeni_model_cache_read_telemetry_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="codex-subscription"}[30m])) or vector(0)) == 0
             )
           for: 15m
           labels:
@@ -1732,12 +1737,12 @@ spec:
         - alert: OpenGeniMachineOpInfraFailuresHigh
           expr: |
             (
-              sum(increase(opengeni_machine_op_total{outcome="failed"}[10m]))
+              sum(increase(opengeni_machine_op_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed"}[10m]))
               /
-              clamp_min(sum(increase(opengeni_machine_op_total[10m])), 1)
+              clamp_min(sum(increase(opengeni_machine_op_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
             ) > 0.1
             and on()
-            sum(increase(opengeni_machine_op_total[10m])) >= 10
+            sum(increase(opengeni_machine_op_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 10
           for: 10m
           labels:
             severity: warning
@@ -1751,7 +1756,7 @@ spec:
           # Healed faults are the LEADING indicator of the next unhealed one — a
           # blip/backpressure the transport absorbed. A rising rate precedes real
           # op failures, so this fires EARLY (info severity) as a heads-up.
-          expr: sum(rate(opengeni_machine_op_healed_total[10m])) > 0.2
+          expr: sum(rate(opengeni_machine_op_healed_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) > 0.2
           for: 15m
           labels:
             severity: info
@@ -2007,13 +2012,19 @@ spec:
         # observability.prometheusRule.rules.
         - alert: OpenGeniWorkerMemoryNearLimit
           expr: |
-            max by (namespace, pod, container) (
-              container_memory_working_set_bytes{container=~"worker|api|relay", pod=~".*opengeni.*"}
-            )
-            /
-            max by (namespace, pod, container) (
-              kube_pod_container_resource_limits{resource="memory", container=~"worker|api|relay", pod=~".*opengeni.*"}
+            (
+              max by (namespace, pod, container) (
+                container_memory_working_set_bytes{namespace={{ .Release.Namespace | quote }},container=~"worker|api|relay"}
+              )
+              /
+              max by (namespace, pod, container) (
+                kube_pod_container_resource_limits{namespace={{ .Release.Namespace | quote }},resource="memory",container=~"worker|api|relay"}
+              )
             ) > 0.9
+            and on (namespace, pod)
+            max by (namespace, pod) (
+              kube_pod_labels{namespace={{ .Release.Namespace | quote }},label_app_kubernetes_io_instance={{ .Release.Name | quote }}}
+            )
           for: 5m
           labels:
             severity: warning
@@ -2027,8 +2038,8 @@ spec:
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniHpaAtMaxReplicas
           expr: |
-            kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler=~".*opengeni.*"}
-            >= kube_horizontalpodautoscaler_spec_max_replicas{horizontalpodautoscaler=~".*opengeni.*"}
+            kube_horizontalpodautoscaler_status_current_replicas{namespace={{ .Release.Namespace | quote }},horizontalpodautoscaler=~{{ printf "%s-worker-(control|turns)" (regexQuoteMeta $fullName) | quote }}}
+            >= kube_horizontalpodautoscaler_spec_max_replicas{namespace={{ .Release.Namespace | quote }},horizontalpodautoscaler=~{{ printf "%s-worker-(control|turns)" (regexQuoteMeta $fullName) | quote }}}
           for: 15m
           labels:
             severity: warning
