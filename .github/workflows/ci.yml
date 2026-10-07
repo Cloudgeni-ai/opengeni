@@ -531,6 +531,7 @@ jobs:
           --name typecheck
           --output ci-profile/typecheck.json
           --timeout-seconds 600
+          --live-resources
           -- bun scripts/ci/run-typecheck-plan.ts
           --plan ${{ runner.temp }}/ci-impact-plan/impact-plan.json
 
