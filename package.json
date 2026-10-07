@@ -141,6 +141,7 @@
     "check:docs-refs": "bun scripts/check-docs-refs.ts",
     "check:model-pricing": "bun scripts/check-model-pricing.ts",
     "check:public-hygiene": "bun scripts/check-public-repo-hygiene.ts",
+    "check:subscription-contract": "bun scripts/check-subscription-contract.ts",
     "check:workflow-graph": "bun scripts/workflow-execution-graph.ts",
     "workflow-graph:refresh": "bun scripts/workflow-execution-graph.ts --write",
     "check:migration-ordinals": "bun scripts/check-migration-ordinals.ts",
