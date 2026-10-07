@@ -109,6 +109,28 @@ count toward the same 256-request budget and share one per-observation signal;
 the 180-second deadline and existing byte limits are unchanged. Pre-write discovery
 and occupied-version/stable-tag guards still use their existing metadata path.
 
+**Receipt-only recovery:** after a failed canary workflow has acknowledged its
+entire cohort, `reconcile-canary-publication.yml` can observe that exact source,
+run and attempt without publishing again. The protected current controller reads
+historical source only as immutable JSON data. It requires the original provider
+failure, absent Site artifact, bounded receipt artifact, complete linked positive
+acknowledgements and zero unknown writes. It verifies actual archive/manifest
+hashes and official GitHub provenance, then runs the unchanged bounded metadata
+poller and final complete-cohort reread. Unknown writes, expired/ambiguous artifacts,
+unsupported producer protocols, changed latest or superseded canary tags fail
+closed; this command cannot repair tags, rebuild packages or dispatch another run.
+The new `canary-publication-reconciliation-*` receipt and
+`reconciled-site-package-versions-*` artifact retain both controller and failed
+origin identities and set `promotionEligible: false`. They never replace the
+failed publisher conclusion or masquerade as its missing Site artifact.
+Consumers need explicit manual staging authority for this distinct contract;
+normal production, promotion, scheduling and image/source checks remain mandatory.
+Additional archive/provider GETs have a separate 15-minute stage deadline and
+finite byte/request quotas. Metadata still has one 180-second/256-GET/four-parallel
+phase with its original custody caps. Official `gh attestation verify` retains
+its default public-good TUF trust fetches outside the controlled GET byte quota;
+each verifier child, stdio and cache is bounded separately.
+
 In GitHub Actions, `N` has a floor derived from the workflow run ID and attempt
 (`run ID * 1000 + attempt`), so retries do not reuse versions hidden by stale
 registry tags or staged publication. A visible version at or above that floor
