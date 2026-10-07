@@ -6292,6 +6292,16 @@
       top: calc(var(--spacing) * 13);
     }
   }
+:where(.og-root).pointer-coarse\:top-auto,:where(.og-root) .pointer-coarse\:top-auto {
+    @media (pointer: coarse) {
+      top: auto;
+    }
+  }
+:where(.og-root).pointer-coarse\:bottom-0,:where(.og-root) .pointer-coarse\:bottom-0 {
+    @media (pointer: coarse) {
+      bottom: calc(var(--spacing) * 0);
+    }
+  }
 :where(.og-root).pointer-coarse\:-mx-\[19px\],:where(.og-root) .pointer-coarse\:-mx-\[19px\] {
     @media (pointer: coarse) {
       margin-inline: calc(19px * -1);
@@ -6390,6 +6400,11 @@
 :where(.og-root).pointer-coarse\:py-2\.5,:where(.og-root) .pointer-coarse\:py-2\.5 {
     @media (pointer: coarse) {
       padding-block: calc(var(--spacing) * 2.5);
+    }
+  }
+:where(.og-root).pointer-coarse\:pb-11,:where(.og-root) .pointer-coarse\:pb-11 {
+    @media (pointer: coarse) {
+      padding-bottom: calc(var(--spacing) * 11);
     }
   }
 :where(.og-root).pointer-coarse\:opacity-70,:where(.og-root) .pointer-coarse\:opacity-70 {
