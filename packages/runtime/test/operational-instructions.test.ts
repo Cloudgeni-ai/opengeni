@@ -92,6 +92,16 @@ describe("provider-neutral operational instructions", () => {
     );
   });
 
+  test("limits programmatic coverage to the Codemode catalog, not sandbox built-ins", () => {
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).not.toContain("Every tool available to you");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Every tool in the Codemode catalog (what `ogtool list` shows)",
+    );
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Built-in sandbox tools for the shell, file patching, image viewing and terminal input are not in that catalog",
+    );
+  });
+
   test("does not carry Codex-only runtime language", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("You are Codex");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("GPT-5");

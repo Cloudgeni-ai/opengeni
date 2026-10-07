@@ -33,14 +33,14 @@ const LOCKED: Record<string, { chars: number; sha256: string; layers: string }> 
     layers: "operational_contract,persona_and_core",
   },
   extras_without_governance: {
-    chars: 37324,
-    sha256: "06813bf4fcdcad627caa3d9e2eab4d7bb936a9b6b4f83e81716ad9327c2dd898",
+    chars: 37528,
+    sha256: "b26170de12942ad98b78b9594f8fa38926bacf615c7984bd7acb4971e2e17ca5",
     layers:
       "operational_contract,persona_and_core,codemode,code_search,git_bindings,workspace_memory,skill_catalog,session_instructions",
   },
   extras_with_governance: {
-    chars: 36423,
-    sha256: "2a7fea6ffb0a79955f11152915731def55b8cfaf05c0bb2d79a799bcfe6177aa",
+    chars: 36627,
+    sha256: "f207c82e96827411b028810dc62ab752845058c3b78359233ff8cfd4faea1a3f",
     layers:
       "operational_contract,persona_and_core,workspace_governance,session_instructions,codemode,code_search,workspace_memory",
   },

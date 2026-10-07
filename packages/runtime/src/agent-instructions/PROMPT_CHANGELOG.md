@@ -29,6 +29,11 @@ learning block supplies modes/scope without repeating the doctrine. Slack file
 guidance appears only when context contains files. Intentional legacy locks and
 the independent default-persona fixture are updated with this shared revision.
 
+The shared Codemode directive no longer claims every available tool is callable
+programmatically. It names the Codemode catalog (`ogtool list`) and says the
+built-in sandbox tools (shell, file patching, image viewing, terminal input)
+are outside it, so the agent uses the shell and filesystem directly (OPE-728).
+
 ## Authoring rule
 
 With `capabilities: "all"`, renderer `opengeni`, and every resource present
