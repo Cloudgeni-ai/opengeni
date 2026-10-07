@@ -742,14 +742,12 @@ for (const provider of ["claude", "xai"] as const) {
     expect(await revisions()).toEqual({ [mine.waiterId]: 1, [otherWorkspace.waiterId]: 1 });
 
     // A different pool scope in the same workspace is not woken.
-    expect(
-      await wake(client.db, {
-        workspaceId: input.workspaceId,
-        subjectId: input.otherSubjectId,
-        authoritySnapshot: { version: 1, scope: "organization" },
-        reason: "fixture_other_scope",
-      }),
-    ).toBe(0);
+    await wake(client.db, {
+      workspaceId: input.workspaceId,
+      subjectId: input.otherSubjectId,
+      authoritySnapshot: { version: 1, scope: "organization" },
+      reason: "fixture_other_scope",
+    });
     expect(await revisions()).toEqual({ [mine.waiterId]: 1, [otherWorkspace.waiterId]: 1 });
 
     // Member B changes the workspace pool inside B's own transaction.
@@ -758,7 +756,7 @@ for (const provider of ["claude", "xai"] as const) {
       input.workspaceId,
       input.otherSubjectId,
       async (tx) => {
-        const woken = await wake(tx, {
+        await wake(tx, {
           workspaceId: input.workspaceId,
           subjectId: input.otherSubjectId,
           authoritySnapshot: input.authoritySnapshot,
@@ -771,7 +769,6 @@ for (const provider of ["claude", "xai"] as const) {
           sql`select id from ${table} where id = ${mine.waiterId}`,
         );
         return {
-          woken,
           settings: await readActorSettings(tx),
           visibleSessions: [...sessions].length,
           visibleWaiters: [...waiters].length,
@@ -779,7 +776,6 @@ for (const provider of ["claude", "xai"] as const) {
       },
     );
     expect(observed).toEqual({
-      woken: 1,
       settings: { subjectId: input.otherSubjectId, initiatingHuman: "" },
       visibleSessions: 0,
       visibleWaiters: 0,
@@ -854,8 +850,80 @@ test("an organization-pool change by another member wakes a private organization
       authoritySnapshot: { version: 1, scope },
       reason: "fixture_" + scope,
     });
-  expect(await wakeAs("workspace")).toBe(0);
+  await wakeAs("workspace");
   expect(await revision()).toBe(1);
-  expect(await wakeAs("organization")).toBe(1);
+  await wakeAs("organization");
   expect(await revision()).toBe(2);
+}, 60_000);
+
+async function armPrivateClaudeWaiter(input: Fixture) {
+  const running = await turn(input, "user_private");
+  const armed = await armClaudeCapacityWait(client.db, {
+    ...input,
+    ...running,
+    subjectId: subscriptionPoolWorkerSubject("claude"),
+    earliestResetAt: null,
+    failurePayload: capacityFailure,
+  });
+  if (armed.action !== "waiting") throw new Error("Fixture failed to arm");
+  return armed.waiter.id;
+}
+
+async function claudeWakeRevision(waiterId: string): Promise<number> {
+  const [row] = await shared.admin<{ wake_revision: number }[]>`
+    select wake_revision from claude_capacity_waiters where id = ${waiterId}`;
+  return Number(row!.wake_revision);
+}
+
+async function organizationAdminOutsideWorkspace(input: Fixture): Promise<string> {
+  const subjectId = "user:" + randomUUID();
+  const [personal] = await shared.admin<{ id: string }[]>`
+    insert into workspaces (account_id, name) values (${input.accountId}, 'Admin personal fixture') returning id`;
+  await shared.admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id, role) values (${input.accountId}, ${subjectId}, 'active', ${personal!.id}, 'admin')`;
+  return subjectId;
+}
+
+test("only a subject holding the shared pool wakes another member's private waiter", async () => {
+  const input = await fixture();
+  const waiterId = await armPrivateClaudeWaiter(input);
+  const wakeAs = async (subjectId: string, scope: "workspace" | "organization" = "workspace") =>
+    await wakeClaudeCapacityWaiters(client.db, {
+      workspaceId: input.workspaceId,
+      subjectId,
+      authoritySnapshot: { version: 1, scope },
+      reason: "fixture_wake",
+    });
+
+  // A subject with no authority here wakes under its own subject and reaches
+  // no other member's private waiter.
+  await wakeAs("user:" + randomUUID());
+  expect(await claudeWakeRevision(waiterId)).toBe(1);
+  // An organization member outside this workspace holds the organization
+  // pool, not this workspace's pool.
+  await wakeAs(await organizationAdminOutsideWorkspace(input));
+  expect(await claudeWakeRevision(waiterId)).toBe(1);
+  // Worker usage and quota observations wake as the pool-worker subject.
+  await wakeAs(subscriptionPoolWorkerSubject("claude"));
+  expect(await claudeWakeRevision(waiterId)).toBe(2);
+  // A workspace member does too.
+  await wakeAs(input.otherSubjectId);
+  expect(await claudeWakeRevision(waiterId)).toBe(3);
+}, 60_000);
+
+test("an organization administrator outside the workspace wakes the organization pool's private waiters", async () => {
+  const base = await fixture();
+  const input: Fixture = { ...base, authoritySnapshot: { version: 1, scope: "organization" } };
+  await shared.admin`insert into claude_rotation_settings (account_id, workspace_id, authority_scope) values (${base.accountId}, null, 'organization') on conflict do nothing`;
+  const waiterId = await armPrivateClaudeWaiter(input);
+  const wakeAs = async (subjectId: string) =>
+    await wakeClaudeCapacityWaiters(client.db, {
+      workspaceId: input.workspaceId,
+      subjectId,
+      authoritySnapshot: input.authoritySnapshot,
+      reason: "fixture_organization_wake",
+    });
+  await wakeAs("user:" + randomUUID());
+  expect(await claudeWakeRevision(waiterId)).toBe(1);
+  await wakeAs(await organizationAdminOutsideWorkspace(input));
+  expect(await claudeWakeRevision(waiterId)).toBe(2);
 }, 60_000);

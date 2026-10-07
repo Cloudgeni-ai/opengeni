@@ -97,12 +97,16 @@ therefore arms, waits and resumes exactly like a shared one, while the pool
 worker still sees no other member's private sessions. A caller with any
 ambient session actor keeps it unchanged; the turn's human is never combined
 with a different subject. Immediate wake-ups (reconnect, allocator, rotation or
-pin changes) resolve the pool as the member who made the change. For a shared
-pool, the waiter scan, wake-revision bump and workflow wake then run in the
-trusted service scope, which follows the Codex rule. That reaches every waiter
-of exactly that pool scope in that workspace, including other members'
-`user_private` waiters. The caller receives only a count, so the change grants
-no read access to those sessions. A personal pool's waiters all belong to its
+pin changes) first check that the caller holds the shared pool: a subject with
+live authority over the workspace, an active organization member for the
+organization pool, or the provider's pool-worker subject. For such a caller,
+the waiter scan, wake-revision bump and workflow wake then run in the trusted
+service scope, which follows the Codex rule. That reaches every waiter of
+exactly that pool scope in that workspace, including other members'
+`user_private` waiters. Any other caller wakes under its own subject and
+reaches no other member's private waiter. The wake returns nothing, so it
+grants no read access to those sessions and reveals no count of them. A
+personal pool's waiters all belong to its
 owner and wake under the owner's subject. The periodic recheck, at most 60
 seconds away, remains a backstop. If a wait still cannot be armed for a
 non-database reason, the turn fails with the explicit, retryable
