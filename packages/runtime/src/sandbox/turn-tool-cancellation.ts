@@ -1144,10 +1144,30 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
           throw cancellationError(this.reason);
         }
         if (initialPage) {
-          const result = await observeSynchronousCommand(initialPage, async () => {
-            throw new Error("Remote command did not report terminal completion");
+          const readProcess =
+            session.writeStdinForProcessControl?.bind(session) ?? session.writeStdin?.bind(session);
+          const result = await observeSynchronousCommand(initialPage, async (originalSessionId) => {
+            if (!readProcess) {
+              throw new Error("Remote command did not report terminal completion");
+            }
+            const raw = await readProcess({
+              sessionId: originalSessionId,
+              chars: "",
+              yieldTimeMs: TURN_PROVIDER_YIELD_SLICE_MS,
+              ...(args.maxOutputTokens !== undefined
+                ? { maxOutputTokens: args.maxOutputTokens }
+                : {}),
+            });
+            if (typeof raw !== "string") {
+              throw new Error("Remote command observation returned an invalid result");
+            }
+            return synchronousCommandPage(session as ChannelASession, raw, originalSessionId);
           });
-          if (hasTerminalReceipt && this.cancelled && !remoteExec?.ownershipTransferred) {
+          // A numeric provider session is an exact observation handle too.
+          // Keep the remote cancellation fence until its terminal receipt has
+          // been read, then let the caller apply cancellation before success.
+          remoteExec?.settle();
+          if (this.cancelled && !remoteExec?.ownershipTransferred) {
             throw cancellationError(this.reason);
           }
           return result;
