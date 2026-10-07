@@ -944,7 +944,7 @@ CREATE POLICY subscription_core_capability_membership_read ON organization_membe
     AND EXISTS (SELECT 1 FROM opengeni_private.subscription_runtime_capabilities capability
       WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
         AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
-        AND capability.capability_kind IN ('personal_access', 'session_access', 'binding_access', 'lifecycle')
+        AND capability.capability_kind IN ('personal_access', 'session_access', 'binding_access', 'lifecycle', 'designation_management')
         AND capability.account_id = organization_memberships.account_id));
 CREATE POLICY subscription_core_capability_authority_read ON organization_user_resource_authorities FOR SELECT
   USING (current_user = pg_catalog.pg_get_userbyid((SELECT relation.relowner
@@ -1017,49 +1017,73 @@ REVOKE ALL ON FUNCTION opengeni_private.subscription_person_preference_visible(u
 CREATE FUNCTION opengeni_private.subscription_apps_designation_allowed(
   p_account_id uuid, p_workspace_id uuid, p_connection_id uuid
 ) RETURNS boolean
-LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path FROM CURRENT
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path FROM CURRENT
 AS $function$
-  SELECT p_account_id::text = nullif(current_setting('opengeni.account_id', true), '')
-    AND p_workspace_id::text = nullif(current_setting('opengeni.workspace_id', true), '')
-    AND EXISTS (
-      SELECT 1 FROM subscription_connections connection
-      WHERE connection.account_id = p_account_id AND connection.id = p_connection_id
-        AND connection.provider = 'codex' AND connection.ownership = 'shared'
-        AND connection.status = 'active'
-        AND (
-          connection.scope_kind = 'organization'
-          OR (connection.scope_kind = 'workspaces' AND EXISTS (
-            SELECT 1 FROM subscription_connection_workspaces assignment
-            WHERE assignment.account_id = connection.account_id
-              AND assignment.connection_id = connection.id
-              AND assignment.workspace_id = p_workspace_id
-          ))
-          OR (connection.scope_kind = 'people' AND EXISTS (
-            SELECT 1 FROM subscription_connection_people assignment
-            JOIN organization_memberships membership
-              ON membership.id = assignment.organization_membership_id
-              AND membership.account_id = assignment.account_id
-            WHERE assignment.account_id = connection.account_id
-              AND assignment.connection_id = connection.id
-              AND membership.status = 'active' AND membership.revoked_at IS NULL
-              AND (membership.personal_workspace_id = p_workspace_id OR EXISTS (
-                SELECT 1 FROM workspace_memberships workspace_membership
-                WHERE workspace_membership.account_id = p_account_id
-                  AND workspace_membership.workspace_id = p_workspace_id
-                  AND workspace_membership.subject_id = membership.subject_id
-              ))
-          ))
-        )
-        AND (
-          opengeni_private.subscription_organization_admin(p_account_id)
-          OR (connection.managed_by_workspace_id = p_workspace_id AND EXISTS (
-            SELECT 1 FROM workspace_memberships manager
-            WHERE manager.account_id = p_account_id AND manager.workspace_id = p_workspace_id
-              AND manager.subject_id = nullif(current_setting('opengeni.subject_id', true), '')
-              AND manager.role = 'admin'
-          ))
-        )
-    )
+DECLARE
+  organization_admin boolean;
+  allowed boolean := false;
+BEGIN
+  IF p_account_id::text IS DISTINCT FROM nullif(current_setting('opengeni.account_id', true), '')
+    OR p_workspace_id::text IS DISTINCT FROM nullif(current_setting('opengeni.workspace_id', true), '')
+  THEN RETURN false; END IF;
+
+  organization_admin := opengeni_private.subscription_organization_admin(p_account_id);
+  IF NOT organization_admin AND NOT EXISTS (
+    SELECT 1 FROM workspace_memberships manager
+    WHERE manager.account_id = p_account_id AND manager.workspace_id = p_workspace_id
+      AND manager.subject_id = nullif(current_setting('opengeni.subject_id', true), '')
+      AND manager.role = 'admin'
+  ) THEN RETURN false; END IF;
+
+  INSERT INTO opengeni_private.subscription_runtime_capabilities (
+    backend_pid, transaction_id, capability_kind, account_id, workspace_id, connection_id
+  ) VALUES (
+    pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(),
+    'designation_management', p_account_id, p_workspace_id, p_connection_id
+  ) ON CONFLICT (backend_pid, transaction_id, capability_kind, account_id, connection_id)
+    DO UPDATE SET workspace_id = EXCLUDED.workspace_id;
+
+  SELECT EXISTS (
+    SELECT 1 FROM subscription_connections connection
+    WHERE connection.account_id = p_account_id AND connection.id = p_connection_id
+      AND connection.provider = 'codex' AND connection.ownership = 'shared'
+      AND connection.status = 'active'
+      AND (organization_admin OR connection.managed_by_workspace_id = p_workspace_id)
+      AND (
+        connection.scope_kind = 'organization'
+        OR (connection.scope_kind = 'workspaces' AND EXISTS (
+          SELECT 1 FROM subscription_connection_workspaces assignment
+          WHERE assignment.account_id = connection.account_id
+            AND assignment.connection_id = connection.id
+            AND assignment.workspace_id = p_workspace_id
+        ))
+        OR (connection.scope_kind = 'people' AND EXISTS (
+          SELECT 1 FROM subscription_connection_people assignment
+          JOIN organization_memberships membership
+            ON membership.id = assignment.organization_membership_id
+            AND membership.account_id = assignment.account_id
+          WHERE assignment.account_id = connection.account_id
+            AND assignment.connection_id = connection.id
+            AND membership.status = 'active' AND membership.revoked_at IS NULL
+            AND (membership.personal_workspace_id = p_workspace_id OR EXISTS (
+              SELECT 1 FROM workspace_memberships workspace_membership
+              WHERE workspace_membership.account_id = p_account_id
+                AND workspace_membership.workspace_id = p_workspace_id
+                AND workspace_membership.subject_id = membership.subject_id
+            ))
+        ))
+      )
+  ) INTO allowed;
+
+  DELETE FROM opengeni_private.subscription_runtime_capabilities capability
+  WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+    AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+    AND capability.capability_kind = 'designation_management'
+    AND capability.account_id = p_account_id
+    AND capability.workspace_id = p_workspace_id
+    AND capability.connection_id = p_connection_id;
+  RETURN allowed;
+END
 $function$;
 REVOKE ALL ON FUNCTION opengeni_private.subscription_apps_designation_allowed(uuid, uuid, uuid) FROM PUBLIC;
 
@@ -1187,6 +1211,17 @@ BEGIN
       organization_membership_id,
       nullif(current_setting('opengeni.session_owner_subject_id', true), ''),
       nullif(current_setting('opengeni.turn_human_subject_id', true), '')));
+  CREATE POLICY subscription_connection_people_designation_read ON subscription_connection_people FOR SELECT
+    USING (current_user = pg_catalog.pg_get_userbyid((SELECT relation.relowner
+        FROM pg_catalog.pg_class relation
+        WHERE relation.oid = 'subscription_connection_people'::regclass))
+      AND EXISTS (SELECT 1 FROM opengeni_private.subscription_runtime_capabilities capability
+        WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+          AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+          AND capability.capability_kind = 'designation_management'
+          AND capability.account_id = subscription_connection_people.account_id
+          AND capability.workspace_id = nullif(current_setting('opengeni.workspace_id', true), '')::uuid
+          AND capability.connection_id = subscription_connection_people.connection_id));
   CREATE POLICY subscription_connection_people_admin ON subscription_connection_people FOR ALL
     USING (opengeni_private.subscription_organization_admin(account_id))
     WITH CHECK (opengeni_private.subscription_organization_admin(account_id));

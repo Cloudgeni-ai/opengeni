@@ -877,6 +877,23 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
       await shared!.admin`
       insert into subscription_connection_people (account_id, connection_id, organization_membership_id)
       values (${fixture.accountId}, ${connection!.id}::uuid, ${membership!.id}::uuid)`;
+      await withSessionRlsActorContext({ subjectId: fixture.subjectId }, () =>
+        withRlsContext(client!.db, { accountId: fixture.accountId, workspaceId }, (db) =>
+          rawRows(
+            db,
+            sql`insert into subscription_apps_designations (
+                account_id, workspace_id, connection_id, updated_by_subject_id
+              ) values (
+                ${fixture.accountId}::uuid, ${workspaceId}::uuid,
+                ${connection!.id}::uuid, ${fixture.subjectId}
+              )`,
+          ),
+        ),
+      );
+      const [designation] = await shared!.admin<{ connection_id: string }[]>`
+      select connection_id::text as connection_id from subscription_apps_designations
+      where workspace_id = ${workspaceId}::uuid`;
+      expect(designation?.connection_id).toBe(connection!.id);
       await withSessionRlsActorContext(
         {
           subjectId: "service:subscription-test",
