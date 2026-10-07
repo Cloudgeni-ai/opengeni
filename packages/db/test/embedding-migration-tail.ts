@@ -101,4 +101,8 @@ export const embeddingMigrationTail = [
   // Extends the containment reason installed by withheld 0547; replay after it.
   "0614_quiescence_command_containment.sql",
   "0622_organization_slack_bot_delivery.sql",
+  // M2 extends the membership finalizer to revoke legacy Claude rows; replay
+  // only after the deliberately withheld 0598 Claude tables are restored.
+  "0642_shared_subscription_core.sql",
+  "0643_model_call_facts_subscription_connection_index.sql",
 ];
