@@ -540,6 +540,87 @@ export function cancellableShellCommand(command: string, markerPath: string): st
   ].join("\n");
 }
 
+/** Keep large internal synchronous commands out of the repeated process-group
+ * launch branches. A quoted heredoc transports the source once, then the
+ * source is passed in the environment and removed before user code runs; the
+ * retained provider process still owns the same marker, process group, and
+ * terminal exit status as the ordinary shell wrapper. */
+export function cancellableSynchronousShellCommand(command: string, markerPath: string): string {
+  const cancellationPath = shellCancellationPath(markerPath);
+  const source = [`[ ! -e ${singleQuote(cancellationPath)} ] || exit 130`, command].join("\n");
+  let token = crypto.randomUUID().replaceAll("-", "_");
+  let delimiter = `__OPENGENI_SYNC_HEREDOC_${token}__`;
+  let sentinel = `__OPENGENI_SYNC_END_${token}__`;
+  while (source.split("\n").includes(delimiter) || source.includes(sentinel)) {
+    token = crypto.randomUUID().replaceAll("-", "_");
+    delimiter = `__OPENGENI_SYNC_HEREDOC_${token}__`;
+    sentinel = `__OPENGENI_SYNC_END_${token}__`;
+  }
+  const sourceVariable = `__opengeni_sync_source_${token}`;
+  const bodyVariable = `__opengeni_sync_body_${token}`;
+  const marker = singleQuote(markerPath);
+  const markerDir = singleQuote(SHELL_MARKER_DIR);
+  const groupLeaderCommand = [
+    ...processInspectionCommandLines(),
+    `[ "\${${sourceVariable}+x}" = x ] || exit 125`,
+    `${bodyVariable}="$${sourceVariable}"`,
+    `unset ${sourceVariable}`,
+    `__opengeni_marker=${marker}`,
+    "umask 077",
+    `command mkdir -p ${markerDir} || exit 125`,
+    '__opengeni_pid="$$"',
+    '__opengeni_pgid="$(__opengeni_process_group_id "$__opengeni_pid")"',
+    'case "$__opengeni_pid:$__opengeni_pgid" in *[!0-9:]*|*:|:*) exit 125 ;; esac',
+    '[ "$__opengeni_pid" -gt 1 ] && [ "$__opengeni_pgid" -gt 1 ] || exit 125',
+    '[ "$__opengeni_pid" = "$__opengeni_pgid" ] || exit 125',
+    'command printf \'%s %s\\n\' "$__opengeni_pid" "$__opengeni_pgid" > "$__opengeni_marker" || exit 125',
+    "trap 'command rm -f \"$__opengeni_marker\"' EXIT",
+    "(",
+    `eval "$${bodyVariable}"`,
+    ")",
+    "__opengeni_status=$?",
+    `unset ${bodyVariable}`,
+    'exit "$__opengeni_status"',
+  ].join("\n");
+
+  return [
+    ...processInspectionCommandLines(),
+    '__opengeni_outer_pid="$$"',
+    '__opengeni_outer_pgid="$(__opengeni_process_group_id "$__opengeni_outer_pid")"',
+    'case "$__opengeni_outer_pid:$__opengeni_outer_pgid" in *[!0-9:]*|*:|:*) exit 125 ;; esac',
+    `${sourceVariable}=""`,
+    `${bodyVariable}_line=""`,
+    `${bodyVariable}_found=0`,
+    `while IFS= read -r ${bodyVariable}_line; do`,
+    `  case "$${bodyVariable}_line" in`,
+    `    *${sentinel})`,
+    `      ${bodyVariable}_line="\${${bodyVariable}_line%${sentinel}}"`,
+    `      ${sourceVariable}="$${sourceVariable}$${bodyVariable}_line"`,
+    `      ${bodyVariable}_found=1`,
+    "      break ;;",
+    "    *)",
+    `      ${sourceVariable}="$${sourceVariable}$${bodyVariable}_line
+"`,
+    "      ;;",
+    "  esac",
+    `done <<'${delimiter}'`,
+    `${source}${sentinel}`,
+    delimiter,
+    ` [ "$${bodyVariable}_found" = 1 ] || exit 125`,
+    `export ${sourceVariable}`,
+    'if [ "$__opengeni_outer_pid" != "$__opengeni_outer_pgid" ]; then',
+    '  __opengeni_setsid="$(command -v setsid 2>/dev/null)"',
+    '  if [ -n "$__opengeni_setsid" ]; then',
+    `    exec "$__opengeni_setsid" /bin/sh -c ${singleQuote(groupLeaderCommand)}`,
+    "  fi",
+    '  __opengeni_python="$(command -v python3 2>/dev/null)"',
+    '  [ -n "$__opengeni_python" ] || exit 125',
+    `  exec "$__opengeni_python" -c ${singleQuote('import os,sys; os.setsid(); os.execv("/bin/sh", ["/bin/sh", "-c", sys.argv[1]])')} ${singleQuote(groupLeaderCommand)}`,
+    "fi",
+    groupLeaderCommand,
+  ].join("\n");
+}
+
 function pendingShellCancellationCommand(state: PendingShellStart): string {
   const marker = singleQuote(state.markerPath);
   const cancellation = singleQuote(state.cancellationPath);
@@ -947,8 +1028,13 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             )
           : null;
       const markerPath = shellMarkerPath(crypto.randomUUID());
+      const command = useRemoteOpCancellation
+        ? args.cmd
+        : lossless
+          ? cancellableSynchronousShellCommand(args.cmd, markerPath)
+          : cancellableShellCommand(args.cmd, markerPath);
       const commandInput = JSON.stringify({
-        cmd: useRemoteOpCancellation ? args.cmd : cancellableShellCommand(args.cmd, markerPath),
+        cmd: command,
         ...(args.workdir ? { workdir: args.workdir } : {}),
         ...(args.shell ? { shell: args.shell } : {}),
         ...(args.login !== undefined ? { login: args.login } : {}),

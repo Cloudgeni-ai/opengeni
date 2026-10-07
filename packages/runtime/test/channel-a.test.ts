@@ -50,6 +50,7 @@ import {
   type ChannelASession,
 } from "../src/sandbox";
 import { createSandboxClientForBackend } from "../src/index";
+import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-cancellation";
 
 const NUL = String.fromCharCode(0);
 
@@ -323,6 +324,56 @@ function framedConfinedOutput(command: string, payload = "", status = 0, prelude
 }
 
 describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
+  test("multi-batch filesystem writes stay below the provider argument limit", async () => {
+    const { session, root } = await makeBox();
+    const controller = createTurnToolCancellationController();
+    const files = Array.from({ length: 8 }, (_, index) => ({
+      path: `file-${index}.txt`,
+      content: "x".repeat(12_000),
+    }));
+    let synchronousRuns = 0;
+    const service = new SandboxChannelAService({
+      session,
+      workspaceRoot: root,
+      commandRunner: (target, args) => {
+        synchronousRuns++;
+        return controller.runSandboxCommandSynchronous(target, args);
+      },
+    });
+
+    const result = await service.fsWriteFiles({ directory: "large-write", files });
+    await controller.waitForQuiescence();
+
+    expect(result.written).toEqual(files.map((file) => file.path));
+    expect(synchronousRuns).toBeGreaterThan(2);
+    for (const file of files) {
+      expect(readFileSync(join(root, "large-write", file.path), "utf8")).toBe(file.content);
+    }
+  });
+
+  test("internal synchronous cancellation waits for the compact command's process group", async () => {
+    const { session, root } = await makeBox();
+    const startedPath = `${root}/sync-cancel-started-${crypto.randomUUID()}`;
+    const latePath = `${root}/sync-cancel-late-${crypto.randomUUID()}`;
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    const operation = controller.runSandboxCommandSynchronous(session, {
+      cmd: `printf started > '${startedPath}'; trap '' INT TERM; sleep 2; printf late > '${latePath}'`,
+    });
+
+    for (let attempt = 0; attempt < 200 && !existsSync(startedPath); attempt += 1) {
+      await Bun.sleep(10);
+    }
+    expect(existsSync(startedPath)).toBe(true);
+    abort.abort(new Error("steered during internal filesystem command"));
+    const result = await operation;
+    expect(result.exitCode).not.toBe(0);
+    await controller.waitForQuiescence();
+    await Bun.sleep(2_200);
+
+    expect(existsSync(latePath)).toBe(false);
+  });
+
   test("a filesystem-root workspace permits real child file operations", async () => {
     const directory = realpathSync(mkdtempSync(join(tmpdir(), "opengeni-root-workspace-")));
     temporaryRoots.push(directory);

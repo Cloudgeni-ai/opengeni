@@ -7,7 +7,10 @@ import {
   synchronousCommandPage,
   SynchronousCommandOutcomeUnknownError,
 } from "../src/sandbox/synchronous-command";
-import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-cancellation";
+import {
+  cancellableSynchronousShellCommand,
+  createTurnToolCancellationController,
+} from "../src/sandbox/turn-tool-cancellation";
 import { mcpToolErrorOutput } from "../src/index";
 
 function running(handle: number, output = ""): string {
@@ -193,11 +196,13 @@ test("a competing collector's cursor advance cannot authorize a result with miss
 test("worker synchronous runner is non-PTY and collects protocol output without tail truncation", async () => {
   const controller = createTurnToolCancellationController();
   const prefix = "p".repeat(20_000);
+  const userCommand = "filesystem protocol";
   let starts = 0;
   const result = await controller.runSandboxCommandSynchronous(
     {
       execCommand: async (args) => {
         expect(args.tty).toBe(false);
+        expect(args.cmd.indexOf(userCommand)).toBe(args.cmd.lastIndexOf(userCommand));
         // The cancellable group leader propagates the original shell's status.
         expect(args.cmd).toContain("__opengeni_status=$?");
         starts++;
@@ -209,13 +214,25 @@ test("worker synchronous runner is non-PTY and collects protocol output without 
         return exited(9, "__OPENGENI_FS_BATCH_OK__");
       },
     },
-    { cmd: "filesystem protocol", maxOutputTokens: 1 },
+    { cmd: userCommand, maxOutputTokens: 1 },
   );
   expect(result.stdout).toBe(`${prefix}__OPENGENI_FS_BATCH_OK__`);
   expect(result.exitCode).toBe(9);
   expect(starts).toBe(1);
   controller.cancel();
   await controller.waitForQuiescence();
+});
+
+test("synchronous cancellation wrapper keeps a large command under the single-argument limit", () => {
+  const command = "':'\n".repeat(24_000);
+  const wrapped = cancellableSynchronousShellCommand(
+    command,
+    `/tmp/opengeni-turn-shell/test-${crypto.randomUUID()}`,
+  );
+
+  expect(Buffer.byteLength(command, "utf8")).toBeLessThan(128 * 1024);
+  expect(wrapped.indexOf(command)).toBe(wrapped.lastIndexOf(command));
+  expect(Buffer.byteLength(wrapped, "utf8")).toBeLessThan(128 * 1024);
 });
 
 test("failed worker observation keeps the physical fence until exact retained settlement", async () => {
@@ -264,8 +281,12 @@ test("cancellation interrupts observation but drain still awaits original termin
   });
   let originalSettled = false;
   let cancellationRequested = false;
+  const userCommand = "write once";
   const session: ChannelASession = {
-    execCommand: async () => running(50, "write markers"),
+    execCommand: async ({ cmd }) => {
+      expect(cmd.indexOf(userCommand)).toBe(cmd.lastIndexOf(userCommand));
+      return running(50, "write markers");
+    },
     hasRetainedProcess: () => !originalSettled,
     reconcileRetainedProcess: async () => originalSettled,
     cancelSupervisedCommand: async () => {
@@ -285,7 +306,7 @@ test("cancellation interrupts observation but drain still awaits original termin
       return exited(130);
     },
   };
-  const run = controller.runSandboxCommandSynchronous(session, { cmd: "write once" });
+  const run = controller.runSandboxCommandSynchronous(session, { cmd: userCommand });
   const rejection = run.catch((error) => error);
   await observing;
   controller.cancel();
