@@ -32,12 +32,14 @@ test("parses pending and test-backed verification lines across wrapped list item
       "- **SUB-FIXTURE-02** Second requirement. Verification:",
       "  `apps/x/test/a.test.ts`, `apps/x/test/b.test.ts`.",
       "- **SUB-FIXTURE-03** Missing verification.",
+      "- **SUB-FIXTURE-04** Superseded requirement. Verification: retired.",
     ].join("\n"),
   );
   expect(requirements.map((requirement) => requirement.verification)).toEqual([
     { kind: "pending", workItem: "alpha" },
     { kind: "tests", paths: ["apps/x/test/a.test.ts", "apps/x/test/b.test.ts"] },
     null,
+    { kind: "retired" },
   ]);
 });
 
@@ -63,7 +65,7 @@ test("reports duplicate, unverified, missing, unclaimed and undefined requiremen
     const messages = checkSubscriptionContract(root).map((finding) => finding.message);
     expect(messages).toEqual([
       "SUB-FIXTURE-01 is defined more than once",
-      "SUB-FIXTURE-02 needs 'Verification: pending (<work item>).' or a list of backticked test files",
+      "SUB-FIXTURE-02 needs 'Verification: pending (<work item>).', 'Verification: retired.' or a list of backticked test files",
       "SUB-FIXTURE-03 names a test file that does not exist: apps/x/test/missing.test.ts",
       "does not name SUB-FIXTURE-04 in any test title",
       "SUB-FIXTURE-05 names an unknown work item: beta",
@@ -161,6 +163,18 @@ test("requirement IDs match only on whole-ID boundaries", () => {
     expect(checkSubscriptionContract(root).map((finding) => finding.message)).toEqual([
       "does not name SUB-FIXTURE-01 in any test title",
     ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a retired requirement needs no tests and stays defined", () => {
+  const root = fixtureRepository({
+    [CONTRACT_PATH]: "- **SUB-FIXTURE-01** Superseded. Verification: retired.\n",
+    "apps/x/test/history.test.ts": "// SUB-FIXTURE-01 was retired.\n",
+  });
+  try {
+    expect(checkSubscriptionContract(root)).toEqual([]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

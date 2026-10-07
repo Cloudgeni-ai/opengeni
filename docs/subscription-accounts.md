@@ -18,12 +18,13 @@ for it until the matching requirement below is implemented:
 ## How to read this contract
 
 - Every requirement has a stable ID (`SUB-<AREA>-<NN>`). IDs are never reused
-  or renumbered; a retired requirement keeps its ID and is marked retired.
+  or renumbered; a retired requirement keeps its ID and is marked
+  `Verification: retired.`
 - Each requirement ends with a `Verification:` line. It lists the test files
   (unit `*.test.ts(x)`, integration `*.integration.ts` or end-to-end
   `*.e2e.ts`, anywhere CI discovers tests) that assert the requirement, or
   `pending` with the work item (see
-  [Work items](#work-items)) that will add them. A test asserts a requirement
+  [Work items](#work-items)) that will add them, or `retired`. A test asserts a requirement
   by naming its ID in its title: the first string argument of a `test`, `it`
   or `describe` call. IDs in comments, other strings, or skipped and `todo`
   tests do not count.

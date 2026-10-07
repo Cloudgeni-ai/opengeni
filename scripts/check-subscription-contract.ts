@@ -22,6 +22,7 @@ export const CONTRACT_PATH = "docs/subscription-accounts.md";
 const ID_PATTERN = /(?<![A-Z0-9-])SUB-[A-Z]+-\d{2}(?!\d)/g;
 const DEFINITION_PATTERN = /^- \*\*(SUB-[A-Z]+-\d{2})\*\*/;
 const PENDING_PATTERN = /^pending \(([a-z][a-z0-9-]*)\)\.?$/;
+const RETIRED_PATTERN = /^retired\.?$/;
 const WORK_ITEM_ROW = /^\| `([a-z][a-z0-9-]*)` \|/;
 const SELF_TEST = "scripts/check-subscription-contract.test.ts";
 /** Test-defining calls whose first string argument is a title. */
@@ -32,7 +33,11 @@ const NOT_RUN_MODIFIERS = new Set(["skip", "todo"]);
 export type ContractRequirement = {
   id: string;
   line: number;
-  verification: { kind: "pending"; workItem: string } | { kind: "tests"; paths: string[] } | null;
+  verification:
+    | { kind: "pending"; workItem: string }
+    | { kind: "retired" }
+    | { kind: "tests"; paths: string[] }
+    | null;
 };
 
 export type ContractFinding = { file: string; line: number; message: string };
@@ -58,6 +63,9 @@ export function parseContract(markdown: string): ContractRequirement[] {
       const pending = PENDING_PATTERN.exec(value);
       if (pending) {
         verification = { kind: "pending", workItem: pending[1]! };
+      } else if (RETIRED_PATTERN.test(value)) {
+        // A retired ID stays defined so it is never reused; nothing verifies it.
+        verification = { kind: "retired" };
       } else {
         const paths = [...value.matchAll(/`([^`]+)`/g)].map((path) => path[1]!);
         if (paths.length > 0) verification = { kind: "tests", paths };
@@ -200,10 +208,11 @@ export function checkSubscriptionContract(root: string): ContractFinding[] {
         line: requirement.line,
         message:
           requirement.id +
-          " needs 'Verification: pending (<work item>).' or a list of backticked test files",
+          " needs 'Verification: pending (<work item>).', 'Verification: retired.' or a list of backticked test files",
       });
       continue;
     }
+    if (requirement.verification.kind === "retired") continue;
     if (requirement.verification.kind === "pending") {
       if (!workItems.has(requirement.verification.workItem)) {
         findings.push({
