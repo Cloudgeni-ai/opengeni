@@ -92,7 +92,7 @@ for it until the matching requirement below is implemented:
 
 ### Settings and overrides
 
-- **SUB-SET-01** Rotation (Primary only or spread), cross-provider failover
+- **SUB-SET-01** Rotation (Primary first or spread), cross-provider failover
   (on or off, plus the fallback order), personal connections allowed, and
   personal fallback allowed are organization settings with defaults.
   Verification: pending (data-model).
@@ -136,8 +136,10 @@ for it until the matching requirement below is implemented:
   explicitly for the session, or when the owner opted in to "fall back to my
   account when the organization pool is exhausted" (off by default).
   Verification: pending (personal-connections).
-- **SUB-SEL-03** Primary only selects the primary account while it is
-  eligible; spread distributes new sessions fairly across eligible accounts.
+- **SUB-SEL-03** Primary first places new work on the primary account while
+  it can serve the work; when it cannot, failover moves to the next eligible
+  account (SUB-FAIL-02). Spread distributes new sessions fairly across
+  eligible accounts. Neither mode moves a session whose cache is warm.
   Verification: pending (shared-core).
 - **SUB-SEL-04** A manual pin to an account is binding: the session waits for
   that account instead of moving. Verification: pending (shared-core).
@@ -364,6 +366,9 @@ by the implementer and recorded here; consequential ones are escalated.
 | D-09 | 2026-10-07 | Voice, transcription and media generation do not fail over across providers in the first release. |
 | D-10 | 2026-10-07 | Pool authority is additive to session access: pool-worker operations re-establish the acting turn's frozen initiating human. |
 | D-11 | 2026-10-07 | The definition of done is evidence: requirement-to-test coverage, provider conformance, concurrency, crash and replay suites, migration checks and mutation tests, not a numeric confidence figure. |
+| D-12 | 2026-10-07 | Implementer decision: when a person has opted in to personal fallback, the same model on their personal account is tried before cross-provider failover, because keeping the model is what they opted into. |
+| D-13 | 2026-10-07 | Implementer decision: "Primary only" becomes "Primary first". The primary account takes new work while it can; a backup account is used when the primary cannot serve, instead of the work waiting while an idle eligible account exists. This removes the behaviour behind the original report of an unused second account. |
+| D-14 | 2026-10-07 | Implementer decision: unknown quota is eligible but ranked after accounts with known capacity, so missing metadata neither blocks work nor wins over known capacity. |
 
 ### Open decisions
 
@@ -374,6 +379,18 @@ by the implementer and recorded here; consequential ones are escalated.
 | Q-03 | How do Codex Apps and reset-credit redemption fit organization-owned connections? | Keep explicit human-controlled boundaries; bind Apps to a chosen connection independently of model routing. |
 
 ## Verification
+
+The executable reference model of this contract is
+`packages/testing/src/subscription-reference-model.ts`. It is written from
+this document, not from production code. `decide` returns the contract's
+placement for a session (run on an account and model, or wait with a reason);
+`checkDecision` checks any decision, including one made by production code,
+against the contract's invariants. Its tests generate thousands of worlds and
+include a mutation gate: ignoring a pin, switching while the cache is warm,
+using a personal account without an explicit choice, waiting while capacity
+exists and crossing providers when forbidden are each caught by a named
+requirement. Production conformance tests compare the shared core's decisions
+against the model.
 
 The evidence gates for the whole programme (work item `verification-suite`) are: complete
 requirement-to-test coverage (this document reaches no `pending` entries),
