@@ -172,12 +172,21 @@ function modelAllowed(world: World, session: Session, modelId: ModelId): boolean
 }
 
 /**
- * May this connection serve this session's work at all (ignoring capacity and
- * the explicit-choice rule for personal accounts)? SUB-ELIG-01..05.
+ * Why this connection may not serve this session's work at all, ignoring the
+ * model, capacity and the explicit-choice rule for personal accounts, labelled
+ * with the requirement that forbids it; null when it may.
  */
-export function isAuthorized(world: World, session: Session, connection: Connection): boolean {
+export function authorizationFailure(
+  world: World,
+  session: Session,
+  connection: Connection,
+): InvariantViolation | null {
+  const failure = (requirement: string, message: string) => ({ requirement, message });
   const workspace = byId(world.workspaces, session.workspaceId);
-  if (!workspace || !connection.healthy || !connection.allocatorEnabled) return false;
+  if (!workspace) return failure("SUB-ELIG-01", "the session's workspace is unknown");
+  if (!connection.healthy || !connection.allocatorEnabled) {
+    return failure("SUB-ELIG-04", "the account is unhealthy or excluded from allocation");
+  }
   if (connection.ownership.kind === "personal") {
     const settings = effectiveSettings(world.settings, workspace.id).values;
     const owner = byId(world.people, connection.ownership.ownerId);
@@ -185,17 +194,58 @@ export function isAuthorized(world: World, session: Session, connection: Connect
       session.ownerId === connection.ownership.ownerId &&
       (session.visibility === "private" ||
         (workspace.kind === "personal" && workspace.ownerId === connection.ownership.ownerId));
-    return settings.personalConnectionsAllowed && !!owner?.active && ownersOwnWork;
+    if (!settings.personalConnectionsAllowed) {
+      return failure("SUB-SCOPE-05", "personal connections are disabled here");
+    }
+    if (!owner?.active) return failure("SUB-ACCESS-06", "the personal account's owner left");
+    if (!ownersOwnWork) {
+      return failure("SUB-ELIG-05", "a personal account served work other than its owner's own");
+    }
+    return null;
   }
   const scope = connection.ownership.scope;
-  if (scope.kind === "organization") return true;
-  if (scope.kind === "workspaces") {
-    return (
-      scope.workspaceIds.includes(workspace.id) ||
-      (workspace.kind === "personal" && scope.personalWorkspaces)
-    );
+  const inScope =
+    scope.kind === "organization" ||
+    (scope.kind === "workspaces"
+      ? scope.workspaceIds.includes(workspace.id) ||
+        (workspace.kind === "personal" && scope.personalWorkspaces)
+      : scope.personIds.includes(session.ownerId));
+  return inScope ? null : failure("SUB-ELIG-01", "the account's scope excludes this work");
+}
+
+/** May this connection serve this session's work at all? SUB-ELIG-01, 04, 05. */
+export function isAuthorized(world: World, session: Session, connection: Connection): boolean {
+  return authorizationFailure(world, session, connection) === null;
+}
+
+/**
+ * Why this connection cannot serve this session on this model now, labelled
+ * with the requirement that forbids it; null when it can.
+ */
+export function servingFailure(
+  world: World,
+  session: Session,
+  connection: Connection,
+  modelId: ModelId,
+  now: number,
+): InvariantViolation | null {
+  const model = byId(world.models, modelId);
+  if (
+    !model ||
+    model.provider !== connection.provider ||
+    !connection.entitledModels.includes(modelId)
+  ) {
+    return { requirement: "SUB-ELIG-03", message: "the account's plan does not include the model" };
   }
-  return scope.personIds.includes(session.ownerId);
+  if (!modelAllowed(world, session, modelId)) {
+    return { requirement: "SUB-ELIG-02", message: "the workspace does not allow the model" };
+  }
+  const authorization = authorizationFailure(world, session, connection);
+  if (authorization) return authorization;
+  if (!hasCapacity(connection, now)) {
+    return { requirement: "SUB-FAIL-02", message: "the account has no capacity now" };
+  }
+  return null;
 }
 
 export function canServe(
@@ -205,15 +255,7 @@ export function canServe(
   modelId: ModelId,
   now: number,
 ): boolean {
-  const model = byId(world.models, modelId);
-  return (
-    !!model &&
-    model.provider === connection.provider &&
-    connection.entitledModels.includes(modelId) &&
-    modelAllowed(world, session, modelId) &&
-    isAuthorized(world, session, connection) &&
-    hasCapacity(connection, now)
-  );
+  return servingFailure(world, session, connection, modelId, now) === null;
 }
 
 // Selection
@@ -480,8 +522,13 @@ export function checkDecision(
 
   if (decision.kind === "run") {
     const connection = byId(world.connections, decision.connectionId);
-    if (!connection || !canServe(world, session, connection, decision.modelId, now)) {
-      fail("SUB-ELIG-01", "the chosen account cannot serve this session and model now");
+    if (!connection) {
+      fail("SUB-ELIG-01", "the chosen account does not exist");
+      return violations;
+    }
+    const ineligible = servingFailure(world, session, connection, decision.modelId, now);
+    if (ineligible) {
+      violations.push(ineligible);
       return violations;
     }
     if (session.pinnedConnectionId && decision.connectionId !== session.pinnedConnectionId) {

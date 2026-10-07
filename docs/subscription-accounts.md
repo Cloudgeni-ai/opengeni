@@ -418,7 +418,15 @@ The executable reference model of this contract is
 this document, not from production code. `decide` returns the contract's
 placement for a session (run on an account and model, or wait with a reason);
 `checkDecision` checks any decision, including one made by production code,
-against the contract's invariants. Its tests generate thousands of worlds and
+against the contract's invariants, labelling each violation with the
+requirement it breaks (an ineligible account names the precise
+`SUB-ELIG-0x`, `SUB-SCOPE-05` or `SUB-ACCESS-06`). `checkDecision` is not
+fully independent of `decide`: both use the same effective-settings,
+eligibility, cache-warmth and reasoning-level helpers, so a mistake in a
+shared helper would be invisible to the invariant check. Scenario tests pin
+those helpers' behaviour directly. The model's tests name requirements with
+the `model:` marker because they check the model, not the product. Its tests
+generate thousands of worlds and
 include a mutation gate: ignoring a pin, switching while the cache is warm,
 using a personal account without an explicit choice, waiting while capacity
 exists and crossing providers when forbidden are each caught by a named

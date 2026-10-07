@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   applyDecision,
+  canServe,
   checkDecision,
   decide,
   effectiveSettings,
@@ -244,13 +245,7 @@ describe("subscription reference model", () => {
         const personal = world.connections.find(
           (connection) =>
             connection.ownership.kind === "personal" &&
-            checkDecision(world, sessionId, now, {
-              kind: "run",
-              connectionId: connection.id,
-              modelId: session.preferredModelId,
-              reasoningLevel: session.reasoningLevel,
-              switch: "initial",
-            }).every((violation) => violation.requirement !== "SUB-ELIG-01"),
+            canServe(world, session, connection, session.preferredModelId, now),
         );
         return personal
           ? {
@@ -680,5 +675,54 @@ describe("reference model scenarios", () => {
     const wait = decide(onlyThis, "session-1", NOW);
     expect(wait).toEqual({ kind: "wait", reason: "model_not_allowed", earliestResetAt: null });
     expect(checkDecision(onlyThis, "session-1", NOW, wait)).toEqual([]);
+  });
+
+  test("model:SUB-ELIG-01, model:SUB-ELIG-02, model:SUB-ELIG-03, model:SUB-ELIG-04, model:SUB-ELIG-05: an ineligible placement names the precise requirement", () => {
+    const runOn = (connectionId: string, modelId = "claude/model-a"): Decision => ({
+      kind: "run",
+      connectionId,
+      modelId,
+      reasoningLevel: "max",
+      switch: "initial",
+    });
+    const labels = (world: World, decision: Decision) =>
+      checkDecision(world, "session-1", NOW, decision).map((violation) => violation.requirement);
+    const replace = (id: string, change: Partial<Connection>): World => ({
+      ...base(),
+      connections: base().connections.map((connection) =>
+        connection.id === id ? { ...connection, ...change } : connection,
+      ),
+    });
+    expect(
+      labels(
+        replace("claude-a", {
+          ownership: { kind: "shared", scope: { kind: "people", personIds: [] } },
+        }),
+        runOn("claude-a"),
+      ),
+    ).toEqual(["SUB-ELIG-01"]);
+    expect(
+      labels(
+        {
+          ...base(),
+          workspaces: [
+            { id: "ws-team", kind: "shared", ownerId: null, allowedModels: ["codex/model-a"] },
+          ],
+        },
+        runOn("claude-a"),
+      ),
+    ).toEqual(["SUB-ELIG-02"]);
+    expect(labels(replace("claude-a", { entitledModels: [] }), runOn("claude-a"))).toEqual([
+      "SUB-ELIG-03",
+    ]);
+    expect(labels(replace("claude-a", { healthy: false }), runOn("claude-a"))).toEqual([
+      "SUB-ELIG-04",
+    ]);
+    expect(
+      labels(
+        replace("claude-a", { ownership: { kind: "personal", ownerId: "person-a" } }),
+        runOn("claude-a"),
+      ),
+    ).toEqual(["SUB-ELIG-05"]);
   });
 });
