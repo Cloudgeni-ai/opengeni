@@ -297,19 +297,6 @@ test.each(["organization", "personal"] as const)(
     });
 
     await settleIdle(parent);
-    await admin`
-      update sessions set input_wait_until = now() - interval '1 second'
-      where id = ${parent.session.id} and input_wait_turn_id = ${wait.waitTurnId}`;
-    expect(
-      await settleSessionInputWait(db, {
-        accountId,
-        workspaceId,
-        sessionId: parent.session.id,
-        waitTurnId: wait.waitTurnId,
-        disposition: "timeout",
-      }),
-    ).toMatchObject({ action: "timeout" });
-
     await settleIdle(child);
     const boundary = await settleSessionIdleWithParentOutbox(db, workspaceId, child.session.id);
     if (boundary.action !== "settled" || !boundary.notifyParent) {
@@ -335,6 +322,22 @@ test.each(["organization", "personal"] as const)(
     };
     await notifyParentOfChildIdle(services, workspaceId, child.session.id, boundary.episodeKey);
     expect(errors).toEqual([]);
+
+    // Insert the eligible child update before the timeout so inbox planning
+    // selects receiver-owned execution context before coalescing both with the
+    // background-command result.
+    await admin`
+      update sessions set input_wait_until = now() - interval '1 second'
+      where id = ${parent.session.id} and input_wait_turn_id = ${wait.waitTurnId}`;
+    expect(
+      await settleSessionInputWait(db, {
+        accountId,
+        workspaceId,
+        sessionId: parent.session.id,
+        waitTurnId: wait.waitTurnId,
+        disposition: "timeout",
+      }),
+    ).toMatchObject({ action: "timeout" });
 
     const pending = await admin<
       { id: string; kind: string; claude: PoolSnapshot; xai: PoolSnapshot }[]
@@ -365,11 +368,18 @@ test.each(["organization", "personal"] as const)(
     });
     expect(delivered.action).toBe("claimed");
     if (delivered.action !== "claimed") throw new Error("Coalesced updates were not delivered");
-    const [deliveredAuthority] = await admin<{ claude: PoolSnapshot; xai: PoolSnapshot }[]>`
+    const [deliveredAuthority] = await admin<
+      {
+        claude: PoolSnapshot;
+        xai: PoolSnapshot;
+        execution_context_turn_id: string | null;
+      }[]
+    >`
       select claude_provider_account_authority_snapshot as claude,
-        xai_provider_account_authority_snapshot as xai
+        xai_provider_account_authority_snapshot as xai, execution_context_turn_id
       from session_turns where id = ${delivered.turn.id}`;
-    expect(deliveredAuthority).toEqual(accepted);
+    expect(deliveredAuthority).toMatchObject(accepted!);
+    expect(deliveredAuthority?.execution_context_turn_id).toBe(parent.turn.id);
     const deliveredRows = await admin<{ state: string; delivered_turn_id: string | null }[]>`
       select state, delivered_turn_id from session_system_updates
       where id = any(${pending.map((row) => row.id)}::uuid[])
