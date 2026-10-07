@@ -12,7 +12,6 @@ import {
   ListToolsRequestSchema,
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
-import { CODEX_CLIENT_VERSION } from "@opengeni/codex";
 import { IntegrationInvocationError } from "@opengeni/capabilities";
 import type { Settings } from "@opengeni/config";
 import {
@@ -45,13 +44,12 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
-  buildCodexTokenResolver,
   buildConnectionTokenResolver,
   buildSlackApiRateLimiter,
   lockActiveExternalOrganizationKeyAuthority,
   withAccountRls,
   requireWorkspace,
-  withCodexAppsRequestAuthorization,
+  codexAppsRequestAuth,
   consumeToolGatewayApproval,
   getWorkspaceArtifactContentRef,
   issueToolGatewayApproval,
@@ -367,31 +365,10 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     ? await resolveCodexAppsCredentialIdForRun(routeDeps.db, grant.workspaceId)
     : null;
   const codexAppsAuth = codexAppsCredentialId
-    ? (() => {
-        const resolver = buildCodexTokenResolver(
-          routeDeps.db,
-          settings,
-          grant.workspaceId,
-          codexAppsCredentialId,
-        );
-        return {
-          clientVersion: CODEX_CLIENT_VERSION,
-          withAuthorization: async <T>(
-            use: (token: { accessToken: string; chatgptAccountId: string | null }) => Promise<T>,
-          ): Promise<T> =>
-            await resolver.getToken().then(
-              async (token) =>
-                await withCodexAppsRequestAuthorization(
-                  routeDeps.db,
-                  {
-                    workspaceId: grant.workspaceId,
-                    credentialId: codexAppsCredentialId,
-                  },
-                  async () => await use(token),
-                ),
-            ),
-        };
-      })()
+    ? codexAppsRequestAuth(routeDeps.db, settings, {
+        workspaceId: grant.workspaceId,
+        credentialId: codexAppsCredentialId,
+      })
     : undefined;
   const localMcpServers = [...firstPartyServers, ...apiIntegrationServers];
   const policyTargets = new Map(
