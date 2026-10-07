@@ -96,6 +96,9 @@ function sourceProvisionsRolesOnSharedDatabase(source: string): boolean {
 export function sourceMutatesSharedPostgresRole(source: string): boolean {
   return (
     /\b(?:create|alter|drop)\s+role\b/i.test(source) ||
+    // This fixture creates a cluster-wide owner role and drops it on release.
+    // A concurrent migration can still hold the role in a catalog snapshot.
+    /\bacquireOwnerMigratedTestDatabase\s*\(/.test(source) ||
     (/\bacquireBlankTestDatabase\b/.test(source) && /\bprovisionRoles\s*\(/.test(source)) ||
     sourceProvisionsRolesOnSharedDatabase(source)
   );
