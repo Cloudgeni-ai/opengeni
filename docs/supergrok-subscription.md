@@ -86,16 +86,22 @@ Pool authority is additive to session access, never a replacement for it.
 Shared (organization or workspace) pools are read and written under the
 synthetic pool-worker database subject (`worker:xai-workspace`, or
 `worker:claude-workspace` for the Claude pool that shares this code). Every
-capacity-wait, recovery, workflow peek, pin and last-account operation that
-runs under that subject re-establishes the acting turn's frozen
-`initiating_human_subject_id` (`withSubscriptionPoolSessionAccess` in
+capacity-wait arm, periodic recovery, workflow peek, lease, pin and
+last-account operation that runs under that subject without an ambient actor
+re-establishes the acting turn's frozen `initiating_human_subject_id`
+(`withSubscriptionPoolSessionAccess` in
 `packages/db/src/subscription-session-access.ts`). A `user_private` session
 therefore arms, waits and resumes exactly like a shared one, while the pool
-worker still sees no other member's private sessions. A caller whose ambient
-session actor already carries an initiating human keeps it unchanged. If a
-wait still cannot be armed for a non-database reason, the turn fails with the
-explicit, retryable `<provider>_capacity_wait_unavailable` state instead of a
-generic activity failure.
+worker still sees no other member's private sessions. A caller with any
+ambient session actor keeps it unchanged; the turn's human is never combined
+with a different subject. Immediate wake-ups (reconnect, allocator, rotation or
+pin changes) run as the member who made the change and do not reach another
+member's private waiter; that waiter resumes on its next periodic recheck, at
+most 60 seconds later. If a wait still cannot be armed for a non-database
+reason, the turn fails with the explicit, retryable
+`<provider>_capacity_wait_unavailable` state instead of a generic activity
+failure; operators see the underlying error class and SQLSTATE in the worker
+log, never in the user-visible message.
 
 ## Allocation, pins, and leases
 
