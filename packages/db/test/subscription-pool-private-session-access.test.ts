@@ -9,6 +9,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { emptyClaudeUsage } from "@opengeni/config";
 import { sql } from "drizzle-orm";
 import {
+  acquireXaiCredentialLease,
   armClaudeCapacityWait,
   armXaiCapacityWait,
   createDb,
@@ -24,10 +25,12 @@ import {
   withSessionActivityRlsContext,
   withSessionRlsActorContext,
   withSubscriptionPoolSessionAccess,
+  withWorkspaceRls,
   withWorkspaceSubjectRls,
   type DbClient,
 } from "../src";
 import {
+  acquireClaudeCredentialLease,
   createClaudeSubscriptionAccount,
   getClaudeRotationSettings,
   getClaudeSessionAccountPin,
@@ -38,6 +41,8 @@ import {
   updateClaudeRotationSettings,
   type ClaudeAccountSecret,
 } from "../src/claude-subscription-accounts";
+import { currentSessionRlsActorContext } from "../src/database";
+import { withTemporaryPoolSessionAccessInTransaction } from "../src/subscription-session-access";
 
 let shared: SharedTestDatabase;
 let client: DbClient;
@@ -154,7 +159,12 @@ async function rejectOpus(input: Fixture, id: string, version: number, now: Date
   await shared.admin`insert into claude_subscription_account_usage (credential_id, account_id, credential_version, snapshot) values (${id}, ${input.accountId}, ${version}, ${JSON.stringify(snapshot)}::jsonb) on conflict (credential_id) do update set snapshot = excluded.snapshot, credential_version = excluded.credential_version`;
 }
 
-async function turn(input: Fixture, visibility: Visibility, ownerSubjectId = input.subjectId) {
+async function turn(
+  input: Fixture,
+  visibility: Visibility,
+  ownerSubjectId = input.subjectId,
+  initiatingHumanSubjectId: string | null = ownerSubjectId,
+) {
   const policy = TurnExecutionPolicyV1.parse({
     schemaVersion: 1,
     productModelId: "fixture-model",
@@ -195,7 +205,7 @@ async function turn(input: Fixture, visibility: Visibility, ownerSubjectId = inp
       sql`update sessions set status = 'running', temporal_workflow_id = ${workflowId} where id = ${sessionId}`,
     );
     await tx.execute(
-      sql`insert into session_turns (id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id, status, source, position, prompt, model, reasoning_effort, latency_mode, sandbox_backend, execution_generation, active_attempt_id, metadata, initiating_human_subject_id, claude_provider_account_authority_snapshot, xai_provider_account_authority_snapshot) values (${turnId}, ${input.accountId}, ${input.workspaceId}, ${sessionId}, ${randomUUID()}, ${workflowId}, 'running', 'user', 1, 'Fixture', 'fixture-model', 'high', 'standard', 'none', 1, ${attemptId}, ${JSON.stringify(metadata)}::jsonb, ${ownerSubjectId}, ${JSON.stringify(input.authoritySnapshot)}::jsonb, ${JSON.stringify(input.authoritySnapshot)}::jsonb)`,
+      sql`insert into session_turns (id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id, status, source, position, prompt, model, reasoning_effort, latency_mode, sandbox_backend, execution_generation, active_attempt_id, metadata, initiating_human_subject_id, claude_provider_account_authority_snapshot, xai_provider_account_authority_snapshot) values (${turnId}, ${input.accountId}, ${input.workspaceId}, ${sessionId}, ${randomUUID()}, ${workflowId}, 'running', 'user', 1, 'Fixture', 'fixture-model', 'high', 'standard', 'none', 1, ${attemptId}, ${JSON.stringify(metadata)}::jsonb, ${initiatingHumanSubjectId}, ${JSON.stringify(input.authoritySnapshot)}::jsonb, ${JSON.stringify(input.authoritySnapshot)}::jsonb)`,
     );
     await tx.execute(sql`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`);
     await tx.execute(
@@ -407,4 +417,231 @@ test("non-pool subjects run unchanged", async () => {
       ),
   );
   expect(seen).toBe(0);
+}, 60_000);
+
+async function poolVisibleSessions(
+  input: Fixture,
+  provider: "claude" | "xai",
+  sessionIds: string[],
+): Promise<string[]> {
+  return await withWorkspaceSubjectRls(
+    client.db,
+    input.workspaceId,
+    subscriptionPoolWorkerSubject(provider),
+    async (tx) => {
+      const rows = await tx.execute<{ id: string }>(
+        sql`select id from sessions where id in (${sql.join(
+          sessionIds.map((id) => sql`${id}`),
+          sql`, `,
+        )})`,
+      );
+      return [...rows].map((row) => row.id).sort();
+    },
+  );
+}
+
+test.each([
+  ["a workspace member without a human", (input: Fixture) => ({ subjectId: input.otherSubjectId })],
+  [
+    "a service turn actor whose initiating human is null",
+    () => ({ subjectId: "service:agent-turn", initiatingHumanSubjectId: null }),
+  ],
+  [
+    "a service turn actor carrying another human",
+    (input: Fixture) => ({
+      subjectId: "service:agent-turn",
+      initiatingHumanSubjectId: input.otherSubjectId,
+    }),
+  ],
+] as const)(
+  "an ambient actor (%s) runs unchanged and never borrows the turn's human",
+  async (_label, actorFor) => {
+    const input = await fixture();
+    // Both sessions belong to the same human; the shared one's turn is readable
+    // by the ambient actor, so only the short-circuit keeps the private one hidden.
+    const mine = await turn(input, "user_private");
+    const sharedByMe = await turn(input, "workspace_shared");
+    const ambient = actorFor(input);
+    const observed = await withSessionRlsActorContext(
+      ambient,
+      async () =>
+        await withSubscriptionPoolSessionAccess(
+          client.db,
+          {
+            workspaceId: input.workspaceId,
+            subjectId: subscriptionPoolWorkerSubject("claude"),
+            sessionId: sharedByMe.sessionId,
+            turnId: sharedByMe.turnId,
+          },
+          async () => ({
+            actor: currentSessionRlsActorContext(),
+            visible: await poolVisibleSessions(input, "claude", [
+              mine.sessionId,
+              sharedByMe.sessionId,
+            ]),
+          }),
+        ),
+    );
+    expect(observed.actor).toBe(ambient);
+    expect(observed.visible).toEqual([sharedByMe.sessionId]);
+  },
+  60_000,
+);
+
+test("without an ambient actor the helper restores exactly the pool-worker subject and the turn's human", async () => {
+  const input = await fixture();
+  const mine = await turn(input, "user_private");
+  const worker = subscriptionPoolWorkerSubject("xai");
+  const actor = await withSubscriptionPoolSessionAccess(
+    client.db,
+    { workspaceId: input.workspaceId, subjectId: worker, sessionId: mine.sessionId },
+    async () => currentSessionRlsActorContext(),
+  );
+  expect(actor).toEqual({ subjectId: worker, initiatingHumanSubjectId: input.subjectId });
+}, 60_000);
+
+test("restoring pool session access refuses an open transaction handle", async () => {
+  const input = await fixture();
+  const mine = await turn(input, "user_private");
+  const worker = subscriptionPoolWorkerSubject("claude");
+  let ran = false;
+  await expect(
+    withWorkspaceSubjectRls(
+      client.db,
+      input.workspaceId,
+      worker,
+      async (tx) =>
+        await withSubscriptionPoolSessionAccess(
+          tx,
+          { workspaceId: input.workspaceId, subjectId: worker, sessionId: mine.sessionId },
+          async () => {
+            ran = true;
+          },
+        ),
+    ),
+  ).rejects.toThrow("not an open transaction");
+  expect(ran).toBe(false);
+}, 60_000);
+
+for (const provider of ["claude", "xai"] as const) {
+  test.each(visibilities)(
+    `${provider} lease acquisition under the pool worker subject succeeds for %s sessions`,
+    async (visibility) => {
+      const input = await fixture();
+      if (provider === "claude") await pool(input);
+      const running = await turn(input, visibility);
+      const acquire =
+        provider === "claude" ? acquireClaudeCredentialLease : acquireXaiCredentialLease;
+      const leased = await acquire(client.db, {
+        ...input,
+        sessionId: running.sessionId,
+        turnId: running.turnId,
+        subjectId: subscriptionPoolWorkerSubject(provider),
+        holderId: "fixture-holder-" + randomUUID(),
+        upstreamModelId: "claude-opus-fixture",
+        modelId: "fixture-model",
+      });
+      if (provider === "claude") expect(leased.credentialId).not.toBeNull();
+      else expect(leased.credentialId).toBeNull();
+    },
+    60_000,
+  );
+}
+
+test("a turn without an initiating human restores nothing and private sessions stay hidden", async () => {
+  const input = await fixture();
+  const serviceTurn = await turn(input, "user_private", input.subjectId, null);
+  const worker = subscriptionPoolWorkerSubject("claude");
+  const observed = await withSubscriptionPoolSessionAccess(
+    client.db,
+    {
+      workspaceId: input.workspaceId,
+      subjectId: worker,
+      sessionId: serviceTurn.sessionId,
+      turnId: serviceTurn.turnId,
+    },
+    async () => ({
+      actor: currentSessionRlsActorContext(),
+      visible: await poolVisibleSessions(input, "claude", [serviceTurn.sessionId]),
+    }),
+  );
+  expect(observed).toEqual({ actor: undefined, visible: [] });
+  await expect(
+    armClaudeCapacityWait(client.db, {
+      ...input,
+      ...serviceTurn,
+      subjectId: worker,
+      earliestResetAt: null,
+      failurePayload: capacityFailure,
+    }),
+  ).rejects.toThrow();
+}, 60_000);
+
+test("a turn id from another session restores nothing", async () => {
+  const input = await fixture();
+  const mine = await turn(input, "user_private");
+  const theirs = await turn(input, "workspace_shared", input.otherSubjectId);
+  const observed = await withSubscriptionPoolSessionAccess(
+    client.db,
+    {
+      workspaceId: input.workspaceId,
+      subjectId: subscriptionPoolWorkerSubject("xai"),
+      sessionId: theirs.sessionId,
+      turnId: mine.turnId,
+    },
+    async () => ({
+      actor: currentSessionRlsActorContext(),
+      visible: await poolVisibleSessions(input, "xai", [mine.sessionId]),
+    }),
+  );
+  expect(observed).toEqual({ actor: undefined, visible: [] });
+}, 60_000);
+
+test("temporary in-transaction pool session access restores the prior initiating human", async () => {
+  const input = await fixture();
+  const readHuman = async (tx: Parameters<typeof withTemporaryPoolSessionAccessInTransaction>[0]) =>
+    (
+      await tx.execute<{ value: string | null }>(
+        sql`select current_setting('opengeni.initiating_human_subject_id', true) as value`,
+      )
+    )[0]?.value ?? "";
+  const observed = await withWorkspaceRls(client.db, input.workspaceId, async (tx) => {
+    const before = await readHuman(tx);
+    const inside = await withTemporaryPoolSessionAccessInTransaction(
+      tx,
+      input.subjectId,
+      async () => await readHuman(tx),
+    );
+    const afterSuccess = await readHuman(tx);
+    let insideFailure = "";
+    const failure = new Error("fixture failure");
+    const thrown = await withTemporaryPoolSessionAccessInTransaction(
+      tx,
+      input.subjectId,
+      async () => {
+        insideFailure = await readHuman(tx);
+        throw failure;
+      },
+    ).catch((error: unknown) => error);
+    const afterError = await readHuman(tx);
+    // An initiating human already on the transaction is kept, never replaced.
+    await tx.execute(
+      sql`select set_config('opengeni.initiating_human_subject_id', ${input.otherSubjectId}, true)`,
+    );
+    const kept = await withTemporaryPoolSessionAccessInTransaction(
+      tx,
+      input.subjectId,
+      async () => await readHuman(tx),
+    );
+    return { before, inside, afterSuccess, insideFailure, thrown, afterError, kept };
+  });
+  expect(observed).toEqual({
+    before: "",
+    inside: input.subjectId,
+    afterSuccess: "",
+    insideFailure: input.subjectId,
+    thrown: expect.any(Error),
+    afterError: "",
+    kept: input.otherSubjectId,
+  });
 }, 60_000);

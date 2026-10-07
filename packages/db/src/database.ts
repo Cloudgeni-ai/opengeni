@@ -703,7 +703,8 @@ type SessionActivityGate = {
   owner: boolean;
 };
 
-function isTransactionHandle(db: Database): boolean {
+/** True for an open transaction (or savepoint) handle rather than a pool handle. */
+export function isTransactionHandle(db: Database): boolean {
   return typeof (db as Database & { rollback?: unknown }).rollback === "function";
 }
 

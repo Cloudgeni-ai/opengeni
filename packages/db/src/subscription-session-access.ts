@@ -2,6 +2,7 @@ import { and, eq, sql } from "drizzle-orm";
 
 import {
   currentSessionRlsActorContext,
+  isTransactionHandle,
   rawRows,
   withSessionRlsActorContext,
   withWorkspaceRls,
@@ -47,9 +48,13 @@ export function isSubscriptionPoolWorkerSubject(subjectId: string): boolean {
 /**
  * Read the frozen initiating human of the exact turn a subscription operation
  * acts for: `turnId` when supplied, otherwise the session's active turn. Runs
- * in the caller's trusted service context (no subject), which already sees
- * every session row of the workspace; the value it returns can only narrow
- * the later pool-worker transaction to that human's sessions.
+ * only in a trusted service context with no ambient actor and on a pool
+ * handle (never an open transaction), so the read sees every session row of
+ * the workspace and no inherited subject or initiating-human setting can
+ * influence which turn it finds. The value it returns can only narrow the
+ * later pool-worker transaction to that human's sessions. A `turnId` that
+ * does not belong to `sessionId`, or a turn without an initiating human,
+ * yields `null`.
  */
 async function readFrozenInitiatingHuman(
   db: Database,
@@ -97,13 +102,29 @@ async function readFrozenInitiatingHuman(
  *
  * - Non-pool subjects (a human acting on their own private pool, or an API
  *   caller) already carry their own access and run unchanged.
- * - A caller whose ambient session actor already carries an initiating human
- *   owns its context; this helper never overrides it.
- * - Otherwise (background recovery, wake handlers, failure settlement) the
- *   exact turn's frozen initiating human is re-established for the duration
- *   of `fn`, so private and shared sessions behave identically. The turn is
- *   read in the caller's own context: an ambient actor that cannot see the
- *   turn gains nothing.
+ * - Any ambient session actor owns its context and `fn` runs unchanged,
+ *   whatever its subject and whether or not it carries an initiating human
+ *   (for example the agent-turn actor of a service turn whose initiating
+ *   human is null). The restored human is never combined with a different
+ *   subject, so an ambient actor can never gain another member's private
+ *   session visibility through this helper.
+ * - Otherwise (no ambient actor: background recovery, wake handlers, failure
+ *   settlement) the exact turn's frozen initiating human is re-established
+ *   together with the pool-worker subject for the duration of `fn`, so
+ *   private and shared sessions behave identically. Pass the acting `turnId`;
+ *   without it the session's active turn is used. A turn with no initiating
+ *   human, or one that is not a turn of `sessionId`, restores nothing and
+ *   private sessions stay hidden (fail closed).
+ *
+ * The restored actor applies to every scope `fn` opens. Wrapped functions are
+ * single transactions already scoped to the pool-worker subject, so it only
+ * affects that transaction.
+ *
+ * Call it with a pool handle. When restoration would be needed it refuses an
+ * open transaction handle: such a transaction is already scoped to some
+ * subject and initiating human, which would decide which turn the lookup can
+ * see, and the restored actor would then apply inside a transaction whose
+ * scope the caller chose.
  */
 export async function withSubscriptionPoolSessionAccess<T>(
   db: Database,
@@ -111,12 +132,16 @@ export async function withSubscriptionPoolSessionAccess<T>(
   fn: () => Promise<T>,
 ): Promise<T> {
   if (!isSubscriptionPoolWorkerSubject(input.subjectId)) return await fn();
-  const ambient = currentSessionRlsActorContext();
-  if (ambient?.initiatingHumanSubjectId) return await fn();
+  if (currentSessionRlsActorContext()) return await fn();
+  if (isTransactionHandle(db)) {
+    throw new Error(
+      "withSubscriptionPoolSessionAccess: pool-worker session access must be restored from a pool handle, not an open transaction",
+    );
+  }
   const initiatingHumanSubjectId = await readFrozenInitiatingHuman(db, input);
   if (!initiatingHumanSubjectId) return await fn();
   return await withSessionRlsActorContext(
-    { ...ambient, subjectId: ambient?.subjectId ?? input.subjectId, initiatingHumanSubjectId },
+    { subjectId: input.subjectId, initiatingHumanSubjectId },
     fn,
   );
 }
