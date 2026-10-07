@@ -71,6 +71,11 @@ export {
 } from "./modal-native-live-origin";
 export { SubscriptionAccountChangedError } from "./subscription-account-conflict";
 export {
+  createSubscriptionConnection,
+  readSubscriptionEffectiveSettings,
+  type EffectiveSubscriptionSettingsRow,
+} from "./subscription-core-repository";
+export {
   isSubscriptionPoolWorkerSubject,
   subscriptionPoolWorkerSubject,
   withSubscriptionPoolSessionAccess,

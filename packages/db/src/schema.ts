@@ -1,4 +1,5 @@
 import { createSubscriptionPoolTables } from "./subscription-pool-schema";
+import { subscriptionConnections } from "./subscription-core-schema";
 import type { StoredSessionAdmissionBlock } from "./session-admission-block";
 import {
   commentaryInclusiveMeaningfulSessionEventSql,
@@ -40,6 +41,7 @@ import {
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 export * from "./knowledge-entries-schema";
+export * from "./subscription-core-schema";
 import type { ResolvedAgentConfig, SessionToolPolicy } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
 import {
@@ -12310,6 +12312,9 @@ export const modelCallFacts = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id").references(() => subscriptionConnections.id, {
+      onDelete: "set null",
+    }),
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
@@ -12367,6 +12372,9 @@ export const modelCallFacts = pgTable(
       table.sessionId,
       table.occurredAt,
     ),
+    subscriptionConnectionOccurred: index("model_call_facts_connection_occurred_idx")
+      .on(table.accountId, table.connectionId, table.occurredAt)
+      .where(sql`${table.connectionId} is not null`),
     workspaceScheduledTaskOccurred: index("model_call_facts_workspace_scheduled_task_occurred_idx")
       .on(table.workspaceId, table.scheduledTaskId, table.occurredAt)
       .where(sql`${table.scheduledTaskId} is not null`),

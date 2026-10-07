@@ -297,6 +297,61 @@ export function stripRoutineBodies(statement: string): string {
  * source, not an executed migration query. Keep arbitrary EXECUTE strings and
  * every actual query outside the replacement visible to the guard. */
 function stripCatalogRoutinePatchLiterals(statement: string): string {
+  // Chained replacements of a pg_get_functiondef result are also routine
+  // source, provided the resulting definition is the block's sole dynamic
+  // execution. Keep every other statement visible to the backfill analyzer.
+  const source = /\b([a-z_]\w*)\s*:=\s*pg_get_functiondef\s*\([\s\S]*?\)\s*;/gi;
+  const sources = [...statement.matchAll(source)];
+  if (sources.length === 1) {
+    const variable = sources[0]![1]!;
+    const execution = new RegExp(`\\bEXECUTE\\s+${variable}\\s*;`, "gi");
+    const executions = [...statement.matchAll(execution)];
+    const otherExecutions = [...statement.matchAll(/\bEXECUTE\b/gi)].length;
+    const assignments = [...statement.matchAll(new RegExp(`\\b${variable}\\s*:=`, "gi"))];
+    if (executions.length === 1 && otherExecutions === 1) {
+      const replacements: Array<{ start: number; end: number }> = [];
+      let cursor = sources[0]!.index! + sources[0]![0].length;
+      const assignment = new RegExp(
+        `\\b${variable}\\s*:=\\s*replace\\s*\\(\\s*${variable}\\s*,`,
+        "gi",
+      );
+      let match: RegExpExecArray | null;
+      while ((match = assignment.exec(statement))) {
+        if (match.index < cursor) continue;
+        let depth = 1;
+        let quoted = false;
+        let end = match.index + match[0].length;
+        for (; end < statement.length; end += 1) {
+          const char = statement[end]!;
+          if (char === "'") {
+            if (quoted && statement[end + 1] === "'") {
+              end += 1;
+              continue;
+            }
+            quoted = !quoted;
+          } else if (!quoted && char === "(") depth += 1;
+          else if (!quoted && char === ")") depth -= 1;
+          else if (!quoted && char === ";" && depth === 0) break;
+        }
+        if (depth !== 0 || quoted || statement[end] !== ";") break;
+        replacements.push({ start: match.index, end: end + 1 });
+        cursor = end + 1;
+        assignment.lastIndex = cursor;
+      }
+      if (replacements.length > 0 && assignments.length === replacements.length + 1) {
+        const ranges = [
+          ...replacements,
+          { start: executions[0]!.index!, end: executions[0]!.index! + executions[0]![0].length },
+        ].sort((left, right) => right.start - left.start);
+        let stripped = statement;
+        for (const range of ranges) {
+          stripped = `${stripped.slice(0, range.start)}${stripped.slice(range.end)}`;
+        }
+        return stripped;
+      }
+    }
+  }
+
   const assignments = /\b([a-z_]\w*)\s*:=\s*(\$[a-z_]\w*\$|\$\$)([\s\S]*?)\2\s*;/gi;
   return statement.replace(assignments, (whole, variable: string, _tag: string) => {
     const outside = statement.replace(whole, `${variable} := NULL;`);

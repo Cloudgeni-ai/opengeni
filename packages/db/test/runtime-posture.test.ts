@@ -1232,26 +1232,26 @@ describe("runtime database posture evaluator", () => {
         ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 322],
+            [FORCE_RLS_TABLES, 335],
             [NON_RLS_RUNTIME_TABLES, 19],
-            [RUNTIME_FULL_DML_TABLES, 163],
+            [RUNTIME_FULL_DML_TABLES, 176],
             [RUNTIME_READ_ONLY_TABLES, 26],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 46],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 33],
             [PROTECTED_NO_DIRECT_DML_TABLES, 72],
-            [RUNTIME_DML_TABLES, 269],
+            [RUNTIME_DML_TABLES, 282],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 206],
+            [FORCE_RLS_TABLES, 219],
             [NON_RLS_RUNTIME_TABLES, 12],
-            [RUNTIME_FULL_DML_TABLES, 120],
+            [RUNTIME_FULL_DML_TABLES, 133],
             [RUNTIME_READ_ONLY_TABLES, 18],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 38],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
             [PROTECTED_NO_DIRECT_DML_TABLES, 30],
-            [RUNTIME_DML_TABLES, 188],
+            [RUNTIME_DML_TABLES, 201],
           ] as const);
       for (const [tables, length] of contracts) {
         // Nine additive embedding tables: three full-DML, four append-only,
@@ -1360,7 +1360,8 @@ describe("runtime database posture evaluator", () => {
         8 +
         1 +
         6 +
-        1;
+        1 +
+        13; // M2 adds thirteen FORCE-RLS tables with explicit runtime DML contracts.
       expect(RUNTIME_TABLE_PRIVILEGES.credit_debit_allocations).toEqual(["SELECT", "INSERT"]);
       for (const removed of [
         "workspace_packs",
