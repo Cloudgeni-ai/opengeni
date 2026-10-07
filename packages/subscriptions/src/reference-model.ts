@@ -24,6 +24,8 @@ export type Rotation =
 export type SubscriptionSettings = {
   /** Per provider; a provider without an entry spreads work. */
   rotation: Record<ProviderId, Rotation>;
+  /** `automatic` admits both classified shared pools; missing entries retain legacy behavior. */
+  inferenceSource?: Record<ProviderId, "automatic" | "workspace" | "organization">;
   crossProviderFailover: boolean;
   /** Ordered fallback models for a preferred model, possibly on other providers. */
   fallbackOrder: Record<ModelId, ModelId[]>;
@@ -57,6 +59,12 @@ export type Connection = {
   entitledModels: readonly ModelId[];
   /** Administrator access policy on the connection; null or absent allows every entitled model. */
   allowedModelIds?: readonly ModelId[] | null;
+  assignmentPolicies?: readonly {
+    workspaceId: string;
+    inferencePool: "workspace" | "organization";
+    allowedModelIds: readonly ModelId[] | null;
+    allocatorEnabled: boolean;
+  }[];
   /** Per-model cooldowns (Claude reports model-specific limits). */
   modelCooldowns?: Readonly<Record<ModelId, number>>;
   quota: Quota;
@@ -140,6 +148,7 @@ export type EffectiveSettings = {
 
 const SETTING_KEYS: readonly SettingKey[] = [
   "rotation",
+  "inferenceSource",
   "crossProviderFailover",
   "fallbackOrder",
   "personalConnectionsAllowed",
@@ -160,7 +169,7 @@ export function effectiveSettings(policy: SettingsPolicy, workspaceId: string): 
     const overridden = override[key] !== undefined && !policy.locked.includes(key);
     if (overridden) {
       (values as Record<SettingKey, unknown>)[key] =
-        key === "rotation" || key === "fallbackOrder"
+        key === "rotation" || key === "inferenceSource" || key === "fallbackOrder"
           ? { ...policy.organization[key], ...(override[key] as object) }
           : override[key];
     }
@@ -226,6 +235,19 @@ export function authorizationFailure(
     }
     return null;
   }
+  if (connection.assignmentPolicies !== undefined) {
+    const source =
+      effectiveSettings(world.settings, workspace.id).values.inferenceSource?.[connection.provider] ??
+      "automatic";
+    const matching = connection.assignmentPolicies.filter(
+      (policy) =>
+        policy.workspaceId === workspace.id &&
+        (source === "automatic" || policy.inferencePool === source),
+    );
+    if (matching.length === 0) {
+      return failure("SUB-SET-06", "the effective inference source excludes this assignment");
+    }
+  }
   const scope = connection.ownership.scope;
   const inScope =
     scope.kind === "organization" ||
@@ -265,6 +287,27 @@ export function servingFailure(
       requirement: "SUB-ELIG-03",
       message: "the account's access policy excludes the model",
     };
+  }
+  if (connection.assignmentPolicies !== undefined) {
+    const workspace = byId(world.workspaces, session.workspaceId)!;
+    const source =
+      effectiveSettings(world.settings, workspace.id).values.inferenceSource?.[connection.provider] ??
+      "automatic";
+    const matching = connection.assignmentPolicies.filter(
+      (policy) =>
+        policy.workspaceId === workspace.id &&
+        (source === "automatic" || policy.inferencePool === source),
+    );
+    if (!matching.some((policy) => policy.allocatorEnabled)) {
+      return { requirement: "SUB-ELIG-04", message: "the source assignment is excluded from allocation" };
+    }
+    if (
+      !matching.some(
+        (policy) => policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId),
+      )
+    ) {
+      return { requirement: "SUB-ELIG-03", message: "the source assignment excludes the model" };
+    }
   }
   if ((connection.modelCooldowns?.[modelId] ?? -Infinity) > now) {
     return { requirement: "SUB-ELIG-03", message: "the account is cooling down for the model" };

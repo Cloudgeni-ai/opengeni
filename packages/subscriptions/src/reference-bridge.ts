@@ -20,6 +20,7 @@
  * - An explicit binding is the reference model's pin.
  */
 import * as reference from "./reference-model";
+import { inferenceSourceFor } from "./settings";
 import type {
   CacheFacts,
   PlacementDecision,
@@ -112,6 +113,9 @@ function referenceConnection(
     allocatorEnabled: connection.allocatorEnabled && capacity.kind !== "exhausted_without_reset",
     entitledModels: entitled,
     allowedModelIds: connection.allowedModelIds,
+    ...(connection.assignmentPolicies === undefined
+      ? {}
+      : { assignmentPolicies: connection.assignmentPolicies }),
     modelCooldowns: { ...connection.quota?.modelCooldowns },
     quota: capacity.kind === "exhausted_without_reset" ? { kind: "unknown" } : capacity,
   };
@@ -141,10 +145,12 @@ export function toReferenceWorld(input: PlacementInput): {
           authority.provider === connection.provider && authority.ownerMembershipId === owner,
       );
     }
-    return (
-      switches(connection.provider)?.useOrganizationAccounts !== false ||
-      connection.ownership.managedByWorkspaceId === workspace.id
-    );
+    if (connection.assignmentPolicies !== undefined) return true;
+    const source = inferenceSourceFor(settings, connection.provider);
+    const managedHere = connection.ownership.managedByWorkspaceId === workspace.id;
+    if (source === "workspace") return managedHere;
+    if (source === "organization") return !managedHere;
+    return switches(connection.provider)?.useOrganizationAccounts !== false || managedHere;
   });
   const providers = new Set([
     ...input.models.map((model) => model.provider),
@@ -157,6 +163,9 @@ export function toReferenceWorld(input: PlacementInput): {
       settings: {
         organization: {
           rotation: settings.rotation,
+          inferenceSource: Object.fromEntries(
+            [...providers].map((provider) => [provider, inferenceSourceFor(settings, provider)]),
+          ),
           crossProviderFailover: settings.crossProviderFailover,
           fallbackOrder: Object.fromEntries(
             Object.entries(settings.fallbackOrder).map(([modelId, order]) => [modelId, [...order]]),

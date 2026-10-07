@@ -76,11 +76,10 @@ export function effectiveSettings(
       // A provider's switches override field by field (D-25).
       value[entryKey] =
         key === "providers"
-          ? {
-              ...DEFAULT_PROVIDER_SWITCHES,
-              ...(base[entryKey] as ProviderSwitches | undefined),
-              ...(entry as Partial<ProviderSwitches>),
-            }
+          ? mergeProviderSwitches(
+              base[entryKey] as ProviderSwitches | undefined,
+              entry as Partial<ProviderSwitches>,
+            )
           : entry;
       sources[entryKey] = "workspace";
     }
@@ -125,4 +124,35 @@ export function providerSwitchesFor(
   provider: ProviderId,
 ): ProviderSwitches {
   return settings.providers[provider] ?? DEFAULT_PROVIDER_SWITCHES;
+}
+
+/** Legacy boolean rows remain readable; all effective values expose one source. */
+export function resolveProviderSwitches(switches: ProviderSwitches): ProviderSwitches & {
+  inferenceSource: NonNullable<ProviderSwitches["inferenceSource"]>;
+} {
+  const inferenceSource =
+    switches.inferenceSource ?? (switches.useOrganizationAccounts ? "automatic" : "workspace");
+  return {
+    ...switches,
+    inferenceSource,
+    useOrganizationAccounts: inferenceSource !== "workspace",
+  };
+}
+
+export function inferenceSourceFor(
+  settings: SubscriptionSettingValues,
+  provider: ProviderId,
+): NonNullable<ProviderSwitches["inferenceSource"]> {
+  return resolveProviderSwitches(providerSwitchesFor(settings, provider)).inferenceSource;
+}
+
+function mergeProviderSwitches(
+  base: ProviderSwitches | undefined,
+  override: Partial<ProviderSwitches>,
+): ProviderSwitches & { inferenceSource: NonNullable<ProviderSwitches["inferenceSource"]> } {
+  const raw = { ...base, ...override };
+  const merged = { ...DEFAULT_PROVIDER_SWITCHES, ...raw };
+  return raw.inferenceSource === undefined
+    ? resolveProviderSwitches(merged)
+    : resolveProviderSwitches({ ...merged, inferenceSource: raw.inferenceSource });
 }

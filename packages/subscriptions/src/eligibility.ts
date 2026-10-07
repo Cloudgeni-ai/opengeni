@@ -1,5 +1,5 @@
 import { modelCooldownUntil, quotaCapacity, type QuotaCapacity } from "./quota";
-import { providerSwitchesFor } from "./settings";
+import { inferenceSourceFor, providerSwitchesFor } from "./settings";
 import type {
   ModelDescriptor,
   ModelId,
@@ -17,6 +17,7 @@ import type {
 export type AuthorizationIneligibility =
   | "provider_disabled"
   | "organization_accounts_off"
+  | "inference_source_excludes_connection"
   | "out_of_scope"
   | "personal_connections_disabled"
   | "personal_owner_inactive"
@@ -40,6 +41,7 @@ export type Ineligibility = AuthorizationIneligibility | ServiceIneligibility;
 export const AUTHORIZATION_INELIGIBILITIES: readonly AuthorizationIneligibility[] = Object.freeze([
   "provider_disabled",
   "organization_accounts_off",
+  "inference_source_excludes_connection",
   "out_of_scope",
   "personal_connections_disabled",
   "personal_owner_inactive",
@@ -89,6 +91,29 @@ function findPerson(input: PlacementInput, membershipId: string): PlacementPerso
   return input.people.find((person) => person.membershipId === membershipId);
 }
 
+function sourceAssignments(input: PlacementInput, connection: SubscriptionConnection) {
+  const source = inferenceSourceFor(input.settings, connection.provider);
+  return connection.assignmentPolicies?.filter(
+    (policy) =>
+      policy.workspaceId === input.workspace.id &&
+      (source === "automatic" || policy.inferencePool === source),
+  );
+}
+
+function sharedConnectionMatchesSource(input: PlacementInput, connection: SubscriptionConnection) {
+  const source = inferenceSourceFor(input.settings, connection.provider);
+  const assignments = sourceAssignments(input, connection);
+  if (assignments !== undefined) return assignments.length > 0;
+
+  // M2 worlds do not yet include the M3 per-workspace assignment relation.
+  // Keep their compatibility projection readable while the cutover is off.
+  const managedHere = connection.ownership.kind === "shared" &&
+    connection.ownership.managedByWorkspaceId === input.workspace.id;
+  if (source === "workspace") return managedHere;
+  if (source === "organization") return !managedHere;
+  return providerSwitchesFor(input.settings, connection.provider).useOrganizationAccounts || managedHere;
+}
+
 /** Workspace model restrictions are a ceiling on every selection (SUB-ELIG-02). */
 export function modelAllowedInWorkspace(workspace: PlacementWorkspace, modelId: ModelId): boolean {
   return workspace.allowedModelIds === null || workspace.allowedModelIds.includes(modelId);
@@ -132,8 +157,12 @@ export function authorizationIneligibility(
     if (!frozen) reasons.push("personal_authority_missing");
     return reasons;
   }
-  if (!switches.useOrganizationAccounts && ownership.managedByWorkspaceId !== workspace.id) {
-    reasons.push("organization_accounts_off");
+  if (!sharedConnectionMatchesSource(input, connection)) {
+    reasons.push(
+      switches.inferenceSource === undefined && !switches.useOrganizationAccounts
+        ? "organization_accounts_off"
+        : "inference_source_excludes_connection",
+    );
   }
   const scope = ownership.scope;
   const inScope =
@@ -154,7 +183,13 @@ function staticServiceIneligibility(
 ): ServiceIneligibility[] {
   const reasons: ServiceIneligibility[] = [];
   if (connection.health !== "healthy") reasons.push("unhealthy");
-  if (!connection.allocatorEnabled) reasons.push("allocator_disabled");
+  const assignments = sourceAssignments(input, connection);
+  if (
+    !connection.allocatorEnabled ||
+    (assignments !== undefined && !assignments.some((policy) => policy.allocatorEnabled))
+  ) {
+    reasons.push("allocator_disabled");
+  }
   const model = findModel(input, modelId);
   if (!model) reasons.push("model_unknown");
   else if (model.provider !== connection.provider) reasons.push("wrong_provider");
@@ -166,6 +201,14 @@ function staticServiceIneligibility(
     !connection.excludedModelIds.includes(modelId);
   if (!entitled) reasons.push("model_not_entitled");
   if (connection.allowedModelIds !== null && !connection.allowedModelIds.includes(modelId)) {
+    reasons.push("model_not_allowed_by_connection");
+  }
+  if (
+    assignments !== undefined &&
+    !assignments.some(
+      (policy) => policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId),
+    )
+  ) {
     reasons.push("model_not_allowed_by_connection");
   }
   return reasons;
