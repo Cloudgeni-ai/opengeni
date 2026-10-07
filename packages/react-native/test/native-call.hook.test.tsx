@@ -92,6 +92,7 @@ describe("native realtime call", () => {
     await act(async () => await hook.result.current.start());
     expect(system.log).toEqual(["call.start:Release plan"]);
     expect(voice.log).toEqual(["realtime.start"]);
+    expect(hook.result.current.systemCall).toBe(true);
     expect(hook.result.current.phase).toBe("connecting");
     await status("starting");
     await status("active");
@@ -165,6 +166,31 @@ describe("native realtime call", () => {
     );
     await act(async () => await hook.result.current.start());
     expect(voice.log).toEqual(["realtime.start"]);
+    expect(hook.result.current.systemCall).toBe(false);
+  });
+
+  test("a refused system call still talks, as an in-app call", async () => {
+    const voice = fakeRealtime();
+    const system = fakeCall();
+    system.call.startCall = async () => {
+      throw new Error("CallKit refused the call");
+    };
+    const hook = await renderHook(
+      (realtime: NativeCallRealtime) =>
+        useNativeRealtimeCall({ realtime, call: system.call, title: "Plan" }),
+      voice.realtime,
+    );
+    await act(async () => await hook.result.current.start());
+    expect(voice.log).toEqual(["realtime.start"]);
+    expect(hook.result.current.systemCall).toBe(false);
+    expect(hook.result.current.error).toBeNull();
+    await hook.rerender({ ...voice.realtime, snapshot: snapshot("active") });
+    expect(hook.result.current.phase).toBe("active");
+    await act(async () => hook.result.current.setMuted(true));
+    await act(async () => await hook.result.current.end());
+    // Nothing reaches the system for a call it never accepted.
+    expect(system.log).toEqual([]);
+    expect(voice.log).toContain("realtime.stop");
   });
 });
 

@@ -21,6 +21,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
 import { BrandMark } from "@/brand-mark";
 import { useAgentCall } from "@/call";
+import { pinCallSession, unpinCallSession, useOutsideCallPreferences } from "@/call-preferences";
 import { copyText } from "@/clipboard";
 import { useSessionComputeLabel } from "@/compute-label";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
@@ -29,6 +30,9 @@ import { AppThemeProvider } from "@/theme";
 import { useComposerVoice } from "@/voice";
 
 const renderMarkdown = createWebMarkdownRenderer({ onCopy: (text) => void copyText(text) });
+
+/** The session menu item that sends outside calls (Siri, Phone, Shortcuts) to this session. */
+const CALL_PIN_ACTION = "opengeni.take-calls-here";
 
 export default function SessionScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -88,6 +92,10 @@ function LiveSession(props: {
   const title = session ? sessionDisplayTitle(session) : "";
   const agentCall = useAgentCall();
   const onCall = agentCall.sessionId === props.sessionId;
+  const callPreferences = useOutsideCallPreferences();
+  const takesCalls =
+    callPreferences.target === "pinned" && callPreferences.pinned?.sessionId === props.sessionId;
+  const workspaceId = props.workspaceId;
   const headerTitle = useCallback(
     () => (
       <AppThemeProvider>
@@ -132,17 +140,33 @@ function LiveSession(props: {
               onActionFeedback={() => void Haptics.selectionAsync()}
               renderMenu={({ actions, trigger }) => (
                 <NativeMenu
-                  actions={actions.map((action) => ({
-                    id: action.key,
-                    title: action.label,
-                    ...(action.systemImage
-                      ? { image: action.systemImage as MenuAction["image"] }
-                      : {}),
-                    ...(action.destructive ? { attributes: { destructive: true } } : {}),
-                  }))}
-                  onPressAction={({ nativeEvent }) =>
-                    actions.find((action) => action.key === nativeEvent.event)?.onPress()
-                  }
+                  actions={[
+                    {
+                      id: CALL_PIN_ACTION,
+                      title: takesCalls ? "Stop taking calls here" : "Take calls here",
+                      image: (takesCalls
+                        ? "phone.down"
+                        : "phone.arrow.down.left") as MenuAction["image"],
+                    },
+                    ...actions.map((action) => ({
+                      id: action.key,
+                      title: action.label,
+                      ...(action.systemImage
+                        ? { image: action.systemImage as MenuAction["image"] }
+                        : {}),
+                      ...(action.destructive ? { attributes: { destructive: true } } : {}),
+                    })),
+                  ]}
+                  onPressAction={({ nativeEvent }) => {
+                    if (nativeEvent.event === CALL_PIN_ACTION) {
+                      void Haptics.selectionAsync();
+                      if (takesCalls) unpinCallSession();
+                      else if (workspaceId)
+                        pinCallSession({ workspaceId, sessionId: props.sessionId, title });
+                      return;
+                    }
+                    actions.find((action) => action.key === nativeEvent.event)?.onPress();
+                  }}
                 >
                   {trigger}
                 </NativeMenu>
@@ -151,7 +175,18 @@ function LiveSession(props: {
           </View>
         </AppThemeProvider>
       ) : null,
-    [agentCall, onCall, props.client, props.sessionId, refreshSession, session, theme.colors.fg],
+    [
+      agentCall,
+      onCall,
+      props.client,
+      props.sessionId,
+      refreshSession,
+      session,
+      takesCalls,
+      theme.colors.fg,
+      title,
+      workspaceId,
+    ],
   );
   // Photos and files, as the web composer's + offers them.
   const attachMenu = (

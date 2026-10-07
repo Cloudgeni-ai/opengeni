@@ -14,7 +14,7 @@ import {
   connectCallAudioToWebRtc,
   createReactNativeWebRtcAdapter,
 } from "@opengeni/react-native/webrtc";
-import type { EffectiveSessionControl } from "@opengeni/sdk";
+import { OpenGeniApiError, type EffectiveSessionControl } from "@opengeni/sdk";
 import * as Haptics from "expo-haptics";
 import {
   createContext,
@@ -29,7 +29,7 @@ import {
 import { Alert, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
-import { getOutsideCallTarget } from "@/call-preferences";
+import { getOutsideCallTarget, getPinnedCallSession, unpinCallSession } from "@/call-preferences";
 import { AppThemeProvider } from "@/theme";
 
 type CallTarget = { workspaceId: string; sessionId: string };
@@ -99,6 +99,16 @@ export function CallProvider({ children }: { children: ReactNode }) {
       if (!workspaceId) return;
       if (requested) return callSession(requested);
       try {
+        const pinned = getPinnedCallSession();
+        if (getOutsideCallTarget() === "pinned" && pinned?.workspaceId === workspaceId) {
+          const gone = await client.getSession(workspaceId, pinned.sessionId).then(
+            () => false,
+            (error: unknown) => error instanceof OpenGeniApiError && error.status === 404,
+          );
+          if (!gone) return callSession(pinned.sessionId);
+          // The chosen session is gone: forget it and start fresh rather than fail the call.
+          unpinCallSession();
+        }
         if (getOutsideCallTarget() === "latest") {
           const [latest] = await client.listSessions(workspaceId, { limit: 1 });
           if (latest) return callSession(latest.id);

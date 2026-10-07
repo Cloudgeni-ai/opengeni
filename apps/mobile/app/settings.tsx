@@ -7,7 +7,7 @@ import { setAppearance, useAppearancePreference, type AppearancePreference } fro
 import { serverLabel } from "@/account-store";
 import {
   setOutsideCallTarget,
-  useOutsideCallTarget,
+  useOutsideCallPreferences,
   type OutsideCallTarget,
 } from "@/call-preferences";
 import { useNotificationSettingsSection } from "@/notifications";
@@ -31,7 +31,7 @@ function Settings() {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const appearance = useAppearancePreference();
-  const outsideCallTarget = useOutsideCallTarget();
+  const { target: outsideCallTarget, pinned: pinnedCallSession } = useOutsideCallPreferences();
   const { accounts, account, workspace, organizations, switchAccount, signOut } = useAccount();
   const notifications = useNotificationSettingsSection();
   const org = organizations.find((each) => each.accountId === workspace?.accountId);
@@ -134,6 +134,13 @@ function Settings() {
   const callTargets: { id: OutsideCallTarget; title: string; subtitle: string }[] = [
     { id: "new", title: "Start a new session", subtitle: "A fresh conversation for each call" },
     { id: "latest", title: "Continue the latest session", subtitle: "Pick up where you left off" },
+    {
+      id: "pinned",
+      title: "Call a chosen session",
+      subtitle: pinnedCallSession
+        ? pinnedCallSession.title || "Untitled session"
+        : "Choose one with “Take calls here” in a session's menu",
+    },
   ];
   sections.push({
     id: "calls",
@@ -146,7 +153,16 @@ function Settings() {
       title: each.title,
       subtitle: each.subtitle,
       selected: outsideCallTarget === each.id,
-      onPress: () => setOutsideCallTarget(each.id),
+      onPress: () => {
+        if (each.id === "pinned" && !pinnedCallSession) {
+          Alert.alert(
+            "Choose a session first",
+            "Open the session you want to call, tap its ⋯ menu and choose “Take calls here”.",
+          );
+          return;
+        }
+        setOutsideCallTarget(each.id);
+      },
     })),
   });
   if (account) {
