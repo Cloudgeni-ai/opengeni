@@ -2085,7 +2085,10 @@ BEGIN
       'subscription_organization_admin(uuid)',
       'subscription_people_assignment_visible(uuid,uuid,uuid,text,text)',
       'subscription_person_preference_visible(uuid,uuid,text,text)',
-      'subscription_apps_designation_allowed(uuid,uuid,uuid)'
+      'subscription_apps_designation_allowed(uuid,uuid,uuid)',
+      'subscription_apps_designation_manage_allowed(uuid,uuid,uuid)',
+      'guard_subscription_connection_scope()',
+      'guard_subscription_turn_session_reference()'
     ] LOOP
       IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
         EXECUTE format(

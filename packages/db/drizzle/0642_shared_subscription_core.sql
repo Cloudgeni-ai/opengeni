@@ -21,13 +21,16 @@ CREATE TABLE opengeni_private.subscription_runtime_capabilities (
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (backend_pid, transaction_id, capability_kind, account_id, connection_id),
   CONSTRAINT subscription_runtime_capabilities_kind_chk
-    CHECK (capability_kind IN ('personal_access', 'session_access', 'lifecycle')),
+    CHECK (capability_kind IN ('personal_access', 'session_access', 'binding_access', 'lifecycle')),
   CONSTRAINT subscription_runtime_capabilities_provider_chk CHECK (
     (capability_kind = 'personal_access' AND provider IN ('codex','claude','xai')
       AND session_id IS NOT NULL AND turn_id IS NOT NULL
       AND session_owner_subject_id IS NOT NULL AND turn_human_subject_id IS NOT NULL)
     OR (capability_kind = 'session_access' AND provider IS NULL
       AND session_id IS NOT NULL AND turn_id IS NOT NULL
+      AND session_owner_subject_id IS NOT NULL AND turn_human_subject_id IS NOT NULL)
+    OR (capability_kind = 'binding_access' AND provider IN ('codex','claude','xai')
+      AND session_id IS NOT NULL AND turn_id IS NULL
       AND session_owner_subject_id IS NOT NULL AND turn_human_subject_id IS NOT NULL)
     OR (capability_kind = 'lifecycle' AND provider IS NULL AND session_id IS NULL
       AND turn_id IS NULL AND session_owner_subject_id IS NULL AND turn_human_subject_id IS NULL)
@@ -387,7 +390,7 @@ AS $function$
       SELECT 1 FROM opengeni_private.subscription_runtime_capabilities capability
       WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
         AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
-        AND capability.capability_kind = 'personal_access'
+        AND capability.capability_kind IN ('personal_access', 'binding_access')
         AND capability.account_id = p_account_id
         AND capability.connection_id = p_connection_id
         AND capability.provider = p_provider
@@ -552,7 +555,7 @@ AS $function$
         SELECT 1 FROM opengeni_private.subscription_runtime_capabilities capability
         WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
           AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
-          AND capability.capability_kind = 'personal_access'
+          AND capability.capability_kind IN ('personal_access', 'binding_access')
           AND capability.account_id = p_account_id AND capability.connection_id = p_connection_id
           AND p_owner_subject_id = capability.session_owner_subject_id
           AND opengeni_private.subscription_personal_connection_visible(
@@ -574,7 +577,7 @@ AS $function$
           AND assignment.organization_membership_id = membership.id
         WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
           AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
-          AND capability.capability_kind = 'session_access'
+          AND capability.capability_kind IN ('session_access', 'binding_access')
           AND capability.account_id = p_account_id
           AND capability.workspace_id = p_workspace_id
           AND capability.session_id IS NOT NULL AND capability.turn_id IS NOT NULL
@@ -655,6 +658,13 @@ BEGIN
 END
 $function$;
 REVOKE ALL ON FUNCTION opengeni_private.guard_subscription_connection_scope() FROM PUBLIC;
+DO $grant_connection_scope_guard$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION opengeni_private.guard_subscription_connection_scope() TO opengeni_app;
+  END IF;
+END
+$grant_connection_scope_guard$;
 CREATE TRIGGER subscription_connections_scope_guard
   BEFORE UPDATE ON subscription_connections
   FOR EACH ROW EXECUTE FUNCTION opengeni_private.guard_subscription_connection_scope();
@@ -678,6 +688,13 @@ BEGIN
 END
 $function$;
 REVOKE ALL ON FUNCTION opengeni_private.guard_subscription_turn_session_reference() FROM PUBLIC;
+DO $grant_turn_session_guard$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION opengeni_private.guard_subscription_turn_session_reference() TO opengeni_app;
+  END IF;
+END
+$grant_turn_session_guard$;
 CREATE TRIGGER subscription_leases_turn_session_guard
   BEFORE INSERT OR UPDATE OF account_id, workspace_id, session_id, turn_id ON subscription_leases
   FOR EACH ROW EXECUTE FUNCTION opengeni_private.guard_subscription_turn_session_reference();
@@ -688,6 +705,126 @@ CREATE TRIGGER subscription_turn_failures_turn_session_guard
   BEFORE INSERT OR UPDATE OF account_id, workspace_id, session_id, turn_id ON subscription_turn_failures
   FOR EACH ROW EXECUTE FUNCTION opengeni_private.guard_subscription_turn_session_reference();
 
+-- Bindings and leases must point into the exact session's current eligible
+-- pool. A binding has no turn snapshot, so its narrower capability is limited
+-- to the session owner and current human. A lease additionally validates the
+-- turn's frozen personal-account authority.
+CREATE FUNCTION opengeni_private.guard_subscription_connection_reference()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT
+AS $function$
+DECLARE
+  session_owner text;
+  turn_human text;
+  target subscription_connections%ROWTYPE;
+  visible boolean;
+BEGIN
+  IF NEW.connection_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.account_id IS DISTINCT FROM nullif(current_setting('opengeni.account_id', true), '')::uuid
+    OR NEW.workspace_id IS DISTINCT FROM nullif(current_setting('opengeni.workspace_id', true), '')::uuid
+    OR NOT session_reference_visible(NEW.account_id, NEW.workspace_id, NEW.session_id)
+  THEN
+    RAISE EXCEPTION 'subscription connection target is outside the visible session'
+      USING ERRCODE = '42501';
+  END IF;
+  SELECT session.owner_subject_id INTO session_owner
+  FROM sessions session
+  WHERE session.account_id = NEW.account_id AND session.workspace_id = NEW.workspace_id
+    AND session.id = NEW.session_id;
+  IF session_owner IS NULL THEN
+    RAISE EXCEPTION 'subscription session owner is unavailable'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF TG_TABLE_NAME = 'subscription_leases' THEN
+    SELECT turn.initiating_human_subject_id INTO turn_human
+    FROM session_turns turn
+    WHERE turn.account_id = NEW.account_id AND turn.workspace_id = NEW.workspace_id
+      AND turn.session_id = NEW.session_id AND turn.id = NEW.turn_id;
+    IF turn_human IS NULL OR NOT opengeni_private.authorize_subscription_session_access(
+      NEW.account_id, NEW.workspace_id, NEW.session_id, NEW.turn_id, session_owner, turn_human
+    ) THEN
+      RAISE EXCEPTION 'subscription lease turn is not authorized for this session'
+        USING ERRCODE = '42501';
+    END IF;
+    PERFORM opengeni_private.authorize_subscription_personal_access(
+      NEW.account_id, NEW.workspace_id, NEW.session_id, NEW.turn_id, NEW.connection_id,
+      NEW.provider, session_owner, turn_human
+    );
+  ELSE
+    turn_human := nullif(current_setting('opengeni.initiating_human_subject_id', true), '');
+    IF turn_human IS NULL THEN
+      RAISE EXCEPTION 'subscription binding requires an initiating human'
+        USING ERRCODE = '42501';
+    END IF;
+    INSERT INTO opengeni_private.subscription_runtime_capabilities (
+      backend_pid, transaction_id, capability_kind, account_id, workspace_id,
+      session_id, connection_id, provider, session_owner_subject_id, turn_human_subject_id
+    ) VALUES (
+      pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(), 'binding_access',
+      NEW.account_id, NEW.workspace_id, NEW.session_id, NEW.connection_id, NEW.provider,
+      session_owner, turn_human
+    )
+    ON CONFLICT (backend_pid, transaction_id, capability_kind, account_id, connection_id)
+    DO UPDATE SET workspace_id = EXCLUDED.workspace_id, session_id = EXCLUDED.session_id,
+      provider = EXCLUDED.provider,
+      session_owner_subject_id = EXCLUDED.session_owner_subject_id,
+      turn_human_subject_id = EXCLUDED.turn_human_subject_id;
+    PERFORM pg_catalog.set_config('opengeni.session_owner_subject_id', session_owner, true);
+    PERFORM pg_catalog.set_config('opengeni.turn_human_subject_id', turn_human, true);
+  END IF;
+
+  SELECT connection.* INTO target
+  FROM subscription_connections connection
+  WHERE connection.account_id = NEW.account_id AND connection.id = NEW.connection_id
+    AND connection.provider = NEW.provider AND connection.status = 'active';
+  IF NOT FOUND OR NOT opengeni_private.subscription_connection_visible(
+    NEW.account_id, NEW.workspace_id, target.id, target.ownership, target.scope_kind,
+    target.owner_organization_membership_id, target.owner_subject_id, target.provider
+  ) THEN
+    RAISE EXCEPTION 'subscription connection is not in the session eligible pool'
+      USING ERRCODE = '42501';
+  END IF;
+  IF target.ownership = 'personal' AND TG_TABLE_NAME = 'subscription_session_bindings' THEN
+    SELECT EXISTS (
+      SELECT 1 FROM sessions session
+      JOIN organization_memberships membership ON membership.account_id = session.account_id
+        AND membership.id = target.owner_organization_membership_id
+        AND membership.subject_id = session.owner_subject_id
+      JOIN organization_user_resource_authorities authority
+        ON authority.id = target.authority_id AND authority.account_id = target.account_id
+        AND authority.organization_membership_id = membership.id
+        AND authority.resource_kind = target.authority_resource_kind
+        AND authority.resource_id = target.id
+        AND authority.generation = target.authority_generation
+        AND authority.status = 'active' AND authority.revoked_at IS NULL
+      WHERE session.account_id = NEW.account_id AND session.workspace_id = NEW.workspace_id
+        AND session.id = NEW.session_id AND session.owner_subject_id = target.owner_subject_id
+        AND turn_human = session.owner_subject_id AND membership.status = 'active'
+        AND membership.revoked_at IS NULL
+        AND (session.visibility = 'user_private' OR membership.personal_workspace_id = NEW.workspace_id)
+    ) INTO visible;
+    IF NOT visible OR NOT coalesce((subscription_effective_settings(
+      NEW.account_id, NEW.workspace_id
+    ) #>> '{values,personalConnectionsAllowed}')::boolean, false) THEN
+      RAISE EXCEPTION 'personal subscription connection is not eligible for this session'
+        USING ERRCODE = '42501';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$function$;
+REVOKE ALL ON FUNCTION opengeni_private.guard_subscription_connection_reference() FROM PUBLIC;
+CREATE TRIGGER subscription_session_bindings_connection_reference_guard
+  BEFORE INSERT OR UPDATE OF account_id, workspace_id, session_id, connection_id, provider
+  ON subscription_session_bindings
+  FOR EACH ROW EXECUTE FUNCTION opengeni_private.guard_subscription_connection_reference();
+CREATE TRIGGER subscription_leases_connection_reference_guard
+  BEFORE INSERT OR UPDATE OF account_id, workspace_id, session_id, turn_id, connection_id, provider
+  ON subscription_leases
+  FOR EACH ROW EXECUTE FUNCTION opengeni_private.guard_subscription_connection_reference();
+
 -- Only the SECURITY DEFINER authorization seam can use the transaction-local
 -- capability to inspect live membership and resource-authority rows.
 CREATE POLICY subscription_core_capability_membership_read ON organization_memberships FOR SELECT
@@ -696,7 +833,7 @@ CREATE POLICY subscription_core_capability_membership_read ON organization_membe
     AND EXISTS (SELECT 1 FROM opengeni_private.subscription_runtime_capabilities capability
       WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
         AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
-        AND capability.capability_kind IN ('personal_access', 'session_access', 'lifecycle')
+        AND capability.capability_kind IN ('personal_access', 'session_access', 'binding_access', 'lifecycle')
         AND capability.account_id = organization_memberships.account_id));
 CREATE POLICY subscription_core_capability_authority_read ON organization_user_resource_authorities FOR SELECT
   USING (current_user = pg_catalog.pg_get_userbyid((SELECT relation.relowner
@@ -704,7 +841,7 @@ CREATE POLICY subscription_core_capability_authority_read ON organization_user_r
     AND EXISTS (SELECT 1 FROM opengeni_private.subscription_runtime_capabilities capability
       WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
         AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
-        AND capability.capability_kind IN ('personal_access', 'lifecycle')
+        AND capability.capability_kind IN ('personal_access', 'binding_access', 'lifecycle')
         AND capability.account_id = organization_user_resource_authorities.account_id));
 
 CREATE FUNCTION opengeni_private.subscription_people_assignment_visible(
@@ -724,7 +861,7 @@ AS $function$
         AND membership.subject_id = capability.session_owner_subject_id
       WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
         AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
-        AND capability.capability_kind = 'session_access'
+        AND capability.capability_kind IN ('session_access', 'binding_access')
         AND capability.account_id = p_account_id
         AND capability.workspace_id = p_workspace_id
         AND capability.session_owner_subject_id = p_session_owner_subject_id
@@ -742,9 +879,21 @@ CREATE FUNCTION opengeni_private.subscription_person_preference_visible(
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path FROM CURRENT
 AS $function$
   SELECT p_account_id::text = nullif(current_setting('opengeni.account_id', true), '')
+    AND p_turn_human_subject_id = nullif(current_setting('opengeni.initiating_human_subject_id', true), '')
     AND p_session_owner_subject_id = nullif(current_setting('opengeni.session_owner_subject_id', true), '')
     AND p_turn_human_subject_id = nullif(current_setting('opengeni.turn_human_subject_id', true), '')
     AND p_session_owner_subject_id = p_turn_human_subject_id
+    AND EXISTS (
+      SELECT 1 FROM opengeni_private.subscription_runtime_capabilities capability
+      WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+        AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+        AND capability.capability_kind IN ('session_access', 'binding_access')
+        AND capability.account_id = p_account_id
+        AND capability.workspace_id = nullif(current_setting('opengeni.workspace_id', true), '')::uuid
+        AND capability.session_id IS NOT NULL AND capability.turn_id IS NOT NULL
+        AND capability.session_owner_subject_id = p_session_owner_subject_id
+        AND capability.turn_human_subject_id = p_turn_human_subject_id
+    )
     AND EXISTS (
       SELECT 1 FROM organization_memberships membership
       WHERE membership.account_id = p_account_id AND membership.id = p_membership_id
@@ -802,6 +951,30 @@ AS $function$
     )
 $function$;
 REVOKE ALL ON FUNCTION opengeni_private.subscription_apps_designation_allowed(uuid, uuid, uuid) FROM PUBLIC;
+
+CREATE FUNCTION opengeni_private.subscription_apps_designation_manage_allowed(
+  p_account_id uuid, p_workspace_id uuid, p_connection_id uuid
+) RETURNS boolean
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path FROM CURRENT
+AS $function$
+  SELECT p_account_id::text = nullif(current_setting('opengeni.account_id', true), '')
+    AND p_workspace_id::text = nullif(current_setting('opengeni.workspace_id', true), '')
+    AND (
+      opengeni_private.subscription_organization_admin(p_account_id)
+      OR EXISTS (
+        SELECT 1 FROM subscription_connections connection
+        JOIN workspace_memberships manager
+          ON manager.account_id = connection.account_id
+          AND manager.workspace_id = p_workspace_id
+          AND manager.subject_id = nullif(current_setting('opengeni.subject_id', true), '')
+          AND manager.role = 'admin'
+        WHERE connection.account_id = p_account_id
+          AND connection.id = p_connection_id
+          AND connection.managed_by_workspace_id = p_workspace_id
+      )
+    )
+$function$;
+REVOKE ALL ON FUNCTION opengeni_private.subscription_apps_designation_manage_allowed(uuid, uuid, uuid) FROM PUBLIC;
 DO $grant_subscription_policy_helpers$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
@@ -810,6 +983,7 @@ BEGIN
     GRANT EXECUTE ON FUNCTION opengeni_private.subscription_people_assignment_visible(uuid, uuid, uuid, text, text) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION opengeni_private.subscription_person_preference_visible(uuid, uuid, text, text) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION opengeni_private.subscription_apps_designation_allowed(uuid, uuid, uuid) TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION opengeni_private.subscription_apps_designation_manage_allowed(uuid, uuid, uuid) TO opengeni_app;
   END IF;
 END
 $grant_subscription_policy_helpers$;
@@ -839,16 +1013,16 @@ BEGIN
   CREATE POLICY subscription_connections_insert_admin ON subscription_connections FOR INSERT
     WITH CHECK (opengeni_private.subscription_organization_admin(account_id));
   CREATE POLICY subscription_connections_update_scope ON subscription_connections FOR UPDATE
-    USING (opengeni_private.subscription_connection_visible(account_id,
+    USING ((ownership = 'shared' AND opengeni_private.subscription_organization_admin(account_id))
+      OR (ownership = 'shared' AND opengeni_private.subscription_connection_visible(account_id,
         nullif(current_setting('opengeni.workspace_id', true), '')::uuid,
         id, ownership, scope_kind, owner_organization_membership_id, owner_subject_id, provider)
-      AND (opengeni_private.subscription_organization_admin(account_id)
-        OR (managed_by_workspace_id = nullif(current_setting('opengeni.workspace_id', true), '')::uuid
+        AND managed_by_workspace_id = nullif(current_setting('opengeni.workspace_id', true), '')::uuid
           AND EXISTS (SELECT 1 FROM workspace_memberships grant_row
             WHERE grant_row.account_id = subscription_connections.account_id
               AND grant_row.workspace_id = subscription_connections.managed_by_workspace_id
               AND grant_row.subject_id = nullif(current_setting('opengeni.subject_id', true), '')
-              AND grant_row.role = 'admin'))))
+              AND grant_row.role = 'admin')))
     WITH CHECK (opengeni_private.subscription_organization_admin(account_id)
       OR (managed_by_workspace_id = nullif(current_setting('opengeni.workspace_id', true), '')::uuid
         AND ownership = 'shared'
@@ -926,7 +1100,7 @@ BEGIN
     USING (account_id::text = nullif(current_setting('opengeni.account_id', true), '')
       AND workspace_id::text = nullif(current_setting('opengeni.workspace_id', true), ''));
   CREATE POLICY subscription_apps_designations_admin ON subscription_apps_designations FOR ALL
-    USING (opengeni_private.subscription_apps_designation_allowed(account_id, workspace_id, connection_id))
+    USING (opengeni_private.subscription_apps_designation_manage_allowed(account_id, workspace_id, connection_id))
     WITH CHECK (opengeni_private.subscription_apps_designation_allowed(account_id, workspace_id, connection_id));
   CREATE POLICY subscription_provider_cutovers_scope ON subscription_provider_cutovers FOR SELECT
     USING (account_id::text = nullif(current_setting('opengeni.account_id', true), ''));
@@ -1128,7 +1302,9 @@ BEGIN
   EXECUTE format('ALTER FUNCTION opengeni_private.subscription_people_assignment_visible(uuid,uuid,uuid,text,text) SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema);
   EXECUTE format('ALTER FUNCTION opengeni_private.subscription_person_preference_visible(uuid,uuid,text,text) SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema);
   EXECUTE format('ALTER FUNCTION opengeni_private.subscription_apps_designation_allowed(uuid,uuid,uuid) SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema);
+  EXECUTE format('ALTER FUNCTION opengeni_private.subscription_apps_designation_manage_allowed(uuid,uuid,uuid) SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema);
   EXECUTE format('ALTER FUNCTION opengeni_private.guard_subscription_turn_session_reference() SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema);
+  EXECUTE format('ALTER FUNCTION opengeni_private.guard_subscription_connection_reference() SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema);
   EXECUTE format('ALTER FUNCTION %I.subscription_effective_settings(uuid,uuid) SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema, data_schema);
   EXECUTE format('ALTER FUNCTION %I.finalize_organization_retention_deletion(uuid,uuid,uuid,text) SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema, data_schema);
 END

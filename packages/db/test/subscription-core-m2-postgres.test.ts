@@ -303,13 +303,27 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
         account_id, provider, credential_encrypted, ownership, scope_kind
       ) values (${fixture.accountId}, 'codex', 'v1:explicit-binding', 'shared', 'organization')
       returning id::text as id`;
-      await shared!.admin`
-      insert into subscription_session_bindings (
-        account_id, workspace_id, session_id, provider, connection_id, model_id, choice
-      ) values (
-        ${fixture.accountId}, ${fixture.workspaceId}, ${session.id}::uuid, 'codex',
-        ${connection!.id}::uuid, 'fixture-model', 'explicit'
-      )`;
+      await withSessionRlsActorContext(
+        {
+          subjectId: fixture.subjectId,
+          initiatingHumanSubjectId: fixture.subjectId,
+        },
+        () =>
+          withRlsContext(
+            client!.db,
+            { accountId: fixture.accountId, workspaceId: fixture.workspaceId },
+            (db) =>
+              rawRows(
+                db,
+                sql`insert into subscription_session_bindings (
+                account_id, workspace_id, session_id, provider, connection_id, model_id, choice
+              ) values (
+                ${fixture.accountId}::uuid, ${fixture.workspaceId}::uuid, ${session.id}::uuid,
+                'codex', ${connection!.id}::uuid, 'fixture-model', 'explicit'
+              )`,
+              ),
+          ),
+      );
 
       await shared!.admin`
       delete from subscription_connections where account_id = ${fixture.accountId}
@@ -319,6 +333,119 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
       from subscription_session_bindings
       where workspace_id = ${fixture.workspaceId} and session_id = ${session.id}::uuid`;
       expect(binding).toEqual({ connection_id: null, choice: "explicit" });
+    },
+    180_000,
+  );
+
+  test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
+    "restricted roles cannot bind or lease a connection outside the session pool",
+    async () => {
+      const fixture = await organizationFixture();
+      const [otherWorkspace] = await shared!.admin<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${fixture.accountId}, 'Subscription out-of-scope workspace')
+        returning id::text as id`;
+      const session = await withSessionRlsActorContext({ subjectId: fixture.subjectId }, () =>
+        createSession(client!.db, {
+          accountId: fixture.accountId,
+          workspaceId: fixture.workspaceId,
+          initialMessage: "subscription connection target guard fixture",
+          resources: [],
+          metadata: {},
+          model: "fixture-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          createdBy: { kind: "subject", subjectId: fixture.subjectId },
+          createdByContext: {},
+        }),
+      );
+      const turn = await withSessionRlsActorContext({ subjectId: fixture.subjectId }, () =>
+        enqueueSessionTurn(client!.db, {
+          accountId: fixture.accountId,
+          workspaceId: fixture.workspaceId,
+          sessionId: session.id,
+          triggerEventId: crypto.randomUUID(),
+          temporalWorkflowId: `subscription-target-${session.id}`,
+          source: "user",
+          prompt: "subscription connection target guard fixture",
+          resources: [],
+          tools: [],
+          model: "fixture-model",
+          reasoningEffort: "medium",
+          sandboxBackend: "none",
+          metadata: {},
+          initiator: { kind: "subject", subjectId: fixture.subjectId },
+        }),
+      );
+      const [connection] = await shared!.admin<{ id: string }[]>`
+        insert into subscription_connections (
+          account_id, provider, credential_encrypted, ownership, scope_kind
+        ) values (${fixture.accountId}, 'codex', 'v1:other-workspace', 'shared', 'workspaces')
+        returning id::text as id`;
+      await shared!.admin`
+        insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
+        values (${fixture.accountId}, ${connection!.id}::uuid, ${otherWorkspace!.id}::uuid)`;
+
+      let bindingError: unknown;
+      try {
+        await withSessionRlsActorContext({ subjectId: fixture.subjectId }, () =>
+          withRlsContext(
+            client!.db,
+            {
+              accountId: fixture.accountId,
+              workspaceId: fixture.workspaceId,
+            },
+            (db) =>
+              rawRows(
+                db,
+                sql`insert into subscription_session_bindings (
+                account_id, workspace_id, session_id, provider, connection_id, model_id, choice
+              ) values (
+                ${fixture.accountId}::uuid, ${fixture.workspaceId}::uuid, ${session.id}::uuid,
+                'codex', ${connection!.id}::uuid, 'fixture-model', 'explicit'
+              )`,
+              ),
+          ),
+        );
+      } catch (error) {
+        bindingError = error;
+      }
+      const bindingCode =
+        (bindingError as { code?: string; cause?: { code?: string } } | undefined)?.code ??
+        (bindingError as { cause?: { code?: string } } | undefined)?.cause?.code;
+      expect(bindingCode).toBe("42501");
+
+      let leaseError: unknown;
+      try {
+        await withSessionRlsActorContext({ subjectId: fixture.subjectId }, () =>
+          withRlsContext(
+            client!.db,
+            {
+              accountId: fixture.accountId,
+              workspaceId: fixture.workspaceId,
+            },
+            (db) =>
+              rawRows(
+                db,
+                sql`insert into subscription_leases (
+                account_id, workspace_id, session_id, turn_id, connection_id,
+                provider, holder_id, generation, leased_until
+              ) values (
+                ${fixture.accountId}::uuid, ${fixture.workspaceId}::uuid, ${session.id}::uuid,
+                ${turn.id}::uuid, ${connection!.id}::uuid, 'codex', 'fixture-holder', 1,
+                now() + interval '1 minute'
+              )`,
+              ),
+          ),
+        );
+      } catch (error) {
+        leaseError = error;
+      }
+      const leaseCode =
+        (leaseError as { code?: string; cause?: { code?: string } } | undefined)?.code ??
+        (leaseError as { cause?: { code?: string } } | undefined)?.cause?.code;
+      expect(leaseCode).toBe("42501");
     },
     180_000,
   );
@@ -516,6 +643,10 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
       await shared!.admin`
       insert into subscription_connection_people (account_id, connection_id, organization_membership_id)
       values (${fixture.accountId}, ${connection!.id}::uuid, ${membership!.id}::uuid)`;
+      await shared!.admin`
+      insert into subscription_person_preferences (
+        account_id, organization_membership_id, personal_fallback_opt_in
+      ) values (${fixture.accountId}, ${membership!.id}::uuid, false)`;
 
       const inspectAs = (initiatingHumanSubjectId: string, sessionOwnerSubjectId: string) =>
         withSessionRlsActorContext(
@@ -536,7 +667,13 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
                   db,
                   sql`select id::text as id from subscription_connections where id = ${connection!.id}::uuid`,
                 );
-                return { allowed: authorization?.allowed ?? false, visible };
+                const preferences = await rawRows<{ personal_fallback_opt_in: boolean }>(
+                  db,
+                  sql`select personal_fallback_opt_in from subscription_person_preferences
+                    where account_id = ${fixture.accountId}::uuid
+                      and organization_membership_id = ${membership!.id}::uuid`,
+                );
+                return { allowed: authorization?.allowed ?? false, visible, preferences };
               },
             ),
         );
@@ -544,14 +681,17 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
       expect(await inspectAs(fixture.subjectId, fixture.subjectId)).toEqual({
         allowed: true,
         visible: [{ id: connection!.id }],
+        preferences: [{ personal_fallback_opt_in: false }],
       });
       expect(await inspectAs(fixture.subjectId, "user:another-person")).toEqual({
         allowed: false,
         visible: [],
+        preferences: [],
       });
       expect(await inspectAs("user:private-session-outsider", fixture.subjectId)).toEqual({
         allowed: false,
         visible: [],
+        preferences: [],
       });
 
       const otherSession = await withSessionRlsActorContext({ subjectId: fixture.subjectId }, () =>
@@ -600,7 +740,7 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
       } catch (error) {
         mismatchedTurnError = error;
       }
-      expect((mismatchedTurnError as { code?: string } | undefined)?.code).toBe("23503");
+      expect((mismatchedTurnError as { code?: string } | undefined)?.code).toBe("42501");
     },
     180_000,
   );
