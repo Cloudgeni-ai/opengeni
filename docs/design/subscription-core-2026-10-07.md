@@ -219,7 +219,10 @@ request; it marks the lease for failover at the next model-call boundary.
   acceptance (API keys, operators, Slack, service schedules) freezes no
   personal authority (SUB-ACCESS-01).
 - The inbox execution-context fence (0608) and scheduled admission (0275,
-  0478) compare `subscription_authority` instead of the per-provider columns.
+  0478) compare Codex against its v2 entry while continuing to compare Claude
+  and xAI against their existing provider-specific v1 columns through M4/M6.
+  M3 must not replace those deferred-provider comparisons with v2, which does
+  not encode their legacy shared-pool scope or generation.
 - Provider cutovers are additive and provider-scoped. M3 writes only the
   Codex entry in v2 on live accepted-work rows, including scheduled tasks,
   while preserving all existing v1 columns byte-for-byte. Claude and xAI
@@ -782,11 +785,12 @@ fail over across providers in the first release.
   placement and dispatch after cutover.
 - Compatibility tests prove M3 adds Codex v2 authority without changing xAI or
   Claude v1 snapshot bytes or breaking their existing accepted-authority
-  readers; ownerless service sessions can use shared connections but cannot
-  observe or acquire personal connections; Personal-workspace fallback needs
-  both the migrated owner opt-in and effective setting, with organization
-  locks preserved; and resource-generation transfer preserves valid queued
-  authority while a revoked/stale resource never regains personal access.
+  readers or 0608/0275/0478 admission-fence comparisons. Ownerless service
+  sessions can use shared connections but cannot observe or acquire personal
+  connections. Personal-workspace fallback needs both the migrated owner
+  opt-in and effective setting, with organization locks preserved.
+  Resource-generation transfer preserves valid queued authority while a
+  revoked/stale resource never regains personal access.
 - The contract's mutation gate.
 
 ## 8. Risks
