@@ -24,6 +24,7 @@ import { SkillReviewReference, skillReviewHumanInput } from "./skills";
 import { AgentLearningOverrides } from "./agent-learning";
 export * from "./skills";
 export * from "./agent-config";
+export * from "./first-party-tool-authorization";
 export * from "./model-availability";
 import {
   AGENT_INSTRUCTIONS_MAX_CHARACTERS,
@@ -9651,6 +9652,9 @@ export const ToolAuthNeededReason = z.enum([
   "personal_authority_unavailable",
   "unsupported_auth",
   "resource_scope_unavailable",
+  // The workspace's explicitly designated credential (for example Codex Apps)
+  // cannot be used; distinct from a token refresh failure.
+  "designated_credential_unavailable",
 ]);
 export type ToolAuthNeededReason = z.infer<typeof ToolAuthNeededReason>;
 

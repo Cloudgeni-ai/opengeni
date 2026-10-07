@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "134f957dac833f321ed90ad01dde9d6a5d5007277220e5867966eb4d39b357bc"
+      "sha256": "0df365dba83f6c26edd2958d13dbeaca6c2361492a04af6871d4fae4fb7a745e"
     },
     {
       "path": ".github/workflows/deprecate-pre-1.0.yml",

@@ -1569,6 +1569,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             trigger,
             preparationIndependentToolNames,
             codeSearchAvailable: toolRuntime.codeSearchAvailable,
+            promptToolAvailability: toolRuntime.promptToolAvailability,
             videoGenerationAcceptancesByCallId,
             activeSandboxBackend,
             groupBoxBackend,
