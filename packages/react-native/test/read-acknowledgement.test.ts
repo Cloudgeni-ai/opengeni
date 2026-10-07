@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readAcknowledgementFrontier } from "./read-acknowledgement";
+import { readAcknowledgementFrontier } from "../src/read-acknowledgement";
 
 describe("readAcknowledgementFrontier", () => {
   test("an unread session is acknowledged through its last sequence", () => {

@@ -29,6 +29,8 @@ import {
   type NativeVoiceRecording,
 } from "./voice-input";
 
+export { createExpoCallAdapter, parseNativeCallEvent } from "./realtime/expo-call";
+
 function lifecycleState(value: string | null | undefined): NativeLifecycleState {
   if (value === "active") return "active";
   if (value === "background") return "background";

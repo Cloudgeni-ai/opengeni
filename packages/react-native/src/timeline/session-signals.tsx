@@ -2,7 +2,7 @@ import type { ClientModel, LineageNode, SessionBackgroundCommand } from "@openge
 import type { UseGoalResult } from "@opengeni/react/session";
 import { sessionAgentsSignal, sessionGoalStateLabel } from "@opengeni/react/session-agents-model";
 import { useState, type ReactNode } from "react";
-import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, ScrollView, Text, View, type TextStyle } from "react-native";
 import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
 import { SessionRow } from "./session-list";
@@ -307,6 +307,6 @@ export function signalChipStyle(theme: NativeTimelineTheme, pressed: boolean) {
   };
 }
 
-export function signalChipText(theme: NativeTimelineTheme) {
+export function signalChipText(theme: NativeTimelineTheme): TextStyle {
   return { ...fontStyle(theme, 500), fontSize: 13, color: theme.colors.fg };
 }

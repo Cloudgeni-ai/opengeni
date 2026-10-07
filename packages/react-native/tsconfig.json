@@ -6,5 +6,5 @@
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "types": ["bun", "react"]
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts", "test/**/*.tsx"]
 }

@@ -1,5 +1,5 @@
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
-import { Pressable, ScrollView, Text, View } from "react-native";
+import { Pressable, ScrollView, Text, View, type TextStyle } from "react-native";
 import Markdown, { MarkdownIt, renderRules, type RenderRules } from "react-native-markdown-display";
 import { isReservedOpenGeniLink, parseOpenGeniLink, type OpenGeniLinkTarget } from "@opengeni/sdk";
 import { Icon } from "./icon";
@@ -31,7 +31,10 @@ const PARSER = (() => {
    code blocks `rounded-og-md bg-surface-1/70 px-3 py-2.5 text-og-sm leading-5`.
    -------------------------------------------------------------------------- */
 
-export function webMarkdownStyles(theme: NativeTimelineTheme, tone: "body" | "muted") {
+export function webMarkdownStyles(
+  theme: NativeTimelineTheme,
+  tone: "body" | "muted",
+): Record<string, TextStyle> {
   const c = theme.colors;
   const muted = tone === "muted";
   const size = muted ? theme.size.base : theme.size.md;
