@@ -189,3 +189,75 @@ unchanged.
   in chat are omitted; `renderer_markdown` adds "# Links and rendering"
   (plain web links only; workspace files by path in backticks when a sandbox
   is attached).
+
+## Tool-availability variants
+
+A broad capability is product semantics, not tool authority: a configured
+session can keep `goals` or `knowledge` on while its accepted first-party
+selection or permission ceiling excludes the matching tools. The worker now
+freezes a per-attempt `AgentPromptToolAvailability` from the same selection and
+ceiling it signs into the delegated token (`deriveAgentPromptToolAvailability`,
+using the shared first-party registration table). It is a rendering input only
+and never changes capabilities, catalogs, approvals, or permissions.
+
+Only a first-party tool that the selection omits, or whose registration
+predicate the ceiling cannot satisfy, is proven absent. Deferred or lazily
+disclosed tools, external MCP catalogs, provider-hosted and local adapter tools
+(`tool_search`, `generate_image`, `command_input`, ...) and live-grant narrowing
+are unknown and keep their guidance. Omitted availability (legacy sessions,
+old callers, standalone compaction) renders exactly as before; the legacy
+composition never reads it. With nothing proven absent the modular bytes are
+unchanged, including for the default selection and ceiling.
+
+When a named tool is proven absent, only the clauses naming it change:
+
+- Goals: the ownership sentence names only the remaining goal tools (with
+  none: "If the session has a goal, you own it: keep working toward it.");
+  the goal_complete handoff and call sentences need `goal_complete`, and
+  without it: "Saying or verifying that the work is done does not complete the
+  goal, and this session has no goal-completion tool: report the outcome
+  instead of claiming the goal is complete."; the goal-pause judgment needs
+  `goal_pause`; the document-deliverable bullet needs `goal_complete` and
+  `goal_set` or `goal_progress`.
+- Knowledge: each sentence naming `task_note_save`, `knowledge_search`,
+  `knowledge_get`, `knowledge_save`, `knowledge_prepare_save`,
+  `knowledge_retain_message`, `knowledge_retain_file`, `instruction_policy_get`
+  or `instruction_policy_save` is narrowed or dropped; the "Before saving"
+  paragraph and "Save a separate finding" need `knowledge_save`. Storage
+  purpose, grounding, pending-entry, learning-mode, and authority rules stay.
+- Integration setup: the `variable_set_list`/`capability_catalog_search`
+  discovery sentence names what remains; the two setup-card sentences and the
+  card follow-ups need their tools.
+- Session coordination: the `session_events` paragraph, the
+  `session_send_message` follow-up clause, the child Variable Set sentence
+  (`variable_set_list`, `session_create`), the `wait_for_input` long-wait and
+  `finalAnswer` sentences, the `session_wait` join and short-wait sentences,
+  and the `session_get` contrasts each need their tools.
+- Runtime mechanics and base behavior: without `wait_for_input` the in-flight
+  and already-waiting sentences and the three base-behavior `wait_for_input`
+  clauses are dropped, and `## Waiting` keeps only its tool-neutral sentence
+  ("When monitoring requires timed checks, use the available
+  recurring-monitoring or session-wait mechanism at that meaningful cadence
+  rather than ritual polling."); Background commands keeps general command
+  guidance and names only the remaining `command_read`/`command_wait`.
+- Artifacts: without `sandbox_file_publish` the visual rule reads "Use the
+  exact retained artifact id from an image tool receipt. A sandbox path is not
+  an inline image source."
+- Sandbox environment: the `rig_propose_change` and `rig_get` sentences need
+  their tools.
+
+Tool discovery, media, accepted user/workspace/Skill instructions, active-goal
+continuation input, and the Codemode/code-search/Git-binding attempt
+directives are unchanged.
+
+Known exception: the Codemode directive's observation clause still names
+`command_wait`/`command_read` when those tools are proven absent; a test pins
+it as the only surviving prompt-named tool.
+
+Linked turns: the permission ceiling of a turn acting for a linked external
+identity is that turn's own snapshot. A session mixing linked and unlinked
+turns (or turns for different linked identities) can therefore render a
+different operational contract per turn, which breaks prompt-prefix reuse
+across those turns. This is expected: the turn's executable first-party
+permissions differ in the same way. Turns with the same authority keep an
+identical contract.

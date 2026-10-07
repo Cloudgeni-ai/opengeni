@@ -78,6 +78,7 @@ import {
 } from "../../observability-metrics";
 import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
+import { promptToolAvailabilityForTurn } from "./prompt-tool-availability";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import {
@@ -584,6 +585,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
     allowedFirstPartyMcpToolsForSession(runSettings, session.firstPartyMcpTools),
   );
+  // Frozen with the selection and ceiling above; instructions only.
+  const promptToolAvailability = promptToolAvailabilityForTurn({
+    agentConfig: session.agent,
+    selectedFirstPartyMcpTools,
+    firstPartyPermissions: effectiveFirstPartyPermissions,
+  });
   const titleToolPlan = sessionTitleToolPlan({
     agentConfig: session.agent,
     tools: turnTools,
@@ -1257,6 +1264,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       "skill_read",
     ],
     codeSearchAvailable: codeSearchTools.length > 0,
+    promptToolAvailability,
     skillCatalog,
   };
 }

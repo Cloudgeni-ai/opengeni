@@ -15,10 +15,15 @@ export {
   resolveAgentIdentity,
 } from "./identity";
 export { rigInstructions, workspaceEnvironmentInstructions } from "./modules/environment";
+export {
+  deriveAgentPromptToolAvailability,
+  type AgentPromptToolAvailabilityInput,
+} from "./tool-availability";
 export type {
   AgentPromptContext,
   AgentPromptModule,
   AgentPromptResources,
+  AgentPromptToolAvailability,
   RigInstructionsContext,
   WorkspaceEnvironmentContext,
 } from "./types";

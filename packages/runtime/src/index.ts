@@ -307,6 +307,7 @@ import {
   rigInstructions,
   workspaceEnvironmentInstructions,
   type AgentPromptResources,
+  type AgentPromptToolAvailability,
   type RigInstructionsContext,
   type WorkspaceEnvironmentContext,
 } from "./agent-instructions";
@@ -317,12 +318,15 @@ export {
   SESSION_INSTRUCTIONS_PREAMBLE,
   composeModularAgentInstructions,
   composeOperationalContract,
+  deriveAgentPromptToolAvailability,
   identityFromLegacyTemplate,
   resolveAgentIdentity,
   rigInstructions,
   workspaceEnvironmentInstructions,
   type AgentPromptContext,
   type AgentPromptResources,
+  type AgentPromptToolAvailability,
+  type AgentPromptToolAvailabilityInput,
   type ComposeModularAgentInstructionsInput,
   type ModularInstructionLayer,
   type RigInstructionsContext,
@@ -2330,6 +2334,13 @@ export type BuildAgentOptions = {
    * the build resources and options when omitted.
    */
   agentPromptResources?: AgentPromptResources;
+  /**
+   * Modular composer only: frozen per-attempt tool availability (see
+   * `deriveAgentPromptToolAvailability`). It suppresses instruction clauses
+   * for tools proven absent and never changes the executable catalog. Omitted
+   * means unknown and keeps every clause; the legacy composition ignores it.
+   */
+  agentPromptToolAvailability?: AgentPromptToolAvailability;
   // Per-call agent persona override (the white-label surface). Resolved by the
   // caller as session > workspace > deployment default; when omitted the
   // runtime falls back to settings.agentInstructionsTemplate. The runtime
@@ -2523,6 +2534,9 @@ function inspectModularAgentInstructions(
     renderer: config.renderer,
     identity,
     resources: options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options),
+    ...(options.agentPromptToolAvailability
+      ? { toolAvailability: options.agentPromptToolAvailability }
+      : {}),
     ...(codemodeIsAvailable(options) ? { codemode: CODEMODE_PROGRAMMATIC_DIRECTIVE } : {}),
     ...(options.codeSearchAvailable ? { codeSearch: CODE_SEARCH_DIRECTIVE } : {}),
     ...(gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)

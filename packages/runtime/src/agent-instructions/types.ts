@@ -1,6 +1,7 @@
 import type {
   AgentPromptModuleId,
   AgentRenderer,
+  FirstPartyMcpToolName,
   ResolvedAgentCapabilities,
 } from "@opengeni/contracts";
 
@@ -47,7 +48,38 @@ export type AgentPromptContext = {
   capabilities: ResolvedAgentCapabilities;
   renderer: AgentRenderer;
   resources: AgentPromptResources;
+  /**
+   * Frozen per-attempt tool availability. Omitted means unknown: every
+   * tool-specific clause renders exactly as before.
+   */
+  toolAvailability?: AgentPromptToolAvailability | undefined;
 };
+
+/**
+ * Which tool-specific instruction clauses may render for one attempt. A
+ * rendering input only: it never grants, withholds, defers or reorders a tool.
+ *
+ * `unavailable` lists only tool names proven absent for the attempt (see
+ * `deriveAgentPromptToolAvailability`). Every other name — deferred or lazily
+ * disclosed, external MCP, provider-hosted, local adapter, or unknown — counts
+ * as available, so its guidance stays.
+ */
+export type AgentPromptToolAvailability = {
+  readonly unavailable: readonly FirstPartyMcpToolName[];
+};
+
+/** False only when the attempt proved the named tool absent. */
+export function toolAvailable(context: AgentPromptContext, name: FirstPartyMcpToolName): boolean {
+  return !context.toolAvailability?.unavailable.includes(name);
+}
+
+/** True when none of the named tools was proven absent. */
+export function toolsAvailable(
+  context: AgentPromptContext,
+  names: readonly FirstPartyMcpToolName[],
+): boolean {
+  return names.every((name) => toolAvailable(context, name));
+}
 
 /** One conditional section of the operational contract. */
 export type AgentPromptModule = {
