@@ -22,11 +22,13 @@ for it until the matching requirement below is implemented:
 - Each requirement ends with a `Verification:` line. It lists the test files
   that assert the requirement, or `pending` with the work item (see
   [Work items](#work-items)) that will add them. A test asserts a requirement by naming its ID in the test title.
-- `bun scripts/check-subscription-contract.ts` (run in CI through
-  `scripts/check-subscription-contract.test.ts`) fails when an ID is
-  duplicated, has no verification line, names a missing test file, names a
-  test file that does not mention the ID, names an unknown work item, or when
-  a test mentions an ID that this document does not define.
+- `bun run check:subscription-contract` runs as the `subscription-contract`
+  source guard on every CI plan (full, focused and documentation-only), and
+  `scripts/check-subscription-contract.test.ts` runs the same check as a unit
+  test. It fails when an ID is duplicated, has no verification line, names a
+  missing test file, names a test file that does not mention the ID, names an
+  unknown work item, or when a test mentions an ID that this document does not
+  define.
 - "Must" is a requirement. "Current state" notes describe main today and are
   informative only.
 
