@@ -8,7 +8,7 @@ import {
   useNativeVoiceInput,
   type NativeVoiceRecorder,
   type NativeVoiceRecording,
-} from "./voice-input";
+} from "../src/voice-input";
 
 registerDom();
 

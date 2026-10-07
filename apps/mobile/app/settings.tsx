@@ -5,6 +5,11 @@ import { Alert } from "react-native";
 import { useAccount } from "@/account";
 import { setAppearance, useAppearancePreference, type AppearancePreference } from "@/appearance";
 import { serverLabel } from "@/account-store";
+import {
+  setOutsideCallTarget,
+  useOutsideCallTarget,
+  type OutsideCallTarget,
+} from "@/call-preferences";
 import { useNotificationSettingsSection } from "@/notifications";
 import { SettingsList } from "@/settings-list";
 import type { SettingsSection } from "@/settings-model";
@@ -26,6 +31,7 @@ function Settings() {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const appearance = useAppearancePreference();
+  const outsideCallTarget = useOutsideCallTarget();
   const { accounts, account, workspace, organizations, switchAccount, signOut } = useAccount();
   const notifications = useNotificationSettingsSection();
   const org = organizations.find((each) => each.accountId === workspace?.accountId);
@@ -123,6 +129,24 @@ function Settings() {
       title: each.title,
       selected: appearance === each.id,
       onPress: () => setAppearance(each.id),
+    })),
+  });
+  const callTargets: { id: OutsideCallTarget; title: string; subtitle: string }[] = [
+    { id: "new", title: "Start a new session", subtitle: "A fresh conversation for each call" },
+    { id: "latest", title: "Continue the latest session", subtitle: "Pick up where you left off" },
+  ];
+  sections.push({
+    id: "calls",
+    title: "Calls from outside the app",
+    footer:
+      "Applies to calls from the Phone app's recents, Siri, the home-screen action and Shortcuts (opengeni://call). Calling from a session always talks to that session.",
+    rows: callTargets.map((each) => ({
+      kind: "choice" as const,
+      id: `calls-${each.id}`,
+      title: each.title,
+      subtitle: each.subtitle,
+      selected: outsideCallTarget === each.id,
+      onPress: () => setOutsideCallTarget(each.id),
     })),
   });
   if (account) {

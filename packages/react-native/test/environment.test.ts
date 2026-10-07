@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import type { OpenGeniReactNativeAdapters } from "./adapters";
-import { installOpenGeniReactNativeEnvironment } from "./environment";
+import type { OpenGeniReactNativeAdapters } from "../src/adapters";
+import { installOpenGeniReactNativeEnvironment } from "../src/environment";
 
 function adapters(): OpenGeniReactNativeAdapters {
   return {
@@ -53,7 +53,7 @@ describe("installOpenGeniReactNativeEnvironment", () => {
   });
 
   test("keeps provider globals independent of hydration-driven child unmounts", () => {
-    const source = readFileSync(new URL("./environment.tsx", import.meta.url), "utf8");
+    const source = readFileSync(new URL("../src/environment.tsx", import.meta.url), "utf8");
     const layoutEffect = source.indexOf("useLayoutEffect(() => {");
     const install = source.indexOf("installOpenGeniReactNativeEnvironment(adapters)", layoutEffect);
     const layoutEffectEnd = source.indexOf("}, [adapters])", install);
