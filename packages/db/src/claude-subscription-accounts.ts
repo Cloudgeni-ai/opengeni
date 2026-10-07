@@ -142,6 +142,8 @@ export const {
     resolveClaudeProviderAccountAuthoritySnapshotForAcceptance,
   resolveSubscriptionProviderAccountAuthoritySnapshotForAcceptanceInTransaction:
     resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction,
+  resolveSubscriptionSharedPoolAuthoritySnapshotInTransaction:
+    resolveClaudeSharedPoolAuthoritySnapshotInTransaction,
   workspaceSubscriptionActive: workspaceClaudeSubscriptionActive,
   workspaceSubscriptionActiveForAuthority: workspaceClaudeSubscriptionActiveForAuthority,
   materializeSubscriptionCredentialForRun: materializeClaudeSubscriptionAccountForRun,
