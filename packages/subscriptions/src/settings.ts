@@ -71,8 +71,8 @@ export function effectiveSettings(
     const value: Record<string, unknown> = { ...base };
     const sources: Record<string, SettingSource> = {};
     for (const [entryKey, entry] of Object.entries(base)) {
-      if (key === "providers") {
-        value[entryKey] = mergeProviderSwitches(undefined, entry as ProviderSwitches);
+      if (key === "providers" && (entry as ProviderSwitches).inferenceSource !== undefined) {
+        value[entryKey] = resolveProviderSwitches(entry as ProviderSwitches);
       }
       sources[entryKey] = "organization";
     }
@@ -154,7 +154,7 @@ export function inferenceSourceFor(
 function mergeProviderSwitches(
   base: ProviderSwitches | undefined,
   override: Partial<ProviderSwitches>,
-): ProviderSwitches & { inferenceSource: NonNullable<ProviderSwitches["inferenceSource"]> } {
+): ProviderSwitches {
   const inherited = resolveProviderSwitches({ ...DEFAULT_PROVIDER_SWITCHES, ...base });
   const inferenceSource =
     override.inferenceSource ??
@@ -163,10 +163,14 @@ function mergeProviderSwitches(
       : override.useOrganizationAccounts
         ? "automatic"
         : "workspace");
+  const hasAuthoritativeSource =
+    override.inferenceSource !== undefined || base?.inferenceSource !== undefined;
+  const { inferenceSource: _inheritedSource, ...inheritedValues } = inherited;
+  const { inferenceSource: _overrideSource, ...overrideValues } = override;
   return {
-    ...inherited,
-    ...override,
-    inferenceSource,
+    ...inheritedValues,
+    ...overrideValues,
+    ...(hasAuthoritativeSource ? { inferenceSource } : {}),
     useOrganizationAccounts: inferenceSource !== "workspace",
   };
 }

@@ -157,7 +157,6 @@ describe("effective settings", () => {
     });
     expect(resolved.sources.rotation).toEqual({ codex: "workspace", claude: "organization" });
     expect(resolved.values.providers.codex).toEqual({
-      inferenceSource: "workspace",
       useOrganizationAccounts: false,
       enabled: true,
     });
@@ -213,7 +212,9 @@ describe("provider switches", () => {
     const localFirst = input({
       settings: {
         rotation: { codex: { mode: "primary_first", primaryConnectionId: "codex-local" } },
-        providers: { codex: { inferenceSource: "automatic", useOrganizationAccounts: true, enabled: true } },
+        providers: {
+          codex: { inferenceSource: "automatic", useOrganizationAccounts: true, enabled: true },
+        },
       },
       connections: [workspaceAccount, organizationAccount],
     });
@@ -227,7 +228,11 @@ describe("provider switches", () => {
         settings: {
           ...localFirst.settings,
           providers: {
-            codex: { inferenceSource: "organization", useOrganizationAccounts: true, enabled: true },
+            codex: {
+              inferenceSource: "organization",
+              useOrganizationAccounts: true,
+              enabled: true,
+            },
           },
         },
       }),
@@ -266,7 +271,9 @@ describe("provider switches", () => {
       connections: [bothPools],
       session: { preferredModelId: "codex/a" },
       settings: {
-        providers: { codex: { inferenceSource: "automatic", useOrganizationAccounts: true, enabled: true } },
+        providers: {
+          codex: { inferenceSource: "automatic", useOrganizationAccounts: true, enabled: true },
+        },
       },
     });
     expect(decidePlacement(base)).toMatchObject({ kind: "run", connectionId: "codex-shared" });
@@ -289,7 +296,11 @@ describe("provider switches", () => {
         settings: {
           ...base.settings,
           providers: {
-            codex: { inferenceSource: "organization", useOrganizationAccounts: true, enabled: true },
+            codex: {
+              inferenceSource: "organization",
+              useOrganizationAccounts: true,
+              enabled: true,
+            },
           },
         },
       }),
@@ -343,7 +354,11 @@ describe("provider switches", () => {
           connections: [organizationAccount],
           settings: {
             providers: {
-              codex: { inferenceSource: "automatic", useOrganizationAccounts: false, enabled: true },
+              codex: {
+                inferenceSource: "automatic",
+                useOrganizationAccounts: false,
+                enabled: true,
+              },
             },
           },
         }),
@@ -964,7 +979,6 @@ describe("cache lifetime and settings fields", () => {
       "ws-team",
     );
     expect(resolved.values.providers.codex).toEqual({
-      inferenceSource: "workspace",
       useOrganizationAccounts: false,
       enabled: false,
     });

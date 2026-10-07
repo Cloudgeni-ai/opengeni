@@ -33,7 +33,7 @@ export type ServiceIneligibility =
   | "model_not_allowed_by_workspace"
   | "model_not_entitled"
   | "model_not_allowed_by_connection"
-  | "source_assignment_policy_mismatch"
+  | "source_assignment_allocator_mismatch"
   | "model_cooling_down"
   | "exhausted";
 
@@ -64,7 +64,6 @@ const PERMANENT_SERVICE = new Set<Ineligibility>([
   "model_not_allowed_by_workspace",
   "model_not_entitled",
   "model_not_allowed_by_connection",
-  "source_assignment_policy_mismatch",
 ]);
 
 /**
@@ -109,7 +108,8 @@ function sharedConnectionMatchesSource(input: PlacementInput, connection: Subscr
 
   // M2 worlds do not yet include the M3 per-workspace assignment relation.
   // Keep their compatibility projection readable while the cutover is off.
-  const managedHere = connection.ownership.kind === "shared" &&
+  const managedHere =
+    connection.ownership.kind === "shared" &&
     connection.ownership.managedByWorkspaceId === input.workspace.id;
   if (source === "workspace") return managedHere;
   if (source === "organization") return !managedHere;
@@ -186,7 +186,10 @@ function staticServiceIneligibility(
   const reasons: ServiceIneligibility[] = [];
   if (connection.health !== "healthy") reasons.push("unhealthy");
   const assignments = sourceAssignments(input, connection);
-  if (!connection.allocatorEnabled || (assignments !== undefined && !assignments.some((policy) => policy.allocatorEnabled))) {
+  if (
+    !connection.allocatorEnabled ||
+    (assignments !== undefined && !assignments.some((policy) => policy.allocatorEnabled))
+  ) {
     reasons.push("allocator_disabled");
   }
   const model = findModel(input, modelId);
@@ -204,13 +207,20 @@ function staticServiceIneligibility(
   }
   if (assignments !== undefined) {
     const hasAllocatableAssignment = assignments.some((policy) => policy.allocatorEnabled);
+    const hasModelAssignment = assignments.some(
+      (policy) => policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId),
+    );
     const hasServingAssignment = assignments.some(
       (policy) =>
         policy.allocatorEnabled &&
         (policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId)),
     );
     if (hasAllocatableAssignment && !hasServingAssignment) {
-      reasons.push("source_assignment_policy_mismatch");
+      reasons.push(
+        hasModelAssignment
+          ? "source_assignment_allocator_mismatch"
+          : "model_not_allowed_by_connection",
+      );
     }
   }
   return reasons;

@@ -237,8 +237,9 @@ export function authorizationFailure(
   }
   if (connection.assignmentPolicies !== undefined) {
     const source =
-      effectiveSettings(world.settings, workspace.id).values.inferenceSource?.[connection.provider] ??
-      "automatic";
+      effectiveSettings(world.settings, workspace.id).values.inferenceSource?.[
+        connection.provider
+      ] ?? "automatic";
     const matching = connection.assignmentPolicies.filter(
       (policy) =>
         policy.workspaceId === workspace.id &&
@@ -291,8 +292,9 @@ export function servingFailure(
   if (connection.assignmentPolicies !== undefined) {
     const workspace = byId(world.workspaces, session.workspaceId)!;
     const source =
-      effectiveSettings(world.settings, workspace.id).values.inferenceSource?.[connection.provider] ??
-      "automatic";
+      effectiveSettings(world.settings, workspace.id).values.inferenceSource?.[
+        connection.provider
+      ] ?? "automatic";
     const matching = connection.assignmentPolicies.filter(
       (policy) =>
         policy.workspaceId === workspace.id &&
@@ -300,7 +302,10 @@ export function servingFailure(
     );
     const hasAllocatableAssignment = matching.some((policy) => policy.allocatorEnabled);
     if (!hasAllocatableAssignment) {
-      return { requirement: "SUB-ELIG-04", message: "the source assignment is excluded from allocation" };
+      return {
+        requirement: "SUB-ELIG-04",
+        message: "the source assignment is excluded from allocation",
+      };
     }
     if (
       !matching.some(
@@ -309,9 +314,14 @@ export function servingFailure(
           (policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId)),
       )
     ) {
+      const hasModelAssignment = matching.some(
+        (policy) => policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId),
+      );
       return {
-        requirement: "SUB-ELIG-03",
-        message: "no allocatable source assignment allows the model",
+        requirement: hasModelAssignment ? "SUB-ELIG-04" : "SUB-ELIG-03",
+        message: hasModelAssignment
+          ? "model access exists only on a source assignment excluded from allocation"
+          : "no source assignment allows the model",
       };
     }
   }
@@ -463,6 +473,26 @@ function earliestReset(
       ) {
         continue;
       }
+      if (connection.assignmentPolicies !== undefined) {
+        const source =
+          effectiveSettings(world.settings, session.workspaceId).values.inferenceSource?.[
+            connection.provider
+          ] ?? "automatic";
+        const assignments = connection.assignmentPolicies.filter(
+          (policy) =>
+            policy.workspaceId === session.workspaceId &&
+            (source === "automatic" || policy.inferencePool === source),
+        );
+        if (
+          !assignments.some(
+            (policy) =>
+              policy.allocatorEnabled &&
+              (policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId)),
+          )
+        ) {
+          continue;
+        }
+      }
       const cooldownUntil = connection.modelCooldowns?.[modelId] ?? -Infinity;
       const quotaUntil =
         connection.quota.kind === "exhausted" ? connection.quota.resetsAt : -Infinity;
@@ -491,6 +521,24 @@ export function pinnedNeverServes(
   if (!model || model.provider !== pinned.provider) return true;
   if (!pinned.entitledModels.includes(model.id)) return true;
   if (pinned.allowedModelIds != null && !pinned.allowedModelIds.includes(model.id)) return true;
+  if (pinned.assignmentPolicies !== undefined) {
+    const source =
+      effectiveSettings(world.settings, session.workspaceId).values.inferenceSource?.[
+        pinned.provider
+      ] ?? "automatic";
+    const assignments = pinned.assignmentPolicies.filter(
+      (policy) =>
+        policy.workspaceId === session.workspaceId &&
+        (source === "automatic" || policy.inferencePool === source),
+    );
+    if (
+      !assignments.some(
+        (policy) => policy.allowedModelIds === null || policy.allowedModelIds.includes(model.id),
+      )
+    ) {
+      return true;
+    }
+  }
   return !isAuthorized(world, session, { ...pinned, healthy: true, allocatorEnabled: true });
 }
 

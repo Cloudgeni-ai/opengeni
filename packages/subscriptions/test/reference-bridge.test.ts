@@ -339,4 +339,167 @@ describe("reference bridge", () => {
       checkPlacementDecision(input, ranAnyway).map((violation) => violation.requirement),
     ).toContain("SUB-ELIG-01");
   });
+
+  test("source assignment eligibility agrees for placement, pin classification, and reset reporting", () => {
+    const base = randomProductionInput(7331);
+    const makeInput = (
+      assignmentPolicies: NonNullable<SubscriptionConnection["assignmentPolicies"]>,
+      options: { pinned?: boolean; exhausted?: boolean } = {},
+    ): PlacementInput => ({
+      ...base,
+      now: NOW,
+      workspace: { id: "ws-team", kind: "shared", ownerMembershipId: null, allowedModelIds: null },
+      session: {
+        ...base.session,
+        id: "assignment-policy-session",
+        workspaceId: "ws-team",
+        visibility: "shared",
+        ownerMembershipId: "member-a",
+        preferredModelId: "codex/b",
+        binding: options.pinned
+          ? {
+              connectionId: "codex-assignment",
+              provider: "codex",
+              modelId: "codex/b",
+              choice: "explicit",
+              lastModelCallAt: NOW,
+            }
+          : null,
+        onlyThisModel: options.pinned ?? false,
+        reselectionPoints: [],
+        personalAuthority: [],
+        compactionProviderLock: null,
+      },
+      settings: {
+        rotation: {},
+        providers: {
+          codex: { inferenceSource: "automatic", useOrganizationAccounts: true, enabled: true },
+        },
+        crossProviderFailover: false,
+        fallbackOrder: {},
+        personalConnectionsAllowed: true,
+        personalFallbackAllowed: false,
+      },
+      people: [{ membershipId: "member-a", active: true, personalFallbackOptIn: false }],
+      connections: [
+        {
+          id: "codex-assignment",
+          provider: "codex",
+          kind: "subscription",
+          ownership: {
+            kind: "shared",
+            managedByWorkspaceId: null,
+            scope: { kind: "organization" },
+          },
+          health: "healthy",
+          allocatorEnabled: true,
+          entitledModelIds: null,
+          excludedModelIds: [],
+          allowedModelIds: null,
+          assignmentPolicies,
+          refreshGeneration: 1,
+          quota: options.exhausted
+            ? {
+                windows: [
+                  {
+                    id: "primary",
+                    usedPercent: 100,
+                    resetsAt: NOW + 60_000,
+                    status: "exhausted",
+                  },
+                ],
+                modelCooldowns: {},
+                exhaustedUntil: null,
+                exhaustedKind: null,
+                revision: 1,
+                observedAt: NOW - 1_000,
+                observedRefreshGeneration: 1,
+                source: "usage_endpoint",
+              }
+            : null,
+        },
+      ],
+    });
+    const compareWithReference = (input: PlacementInput) => {
+      const decision = decidePlacement(input);
+      const { world, sessionId } = toReferenceWorld(input);
+      expect(toReferenceDecision(decision, input)).toEqual(decide(world, sessionId, NOW));
+      expect(checkPlacementDecision(input, decision)).toEqual([]);
+      return decision;
+    };
+
+    const mixedAssignment = makeInput([
+      {
+        workspaceId: "ws-team",
+        inferencePool: "workspace",
+        allowedModelIds: ["codex/a"],
+        allocatorEnabled: true,
+      },
+      {
+        workspaceId: "ws-team",
+        inferencePool: "organization",
+        allowedModelIds: ["codex/b"],
+        allocatorEnabled: false,
+      },
+    ]);
+    expect(compareWithReference(mixedAssignment)).toMatchObject({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+    });
+
+    const modelExcludedPin = makeInput(
+      [
+        {
+          workspaceId: "ws-team",
+          inferencePool: "workspace",
+          allowedModelIds: ["codex/a"],
+          allocatorEnabled: true,
+        },
+      ],
+      { pinned: true },
+    );
+    expect(compareWithReference(modelExcludedPin)).toMatchObject({
+      kind: "wait",
+      reason: "pinned_account_ineligible",
+    });
+
+    const recoverablyDisabledPin = makeInput(
+      [
+        {
+          workspaceId: "ws-team",
+          inferencePool: "workspace",
+          allowedModelIds: ["codex/a"],
+          allocatorEnabled: true,
+        },
+        {
+          workspaceId: "ws-team",
+          inferencePool: "organization",
+          allowedModelIds: ["codex/b"],
+          allocatorEnabled: false,
+        },
+      ],
+      { pinned: true },
+    );
+    expect(compareWithReference(recoverablyDisabledPin)).toMatchObject({
+      kind: "wait",
+      reason: "pinned_account_unavailable",
+    });
+
+    const permanentlyExcluded = makeInput(
+      [
+        {
+          workspaceId: "ws-team",
+          inferencePool: "workspace",
+          allowedModelIds: ["codex/a"],
+          allocatorEnabled: true,
+        },
+      ],
+      { exhausted: true },
+    );
+    expect(compareWithReference(permanentlyExcluded)).toMatchObject({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+      earliestResetAt: null,
+    });
+  });
 });
