@@ -953,7 +953,9 @@ AS $function$
     SELECT * FROM subscription_settings WHERE account_id = p_account_id AND workspace_id = p_workspace_id
   ), keys AS (
   SELECT entry.key FROM org, LATERAL jsonb_object_keys(org.rotation) AS entry(key)
-    UNION SELECT entry.key FROM ws, LATERAL jsonb_object_keys(ws.rotation) AS entry(key)
+    UNION SELECT entry.key FROM ws CROSS JOIN org,
+      LATERAL jsonb_object_keys(ws.rotation) AS entry(key)
+      WHERE NOT ('rotation' = ANY(coalesce(org.locked_settings, '{}')))
   ), rotation_entries AS (
     SELECT keys.key,
       CASE WHEN ws.rotation ? keys.key AND NOT ('rotation' = ANY(coalesce(org.locked_settings, '{}')))
@@ -977,7 +979,9 @@ AS $function$
     FROM rotation_entries
   ), provider_keys AS (
     SELECT entry.key FROM org, LATERAL jsonb_object_keys(org.providers) AS entry(key)
-    UNION SELECT entry.key FROM ws, LATERAL jsonb_object_keys(ws.providers) AS entry(key)
+    UNION SELECT entry.key FROM ws CROSS JOIN org,
+      LATERAL jsonb_object_keys(ws.providers) AS entry(key)
+      WHERE NOT ('providers' = ANY(coalesce(org.locked_settings, '{}')))
   ), prov AS (
     SELECT coalesce(jsonb_object_agg(provider_keys.key,
       '{"useOrganizationAccounts":true,"enabled":true}'::jsonb
@@ -990,7 +994,9 @@ AS $function$
     FROM provider_keys CROSS JOIN org LEFT JOIN ws ON true
   ), fallback_keys AS (
     SELECT entry.key FROM org, LATERAL jsonb_object_keys(org.fallback_order) AS entry(key)
-    UNION SELECT entry.key FROM ws, LATERAL jsonb_object_keys(ws.fallback_order) AS entry(key)
+    UNION SELECT entry.key FROM ws CROSS JOIN org,
+      LATERAL jsonb_object_keys(ws.fallback_order) AS entry(key)
+      WHERE NOT ('fallbackOrder' = ANY(coalesce(org.locked_settings, '{}')))
   ), fallback AS (
     SELECT coalesce(jsonb_object_agg(fallback_keys.key,
       CASE WHEN ws.fallback_order ? fallback_keys.key

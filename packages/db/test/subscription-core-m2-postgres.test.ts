@@ -218,6 +218,68 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
   );
 
   test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
+    "SUB-SET-03: locked sparse maps ignore workspace-only keys in SQL parity",
+    async () => {
+      const fixture = await organizationFixture();
+      const organization = {
+        rotation: { codex: { mode: "spread" } },
+        providers: {},
+        crossProviderFailover: false,
+        fallbackOrder: { "codex/model-a": ["claude/model-b"] },
+      } as const;
+      const workspace = {
+        rotation: { claude: { mode: "spread" } },
+        providers: { xai: { enabled: false } },
+        fallbackOrder: { "xai/model-c": ["codex/model-a"] },
+      } as const;
+      const locked = ["rotation", "providers", "fallbackOrder"] as const;
+      await shared!.admin`
+        insert into subscription_settings (
+          account_id, workspace_id, rotation, providers, cross_provider_failover,
+          fallback_order, personal_connections_allowed, personal_fallback_allowed, locked_settings
+        ) values (
+          ${fixture.accountId}, null, ${shared!.admin.json(organization.rotation)}::jsonb,
+          ${shared!.admin.json(organization.providers)}::jsonb, false,
+          ${shared!.admin.json(organization.fallbackOrder)}::jsonb, true, false, ${locked}
+        )`;
+      await shared!.admin`
+        insert into subscription_settings (
+          account_id, workspace_id, rotation, providers, fallback_order
+        ) values (
+          ${fixture.accountId}, ${fixture.workspaceId},
+          ${shared!.admin.json(workspace.rotation)}::jsonb,
+          ${shared!.admin.json(workspace.providers)}::jsonb,
+          ${shared!.admin.json(workspace.fallbackOrder)}::jsonb
+        )`;
+
+      const expected = effectiveSettings(
+        {
+          organization: {
+            ...organization,
+            personalConnectionsAllowed: true,
+            personalFallbackAllowed: false,
+          },
+          locked,
+          workspaces: { [fixture.workspaceId]: workspace },
+        },
+        fixture.workspaceId,
+      );
+      const actual = await withSessionRlsActorContext({ subjectId: fixture.subjectId }, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: fixture.accountId, workspaceId: fixture.workspaceId },
+          (db) => readSubscriptionEffectiveSettings(db, fixture.accountId, fixture.workspaceId),
+        ),
+      );
+      expect(actual).toEqual(expected);
+      expect(actual.values.providers).toEqual({});
+      expect(actual.values.rotation).toEqual(organization.rotation);
+      expect(actual.values.fallbackOrder).toEqual(organization.fallbackOrder);
+    },
+    180_000,
+  );
+
+  test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
     "explicit session bindings remain pinned when their connection is deleted",
     async () => {
       const fixture = await organizationFixture();
