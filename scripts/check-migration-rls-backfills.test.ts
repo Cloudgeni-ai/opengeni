@@ -136,6 +136,34 @@ END $patch$;`;
       analyze(patch.replace("EXECUTE replace", "definition := 'SELECT 1'; EXECUTE replace")),
     ).toHaveLength(1);
   });
+  test("ignores chained pg_get_functiondef replacements but still sees independent writes", () => {
+    const patch = `DO $patch$ DECLARE definition text;
+BEGIN
+definition := pg_get_functiondef('example()'::regprocedure);
+IF definition IS NULL THEN RAISE EXCEPTION 'missing catalog routine'; END IF;
+definition := replace(definition, 'anchor one', 'DELETE FROM widgets;');
+definition := replace(definition, 'anchor two', 'UPDATE widgets SET id = id;');
+EXECUTE definition;
+END $patch$;`;
+    const analyze = (sql: string) =>
+      analyzeMigrationRlsBackfills(
+        fixture({
+          "0001_base.sql": FORCED_TABLE,
+          "0002_patch.sql": sql,
+        }),
+      );
+    expect(analyze(patch)).toHaveLength(0);
+    expect(
+      analyze(
+        patch.replace("EXECUTE definition;", "EXECUTE definition; UPDATE widgets SET id = id;"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      analyze(
+        patch.replace("EXECUTE definition;", "EXECUTE 'DELETE FROM widgets'; EXECUTE definition;"),
+      ),
+    ).toHaveLength(1);
+  });
   test("flags a bare backfill over a FORCE-RLS table", () => {
     const directory = fixture({
       "0001_base.sql": FORCED_TABLE,

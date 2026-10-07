@@ -1,4 +1,5 @@
 import { createSubscriptionPoolTables } from "./subscription-pool-schema";
+import { subscriptionConnections } from "./subscription-core-schema";
 import type { StoredSessionAdmissionBlock } from "./session-admission-block";
 import {
   commentaryInclusiveMeaningfulSessionEventSql,
@@ -12311,7 +12312,9 @@ export const modelCallFacts = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    connectionId: uuid("connection_id"),
+    connectionId: uuid("connection_id").references(() => subscriptionConnections.id, {
+      onDelete: "set null",
+    }),
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),

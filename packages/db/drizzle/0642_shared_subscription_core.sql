@@ -42,10 +42,38 @@ BEGIN
 END
 $revoke_capability$;
 
-CREATE UNIQUE INDEX organization_user_resource_authorities_sub_connection_uq
-  ON organization_user_resource_authorities (
-    id, account_id, organization_membership_id, resource_kind, resource_id
-  );
+-- Resource identity is immutable, but authority generation advances on leave.
+-- Do not make that mutable fence part of a physical foreign key, or offboarding
+-- cannot revoke retained provider credentials while preserving them for cleanup.
+ALTER TABLE codex_subscription_credentials
+  ADD CONSTRAINT codex_credentials_subscription_resource_fk
+  FOREIGN KEY (organization_user_resource_authority_id, account_id,
+    owner_organization_membership_id, organization_user_resource_kind, id)
+  REFERENCES organization_user_resource_authorities
+    (id, account_id, organization_membership_id, resource_kind, resource_id)
+  ON DELETE RESTRICT NOT VALID;
+ALTER TABLE codex_subscription_credentials
+  DROP CONSTRAINT codex_credentials_user_authority_fk;
+
+ALTER TABLE claude_subscription_credentials
+  ADD CONSTRAINT claude_credentials_subscription_resource_fk
+  FOREIGN KEY (organization_user_resource_authority_id, account_id,
+    owner_organization_membership_id, organization_user_resource_kind, id)
+  REFERENCES organization_user_resource_authorities
+    (id, account_id, organization_membership_id, resource_kind, resource_id)
+  ON DELETE RESTRICT NOT VALID;
+ALTER TABLE claude_subscription_credentials
+  DROP CONSTRAINT claude_subscription_credentials_user_authority_fk;
+
+ALTER TABLE xai_subscription_credentials
+  ADD CONSTRAINT xai_credentials_subscription_resource_fk
+  FOREIGN KEY (organization_user_resource_authority_id, account_id,
+    owner_organization_membership_id, organization_user_resource_kind, id)
+  REFERENCES organization_user_resource_authorities
+    (id, account_id, organization_membership_id, resource_kind, resource_id)
+  ON DELETE RESTRICT NOT VALID;
+ALTER TABLE xai_subscription_credentials
+  DROP CONSTRAINT xai_subscription_credentials_user_authority_fk;
 
 CREATE TABLE subscription_connections (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -245,7 +273,9 @@ CREATE TABLE subscription_session_bindings (
   CHECK (provider IN ('codex', 'claude', 'xai') AND choice IN ('automatic', 'explicit') AND version > 0),
   CHECK (length(btrim(model_id)) BETWEEN 1 AND 512),
   CHECK (last_switch_reason IS NULL OR last_switch_reason IN ('initial','reselected_cold','failover_same_provider','failover_cross_provider','return_to_preferred','explicit_choice','revoked')),
-  CHECK (choice <> 'explicit' OR connection_id IS NOT NULL)
+  -- A deleted explicit target remains an explicit, unavailable pin. It must
+  -- not silently become an automatic account choice through ON DELETE SET NULL.
+  CHECK (choice IN ('automatic', 'explicit'))
 );
 CREATE INDEX subscription_session_bindings_connection_idx ON subscription_session_bindings(account_id, provider, connection_id);
 
@@ -339,9 +369,8 @@ CREATE TABLE subscription_provider_cutovers (
 
 ALTER TABLE model_call_facts ADD COLUMN connection_id uuid;
 ALTER TABLE model_call_facts ADD CONSTRAINT model_call_facts_subscription_connection_fk
-  FOREIGN KEY (account_id, connection_id) REFERENCES subscription_connections(account_id, id) ON DELETE SET NULL (connection_id);
-CREATE INDEX model_call_facts_connection_occurred_idx
-  ON model_call_facts(account_id, connection_id, occurred_at) WHERE connection_id IS NOT NULL;
+  FOREIGN KEY (account_id, connection_id) REFERENCES subscription_connections(account_id, id)
+  ON DELETE SET NULL (connection_id) NOT VALID;
 
 -- The one common personal-row authorization seam. Callers must first establish
 -- an exact transaction capability; the two human identities are explicit and
@@ -474,7 +503,10 @@ BEGIN
     AND membership.subject_id = p_session_owner_subject_id AND membership.status = 'active'
     AND membership.revoked_at IS NULL AND connection.ownership = 'personal'
     AND connection.owner_subject_id = p_session_owner_subject_id
-    AND connection.status = 'active';
+    AND connection.status = 'active'
+    AND p_turn_human_subject_id = p_session_owner_subject_id
+    AND (session.visibility = 'user_private'
+      OR membership.personal_workspace_id = p_workspace_id);
   IF accepted_snapshot IS NULL OR accepted_snapshot->>'scope' <> 'user'
     OR accepted_snapshot->>'authorityGeneration' IS DISTINCT FROM (
       SELECT authority_generation::text FROM subscription_connections
@@ -603,6 +635,7 @@ BEGIN
   IF TG_OP = 'UPDATE' AND (
       NEW.account_id IS DISTINCT FROM OLD.account_id
       OR NEW.provider IS DISTINCT FROM OLD.provider
+      OR NEW.kind IS DISTINCT FROM OLD.kind
       OR NEW.ownership IS DISTINCT FROM OLD.ownership
       OR NEW.owner_organization_membership_id IS DISTINCT FROM OLD.owner_organization_membership_id
       OR NEW.owner_subject_id IS DISTINCT FROM OLD.owner_subject_id
@@ -612,6 +645,8 @@ BEGIN
       OR NEW.scope_kind IS DISTINCT FROM OLD.scope_kind
       OR NEW.allow_personal_workspaces IS DISTINCT FROM OLD.allow_personal_workspaces
       OR NEW.managed_by_workspace_id IS DISTINCT FROM OLD.managed_by_workspace_id
+      OR NEW.allowed_model_ids IS DISTINCT FROM OLD.allowed_model_ids
+      OR NEW.excluded_models IS DISTINCT FROM OLD.excluded_models
   ) AND NOT opengeni_private.subscription_organization_admin(OLD.account_id) THEN
     RAISE EXCEPTION 'only organization administrators may change subscription connection scope or ownership'
       USING ERRCODE = '42501';
@@ -623,6 +658,35 @@ REVOKE ALL ON FUNCTION opengeni_private.guard_subscription_connection_scope() FR
 CREATE TRIGGER subscription_connections_scope_guard
   BEFORE UPDATE ON subscription_connections
   FOR EACH ROW EXECUTE FUNCTION opengeni_private.guard_subscription_connection_scope();
+
+-- The turn id and session id are separate inputs on the runtime records. Keep
+-- them cryptographically/relationally bound even though the legacy turn table
+-- has no composite candidate key for a declarative foreign key.
+CREATE FUNCTION opengeni_private.guard_subscription_turn_session_reference()
+RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path FROM CURRENT
+AS $function$
+BEGIN
+  PERFORM 1 FROM session_turns turn
+  WHERE turn.account_id = NEW.account_id AND turn.workspace_id = NEW.workspace_id
+    AND turn.session_id = NEW.session_id AND turn.id = NEW.turn_id
+  FOR KEY SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'subscription turn does not belong to the referenced session'
+      USING ERRCODE = '23503';
+  END IF;
+  RETURN NEW;
+END
+$function$;
+REVOKE ALL ON FUNCTION opengeni_private.guard_subscription_turn_session_reference() FROM PUBLIC;
+CREATE TRIGGER subscription_leases_turn_session_guard
+  BEFORE INSERT OR UPDATE OF account_id, workspace_id, session_id, turn_id ON subscription_leases
+  FOR EACH ROW EXECUTE FUNCTION opengeni_private.guard_subscription_turn_session_reference();
+CREATE TRIGGER subscription_capacity_waiters_turn_session_guard
+  BEFORE INSERT OR UPDATE OF account_id, workspace_id, session_id, turn_id ON subscription_capacity_waiters
+  FOR EACH ROW EXECUTE FUNCTION opengeni_private.guard_subscription_turn_session_reference();
+CREATE TRIGGER subscription_turn_failures_turn_session_guard
+  BEFORE INSERT OR UPDATE OF account_id, workspace_id, session_id, turn_id ON subscription_turn_failures
+  FOR EACH ROW EXECUTE FUNCTION opengeni_private.guard_subscription_turn_session_reference();
 
 -- Only the SECURITY DEFINER authorization seam can use the transaction-local
 -- capability to inspect live membership and resource-authority rows.
@@ -643,6 +707,113 @@ CREATE POLICY subscription_core_capability_authority_read ON organization_user_r
         AND capability.capability_kind IN ('personal_access', 'lifecycle')
         AND capability.account_id = organization_user_resource_authorities.account_id));
 
+CREATE FUNCTION opengeni_private.subscription_people_assignment_visible(
+  p_account_id uuid, p_workspace_id uuid, p_membership_id uuid,
+  p_session_owner_subject_id text, p_turn_human_subject_id text
+) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path FROM CURRENT
+AS $function$
+  SELECT p_account_id::text = nullif(current_setting('opengeni.account_id', true), '')
+    AND p_workspace_id::text = nullif(current_setting('opengeni.workspace_id', true), '')
+    AND p_session_owner_subject_id = nullif(current_setting('opengeni.session_owner_subject_id', true), '')
+    AND p_turn_human_subject_id = nullif(current_setting('opengeni.turn_human_subject_id', true), '')
+    AND EXISTS (
+      SELECT 1 FROM opengeni_private.subscription_runtime_capabilities capability
+      JOIN organization_memberships membership
+        ON membership.account_id = capability.account_id
+        AND membership.subject_id = capability.session_owner_subject_id
+      WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+        AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+        AND capability.capability_kind = 'session_access'
+        AND capability.account_id = p_account_id
+        AND capability.workspace_id = p_workspace_id
+        AND capability.session_owner_subject_id = p_session_owner_subject_id
+        AND capability.turn_human_subject_id = p_turn_human_subject_id
+        AND membership.id = p_membership_id
+        AND membership.status = 'active' AND membership.revoked_at IS NULL
+    )
+$function$;
+REVOKE ALL ON FUNCTION opengeni_private.subscription_people_assignment_visible(uuid, uuid, uuid, text, text) FROM PUBLIC;
+
+CREATE FUNCTION opengeni_private.subscription_person_preference_visible(
+  p_account_id uuid, p_membership_id uuid,
+  p_session_owner_subject_id text, p_turn_human_subject_id text
+) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path FROM CURRENT
+AS $function$
+  SELECT p_account_id::text = nullif(current_setting('opengeni.account_id', true), '')
+    AND p_session_owner_subject_id = nullif(current_setting('opengeni.session_owner_subject_id', true), '')
+    AND p_turn_human_subject_id = nullif(current_setting('opengeni.turn_human_subject_id', true), '')
+    AND p_session_owner_subject_id = p_turn_human_subject_id
+    AND EXISTS (
+      SELECT 1 FROM organization_memberships membership
+      WHERE membership.account_id = p_account_id AND membership.id = p_membership_id
+        AND membership.subject_id = p_session_owner_subject_id
+        AND membership.status = 'active' AND membership.revoked_at IS NULL
+    )
+$function$;
+REVOKE ALL ON FUNCTION opengeni_private.subscription_person_preference_visible(uuid, uuid, text, text) FROM PUBLIC;
+
+CREATE FUNCTION opengeni_private.subscription_apps_designation_allowed(
+  p_account_id uuid, p_workspace_id uuid, p_connection_id uuid
+) RETURNS boolean
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path FROM CURRENT
+AS $function$
+  SELECT p_account_id::text = nullif(current_setting('opengeni.account_id', true), '')
+    AND p_workspace_id::text = nullif(current_setting('opengeni.workspace_id', true), '')
+    AND EXISTS (
+      SELECT 1 FROM subscription_connections connection
+      WHERE connection.account_id = p_account_id AND connection.id = p_connection_id
+        AND connection.provider = 'codex' AND connection.ownership = 'shared'
+        AND connection.status = 'active'
+        AND (
+          connection.scope_kind = 'organization'
+          OR (connection.scope_kind = 'workspaces' AND EXISTS (
+            SELECT 1 FROM subscription_connection_workspaces assignment
+            WHERE assignment.account_id = connection.account_id
+              AND assignment.connection_id = connection.id
+              AND assignment.workspace_id = p_workspace_id
+          ))
+          OR (connection.scope_kind = 'people' AND EXISTS (
+            SELECT 1 FROM subscription_connection_people assignment
+            JOIN organization_memberships membership
+              ON membership.id = assignment.organization_membership_id
+              AND membership.account_id = assignment.account_id
+            WHERE assignment.account_id = connection.account_id
+              AND assignment.connection_id = connection.id
+              AND membership.status = 'active' AND membership.revoked_at IS NULL
+              AND (membership.personal_workspace_id = p_workspace_id OR EXISTS (
+                SELECT 1 FROM workspace_memberships workspace_membership
+                WHERE workspace_membership.account_id = p_account_id
+                  AND workspace_membership.workspace_id = p_workspace_id
+                  AND workspace_membership.subject_id = membership.subject_id
+              ))
+          ))
+        )
+        AND (
+          opengeni_private.subscription_organization_admin(p_account_id)
+          OR (connection.managed_by_workspace_id = p_workspace_id AND EXISTS (
+            SELECT 1 FROM workspace_memberships manager
+            WHERE manager.account_id = p_account_id AND manager.workspace_id = p_workspace_id
+              AND manager.subject_id = nullif(current_setting('opengeni.subject_id', true), '')
+              AND manager.role = 'admin'
+          ))
+        )
+    )
+$function$;
+REVOKE ALL ON FUNCTION opengeni_private.subscription_apps_designation_allowed(uuid, uuid, uuid) FROM PUBLIC;
+DO $grant_subscription_policy_helpers$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION opengeni_private.subscription_connection_visible(uuid, uuid, uuid, text, text, uuid, text, text) TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION opengeni_private.subscription_organization_admin(uuid) TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION opengeni_private.subscription_people_assignment_visible(uuid, uuid, uuid, text, text) TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION opengeni_private.subscription_person_preference_visible(uuid, uuid, text, text) TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION opengeni_private.subscription_apps_designation_allowed(uuid, uuid, uuid) TO opengeni_app;
+  END IF;
+END
+$grant_subscription_policy_helpers$;
+
 -- Every new table has FORCE RLS. Organization and workspace scope use the
 -- standard transaction GUCs; tables referencing sessions receive the same
 -- restrictive policy function as the existing session_visibility_isolation.
@@ -661,10 +832,10 @@ BEGIN
   END LOOP;
 
   CREATE POLICY subscription_connections_scope ON subscription_connections FOR SELECT
-    USING (opengeni_private.subscription_connection_visible(account_id,
-      nullif(current_setting('opengeni.workspace_id', true), '')::uuid,
-      id,
-      ownership, scope_kind, owner_organization_membership_id, owner_subject_id, provider));
+    USING ((ownership = 'shared' AND opengeni_private.subscription_organization_admin(account_id))
+      OR opengeni_private.subscription_connection_visible(account_id,
+        nullif(current_setting('opengeni.workspace_id', true), '')::uuid,
+        id, ownership, scope_kind, owner_organization_membership_id, owner_subject_id, provider));
   CREATE POLICY subscription_connections_insert_admin ON subscription_connections FOR INSERT
     WITH CHECK (opengeni_private.subscription_organization_admin(account_id));
   CREATE POLICY subscription_connections_update_scope ON subscription_connections FOR UPDATE
@@ -689,8 +860,18 @@ BEGIN
   CREATE POLICY subscription_connections_delete_admin ON subscription_connections FOR DELETE
     USING (opengeni_private.subscription_organization_admin(account_id));
   CREATE POLICY subscription_connections_membership_lifecycle ON subscription_connections FOR DELETE
-    USING (current_user = pg_catalog.pg_get_userbyid((SELECT relation.relowner
-        FROM pg_catalog.pg_class relation WHERE relation.oid = 'subscription_connections'::regclass))
+    USING (current_user = pg_catalog.pg_get_userbyid((SELECT lifecycle.proowner
+        FROM pg_catalog.pg_proc lifecycle
+        WHERE lifecycle.oid = pg_catalog.to_regprocedure(pg_catalog.format(
+          '%I.finalize_organization_retention_deletion(uuid,uuid,uuid,text)',
+          current_schema()))))
+      AND current_setting('opengeni.organization_tenancy_lifecycle', true) = 'organization_membership_lifecycle');
+  CREATE POLICY subscription_connections_membership_lifecycle_read ON subscription_connections FOR SELECT
+    USING (current_user = pg_catalog.pg_get_userbyid((SELECT lifecycle.proowner
+        FROM pg_catalog.pg_proc lifecycle
+        WHERE lifecycle.oid = pg_catalog.to_regprocedure(pg_catalog.format(
+          '%I.finalize_organization_retention_deletion(uuid,uuid,uuid,text)',
+          current_schema()))))
       AND current_setting('opengeni.organization_tenancy_lifecycle', true) = 'organization_membership_lifecycle');
   CREATE POLICY subscription_connection_workspaces_scope ON subscription_connection_workspaces FOR SELECT
     USING (account_id::text = nullif(current_setting('opengeni.account_id', true), '')
@@ -699,18 +880,11 @@ BEGIN
     USING (opengeni_private.subscription_organization_admin(account_id))
     WITH CHECK (opengeni_private.subscription_organization_admin(account_id));
   CREATE POLICY subscription_connection_people_scope ON subscription_connection_people FOR SELECT
-    USING (account_id::text = nullif(current_setting('opengeni.account_id', true), '')
-      AND EXISTS (SELECT 1 FROM opengeni_private.subscription_runtime_capabilities capability
-        JOIN organization_memberships membership ON membership.account_id = capability.account_id
-          AND membership.subject_id = capability.session_owner_subject_id
-        WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
-          AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
-          AND capability.capability_kind = 'session_access'
-          AND capability.account_id = subscription_connection_people.account_id
-          AND capability.workspace_id = nullif(current_setting('opengeni.workspace_id', true), '')::uuid
-          AND capability.session_owner_subject_id = nullif(current_setting('opengeni.session_owner_subject_id', true), '')
-          AND capability.turn_human_subject_id = nullif(current_setting('opengeni.turn_human_subject_id', true), '')
-          AND membership.id = subscription_connection_people.organization_membership_id));
+    USING (opengeni_private.subscription_people_assignment_visible(
+      account_id, nullif(current_setting('opengeni.workspace_id', true), '')::uuid,
+      organization_membership_id,
+      nullif(current_setting('opengeni.session_owner_subject_id', true), ''),
+      nullif(current_setting('opengeni.turn_human_subject_id', true), '')));
   CREATE POLICY subscription_connection_people_admin ON subscription_connection_people FOR ALL
     USING (opengeni_private.subscription_organization_admin(account_id))
     WITH CHECK (opengeni_private.subscription_organization_admin(account_id));
@@ -742,28 +916,20 @@ BEGIN
             AND grant_row.subject_id = nullif(current_setting('opengeni.subject_id', true), '')
             AND grant_row.role = 'admin')));
   CREATE POLICY subscription_person_preferences_scope ON subscription_person_preferences FOR ALL
-    USING (account_id::text = nullif(current_setting('opengeni.account_id', true), '')
-      AND EXISTS (SELECT 1 FROM organization_memberships membership WHERE membership.id = organization_membership_id
-        AND membership.subject_id = nullif(current_setting('opengeni.initiating_human_subject_id', true), '')))
-    WITH CHECK (account_id::text = nullif(current_setting('opengeni.account_id', true), '')
-      AND EXISTS (SELECT 1 FROM organization_memberships membership WHERE membership.id = organization_membership_id
-        AND membership.subject_id = nullif(current_setting('opengeni.initiating_human_subject_id', true), '')));
+    USING (opengeni_private.subscription_person_preference_visible(
+      account_id, organization_membership_id,
+      nullif(current_setting('opengeni.session_owner_subject_id', true), ''),
+      nullif(current_setting('opengeni.turn_human_subject_id', true), '')))
+    WITH CHECK (opengeni_private.subscription_person_preference_visible(
+      account_id, organization_membership_id,
+      nullif(current_setting('opengeni.session_owner_subject_id', true), ''),
+      nullif(current_setting('opengeni.turn_human_subject_id', true), '')));
   CREATE POLICY subscription_apps_designations_scope ON subscription_apps_designations FOR SELECT
     USING (account_id::text = nullif(current_setting('opengeni.account_id', true), '')
       AND workspace_id::text = nullif(current_setting('opengeni.workspace_id', true), ''));
   CREATE POLICY subscription_apps_designations_admin ON subscription_apps_designations FOR ALL
-    USING (opengeni_private.subscription_organization_admin(account_id)
-      OR EXISTS (SELECT 1 FROM workspace_memberships grant_row
-        WHERE grant_row.account_id = subscription_apps_designations.account_id
-          AND grant_row.workspace_id = subscription_apps_designations.workspace_id
-          AND grant_row.subject_id = nullif(current_setting('opengeni.subject_id', true), '')
-          AND grant_row.role = 'admin'))
-    WITH CHECK (opengeni_private.subscription_organization_admin(account_id)
-      OR EXISTS (SELECT 1 FROM workspace_memberships grant_row
-        WHERE grant_row.account_id = subscription_apps_designations.account_id
-          AND grant_row.workspace_id = subscription_apps_designations.workspace_id
-          AND grant_row.subject_id = nullif(current_setting('opengeni.subject_id', true), '')
-          AND grant_row.role = 'admin'));
+    USING (opengeni_private.subscription_apps_designation_allowed(account_id, workspace_id, connection_id))
+    WITH CHECK (opengeni_private.subscription_apps_designation_allowed(account_id, workspace_id, connection_id));
   CREATE POLICY subscription_provider_cutovers_scope ON subscription_provider_cutovers FOR SELECT
     USING (account_id::text = nullif(current_setting('opengeni.account_id', true), ''));
   CREATE POLICY subscription_provider_cutovers_admin ON subscription_provider_cutovers FOR ALL
@@ -774,7 +940,7 @@ BEGIN
     EXECUTE format('CREATE POLICY session_visibility_isolation ON %I AS RESTRICTIVE FOR ALL USING (session_reference_visible(account_id, workspace_id, session_id)) WITH CHECK (session_reference_visible(account_id, workspace_id, session_id))', table_name);
     EXECUTE format('CREATE POLICY subscription_account_workspace_scope ON %I FOR ALL USING (account_id::text = nullif(current_setting(''opengeni.account_id'', true), '''') AND workspace_id::text = nullif(current_setting(''opengeni.workspace_id'', true), '''')) WITH CHECK (account_id::text = nullif(current_setting(''opengeni.account_id'', true), '''') AND workspace_id::text = nullif(current_setting(''opengeni.workspace_id'', true), ''''))', table_name);
   END LOOP;
-END
+END;
 $rls$;
 
 -- Provider-neutral settings resolver. It returns normalized values and a
@@ -816,9 +982,10 @@ AS $function$
     UNION SELECT entry.key FROM ws, LATERAL jsonb_object_keys(ws.providers) AS entry(key)
   ), prov AS (
     SELECT coalesce(jsonb_object_agg(provider_keys.key,
-      CASE WHEN ws.providers ? provider_keys.key AND NOT ('providers' = ANY(coalesce(org.locked_settings, '{}')))
-        THEN coalesce(org.providers->provider_keys.key, '{}'::jsonb) || ws.providers->provider_keys.key
-        ELSE coalesce(org.providers->provider_keys.key, '{}'::jsonb) END), '{}'::jsonb) value,
+      '{"useOrganizationAccounts":true,"enabled":true}'::jsonb
+        || coalesce(org.providers->provider_keys.key, '{}'::jsonb)
+        || CASE WHEN ws.providers ? provider_keys.key AND NOT ('providers' = ANY(coalesce(org.locked_settings, '{}')))
+          THEN ws.providers->provider_keys.key ELSE '{}'::jsonb END), '{}'::jsonb) value,
       coalesce(jsonb_object_agg(provider_keys.key,
       CASE WHEN ws.providers ? provider_keys.key AND NOT ('providers' = ANY(coalesce(org.locked_settings, '{}')))
         THEN 'workspace' ELSE 'organization' END), '{}'::jsonb) sources
@@ -871,39 +1038,15 @@ $grant_effective$;
 -- The generic resource authority covers all providers. Revoke personal rows
 -- on leave using the existing retention/removal lifecycle and keep historic
 -- provider-specific resource kinds supported for old records.
-CREATE FUNCTION opengeni_private.delete_subscription_resources_for_membership(
-  p_account_id uuid, p_membership_id uuid
-) RETURNS TABLE (claude_count integer, subscription_count integer)
-LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT
-AS $function$
-BEGIN
-  DELETE FROM claude_subscription_credentials resource
-  USING organization_user_resource_authorities authority
-  WHERE authority.account_id = p_account_id AND authority.organization_membership_id = p_membership_id
-    AND authority.resource_kind = 'claude_subscription' AND authority.resource_id = resource.id
-    AND resource.account_id = authority.account_id
-    AND resource.organization_user_resource_authority_id = authority.id
-    AND resource.owner_organization_membership_id = authority.organization_membership_id;
-  GET DIAGNOSTICS claude_count = ROW_COUNT;
-
-  DELETE FROM subscription_connections resource USING organization_user_resource_authorities authority
-  WHERE authority.account_id = p_account_id AND authority.organization_membership_id = p_membership_id
-    AND authority.resource_kind = 'subscription_connection' AND authority.resource_id = resource.id
-    AND resource.account_id = authority.account_id AND resource.authority_id = authority.id
-    AND resource.owner_organization_membership_id = authority.organization_membership_id;
-  GET DIAGNOSTICS subscription_count = ROW_COUNT;
-  RETURN NEXT;
-END
-$function$;
-REVOKE ALL ON FUNCTION opengeni_private.delete_subscription_resources_for_membership(uuid, uuid) FROM PUBLIC;
-
 -- Preserve the audited 0263 lifecycle function while extending its accepted
--- resource inventory and revoking generic subscription connections on leave.
+-- resource inventory and deleting generic subscription connections only
+-- inside the finalizer's validated, claimed retention transaction.
 DO $membership_lifecycle$
 DECLARE definition text;
 BEGIN
-  SELECT pg_get_functiondef('finalize_organization_retention_deletion(uuid,uuid,uuid,text)'::regprocedure)
-    INTO definition;
+  definition := pg_get_functiondef(
+    'finalize_organization_retention_deletion(uuid,uuid,uuid,text)'::regprocedure
+  );
   IF definition IS NULL THEN
     RAISE EXCEPTION 'organization membership retention function signature changed';
   END IF;
@@ -919,8 +1062,28 @@ BEGIN
       ''rig'', ''subscription_connection'', ''variable_set'', ''xai_subscription''');
   definition := replace(definition,
     '  DELETE FROM ' || 'rigs resource',
-    '  SELECT claude_count, subscription_count INTO deleted_claude, deleted_subscriptions
-    FROM opengeni_private.delete_subscription_resources_for_membership(p_account_id, p_membership_id);
+    '  DELETE FROM claude_subscription_credentials resource
+  USING organization_user_resource_authorities authority
+  WHERE authority.account_id = p_account_id
+    AND authority.organization_membership_id = p_membership_id
+    AND authority.resource_kind = ''claude_subscription''
+    AND authority.resource_id = resource.id
+    AND resource.account_id = authority.account_id
+    AND resource.organization_user_resource_authority_id = authority.id
+    AND resource.owner_organization_membership_id = authority.organization_membership_id;
+  GET DIAGNOSTICS deleted_claude = ROW_COUNT;
+
+  DELETE FROM subscription_connections resource
+  USING organization_user_resource_authorities authority
+  WHERE authority.account_id = p_account_id
+    AND authority.organization_membership_id = p_membership_id
+    AND authority.resource_kind = ''subscription_connection''
+    AND authority.resource_id = resource.id
+    AND resource.account_id = authority.account_id
+    AND resource.authority_id = authority.id
+    AND resource.owner_organization_membership_id = authority.organization_membership_id;
+  GET DIAGNOSTICS deleted_subscriptions = ROW_COUNT;
+
   DELETE FROM ' || 'rigs resource');
   definition := replace(definition,
     '''xaiSubscriptions'', deleted_xai, ''connectedMachinesTombstoned''',
@@ -946,3 +1109,23 @@ BEGIN
   END IF;
 END
 $grants$;
+
+-- Pin lookups to the trusted data/private schemas and explicitly place pg_temp
+-- last. Otherwise PostgreSQL implicitly checks the caller's temporary schema
+-- before an unqualified relation referenced by a SECURITY DEFINER function.
+DO $subscription_core_search_paths$
+DECLARE data_schema text := current_schema();
+BEGIN
+  EXECUTE format('ALTER FUNCTION opengeni_private.subscription_personal_connection_visible(uuid,uuid,uuid,text,text,text) SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema);
+  EXECUTE format('ALTER FUNCTION opengeni_private.authorize_subscription_session_access(uuid,uuid,uuid,uuid,text,text) SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema);
+  EXECUTE format('ALTER FUNCTION opengeni_private.authorize_subscription_personal_access(uuid,uuid,uuid,uuid,uuid,text,text,text) SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema);
+  EXECUTE format('ALTER FUNCTION opengeni_private.subscription_connection_visible(uuid,uuid,uuid,text,text,uuid,text,text) SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema);
+  EXECUTE format('ALTER FUNCTION opengeni_private.subscription_organization_admin(uuid) SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema);
+  EXECUTE format('ALTER FUNCTION opengeni_private.subscription_people_assignment_visible(uuid,uuid,uuid,text,text) SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema);
+  EXECUTE format('ALTER FUNCTION opengeni_private.subscription_person_preference_visible(uuid,uuid,text,text) SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema);
+  EXECUTE format('ALTER FUNCTION opengeni_private.subscription_apps_designation_allowed(uuid,uuid,uuid) SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema);
+  EXECUTE format('ALTER FUNCTION opengeni_private.guard_subscription_turn_session_reference() SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema);
+  EXECUTE format('ALTER FUNCTION %I.subscription_effective_settings(uuid,uuid) SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema, data_schema);
+  EXECUTE format('ALTER FUNCTION %I.finalize_organization_retention_deletion(uuid,uuid,uuid,text) SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema, data_schema);
+END
+$subscription_core_search_paths$;

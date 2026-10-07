@@ -39,10 +39,11 @@ async function buildSchemaContract(directory?: string) {
 describe("release schema contract", () => {
   test("registers the shared subscription-core M2 rolling migration in the release contract", async () => {
     const contract = await buildCompleteSchemaContract();
-    expect(contract.migrations.find((migration) =>
-      migration.path === "0641_shared_subscription_core.sql",
-    )).toMatchObject({ path: "0641_shared_subscription_core.sql", deploymentMode: "rolling" });
-    expect(contract.latestMigration).toBe("0641_shared_subscription_core.sql");
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0642_shared_subscription_core.sql",
+      ),
+    ).toMatchObject({ path: "0642_shared_subscription_core.sql", deploymentMode: "rolling" });
   });
 
   test("checks complete ledger metadata against migration files", async () => {
@@ -2082,7 +2083,9 @@ describe("release schema contract", () => {
     const appendedMigrationPaths = [
       // Exclusion membership is unordered; keep this addition away from the shared tail.
       "0640_knowledge_entry_created_since.sql",
-      "0641_shared_subscription_core.sql",
+      "0641_subscription_authority_identity_index.sql",
+      "0642_shared_subscription_core.sql",
+      "0643_model_call_facts_subscription_connection_index.sql",
       "0463_host_mcp_resolver_registration.sql",
       "0461_unified_knowledge.sql",
       "0460_host_export_message_attribution.sql",
