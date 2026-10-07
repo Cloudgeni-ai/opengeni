@@ -1526,6 +1526,181 @@ export const SANDBOX_COMMAND_CONTAINMENT_OUTCOMES = [
 export type SandboxCommandContainmentOutcome =
   (typeof SANDBOX_COMMAND_CONTAINMENT_OUTCOMES)[number];
 
+/**
+ * Shared subscription core shadow (docs/subscription-accounts.md, SUB-COMPAT-03).
+ * Every label is a closed set: provider, security parity, placement agreement,
+ * contract requirement, skip reason and the legacy decision inputs present.
+ */
+export const SUBSCRIPTION_CORE_SHADOW_PROVIDERS = ["codex", "xai", "claude"] as const;
+/** Is the account the legacy selector chose inside the core's eligible set? */
+export const SUBSCRIPTION_CORE_SHADOW_PARITY = [
+  "eligible",
+  "not_authorized",
+  "not_servable",
+  "unknown_connection",
+  "no_selection",
+] as const;
+/** How the core's decision compares with the legacy decision (would-switch). */
+export const SUBSCRIPTION_CORE_SHADOW_PLACEMENTS = [
+  "same_account",
+  "different_account",
+  "core_waits",
+  "core_runs_legacy_waits",
+  "both_wait",
+] as const;
+/** Requirements the reference checker can report, plus checker failure. */
+export const SUBSCRIPTION_CORE_SHADOW_REQUIREMENTS = [
+  "SUB-ACCESS-06",
+  "SUB-ELIG-01",
+  "SUB-ELIG-02",
+  "SUB-ELIG-03",
+  "SUB-ELIG-04",
+  "SUB-ELIG-05",
+  "SUB-FAIL-02",
+  "SUB-FAIL-03",
+  "SUB-FAIL-04",
+  "SUB-OWN-05",
+  "SUB-SEL-02",
+  "SUB-SEL-04",
+  "SUB-STICK-02",
+  "SUB-WAIT-01",
+  "SUB-WAIT-02",
+  "other",
+  "checker_error",
+] as const;
+export const SUBSCRIPTION_CORE_SHADOW_SKIPS = [
+  "no_session_actor",
+  "session_not_visible",
+  "timeout",
+  "cancelled",
+  "error",
+] as const;
+/**
+ * Legacy decision inputs the Codex fleet shadow does not record (inventory
+ * Part 3, answer (c)), counted when present in a compared decision.
+ */
+export const SUBSCRIPTION_CORE_SHADOW_INPUTS = [
+  "manual_pin",
+  "policy_pin",
+  "last_account",
+  "rotation_off",
+  "rotation_on",
+  "organization_pool",
+  "personal_pool",
+  "codex_mode_override",
+  "model_policy",
+  "model_filtered",
+  "plan_excluded",
+  "model_cooldown",
+  "exhausted",
+  "unknown_quota",
+  "compaction_lock",
+  "lease_reused",
+  "truncated",
+] as const;
+
+export type SubscriptionCoreShadowProvider = (typeof SUBSCRIPTION_CORE_SHADOW_PROVIDERS)[number];
+export type SubscriptionCoreShadowParity = (typeof SUBSCRIPTION_CORE_SHADOW_PARITY)[number];
+export type SubscriptionCoreShadowPlacement = (typeof SUBSCRIPTION_CORE_SHADOW_PLACEMENTS)[number];
+export type SubscriptionCoreShadowSkip = (typeof SUBSCRIPTION_CORE_SHADOW_SKIPS)[number];
+export type SubscriptionCoreShadowInput = (typeof SUBSCRIPTION_CORE_SHADOW_INPUTS)[number];
+
+export type SubscriptionCoreShadowObservation =
+  | { outcome: "skipped"; reason: SubscriptionCoreShadowSkip }
+  | {
+      outcome: "compared";
+      parity: SubscriptionCoreShadowParity;
+      /** The first reason the legacy account is outside the eligible set. */
+      parityReason: string | null;
+      placement: SubscriptionCoreShadowPlacement;
+      violations: readonly string[];
+      inputs: readonly SubscriptionCoreShadowInput[];
+    };
+
+const SUBSCRIPTION_CORE_SHADOW_REQUIREMENT_SET = new Set<string>(
+  SUBSCRIPTION_CORE_SHADOW_REQUIREMENTS,
+);
+/** First reasons a legacy account is outside the eligible set (policy ineligibility). */
+export const SUBSCRIPTION_CORE_SHADOW_PARITY_REASONS = [
+  "provider_disabled",
+  "organization_accounts_off",
+  "out_of_scope",
+  "personal_connections_disabled",
+  "personal_owner_inactive",
+  "personal_not_owners_work",
+  "personal_authority_missing",
+  "unhealthy",
+  "allocator_disabled",
+  "wrong_provider",
+  "model_unknown",
+  "model_not_allowed_by_workspace",
+  "model_not_entitled",
+  "model_not_allowed_by_connection",
+  "model_cooling_down",
+  "exhausted",
+] as const;
+const SUBSCRIPTION_CORE_SHADOW_PARITY_REASON_SET = new Set<string>(
+  SUBSCRIPTION_CORE_SHADOW_PARITY_REASONS,
+);
+
+export function recordSubscriptionCoreShadow(
+  observability: Pick<Observability, "incrementCounter" | "observeHistogram">,
+  provider: SubscriptionCoreShadowProvider,
+  observation: SubscriptionCoreShadowObservation,
+  durationSeconds: number,
+): void {
+  observability.observeHistogram({
+    name: "opengeni_subscription_core_shadow_duration_seconds",
+    help: "Shared subscription core shadow comparison duration by provider, including skips.",
+    labels: { provider },
+    value: durationSeconds,
+  });
+  if (observation.outcome === "skipped") {
+    observability.incrementCounter({
+      name: "opengeni_subscription_core_shadow_skips_total",
+      help: "Shadow comparisons not made, by fixed reason; placement is unaffected.",
+      labels: { provider, reason: observation.reason },
+    });
+    return;
+  }
+  observability.incrementCounter({
+    name: "opengeni_subscription_core_shadow_comparisons_total",
+    help: "Shadow comparisons by security parity of the legacy account and core placement agreement.",
+    labels: { provider, parity: observation.parity, placement: observation.placement },
+  });
+  if (observation.parityReason !== null) {
+    observability.incrementCounter({
+      name: "opengeni_subscription_core_shadow_parity_failures_total",
+      help: "Legacy-selected accounts outside the core's eligible set, by first fixed reason.",
+      labels: {
+        provider,
+        reason: SUBSCRIPTION_CORE_SHADOW_PARITY_REASON_SET.has(observation.parityReason)
+          ? observation.parityReason
+          : "other",
+      },
+    });
+  }
+  for (const requirement of new Set(observation.violations)) {
+    observability.incrementCounter({
+      name: "opengeni_subscription_core_shadow_violations_total",
+      help: "Contract invariant violations of the core's own shadow decision, by requirement.",
+      labels: {
+        provider,
+        requirement: SUBSCRIPTION_CORE_SHADOW_REQUIREMENT_SET.has(requirement)
+          ? requirement
+          : "other",
+      },
+    });
+  }
+  for (const input of observation.inputs) {
+    observability.incrementCounter({
+      name: "opengeni_subscription_core_shadow_inputs_total",
+      help: "Legacy decision inputs present in compared shadow decisions, by fixed input.",
+      labels: { provider, input },
+    });
+  }
+}
+
 export function recordSandboxCommandContainment(
   observability: Observability,
   outcome: SandboxCommandContainmentOutcome,

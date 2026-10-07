@@ -22,6 +22,10 @@ import {
   subscriptionCapacityArmingFailure,
 } from "./subscription-capacity-arming";
 import { refreshExhaustedXaiQuota } from "../xai-quota";
+import {
+  runSubscriptionCoreShadow,
+  subscriptionCoreShadowRequest,
+} from "./subscription-core-shadow";
 
 async function selectScopedSubscriptionTurnCapacity(
   deps: CapacityPhaseDeps,
@@ -113,6 +117,17 @@ async function selectScopedSubscriptionTurnCapacity(
       leased.holderId !== null &&
       leased.generation !== null &&
       lease.confirmedUntilMs !== null;
+    // Shared subscription core shadow: read-only, bounded and fail-open; it
+    // never changes the lease or wait decided here.
+    await runSubscriptionCoreShadow({
+      enabled: deps.settings.subscriptionCoreShadowEnabled,
+      timeoutMs: deps.settings.subscriptionCoreShadowTimeoutMs,
+      db,
+      observability: deps.observability,
+      signal: deps.cancellationSignal,
+      request: subscriptionCoreShadowRequest(deps, provider, turn.id, authoritySnapshot.scope),
+      legacy: { selectedConnectionId: providerTurn[credentialKey], reusedLease: leased.reused },
+    });
     if (!providerTurn[credentialKey]) {
       const relevant =
         sessionPin?.pinnedCredentialId && sessionPin.pinSource !== "policy"

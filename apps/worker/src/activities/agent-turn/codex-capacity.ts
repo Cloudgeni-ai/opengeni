@@ -42,6 +42,10 @@ import type {
   RunAgentTurnResult,
 } from "../types";
 import { recordTurnStartupPhase } from "../../observability-metrics";
+import {
+  runSubscriptionCoreShadow,
+  subscriptionCoreShadowRequest,
+} from "./subscription-core-shadow";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { deliverFailedChildTurnToParent } from "../parent-wake";
 import { randomUUID } from "node:crypto";
@@ -577,6 +581,21 @@ export async function selectCodexTurnCapacity(
           payloadBytes: shadowResult.payloadBytes,
         });
       }
+
+      // Shared subscription core shadow: read-only, bounded and fail-open; it
+      // never changes the lease, wait or failover decided above.
+      await runSubscriptionCoreShadow({
+        enabled: settings.subscriptionCoreShadowEnabled,
+        timeoutMs: settings.subscriptionCoreShadowTimeoutMs,
+        db,
+        observability,
+        signal: deps.cancellationSignal,
+        request: subscriptionCoreShadowRequest(deps, "codex", turnId, null),
+        legacy: {
+          selectedConnectionId: providerTurn.effectiveCodexCredentialId,
+          reusedLease: leased.reused,
+        },
+      });
 
       const poolDepth = eligibleCount === 0 ? "zero" : eligibleCount === 1 ? "one" : "many";
       observability.incrementCounter({

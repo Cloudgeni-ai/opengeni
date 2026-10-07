@@ -212,6 +212,7 @@ import {
   type CodexPlanEntitlementExclusion,
 } from "./codex-plan-entitlement";
 export * from "./codex-plan-entitlement";
+export * from "./legacy-subscription-world";
 export * from "./scheduled-task-access";
 export { buildSlackApiRateLimiter } from "./slack-api-rate-limits";
 export * from "./scheduled-human-wait";
