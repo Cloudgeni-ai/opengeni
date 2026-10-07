@@ -114,3 +114,17 @@ AS $function$
       'personalFallbackAllowed', CASE WHEN ws.personal_fallback_allowed IS NOT NULL AND NOT ('personalFallbackAllowed' = ANY(coalesce(org.locked_settings, '{}'))) THEN 'workspace' ELSE 'organization' END)
   ) FROM org CROSS JOIN rot CROSS JOIN prov CROSS JOIN fallback LEFT JOIN ws ON true
 $function$;
+
+-- Keep unqualified settings reads in the trusted data schema. In particular,
+-- pg_temp must be explicit and last so a caller-created temporary table cannot
+-- shadow subscription_settings when this resolver is called by a guard.
+DO $subscription_inference_source_search_path$
+DECLARE data_schema text := current_schema();
+BEGIN
+  EXECUTE format(
+    'ALTER FUNCTION %I.subscription_effective_settings(uuid,uuid) SET search_path = pg_catalog, %I, opengeni_private, pg_temp',
+    data_schema,
+    data_schema
+  );
+END
+$subscription_inference_source_search_path$;
