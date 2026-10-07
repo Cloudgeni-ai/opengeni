@@ -12,6 +12,7 @@ import type { Database } from "./database";
 import { rawRows, withWorkspaceSubjectRls, withRlsContext, setSubjectRlsContext } from "./database";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import * as schema from "./schema";
+import { withSubscriptionPoolSessionAccess } from "./subscription-session-access";
 
 import type { SubscriptionPoolTables } from "./subscription-pool-schema";
 
@@ -1356,7 +1357,24 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     });
   }
 
+  /** Pool-worker subjects keep the acting turn's session access; see subscription-session-access. */
   async function acquireSubscriptionCredentialLease(
+    db: Database,
+    input: Parameters<typeof acquireSubscriptionCredentialLeaseInSessionContext>[1],
+  ): ReturnType<typeof acquireSubscriptionCredentialLeaseInSessionContext> {
+    return await withSubscriptionPoolSessionAccess(
+      db,
+      {
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+      },
+      async () => await acquireSubscriptionCredentialLeaseInSessionContext(db, input),
+    );
+  }
+
+  async function acquireSubscriptionCredentialLeaseInSessionContext(
     db: Database,
     input: {
       modelId?: string;
@@ -2150,7 +2168,24 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     );
   }
 
+  /** Pool-worker subjects keep the acting turn's session access; see subscription-session-access. */
   async function setSubscriptionSessionAccountPin(
+    db: Database,
+    input: Parameters<typeof setSubscriptionSessionAccountPinInSessionContext>[1],
+  ): ReturnType<typeof setSubscriptionSessionAccountPinInSessionContext> {
+    return await withSubscriptionPoolSessionAccess(
+      db,
+      {
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        sessionId: input.sessionId,
+        turnId: null,
+      },
+      async () => await setSubscriptionSessionAccountPinInSessionContext(db, input),
+    );
+  }
+
+  async function setSubscriptionSessionAccountPinInSessionContext(
     db: Database,
     input: {
       accountId: string;
@@ -2224,7 +2259,24 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     );
   }
 
+  /** Pool-worker subjects keep the acting turn's session access; see subscription-session-access. */
   async function getSubscriptionSessionAccountPin(
+    db: Database,
+    input: Parameters<typeof getSubscriptionSessionAccountPinInSessionContext>[1],
+  ): ReturnType<typeof getSubscriptionSessionAccountPinInSessionContext> {
+    return await withSubscriptionPoolSessionAccess(
+      db,
+      {
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        sessionId: input.sessionId,
+        turnId: null,
+      },
+      async () => await getSubscriptionSessionAccountPinInSessionContext(db, input),
+    );
+  }
+
+  async function getSubscriptionSessionAccountPinInSessionContext(
     db: Database,
     input: {
       workspaceId: string;
@@ -2263,7 +2315,24 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     );
   }
 
+  /** Pool-worker subjects keep the acting turn's session access; see subscription-session-access. */
   async function recordSubscriptionSessionLastAccount(
+    db: Database,
+    input: Parameters<typeof recordSubscriptionSessionLastAccountInSessionContext>[1],
+  ): ReturnType<typeof recordSubscriptionSessionLastAccountInSessionContext> {
+    return await withSubscriptionPoolSessionAccess(
+      db,
+      {
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        sessionId: input.sessionId,
+        turnId: null,
+      },
+      async () => await recordSubscriptionSessionLastAccountInSessionContext(db, input),
+    );
+  }
+
+  async function recordSubscriptionSessionLastAccountInSessionContext(
     db: Database,
     input: {
       accountId: string;

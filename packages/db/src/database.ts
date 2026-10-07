@@ -70,6 +70,15 @@ export function currentSessionAttachmentReadAccess(): SessionAttachmentReadAcces
 }
 
 /**
+ * The ambient session RLS actor established by the caller, if any. Read-only:
+ * helpers use it to decide whether the caller already owns session access and
+ * must never mutate it.
+ */
+export function currentSessionRlsActorContext(): Readonly<SessionRlsActorContext> | undefined {
+  return sessionRlsActorContext.getStore();
+}
+
+/**
  * Stable identity of the ambient session RLS actor: every field that
  * `setRlsContext` turns into database-visible GUCs or that scoped reads
  * consult. Two callers with equal keys see exactly the same rows, so the key

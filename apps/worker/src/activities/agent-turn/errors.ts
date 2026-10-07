@@ -737,6 +737,15 @@ function retryablePersistenceFailureCode(
  * running-turn lane additionally requires a closed own-client outage class;
  * existing pre-execution recovery classifications are unchanged.
  */
+/**
+ * True when an error is a structured database failure that the exact-attempt
+ * database recovery path owns. Callers that translate other failures into
+ * user-visible states must rethrow these unchanged.
+ */
+export function isPostClaimDatabaseRecoveryCandidate(error: unknown): boolean {
+  return retryableDatabaseFailureCode(error, true) !== null;
+}
+
 export function postClaimDatabaseRecoveryFailure(input: {
   error: unknown;
   turnId: string;

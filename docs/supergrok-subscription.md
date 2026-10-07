@@ -82,6 +82,21 @@ finished causal turn; scheduled occurrences copy the task snapshot; compaction,
 agent messages, child results, and coalesced internal updates preserve the same
 snapshot. Private work additionally requires the exact initiating human.
 
+Pool authority is additive to session access, never a replacement for it.
+Shared (organization or workspace) pools are read and written under the
+synthetic pool-worker database subject (`worker:xai-workspace`, or
+`worker:claude-workspace` for the Claude pool that shares this code). Every
+capacity-wait, recovery, workflow peek, pin and last-account operation that
+runs under that subject re-establishes the acting turn's frozen
+`initiating_human_subject_id` (`withSubscriptionPoolSessionAccess` in
+`packages/db/src/subscription-session-access.ts`). A `user_private` session
+therefore arms, waits and resumes exactly like a shared one, while the pool
+worker still sees no other member's private sessions. A caller whose ambient
+session actor already carries an initiating human keeps it unchanged. If a
+wait still cannot be armed for a non-database reason, the turn fails with the
+explicit, retryable `<provider>_capacity_wait_unavailable` state instead of a
+generic activity failure.
+
 ## Allocation, pins, and leases
 
 Disconnecting a workspace or personal credential clears its session pin and pin
