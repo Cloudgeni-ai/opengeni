@@ -229,7 +229,7 @@ const capacityFailure = { code: "synthetic_capacity_unavailable" };
 
 for (const provider of ["claude", "xai"] as const) {
   test.each(visibilities)(
-    `${provider} capacity arming under the pool worker subject succeeds for %s sessions`,
+    `SUB-ACCESS-03: ${provider} capacity arming under the pool worker subject succeeds for %s sessions`,
     async (visibility) => {
       const arm = provider === "claude" ? armClaudeCapacityWait : armXaiCapacityWait;
       const input = await fixture();
@@ -254,7 +254,7 @@ for (const provider of ["claude", "xai"] as const) {
 }
 
 test.each(visibilities)(
-  "Claude %s capacity wait resumes after quota recovery",
+  "SUB-ACCESS-03: Claude %s capacity wait resumes after quota recovery",
   async (visibility) => {
     const input = await fixture(),
       { a, b } = await pool(input),
@@ -303,7 +303,7 @@ test.each(visibilities)(
 );
 
 test.each(visibilities)(
-  "SuperGrok %s capacity waiter stays visible to recovery",
+  "SUB-ACCESS-03: SuperGrok %s capacity waiter stays visible to recovery",
   async (visibility) => {
     const input = await fixture(),
       running = await turn(input, visibility);
@@ -332,7 +332,7 @@ test.each(visibilities)(
 );
 
 test.each(visibilities)(
-  "Claude %s session pin and last-account metadata work under the pool worker subject",
+  "SUB-ACCESS-03: Claude %s session pin and last-account metadata work under the pool worker subject",
   async (visibility) => {
     const input = await fixture(),
       { a } = await pool(input),
@@ -355,7 +355,7 @@ test.each(visibilities)(
   60_000,
 );
 
-test("restored session access admits only the acting turn's human, never another member's private session", async () => {
+test("SUB-ACCESS-02, SUB-ACCESS-04: restored session access admits only the acting turn's human, never another member's private session", async () => {
   const input = await fixture();
   const mine = await turn(input, "user_private");
   const theirs = await turn(input, "user_private", input.otherSubjectId);
@@ -384,7 +384,7 @@ test("restored session access admits only the acting turn's human, never another
   expect(bare).toBe(0);
 }, 60_000);
 
-test("an ambient actor carrying a different human is never overridden", async () => {
+test("SUB-ACCESS-04: an ambient actor carrying a different human is never overridden", async () => {
   const input = await fixture(),
     running = await turn(input, "user_private");
   const armed = await armClaudeCapacityWait(client.db, {
@@ -403,7 +403,7 @@ test("an ambient actor carrying a different human is never overridden", async ()
   expect(seen).toBeNull();
 }, 60_000);
 
-test("non-pool subjects run unchanged", async () => {
+test("SUB-ACCESS-02: non-pool subjects run unchanged", async () => {
   const input = await fixture(),
     running = await turn(input, "user_private");
   const seen = await withSubscriptionPoolSessionAccess(
@@ -535,7 +535,7 @@ test("restoring pool session access refuses an open transaction handle", async (
 
 for (const provider of ["claude", "xai"] as const) {
   test.each(visibilities)(
-    `${provider} lease acquisition under the pool worker subject succeeds for %s sessions`,
+    `SUB-ACCESS-03: ${provider} lease acquisition under the pool worker subject succeeds for %s sessions`,
     async (visibility) => {
       const input = await fixture();
       if (provider === "claude") await pool(input);
@@ -596,7 +596,7 @@ for (const provider of ["claude", "xai"] as const) {
   );
 }
 
-test("a turn without an initiating human restores nothing and private sessions stay hidden", async () => {
+test("SUB-ACCESS-04: a turn without an initiating human restores nothing and private sessions stay hidden", async () => {
   const input = await fixture();
   const serviceTurn = await turn(input, "user_private", input.subjectId, null);
   const worker = subscriptionPoolWorkerSubject("claude");

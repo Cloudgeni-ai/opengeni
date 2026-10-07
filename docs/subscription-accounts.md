@@ -259,7 +259,7 @@ for it until the matching requirement below is implemented:
   Verification: pending (verification-suite).
 - **SUB-WAIT-05** A wait that cannot be armed surfaces as an explicit,
   retryable state, never as a generic activity failure. Database outages keep
-  their exact-attempt recovery path. Verification: pending (private-session-access).
+  their exact-attempt recovery path. Verification: `apps/worker/test/subscription-capacity-arming.test.ts`.
 
 ### Authority and session access
 
@@ -272,12 +272,12 @@ for it until the matching requirement below is implemented:
   Verification: pending (accepted-scope-propagation).
 - **SUB-ACCESS-02** Pool authority is additive to session access. Using a
   shared pool never changes who can see a session.
-  Verification: pending (private-session-access).
+  Verification: `packages/db/test/subscription-pool-private-session-access.test.ts`.
 - **SUB-ACCESS-03** A private session arms, waits, is observed by the
   workflow, recovers and keeps pins exactly like a shared session.
-  Verification: pending (private-session-access).
+  Verification: `packages/db/test/subscription-pool-private-session-access.test.ts`.
 - **SUB-ACCESS-04** A pool worker never gains visibility of another member's
-  private session. Verification: pending (private-session-access).
+  private session. Verification: `packages/db/test/subscription-pool-private-session-access.test.ts`.
 - **SUB-ACCESS-05** Revoking a connection or a person's access is enforced on
   the next selection, lease renewal and dispatch check.
   Verification: pending (shared-core).
@@ -328,7 +328,7 @@ for it until the matching requirement below is implemented:
   routed never excludes, replaces or widens it; an unavailable designated
   credential is reported with its own reason at most once per turn, and the
   designation can be cleared in every routing mode.
-  Verification: pending (codex-apps-binding).
+  Verification: `apps/api/test/codex-redemption-routes.test.ts`, `packages/db/test/codex-token-resolver.test.ts`, `packages/runtime/test/runtime.test.ts`.
 - **SUB-APPS-02** Reset-credit redemption keeps its explicit human-controlled
   boundary and is never triggered by automatic selection or failover.
   Verification: pending (shared-core).
