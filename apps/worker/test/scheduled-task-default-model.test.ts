@@ -36,13 +36,29 @@ import type { ActivityServices } from "../src/activities/types";
 let available = true;
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
+const unavailableModelCatalogs = new Set<string>();
+const modelCatalogRequests = new Set<string>();
 
 let restoreModelsProbe = () => {};
 beforeAll(async () => {
-  const modelsProbe = spyOn(codex, "fetchCodexModels").mockResolvedValue({
-    ok: true,
-    status: 200,
-    slugs: ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
+  // The selection loader captures its discovery dependency at module load.
+  // Stub the provider transport, not an export spy that the loader never calls.
+  const originalFetch = globalThis.fetch;
+  const modelsEndpoint = new URL(`${codex.CODEX_RESPONSES_BASE}/models`);
+  const modelsProbe = spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    if (url.origin !== modelsEndpoint.origin || url.pathname !== modelsEndpoint.pathname) {
+      return originalFetch(input, init);
+    }
+    expect(request.method).toBe("GET");
+    expect(request.headers.get("authorization")).toBe("Bearer test");
+    const accountId = request.headers.get("chatgpt-account-id") ?? "";
+    modelCatalogRequests.add(accountId);
+    if (unavailableModelCatalogs.has(accountId)) return new Response(null, { status: 503 });
+    return Response.json({
+      models: ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"].map((slug) => ({ slug })),
+    });
   });
   restoreModelsProbe = () => modelsProbe.mockRestore();
   shared = await acquireSharedTestDatabase("worker-scheduled-default-model");
@@ -217,6 +233,44 @@ describe("scheduled occurrences without a model use the resolved default", () =>
       model: "codex/gpt-6-astra",
       reasoningEffort: "high",
     });
+    expect(modelCatalogRequests.has(`scheduled-default-${grant.workspaceId}`)).toBe(true);
+  }, 120_000);
+
+  test("unavailable subscription discovery preserves free, credits, and explicit defaults", async () => {
+    if (!available) return;
+    const grant = await workspace();
+    const report = await dailyReport(grant);
+    const pinned = await dailyReport(grant, DEFAULT_OPENROUTER_MODEL_ID);
+    const accountId = `scheduled-default-${grant.workspaceId}`;
+    unavailableModelCatalogs.add(accountId);
+    try {
+      await upsertCodexSubscriptionCredential(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        credentialEncrypted: encryptEnvironmentValue(
+          Buffer.from(settings().environmentsEncryptionKey!, "base64"),
+          JSON.stringify({ access_token: "test", refresh_token: "test", id_token: "test" }),
+        ),
+        chatgptAccountId: accountId,
+        scopes: null,
+        planType: "pro",
+        isFedramp: false,
+        expiresAt: new Date(Date.now() + 3_600_000),
+        lastRefreshAt: new Date(),
+      });
+      await ensureCodexRotationSettings(client.db, grant.accountId, grant.workspaceId);
+      await updateCodexRotationSettings(client.db, grant.workspaceId, { rotationEnabled: true });
+      expect(await occurrence(grant, report)).toMatchObject({ model: DEFAULT_OPENROUTER_MODEL_ID });
+      await addCredits(grant);
+      expect(await occurrence(grant, report)).toMatchObject({
+        model: "gpt-6-luna",
+        reasoningEffort: "xhigh",
+      });
+      expect(await occurrence(grant, pinned)).toMatchObject({ model: DEFAULT_OPENROUTER_MODEL_ID });
+      expect(modelCatalogRequests.has(accountId)).toBe(true);
+    } finally {
+      unavailableModelCatalogs.delete(accountId);
+    }
   }, 120_000);
 
   test("a retried occurrence keeps its accepted model after credits arrive", async () => {
