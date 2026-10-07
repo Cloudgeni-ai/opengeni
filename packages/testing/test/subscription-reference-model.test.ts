@@ -183,7 +183,7 @@ function violationsFor(decider: (world: World, sessionId: string, now: number) =
 }
 
 describe("subscription reference model", () => {
-  test("satisfies every checked invariant across 4000 generated worlds (SUB-ELIG-01, SUB-SEL-02, SUB-SEL-04, SUB-STICK-02, SUB-FAIL-02, SUB-FAIL-03, SUB-FAIL-04, SUB-WAIT-01)", () => {
+  test("satisfies every checked invariant across 4000 generated worlds (model:SUB-ELIG-01, model:SUB-SEL-02, model:SUB-SEL-04, model:SUB-STICK-02, model:SUB-FAIL-02, model:SUB-FAIL-03, model:SUB-FAIL-04, model:SUB-WAIT-01)", () => {
     const violations = violationsFor(decide);
     expect(violations).toEqual([]);
   });
@@ -214,7 +214,7 @@ describe("subscription reference model", () => {
     const requirements = (violations: InvariantViolation[]) =>
       new Set(violations.map((violation) => violation.requirement));
 
-    test("ignoring an explicit pin is caught (SUB-SEL-04)", () => {
+    test("ignoring an explicit pin is caught (model:SUB-SEL-04)", () => {
       const ignorePin = (world: World, sessionId: string, now: number) =>
         decide(
           {
@@ -227,7 +227,7 @@ describe("subscription reference model", () => {
       expect(requirements(violationsFor(ignorePin)).has("SUB-SEL-04")).toBe(true);
     });
 
-    test("switching account while the cache is warm is caught (SUB-STICK-02)", () => {
+    test("switching account while the cache is warm is caught (model:SUB-STICK-02)", () => {
       const ignoreBinding = (world: World, sessionId: string, now: number) =>
         decide(
           { ...world, sessions: world.sessions.map((session) => ({ ...session, binding: null })) },
@@ -237,7 +237,7 @@ describe("subscription reference model", () => {
       expect(requirements(violationsFor(ignoreBinding)).has("SUB-STICK-02")).toBe(true);
     });
 
-    test("using a personal account without an explicit choice is caught (SUB-SEL-02)", () => {
+    test("using a personal account without an explicit choice is caught (model:SUB-SEL-02)", () => {
       const personalFirst = (world: World, sessionId: string, now: number): Decision => {
         const session = world.sessions.find((candidate) => candidate.id === sessionId)!;
         const personal = world.connections.find(
@@ -264,7 +264,7 @@ describe("subscription reference model", () => {
       expect(requirements(violationsFor(personalFirst)).has("SUB-SEL-02")).toBe(true);
     });
 
-    test("waiting while an eligible account has capacity is caught (SUB-WAIT-01)", () => {
+    test("waiting while an eligible account has capacity is caught (model:SUB-WAIT-01)", () => {
       const alwaysWait = (): Decision => ({
         kind: "wait",
         reason: "no_eligible_capacity",
@@ -273,7 +273,7 @@ describe("subscription reference model", () => {
       expect(requirements(violationsFor(alwaysWait)).has("SUB-WAIT-01")).toBe(true);
     });
 
-    test("failing over across providers when the setting forbids it is caught (SUB-FAIL-03)", () => {
+    test("failing over across providers when the setting forbids it is caught (model:SUB-FAIL-03)", () => {
       const forceCrossProvider = (world: World, sessionId: string, now: number) => {
         const forced = (settings: Partial<SubscriptionSettings>) => ({
           ...settings,
@@ -357,7 +357,7 @@ describe("reference model scenarios", () => {
     ),
   });
 
-  test("SUB-FAIL-02: when the primary is exhausted the same accepted work moves to the next account of the same provider", () => {
+  test("model:SUB-FAIL-02: when the primary is exhausted the same accepted work moves to the next account of the same provider", () => {
     let world = base();
     const first = decide(world, "session-1", NOW);
     expect(first).toMatchObject({ kind: "run", connectionId: "claude-a", switch: "initial" });
@@ -369,7 +369,7 @@ describe("reference model scenarios", () => {
     });
   });
 
-  test("SUB-FAIL-03: with every Claude account exhausted the work fails over to the next provider at the nearest reasoning level", () => {
+  test("model:SUB-FAIL-03: with every Claude account exhausted the work fails over to the next provider at the nearest reasoning level", () => {
     let world = exhaust(exhaust(base(), "claude-a", NOW + 3_600_000), "claude-b", NOW + 3_600_000);
     world = {
       ...world,
@@ -387,7 +387,7 @@ describe("reference model scenarios", () => {
     });
   });
 
-  test("SUB-FAIL-07: after failover the session stays while warm and returns to the preferred model once cold", () => {
+  test("model:SUB-FAIL-07: after failover the session stays while warm and returns to the preferred model once cold", () => {
     let world = exhaust(exhaust(base(), "claude-a", NOW + 60_000), "claude-b", NOW + 60_000);
     const failover = decide(world, "session-1", NOW);
     world = applyDecision(world, "session-1", failover, NOW);
@@ -405,7 +405,7 @@ describe("reference model scenarios", () => {
     });
   });
 
-  test("SUB-SEL-04, SUB-WAIT-02: a pinned session waits with the reset time and resumes on the same account after it", () => {
+  test("model:SUB-SEL-04, model:SUB-WAIT-02: a pinned session waits with the reset time and resumes on the same account after it", () => {
     let world = exhaust(base(), "claude-a", NOW + 60_000);
     world = {
       ...world,
@@ -422,7 +422,7 @@ describe("reference model scenarios", () => {
     });
   });
 
-  test("SUB-FAIL-05: 'only this model' never crosses providers and waits when its provider is exhausted", () => {
+  test("model:SUB-FAIL-05: 'only this model' never crosses providers and waits when its provider is exhausted", () => {
     let world = exhaust(exhaust(base(), "claude-a", NOW + 60_000), "claude-b", NOW + 90_000);
     world = {
       ...world,
@@ -435,7 +435,7 @@ describe("reference model scenarios", () => {
     });
   });
 
-  test("SUB-SEL-01, SUB-SEL-02: an opted-in personal account is used only after the organization accounts for the same model", () => {
+  test("model:SUB-SEL-01, model:SUB-SEL-02: an opted-in personal account is used only after the organization accounts for the same model", () => {
     let world: World = {
       ...base(),
       people: [{ id: "person-a", active: true, personalFallbackOptIn: true }],
@@ -463,7 +463,7 @@ describe("reference model scenarios", () => {
     expect(decide(sharedSession, "session-1", NOW)).toMatchObject({ connectionId: "codex-a" });
   });
 
-  test("SUB-SET-03: a locked organization setting ignores the workspace override", () => {
+  test("model:SUB-SET-03: a locked organization setting ignores the workspace override", () => {
     const world = base();
     const policy = {
       ...world.settings,

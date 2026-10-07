@@ -167,8 +167,21 @@ export function testTitles(path: string, source: string): string[] {
   return titles;
 }
 
+/**
+ * A test that exercises a requirement without verifying production behaviour
+ * (the reference model's own tests) names it as `model:SUB-…`. The ID must
+ * still be defined, but the mention never counts as verification.
+ */
+export const MODEL_MARKER = "model:";
+
 function titlesName(titles: readonly string[], id: string): boolean {
-  return titles.some((title) => [...title.matchAll(ID_PATTERN)].some((match) => match[0] === id));
+  return titles.some((title) =>
+    [...title.matchAll(ID_PATTERN)].some(
+      (match) =>
+        match[0] === id &&
+        title.slice(Math.max(0, match.index - MODEL_MARKER.length), match.index) !== MODEL_MARKER,
+    ),
+  );
 }
 
 export function checkSubscriptionContract(root: string): ContractFinding[] {

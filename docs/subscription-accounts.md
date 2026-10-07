@@ -28,6 +28,12 @@ for it until the matching requirement below is implemented:
   by naming its ID in its title: the first string argument of a `test`, `it`
   or `describe` call. IDs in comments, other strings, or skipped and `todo`
   tests do not count.
+- A test that exercises a requirement without verifying the product, such as
+  the reference model's own tests (see [Verification](#verification)), names
+  it with the `model:` marker, for example `model:SUB-WAIT-01`. The checker
+  still requires the ID to be defined here, but a `model:` mention never
+  counts as verification, so it cannot satisfy a `Verification:` line or make
+  a `pending` requirement look covered.
 - `bun run check:subscription-contract` runs as the `subscription-contract`
   source guard on every CI plan (full, focused and documentation-only), and
   `scripts/check-subscription-contract.test.ts` runs the same check as a unit

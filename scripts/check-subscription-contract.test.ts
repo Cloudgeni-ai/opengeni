@@ -179,3 +179,21 @@ test("a retired requirement needs no tests and stays defined", () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a model: mention must be defined but never verifies a requirement", () => {
+  const root = fixtureRepository({
+    [CONTRACT_PATH]: "- **SUB-FIXTURE-01** Verification: `packages/x/test/model.test.ts`.\n",
+    "packages/x/test/model.test.ts": [
+      'test("model:SUB-FIXTURE-01 the reference model agrees", () => {});',
+      'test("model:SUB-FIXTURE-09 is still checked", () => {});',
+    ].join("\n"),
+  });
+  try {
+    expect(checkSubscriptionContract(root).map((finding) => finding.message)).toEqual([
+      "does not name SUB-FIXTURE-01 in any test title",
+      "SUB-FIXTURE-09 is not defined in " + CONTRACT_PATH,
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
