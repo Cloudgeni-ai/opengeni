@@ -16,7 +16,7 @@ import {
   useNativeTimelineTheme,
 } from "@opengeni/react-native/timeline";
 import { Stack, router, useFocusEffect } from "expo-router";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Platform,
@@ -29,6 +29,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
 import { useAccount } from "@/account";
+import { cachedLists, rememberLists } from "@/session-list-cache";
 import { serverLabel } from "@/account-store";
 import { BrandMark } from "@/brand-mark";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
@@ -104,24 +105,32 @@ function Home() {
     error,
     reload,
   } = useAccount();
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [sessions, setSessions] = useState<Session[]>(() => cachedLists(workspaceId).home ?? []);
+  // Only a pull shows the refresh spinner; focus refreshes are quiet so the
+  // composer never jumps when you come back to this screen.
+  const [pulling, setPulling] = useState(false);
   const [draft, setDraft] = useState("");
   const [creating, setCreating] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!workspaceId) return;
-    setLoading(true);
     try {
-      setSessions(await client.listSessions(workspaceId, { limit: 50 }));
+      // Top-level conversations only, as web's home: sub-agents are reached from
+      // their parent and would otherwise crowd the list.
+      const list = await client.listSessions(workspaceId, { limit: 12, parentSessionId: null });
+      rememberLists(workspaceId, { home: list });
+      setSessions(list);
       setListError(null);
     } catch (caught) {
       setListError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setLoading(false);
     }
   }, [client, workspaceId]);
+
+  // A workspace switch shows that workspace's last list at once.
+  useEffect(() => {
+    setSessions(cachedLists(workspaceId).home ?? []);
+  }, [workspaceId]);
 
   useFocusEffect(
     useCallback(() => {
@@ -318,7 +327,15 @@ function Home() {
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="interactive"
         refreshControl={
-          <RefreshControl refreshing={loading} onRefresh={() => void reload().then(load)} />
+          <RefreshControl
+            refreshing={pulling}
+            onRefresh={() => {
+              setPulling(true);
+              void reload()
+                .then(load)
+                .finally(() => setPulling(false));
+            }}
+          />
         }
         contentContainerStyle={{
           paddingHorizontal: 16,

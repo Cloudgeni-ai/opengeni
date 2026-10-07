@@ -144,6 +144,9 @@ export function NativeSessionScreen({
       {topBar}
       <MessageTimeline
         {...timelineProps}
+        hasOlder={controller.hasOlder}
+        loadingOlder={controller.loadingOlder}
+        onLoadOlder={controller.loadOlder}
         contentInsetBottom={composerHeight + 20}
         overlayInsetBottom={composerHeight}
         renderMessageActions={feedback || hostMessageActions ? renderMessageActions : undefined}

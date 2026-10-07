@@ -2015,6 +2015,9 @@ function reportDraftSaveFailure(draft: {
 function RecentSessions({ workspaceId }: { workspaceId: string }) {
   const { sessions, pinned } = useWorkspaceSessions({
     limit: 12,
+    // Top-level conversations: sub-agents open from their parent and would
+    // otherwise fill this short page in a workspace that runs many of them.
+    parentSessionId: null,
     pollIntervalMs: 30_000,
   });
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
