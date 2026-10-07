@@ -1,5 +1,6 @@
 import { KNOWLEDGE_GUIDANCE } from "./agent-instructions/modules/knowledge";
 import { measureMcpPhase } from "@opengeni/observability";
+import { interactionToolErrorOutput, type InteractionToolErrorResult } from "./interaction-tools";
 import { createMcpTransportLogger } from "./mcp-transport-logger";
 import {
   withPreparedCompactionRequest,
@@ -2747,8 +2748,11 @@ const agentRigCredentialHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 export function mcpToolErrorOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
+  structuredContent?: InteractionToolErrorResult["structuredContent"];
 } {
   if (isRoutingMutationOutputRejectedError(error)) throw error;
+  const interactionFailure = interactionToolErrorOutput(error);
+  if (interactionFailure) return interactionFailure;
   const text =
     invalidToolArgumentsText(error) ??
     (isIntegrationInvocationOutcomeUnknownError(error)

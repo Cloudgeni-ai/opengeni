@@ -38,6 +38,7 @@ import {
 } from "@openai/agents-core";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { IntegrationInvocationError } from "@opengeni/capabilities";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   DEFAULT_AGENT_INSTRUCTIONS,
@@ -2112,6 +2113,123 @@ describe("runtime event normalization", () => {
   });
 
   describe("failed MCP tool calls carry an isError flag", () => {
+    test.each(["browser", "computer"] as const)(
+      "connected-machine %s timeout preserves uncertainty and correlation for the model",
+      (surface) => {
+        const failure = new OpenGeniApiError(
+          504,
+          JSON.stringify({
+            error: {
+              code: "upstream_unavailable",
+              message: "The connected machine did not respond in time.",
+              retryable: true,
+              outcomeUnknown: true,
+              requestId: "api-request-42",
+              details: {
+                interactionLayer: "connected_machine",
+                interactionSurface: surface,
+                controlFailureCode: "timeout",
+                controlRequestId: "control-request-42",
+                providerOutput: "synthetic-private-provider-output",
+              },
+            },
+          }),
+          { mutation: true },
+        );
+        const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+        const render = (agent as any).mcpConfig.errorFunction;
+        const result = render({ context: {}, error: failure });
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent.error).toMatchObject({
+          code: "upstream_unavailable",
+          retryable: true,
+          outcomeUnknown: true,
+          requestId: "api-request-42",
+          details: {
+            interactionLayer: "connected_machine",
+            interactionSurface: surface,
+            controlFailureCode: "timeout",
+            controlRequestId: "control-request-42",
+          },
+        });
+        expect(result.structuredContent.error.guidance).toContain("Do not repeat actions");
+        expect(JSON.parse(result.content[0].text)).toEqual(result.structuredContent);
+        expect(result.content[0].text).not.toContain("Please try again");
+        expect(result.content[0].text).not.toContain("synthetic-private-provider-output");
+      },
+    );
+
+    test("connected-machine refusal retains its known outcome and non-retryable ruling", () => {
+      const failure = new OpenGeniApiError(
+        403,
+        JSON.stringify({
+          error: {
+            code: "forbidden",
+            message: "Screen access is not enabled.",
+            retryable: false,
+            outcomeUnknown: false,
+            details: {
+              interactionLayer: "connected_machine",
+              interactionSurface: "computer",
+              controlFailureCode: "consent_required",
+            },
+          },
+        }),
+        { mutation: false },
+      );
+      const result = mcpToolErrorOutput(failure);
+      expect(result.structuredContent?.error).toMatchObject({
+        retryable: false,
+        outcomeUnknown: false,
+        guidance: expect.stringContaining("not marked retryable"),
+      });
+      expect(result.content[0].text).not.toContain("Please try again");
+    });
+
+    test("an uncertain API failure without control details still forbids automatic retries", () => {
+      const failure = new OpenGeniApiError(504, "Synthetic request timed out.", {
+        outcomeUnknown: true,
+        correlationId: "api-request-43",
+      });
+      const result = mcpToolErrorOutput(failure);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent?.error).toMatchObject({
+        outcomeUnknown: true,
+        requestId: "api-request-43",
+        guidance: expect.stringContaining("Do not repeat actions"),
+      });
+      expect(result.structuredContent?.error).not.toHaveProperty("details");
+      expect(result.content[0].text).not.toContain("Please try again");
+    });
+
+    test("connected-machine model errors never forward unbounded ids or arbitrary details", () => {
+      const failure = new OpenGeniApiError(
+        504,
+        JSON.stringify({
+          error: {
+            message: "Synthetic failure.",
+            outcomeUnknown: true,
+            details: {
+              interactionLayer: "connected_machine",
+              interactionSurface: "browser",
+              controlFailureCode: "timeout",
+              controlRequestId: "https://example.invalid/private-token",
+              arbitrary: "synthetic-secret",
+            },
+          },
+        }),
+      );
+      const result = mcpToolErrorOutput(failure);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent?.error.details).toEqual({
+        interactionLayer: "connected_machine",
+        interactionSurface: "browser",
+        controlFailureCode: "timeout",
+      });
+      expect(result.content[0].text).not.toContain("private-token");
+      expect(result.content[0].text).not.toContain("synthetic-secret");
+    });
+
     test("mcpToolErrorOutput shapes a thrown error as an MCP isError result", () => {
       const out = mcpToolErrorOutput(new Error("MCP error -32602: Invalid params"));
       expect(out.isError).toBe(true);
