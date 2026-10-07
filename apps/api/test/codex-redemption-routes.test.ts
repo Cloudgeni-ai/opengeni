@@ -4,13 +4,21 @@ import {
   resolveCodexAppsCredentialIdForRun,
   stampDelegatedHumanAuthorization,
 } from "@opengeni/core";
+import { CodexAppsCredentialUnavailable, isCodexAppsCredentialUnavailable } from "@opengeni/codex";
 import {
+  buildCodexAppsTokenResolver,
+  codexAppsRequestAuth,
   createDb,
+  decryptEnvironmentValue,
   encryptEnvironmentValue,
   ensureManagedAccessForUserWithOrganizationMemberships,
+  getWorkspaceCodexSubscriptionSource,
   listCodexAccountStatuses,
+  loadCodexCredentialForRun,
+  setWorkspaceCodexSubscriptionMode,
   synchronizeCanonicalHumanLoginBindings,
   upsertCodexSubscriptionCredential,
+  upsertOrganizationCodexSubscriptionCredential,
   type DbClient,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
@@ -239,6 +247,101 @@ async function prepare(
   };
 }
 
+function encryptedCodexTokens(accessToken: string, refreshToken: string): string {
+  return encryptEnvironmentValue(
+    Buffer.from(settings.environmentsEncryptionKey!, "base64"),
+    JSON.stringify({ access_token: accessToken, refresh_token: refreshToken, id_token: "id" }),
+  );
+}
+
+/** A workspace whose owner may manage Apps, with designation-ready credentials. */
+async function appsRoutingFixture(api: ReturnType<typeof app>) {
+  const access = await api.request("/v1/access/me", { headers: { cookie: OWNER_COOKIE } });
+  const accountId = ((await access.json()) as AccessContext).defaultAccountId!;
+  const workspaceId = crypto.randomUUID();
+  await admin`
+    insert into workspaces (id, account_id, name)
+    values (${workspaceId}, ${accountId}, ${`apps-routing-${workspaceId}`})`;
+  await admin`
+    insert into workspace_memberships (
+      account_id, workspace_id, subject_id, subject_label, role, permissions
+    ) values (
+      ${accountId}, ${workspaceId}, ${`user:${OWNER_USER_ID}`}, 'Apps owner', 'member',
+      ${admin.json(["workspace:read", "connections:write"])}
+    )`;
+  const connect = async (label: string, expiresAt: Date) =>
+    await upsertCodexSubscriptionCredential(client.db, {
+      accountId,
+      workspaceId,
+      credentialEncrypted: encryptedCodexTokens(`${label}-token`, `${label}-refresh-1`),
+      chatgptAccountId: `${label}-${crypto.randomUUID()}`,
+      scopes: null,
+      planType: "pro",
+      isFedramp: false,
+      expiresAt,
+      lastRefreshAt: new Date(Date.now() - 60 * 60_000),
+      connectedBySubjectId: `user:${OWNER_USER_ID}`,
+    });
+  const connectOrganization = async () =>
+    await upsertOrganizationCodexSubscriptionCredential(client.db, {
+      organizationId: accountId,
+      actorSubjectId: `user:${OWNER_USER_ID}`,
+      credentialEncrypted: encryptedCodexTokens("org-token", "org-refresh-1"),
+      chatgptAccountId: `org-${crypto.randomUUID()}`,
+      scopes: null,
+      planType: "pro",
+      isFedramp: false,
+      expiresAt: new Date(Date.now() - 60_000),
+      lastRefreshAt: new Date(Date.now() - 60 * 60_000),
+    });
+  const designate = async (credentialId: string, expectedVersion: number) => {
+    const response = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
+      method: "POST",
+      headers: browserHeaders(OWNER_COOKIE),
+      body: JSON.stringify({ accountId: credentialId, expectedVersion }),
+    });
+    expect(response.status).toBe(200);
+  };
+  const routeToOrganization = async () => {
+    await setWorkspaceCodexSubscriptionMode(client.db, {
+      accountId,
+      workspaceId,
+      subjectId: `user:${OWNER_USER_ID}`,
+      mode: "organization",
+    });
+    expect(
+      (await getWorkspaceCodexSubscriptionSource(client.db, workspaceId)).effectiveSource,
+    ).toBe("organization");
+  };
+  return { accountId, workspaceId, connect, connectOrganization, designate, routeToOrganization };
+}
+
+async function credentialRow(credentialId: string) {
+  const [row] = await admin<
+    { version: number; status: string; credential_encrypted: string }[]
+  >`select version, status, credential_encrypted
+    from codex_subscription_credentials where id = ${credentialId}`;
+  return row!;
+}
+
+function storedTokens(row: { credential_encrypted: string }) {
+  return JSON.parse(
+    decryptEnvironmentValue(
+      Buffer.from(settings.environmentsEncryptionKey!, "base64"),
+      row.credential_encrypted,
+    ),
+  ) as { access_token: string; refresh_token: string };
+}
+
+async function rejection(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  throw new Error("expected rejection");
+}
+
 beforeAll(async () => {
   shared = await acquireDatabase();
   if (!shared) {
@@ -301,6 +404,166 @@ afterAll(async () => {
 });
 
 describe("Codex quota managed-cookie-only reset redemption API", () => {
+  test("SUB-APPS-01: a workspace Apps designation under organization routing loads its token, persists refreshes, and can be cleared", async () => {
+    if (!available) return;
+    const api = app();
+    const fixture = await appsRoutingFixture(api);
+    const { workspaceId } = fixture;
+    const designated = await fixture.connect("apps", new Date(Date.now() - 60_000));
+    await fixture.designate(designated.id, 0);
+    await fixture.connectOrganization();
+    await fixture.routeToOrganization();
+
+    // Inference routing now excludes the workspace credential (control); the
+    // Apps designation is still the executable Apps authority.
+    expect(await loadCodexCredentialForRun(client.db, settings, workspaceId, designated.id)).toBe(
+      null,
+    );
+    expect(await resolveCodexAppsCredentialIdForRun(client.db, workspaceId)).toBe(designated.id);
+
+    const before = await credentialRow(designated.id);
+    const refreshed: string[] = [];
+    const token = await buildCodexAppsTokenResolver(
+      client.db,
+      settings,
+      workspaceId,
+      designated.id,
+      {
+        refresh: async (refreshToken) => {
+          refreshed.push(refreshToken);
+          return { accessToken: "apps-fresh-token", refreshToken: "apps-refresh-2" };
+        },
+      },
+    ).getToken();
+    expect(token.accessToken).toBe("apps-fresh-token");
+    expect(refreshed).toEqual(["apps-refresh-1"]);
+    const after = await credentialRow(designated.id);
+    expect(after.version).toBe(before.version + 1);
+    expect(after.status).toBe("active");
+    expect(storedTokens(after)).toMatchObject({
+      access_token: "apps-fresh-token",
+      refresh_token: "apps-refresh-2",
+    });
+
+    // The runtime request path uses the persisted token without another refresh
+    // and holds the designation through dispatch.
+    const requestAuth = codexAppsRequestAuth(client.db, settings, {
+      workspaceId,
+      credentialId: designated.id,
+    });
+    expect((await requestAuth.withAuthorization(async (bearer) => bearer)).accessToken).toBe(
+      "apps-fresh-token",
+    );
+    expect((await credentialRow(designated.id)).version).toBe(after.version);
+
+    // Turning Apps off is reported as possible and works in organization mode.
+    const accounts = await api.request(`/v1/workspaces/${workspaceId}/codex/accounts`, {
+      headers: { cookie: OWNER_COOKIE },
+    });
+    expect(accounts.status).toBe(200);
+    expect(((await accounts.json()) as any).apps).toMatchObject({
+      credentialId: designated.id,
+      version: 1,
+      canDisable: true,
+    });
+    const cleared = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
+      method: "DELETE",
+      headers: browserHeaders(OWNER_COOKIE),
+      body: JSON.stringify({ expectedVersion: 1 }),
+    });
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toMatchObject({ credentialId: null, version: 2, changed: true });
+    expect(await resolveCodexAppsCredentialIdForRun(client.db, workspaceId)).toBeNull();
+    const afterClear = await api.request(`/v1/workspaces/${workspaceId}/codex/accounts`, {
+      headers: { cookie: OWNER_COOKIE },
+    });
+    expect(((await afterClear.json()) as any).apps).toMatchObject({
+      credentialId: null,
+      canDisable: false,
+    });
+
+    // A cleared designation is classified as unavailable, not a refresh failure.
+    const revoked = await rejection(requestAuth.withAuthorization(async (bearer) => bearer));
+    expect(revoked).toBeInstanceOf(CodexAppsCredentialUnavailable);
+
+    // Designating stays a workspace-routing action; only clearing is mode-free.
+    const redesignate = await api.request(`/v1/workspaces/${workspaceId}/codex/apps`, {
+      method: "POST",
+      headers: browserHeaders(OWNER_COOKIE),
+      body: JSON.stringify({ accountId: designated.id, expectedVersion: 2 }),
+    });
+    expect(redesignate.status).toBe(409);
+  });
+
+  test("SUB-APPS-01: organization routing cannot reach a credential that is not the Apps designation", async () => {
+    if (!available) return;
+    const api = app();
+    const fixture = await appsRoutingFixture(api);
+    const { workspaceId } = fixture;
+    const designated = await fixture.connect("apps", new Date(Date.now() + 60 * 60_000));
+    const sibling = await fixture.connect("sibling", new Date(Date.now() - 60_000));
+    await fixture.designate(designated.id, 0);
+    const organization = await fixture.connectOrganization();
+    await fixture.routeToOrganization();
+
+    // A different workspace's own designated credential.
+    const foreign = await appsRoutingFixture(api);
+    const foreignDesignated = await foreign.connect("foreign", new Date(Date.now() - 60_000));
+    await foreign.designate(foreignDesignated.id, 0);
+
+    // The organization credential is in this workspace's effective inference
+    // pool, but that never makes it reachable as Apps.
+    expect(
+      (await loadCodexCredentialForRun(client.db, settings, workspaceId, organization.id))?.id,
+    ).toBe(organization.id);
+
+    for (const credentialId of [organization.id, sibling.id, foreignDesignated.id]) {
+      const before = await admin<{ version: number }[]>`
+        select version from codex_subscription_credentials where id = ${credentialId}`;
+      let refreshCalls = 0;
+      const tokenError = await rejection(
+        buildCodexAppsTokenResolver(client.db, settings, workspaceId, credentialId, {
+          refresh: async () => {
+            refreshCalls += 1;
+            return { accessToken: "must-not-be-used", refreshToken: "must-not-be-used" };
+          },
+        }).getToken(),
+      );
+      expect(isCodexAppsCredentialUnavailable(tokenError)).toBe(true);
+      expect(refreshCalls).toBe(0);
+      const requestError = await rejection(
+        codexAppsRequestAuth(client.db, settings, { workspaceId, credentialId }).withAuthorization(
+          async (bearer) => bearer,
+        ),
+      );
+      expect(isCodexAppsCredentialUnavailable(requestError)).toBe(true);
+      const after = await admin<{ version: number }[]>`
+        select version from codex_subscription_credentials where id = ${credentialId}`;
+      expect(after[0]!.version).toBe(before[0]!.version);
+    }
+
+    // Positive control: the exact designation is reachable.
+    expect(
+      (
+        await codexAppsRequestAuth(client.db, settings, {
+          workspaceId,
+          credentialId: designated.id,
+        }).withAuthorization(async (bearer) => bearer)
+      ).accessToken,
+    ).toBe("apps-token");
+
+    // The designation is not durable authority: once its owner loses Apps
+    // management permission, the Apps path no longer loads the credential.
+    await admin`
+      update workspace_memberships
+      set permissions = ${admin.json(["workspace:read"])}
+      where workspace_id = ${workspaceId} and subject_id = ${`user:${OWNER_USER_ID}`}`;
+    const ownerRevoked = await rejection(
+      buildCodexAppsTokenResolver(client.db, settings, workspaceId, designated.id).getToken(),
+    );
+    expect(isCodexAppsCredentialUnavailable(ownerRevoked)).toBe(true);
+  });
+
   test("an actual Better Auth sign-in cookie can prepare its owning credential", async () => {
     if (!available) return;
     const actualSettings = testSettings({

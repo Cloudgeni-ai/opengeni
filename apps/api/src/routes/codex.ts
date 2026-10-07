@@ -1449,6 +1449,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         credentialId: apps.credentialId,
         version: apps.version,
         designatedAt: apps.designatedAt,
+        // Clearing is independent of inference routing (see DELETE below), so
+        // this is true in workspace, organization and disabled modes alike.
         canDisable: canManageApps && apps.credentialId !== null,
       },
       settings: {
@@ -1517,7 +1519,10 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/codex/apps", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireWorkspaceCodexManagementSource(deps, workspaceId);
+    // The Apps designation is its own setting, not part of inference-account
+    // routing: a workspace that switched routing to organization accounts (or
+    // disabled subscriptions) must still be able to turn Apps off. Clearing
+    // only removes authority; the owner/permission checks below still apply.
     const { human, accountId } = await requireCodexAppsHuman(c, deps, workspaceId);
     const parsed = z
       .object({ expectedVersion: z.number().int().nonnegative() })

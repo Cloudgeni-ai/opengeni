@@ -290,6 +290,7 @@ import {
   CODEX_ORIGINATOR,
   classifyCodexEncryptedArtifactRejection,
   codexAppsSanitizingFetch,
+  isCodexAppsCredentialUnavailable,
 } from "@opengeni/codex";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
@@ -7307,24 +7308,41 @@ function firstPartyAuthFetch(
   };
 }
 
-/** Resolve explicit Apps authentication for each MCP request; no inference fallback. */
+/**
+ * Resolve explicit Apps authentication for each MCP request; no inference fallback.
+ *
+ * Apps is discovered on every turn (`cacheToolsList: false`), so setup traffic
+ * (initialize, tools/list) never publishes an authorization card: a broken
+ * designation would otherwise post a new card on every turn that selects Apps.
+ * Only a tool call that needs Apps publishes, at most once per prepared tool
+ * environment (one turn attempt).
+ */
 function codexAppsAuthFetch(
   baseFetch: FetchLike,
   settings: Settings,
   options: PrepareToolsOptions,
 ): FetchLike {
+  let authNeededPublished = false;
+  const publishForToolCall = async (
+    request: McpRequestReplayInfo,
+    reason: ToolAuthNeededPayload["reason"],
+  ): Promise<void> => {
+    if (!request.toolName || authNeededPublished) return;
+    authNeededPublished = true;
+    await publishCodexAppsAuthNeeded(options, request, reason);
+  };
   return async (input, init) => {
     const request = await mcpRequestReplayInfo(input, init);
     const auth = options.codexAppsAuth;
     if (!auth) {
-      await publishCodexAppsAuthNeeded(options, request, "missing_connection");
+      await publishForToolCall(request, "missing_connection");
       throw new Error("Codex Apps has no explicit workspace designation");
     }
     let token: { accessToken: string; chatgptAccountId: string | null };
     try {
       token = await auth.withAuthorization(async (snapshot) => snapshot);
     } catch (error) {
-      await publishCodexAppsAuthNeeded(options, request, "refresh_failed");
+      await publishForToolCall(request, codexAppsAuthFailureReason(error));
       throw error;
     }
     const headers: Record<string, string> = {
@@ -7340,14 +7358,17 @@ function codexAppsAuthFetch(
       withConnectionHeaders(input, init, headers),
     );
     if (response.status === 401 || response.status === 403) {
-      await publishCodexAppsAuthNeeded(
-        options,
-        request,
-        response.status === 403 ? "insufficient_scope" : "expired",
-      );
+      await publishForToolCall(request, response.status === 403 ? "insufficient_scope" : "expired");
     }
     return response;
   };
+}
+
+/** The designation being unusable is not a refresh failure. */
+function codexAppsAuthFailureReason(error: unknown): ToolAuthNeededPayload["reason"] {
+  return isCodexAppsCredentialUnavailable(error)
+    ? "designated_credential_unavailable"
+    : "refresh_failed";
 }
 
 async function publishCodexAppsAuthNeeded(

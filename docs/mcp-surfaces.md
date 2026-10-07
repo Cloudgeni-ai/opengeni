@@ -353,13 +353,29 @@ empty tool-search pool. Statusless transport failures are marked retryable;
 provider response bodies, URLs, headers, and credentials remain outside the
 public diagnostic projection.
 
+Apps is discovered on every turn, so setup traffic (initialize and tool
+listing) never publishes a `tool.auth_needed` card; otherwise a broken
+designation would post a new card on every turn that selects Apps. Only a tool
+call that needs Apps publishes one, at most once per prepared tool environment.
+A designated credential that can no longer be used (the designation was cleared
+or changed, the credential was disconnected or is not active, or its owner lost
+the permission) is reported as `designated_credential_unavailable`, distinct from
+`refresh_failed`, which remains the reason for an actual token refresh failure.
+
 Inference and Apps authority are deliberately unrelated. The designated Apps
 credential works with compatible Codex or non-Codex inference and remains usable
 when every inference subscription is quota-exhausted, cooled down, allocator-
-disabled, unpinned, or leased elsewhere. Only the current human owner of an
+disabled, unpinned, or leased elsewhere. Loading its token and persisting its
+refreshes use the designation itself as authority (this workspace's own
+credential, the current designation, and its owner's current permission), never
+the workspace's inference routing source, so a designation keeps working when
+routing uses organization accounts or subscriptions are disabled. That authority
+reaches only the designated credential, never another workspace or organization
+account. Only the current human owner of an
 active connected credential may designate it, and that human must currently
 hold `connections:write` (workspace-admin scope satisfies it). Any managed human
-with that scope may clear the designation without owning the credential. Bearer,
+with that scope may clear the designation without owning the credential, in any
+routing mode; designating still requires workspace routing. Bearer,
 agent, scheduled, and service identities cannot perform either mutation. Every
 Apps request rechecks the exact designation, connection status, owner membership,
 and owner permission immediately before resolving/sending credentials. Reconnect

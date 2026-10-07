@@ -607,6 +607,8 @@ import { SandboxTransitionWaitBudget } from "./sandbox-transition-wait";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 import {
   canonicalizePersistedHistoryItem,
+  CODEX_CLIENT_VERSION,
+  CodexAppsCredentialUnavailable,
   codexPlanKey,
   omitOutputOnlyHistoryItemFields,
   isCodexBilledModel,
@@ -24747,7 +24749,8 @@ function canManageCodexApps(permissions: unknown): boolean {
   );
 }
 
-export class CodexAppsAuthorizationRevokedError extends Error {
+/** A specific designated-credential unavailability observed at request time. */
+export class CodexAppsAuthorizationRevokedError extends CodexAppsCredentialUnavailable {
   constructor() {
     super("Codex Apps authorization is no longer active");
     this.name = "CodexAppsAuthorizationRevokedError";
@@ -25075,14 +25078,54 @@ type CodexAcceptedCredentialAuthority =
       turnId: string;
       purpose: "capacity_refresh";
     };
+/**
+ * Use of the workspace's explicit Codex Apps designation. This authority is
+ * deliberately independent of the inference routing source (workspace,
+ * organization, or disabled): it reaches exactly the designated credential and
+ * nothing else in the workspace or organization inference pool.
+ */
+type CodexAppsCredentialUseAuthority = { purpose: "codex_apps" };
+type CodexCredentialUseAuthority =
+  | CodexAcceptedCredentialAuthority
+  | CodexAppsCredentialUseAuthority;
+
+const CODEX_APPS_CREDENTIAL_USE: CodexAppsCredentialUseAuthority = { purpose: "codex_apps" };
+
+/**
+ * The designated Apps credential, under the same designation and owner rules as
+ * `withCodexAppsRequestAuthorization`: the row must be this workspace's own
+ * (never organization-scoped) credential, be the current designation, and its
+ * connecting owner must still hold Apps management permission here.
+ */
+function codexAppsCredentialUseCondition(workspaceId: string): SQL {
+  return and(
+    eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+    inArray(schema.codexSubscriptionCredentials.authorityScope, ["workspace", "user"]),
+    sql`exists (
+      select 1 from codex_apps_settings apps
+      join workspace_memberships apps_owner
+        on apps_owner.account_id = apps.account_id
+       and apps_owner.workspace_id = apps.workspace_id
+       and apps_owner.subject_id = ${schema.codexSubscriptionCredentials.connectedBySubjectId}
+      where apps.workspace_id = ${workspaceId}
+        and apps.account_id = ${schema.codexSubscriptionCredentials.accountId}
+        and apps.credential_id = ${schema.codexSubscriptionCredentials.id}
+        and (
+          apps_owner.permissions @> '["connections:write"]'::jsonb
+          or apps_owner.permissions @> '["workspace:admin"]'::jsonb
+        )
+    )`,
+  )!;
+}
 
 async function codexCredentialUseCondition(
   tx: Database,
   workspaceId: string,
-  authority?: CodexAcceptedCredentialAuthority,
+  authority?: CodexCredentialUseAuthority,
 ): Promise<SQL | null> {
   if (!authority) return (await effectiveCodexCredentialPoolCondition(tx, workspaceId)).condition;
   if ("purpose" in authority) {
+    if (authority.purpose === "codex_apps") return codexAppsCredentialUseCondition(workspaceId);
     return sql`opengeni_private.codex_credential_serves_turn(
       ${schema.codexSubscriptionCredentials.accountId}, ${workspaceId}::uuid,
       ${schema.codexSubscriptionCredentials.id}, ${authority.turnId}::uuid)`;
@@ -25110,7 +25153,7 @@ export async function loadCodexCredentialForRun(
   settings: Settings,
   workspaceId: string,
   credentialId: string,
-  authority?: CodexAcceptedCredentialAuthority,
+  authority?: CodexCredentialUseAuthority,
 ): Promise<CodexCredentialForRun | null> {
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
@@ -25242,7 +25285,7 @@ export async function recordCodexTokenRefresh(
      * returned one. A changed plan retires any plan entitlement exclusion.
      */
     planType?: string | null | undefined;
-    authority?: CodexAcceptedCredentialAuthority | undefined;
+    authority?: CodexCredentialUseAuthority | undefined;
   },
 ): Promise<boolean> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
@@ -25318,7 +25361,7 @@ export async function setCodexCredentialStatus(
   status: "active" | "needs_relogin" | "error",
   lastError: string | null,
   target: { id: string; version: number },
-  authority?: CodexAcceptedCredentialAuthority,
+  authority?: CodexCredentialUseAuthority,
 ): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const condition = await codexCredentialUseCondition(scopedDb, workspaceId, authority);
@@ -88448,6 +88491,106 @@ export function buildCodexTokenResolver(
     };
   }
   return buildCodexTokenResolverCore(db, settings, workspaceId, credentialId, deps);
+}
+
+/**
+ * Token persistence for the workspace's designated Codex Apps credential.
+ * Loading, the refresh compare-and-set and relogin stamping all use the Apps
+ * designation authority, never the inference routing pool, so a workspace
+ * designation keeps working (and its refreshes persist) under organization
+ * routing. A credential that is not the loadable, active designation is
+ * `CodexAppsCredentialUnavailable`, not a refresh failure.
+ */
+function codexAppsAuthDeps(): CodexAuthDeps {
+  return {
+    loadCredential: async (db, settings, workspaceId, credentialId) => {
+      const credential = await loadCodexCredentialForRun(
+        db,
+        settings,
+        workspaceId,
+        credentialId,
+        CODEX_APPS_CREDENTIAL_USE,
+      );
+      if (!credential || credential.status !== "active") {
+        throw new CodexAppsCredentialUnavailable();
+      }
+      return credential;
+    },
+    recordRefresh: (db, input) =>
+      recordCodexTokenRefresh(db, { ...input, authority: CODEX_APPS_CREDENTIAL_USE }),
+    setStatus: (db, workspaceId, status, lastError, target) =>
+      setCodexCredentialStatus(
+        db,
+        workspaceId,
+        status,
+        lastError,
+        target,
+        CODEX_APPS_CREDENTIAL_USE,
+      ),
+    refresh: refreshCodexToken,
+    encrypt: encryptEnvironmentValue,
+    keyBytes: environmentsEncryptionKeyBytes,
+    withRefreshLock: withCodexCredentialRefreshLock,
+    onPlanExclusionRetired: async (db, workspaceId) => {
+      await wakeCodexCapacityAfterPlanChange(db, workspaceId, undefined);
+    },
+  };
+}
+
+/**
+ * Refreshing resolver for exactly the workspace's designated Codex Apps
+ * credential. `refresh` replaces only the provider OAuth call (tests); loading,
+ * persistence and authority always use the Apps designation.
+ */
+export function buildCodexAppsTokenResolver(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  credentialId: string,
+  options: { refresh?: CodexAuthDeps["refresh"] } = {},
+): ReturnType<typeof buildCodexTokenResolverCore> {
+  const deps = codexAppsAuthDeps();
+  return buildCodexTokenResolverCore(
+    db,
+    settings,
+    workspaceId,
+    credentialId,
+    options.refresh ? { ...deps, refresh: options.refresh } : deps,
+  );
+}
+
+export type CodexAppsRequestAuth = {
+  clientVersion: string;
+  withAuthorization: <T>(
+    use: (token: { accessToken: string; chatgptAccountId: string | null }) => Promise<T>,
+  ) => Promise<T>;
+};
+
+/**
+ * Runtime Apps authentication for one workspace designation: resolve (and
+ * refresh) the designated credential's bearer, then hold the exact
+ * designation, credential and owner authorization through the outbound request.
+ * Failures that mean the designation cannot be used are
+ * `CodexAppsCredentialUnavailable`.
+ */
+export function codexAppsRequestAuth(
+  db: Database,
+  settings: Settings,
+  input: { workspaceId: string; credentialId: string },
+): CodexAppsRequestAuth {
+  const resolver = buildCodexAppsTokenResolver(db, settings, input.workspaceId, input.credentialId);
+  return {
+    clientVersion: CODEX_CLIENT_VERSION,
+    withAuthorization: async (use) => {
+      const token = await resolver.getToken();
+      return await withCodexAppsRequestAuthorization(
+        db,
+        { workspaceId: input.workspaceId, credentialId: input.credentialId },
+        async () =>
+          await use({ accessToken: token.accessToken, chatgptAccountId: token.chatgptAccountId }),
+      );
+    },
+  };
 }
 
 export async function fetchCodexUsageForAccount(
