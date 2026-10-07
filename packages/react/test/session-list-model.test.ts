@@ -85,6 +85,23 @@ describe("session-list-model", () => {
     ]);
   });
 
+  test("home leaves sub-agents to their parent, so they never crowd out conversations", () => {
+    const mine = session("mine", { updatedAt: "2026-10-03T10:00:00Z" });
+    const agents = Array.from({ length: 8 }, (_, index) =>
+      session(`agent-${index}`, {
+        status: "running",
+        parentSessionId: "mine",
+        updatedAt: "2026-10-03T11:50:00Z",
+      }),
+    );
+    const pinnedAgent = session("pinned-agent", { pinned: true, parentSessionId: "mine" });
+    expect(
+      recentSessionsForHome([...agents, mine, pinnedAgent], [pinnedAgent], 6, now).map(
+        (row) => row.id,
+      ),
+    ).toEqual(["mine"]);
+  });
+
   test("status dot: background commands read as running", () => {
     expect(recentSessionStatus(session("x"))).toEqual({ tone: "idle", pulse: false });
     expect(recentSessionStatus(session("x", { status: "requires_action" }))).toEqual({
