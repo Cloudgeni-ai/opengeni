@@ -29,10 +29,12 @@ import {
 } from "@opengeni/react/timeline-model";
 import { useCallback, useMemo, useRef, useState, type ComponentRef, type ReactNode } from "react";
 import {
+  ActivityIndicator,
   Pressable,
   ScrollView,
   Text,
   View,
+  type LayoutChangeEvent,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   type StyleProp,
@@ -66,6 +68,11 @@ export type NativeMarkdownRenderer = (
   options: { tone: "body" | "muted"; streaming?: boolean | undefined },
 ) => ReactNode;
 
+/** Start fetching older history this far before the reader reaches the top. */
+const OLDER_HISTORY_PREFETCH_PX = 600;
+/** Web's phone clamp for long user messages (max-h-56). */
+const USER_MESSAGE_COLLAPSED_PX = 224;
+
 export interface NativeMessageTimelineProps extends NativeActivityOptions {
   /** Projected items (preferred) or raw durable events. */
   items?: TimelineItem[] | undefined;
@@ -84,6 +91,14 @@ export interface NativeMessageTimelineProps extends NativeActivityOptions {
   trailing?: ReactNode;
   emptyState?: ReactNode;
   header?: ReactNode;
+  /**
+   * Older durable history exists before the loaded window. When the reader
+   * scrolls near the top (or the loaded window doesn't fill the screen), the
+   * timeline calls `onLoadOlder` and keeps the reader's place as rows arrive.
+   */
+  hasOlder?: boolean | undefined;
+  loadingOlder?: boolean | undefined;
+  onLoadOlder?: (() => unknown) | undefined;
   contentInsetTop?: number | undefined;
   contentInsetBottom?: number | undefined;
   /** Height of host chrome floating over the timeline's bottom edge (a floating composer). */
@@ -134,6 +149,38 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   const releaseFollow = useCallback(() => {
     following.current = false;
   }, []);
+  // Older history: latest values for scroll callbacks without re-binding them.
+  const history = useRef({
+    hasOlder: false,
+    loading: false,
+    load: undefined as (() => unknown) | undefined,
+  });
+  history.current = {
+    hasOlder: props.hasOlder === true,
+    loading: props.loadingOlder === true,
+    load: props.onLoadOlder,
+  };
+  const viewportHeight = useRef(0);
+  // Older rows arrive above the reader. Keep the reader's place by moving the
+  // offset by the added height (UIKit's maintainVisibleContentPosition fights
+  // the reader's drag while live rows re-lay out, so it isn't used).
+  const contentHeight = useRef(0);
+  const firstGroupKey = useRef<string | null>(null);
+  const prepended = useRef(false);
+  const nextFirstKey = groups[0] ? groupKey(groups[0]) : null;
+  if (nextFirstKey !== firstGroupKey.current) {
+    const previous = firstGroupKey.current;
+    if (previous !== null && groups.some((group) => groupKey(group) === previous)) {
+      prepended.current = true;
+    }
+    firstGroupKey.current = nextFirstKey;
+  }
+  const requestOlder = useCallback(() => {
+    const { hasOlder, loading, load } = history.current;
+    if (!hasOlder || loading || !load) return;
+    history.current = { ...history.current, loading: true };
+    void Promise.resolve(load()).catch(() => undefined);
+  }, []);
   const registerSticky = useMemo(
     () => ({
       register: (key: string, entry: StickyWorkHeader | null) => {
@@ -156,10 +203,14 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   const onScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const distance = measure(event);
-      if (readerScrolling.current) following.current = distance < 48;
+      // Mid-drag only releases follow; the drag's end decides whether to resume it.
+      if (readerScrolling.current && distance >= 48) following.current = false;
       setShowJump(distance > 240 && !following.current);
       const { contentOffset, layoutMeasurement } = event.nativeEvent;
       scrollY.current = contentOffset.y;
+      // The reader is approaching the oldest loaded row: fetch the window before it.
+      // Momentum after a fling counts too, so this keys on follow, not the drag.
+      if (!following.current && contentOffset.y < OLDER_HISTORY_PREFETCH_PX) requestOlder();
       updatePinned();
       const prompts = [...promptFrames.entries()]
         .map(([key, frame]) => ({ key, ...frame }))
@@ -170,7 +221,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
       });
       setQuestionNav((current) => (current === next ? current : next));
     },
-    [measure, promptFrames, updatePinned],
+    [measure, promptFrames, requestOlder, updatePinned],
   );
   const onScrollEnd = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -179,9 +230,25 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
     },
     [measure],
   );
-  const onContentSizeChange = useCallback(() => {
-    if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
-  }, []);
+  const onContentSizeChange = useCallback(
+    (_width: number, height: number) => {
+      const added = height - contentHeight.current;
+      contentHeight.current = height;
+      if (prepended.current) {
+        prepended.current = false;
+        if (!following.current && added > 0) {
+          scrollY.current += added;
+          scrollRef.current?.scrollTo({ y: scrollY.current, animated: false });
+          return;
+        }
+      }
+      if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
+      // A short window can't be scrolled, so it could never reach the top: keep loading.
+      if (viewportHeight.current > 0 && height < viewportHeight.current + OLDER_HISTORY_PREFETCH_PX)
+        requestOlder();
+    },
+    [requestOlder],
+  );
   const activityOptions = useMemo<NativeActivityOptions>(
     () => ({
       toolRenderers: props.toolRenderers,
@@ -217,10 +284,15 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                 onScroll={onScroll}
                 onScrollBeginDrag={() => {
                   readerScrolling.current = true;
+                  // The reader takes over: a live turn re-lays out the content many
+                  // times a second, and snapping to the end on each pass would undo
+                  // the drag before it got far. Follow is re-decided when it ends.
+                  following.current = false;
                 }}
                 onScrollEndDrag={onScrollEnd}
                 onMomentumScrollEnd={onScrollEnd}
-                onLayout={() => {
+                onLayout={(event: LayoutChangeEvent) => {
+                  viewportHeight.current = event.nativeEvent.layout.height;
                   if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
                 }}
                 scrollEventThrottle={32}
@@ -235,7 +307,12 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                   flexGrow: 1,
                 }}
               >
-                {props.header}
+                <View>
+                  {props.hasOlder ? (
+                    <OlderHistoryRow loading={props.loadingOlder === true} onPress={requestOlder} />
+                  ) : null}
+                  {props.header}
+                </View>
                 {groups.length === 0 && props.emptyState ? props.emptyState : null}
                 {groups.map((group) => {
                   const key = groupKey(group);
@@ -783,6 +860,91 @@ function MessageFooter({
   );
 }
 
+/**
+ * Web's long-message disclosure: a sent message taller than the phone clamp
+ * shows its top with a fade and "Show more"; the full text stays mounted.
+ */
+function CollapsibleUserText({ children }: { children: ReactNode }) {
+  const theme = useNativeTimelineTheme();
+  const [height, setHeight] = useState(0);
+  const [expanded, setExpanded] = useState(false);
+  // A little slack so a message just over the clamp isn't hidden behind a control.
+  const collapsible = height > USER_MESSAGE_COLLAPSED_PX + 48;
+  const collapsed = collapsible && !expanded;
+  const surface = theme.colors["surface-2"];
+  return (
+    <View>
+      <View style={collapsed ? { maxHeight: USER_MESSAGE_COLLAPSED_PX, overflow: "hidden" } : null}>
+        {/* Measure only while unclipped: inside the clip the content is laid out
+            shorter, and re-measuring there would flip collapse on and off. */}
+        <View
+          onLayout={(event) => {
+            if (!collapsed) setHeight(event.nativeEvent.layout.height);
+          }}
+        >
+          {children}
+        </View>
+        {collapsed ? (
+          <View
+            pointerEvents="none"
+            style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 48 }}
+          >
+            {[0.25, 0.5, 0.75, 0.95].map((alpha) => (
+              <View key={alpha} style={{ flex: 1, backgroundColor: withAlpha(surface, alpha) }} />
+            ))}
+          </View>
+        ) : null}
+      </View>
+      {collapsible ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded }}
+          hitSlop={8}
+          onPress={() => setExpanded((value) => !value)}
+          style={{ alignSelf: "flex-start", paddingTop: 6 }}
+        >
+          <Text
+            style={{
+              ...fontStyle(theme, 500),
+              fontSize: theme.size.sm,
+              color: theme.colors["fg-muted"],
+            }}
+          >
+            {expanded ? "Show less" : "Show more"}
+          </Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+/** Top of the loaded window: a spinner while older history loads, else a manual control. */
+function OlderHistoryRow({ loading, onPress }: { loading: boolean; onPress: () => void }) {
+  const theme = useNativeTimelineTheme();
+  return (
+    <View style={{ alignItems: "center", paddingVertical: 8 }}>
+      {loading ? (
+        <ActivityIndicator
+          color={theme.colors["fg-muted"]}
+          accessibilityLabel="Loading earlier messages"
+        />
+      ) : (
+        <Pressable accessibilityRole="button" hitSlop={8} onPress={onPress}>
+          <Text
+            style={{
+              ...fontStyle(theme, 500),
+              fontSize: theme.size.sm,
+              color: theme.colors["fg-muted"],
+            }}
+          >
+            Load earlier messages
+          </Text>
+        </Pressable>
+      )}
+    </View>
+  );
+}
+
 function UserMessageRow({ item, context }: { item: UserMessageItem; context: GroupContext }) {
   const theme = useNativeTimelineTheme();
   const failed = item.delivery?.state === "failed";
@@ -806,8 +968,8 @@ function UserMessageRow({ item, context }: { item: UserMessageItem; context: Gro
               paddingVertical: 10,
             }}
           >
-            {item.text ? (
-              context.renderMarkdown ? (
+            <CollapsibleUserText>
+              {context.renderMarkdown ? (
                 context.renderMarkdown(item.text, { tone: "body" })
               ) : (
                 <Text
@@ -821,8 +983,8 @@ function UserMessageRow({ item, context }: { item: UserMessageItem; context: Gro
                 >
                   {item.text}
                 </Text>
-              )
-            ) : null}
+              )}
+            </CollapsibleUserText>
           </View>
         ) : null}
         <MessageFooter
