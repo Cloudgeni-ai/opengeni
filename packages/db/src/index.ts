@@ -8042,43 +8042,94 @@ export async function getRetainedScreenshotArtifact(
           eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId),
         ),
       )
-      .where(
-        and(
-          eq(schema.retainedScreenshotArtifacts.workspaceId, workspaceId),
-          or(
-            eq(schema.retainedScreenshotArtifacts.sessionId, sessionId),
-            // A fork copies canonical receipts, not the original artifact row.
-            // Require both recorded ancestry and an actually copied image receipt;
-            // knowing an ancestor artifact UUID is not enough. All reads retain RLS.
-            sql`exists (
-              with recursive lineage(id, parent_id) as (
-                select s.id, s.forked_from_session_id from sessions s
-                where s.workspace_id = ${workspaceId} and s.id = ${sessionId}
-                union
-                select s.id, s.forked_from_session_id from sessions s
-                join lineage l on s.id = l.parent_id
-                where s.workspace_id = ${workspaceId}
-              )
-              select 1 from lineage l
-              where l.id = ${schema.retainedScreenshotArtifacts.sessionId}
-                and exists (
-                  select 1 from session_history_items h
-                  where h.workspace_id = ${workspaceId} and h.session_id = ${sessionId}
-                    and h.turn_id is null
-                    and (
-                      h.item @> ${JSON.stringify({ output: { type: "retained_artifact", artifact: { artifactId } } })}::jsonb
-                      or h.item @> ${JSON.stringify({ output: [{ image: { type: "retained_artifact", artifact: { artifactId } } }] })}::jsonb
-                      or h.item @> ${JSON.stringify({ output: { content: [{ image: { type: "retained_artifact", artifact: { artifactId } } }] } })}::jsonb
-                    )
-                )
-            )`,
-          ),
-          eq(schema.retainedScreenshotArtifacts.artifactId, artifactId),
-        ),
-      )
+      .where(retainedScreenshotSessionArtifactPredicate(workspaceId, sessionId, artifactId))
       .limit(1);
     return row ? mapRetainedScreenshotArtifact(row.artifact, row.file) : null;
   });
+}
+
+/**
+ * Lifecycle state of a session-qualified screenshot whose file row the current
+ * file authority hides, such as another member's private image in a shared
+ * session. The file foreign key restricts deleting a file while its artifact
+ * row exists, so an artifact row without a visible file is an authority
+ * exclusion, never a deletion. Returns null when the artifact is absent or its
+ * file is readable. Exposes only workspace-visible lifecycle state: no file,
+ * object key or bytes, and the authority boundary is unchanged.
+ */
+export async function getWithheldRetainedScreenshotArtifactState(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  artifactId: string,
+): Promise<{ status: RetainedScreenshotArtifactStatus; retentionExpiresAt: Date } | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        status: schema.retainedScreenshotArtifacts.status,
+        retentionExpiresAt: schema.retainedScreenshotArtifacts.retentionExpiresAt,
+      })
+      .from(schema.retainedScreenshotArtifacts)
+      .leftJoin(
+        schema.files,
+        and(
+          eq(schema.files.workspaceId, schema.retainedScreenshotArtifacts.workspaceId),
+          eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId),
+        ),
+      )
+      .where(
+        and(
+          retainedScreenshotSessionArtifactPredicate(workspaceId, sessionId, artifactId),
+          isNull(schema.files.id),
+        ),
+      )
+      .limit(1);
+    return row
+      ? {
+          status: row.status as RetainedScreenshotArtifactStatus,
+          retentionExpiresAt: row.retentionExpiresAt,
+        }
+      : null;
+  });
+}
+
+function retainedScreenshotSessionArtifactPredicate(
+  workspaceId: string,
+  sessionId: string,
+  artifactId: string,
+) {
+  return and(
+    eq(schema.retainedScreenshotArtifacts.workspaceId, workspaceId),
+    or(
+      eq(schema.retainedScreenshotArtifacts.sessionId, sessionId),
+      // A fork copies canonical receipts, not the original artifact row.
+      // Require both recorded ancestry and an actually copied image receipt;
+      // knowing an ancestor artifact UUID is not enough. All reads retain RLS.
+      sql`exists (
+        with recursive lineage(id, parent_id) as (
+          select s.id, s.forked_from_session_id from sessions s
+          where s.workspace_id = ${workspaceId} and s.id = ${sessionId}
+          union
+          select s.id, s.forked_from_session_id from sessions s
+          join lineage l on s.id = l.parent_id
+          where s.workspace_id = ${workspaceId}
+        )
+        select 1 from lineage l
+        where l.id = ${schema.retainedScreenshotArtifacts.sessionId}
+          and exists (
+            select 1 from session_history_items h
+            where h.workspace_id = ${workspaceId} and h.session_id = ${sessionId}
+              and h.turn_id is null
+              and (
+                h.item @> ${JSON.stringify({ output: { type: "retained_artifact", artifact: { artifactId } } })}::jsonb
+                or h.item @> ${JSON.stringify({ output: [{ image: { type: "retained_artifact", artifact: { artifactId } } }] })}::jsonb
+                or h.item @> ${JSON.stringify({ output: { content: [{ image: { type: "retained_artifact", artifact: { artifactId } } }] } })}::jsonb
+              )
+          )
+      )`,
+    ),
+    eq(schema.retainedScreenshotArtifacts.artifactId, artifactId),
+  );
 }
 
 /** Recover a legacy damaged receipt only when its tool call has one exact
@@ -8111,6 +8162,42 @@ export async function getRetainedScreenshotArtifactForToolCall(
     return rows.length === 1
       ? mapRetainedScreenshotArtifact(rows[0]!.artifact, rows[0]!.file)
       : null;
+  });
+}
+
+/** Recover a legacy damaged receipt's artifact id when its tool call has one
+ * exact screenshot in this session whose file the current file authority hides
+ * (see getWithheldRetainedScreenshotArtifactState). Returns only the id; the
+ * caller still applies the withheld lifecycle checks. */
+export async function getWithheldRetainedScreenshotArtifactIdForToolCall(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  toolCallId: string,
+): Promise<string | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        artifactId: schema.retainedScreenshotArtifacts.artifactId,
+        fileId: schema.files.id,
+      })
+      .from(schema.retainedScreenshotArtifacts)
+      .leftJoin(
+        schema.files,
+        and(
+          eq(schema.files.workspaceId, schema.retainedScreenshotArtifacts.workspaceId),
+          eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.retainedScreenshotArtifacts.workspaceId, workspaceId),
+          eq(schema.retainedScreenshotArtifacts.sessionId, sessionId),
+          eq(schema.retainedScreenshotArtifacts.toolCallId, toolCallId),
+        ),
+      )
+      .limit(2);
+    return rows.length === 1 && rows[0]!.fileId === null ? rows[0]!.artifactId : null;
   });
 }
 
