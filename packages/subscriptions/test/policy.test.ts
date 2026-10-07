@@ -563,7 +563,7 @@ describe("explicit choices, personal fallback and explained waits", () => {
     });
   });
 
-  test("SUB-STICK-02, SUB-STICK-07: a warm personal account is kept in its owner's private session and left once the session is shared", () => {
+  test("SUB-STICK-02, SUB-STICK-03, SUB-STICK-07: a warm personal account is kept in its owner's private session after fallback is turned off (D-27), left at the next cold re-selection, and left when the session is shared or personal connections are disabled (SUB-OWN-05)", () => {
     const mine = personal("codex-mine", "codex");
     const base = {
       connections: [connection("codex-org", "codex"), mine],
@@ -583,6 +583,42 @@ describe("explicit choices, personal fallback and explained waits", () => {
       connectionId: "codex-mine",
       switch: "sticky",
     });
+    expect(
+      decidePlacement(
+        input({
+          ...base,
+          personalFallbackOptIn: false,
+          settings: { personalFallbackAllowed: false },
+        }),
+      ),
+    ).toMatchObject({ connectionId: "codex-mine", switch: "sticky" });
+    // The organization switch alone, with the owner still opted in.
+    expect(
+      decidePlacement(
+        input({
+          ...base,
+          personalFallbackOptIn: true,
+          settings: { personalFallbackAllowed: false },
+        }),
+      ),
+    ).toMatchObject({ connectionId: "codex-mine", switch: "sticky" });
+    // Disabling personal connections is a forced move (SUB-OWN-05), unlike D-27.
+    expect(
+      decidePlacement(
+        input({
+          ...base,
+          personalFallbackOptIn: true,
+          settings: { personalConnectionsAllowed: false },
+        }),
+      ),
+    ).toMatchObject({ connectionId: "codex-org", personal: false });
+    const cold = {
+      ...base.session,
+      binding: { ...base.session.binding, lastModelCallAt: NOW - 2 * DEFAULT_IDLE_CUTOFF_MS },
+    };
+    expect(
+      decidePlacement(input({ ...base, session: cold, personalFallbackOptIn: false })),
+    ).toMatchObject({ connectionId: "codex-org", personal: false });
     expect(
       decidePlacement(input({ ...base, session: { ...base.session, visibility: "shared" } })),
     ).toMatchObject({ connectionId: "codex-org", personal: false });
