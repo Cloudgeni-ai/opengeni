@@ -37,7 +37,10 @@ import {
   selectCodexCredentialLeaseForTurn,
   type CodexRotationStrategy,
 } from "../codex-rotation";
-import { subscriptionCapacityArmingFailure } from "./subscription-capacity-arming";
+import {
+  subscriptionCapacityArmingDiagnostic,
+  subscriptionCapacityArmingFailure,
+} from "./subscription-capacity-arming";
 import { TurnExecutionPolicyDefinitionMismatchError, type Settings } from "@opengeni/config";
 import {
   classifyCodexEncryptedArtifactRejection,
@@ -1748,6 +1751,10 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       // exact-attempt recovery path.
       const failure = subscriptionCapacityArmingFailure(scopedProvider, armError);
       if (!failure) throw armError;
+      observability.warn(
+        "Subscription capacity wait could not be armed; failing the turn",
+        subscriptionCapacityArmingDiagnostic(scopedProvider, armError),
+      );
       if (
         !(await eventing.settle!({
           events: [

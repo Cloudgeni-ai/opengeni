@@ -17,7 +17,10 @@ import {
 import { publishDurableSessionEvents } from "@opengeni/events";
 
 import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
-import { subscriptionCapacityArmingFailure } from "./subscription-capacity-arming";
+import {
+  subscriptionCapacityArmingDiagnostic,
+  subscriptionCapacityArmingFailure,
+} from "./subscription-capacity-arming";
 import { refreshExhaustedXaiQuota } from "../xai-quota";
 
 async function selectScopedSubscriptionTurnCapacity(
@@ -203,6 +206,10 @@ async function selectScopedSubscriptionTurnCapacity(
       } catch (armError) {
         const failure = subscriptionCapacityArmingFailure(provider, armError);
         if (!failure) throw armError;
+        deps.observability.warn(
+          "Subscription capacity wait could not be armed; failing the turn",
+          subscriptionCapacityArmingDiagnostic(provider, armError),
+        );
         if (
           !(await eventing.settle!({
             events: [
