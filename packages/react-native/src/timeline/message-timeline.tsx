@@ -203,7 +203,8 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   const onScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const distance = measure(event);
-      if (readerScrolling.current) following.current = distance < 48;
+      // Mid-drag only releases follow; the drag's end decides whether to resume it.
+      if (readerScrolling.current && distance >= 48) following.current = false;
       setShowJump(distance > 240 && !following.current);
       const { contentOffset, layoutMeasurement } = event.nativeEvent;
       scrollY.current = contentOffset.y;
@@ -283,6 +284,10 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                 onScroll={onScroll}
                 onScrollBeginDrag={() => {
                   readerScrolling.current = true;
+                  // The reader takes over: a live turn re-lays out the content many
+                  // times a second, and snapping to the end on each pass would undo
+                  // the drag before it got far. Follow is re-decided when it ends.
+                  following.current = false;
                 }}
                 onScrollEndDrag={onScrollEnd}
                 onMomentumScrollEnd={onScrollEnd}
