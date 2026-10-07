@@ -689,6 +689,8 @@ function fullPlan(
       // A ledger-replaying test without an explicit budget is one shard repack
       // away from being killed at the shard default.
       "migration-test-budgets",
+      // Contract requirement IDs and the tests that claim them stay consistent.
+      "subscription-contract",
       // The public API surface snapshot and the published-SDK compatibility
       // run (docs/design/api-compatibility-policy.md).
       "public-api",
@@ -768,7 +770,9 @@ export function createImpactPlan(
       artifactRuntimeRequired: false,
       buildPackages: [],
       exampleBuildProjects: [],
-      guards: ["format", "docs-refs", "generated-fonts", "public-hygiene"],
+      // The subscription contract is a document, so a docs-only change to it
+      // must still be checked against the tests that claim its requirements.
+      guards: ["format", "docs-refs", "generated-fonts", "public-hygiene", "subscription-contract"],
       reasons: changedFiles.map((path) => ({
         path,
         reason: "documentation-only change",
@@ -896,6 +900,9 @@ export function createImpactPlan(
     // ledger-replaying test, which adds a `*.test.ts` and touches no migration.
     // It parses every test file in about two seconds, so it runs unconditionally.
     "migration-test-budgets",
+    // Any test file can name a contract requirement ID; the check reads every
+    // test file in about a second, so it runs unconditionally too.
+    "subscription-contract",
   ];
   if (changedFiles.some((path) => path.startsWith("packages/db/drizzle/"))) {
     guards.push("migration-ordinals", "migration-rls-backfills", "migration-schema-contract");

@@ -3236,6 +3236,7 @@ const AUTH_NEEDED_REASONS: ReadonlySet<string> = new Set([
   "personal_authority_unavailable",
   "unsupported_auth",
   "resource_scope_unavailable",
+  "designated_credential_unavailable",
 ]);
 
 function authNeededReason(value: unknown): AuthNeededItem["reason"] {

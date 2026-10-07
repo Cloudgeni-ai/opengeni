@@ -23025,7 +23025,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"expired\\\"\",\"\\\"insufficient_scope\\\"\",\"\\\"missing_connection\\\"\",\"\\\"personal_authority_unavailable\\\"\",\"\\\"refresh_failed\\\"\",\"\\\"resource_scope_unavailable\\\"\",\"\\\"unsupported_auth\\\"\"]"
+        "$": "enum=[\"\\\"designated_credential_unavailable\\\"\",\"\\\"expired\\\"\",\"\\\"insufficient_scope\\\"\",\"\\\"missing_connection\\\"\",\"\\\"personal_authority_unavailable\\\"\",\"\\\"refresh_failed\\\"\",\"\\\"resource_scope_unavailable\\\"\",\"\\\"unsupported_auth\\\"\"]"
       }
     },
     "ToolGatewayApprovalResponse": {

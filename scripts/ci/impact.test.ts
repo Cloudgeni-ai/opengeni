@@ -222,7 +222,13 @@ describe("fail-closed change impact", () => {
     expect(plan.browserAcceptanceLanes).toEqual([]);
     expect(plan.artifactRuntimeRequired).toBe(false);
     expect(plan.buildPackages).toEqual([]);
-    expect(plan.guards).toEqual(["format", "docs-refs", "generated-fonts", "public-hygiene"]);
+    expect(plan.guards).toEqual([
+      "format",
+      "docs-refs",
+      "generated-fonts",
+      "public-hygiene",
+      "subscription-contract",
+    ]);
   });
 
   test.each([
@@ -245,6 +251,7 @@ describe("fail-closed change impact", () => {
     expect(plan.guards).toContain("migration-ordinals");
     expect(plan.guards).toContain("migration-schema-contract");
     expect(plan.guards).toContain("migration-test-budgets");
+    expect(plan.guards).toContain("subscription-contract");
     expect(plan.guards).toContain("public-api");
     expect(plan.guards).toContain("sdk-compat");
     expect(plan.reasons.some((reason) => reason.path === path)).toBe(true);
@@ -265,6 +272,20 @@ describe("fail-closed change impact", () => {
     const web = createImpactPlan(["apps/web/src/main.tsx"]);
     expect(web.guards).not.toContain("public-api");
     expect(web.guards).not.toContain("sdk-compat");
+  });
+
+  test("the subscription contract guard runs on docs-only and focused plans", () => {
+    const contract = createImpactPlan(["docs/subscription-accounts.md"]);
+    expect(contract.mode).toBe("docs");
+    expect(contract.guards).toContain("subscription-contract");
+    for (const path of [
+      "packages/testing/src/subscription-reference-model.ts",
+      "apps/web/src/main.tsx",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.guards, path).toContain("subscription-contract");
+    }
   });
 
   test("empty and invalid change sets fail closed", () => {

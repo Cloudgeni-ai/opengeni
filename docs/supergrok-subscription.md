@@ -79,7 +79,17 @@ provider subject, label, quota, plan, or token. Direct Send/Steer resolves the
 authenticated subject's current active authority; edits copy the source turn;
 children copy the exact spawning parent turn; goal continuations copy the latest
 finished causal turn; scheduled occurrences copy the task snapshot; compaction,
-agent messages, child results, and coalesced internal updates preserve the same
+child results, and coalesced internal updates preserve the same snapshot.
+The pool belongs to the receiving session, not the sender: Agent Message and
+Agent Steer keep the sender's causal human but take the receiver's execution
+context turn, else its latest accepted turn, else its initial snapshot. A
+user-scoped pool is kept only for its own human (a child's initial snapshot
+belongs to its spawning turn's human); otherwise the receiver uses its
+organization or workspace pool, and a model that only that personal pool
+serves fails closed. Acceptance without an exact human (service and operator actors,
+organization API keys, bridges, non-subject session creators, and internal
+updates without causal authority) resolves the organization or workspace pool
+and never a personal pool. Already accepted work keeps its frozen
 snapshot. Private work additionally requires the exact initiating human.
 
 Pool authority is additive to session access, never a replacement for it.
