@@ -1519,6 +1519,11 @@ requires consent. Computer frames bind screenshot digest to controller/session/t
 runtime, API and SDK independently verify. The browser extension only attaches;
 Lightpanda is semantic-only.
 
+Connected-machine tool failures preserve the API's closed failure details and
+opaque request references at the model boundary. The MCP error renderer retains
+`outcomeUnknown` and discourages automatic action retries; uncertain execution
+still throws from the interaction executor and never becomes a successful result.
+
 An attached tab's debugger disconnect invalidates only its cached target,
 document, frame and element authority. Read-only recovery can attach the same
 surviving tab with fresh fences; explicit cancellation and uncertain effects

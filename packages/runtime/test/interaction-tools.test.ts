@@ -1667,6 +1667,57 @@ describe("interaction attempt tools", () => {
     },
   );
 
+  test("a known connected-machine read refusal retains its typed control details", async () => {
+    let calls = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        captureBrowserTarget: async () => {
+          calls += 1;
+          throw new OpenGeniApiError(
+            403,
+            JSON.stringify({
+              error: {
+                code: "forbidden",
+                message: "Screen access is not enabled.",
+                retryable: false,
+                outcomeUnknown: false,
+                requestId: "api-read-42",
+                details: {
+                  interactionLayer: "connected_machine",
+                  interactionSurface: "browser",
+                  controlFailureCode: "consent_required",
+                  controlRequestId: "control-read-42",
+                },
+              },
+            }),
+            { mutation: false },
+          );
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_screenshot"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      { browserSessionId, targetId: browserTarget().id },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent?.error).toMatchObject({
+      outcomeUnknown: false,
+      retryable: false,
+      requestId: "api-read-42",
+      details: {
+        interactionLayer: "connected_machine",
+        interactionSurface: "browser",
+        controlFailureCode: "consent_required",
+        controlRequestId: "control-read-42",
+      },
+    });
+    expect(calls).toBe(1);
+  });
+
   test("does not downgrade a failed browser mutation to a known read failure", async () => {
     const failure = new OpenGeniApiError(504, "mutation failed", { outcomeUnknown: false });
     let calls = 0;
