@@ -108,6 +108,11 @@ function randomWorld(seed: number): { world: World; sessionId: string } {
       healthy: rng.bool(0.85),
       allocatorEnabled: rng.bool(0.85),
       entitledModels: rng.bool(0.8) ? providerModels : rng.subset(providerModels),
+      allowedModelIds: rng.bool(0.85) ? null : rng.subset(providerModels),
+      modelCooldowns:
+        rng.bool(0.8) || providerModels.length === 0
+          ? {}
+          : { [rng.pick(providerModels)]: rng.pick([NOW - 1, NOW + 30_000]) },
       quota: rng.pick([
         { kind: "available" as const },
         { kind: "unknown" as const },
@@ -150,6 +155,7 @@ function randomWorld(seed: number): { world: World; sessionId: string } {
       : null,
     pinnedConnectionId: connections.length && rng.bool(0.2) ? rng.pick(connections).id : null,
     onlyThisModel: rng.bool(0.2),
+    reselectionPoint: rng.bool(0.15),
   };
   return {
     sessionId: session.id,
@@ -621,31 +627,113 @@ describe("reference model scenarios", () => {
     });
   });
 
-  test("model:SUB-SEL-03: Spread does not count the deciding session's own binding as load", () => {
-    const session = base().sessions[0]!;
-    const world: World = {
+  test("model:SUB-STICK-05: a completed compaction is a re-selection point even while the cache is warm", () => {
+    let world = exhaust(exhaust(base(), "claude-a", NOW + 60_000), "claude-b", NOW + 60_000);
+    world = applyDecision(world, "session-1", decide(world, "session-1", NOW), NOW);
+    const later = NOW + 61_000;
+    expect(decide(world, "session-1", later)).toMatchObject({
+      connectionId: "codex-a",
+      switch: "sticky",
+    });
+    const compacted: World = {
+      ...world,
+      sessions: world.sessions.map((session) => ({ ...session, reselectionPoint: true })),
+    };
+    expect(decide(compacted, "session-1", later)).toMatchObject({
+      connectionId: "claude-a",
+      switch: "return_to_preferred",
+    });
+  });
+
+  test("model:SUB-ELIG-03: a per-model cooldown or the connection's access policy moves work to another account", () => {
+    const cooled: World = {
+      ...base(),
+      connections: base().connections.map((connection) =>
+        connection.id === "claude-a"
+          ? { ...connection, modelCooldowns: { "claude/model-a": NOW + 60_000 } }
+          : connection,
+      ),
+    };
+    expect(decide(cooled, "session-1", NOW)).toMatchObject({ connectionId: "claude-b" });
+    expect(decide(cooled, "session-1", NOW + 60_000)).toMatchObject({ connectionId: "claude-a" });
+    const restricted: World = {
+      ...base(),
+      connections: base().connections.map((connection) =>
+        connection.id === "claude-a" ? { ...connection, allowedModelIds: [] } : connection,
+      ),
+    };
+    expect(decide(restricted, "session-1", NOW)).toMatchObject({ connectionId: "claude-b" });
+  });
+
+  test("model:SUB-WAIT-02: a cooldown-only wait reports the earliest eligible model cooldown", () => {
+    const cooled: World = {
+      ...base(),
+      sessions: base().sessions.map((session) => ({ ...session, onlyThisModel: true })),
+      connections: base().connections.map((connection) =>
+        connection.provider === "claude"
+          ? {
+              ...connection,
+              modelCooldowns: {
+                "claude/model-a": NOW + (connection.id === "claude-a" ? 60_000 : 30_000),
+              },
+            }
+          : connection,
+      ),
+    };
+    expect(decide(cooled, "session-1", NOW)).toEqual({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+      earliestResetAt: NOW + 30_000,
+    });
+  });
+
+  test("model:SUB-SEL-04, model:SUB-WAIT-02: a pinned wait reports when cooldown and quota both clear", () => {
+    const pinned = (quota: Connection["quota"]): World => ({
+      ...base(),
+      sessions: base().sessions.map((session) => ({ ...session, pinnedConnectionId: "claude-a" })),
+      connections: base().connections.map((connection) =>
+        connection.id === "claude-a"
+          ? {
+              ...connection,
+              quota,
+              modelCooldowns: { "claude/model-a": NOW + 30_000 },
+            }
+          : connection,
+      ),
+    });
+    expect(decide(pinned({ kind: "available" }), "session-1", NOW)).toEqual({
+      kind: "wait",
+      reason: "pinned_account_unavailable",
+      earliestResetAt: NOW + 30_000,
+    });
+    expect(decide(pinned({ kind: "exhausted", resetsAt: NOW + 60_000 }), "session-1", NOW)).toEqual(
+      {
+        kind: "wait",
+        reason: "pinned_account_unavailable",
+        earliestResetAt: NOW + 60_000,
+      },
+    );
+  });
+
+  test("model:SUB-SEL-03, model:SUB-SEL-05: Spread places each session deterministically and spreads sessions across accounts without a cross-session lock", () => {
+    const spreadWorld = (sessionIds: string[]): World => ({
       ...base(),
       settings: {
         ...base().settings,
         organization: { ...base().settings.organization, rotation: {} },
       },
-      sessions: [
-        {
-          ...session,
-          binding: { connectionId: "claude-b", modelId: "claude/model-a", lastUsedAt: 0 },
-        },
-        {
-          ...session,
-          id: "session-2",
-          binding: { connectionId: "claude-a", modelId: "claude/model-a", lastUsedAt: NOW },
-        },
-      ],
-    };
-    // claude-a carries another session; claude-b carries only this one, so it is the lighter.
-    expect(decide(world, "session-1", NOW)).toMatchObject({
-      kind: "run",
-      connectionId: "claude-b",
+      sessions: sessionIds.map((id) => ({ ...base().sessions[0]!, id })),
     });
+    const ids = Array.from({ length: 40 }, (_, index) => "session-" + index);
+    const world = spreadWorld(ids);
+    const placements = ids.map((id) => decide(world, id, NOW));
+    // The same session always lands on the same account, whatever else is bound.
+    expect(decide(spreadWorld([ids[3]!]), ids[3]!, NOW)).toEqual(placements[3]!);
+    // Sessions are spread over both Claude accounts.
+    const used = new Set(
+      placements.map((decision) => (decision.kind === "run" ? decision.connectionId : "")),
+    );
+    expect(used).toEqual(new Set(["claude-a", "claude-b"]));
   });
 
   test("model:SUB-ELIG-02, model:SUB-WAIT-01: a restricted preferred model runs on an allowed fallback and waits only when none is allowed", () => {
