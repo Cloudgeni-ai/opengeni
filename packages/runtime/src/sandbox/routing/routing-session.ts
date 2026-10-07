@@ -2396,13 +2396,22 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           "exec",
           true,
           async (provider) => {
-            const result = provider.execCommand
-              ? await provider.execCommand(input)
-              : provider.exec
-                ? await provider.exec(input)
-                : (() => {
-                    throw new RoutingUnsupportedError("exec", this.cached?.kind ?? "unknown");
-                  })();
+            const result =
+              backend.kind === "modal"
+                ? provider.execCommand
+                  ? await provider.execCommand(input)
+                  : provider.exec
+                    ? await provider.exec(input)
+                    : (() => {
+                        throw new RoutingUnsupportedError("exec", this.cached?.kind ?? "unknown");
+                      })()
+                : provider.exec
+                  ? await provider.exec(input)
+                  : provider.execCommand
+                    ? await provider.execCommand(input)
+                    : (() => {
+                        throw new RoutingUnsupportedError("exec", this.cached?.kind ?? "unknown");
+                      })();
             snapshot(provider, result);
             return result;
           },
@@ -2856,8 +2865,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     backend: ResolvedActiveBackend,
   ): ChannelASession {
     const privateSession = withPlacementPrivateControl(session, backend.kind);
-    const retainedSubcommands =
-      backend.kind === "modal" && admittedProviderCommandHandle() !== undefined;
+    const admittedCompositeMutation = admittedProviderCommandHandle() !== undefined;
     return new Proxy(privateSession, {
       get: (target, property) => {
         if (property === "execReadOnly")
@@ -2865,7 +2873,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
             args: ChannelAExecArgs,
             runner: SynchronousCommandRunner = executeSynchronousCommand,
           ) => withoutProviderCommandHandle(() => runner(target, args));
-        if (property === "execSynchronous" && retainedSubcommands)
+        if (property === "execSynchronous" && admittedCompositeMutation)
           return (
             args: ChannelAExecArgs,
             runner: SynchronousCommandRunner = executeSynchronousCommand,
