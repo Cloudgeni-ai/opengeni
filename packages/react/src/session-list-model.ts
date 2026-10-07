@@ -319,9 +319,16 @@ export function recentSessionsForHome<T extends SessionListRow>(
   limit = 6,
   now: Date = new Date(),
 ): T[] {
-  const ordinary = sessions.filter((session) => !session.pinned);
+  // Sub-agent sessions are reached from their parent. In a workspace that runs
+  // many sub-agents they would otherwise take every slot (they run often) and
+  // push the person's own conversations out of the list.
+  const ordinary = sessions.filter((session) => !session.pinned && !session.parentSessionId);
   const { running, grouped } = groupSessionsForRail(ordinary, now);
-  return [...pinned, ...running, ...grouped.flatMap((bucket) => bucket.sessions)].slice(0, limit);
+  const topLevelPinned = pinned.filter((session) => !session.parentSessionId);
+  return [...topLevelPinned, ...running, ...grouped.flatMap((bucket) => bucket.sessions)].slice(
+    0,
+    limit,
+  );
 }
 
 /** One project (workspace channel) and its sessions, as the web rail groups them. */

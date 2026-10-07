@@ -7,10 +7,11 @@ import {
   useNativeTimelineTheme,
 } from "@opengeni/react-native/timeline";
 import { Stack, router, useFocusEffect } from "expo-router";
-import { useCallback, useMemo, useState } from "react";
-import { RefreshControl, ScrollView, Text, TextInput, View } from "react-native";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { ActivityIndicator, RefreshControl, ScrollView, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
+import { cachedLists, rememberLists } from "@/session-list-cache";
 import { AppThemeProvider } from "@/theme";
 import { WorkspaceSwitcherBlock } from "@/workspace-switcher";
 
@@ -30,25 +31,39 @@ function Sessions() {
   const c = theme.colors;
   const insets = useSafeAreaInsets();
   const { client, models, workspaceId } = useAccount();
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [projects, setProjects] = useState<Channel[]>([]);
-  const [loading, setLoading] = useState(false);
+  // The last list paints at once; refreshes run quietly behind it.
+  const [sessions, setSessions] = useState<Session[]>(
+    () => cachedLists(workspaceId).sessions ?? [],
+  );
+  const [projects, setProjects] = useState<Channel[]>(
+    () => cachedLists(workspaceId).projects ?? [],
+  );
+  const [loaded, setLoaded] = useState(() => cachedLists(workspaceId).sessions !== undefined);
+  const [pulling, setPulling] = useState(false);
   const [query, setQuery] = useState("");
 
   const load = useCallback(async () => {
     if (!workspaceId) return;
-    setLoading(true);
     try {
       const [list, channels] = await Promise.all([
-        client.listSessions(workspaceId, { limit: 100 }),
+        // Top-level conversations, as web's rail: sub-agents open from their parent.
+        client.listSessions(workspaceId, { limit: 100, parentSessionId: null }),
         client.listChannels(workspaceId).catch(() => [] as Channel[]),
       ]);
+      rememberLists(workspaceId, { sessions: list, projects: channels });
       setSessions(list);
       setProjects(channels);
     } finally {
-      setLoading(false);
+      setLoaded(true);
     }
   }, [client, workspaceId]);
+
+  useEffect(() => {
+    const cached = cachedLists(workspaceId);
+    setSessions(cached.sessions ?? []);
+    setProjects(cached.projects ?? []);
+    setLoaded(cached.sessions !== undefined);
+  }, [workspaceId]);
 
   useFocusEffect(
     useCallback(() => {
@@ -80,7 +95,15 @@ function Sessions() {
         style={{ flex: 1, backgroundColor: c.bg }}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="interactive"
-        refreshControl={<RefreshControl refreshing={loading} onRefresh={() => void load()} />}
+        refreshControl={
+          <RefreshControl
+            refreshing={pulling}
+            onRefresh={() => {
+              setPulling(true);
+              void load().finally(() => setPulling(false));
+            }}
+          />
+        }
         contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: insets.bottom + 24 }}
       >
         <View style={{ marginTop: 4, marginHorizontal: -4 }}>
@@ -144,7 +167,9 @@ function Sessions() {
             <SessionRowList sessions={section.sessions} models={models} onOpen={open} />
           </View>
         ))}
-        {!loading && sections.length === 0 ? (
+        {!loaded ? (
+          <ActivityIndicator style={{ marginTop: 32 }} color={c["fg-muted"]} />
+        ) : sections.length === 0 ? (
           <Text
             style={{
               ...fontStyle(theme),
