@@ -526,6 +526,8 @@ jobs:
 
       - name: Profile impacted TypeScript 7 projects
         timeout-minutes: 11
+        env:
+          OPENGENI_TYPECHECK_CONCURRENCY: "1"
         run: >-
           bun scripts/ci/profile-command.ts
           --name typecheck
