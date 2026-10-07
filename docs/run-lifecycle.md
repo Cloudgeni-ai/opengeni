@@ -4073,10 +4073,22 @@ later turns; current authorization and tool availability remain independently
 enforced. Other unscoped synthetic system messages remain excluded.
 
 Attachment receipt text derives only from the durable file reference and mount
-directory. Resolving, losing, or renaming live file metadata does not rewrite
-that text. Active image bytes still require current authorized metadata and
-checksum-valid content; compacted attachment catalogs remain receipt-only.
+directory. Resolving or renaming live file metadata does not rewrite that text,
+and losing it does so only as described below. Active image bytes still require
+current authorized metadata and checksum-valid content; compacted attachment
+catalogs remain receipt-only.
 The receipt-format change incurs a one-time prefix change for existing histories.
+One exception: when this turn's file-authority lookup does not return an active
+reference (another participant's file in a shared session, or a file that is no
+longer available), its receipt says the file is not available to the current
+requester, without guessing which, and gives no download instruction. The model
+then neither attempts a failing fetch nor reports the file as deleted. The
+authority boundary is unchanged. The text is stable across retries and
+compaction for one requester, but it differs between requesters with and
+without access, so a requester switch in a shared session (or a file losing
+availability) changes that history item and the prompt prefix after it.
+Compacted catalogs and callers without an authority resolver keep the
+reference-only receipt.
 
 Service turns without a human file subject read shared attachments under an explicit
 null subject, clearing inherited private-file authority for that lookup. The reader

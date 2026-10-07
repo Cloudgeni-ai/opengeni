@@ -917,7 +917,7 @@ test("oversized retained images fail before blob reads without rewriting history
   expect(reads).toBe(0);
 });
 
-test("attachment receipts stay identical when metadata resolves, disappears, or is renamed", async () => {
+test("authorized attachment receipts stay identical when metadata resolves or is renamed", async () => {
   const asset = file("00000000-0000-4000-8000-000000000099", "application/pdf", 3, "a.pdf");
   const history = [
     { ...user("inspect"), [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: asset.id }] },
@@ -929,7 +929,133 @@ test("attachment receipts stay identical when metadata resolves, disappears, or 
       async () => files,
     )(history);
   const first = await project([asset]);
-  expect(await project([])).toEqual(first);
   expect(await project([{ ...asset, safeFilename: "renamed.pdf", sizeBytes: 30 }])).toEqual(first);
   expect(await project([asset])).toEqual(first);
+});
+
+describe("attachments outside the current requester's file access", () => {
+  const bytes = new TextEncoder().encode("screenshot");
+  const shared = {
+    ...file("00000000-0000-4000-8000-000000000301", "image/png", bytes.length, "shot.png"),
+    sha256: sha256(bytes),
+  };
+  const own = file("00000000-0000-4000-8000-000000000302", "application/pdf", 3, "own.pdf");
+  const history = [
+    {
+      ...user("look at these"),
+      [MODEL_ATTACHMENT_REFS_FIELD]: [
+        { kind: "file", fileId: shared.id },
+        { kind: "file", fileId: own.id },
+      ],
+    },
+  ];
+  const texts = (items: Array<Record<string, unknown>>) =>
+    (items[0]!.content as Array<{ type: string; text?: string }>)
+      .filter((part) => part.type === "input_text")
+      .map((part) => part.text ?? "");
+
+  test("an excluded reference says it is unavailable and never instructs a fetch", async () => {
+    let reads = 0;
+    const lookups: string[][] = [];
+    const projector = createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      async () => {
+        reads++;
+        return bytes;
+      },
+      // The current requester's authority returns only their own file.
+      async (fileIds) => {
+        lookups.push([...fileIds]);
+        return [own];
+      },
+    );
+    const projected = await projector(history);
+    const [, sharedReceipt, ownReceipt] = texts(projected);
+    expect(sharedReceipt).toContain(`fileId=${shared.id}`);
+    expect(sharedReceipt).toContain("not available to the current requester");
+    // The lookup cannot tell another participant's file from one that is no
+    // longer available, so the receipt names both and asserts neither.
+    expect(sharedReceipt).toContain("may belong to another participant");
+    expect(sharedReceipt).toContain("may no longer be available");
+    expect(sharedReceipt).not.toContain("deleted");
+    expect(sharedReceipt).not.toContain("files_get_download_url");
+    expect(sharedReceipt).not.toContain("mountDirectory");
+    // The authority boundary is unchanged: no bytes are read or sent.
+    expect(JSON.stringify(projected)).not.toContain("data:image");
+    expect(reads).toBe(0);
+    // The requester's own file keeps the ordinary receipt.
+    expect(ownReceipt).toContain("files__files_get_download_url");
+    expect(ownReceipt).toContain(`fileId=${own.id}`);
+    // Stable across same-turn reprojection without another lookup.
+    expect(await projector(history)).toEqual(projected);
+    expect(lookups).toEqual([[shared.id, own.id]]);
+  });
+
+  test("inline files of the current turn are never treated as excluded", async () => {
+    const projected = await createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      async () => bytes,
+      async () => [],
+    )(history, { inlineFiles: [shared, own] });
+    for (const receipt of texts(projected).slice(1)) {
+      expect(receipt).toContain("files__files_get_download_url");
+      expect(receipt).not.toContain("not available to the current requester");
+    }
+  });
+
+  test("a failed authority lookup excludes nothing and is retried", async () => {
+    let calls = 0;
+    const projector = createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      async () => bytes,
+      async () => {
+        calls++;
+        if (calls === 1) throw new Error("database unavailable");
+        return [own];
+      },
+    );
+    await expect(projector(history)).rejects.toThrow("database unavailable");
+    const [, sharedReceipt, ownReceipt] = texts(await projector(history));
+    expect(calls).toBe(2);
+    expect(sharedReceipt).toContain("not available to the current requester");
+    expect(ownReceipt).toContain("files__files_get_download_url");
+  });
+
+  test("the same history keeps the ordinary receipt and image for a requester with access", async () => {
+    const projected = await createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      async () => bytes,
+      async () => [shared, own],
+    )(history);
+    const [, sharedReceipt] = texts(projected);
+    expect(sharedReceipt).toContain("files__files_get_download_url");
+    expect(sharedReceipt).not.toContain("not available to the current requester");
+    expect(JSON.stringify(projected)).toContain("data:image/png");
+  });
+
+  test("compacted catalogs and resolver-less callers keep reference-only receipts", async () => {
+    const catalog = [{ ...history[0]!, [MODEL_ATTACHMENT_CATALOG_MARKER]: true }];
+    let lookups = 0;
+    const withResolver = await createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      undefined,
+      async () => {
+        lookups++;
+        return [];
+      },
+    )(catalog);
+    const legacy = await createModelHistoryAttachmentProjector({
+      supportsImageInput: true,
+      inputFileMediaTypes: [],
+    })(history);
+    const receipts = [...texts(withResolver), ...texts(legacy)].filter((text) =>
+      text.startsWith("[Attachment:"),
+    );
+    expect(receipts).toHaveLength(4);
+    for (const receipt of receipts) {
+      expect(receipt).toContain("files__files_get_download_url");
+      expect(receipt).not.toContain("not available to the current requester");
+    }
+    expect(lookups).toBe(0);
+  });
 });
