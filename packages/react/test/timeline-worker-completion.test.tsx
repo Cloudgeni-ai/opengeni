@@ -58,11 +58,9 @@ describe("MessageTimeline — worker completions", () => {
     // The report/evidence stay behind the fold — visible only after expanding.
     expect(r.container.textContent).not.toContain("All 128 assertions passed.");
     expect(r.container.textContent).not.toContain("128/128 green");
-    // A "View session" affordance is present when a handler is wired.
-    const viewButton = Array.from(r.container.querySelectorAll("button")).find((b) =>
-      /View session/.test(b.textContent ?? ""),
-    );
-    expect(viewButton).toBeDefined();
+    // An open-session affordance is present when a handler is wired.
+    const viewButton = r.container.querySelector('button[aria-label="Open agent session"]');
+    expect(viewButton).not.toBeNull();
   });
 
   test("expanding the disclosure reveals the report and evidence", async () => {
@@ -79,10 +77,8 @@ describe("MessageTimeline — worker completions", () => {
     const r = await renderComponent(
       <MessageTimeline events={events} onOpenSession={() => undefined} />,
     );
-    const toggle = Array.from(r.container.querySelectorAll("button")).find((b) =>
-      /Show details/.test(b.textContent ?? ""),
-    );
-    expect(toggle).toBeDefined();
+    const toggle = r.container.querySelector<HTMLElement>("[data-og-agent-row] [role=button]");
+    expect(toggle).not.toBeNull();
     await act(async () => {
       toggle!.click();
       await flush();
@@ -111,8 +107,8 @@ describe("MessageTimeline — worker completions", () => {
         }}
       />,
     );
-    const viewButton = Array.from(r.container.querySelectorAll("button")).find((b) =>
-      /View session/.test(b.textContent ?? ""),
+    const viewButton = r.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open agent session"]',
     );
     await act(async () => {
       viewButton!.click();

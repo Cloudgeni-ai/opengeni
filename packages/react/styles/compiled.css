@@ -1751,9 +1751,6 @@
 :where(.og-root).-mx-1,:where(.og-root) .-mx-1 {
     margin-inline: calc(var(--spacing) * -1);
   }
-:where(.og-root).-mx-1\.5,:where(.og-root) .-mx-1\.5 {
-    margin-inline: calc(var(--spacing) * -1.5);
-  }
 :where(.og-root).-mx-2,:where(.og-root) .-mx-2 {
     margin-inline: calc(var(--spacing) * -2);
   }
@@ -1816,6 +1813,9 @@
   }
 :where(.og-root).mt-\[0\.55em\],:where(.og-root) .mt-\[0\.55em\] {
     margin-top: 0.55em;
+  }
+:where(.og-root).mt-\[3px\],:where(.og-root) .mt-\[3px\] {
+    margin-top: 3px;
   }
 :where(.og-root).mt-auto,:where(.og-root) .mt-auto {
     margin-top: auto;
@@ -1880,6 +1880,9 @@
 :where(.og-root).ml-7,:where(.og-root) .ml-7 {
     margin-left: calc(var(--spacing) * 7);
   }
+:where(.og-root).ml-\[2\.125rem\],:where(.og-root) .ml-\[2\.125rem\] {
+    margin-left: 2.125rem;
+  }
 :where(.og-root).ml-auto,:where(.og-root) .ml-auto {
     margin-left: auto;
   }
@@ -1936,6 +1939,9 @@
   }
 :where(.og-root).inline-flex,:where(.og-root) .inline-flex {
     display: inline-flex;
+  }
+:where(.og-root).inline-grid,:where(.og-root) .inline-grid {
+    display: inline-grid;
   }
 :where(.og-root).table,:where(.og-root) .table {
     display: table;
@@ -3073,12 +3079,6 @@
       border-color: color-mix(in oklab, var(--og-color-status-failed) 50%, transparent);
     }
   }
-:where(.og-root).border-og-status-failed\/60,:where(.og-root) .border-og-status-failed\/60 {
-    border-color: var(--og-color-status-failed);
-    @supports (color: color-mix(in lab, red, red)) {
-      border-color: color-mix(in oklab, var(--og-color-status-failed) 60%, transparent);
-    }
-  }
 :where(.og-root).border-og-status-idle\/25,:where(.og-root) .border-og-status-idle\/25 {
     border-color: var(--og-color-status-idle);
     @supports (color: color-mix(in lab, red, red)) {
@@ -3089,12 +3089,6 @@
     border-color: var(--og-color-status-idle);
     @supports (color: color-mix(in lab, red, red)) {
       border-color: color-mix(in oklab, var(--og-color-status-idle) 30%, transparent);
-    }
-  }
-:where(.og-root).border-og-status-idle\/45,:where(.og-root) .border-og-status-idle\/45 {
-    border-color: var(--og-color-status-idle);
-    @supports (color: color-mix(in lab, red, red)) {
-      border-color: color-mix(in oklab, var(--og-color-status-idle) 45%, transparent);
     }
   }
 :where(.og-root).border-og-status-running\/25,:where(.og-root) .border-og-status-running\/25 {
@@ -3137,12 +3131,6 @@
     border-color: var(--og-color-status-waiting);
     @supports (color: color-mix(in lab, red, red)) {
       border-color: color-mix(in oklab, var(--og-color-status-waiting) 35%, transparent);
-    }
-  }
-:where(.og-root).border-og-status-waiting\/50,:where(.og-root) .border-og-status-waiting\/50 {
-    border-color: var(--og-color-status-waiting);
-    @supports (color: color-mix(in lab, red, red)) {
-      border-color: color-mix(in oklab, var(--og-color-status-waiting) 50%, transparent);
     }
   }
 :where(.og-root).border-status-waiting\/20,:where(.og-root) .border-status-waiting\/20 {
@@ -4489,11 +4477,6 @@
     transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
     transition-duration: var(--tw-duration, var(--default-transition-duration));
   }
-:where(.og-root).transition-\[transform\,color\],:where(.og-root) .transition-\[transform\,color\] {
-    transition-property: transform,color;
-    transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
-    transition-duration: var(--tw-duration, var(--default-transition-duration));
-  }
 :where(.og-root).transition-\[width\],:where(.og-root) .transition-\[width\] {
     transition-property: width;
     transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
@@ -4701,21 +4684,6 @@
       }
     }
   }
-:where(.og-root).group-hover\/worker\:translate-x-0\.5,:where(.og-root) .group-hover\/worker\:translate-x-0\.5 {
-    &:is(:where(.group\/worker):hover *) {
-      @media (hover: hover) {
-        --tw-translate-x: calc(var(--spacing) * 0.5);
-        translate: var(--tw-translate-x) var(--tw-translate-y);
-      }
-    }
-  }
-:where(.og-root).group-hover\/worker\:text-og-fg,:where(.og-root) .group-hover\/worker\:text-og-fg {
-    &:is(:where(.group\/worker):hover *) {
-      @media (hover: hover) {
-        color: var(--og-color-fg);
-      }
-    }
-  }
 :where(.og-root).group-focus-visible\:bg-og-accent,:where(.og-root) .group-focus-visible\:bg-og-accent {
     &:is(:where(.group):focus-visible *) {
       background-color: var(--og-color-accent);
@@ -4731,13 +4699,13 @@
       rotate: 90deg;
     }
   }
-:where(.og-root).group-data-\[state\=open\]\/disclosure\:rotate-90,:where(.og-root) .group-data-\[state\=open\]\/disclosure\:rotate-90 {
-    &:is(:where(.group\/disclosure)[data-state="open"] *) {
+:where(.og-root).group-data-\[state\=open\]\/agent\:rotate-90,:where(.og-root) .group-data-\[state\=open\]\/agent\:rotate-90 {
+    &:is(:where(.group\/agent)[data-state="open"] *) {
       rotate: 90deg;
     }
   }
-:where(.og-root).group-data-\[state\=open\]\/wc\:rotate-90,:where(.og-root) .group-data-\[state\=open\]\/wc\:rotate-90 {
-    &:is(:where(.group\/wc)[data-state="open"] *) {
+:where(.og-root).group-data-\[state\=open\]\/disclosure\:rotate-90,:where(.og-root) .group-data-\[state\=open\]\/disclosure\:rotate-90 {
+    &:is(:where(.group\/disclosure)[data-state="open"] *) {
       rotate: 90deg;
     }
   }
@@ -6419,11 +6387,6 @@
       min-width: 44px;
     }
   }
-:where(.og-root).pointer-coarse\:py-2,:where(.og-root) .pointer-coarse\:py-2 {
-    @media (pointer: coarse) {
-      padding-block: calc(var(--spacing) * 2);
-    }
-  }
 :where(.og-root).pointer-coarse\:py-2\.5,:where(.og-root) .pointer-coarse\:py-2\.5 {
     @media (pointer: coarse) {
       padding-block: calc(var(--spacing) * 2.5);
@@ -6479,6 +6442,12 @@
 :where(.og-root).\[\&_svg\]\:pointer-events-none,:where(.og-root) .\[\&_svg\]\:pointer-events-none {
     & svg {
       pointer-events: none;
+    }
+  }
+:where(.og-root).\[\&_svg\]\:size-3\.5,:where(.og-root) .\[\&_svg\]\:size-3\.5 {
+    & svg {
+      width: calc(var(--spacing) * 3.5);
+      height: calc(var(--spacing) * 3.5);
     }
   }
 :where(.og-root).\[\&_svg\]\:shrink-0,:where(.og-root) .\[\&_svg\]\:shrink-0 {
