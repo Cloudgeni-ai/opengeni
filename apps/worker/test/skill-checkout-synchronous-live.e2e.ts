@@ -639,8 +639,11 @@ for (const scenario of [
           }),
         );
       } finally {
-        await prepared.close();
-        await native.close();
+        try {
+          await prepared.close();
+        } finally {
+          await native.close();
+        }
       }
     },
     180_000,
