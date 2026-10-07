@@ -652,4 +652,33 @@ describe("reference model scenarios", () => {
       connectionId: "claude-b",
     });
   });
+
+  test("model:SUB-ELIG-02, model:SUB-WAIT-01: a restricted preferred model runs on an allowed fallback and waits only when none is allowed", () => {
+    const restricted: World = {
+      ...base(),
+      workspaces: [
+        { id: "ws-team", kind: "shared", ownerId: null, allowedModels: ["codex/model-a"] },
+      ],
+    };
+    expect(decide(restricted, "session-1", NOW)).toMatchObject({
+      kind: "run",
+      connectionId: "codex-a",
+      modelId: "codex/model-a",
+      switch: "initial",
+    });
+    expect(
+      checkDecision(restricted, "session-1", NOW, {
+        kind: "wait",
+        reason: "model_not_allowed",
+        earliestResetAt: null,
+      }).map((violation) => violation.requirement),
+    ).toContain("SUB-WAIT-01");
+    const onlyThis: World = {
+      ...restricted,
+      sessions: restricted.sessions.map((session) => ({ ...session, onlyThisModel: true })),
+    };
+    const wait = decide(onlyThis, "session-1", NOW);
+    expect(wait).toEqual({ kind: "wait", reason: "model_not_allowed", earliestResetAt: null });
+    expect(checkDecision(onlyThis, "session-1", NOW, wait)).toEqual([]);
+  });
 });

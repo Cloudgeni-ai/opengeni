@@ -344,7 +344,12 @@ export function decide(world: World, sessionId: string, now: number): Decision {
     switch: kind,
   });
 
-  if (!modelAllowed(world, session, session.preferredModelId)) {
+  // A restricted preferred model falls through to its allowed failover
+  // candidates (SUB-ELIG-02, SUB-WAIT-01, D-17); waiting on the restriction is
+  // right only when no candidate is allowed.
+  const models = candidateModels(world, session);
+  const allowedModels = models.filter((modelId) => modelAllowed(world, session, modelId));
+  if (allowedModels.length === 0) {
     return { kind: "wait", reason: "model_not_allowed", earliestResetAt: null };
   }
 
@@ -364,7 +369,6 @@ export function decide(world: World, sessionId: string, now: number): Decision {
     };
   }
 
-  const models = candidateModels(world, session);
   const binding = session.binding;
   const bound = binding ? byId(world.connections, binding.connectionId) : undefined;
   const bindingServable =
@@ -405,7 +409,7 @@ export function decide(world: World, sessionId: string, now: number): Decision {
   return {
     kind: "wait",
     reason: "no_eligible_capacity",
-    earliestResetAt: earliestReset(world, session, models, personalFallback),
+    earliestResetAt: earliestReset(world, session, allowedModels, personalFallback),
   };
 }
 
@@ -535,12 +539,15 @@ export function checkDecision(
         );
       }
     }
-  } else if (decision.reason === "model_not_allowed") {
-    // Only a real workspace model restriction justifies this reason.
-    if (modelAllowed(world, session, session.preferredModelId)) {
-      fail("SUB-WAIT-01", "waited for a model restriction although the model is allowed");
-    }
   } else {
+    // Only a real workspace model restriction justifies this reason: no
+    // candidate model, the preferred one or an allowed fallback, is allowed.
+    if (
+      decision.reason === "model_not_allowed" &&
+      models.some((modelId) => modelAllowed(world, session, modelId))
+    ) {
+      fail("SUB-WAIT-01", "waited for a model restriction although an allowed model exists");
+    }
     const pinned = session.pinnedConnectionId
       ? byId(world.connections, session.pinnedConnectionId)
       : undefined;

@@ -129,7 +129,11 @@ for it until the matching requirement below is implemented:
   work's workspace (or, for a personal connection, its owner under
   SUB-ELIG-05). Verification: pending (data-model).
 - **SUB-ELIG-02** Workspace model restrictions are a ceiling on every
-  selection, including failover. Verification: pending (failover).
+  selection, including failover. When the session's preferred model is
+  outside the restriction, selection uses the first allowed model in its
+  failover order, under the same rules as any other failover; it waits on the
+  restriction only when no candidate model is allowed, for example under
+  "only this model" (D-17). Verification: pending (failover).
 - **SUB-ELIG-03** An account is eligible for a model only when its plan
   entitles it to that model. This is automatic filtering, not a user setting.
   Verification: pending (shared-core).
@@ -397,6 +401,7 @@ by the implementer and recorded here; consequential ones are escalated.
 | D-14 | 2026-10-07 | Implementer decision: unknown quota is eligible but ranked after accounts with known capacity, so missing metadata neither blocks work nor wins over known capacity. |
 | D-15 | 2026-10-07 | Implementer decision, precedence between D-13 and D-14: in Primary first, the primary takes new work whenever it can serve it, and unknown quota counts as able to serve. The known-capacity ranking of D-14 orders only the other accounts (and, in Spread, applies before load balancing), so a primary with unknown quota is not passed over for a backup. |
 | D-16 | 2026-10-07 | Implementer decision: reasoning levels map by name first, then by closest relative position on the two ladders; a tie goes to the lower level (cheaper and less likely to exceed the target's plan), and an unlisted level maps to the lower middle. |
+| D-17 | 2026-10-07 | Implementer decision: a preferred model that the workspace does not allow is treated like one without capacity. Work uses the first allowed model in the failover order (SUB-WAIT-01 permits no wait while an allowed model can serve) and waits on the restriction only when no candidate model is allowed. |
 
 ### Open decisions
 
