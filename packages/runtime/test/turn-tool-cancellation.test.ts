@@ -7,6 +7,7 @@ import { join } from "node:path";
 
 import {
   cancellableShellCommand,
+  cancellableSynchronousShellCommand,
   createTurnToolCancellationController,
   isBareInteractiveShellCommand,
 } from "../src/sandbox/turn-tool-cancellation";
@@ -569,21 +570,49 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     },
   );
 
+  test.skipIf(Bun.which("setsid") === null && Bun.which("python3") === null)(
+    "compact synchronous wrapper isolates its group and propagates the original exit status",
+    async () => {
+      const markerPath = `/tmp/opengeni-turn-shell/test-${crypto.randomUUID()}`;
+      const command = cancellableSynchronousShellCommand(
+        'test "$$" = "$(ps -o pgid= -p "$$" | tr -d \'[:space:]\')" && printf isolated && exit 23',
+        markerPath,
+      );
+      const child = Bun.spawn(["/bin/sh", "-c", command], {
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      expect(exitCode, stderr).toBe(23);
+      expect(stdout).toBe("isolated");
+      expect(existsSync(markerPath)).toBe(false);
+    },
+  );
+
   test.skipIf(Bun.which("python3") === null)(
-    "uses Python session isolation without setsid and refuses execution without either helper",
+    "uses Python without setsid and refuses both wrappers without either isolation helper",
     async () => {
       const binDir = mkdtempSync(join(tmpdir(), "opengeni-shell-session-"));
       const markerPath = `/tmp/opengeni-turn-shell/test-${crypto.randomUUID()}`;
-      const command = cancellableShellCommand(
+      const shellCommand = cancellableShellCommand(
         'test "$$" = "$(ps -o pgid= -p "$$" | tr -d \'[:space:]\')" && printf isolated',
         markerPath,
+      );
+      const synchronousCommand = cancellableSynchronousShellCommand(
+        'test "$$" = "$(ps -o pgid= -p "$$" | tr -d \'[:space:]\')" && printf isolated',
+        `${markerPath}-sync`,
       );
       try {
         for (const executable of ["mkdir", "rm", "ps", "tr", "python3"]) {
           symlinkSync(Bun.which(executable)!, join(binDir, executable));
         }
-        const run = async () => {
-          const child = Bun.spawn(["/bin/sh", "-c", command], {
+        const run = async (cmd: string) => {
+          const child = Bun.spawn(["/bin/sh", "-c", cmd], {
             env: { ...process.env, PATH: binDir },
             stdin: "ignore",
             stdout: "pipe",
@@ -596,14 +625,55 @@ describe("turn sandbox-tool physical cancellation fence", () => {
           ]);
           return { stdout, stderr, exitCode };
         };
-        const isolated = await run();
+        const isolated = await run(shellCommand);
         expect(isolated.exitCode, isolated.stderr).toBe(0);
         expect(isolated.stdout).toBe("isolated");
         expect(existsSync(markerPath)).toBe(false);
+        const synchronousIsolated = await run(synchronousCommand);
+        expect(synchronousIsolated.exitCode, synchronousIsolated.stderr).toBe(0);
+        expect(synchronousIsolated.stdout).toBe("isolated");
+        expect(existsSync(`${markerPath}-sync`)).toBe(false);
         rmSync(join(binDir, "python3"));
-        const refused = await run();
+        const refused = await run(shellCommand);
         expect(refused.exitCode).toBe(125);
         expect(refused.stdout).toBe("");
+        expect(existsSync(markerPath)).toBe(false);
+        const synchronousRefused = await run(synchronousCommand);
+        expect(synchronousRefused.exitCode).toBe(125);
+        expect(synchronousRefused.stdout).toBe("");
+        expect(existsSync(`${markerPath}-sync`)).toBe(false);
+      } finally {
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(Bun.which("setsid") === null)(
+    "compact synchronous wrapper preserves an already-group-leader shell and nonzero status",
+    async () => {
+      const binDir = mkdtempSync(join(tmpdir(), "opengeni-shell-leader-"));
+      const markerPath = `/tmp/opengeni-turn-shell/test-${crypto.randomUUID()}`;
+      try {
+        for (const executable of ["mkdir", "rm", "ps", "tr"]) {
+          symlinkSync(Bun.which(executable)!, join(binDir, executable));
+        }
+        const command = cancellableSynchronousShellCommand(
+          'test "$$" = "$(ps -o pgid= -p "$$" | tr -d \'[:space:]\')" && printf isolated && exit 23',
+          markerPath,
+        );
+        const child = Bun.spawn([Bun.which("setsid")!, "/bin/sh", "-c", command], {
+          env: { ...process.env, PATH: binDir },
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        expect(exitCode, stderr).toBe(23);
+        expect(stdout).toBe("isolated");
         expect(existsSync(markerPath)).toBe(false);
       } finally {
         rmSync(binDir, { recursive: true, force: true });
