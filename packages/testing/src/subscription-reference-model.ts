@@ -50,6 +50,10 @@ export type Connection = {
   healthy: boolean;
   allocatorEnabled: boolean;
   entitledModels: readonly ModelId[];
+  /** Administrator access policy on the connection; null or absent allows every entitled model. */
+  allowedModelIds?: readonly ModelId[] | null;
+  /** Per-model cooldowns (Claude reports model-specific limits). */
+  modelCooldowns?: Readonly<Record<ModelId, number>>;
   quota: Quota;
 };
 
@@ -81,6 +85,8 @@ export type Session = {
   pinnedConnectionId: string | null;
   /** "Only this model": no cross-provider failover. Same-model account failover still applies. */
   onlyThisModel: boolean;
+  /** A compaction completed or the model changed since the last placement (SUB-STICK-05). */
+  reselectionPoint?: boolean;
 };
 
 export type World = {
@@ -237,6 +243,15 @@ export function servingFailure(
   ) {
     return { requirement: "SUB-ELIG-03", message: "the account's plan does not include the model" };
   }
+  if (connection.allowedModelIds != null && !connection.allowedModelIds.includes(modelId)) {
+    return {
+      requirement: "SUB-ELIG-03",
+      message: "the account's access policy excludes the model",
+    };
+  }
+  if ((connection.modelCooldowns?.[modelId] ?? -Infinity) > now) {
+    return { requirement: "SUB-ELIG-03", message: "the account is cooling down for the model" };
+  }
   if (!modelAllowed(world, session, modelId)) {
     return { requirement: "SUB-ELIG-02", message: "the workspace does not allow the model" };
   }
@@ -260,18 +275,22 @@ export function canServe(
 
 // Selection
 
-/** Other sessions bound to a connection; the deciding session is not its own load. */
-function boundSessions(world: World, connectionId: string, exceptSessionId: string): number {
-  return world.sessions.filter(
-    (session) => session.id !== exceptSessionId && session.binding?.connectionId === connectionId,
-  ).length;
+/** Deterministic FNV-1a hash used to spread sessions across accounts (D-21). */
+export function spreadHash(sessionId: string, connectionId: string): number {
+  let hash = 0x811c9dc5;
+  for (const character of sessionId + "|" + connectionId) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash;
 }
 
 /**
  * Rank servable connections for one model. In Primary first the primary takes
  * new work whenever it can serve it, and unknown quota counts as able to serve
  * (D-13, D-14, D-15). Every other choice ranks known capacity before unknown
- * quota (D-14), then Spread balances load, then the connection id breaks ties.
+ * quota (D-14), then a deterministic per-session hash spreads sessions (D-21),
+ * then the connection id breaks ties.
  */
 function pick(world: World, session: Session, candidates: Connection[]): Connection | null {
   if (candidates.length === 0) return null;
@@ -286,11 +305,8 @@ function pick(world: World, session: Session, candidates: Connection[]): Connect
   const ranked = [...candidates].sort((left, right) => {
     const known = Number(left.quota.kind === "unknown") - Number(right.quota.kind === "unknown");
     if (known !== 0) return known;
-    if (rotation.mode === "spread") {
-      const load =
-        boundSessions(world, left.id, session.id) - boundSessions(world, right.id, session.id);
-      if (load !== 0) return load;
-    }
+    const spread = spreadHash(session.id, left.id) - spreadHash(session.id, right.id);
+    if (spread !== 0) return spread;
     return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
   });
   return ranked[0]!;
@@ -334,13 +350,16 @@ export function nearestReasoningLevel(
 export function candidateModels(world: World, session: Session): ModelId[] {
   const settings = effectiveSettings(world.settings, session.workspaceId).values;
   const preferred = session.preferredModelId;
-  if (session.onlyThisModel || session.pinnedConnectionId || !settings.crossProviderFailover) {
-    return [preferred];
-  }
+  if (session.onlyThisModel || session.pinnedConnectionId) return [preferred];
   const preferredProvider = byId(world.models, preferred)?.provider;
+  // Same-provider fallback models are always allowed; other providers only
+  // when cross-provider failover is on (SUB-FAIL-02, SUB-FAIL-03).
   const fallbacks = (settings.fallbackOrder[preferred] ?? []).filter(
-    (modelId) =>
-      modelId !== preferred && byId(world.models, modelId)?.provider !== preferredProvider,
+    (modelId, index, all) =>
+      modelId !== preferred &&
+      all.indexOf(modelId) === index &&
+      (byId(world.models, modelId)?.provider === preferredProvider ||
+        settings.crossProviderFailover),
   );
   return [preferred, ...fallbacks];
 }
@@ -420,7 +439,7 @@ export function decide(world: World, sessionId: string, now: number): Decision {
     canServe(world, session, bound, binding.modelId, now);
 
   // Stickiness while the cache is warm (SUB-STICK-02, SUB-STICK-03, SUB-FAIL-07).
-  if (binding && bindingServable && isCacheWarm(world, binding, now)) {
+  if (binding && bindingServable && !session.reselectionPoint && isCacheWarm(world, binding, now)) {
     return run(binding.connectionId, binding.modelId, "sticky");
   }
 
@@ -443,7 +462,12 @@ export function decide(world: World, sessionId: string, now: number): Decision {
     if (!binding) kind = "initial";
     else if (binding.connectionId === chosen.id && binding.modelId === modelId) kind = "sticky";
     else if (index === 0 && binding.modelId !== modelId) kind = "return_to_preferred";
-    else if (index > 0) kind = "failover_cross_provider";
+    else if (index > 0)
+      kind =
+        byId(world.models, modelId)?.provider ===
+        byId(world.models, session.preferredModelId)?.provider
+          ? "failover_same_provider"
+          : "failover_cross_provider";
     else if (bindingServable) kind = "reselected_cold";
     else kind = "failover_same_provider";
     return run(chosen.id, modelId, kind);
@@ -518,7 +542,7 @@ export function checkDecision(
     );
   const anyServable = models.some(servableAutomatically);
   const binding = session.binding;
-  const bindingWarm = !!binding && isCacheWarm(world, binding, now);
+  const bindingWarm = !!binding && !session.reselectionPoint && isCacheWarm(world, binding, now);
 
   if (decision.kind === "run") {
     const connection = byId(world.connections, decision.connectionId);

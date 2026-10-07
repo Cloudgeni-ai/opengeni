@@ -103,6 +103,9 @@ for it until the matching requirement below is implemented:
   Verification: pending (personal-connections).
 - **SUB-OWN-07** Who connected an account is audit metadata, never
   ownership or authority. Verification: pending (data-model).
+- **SUB-OWN-08** One upstream provider account is one connection per owner,
+  however many workspaces it serves, so its quota is counted once.
+  Verification: pending (data-model).
 
 ### Settings and overrides
 
@@ -122,6 +125,10 @@ for it until the matching requirement below is implemented:
   Verification: pending (product-surface).
 - **SUB-SET-05** One organization overview lists every workspace's effective
   settings and highlights overrides. Verification: pending (product-surface).
+- **SUB-SET-06** Per workspace and provider, effective settings can turn the
+  provider off or stop using organization accounts, without changing any
+  connection's scope or the workspace model allowlist.
+  Verification: pending (data-model).
 
 ### Eligibility
 
@@ -135,8 +142,9 @@ for it until the matching requirement below is implemented:
   restriction only when no candidate model is allowed, for example under
   "only this model" (D-17). Verification: pending (failover).
 - **SUB-ELIG-03** An account is eligible for a model only when its plan
-  entitles it to that model. This is automatic filtering, not a user setting.
-  Verification: pending (shared-core).
+  entitles it to that model, it is not cooling down for that model, and the
+  connection's access policy allows the model. This is automatic filtering,
+  not a user setting. Verification: pending (shared-core).
 - **SUB-ELIG-04** Credential health and allocator eligibility are separate.
   Reconnecting restores health without silently changing allocator
   eligibility. Verification: pending (shared-core).
@@ -174,8 +182,9 @@ for it until the matching requirement below is implemented:
 - **SUB-STICK-01** The account belongs to the session, not to whoever sends
   the message. Verification: pending (cache-stickiness).
 - **SUB-STICK-02** While the prompt cache is warm, a session keeps its account
-  across turns, senders, goal continuations, child agents, scheduled runs and
-  compaction. Verification: pending (cache-stickiness).
+  across turns, senders, goal continuations, scheduled runs on the same session
+  and recovery. Child sessions and new scheduled sessions have their own prompt
+  cache and start with an automatic choice. Verification: pending (cache-stickiness).
 - **SUB-STICK-03** A session moves to another account only when forced
   (exhausted, disconnected, revoked, out of scope, owner left) or when the
   cache is predictably cold. Verification: pending (cache-stickiness).
@@ -222,12 +231,20 @@ for it until the matching requirement below is implemented:
   preferred model once that model has capacity and the current cache is cold.
   Verification: pending (failover).
 - **SUB-FAIL-08** Exhaustion in the middle of a turn continues the same
-  accepted turn on the fallback, keeping completed tool calls and accounting
+  accepted turn on the fallback at the next model-call boundary, re-checking
+  funding for the new provider and dropping provider-specific history items
+  from the request copy, while keeping completed tool calls and accounting
   entries without repeating them. Verification: pending (failover).
-- **SUB-FAIL-09** A Codex session using remote compaction can fail over to
-  another provider. Verification: pending (failover).
+- **SUB-FAIL-09** New sessions whose model has an effective cross-provider
+  fallback use portable compaction. An existing Codex remote-compaction session
+  converts to portable compaction at its next compaction while Codex has
+  capacity; until then it fails over only within Codex and otherwise waits
+  with an explained reason. Verification: pending (failover).
 - **SUB-FAIL-10** Voice, transcription and media generation do not fail over
   across providers in the first release. Verification: pending (consumers).
+- **SUB-FAIL-11** Failover within one turn is bounded and recorded per account,
+  so a turn cannot alternate between failing accounts indefinitely.
+  Verification: pending (failover).
 
 ### Durable waits and recovery
 
@@ -402,14 +419,16 @@ by the implementer and recorded here; consequential ones are escalated.
 | D-15 | 2026-10-07 | Implementer decision, precedence between D-13 and D-14: in Primary first, the primary takes new work whenever it can serve it, and unknown quota counts as able to serve. The known-capacity ranking of D-14 orders only the other accounts (and, in Spread, applies before load balancing), so a primary with unknown quota is not passed over for a backup. |
 | D-16 | 2026-10-07 | Implementer decision: reasoning levels map by name first, then by closest relative position on the two ladders; a tie goes to the lower level (cheaper and less likely to exceed the target's plan), and an unlisted level maps to the lower middle. |
 | D-17 | 2026-10-07 | Implementer decision: a preferred model that the workspace does not allow is treated like one without capacity. Work uses the first allowed model in the failover order (SUB-WAIT-01 permits no wait while an allowed model can serve) and waits on the restriction only when no candidate model is allowed. |
+| D-18 | 2026-10-07 | Implementer decision: accounts connected in a Personal workspace migrate to personal connections of that workspace's owner, with their personal fallback switched on so their Personal-workspace sessions keep working. |
+| D-19 | 2026-10-07 | Q-01 resolved after design review: remote compaction keeps no cleartext to convert at failover time, so cross-provider failover relies on portable compaction (SUB-FAIL-09). |
+| D-20 | 2026-10-07 | Q-03 resolved after design review: any in-scope connection can be designated for Codex Apps by an organization administrator or the connection's delegated manager, in every routing mode; reset-credit redemption stays human-only from a browser session for those same people, not "whoever connected it". |
+| D-21 | 2026-10-07 | Implementer decision: Spread uses a deterministic hash of the session id over eligible accounts (known capacity first), so placement needs no lock across sessions and a session lands on the same account every time. |
 
 ### Open decisions
 
 | ID | Question | Recommendation |
 | --- | --- | --- |
-| Q-01 | How does a Codex remote-compaction session fail over (SUB-FAIL-09)? | Convert to portable compaction at the moment of failover; alternative: default to portable when a failover target exists. |
 | Q-02 | Is cross-provider failover on by default for new organizations? | Yes. |
-| Q-03 | How do Codex Apps and reset-credit redemption fit organization-owned connections? | Keep explicit human-controlled boundaries; bind Apps to a chosen connection independently of model routing. |
 
 ## Verification
 
