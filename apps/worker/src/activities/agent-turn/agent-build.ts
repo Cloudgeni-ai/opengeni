@@ -447,6 +447,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           workspaceId: input.workspaceId,
           subjectId,
           sessionId: input.sessionId,
+          turnId: turn.id,
           authoritySnapshot,
         });
         const selected = providerTurn.effectiveXaiCredentialId
@@ -475,6 +476,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               workspaceId: input.workspaceId,
               subjectId,
               sessionId: input.sessionId,
+              turnId: turn.id,
               authoritySnapshot,
               credentialId: selected.credentialId,
               pinSource: "policy",

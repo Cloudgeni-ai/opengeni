@@ -121,6 +121,7 @@
     "@opengeni/contracts": "workspace:*",
     "@opengeni/network": "workspace:*",
     "@opengeni/observability": "workspace:*",
+    "@opengeni/subscriptions": "workspace:*",
     "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.7"
   },

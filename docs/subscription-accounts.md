@@ -103,6 +103,9 @@ for it until the matching requirement below is implemented:
   Verification: pending (personal-connections).
 - **SUB-OWN-07** Who connected an account is audit metadata, never
   ownership or authority. Verification: pending (data-model).
+- **SUB-OWN-08** One upstream provider account is one connection per owner,
+  however many workspaces it serves, so its quota is counted once.
+  Verification: pending (data-model).
 
 ### Settings and overrides
 
@@ -122,6 +125,10 @@ for it until the matching requirement below is implemented:
   Verification: pending (product-surface).
 - **SUB-SET-05** One organization overview lists every workspace's effective
   settings and highlights overrides. Verification: pending (product-surface).
+- **SUB-SET-06** Per workspace and provider, effective settings can turn the
+  provider off or stop using organization accounts, without changing any
+  connection's scope or the workspace model allowlist.
+  Verification: pending (data-model).
 
 ### Eligibility
 
@@ -135,8 +142,9 @@ for it until the matching requirement below is implemented:
   restriction only when no candidate model is allowed, for example under
   "only this model" (D-17). Verification: pending (failover).
 - **SUB-ELIG-03** An account is eligible for a model only when its plan
-  entitles it to that model. This is automatic filtering, not a user setting.
-  Verification: pending (shared-core).
+  entitles it to that model, it is not cooling down for that model, and the
+  connection's access policy allows the model. This is automatic filtering,
+  not a user setting. Verification: pending (shared-core).
 - **SUB-ELIG-04** Credential health and allocator eligibility are separate.
   Reconnecting restores health without silently changing allocator
   eligibility. Verification: pending (shared-core).
@@ -166,7 +174,7 @@ for it until the matching requirement below is implemented:
 - **SUB-SEL-04** A manual pin to an account is binding: the session waits for
   that account instead of moving. Verification: pending (shared-core).
 - **SUB-SEL-05** Selection is atomic and concurrency-safe: concurrent
-  reservations cannot oversubscribe a Primary-only account or bypass fairness.
+  reservations cannot oversubscribe the primary account or bypass fairness.
   Verification: pending (verification-suite).
 
 ### Stickiness and the prompt cache
@@ -174,8 +182,9 @@ for it until the matching requirement below is implemented:
 - **SUB-STICK-01** The account belongs to the session, not to whoever sends
   the message. Verification: pending (cache-stickiness).
 - **SUB-STICK-02** While the prompt cache is warm, a session keeps its account
-  across turns, senders, goal continuations, child agents, scheduled runs and
-  compaction. Verification: pending (cache-stickiness).
+  across turns, senders, goal continuations, scheduled runs on the same session
+  and recovery. Child sessions and new scheduled sessions have their own prompt
+  cache and start with an automatic choice. Verification: pending (cache-stickiness).
 - **SUB-STICK-03** A session moves to another account only when forced
   (exhausted, disconnected, revoked, out of scope, owner left) or when the
   cache is predictably cold. Verification: pending (cache-stickiness).
@@ -222,12 +231,20 @@ for it until the matching requirement below is implemented:
   preferred model once that model has capacity and the current cache is cold.
   Verification: pending (failover).
 - **SUB-FAIL-08** Exhaustion in the middle of a turn continues the same
-  accepted turn on the fallback, keeping completed tool calls and accounting
+  accepted turn on the fallback at the next model-call boundary, re-checking
+  funding for the new provider and dropping provider-specific history items
+  from the request copy, while keeping completed tool calls and accounting
   entries without repeating them. Verification: pending (failover).
-- **SUB-FAIL-09** A Codex session using remote compaction can fail over to
-  another provider. Verification: pending (failover).
+- **SUB-FAIL-09** New sessions whose model has an effective cross-provider
+  fallback use portable compaction. An existing Codex remote-compaction session
+  converts to portable compaction at its next compaction while Codex has
+  capacity; until then it fails over only within Codex and otherwise waits
+  with an explained reason. Verification: pending (failover).
 - **SUB-FAIL-10** Voice, transcription and media generation do not fail over
   across providers in the first release. Verification: pending (consumers).
+- **SUB-FAIL-11** Failover within one turn is bounded and recorded per account,
+  so a turn cannot alternate between failing accounts indefinitely.
+  Verification: pending (failover).
 
 ### Durable waits and recovery
 
@@ -242,7 +259,7 @@ for it until the matching requirement below is implemented:
   Verification: pending (verification-suite).
 - **SUB-WAIT-05** A wait that cannot be armed surfaces as an explicit,
   retryable state, never as a generic activity failure. Database outages keep
-  their exact-attempt recovery path. Verification: pending (private-session-access).
+  their exact-attempt recovery path. Verification: `apps/worker/test/subscription-capacity-arming.test.ts`.
 
 ### Authority and session access
 
@@ -255,12 +272,12 @@ for it until the matching requirement below is implemented:
   Verification: pending (accepted-scope-propagation).
 - **SUB-ACCESS-02** Pool authority is additive to session access. Using a
   shared pool never changes who can see a session.
-  Verification: pending (private-session-access).
+  Verification: `packages/db/test/subscription-pool-private-session-access.test.ts`.
 - **SUB-ACCESS-03** A private session arms, waits, is observed by the
   workflow, recovers and keeps pins exactly like a shared session.
-  Verification: pending (private-session-access).
+  Verification: `packages/db/test/subscription-pool-private-session-access.test.ts`.
 - **SUB-ACCESS-04** A pool worker never gains visibility of another member's
-  private session. Verification: pending (private-session-access).
+  private session. Verification: `packages/db/test/subscription-pool-private-session-access.test.ts`.
 - **SUB-ACCESS-05** Revoking a connection or a person's access is enforced on
   the next selection, lease renewal and dispatch check.
   Verification: pending (shared-core).
@@ -311,7 +328,7 @@ for it until the matching requirement below is implemented:
   routed never excludes, replaces or widens it; an unavailable designated
   credential is reported with its own reason at most once per turn, and the
   designation can be cleared in every routing mode.
-  Verification: pending (codex-apps-binding).
+  Verification: `apps/api/test/codex-redemption-routes.test.ts`, `packages/db/test/codex-token-resolver.test.ts`, `packages/runtime/test/runtime.test.ts`.
 - **SUB-APPS-02** Reset-credit redemption keeps its explicit human-controlled
   boundary and is never triggered by automatic selection or failover.
   Verification: pending (shared-core).
@@ -402,20 +419,31 @@ by the implementer and recorded here; consequential ones are escalated.
 | D-15 | 2026-10-07 | Implementer decision, precedence between D-13 and D-14: in Primary first, the primary takes new work whenever it can serve it, and unknown quota counts as able to serve. The known-capacity ranking of D-14 orders only the other accounts (and, in Spread, applies before load balancing), so a primary with unknown quota is not passed over for a backup. |
 | D-16 | 2026-10-07 | Implementer decision: reasoning levels map by name first, then by closest relative position on the two ladders; a tie goes to the lower level (cheaper and less likely to exceed the target's plan), and an unlisted level maps to the lower middle. |
 | D-17 | 2026-10-07 | Implementer decision: a preferred model that the workspace does not allow is treated like one without capacity. Work uses the first allowed model in the failover order (SUB-WAIT-01 permits no wait while an allowed model can serve) and waits on the restriction only when no candidate model is allowed. |
+| D-18 | 2026-10-07 | Implementer decision: accounts connected in a Personal workspace migrate to personal connections of that workspace's owner, with their personal fallback switched on so their Personal-workspace sessions keep working. |
+| D-19 | 2026-10-07 | Q-01 resolved after design review: remote compaction keeps no cleartext to convert at failover time, so cross-provider failover relies on portable compaction (SUB-FAIL-09). |
+| D-20 | 2026-10-07 | Q-03 resolved after design review: any in-scope connection can be designated for Codex Apps by an organization administrator or the connection's delegated manager, in every routing mode; reset-credit redemption stays human-only from a browser session for those same people, not "whoever connected it". |
+| D-21 | 2026-10-07 | Implementer decision: Spread uses a deterministic hash of the session id over eligible accounts (known capacity first), so placement needs no lock across sessions and a session lands on the same account every time. |
+| D-22 | 2026-10-07 | Implementer decision: a wait reports the earliest future time at which something the session may use (its explicit choice, or an account it may use automatically) can serve it, counting quota resets and per-model cooldowns. Resets that have passed, and resets of accounts that could not serve the work anyway, are never reported. |
+| D-23 | 2026-10-07 | Implementer decision: the Spread hash of D-21 is 32-bit FNV-1a over the UTF-16 code units of `<session id>\|<connection id>`, finished with the murmur3 32-bit finalizer, and the lowest value wins. Raw FNV-1a split three sequentially named accounts 50/25/25, which is not fair spreading. |
+| D-24 | 2026-10-07 | Implementer decision: an explicit choice that can never serve the session's model waits with its own reason (`pinned_account_ineligible`) instead of looking like a temporary outage. That covers an account that is gone, no longer authorized for this work, of another provider, or not entitled or allowed for the model (SUB-ACCESS-06). An unhealthy, paused, exhausted or cooling-down chosen account waits as `pinned_account_unavailable` (SUB-SEL-04). |
+| D-25 | 2026-10-07 | Implementer decision: workspace overrides of per-provider and per-model settings (rotation, provider switches, fallback order) apply entry by entry, and provider switches field by field, so overriding one provider never resets another. |
+| D-26 | 2026-10-07 | Implementer decision: a provider switched off for the workspace (SUB-SET-06) and a compaction mode that ties a session to one provider (SUB-FAIL-09) restrict models exactly like the workspace model restriction of D-17. When the lock is what keeps a usable model away, the wait says so. |
+| D-27 | 2026-10-07 | Implementer decision, following SUB-STICK-02 and SUB-STICK-03: turning personal fallback off (by the owner or the organization) stops new automatic selections of personal accounts but is not a forced move. A session whose cache is warm on its owner's personal account keeps it and moves at its next re-selection point. Sharing the session (SUB-STICK-07), revoking the account or the owner leaving (SUB-STICK-03, SUB-ACCESS-06) still move it at once, and disabling personal connections (SUB-OWN-05) moves it at its next safe point. |
 
 ### Open decisions
 
 | ID | Question | Recommendation |
 | --- | --- | --- |
-| Q-01 | How does a Codex remote-compaction session fail over (SUB-FAIL-09)? | Convert to portable compaction at the moment of failover; alternative: default to portable when a failover target exists. |
 | Q-02 | Is cross-provider failover on by default for new organizations? | Yes. |
-| Q-03 | How do Codex Apps and reset-credit redemption fit organization-owned connections? | Keep explicit human-controlled boundaries; bind Apps to a chosen connection independently of model routing. |
 
 ## Verification
 
 The executable reference model of this contract is
-`packages/testing/src/subscription-reference-model.ts`. It is written from
-this document, not from production code. `decide` returns the contract's
+`packages/subscriptions/src/reference-model.ts`, published separately as
+`@opengeni/subscriptions/reference` so production shadow comparisons can run
+`checkDecision`; tests import it through `@opengeni/testing`. It is written
+from this document, not from production code, and production placement never
+imports it. `decide` returns the contract's
 placement for a session (run on an account and model, or wait with a reason);
 `checkDecision` checks any decision, including one made by production code,
 against the contract's invariants, labelling each violation with the
@@ -430,8 +458,61 @@ generate thousands of worlds and
 include a mutation gate: ignoring a pin, switching while the cache is warm,
 using a personal account without an explicit choice, waiting while capacity
 exists and crossing providers when forbidden are each caught by a named
-requirement. Production conformance tests compare the shared core's decisions
-against the model.
+requirement. Production conformance tests
+(`packages/subscriptions/test/reference-conformance.test.ts` and
+`reference-bridge.test.ts`) require every decision of the shared core's policy
+package, `@opengeni/subscriptions`, to pass `checkDecision` and to equal the
+model's decision. They run over generated reference worlds, multi-turn
+trajectories, scripted scenarios
+(`packages/testing/src/subscription-reference-worlds.ts`) and generated
+production inputs that use features the model lacks (provider switches,
+frozen personal authority, compaction locks, quota shapes), bridged to the
+model. Requirements stay `pending` until production placement runs on the
+core.
+
+### Shadow comparison
+
+Before any provider moves to the core (SUB-COMPAT-03), every Codex, Claude and
+SuperGrok turn compares the core with the legacy selector. Right after the
+legacy selection, the worker
+(`apps/worker/src/activities/agent-turn/subscription-core-shadow.ts`) loads the
+placement world for that session and turn from today's tables through the
+legacy adapter (`packages/db/src/legacy-subscription-world.ts`). It then runs
+the core's placement and the reference model's `checkDecision` on it.
+
+It never changes placement and never delays the turn:
+
+- it starts in the background after the legacy selection, and at most two run
+  at once per worker process; further turns skip it (`busy`);
+- it fails open on every error, timeout and cancellation;
+- it reads under the turn's own session actor, so a private session is visible
+  only through its frozen initiating human and never through an empty subject.
+  A personal (user-scope) pool is read as that human, as the legacy selector
+  reads it; other pools never read personal rows;
+- its statements are SELECTs in one transaction, bounded by
+  `OPENGENI_SUBSCRIPTION_CORE_SHADOW_TIMEOUT_MS` (default 250 ms, at most
+  1000 ms), and no statement starts after that deadline. The transaction is
+  `READ ONLY` for Codex. For Claude and SuperGrok, the credentials' row
+  security records and removes its own transient capability row, exactly as
+  legacy reads of those pools do, so those reads are not `READ ONLY`.
+
+`OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED=false` turns it off; it is on by
+default. It records only content-free data, in fixed-label metrics:
+
+- `opengeni_subscription_core_shadow_comparisons_total{provider,parity,placement}`:
+  whether the legacy account is inside the core's eligible set (security
+  parity) and whether the core would place elsewhere or wait
+  (would-switch);
+- `..._parity_failures_total{provider,reason}`;
+- `..._violations_total{provider,requirement}`;
+- `..._inputs_total{provider,input}`: the legacy inputs the Codex fleet shadow
+  omits, such as pins and their source, rotation, the pool in effect, model
+  filters, plan exclusions, cooldowns and lease reuse;
+- `..._skips_total{provider,reason}`;
+- `..._duration_seconds{provider}`.
+
+A throttled debug log line carries the per-decision record with per-session
+aliases instead of connection ids.
 
 The evidence gates for the whole programme (work item `verification-suite`) are: complete
 requirement-to-test coverage (this document reaches no `pending` entries),

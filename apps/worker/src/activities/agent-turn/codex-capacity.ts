@@ -42,6 +42,10 @@ import type {
   RunAgentTurnResult,
 } from "../types";
 import { recordTurnStartupPhase } from "../../observability-metrics";
+import {
+  startSubscriptionCoreShadow,
+  subscriptionCoreShadowRequest,
+} from "./subscription-core-shadow";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { deliverFailedChildTurnToParent } from "../parent-wake";
 import { randomUUID } from "node:crypto";
@@ -577,6 +581,30 @@ export async function selectCodexTurnCapacity(
           payloadBytes: shadowResult.payloadBytes,
         });
       }
+
+      // Shared subscription core shadow: started in the background, bounded
+      // and fail-open; it never delays the turn or changes the lease, wait or
+      // failover decided above.
+      void startSubscriptionCoreShadow({
+        enabled: settings.subscriptionCoreShadowEnabled,
+        provider: "codex",
+        timeoutMs: settings.subscriptionCoreShadowTimeoutMs,
+        db,
+        observability,
+        signal: deps.cancellationSignal,
+        // The session state the legacy selection was made from, not the
+        // pin and last account it has written since.
+        request: () =>
+          subscriptionCoreShadowRequest(deps, "codex", turnId, null, {
+            pinnedConnectionId: lockedSessionCodexState.pinnedCredentialId,
+            pinSource: lockedSessionCodexState.pinSource,
+            lastConnectionId: lockedSessionCodexState.lastCredentialId,
+          }),
+        legacy: {
+          selectedConnectionId: providerTurn.effectiveCodexCredentialId,
+          reusedLease: leased.reused,
+        },
+      });
 
       const poolDepth = eligibleCount === 0 ? "zero" : eligibleCount === 1 ? "one" : "many";
       observability.incrementCounter({

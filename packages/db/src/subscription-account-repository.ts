@@ -3,6 +3,7 @@ import { subscriptionAccountShardIndex, selectSubscriptionAccount } from "@openg
 import { assignedConnectionDefault, connectionModelAllowed } from "./model-connection-access";
 import { heartbeatSubscriptionCredentialLeaseUntil as heartbeatPoolCredentialLeaseUntil } from "./subscription-credential-leases";
 import {
+  OrganizationMember,
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 as WORKSPACE_AUTHORITY_SNAPSHOT_V1,
   XaiProviderAccountAuthoritySnapshotV1 as SubscriptionAuthoritySnapshotV1,
   type XaiProviderAccountAuthoritySnapshotV1 as SubscriptionAuthoritySnapshot,
@@ -12,6 +13,12 @@ import type { Database } from "./database";
 import { rawRows, withWorkspaceSubjectRls, withRlsContext, setSubjectRlsContext } from "./database";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import * as schema from "./schema";
+import {
+  subscriptionPoolWorkerSubject,
+  withPoolWakeServiceScopeInTransaction,
+  withSubscriptionPoolSessionAccess,
+} from "./subscription-session-access";
+import { subjectHasLiveWorkspaceAuthorityInScope } from "./workspace-authority";
 
 import type { SubscriptionPoolTables } from "./subscription-pool-schema";
 
@@ -1372,7 +1379,24 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     });
   }
 
+  /** Pool-worker subjects keep the acting turn's session access; see subscription-session-access. */
   async function acquireSubscriptionCredentialLease(
+    db: Database,
+    input: Parameters<typeof acquireSubscriptionCredentialLeaseInSessionContext>[1],
+  ): ReturnType<typeof acquireSubscriptionCredentialLeaseInSessionContext> {
+    return await withSubscriptionPoolSessionAccess(
+      db,
+      {
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+      },
+      async () => await acquireSubscriptionCredentialLeaseInSessionContext(db, input),
+    );
+  }
+
+  async function acquireSubscriptionCredentialLeaseInSessionContext(
     db: Database,
     input: {
       modelId?: string;
@@ -2166,9 +2190,28 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     );
   }
 
+  /** Pool-worker subjects keep the acting turn's session access; see subscription-session-access. */
   async function setSubscriptionSessionAccountPin(
     db: Database,
+    input: Parameters<typeof setSubscriptionSessionAccountPinInSessionContext>[1],
+  ): ReturnType<typeof setSubscriptionSessionAccountPinInSessionContext> {
+    return await withSubscriptionPoolSessionAccess(
+      db,
+      {
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        sessionId: input.sessionId,
+        turnId: input.turnId ?? null,
+      },
+      async () => await setSubscriptionSessionAccountPinInSessionContext(db, input),
+    );
+  }
+
+  async function setSubscriptionSessionAccountPinInSessionContext(
+    db: Database,
     input: {
+      /** The acting turn; restores its frozen initiating human for pool-worker subjects. */
+      turnId?: string | null;
       accountId: string;
       workspaceId: string;
       subjectId: string;
@@ -2240,9 +2283,28 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     );
   }
 
+  /** Pool-worker subjects keep the acting turn's session access; see subscription-session-access. */
   async function getSubscriptionSessionAccountPin(
     db: Database,
+    input: Parameters<typeof getSubscriptionSessionAccountPinInSessionContext>[1],
+  ): ReturnType<typeof getSubscriptionSessionAccountPinInSessionContext> {
+    return await withSubscriptionPoolSessionAccess(
+      db,
+      {
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        sessionId: input.sessionId,
+        turnId: input.turnId ?? null,
+      },
+      async () => await getSubscriptionSessionAccountPinInSessionContext(db, input),
+    );
+  }
+
+  async function getSubscriptionSessionAccountPinInSessionContext(
+    db: Database,
     input: {
+      /** The acting turn; restores its frozen initiating human for pool-worker subjects. */
+      turnId?: string | null;
       workspaceId: string;
       subjectId: string;
       sessionId: string;
@@ -2279,9 +2341,28 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     );
   }
 
+  /** Pool-worker subjects keep the acting turn's session access; see subscription-session-access. */
   async function recordSubscriptionSessionLastAccount(
     db: Database,
+    input: Parameters<typeof recordSubscriptionSessionLastAccountInSessionContext>[1],
+  ): ReturnType<typeof recordSubscriptionSessionLastAccountInSessionContext> {
+    return await withSubscriptionPoolSessionAccess(
+      db,
+      {
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        sessionId: input.sessionId,
+        turnId: input.turnId ?? null,
+      },
+      async () => await recordSubscriptionSessionLastAccountInSessionContext(db, input),
+    );
+  }
+
+  async function recordSubscriptionSessionLastAccountInSessionContext(
+    db: Database,
     input: {
+      /** The acting turn; restores its frozen initiating human for pool-worker subjects. */
+      turnId?: string | null;
       accountId: string;
       workspaceId: string;
       subjectId: string;
@@ -2383,6 +2464,59 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     );
   }
 
+  /**
+   * Whether the caller's subject holds the shared pool it wakes: the provider's
+   * pool-worker subject (worker usage and quota observations), a subject with
+   * live authority over this workspace, or, for the organization pool, an
+   * active member of the organization (an administrator wakes every workspace
+   * of the organization, including ones it is not a member of). This is
+   * defense in depth on top of the route's own authorization, not an
+   * authorization by itself: it never establishes who the caller is.
+   */
+  async function sharedPoolWakeCallerHoldsPool(
+    scopedDb: Database,
+    input: { workspaceId: string; subjectId: string; scope: "workspace" | "organization" },
+  ): Promise<boolean> {
+    if (input.subjectId === subscriptionPoolWorkerSubject(provider)) return true;
+    const [scope] = await rawRows<{ account_id: string | null }>(
+      scopedDb,
+      sql`select current_setting('opengeni.account_id', true) as account_id`,
+    );
+    const accountId = scope?.account_id ?? "";
+    if (!accountId) return false;
+    if (
+      await subjectHasLiveWorkspaceAuthorityInScope(scopedDb, {
+        accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+      })
+    )
+      return true;
+    if (
+      input.scope !== "organization" ||
+      !(input.subjectId.startsWith("user:") || input.subjectId.startsWith("external_user:"))
+    )
+      return false;
+    const [memberships] = await rawRows<{ result: unknown }>(
+      scopedDb,
+      sql`select list_self_organization_memberships(${input.subjectId}) as result`,
+    );
+    return OrganizationMember.array()
+      .parse(memberships?.result ?? [])
+      .some(
+        (membership) => membership.organizationId === accountId && membership.status === "active",
+      );
+  }
+
+  /**
+   * Wake every waiting capacity waiter of one exact pool scope in one
+   * workspace. A personal pool is resolved by, and wakes as, its owner. A
+   * shared pool wakes in the service scope, reaching other members' private
+   * waiters too, only when `sharedPoolWakeCallerHoldsPool` accepts the caller.
+   * Any other caller wakes under its own subject, as before, and so reaches no
+   * other member's private waiter. Returns nothing, so no caller can learn how
+   * many (private) waiters exist.
+   */
   async function wakeSubscriptionCapacityWaiters(
     db: Database,
     input: {
@@ -2392,19 +2526,16 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
       reason: string;
       now?: Date;
     },
-  ): Promise<number> {
+  ): Promise<void> {
     const snapshot = SubscriptionAuthoritySnapshotV1.parse(input.authoritySnapshot);
     const now = input.now ?? new Date();
-    return await withWorkspaceSubjectRls(
-      db,
-      input.workspaceId,
-      input.subjectId,
-      async (scopedDb) => {
-        const ownerMembershipId = await resolvePoolOwnerMembershipId(scopedDb, {
-          workspaceId: input.workspaceId,
-          subjectId: input.subjectId,
-          authoritySnapshot: snapshot,
-        });
+    await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+      const ownerMembershipId = await resolvePoolOwnerMembershipId(scopedDb, {
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        authoritySnapshot: snapshot,
+      });
+      const wake = async () => {
         const rows = await scopedDb
           .update(tables.capacityWaiters)
           .set({
@@ -2453,9 +2584,21 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
               },
             });
         }
-        return rows.length;
-      },
-    );
+      };
+      // Shared pools wake in the trusted service scope (the Codex rule): the
+      // caller's subject would hide other members' private waiters. A
+      // personal pool's waiters all belong to its owner, the caller.
+      if (
+        snapshot.scope !== "user" &&
+        (await sharedPoolWakeCallerHoldsPool(scopedDb, {
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+          scope: snapshot.scope,
+        }))
+      )
+        await withPoolWakeServiceScopeInTransaction(scopedDb, wake);
+      else await wake();
+    });
   }
 
   /** Workspace runtime can read its local pools and the same organization's shared pool.
