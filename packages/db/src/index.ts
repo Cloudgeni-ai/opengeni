@@ -35470,6 +35470,26 @@ export async function getInitializedSessionCreateReplay(
   );
 }
 
+/** Read target identity for authorization without expanding chat content or controls. */
+export async function getSessionAuthorizationTargetProjection(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<Pick<Session, "id" | "accountId" | "rootSessionId"> | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        id: schema.sessions.id,
+        accountId: schema.sessions.accountId,
+        rootSessionId: schema.sessions.rootSessionId,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    return row ?? null;
+  });
+}
+
 export async function getSession(
   db: Database,
   workspaceId: string,
