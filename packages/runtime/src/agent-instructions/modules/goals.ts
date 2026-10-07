@@ -1,3 +1,4 @@
+import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import {
   blocks,
   sentences,
@@ -21,11 +22,17 @@ const GOAL_COMPLETION_UNAVAILABLE =
 const GOAL_PAUSE_JUDGMENT =
   "A definitive missing permission or required human decision can justify an immediate goal pause with evidence and the change needed to resume. Work already in flight or a meaningful timed recheck calls for the available waiting mechanism, not a goal pause.";
 
-const GOAL_TOOLS = ["goal_set", "goal_update", "goal_complete", "goal_pause", "goal_resume"];
+const GOAL_TOOLS = [
+  "goal_set",
+  "goal_update",
+  "goal_complete",
+  "goal_pause",
+  "goal_resume",
+] as const satisfies readonly FirstPartyMcpToolName[];
 
 /** The ownership paragraph, naming only goal tools not proven absent. */
 function goalOwnership(context: AgentPromptContext): string {
-  const has = (name: string) => toolAvailable(context, name);
+  const has = (name: FirstPartyMcpToolName) => toolAvailable(context, name);
   if (GOAL_TOOLS.every(has)) return GOAL_OWNERSHIP;
   const complete = has("goal_complete");
   const pause = has("goal_pause");

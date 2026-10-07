@@ -249,9 +249,13 @@ describe("modular prompt: tool-specific clauses", () => {
     expect(composed).toContain("Before saving, use knowledge_prepare_save");
   });
 
-  test("absent wait_for_input drops the waiting mechanics and keeps compaction", () => {
+  test("absent wait_for_input keeps only tool-neutral waiting guidance and compaction", () => {
     const composed = compose({ unavailable: ["wait_for_input"] });
-    expect(composed).not.toContain("## Waiting");
+    expect(composed).toContain(
+      "## Waiting\n\nWhen monitoring requires timed checks, use the available recurring-monitoring or session-wait mechanism at that meaningful cadence rather than ritual polling.\n\n## Compaction",
+    );
+    expect(names(composed, "wait_for_input")).toBe(false);
+    expect(composed).not.toContain("an out-of-turn wait is available");
     expect(composed).toContain("## Compaction");
     expect(composed).toContain(
       "Keep the user informed while work is underway, then end the turn with a self-contained final response.",
@@ -300,5 +304,27 @@ describe("buildAgent instructions: tool availability", () => {
     expect(layer(narrowed, "operational_contract")).not.toBe(
       layer(unknown, "operational_contract"),
     );
+  });
+
+  test("the Codemode directive is a known exception: only it still names command tools", () => {
+    // The attempt directives are not pruned (see PROMPT_CHANGELOG). With every
+    // prompt-named tool absent, the only survivors are the Codemode directive's
+    // `command_wait`/`command_read` observation clause, never the contract.
+    const inspection = inspectPersistentAgentInstructions(settings, {
+      agentConfig,
+      agentPromptResources: ALL_RESOURCES,
+      codemodeAvailable: true,
+      agentPromptToolAvailability: { unavailable: [...PROMPT_NAMED_TOOLS] },
+    });
+    const layer = (id: string) => inspection.layers.find((entry) => entry.id === id)?.content ?? "";
+    expect(PROMPT_NAMED_TOOLS.filter((tool) => names(layer("operational_contract"), tool))).toEqual(
+      [],
+    );
+    expect(PROMPT_NAMED_TOOLS.filter((tool) => names(layer("codemode"), tool))).toEqual([
+      "command_read",
+      "command_wait",
+    ]);
+    const survivors = PROMPT_NAMED_TOOLS.filter((tool) => names(inspection.composed, tool));
+    expect(survivors).toEqual(["command_read", "command_wait"]);
   });
 });

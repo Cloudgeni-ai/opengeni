@@ -12,6 +12,7 @@ import {
 import { inspectPersistentAgentInstructions, type BuildAgentOptions } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import { promptToolAvailabilityForTurn } from "../src/activities/agent-turn/prompt-tool-availability";
+import { sessionTitleToolPlan } from "../src/activities/agent-turn/session-title";
 import { linkedTurnFirstPartyPermissions } from "../src/activities/agent-turn/tool-environment";
 
 const settings = testSettings({ sandboxBackend: "docker" });
@@ -76,7 +77,7 @@ function promptFor(
   });
 }
 
-describe("worker prompt tool availability (OPE-725)", () => {
+describe("worker prompt tool availability", () => {
   test("a session without an agent configuration receives no availability view", () => {
     for (const config of [null, undefined]) {
       expect(
@@ -172,5 +173,71 @@ describe("worker prompt tool availability (OPE-725)", () => {
     const recovered = promptFor([...stored].reverse(), null, { sessionInstructions: "turn 2" });
     const contract = (text: string) => text.slice(0, text.indexOf("# Session instructions"));
     expect(contract(recovered)).toBe(contract(first));
+  });
+
+  test("a linked turn's narrower ceiling changes the contract only while that authority differs", () => {
+    // Linked authority is a per-turn snapshot, so a session mixing linked and
+    // unlinked turns renders different contracts. That is expected: the real
+    // first-party permissions differ on those turns too.
+    const contract = (text: string) => text.slice(0, text.indexOf("# Session instructions"));
+    const linkedAuthority = {
+      permissions: DEFAULT_FIRST_PARTY_MCP_PERMISSIONS.filter(
+        (permission) => permission !== "goals:manage",
+      ),
+    };
+    const unlinked = promptFor(null, linkedTurnFirstPartyPermissions(null, null), {
+      sessionInstructions: "turn 1",
+    });
+    const linked = promptFor(null, linkedTurnFirstPartyPermissions(null, linkedAuthority), {
+      sessionInstructions: "turn 2",
+    });
+    const linkedAgain = promptFor(null, linkedTurnFirstPartyPermissions(null, linkedAuthority), {
+      sessionInstructions: "turn 3",
+    });
+    expect(contract(linked)).not.toBe(contract(unlinked));
+    expect(contract(linkedAgain)).toBe(contract(linked));
+  });
+
+  test("the delegated token's first-party tools are never proven absent by the selection", () => {
+    // The worker signs titleToolPlan.remoteFirstPartyMcpTools into the
+    // delegated token; the prompt view derives from the selection it filters.
+    // A `workspace:admin` ceiling admits every registration, isolating
+    // selection-based absence (ceiling-based absence mirrors API admission).
+    const stores: (readonly FirstPartyMcpToolName[] | null)[] = [
+      null,
+      [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+      DEFAULT_FIRST_PARTY_MCP_TOOLS.filter((tool) => tool !== "set_session_title"),
+      DEFAULT_FIRST_PARTY_MCP_TOOLS.filter(
+        (tool) => !(GOAL_AND_KNOWLEDGE_TOOLS as readonly string[]).includes(tool),
+      ),
+    ];
+    for (const stored of stores) {
+      const selected = selectionFor(stored);
+      const availability = promptToolAvailabilityForTurn({
+        agentConfig,
+        selectedFirstPartyMcpTools: selected,
+        firstPartyPermissions: ["workspace:admin"],
+      });
+      for (const shouldRequestTitle of [false, true]) {
+        for (const parallelGenerationAvailable of [false, true]) {
+          const plan = sessionTitleToolPlan({
+            tools: [],
+            agentConfig,
+            selectedFirstPartyMcpTools: selected,
+            shouldRequestTitle,
+            parallelGenerationAvailable,
+            routeAllowsTitleRequests: true,
+          });
+          expect(plan.remoteFirstPartyMcpTools.filter((tool) => !selected.includes(tool))).toEqual(
+            [],
+          );
+          expect(
+            plan.remoteFirstPartyMcpTools.filter((tool) =>
+              availability?.unavailable.includes(tool),
+            ),
+          ).toEqual([]);
+        }
+      }
+    }
   });
 });

@@ -1,3 +1,4 @@
+import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import {
   blocks,
   sentences,
@@ -29,7 +30,7 @@ export const KNOWLEDGE_GUIDANCE_TOOLS = [
   "knowledge_retain_file",
   "instruction_policy_get",
   "instruction_policy_save",
-] as const;
+] as const satisfies readonly FirstPartyMcpToolName[];
 
 /**
  * `KNOWLEDGE_GUIDANCE` with each clause that names a tool kept only while that
@@ -37,7 +38,7 @@ export const KNOWLEDGE_GUIDANCE_TOOLS = [
  * constant sentence for sentence (pinned by tests); general learning policy,
  * grounding and authority rules never depend on availability.
  */
-export function knowledgeGuidance(has: (name: string) => boolean): string[] {
+export function knowledgeGuidance(has: (name: FirstPartyMcpToolName) => boolean): string[] {
   const search = has("knowledge_search");
   const get = has("knowledge_get");
   const save = has("knowledge_save");

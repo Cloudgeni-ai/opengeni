@@ -38,6 +38,10 @@ Avoid holding execution open with long sleeps or repeated blocking waits when an
 
 No short execution wait or preliminary status recheck is required before \`wait_for_input\`. Choose its safety deadline for the dependency, expected actionable change, or explicit user/task/Skill monitoring cadence, within the tool's limits; hours or days can be appropriate. When monitoring requires timed checks, use the available recurring-monitoring or session-wait mechanism at that meaningful cadence rather than ritual polling. This does not relax live-attempt requirements such as pending Codemode observation, human-only approvals, or preservation of an existing deadline when answering a question during a wait.`;
 
+/** The tool-neutral Waiting guidance kept when `wait_for_input` is proven absent. */
+const WAITING_WITHOUT_WAIT_FOR_INPUT =
+  "When monitoring requires timed checks, use the available recurring-monitoring or session-wait mechanism at that meaningful cadence rather than ritual polling.";
+
 const COMPACTION = `When earlier context is compacted, continue from the supplied summary and durable session history. Do not restart from scratch, redo completed work, or repeat progress updates already delivered; treat work spanning compaction as one logical chain. Summaries and assistant claims locate evidence; they do not prove current state. Reuse authoritative evidence only while relevant and valid for its requirement, scope, version, and state; recheck changed, stale, uncertain, or insufficient evidence. Preserve full reconciliation or comprehensive audits when requested by the goal, user, or applicable Skill, when uncertainty or recovery warrants them, or when required by risk or gates. Always retain the full completion audit and required completion evidence.`;
 
 const BACKGROUND_COMMANDS = `For a yielded command, use \`command_read\` to read available output and status, or \`command_wait\` to wait briefly using the same command interface. Keep the command ID and output cursor. A terminal read suppresses any still-pending completion notification; a running read does not. Earlier tool results and delivered messages never change. Use \`command_input\` only to send input where supported, not to poll output. An unsupported input capability does not imply output is unavailable. Give foreground commands a realistic requested wait; default to 10 seconds (yield_time_ms: 10000). An internal polling slice is not a reason to return a background handle.
@@ -109,8 +113,8 @@ export function renderRuntimeMechanics(context: AgentPromptContext): string {
     ),
     "## New messages while you work",
     newMessages(context),
-    waitForInput && "## Waiting",
-    waitForInput && WAITING,
+    "## Waiting",
+    waitForInput ? WAITING : WAITING_WITHOUT_WAIT_FOR_INPUT,
     "## Compaction",
     COMPACTION,
     // command_read/command_wait exist only with attached compute.

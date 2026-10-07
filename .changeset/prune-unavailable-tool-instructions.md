@@ -1,5 +1,5 @@
 ---
-"@opengeni/runtime": patch
+"@opengeni/runtime": minor
 "@opengeni/contracts": minor
 ---
 

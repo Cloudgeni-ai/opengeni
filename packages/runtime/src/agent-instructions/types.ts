@@ -1,6 +1,7 @@
 import type {
   AgentPromptModuleId,
   AgentRenderer,
+  FirstPartyMcpToolName,
   ResolvedAgentCapabilities,
 } from "@opengeni/contracts";
 
@@ -64,16 +65,19 @@ export type AgentPromptContext = {
  * as available, so its guidance stays.
  */
 export type AgentPromptToolAvailability = {
-  readonly unavailable: readonly string[];
+  readonly unavailable: readonly FirstPartyMcpToolName[];
 };
 
 /** False only when the attempt proved the named tool absent. */
-export function toolAvailable(context: AgentPromptContext, name: string): boolean {
+export function toolAvailable(context: AgentPromptContext, name: FirstPartyMcpToolName): boolean {
   return !context.toolAvailability?.unavailable.includes(name);
 }
 
 /** True when none of the named tools was proven absent. */
-export function toolsAvailable(context: AgentPromptContext, names: readonly string[]): boolean {
+export function toolsAvailable(
+  context: AgentPromptContext,
+  names: readonly FirstPartyMcpToolName[],
+): boolean {
   return names.every((name) => toolAvailable(context, name));
 }
 

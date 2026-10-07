@@ -190,7 +190,7 @@ unchanged.
   (plain web links only; workspace files by path in backticks when a sandbox
   is attached).
 
-## Tool-availability variants (OPE-725)
+## Tool-availability variants
 
 A broad capability is product semantics, not tool authority: a configured
 session can keep `goals` or `knowledge` on while its accepted first-party
@@ -234,9 +234,12 @@ When a named tool is proven absent, only the clauses naming it change:
   `finalAnswer` sentences, the `session_wait` join and short-wait sentences,
   and the `session_get` contrasts each need their tools.
 - Runtime mechanics and base behavior: without `wait_for_input` the in-flight
-  and already-waiting sentences, `## Waiting`, and the three base-behavior
-  `wait_for_input` clauses are dropped; Background commands keeps general
-  command guidance and names only the remaining `command_read`/`command_wait`.
+  and already-waiting sentences and the three base-behavior `wait_for_input`
+  clauses are dropped, and `## Waiting` keeps only its tool-neutral sentence
+  ("When monitoring requires timed checks, use the available
+  recurring-monitoring or session-wait mechanism at that meaningful cadence
+  rather than ritual polling."); Background commands keeps general command
+  guidance and names only the remaining `command_read`/`command_wait`.
 - Artifacts: without `sandbox_file_publish` the visual rule reads "Use the
   exact retained artifact id from an image tool receipt. A sandbox path is not
   an inline image source."
@@ -246,3 +249,15 @@ When a named tool is proven absent, only the clauses naming it change:
 Tool discovery, media, accepted user/workspace/Skill instructions, active-goal
 continuation input, and the Codemode/code-search/Git-binding attempt
 directives are unchanged.
+
+Known exception: the Codemode directive's observation clause still names
+`command_wait`/`command_read` when those tools are proven absent; a test pins
+it as the only surviving prompt-named tool.
+
+Linked turns: the permission ceiling of a turn acting for a linked external
+identity is that turn's own snapshot. A session mixing linked and unlinked
+turns (or turns for different linked identities) can therefore render a
+different operational contract per turn, which breaks prompt-prefix reuse
+across those turns. This is expected: the turn's executable first-party
+permissions differ in the same way. Turns with the same authority keep an
+identical contract.
