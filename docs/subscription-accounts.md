@@ -270,6 +270,7 @@ for it until the matching requirement below is implemented:
   sender's, and non-human acceptance resolves the workspace or organization
   pool instead of assuming workspace scope.
   Verification: `packages/db/test/subscription-pool-receiver-authority.test.ts`,
+  `apps/worker/test/parent-wake-postgres.test.ts`,
   `apps/worker/test/scheduled-task-personal-authority.test.ts`, and
   `packages/db/test/codex-credential-leases.test.ts`.
 - **SUB-ACCESS-02** Pool authority is additive to session access. Using a

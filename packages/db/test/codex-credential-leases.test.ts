@@ -38,6 +38,7 @@ import {
   recordCodexAccountUsageForFinalization,
   recordCodexAccountUsageWithWakeTargets,
   recordSessionCodexSelectionForTurnAttempt,
+  requestSessionTurnRecovery,
   recordCodexTokenRefresh,
   settleCodexCredentialLeaseLoss,
   settleCodexCredentialFailover,
@@ -3520,6 +3521,10 @@ test("SUB-ACCESS-01: Codex accepted source/policy snapshots survive recovery and
     select session_id, trigger_event_id from session_turns where id = ${turnId}`;
   if (!identity) throw new Error("Codex accepted turn identity was not seeded");
 
+  const observedAllocatorContexts: Array<{
+    accounts: string[];
+    rotationEnabled: boolean;
+  }> = [];
   const lease = async (exactTurnId: string) => {
     const fence = await attemptFenceForTurn(exactTurnId);
     return await acquireCodexCredentialLease(
@@ -3531,7 +3536,13 @@ test("SUB-ACCESS-01: Codex accepted source/policy snapshots survive recovery and
         holderId: `sub-access:${fence.attemptId}`,
         advanceActivePointer: false,
       },
-      () => ({ credentialId, decision: "test" }),
+      (context) => {
+        observedAllocatorContexts.push({
+          accounts: context.accounts.map((account) => account.id),
+          rotationEnabled: context.rotationEnabled,
+        });
+        return selector(context);
+      },
     );
   };
   await lease(turnId);
@@ -3540,15 +3551,49 @@ test("SUB-ACCESS-01: Codex accepted source/policy snapshots survive recovery and
   const acceptedPolicy = readCodexCredentialPolicySnapshotV1(acceptedTurn?.metadata);
   expect(acceptedPolicy.kind).toBe("valid");
   if (acceptedPolicy.kind !== "valid") throw new Error("Codex policy was not frozen");
+  expect(acceptedPolicy.policy).toMatchObject({ source: "workspace", rotationEnabled: true });
+  expect(observedAllocatorContexts.at(-1)).toMatchObject({
+    accounts: [credentialId],
+    rotationEnabled: true,
+  });
 
-  // Change live allocator settings after acceptance. A recovery must continue
-  // to use the exact per-turn source and policy snapshot already recorded.
+  // Change both live policy dimensions after acceptance. Recovery must keep
+  // using the accepted workspace source and rotation setting, not these values.
   await updateCodexRotationSettings(dbA, ws!.workspaceId, { rotationEnabled: false });
-  await startRecoveryAttempt(ws!, turnId);
+  await setWorkspaceCodexSubscriptionMode(dbA, {
+    ...ws!,
+    subjectId: null,
+    mode: "disabled",
+  });
+  const acceptedAttempt = await attemptFenceForTurn(turnId);
+  expect(
+    await requestSessionTurnRecovery(dbA, ws!.workspaceId, {
+      sessionId: identity.session_id,
+      turnId,
+      attemptId: acceptedAttempt.attemptId,
+      triggerEventId: identity.trigger_event_id,
+      reason: "worker_restart",
+    }),
+  ).toMatchObject({ action: "recovering" });
+  const recovered = await claimSessionWorkForAttempt(dbA, ws!.workspaceId, {
+    sessionId: identity.session_id,
+    workflowId: acceptedAttempt.workflowId,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  expect(recovered.action).toBe("claimed");
+  if (recovered.action !== "claimed") throw new Error("Codex recovery did not reclaim the turn");
+  expect(recovered.turn.id).toBe(turnId);
   await lease(turnId);
   const [recoveredTurn] = await admin<{ metadata: Record<string, unknown> }[]>`
     select metadata from session_turns where id = ${turnId}`;
   expect(readCodexCredentialPolicySnapshotV1(recoveredTurn?.metadata)).toEqual(acceptedPolicy);
+  expect(observedAllocatorContexts.at(-1)).toMatchObject({
+    accounts: [credentialId],
+    rotationEnabled: true,
+  });
 
   await createSessionGoal(clientA.db, {
     accountId: ws!.accountId,
@@ -3601,7 +3646,12 @@ test("SUB-ACCESS-01: Codex accepted source/policy snapshots survive recovery and
   if (claimed.action !== "claimed") throw new Error(`Codex goal turn was not claimed: ${claimed.reason}`);
   expect(claimed.turn.source).toBe("goal");
   expect(readCodexCredentialPolicySnapshotV1(claimed.turn.metadata)).toEqual(acceptedPolicy);
-  await lease(claimed.turn.id);
+  const continuationLease = await lease(claimed.turn.id);
+  expect(continuationLease.credentialId).toBe(credentialId);
+  expect(observedAllocatorContexts.at(-1)).toMatchObject({
+    accounts: [credentialId],
+    rotationEnabled: true,
+  });
   const [continuedTurn] = await admin<{ metadata: Record<string, unknown> }[]>`
     select metadata from session_turns where id = ${claimed.turn.id}`;
   expect(readCodexCredentialPolicySnapshotV1(continuedTurn?.metadata)).toEqual(acceptedPolicy);

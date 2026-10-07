@@ -421,6 +421,7 @@ test("SUB-ACCESS-01: Agent messages never carry a personal pool into another hum
   const input = await fixture();
   const pools = await connectOrganizationPools(input);
   const ownerPersonal = await connectPersonalPools(input, input.owner);
+  const memberPersonal = await connectPersonalPools(input, input.member);
 
   // The owner's own work runs on their explicitly activated personal pool.
   const ownerSession = await humanSession(input, input.owner);
@@ -444,15 +445,46 @@ test("SUB-ACCESS-01: Agent messages never carry a personal pool into another hum
   const memberSender = await humanSession(input, input.member);
   await prompt(input, memberSender.id, { type: "human", subjectId: input.member });
   const memberClaim = await claim(input, memberSender.id);
-  expect(await turnAuthority(memberClaim.turn.id)).toMatchObject({
-    claude: organization,
-    xai: organization,
-  });
+  const memberSenderAuthority = await turnAuthority(memberClaim.turn.id);
+  expect(memberSenderAuthority.claude.scope).toBe("user");
+  expect(memberSenderAuthority.xai.scope).toBe("user");
+  expect(
+    (
+      await selectClaudeCredentialForUse(client.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.member,
+        shardKey: crypto.randomUUID(),
+        authoritySnapshot: memberSenderAuthority.claude,
+        upstreamModelId,
+      })
+    ).credentialId,
+  ).toBe(memberPersonal.claude);
+  expect(
+    (
+      await selectXaiCredentialForUse(client.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.member,
+        shardKey: crypto.randomUUID(),
+        authoritySnapshot: memberSenderAuthority.xai,
+      })
+    ).credentialId,
+  ).toBe(memberPersonal.xai);
   const ownerTarget = await humanSession(input, input.owner);
   await prompt(input, ownerTarget.id, { type: "human", subjectId: input.owner });
   const [ownerTargetTurn] = await shared.admin<{ id: string }[]>`
     select id from session_turns where session_id = ${ownerTarget.id}`;
-  expect((await turnAuthority(ownerTargetTurn!.id)).claude.scope).toBe("user");
+  const ownerTargetAuthority = await turnAuthority(ownerTargetTurn!.id);
+  expect(ownerTargetAuthority.claude.scope).toBe("user");
+  const ownerInitial = await claim(input, ownerTarget.id);
+  const ownerInitialAuthority = await turnAuthority(ownerInitial.turn.id);
+  expect(ownerInitialAuthority).toMatchObject({
+    claude: ownerTargetAuthority.claude,
+    xai: ownerTargetAuthority.xai,
+  });
+  await expectSelects(input, ownerInitialAuthority, ownerPersonal);
+  await complete(input, ownerTarget.id, ownerInitial);
   const cross = await message(
     input,
     { sessionId: memberSender.id, claimed: memberClaim },
@@ -462,6 +494,10 @@ test("SUB-ACCESS-01: Agent messages never carry a personal pool into another hum
     claude: organization,
     xai: organization,
   });
+  const crossReceived = await claim(input, ownerTarget.id);
+  const crossAuthority = await turnAuthority(crossReceived.turn.id);
+  expect(crossAuthority).toMatchObject({ claude: organization, xai: organization });
+  await expectSelects(input, crossAuthority, pools);
 
   // The same human keeps their own receiver's personal pool: from the latest
   // accepted turn, and from the frozen initial snapshot before any turn exists.
