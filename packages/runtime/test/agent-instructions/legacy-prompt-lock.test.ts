@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { FIRST_PARTY_MCP_TOOL_NAMES } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
 import { inspectPersistentAgentInstructions } from "../../src/index";
 import { LEGACY_PROMPT_CASES } from "./legacy-cases";
@@ -66,5 +67,20 @@ describe("legacy prompt bytes (null agent configuration)", () => {
         expect(inspection.layers.map((layer) => layer.id).join(",")).toBe(locked.layers);
       });
     }
+  }
+
+  // Tool availability is a modular-only rendering input: even a view proving
+  // every first-party tool absent leaves the legacy bytes untouched.
+  for (const [name, options] of Object.entries(LEGACY_PROMPT_CASES)) {
+    test(`${name} ignores tool availability`, () => {
+      const inspection = inspectPersistentAgentInstructions(settings, {
+        ...options,
+        agentPromptToolAvailability: { unavailable: [...FIRST_PARTY_MCP_TOOL_NAMES] },
+      });
+      const locked = LOCKED[name]!;
+      expect(inspection.composed.length).toBe(locked.chars);
+      expect(createHash("sha256").update(inspection.composed).digest("hex")).toBe(locked.sha256);
+      expect(inspection.layers.map((layer) => layer.id).join(",")).toBe(locked.layers);
+    });
   }
 });

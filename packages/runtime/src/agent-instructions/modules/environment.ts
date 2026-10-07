@@ -1,5 +1,5 @@
 import type { RigInstructionsContext, WorkspaceEnvironmentContext } from "../types";
-import { blocks, sentences, type AgentPromptModule } from "../types";
+import { blocks, sentences, toolAvailable, type AgentPromptModule } from "../types";
 
 /**
  * Rig doctrine lines. Shared with the legacy CORE, whose bytes they keep.
@@ -41,7 +41,10 @@ export const workspaceEnvironmentModule: AgentPromptModule = {
     ),
 };
 
-/** The rig lines naming rig tools appear only when workspace admin tools are available. */
+/**
+ * The rig lines naming rig tools appear only when workspace admin tools are
+ * available and the attempt has not proved the named tool absent.
+ */
 export const rigModule: AgentPromptModule = {
   id: "rig",
   applies: (context) => context.resources.rig !== undefined,
@@ -52,8 +55,10 @@ export const rigModule: AgentPromptModule = {
       sentences(
         identity,
         fork,
-        context.capabilities.workspaceAdmin && propose,
-        context.capabilities.workspaceAdmin && consult,
+        context.capabilities.workspaceAdmin &&
+          toolAvailable(context, "rig_propose_change") &&
+          propose,
+        context.capabilities.workspaceAdmin && toolAvailable(context, "rig_get") && consult,
       ),
     );
   },

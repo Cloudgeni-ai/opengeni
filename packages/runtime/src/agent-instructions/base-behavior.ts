@@ -1,4 +1,4 @@
-import { blocks, bullets, sentences, type AgentPromptContext } from "./types";
+import { blocks, bullets, sentences, toolAvailable, type AgentPromptContext } from "./types";
 
 /**
  * The one rule the legacy contract lacked: embedder text wins over OpenGeni's
@@ -21,9 +21,13 @@ function workingWithTheUser(context: AgentPromptContext): string {
   const reserve = context.capabilities.artifacts
     ? "Reserve audits, second sources, extra verification, documents, Sites, and visuals for requests that need them, and offer them in one sentence when they would clearly help."
     : "Reserve audits, second sources, and extra verification for requests that need them, and offer them in one sentence when they would clearly help.";
+  // Ending a turn on `wait_for_input` is described only while the tool may exist.
+  const waitForInput = toolAvailable(context, "wait_for_input");
   return blocks(
     "# Working with the user",
-    "Keep the user informed while work is underway, then end the turn with a self-contained final response or, where the rules below say so, `wait_for_input`.",
+    waitForInput
+      ? "Keep the user informed while work is underway, then end the turn with a self-contained final response or, where the rules below say so, `wait_for_input`."
+      : "Keep the user informed while work is underway, then end the turn with a self-contained final response.",
     "## Match effort to the request",
     sentences(
       "Scale the work to what the user asked.",
@@ -35,9 +39,17 @@ function workingWithTheUser(context: AgentPromptContext): string {
     'When the user repeats an ask, such as "check again", "run it again", or the same question for a new time window, reuse the approach, query, script, or session from the earlier turn with the new inputs instead of rediscovering the environment.',
     `## Progress updates
 
-A progress update is one short, plain sentence about what you found or what comes next; leave out tool, file, and query names unless the user needs them. Skip the opening update when you expect to answer within about 20 seconds. During active work, update at meaningful milestones or when a long stretch of work would otherwise leave the user without useful context. Honor explicit user/task/Skill update cadences within existing authority, including frequent updates when requested. Monitoring checks and user notifications have separate cadences: choose checks for actionable changes or deadlines, not merely to produce reassurance. Do not wake a suspended turn only to repeat an unchanged status unless an explicit update cadence requires it. Do not narrate Skill reads or waits, and do not post a status right before \`wait_for_input\` unless it answers the user; its reason is the status.
+A progress update is one short, plain sentence about what you found or what comes next; leave out tool, file, and query names unless the user needs them. Skip the opening update when you expect to answer within about 20 seconds. During active work, update at meaningful milestones or when a long stretch of work would otherwise leave the user without useful context. Honor explicit user/task/Skill update cadences within existing authority, including frequent updates when requested. Monitoring checks and user notifications have separate cadences: choose checks for actionable changes or deadlines, not merely to produce reassurance. Do not wake a suspended turn only to repeat an unchanged status unless an explicit update cadence requires it. ${
+      waitForInput
+        ? "Do not narrate Skill reads or waits, and do not post a status right before `wait_for_input` unless it answers the user; its reason is the status."
+        : "Do not narrate Skill reads or waits."
+    }
 
-Do not use a progress update as the final response or as a blocking clarification. The final response must be fully self-contained; a turn that ends with \`wait_for_input\` has none, and its reason is the user-visible status.
+Do not use a progress update as the final response or as a blocking clarification. ${
+      waitForInput
+        ? "The final response must be fully self-contained; a turn that ends with `wait_for_input` has none, and its reason is the user-visible status."
+        : "The final response must be fully self-contained."
+    }
 
 Never praise your plan by contrasting it with an implied worse alternative, as in "I will do <X>, not <Y>".`,
     `## Final answer

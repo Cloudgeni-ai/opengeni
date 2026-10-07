@@ -19,7 +19,12 @@ import { repositoriesModule } from "./modules/repositories";
 import { sandboxModule } from "./modules/sandbox";
 import { skillsModule } from "./modules/skills";
 import { subagentsModule } from "./modules/subagents";
-import type { AgentPromptContext, AgentPromptModule, AgentPromptResources } from "./types";
+import type {
+  AgentPromptContext,
+  AgentPromptModule,
+  AgentPromptResources,
+  AgentPromptToolAvailability,
+} from "./types";
 
 /**
  * Conditional modules in composition order. Session-stable modules first;
@@ -58,6 +63,11 @@ export type ComposeModularAgentInstructionsInput = {
   /** The resolved identity (see `resolveAgentIdentity`). */
   identity: string;
   resources: AgentPromptResources;
+  /**
+   * Frozen per-attempt tool availability (a rendering input, never authority).
+   * Omitted keeps every tool-specific clause, byte for byte.
+   */
+  toolAvailability?: AgentPromptToolAvailability | undefined;
   /** Per-attempt runtime directives, each already gated by its caller. */
   codemode?: string | undefined;
   codeSearch?: string | undefined;
@@ -118,6 +128,7 @@ export function composeModularAgentInstructions(input: ComposeModularAgentInstru
     capabilities: input.capabilities,
     renderer: input.renderer,
     resources: input.resources,
+    ...(input.toolAvailability ? { toolAvailability: input.toolAvailability } : {}),
   });
   const layers: ModularInstructionLayer[] = [
     { id: "identity", title: "Identity", content: input.identity.trim(), joinBefore: "" },
