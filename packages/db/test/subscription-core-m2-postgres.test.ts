@@ -451,6 +451,212 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
   );
 
   test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
+    "SUB-OWN-05: binding capabilities cannot bypass frozen authority or disabled personal connections",
+    async () => {
+      const fixture = await organizationFixture();
+      await shared!.admin`
+        insert into subscription_settings (
+          account_id, rotation, providers, cross_provider_failover, fallback_order,
+          personal_connections_allowed, personal_fallback_allowed
+        ) values (
+          ${fixture.accountId}, '{}'::jsonb, '{}'::jsonb, false, '{}'::jsonb, true, false
+        )`;
+      const [membership] = await shared!.admin<{ id: string; personal_workspace_id: string }[]>`
+        select id::text as id, personal_workspace_id::text as personal_workspace_id
+        from organization_memberships
+        where account_id = ${fixture.accountId} and subject_id = ${fixture.subjectId}`;
+      const workspaceId = membership!.personal_workspace_id;
+      const session = await withSessionRlsActorContext({ subjectId: fixture.subjectId }, () =>
+        createSession(client!.db, {
+          accountId: fixture.accountId,
+          workspaceId,
+          initialMessage: "subscription binding capability reuse fixture",
+          resources: [],
+          metadata: {},
+          model: "fixture-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          createdBy: { kind: "subject", subjectId: fixture.subjectId },
+          createdByContext: {},
+        }),
+      );
+      const turn = await withSessionRlsActorContext({ subjectId: fixture.subjectId }, () =>
+        enqueueSessionTurn(client!.db, {
+          accountId: fixture.accountId,
+          workspaceId,
+          sessionId: session.id,
+          triggerEventId: crypto.randomUUID(),
+          temporalWorkflowId: `subscription-binding-capability-${session.id}`,
+          source: "user",
+          prompt: "subscription binding capability reuse fixture",
+          resources: [],
+          tools: [],
+          model: "fixture-model",
+          reasoningEffort: "medium",
+          sandboxBackend: "none",
+          metadata: {},
+          initiator: { kind: "subject", subjectId: fixture.subjectId },
+          claudeProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+        }),
+      );
+
+      const connectionId = crypto.randomUUID();
+      const authorityId = crypto.randomUUID();
+      await shared!.admin`
+        insert into organization_user_resource_authorities (
+          id, account_id, organization_membership_id, resource_kind, resource_id, generation, status
+        ) values (
+          ${authorityId}::uuid, ${fixture.accountId}, ${membership!.id}::uuid,
+          'subscription_connection', ${connectionId}::uuid, 1, 'active'
+        )`;
+      await shared!.admin`
+        insert into subscription_connections (
+          id, account_id, provider, credential_encrypted, ownership, scope_kind,
+          owner_organization_membership_id, owner_subject_id, authority_id,
+          authority_resource_kind, authority_generation
+        ) values (
+          ${connectionId}::uuid, ${fixture.accountId}, 'claude', 'v1:personal-binding-capability',
+          'personal', 'people', ${membership!.id}::uuid, ${fixture.subjectId}, ${authorityId}::uuid,
+          'subscription_connection', 1
+        )`;
+      const [eligibility] = await shared!.admin<
+        {
+          workspace_matches: boolean;
+          owner_matches: boolean;
+          owner_active: boolean;
+          authority_matches: boolean;
+          personal_enabled: boolean;
+        }[]
+      >`
+        select session.workspace_id = ${workspaceId}::uuid as workspace_matches,
+          session.owner_subject_id = ${fixture.subjectId} as owner_matches,
+          membership.status = 'active' and membership.revoked_at is null as owner_active,
+          authority.resource_id = connection.id
+            and authority.organization_membership_id = membership.id
+            and authority.generation = connection.authority_generation
+            and authority.status = 'active' and authority.revoked_at is null as authority_matches,
+          (subscription_effective_settings(${fixture.accountId}::uuid, ${workspaceId}::uuid)
+            #>> '{values,personalConnectionsAllowed}')::boolean as personal_enabled
+        from sessions session
+        join organization_memberships membership on membership.account_id = session.account_id
+          and membership.id = ${membership!.id}::uuid
+        join subscription_connections connection on connection.id = ${connectionId}::uuid
+        join organization_user_resource_authorities authority on authority.id = connection.authority_id
+        where session.id = ${session.id}::uuid`;
+      expect(eligibility).toEqual({
+        workspace_matches: true,
+        owner_matches: true,
+        owner_active: true,
+        authority_matches: true,
+        personal_enabled: true,
+      });
+
+      let leaseError: unknown;
+      await withSessionRlsActorContext(
+        {
+          subjectId: fixture.subjectId,
+          initiatingHumanSubjectId: fixture.subjectId,
+        },
+        () =>
+          withRlsContext(client!.db, { accountId: fixture.accountId, workspaceId }, async (db) => {
+            await rawRows(
+              db,
+              sql`insert into subscription_session_bindings (
+                  account_id, workspace_id, session_id, provider, connection_id, model_id, choice
+                ) values (
+                  ${fixture.accountId}::uuid, ${workspaceId}::uuid, ${session.id}::uuid,
+                  'claude', ${connectionId}::uuid, 'fixture-model', 'explicit'
+                )`,
+            );
+            try {
+              await db.transaction((nested) =>
+                rawRows(
+                  nested as unknown as typeof db,
+                  sql`insert into subscription_leases (
+                      account_id, workspace_id, session_id, turn_id, connection_id, provider,
+                      holder_id, generation, leased_until
+                    ) values (
+                      ${fixture.accountId}::uuid, ${workspaceId}::uuid, ${session.id}::uuid,
+                      ${turn.id}::uuid, ${connectionId}::uuid, 'claude', 'test-holder', 1,
+                      now() + interval '1 minute'
+                    )`,
+                ),
+              );
+            } catch (error) {
+              leaseError = error;
+            }
+          }),
+      );
+      const leaseCode =
+        (leaseError as { code?: string; cause?: { code?: string } } | undefined)?.code ??
+        (leaseError as { cause?: { code?: string } } | undefined)?.cause?.code;
+      expect(leaseCode).toBe("42501");
+
+      const authorizedTurn = await withSessionRlsActorContext(
+        { subjectId: fixture.subjectId },
+        () =>
+          enqueueSessionTurn(client!.db, {
+            accountId: fixture.accountId,
+            workspaceId,
+            sessionId: session.id,
+            triggerEventId: crypto.randomUUID(),
+            temporalWorkflowId: `subscription-disabled-personal-${session.id}`,
+            source: "user",
+            prompt: "disabled personal connection fixture",
+            resources: [],
+            tools: [],
+            model: "fixture-model",
+            reasoningEffort: "medium",
+            sandboxBackend: "none",
+            metadata: {},
+            initiator: { kind: "subject", subjectId: fixture.subjectId },
+            claudeProviderAccountAuthoritySnapshot: {
+              version: 1,
+              scope: "user",
+              authorityGeneration: 1,
+            },
+          }),
+      );
+      await shared!.admin`
+        update subscription_settings set personal_connections_allowed = false
+        where account_id = ${fixture.accountId} and workspace_id is null`;
+      let disabledLeaseError: unknown;
+      await withSessionRlsActorContext(
+        {
+          subjectId: fixture.subjectId,
+          initiatingHumanSubjectId: fixture.subjectId,
+        },
+        () =>
+          withRlsContext(client!.db, { accountId: fixture.accountId, workspaceId }, async (db) => {
+            try {
+              await db.transaction((nested) =>
+                rawRows(
+                  nested as unknown as typeof db,
+                  sql`insert into subscription_leases (
+                    account_id, workspace_id, session_id, turn_id, connection_id, provider,
+                    holder_id, generation, leased_until
+                  ) values (
+                    ${fixture.accountId}::uuid, ${workspaceId}::uuid, ${session.id}::uuid,
+                    ${authorizedTurn.id}::uuid, ${connectionId}::uuid, 'claude', 'disabled-holder', 1,
+                    now() + interval '1 minute'
+                  )`,
+                ),
+              );
+            } catch (error) {
+              disabledLeaseError = error;
+            }
+          }),
+      );
+      const disabledLeaseCode =
+        (disabledLeaseError as { code?: string; cause?: { code?: string } } | undefined)?.code ??
+        (disabledLeaseError as { cause?: { code?: string } } | undefined)?.cause?.code;
+      expect(disabledLeaseCode).toBe("42501");
+    },
+    180_000,
+  );
+
+  test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
     "restricted application role cannot read another organization's connection",
     async () => {
       const first = await organizationFixture();
@@ -515,7 +721,7 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
   );
 
   test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
-    "SUB-OWN-04: delegated workspace managers cannot widen connection model scope",
+    "SUB-OWN-04 and SUB-APPS-01: delegated managers cannot widen model scope and can clear out-of-scope Apps designations",
     async () => {
       const fixture = await organizationFixture();
       const managerSubject = `user:subscription-manager-${crypto.randomUUID()}`;
@@ -537,9 +743,12 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
         account_id, provider, credential_encrypted, scope_kind, managed_by_workspace_id,
         allowed_model_ids
       ) values (
-        ${fixture.accountId}, 'codex', 'v1:delegated', 'organization',
+        ${fixture.accountId}, 'codex', 'v1:delegated', 'workspaces',
         ${fixture.workspaceId}::uuid, ARRAY['model-a']::text[]
       ) returning id::text as id`;
+      await shared!.admin`
+      insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
+      values (${fixture.accountId}, ${connection!.id}::uuid, ${fixture.workspaceId}::uuid)`;
       let error: unknown;
       try {
         await withSessionRlsActorContext({ subjectId: managerSubject }, () =>
@@ -565,6 +774,31 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
         (error as { code?: string; cause?: { code?: string } } | undefined)?.code ??
         (error as { cause?: { code?: string } } | undefined)?.cause?.code;
       expect(pgCode).toBe("42501");
+
+      await shared!.admin`
+        insert into subscription_apps_designations (account_id, workspace_id, connection_id, updated_by_subject_id)
+        values (${fixture.accountId}, ${fixture.workspaceId}::uuid, ${connection!.id}::uuid, ${managerSubject})`;
+      await shared!.admin`
+        delete from subscription_connection_workspaces
+        where account_id = ${fixture.accountId} and connection_id = ${connection!.id}::uuid
+          and workspace_id = ${fixture.workspaceId}::uuid`;
+      await withSessionRlsActorContext({ subjectId: managerSubject }, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: fixture.accountId, workspaceId: fixture.workspaceId },
+          (db) =>
+            rawRows(
+              db,
+              sql`delete from subscription_apps_designations
+                where account_id = ${fixture.accountId}::uuid
+                  and workspace_id = ${fixture.workspaceId}::uuid`,
+            ),
+        ),
+      );
+      const [designationCount] = await shared!.admin<{ count: number }[]>`
+        select count(*)::int as count from subscription_apps_designations
+        where workspace_id = ${fixture.workspaceId}::uuid`;
+      expect(designationCount?.count).toBe(0);
     },
     180_000,
   );
@@ -643,6 +877,24 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
       await shared!.admin`
       insert into subscription_connection_people (account_id, connection_id, organization_membership_id)
       values (${fixture.accountId}, ${connection!.id}::uuid, ${membership!.id}::uuid)`;
+      await withSessionRlsActorContext(
+        {
+          subjectId: "service:subscription-test",
+          initiatingHumanSubjectId: fixture.subjectId,
+        },
+        () =>
+          withRlsContext(client!.db, { accountId: fixture.accountId, workspaceId }, (db) =>
+            rawRows(
+              db,
+              sql`insert into subscription_session_bindings (
+                  account_id, workspace_id, session_id, provider, connection_id, model_id, choice
+                ) values (
+                  ${fixture.accountId}::uuid, ${workspaceId}::uuid, ${session.id}::uuid,
+                  'codex', ${connection!.id}::uuid, 'fixture-model', 'explicit'
+                )`,
+            ),
+          ),
+      );
       await shared!.admin`
       insert into subscription_person_preferences (
         account_id, organization_membership_id, personal_fallback_opt_in
@@ -741,6 +993,44 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
         mismatchedTurnError = error;
       }
       expect((mismatchedTurnError as { code?: string } | undefined)?.code).toBe("42501");
+
+      const serviceTurn = await withSessionRlsActorContext(
+        { subjectId: "service:subscription-core", initiatingHumanSubjectId: fixture.subjectId },
+        () =>
+          enqueueSessionTurn(client!.db, {
+            accountId: fixture.accountId,
+            workspaceId,
+            sessionId: session.id,
+            triggerEventId: crypto.randomUUID(),
+            temporalWorkflowId: `subscription-service-turn-${session.id}`,
+            source: "user",
+            prompt: "subscription service pool fixture",
+            resources: [],
+            tools: [],
+            model: "fixture-model",
+            reasoningEffort: "medium",
+            sandboxBackend: "none",
+            metadata: {},
+            initiator: { kind: "service", subjectId: "service:subscription-core" },
+          }),
+      );
+      await withSessionRlsActorContext(
+        { subjectId: "service:subscription-core", initiatingHumanSubjectId: fixture.subjectId },
+        () =>
+          withRlsContext(client!.db, { accountId: fixture.accountId, workspaceId }, (db) =>
+            rawRows(
+              db,
+              sql`insert into subscription_leases (
+                  account_id, workspace_id, session_id, turn_id, connection_id, provider,
+                  holder_id, generation, leased_until
+                ) values (
+                  ${fixture.accountId}::uuid, ${workspaceId}::uuid, ${session.id}::uuid,
+                  ${serviceTurn.id}::uuid, ${connection!.id}::uuid, 'codex', 'service-holder', 1,
+                  now() + interval '1 minute'
+                )`,
+            ),
+          ),
+      );
     },
     180_000,
   );

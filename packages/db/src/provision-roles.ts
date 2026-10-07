@@ -2088,7 +2088,9 @@ BEGIN
       'subscription_apps_designation_allowed(uuid,uuid,uuid)',
       'subscription_apps_designation_manage_allowed(uuid,uuid,uuid)',
       'guard_subscription_connection_scope()',
-      'guard_subscription_turn_session_reference()'
+      'guard_subscription_turn_session_reference()',
+      'guard_subscription_connection_reference()',
+      'authorize_subscription_service_session_access(uuid,uuid,uuid,uuid,text)'
     ] LOOP
       IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
         EXECUTE format(
