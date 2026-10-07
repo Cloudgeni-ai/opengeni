@@ -35,7 +35,7 @@ const armErrors = {
     drizzleWrapped(Object.assign(new Error("private driver detail"), { code: "ECONNRESET" })),
 };
 
-test("a capacity wait that cannot be armed becomes an explicit, secret-safe user state", () => {
+test("SUB-WAIT-05: a capacity wait that cannot be armed becomes an explicit, secret-safe user state", () => {
   for (const provider of ["claude", "xai"] as const) {
     const failure = subscriptionCapacityArmingFailure(
       provider,
@@ -51,7 +51,7 @@ test("a capacity wait that cannot be armed becomes an explicit, secret-safe user
   }
 });
 
-test("structured database outages keep their exact-attempt recovery path", () => {
+test("SUB-WAIT-05: structured database outages keep their exact-attempt recovery path", () => {
   expect(subscriptionCapacityArmingFailure("claude", armErrors.socketReset())).toBeNull();
   expect(subscriptionCapacityArmingFailure("xai", armErrors.connectionLost())).toBeNull();
 });
@@ -192,7 +192,7 @@ describe("turn-start capacity arming", () => {
     return { deps, settle, observability };
   }
 
-  test("a plain arming error fails the turn explicitly and leaves the session idle", async () => {
+  test("SUB-WAIT-05: a plain arming error fails the turn explicitly and leaves the session idle", async () => {
     const { deps, settle, observability } = capacityDeps();
     const armError = armErrors.plain();
     const arm = spyOn(opengeniDb, "armClaudeCapacityWait").mockRejectedValue(armError);
@@ -315,7 +315,7 @@ describe("failure-settlement capacity arming", () => {
     return { deps, settle, observability };
   }
 
-  test("a plain arming error fails the turn explicitly and leaves the session idle", async () => {
+  test("SUB-WAIT-05: a plain arming error fails the turn explicitly and leaves the session idle", async () => {
     const { deps, settle, observability } = failureDeps();
     const armError = armErrors.plain();
     const arm = spyOn(opengeniDb, "armClaudeCapacityWait").mockRejectedValue(armError);
