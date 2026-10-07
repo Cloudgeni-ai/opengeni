@@ -133,7 +133,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
     requiresControlRevalidation: true,
   },
-  "packages/db/src/index.ts#armXaiCapacityWait": {
+  "packages/db/src/index.ts#armXaiCapacityWaitInSessionContext": {
     inserts: 1,
     contract: "canonical",
     requiresControlRevalidation: true,
@@ -142,7 +142,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "owned_suffix",
   },
-  "packages/db/src/index.ts#reconcileXaiCapacityWait": {
+  "packages/db/src/index.ts#reconcileXaiCapacityWaitInSessionContext": {
     inserts: 1,
     contract: "canonical",
     requiresControlRevalidation: true,
@@ -391,7 +391,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   appendTimeline: ["importArchivedSession", "appendArchivedSessionEvents"],
   cancelSessionSubtreeInTransaction: ["mutateSessionControlInTransaction"],
   supersedeCodexCapacityWaitInTransaction: ["reconcileCodexCapacityWait"],
-  supersedeXaiCapacityWaitInTransaction: ["reconcileXaiCapacityWait"],
+  supersedeXaiCapacityWaitInTransaction: ["reconcileXaiCapacityWaitInSessionContext"],
   projectPausedRecovery: ["commitSessionAttemptQuiescence"],
   recordSessionAttemptQuiescenceInTransaction: [
     "commitSessionAttemptQuiescence",
@@ -404,7 +404,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   ],
   closePendingSessionToolCallsInTransaction: [
     "armCodexCapacityWait",
-    "armXaiCapacityWait",
+    "armXaiCapacityWaitInSessionContext",
     "cancelSessionSubtreeInTransaction",
     "failSessionWorkBeforeAttemptClaim",
     "supersedeSessionCurrentDirectionInTransaction",
@@ -478,7 +478,10 @@ const expectedChildLifecycleNoticeProducers: Record<string, string[]> = {
     "applySessionTurnSettlement",
     "failSessionWorkBeforeAttemptClaim",
   ],
-  enqueueChildWaitingCapacityOutboxTx: ["armCodexCapacityWait", "armXaiCapacityWait"],
+  enqueueChildWaitingCapacityOutboxTx: [
+    "armCodexCapacityWait",
+    "armXaiCapacityWaitInSessionContext",
+  ],
   enqueueChildProgressOutboxTx: ["recordSessionGoalProgressWithEvent"],
 };
 const expectedControlPlaneChildOutboxWrappers: Record<string, string[]> = {
