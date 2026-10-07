@@ -3,6 +3,10 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { helmFixtureEnvironment, run, testTool } from "./queue-demand-tooling";
+import {
+  kubernetesFixtureOpenAPI,
+  kubernetesFixtureResources,
+} from "./queue-demand-kubernetes-fixture";
 
 const chart = resolve(import.meta.dir, "..");
 const tools = Promise.all([
@@ -50,8 +54,11 @@ async function render(
   profiles: string[] = [],
   existingReplicas?: number,
   inheritedEnvironment?: NodeJS.ProcessEnv,
+  validate = false,
 ) {
   const [helm] = await tools;
+  const openapi =
+    existingReplicas === undefined ? undefined : new Uint8Array(await kubernetesFixtureOpenAPI());
   const dir = await mkdtemp(join(tmpdir(), "opengeni-queue-render-"));
   const lookupRequests: string[] = [];
   const lookupCredentialHeaders: string[] = [];
@@ -75,36 +82,43 @@ async function render(
               if (request.headers.has(name)) lookupCredentialHeaders.push(name);
             }
             if (request.method !== "GET") return new Response(null, { status: 405 });
+            if (path === "/openapi/v2")
+              return new Response(openapi, {
+                headers: {
+                  "content-type": "application/octet-stream",
+                },
+              });
+            const resources = kubernetesFixtureResources[path.replace(/^\/(?:api|apis)\//u, "")];
+            if (resources && (capabilities || !path.includes("monitoring.coreos.com")))
+              return Response.json({
+                kind: "APIResourceList",
+                groupVersion: path.replace(/^\/(?:api|apis)\//u, ""),
+                resources: resources.map((resource) => ({
+                  ...resource,
+                  namespaced: true,
+                  verbs: ["get", "list"],
+                })),
+              });
             switch (path) {
               case "/version":
                 return Response.json({ major: "1", minor: "34", gitVersion: "v1.34.0" });
               case "/api":
                 return Response.json({ kind: "APIVersions", apiVersion: "v1", versions: ["v1"] });
-              case "/api/v1":
-                return Response.json({
-                  kind: "APIResourceList",
-                  groupVersion: "v1",
-                  resources: [],
-                });
               case "/apis":
                 return Response.json({
                   kind: "APIGroupList",
                   apiVersion: "v1",
-                  groups: [
-                    {
-                      name: "apps",
-                      versions: [{ groupVersion: "apps/v1", version: "v1" }],
-                      preferredVersion: { groupVersion: "apps/v1", version: "v1" },
-                    },
-                  ],
-                });
-              case "/apis/apps/v1":
-                return Response.json({
-                  kind: "APIResourceList",
-                  groupVersion: "apps/v1",
-                  resources: [
-                    { name: "deployments", kind: "Deployment", namespaced: true, verbs: ["get"] },
-                  ],
+                  groups: Object.keys(kubernetesFixtureResources)
+                    .filter(
+                      (groupVersion) =>
+                        groupVersion !== "v1" &&
+                        (capabilities || !groupVersion.startsWith("monitoring.coreos.com/")),
+                    )
+                    .map((groupVersion) => ({
+                      name: groupVersion.split("/")[0],
+                      versions: [{ groupVersion, version: groupVersion.split("/")[1] }],
+                      preferredVersion: { groupVersion, version: groupVersion.split("/")[1] },
+                    })),
                 });
               case "/apis/apps/v1/namespaces/fixture/deployments/fixture-worker-turns":
                 return Response.json({
@@ -150,7 +164,14 @@ async function render(
         "-f",
         path,
         ...(capabilities ? ["--api-versions", "monitoring.coreos.com/v1"] : []),
-        ...(lookupServer ? ["--is-upgrade", "--dry-run=server", "--kubeconfig", kubeconfig] : []),
+        ...(lookupServer
+          ? [
+              "--is-upgrade",
+              ...(validate ? ["--validate"] : ["--dry-run=server"]),
+              "--kubeconfig",
+              kubeconfig,
+            ]
+          : []),
       ],
       undefined,
       lookupServer ? helmFixtureEnvironment(kubeconfig, inheritedEnvironment) : undefined,
@@ -520,6 +541,34 @@ describe("queue demand schema v1 actual Helm rendering", () => {
     }
   }, 180_000);
 
+  test("server-side discovery requires the owned monitoring prerequisite", async () => {
+    const profiles = ["values.azure-managed.example.yaml"];
+    const present = await render(enabled, true, profiles, 14, undefined, true);
+    expect(present.code, present.stderr).toBe(0);
+    expect(present.lookupRequests).toContain("GET /openapi/v2");
+    expect(present.lookupRequests).toContain("GET /apis/monitoring.coreos.com/v1");
+    expect(present.lookupRequests).toContain("GET /apis/apps/v1");
+    expect(
+      find(present.manifests, "HorizontalPodAutoscaler", "fixture-worker-turns").spec.behavior
+        .scaleDown.selectPolicy,
+    ).toBe("Disabled");
+    const absent = await render(enabled, false, profiles, 14, undefined, true);
+    expect(absent.code).not.toBe(0);
+    expect(absent.stderr).toContain("queueDemand requires monitoring.coreos.com/v1");
+    expect(absent.lookupRequests).not.toContain("GET /apis/monitoring.coreos.com/v1");
+    const malformed = await render(
+      { ...enabled, worker: { ...enabled.worker, podSecurityContext: { runAsUser: "invalid" } } },
+      true,
+      profiles,
+      14,
+      undefined,
+      true,
+    );
+    expect(malformed.code).not.toBe(0);
+    expect(malformed.lookupRequests).toContain("GET /openapi/v2");
+    expect(malformed.stderr).toContain("runAsUser");
+    expect(malformed.stderr).toContain("integer");
+  }, 30_000);
   test("schema and prerequisite failures reject unsupported or unobservable opt-ins", async () => {
     for (const queueDemand of [
       { schemaVersion: 2 },
