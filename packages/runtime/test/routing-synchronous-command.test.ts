@@ -451,7 +451,7 @@ test("multi-file composite imports keep outer confinement with fresh exact retai
   expect(f.adoptedBackground).toEqual([]);
 });
 
-test("read-only SDK yielded handles fail closed without consuming a banner-only reader", async () => {
+test("read-only yielded handles fail closed without consuming an untrusted banner-only reader", async () => {
   let swapped = false;
   let starts = 0;
   let reads = 0;

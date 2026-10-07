@@ -1,4 +1,5 @@
 import type { ChannelAExecArgs, ChannelAExecResult, ChannelASession } from "./channel-a";
+import { withNativeSynchronousCommandCollection } from "./native-synchronous-collection";
 import {
   hasTypedExecHandleLoss,
   isExecSessionLostBanner,
@@ -47,10 +48,12 @@ export class SynchronousCommandOutcomeUnknownError extends Error {
 /** Snapshot before routing commits/acknowledges the raw provider receipt. The
  * protocol must consume complete separate streams, not a human-facing tail. */
 export function synchronousCommandPage(
-  session: Pick<ChannelASession, "getProviderCommandOutput">,
+  session: Pick<ChannelASession, "getProviderCommandOutput" | "getSynchronousCommandOutput">,
   raw: string | ChannelAExecResult,
   originalSessionId?: number,
 ): SynchronousCommandPage {
+  const nativePage = session.getSynchronousCommandOutput?.(raw);
+  if (nativePage) return nativePage;
   const page = session.getProviderCommandOutput?.(raw);
   if (
     !page &&
@@ -141,6 +144,15 @@ export async function executeSynchronousCommand(
   args: ChannelAExecArgs,
 ): Promise<SynchronousCommandResult> {
   if (session.execSynchronous) return await session.execSynchronous(args);
+  return await withNativeSynchronousCommandCollection(session, () =>
+    executeSynchronousCommandOnce(session, args),
+  );
+}
+
+async function executeSynchronousCommandOnce(
+  session: ChannelASession,
+  args: ChannelAExecArgs,
+): Promise<SynchronousCommandResult> {
   const raw = session.exec
     ? await session.exec(args)
     : session.execCommand
