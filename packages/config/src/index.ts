@@ -886,6 +886,13 @@ const SettingsSchema = z.object({
   // bounded, metadata-only adaptive-policy replay record alongside the unchanged
   // sticky-sharded decision. It never changes placement/admission/failover.
   codexFleetPolicyShadowEnabled: EnvBoolean.default(false),
+  // Shared subscription core shadow. After the legacy Codex, Claude or
+  // SuperGrok selection, the worker reads a read-only legacy world and records
+  // content-free metrics comparing the core's decision. Fail-open and bounded by
+  // the timeout; it never changes placement.
+  // OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED, OPENGENI_SUBSCRIPTION_CORE_SHADOW_TIMEOUT_MS
+  subscriptionCoreShadowEnabled: EnvBoolean.default(true),
+  subscriptionCoreShadowTimeoutMs: z.coerce.number().int().min(10).max(1_000).default(250),
   // Multi-account P3 (auto-rotation): an account is "near exhaustion" — ineligible to be
   // rotated TO — when EITHER usage window (5h/weekly) is at/over this percent. Default 90 to
   // match the UI danger flip (UsageBar danger at pct >= 90). OPENGENI_CODEX_ROTATION_NEAR_EXHAUSTION_PCT.
@@ -4549,6 +4556,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
+    subscriptionCoreShadowEnabled: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED"),
+    subscriptionCoreShadowTimeoutMs: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_TIMEOUT_MS"),
     codexProductSku: optional("OPENGENI_CODEX_PRODUCT_SKU"),
     reasoningConfigurationUpdatesEnabled: optional(
       "OPENGENI_REASONING_CONFIGURATION_UPDATES_ENABLED",

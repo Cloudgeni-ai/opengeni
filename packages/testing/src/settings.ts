@@ -221,6 +221,10 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     codexToolSearchEnabled: false,
     lazyToolSearchEnabled: false,
     codexFleetPolicyShadowEnabled: false,
+    // Off by default in tests so existing suites keep their exact database
+    // work; the shadow's own tests enable it.
+    subscriptionCoreShadowEnabled: false,
+    subscriptionCoreShadowTimeoutMs: 250,
     codexProductSku: undefined,
     codexRotationNearExhaustionPct: 90,
     reasoningConfigurationUpdatesEnabled: false,

@@ -72,6 +72,7 @@
     "@opengeni/runtime": "workspace:*",
     "@opengeni/sdk": "workspace:*",
     "@opengeni/storage": "workspace:*",
+    "@opengeni/subscriptions": "workspace:*",
     "@opengeni/tool-gateway": "workspace:*",
     "@opengeni/xai-subscription": "workspace:*",
     "@temporalio/activity": "^1.17.0",

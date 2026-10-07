@@ -470,6 +470,50 @@ frozen personal authority, compaction locks, quota shapes), bridged to the
 model. Requirements stay `pending` until production placement runs on the
 core.
 
+### Shadow comparison
+
+Before any provider moves to the core (SUB-COMPAT-03), every Codex, Claude and
+SuperGrok turn compares the core with the legacy selector. Right after the
+legacy selection, the worker
+(`apps/worker/src/activities/agent-turn/subscription-core-shadow.ts`) loads the
+placement world for that session and turn from today's tables through the
+legacy adapter (`packages/db/src/legacy-subscription-world.ts`). It then runs
+the core's placement and the reference model's `checkDecision` on it.
+
+It never changes placement and never delays the turn:
+
+- it starts in the background after the legacy selection, and at most two run
+  at once per worker process; further turns skip it (`busy`);
+- it fails open on every error, timeout and cancellation;
+- it reads under the turn's own session actor, so a private session is visible
+  only through its frozen initiating human and never through an empty subject.
+  A personal (user-scope) pool is read as that human, as the legacy selector
+  reads it; other pools never read personal rows;
+- its statements are SELECTs in one transaction, bounded by
+  `OPENGENI_SUBSCRIPTION_CORE_SHADOW_TIMEOUT_MS` (default 250 ms, at most
+  1000 ms), and no statement starts after that deadline. The transaction is
+  `READ ONLY` for Codex. For Claude and SuperGrok, the credentials' row
+  security records and removes its own transient capability row, exactly as
+  legacy reads of those pools do, so those reads are not `READ ONLY`.
+
+`OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED=false` turns it off; it is on by
+default. It records only content-free data, in fixed-label metrics:
+
+- `opengeni_subscription_core_shadow_comparisons_total{provider,parity,placement}`:
+  whether the legacy account is inside the core's eligible set (security
+  parity) and whether the core would place elsewhere or wait
+  (would-switch);
+- `..._parity_failures_total{provider,reason}`;
+- `..._violations_total{provider,requirement}`;
+- `..._inputs_total{provider,input}`: the legacy inputs the Codex fleet shadow
+  omits, such as pins and their source, rotation, the pool in effect, model
+  filters, plan exclusions, cooldowns and lease reuse;
+- `..._skips_total{provider,reason}`;
+- `..._duration_seconds{provider}`.
+
+A throttled debug log line carries the per-decision record with per-session
+aliases instead of connection ids.
+
 The evidence gates for the whole programme (work item `verification-suite`) are: complete
 requirement-to-test coverage (this document reaches no `pending` entries),
 no-network provider conformance, concurrency, crash-ordering and replay
