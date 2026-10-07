@@ -202,25 +202,25 @@ function staticServiceIneligibility(
     (connection.entitledModelIds === null || connection.entitledModelIds.includes(modelId)) &&
     !connection.excludedModelIds.includes(modelId);
   if (!entitled) reasons.push("model_not_entitled");
-  if (connection.allowedModelIds !== null && !connection.allowedModelIds.includes(modelId)) {
+  const connectionAllowsModel =
+    connection.allowedModelIds === null || connection.allowedModelIds.includes(modelId);
+  const assignmentAllowsModel =
+    assignments === undefined ||
+    assignments.some(
+      (policy) => policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId),
+    );
+  if (!connectionAllowsModel || !assignmentAllowsModel) {
     reasons.push("model_not_allowed_by_connection");
   }
   if (assignments !== undefined) {
     const hasAllocatableAssignment = assignments.some((policy) => policy.allocatorEnabled);
-    const hasModelAssignment = assignments.some(
-      (policy) => policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId),
-    );
     const hasServingAssignment = assignments.some(
       (policy) =>
         policy.allocatorEnabled &&
         (policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId)),
     );
-    if (hasAllocatableAssignment && !hasServingAssignment) {
-      reasons.push(
-        hasModelAssignment
-          ? "source_assignment_allocator_mismatch"
-          : "model_not_allowed_by_connection",
-      );
+    if (assignmentAllowsModel && hasAllocatableAssignment && !hasServingAssignment) {
+      reasons.push("source_assignment_allocator_mismatch");
     }
   }
   return reasons;
