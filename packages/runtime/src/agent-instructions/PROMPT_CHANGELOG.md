@@ -109,9 +109,15 @@ and literal-prefix recovery; the new `media` capability module directs image
 and video requests to runtime/provider tools rather than integration setup.
 Disabled media removes that module. The legacy prompt remains unchanged.
 
+Known names and schemas still present in context can be reused without
+rediscovery. Goal completion follows the same rule. This changes guidance only;
+search policy, schema visibility and live authorization remain unchanged.
+Repeated-search and cost/time improvements require paired model evaluation.
+
 ```diff
 + Deferred tool schemas are omitted from the first request; absence there does not prove a tool is unavailable.
 + When deferred tools are attached, use `tool_search` for one focused capability at a time; broad searches with small limits can omit a relevant tool.
++ Reuse an exact tool name and input schema already in your current context instead of repeating `tool_search`; when the schema or argument requirements are unknown, discover them before calling.
 + If a search misses, use `tool_list` and follow `nextCursor` until the relevant authorized names are covered, then load exact names with `tool_search`.
 + `namePrefix` is a literal tool-name prefix, not a capability keyword; an empty filtered page does not prove the capability is unavailable.
 + Discovery never grants authority, and remembered tool names must still resolve against the current authorized catalog.
@@ -155,7 +161,7 @@ verified the work, said the goal was complete, and ended without calling the
 (deferred) goal tool. The goal module now says so explicitly.
 
 ```diff
-+ Saying or verifying that the work is done does not complete the goal: call opengeni__goal_complete, and search for the goal tools first when they are not listed.
++ Saying or verifying that the work is done does not complete the goal: call opengeni__goal_complete, and search for the goal tools first only when their exact names or input schemas are not already in your current context.
 ```
 
 ## Conditional variants (capability or resource absent)
