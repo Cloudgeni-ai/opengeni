@@ -273,6 +273,15 @@ describe("subscription reference model", () => {
       expect(requirements(violationsFor(alwaysWait)).has("SUB-WAIT-01")).toBe(true);
     });
 
+    test("claiming a model restriction that does not apply is caught (model:SUB-WAIT-01)", () => {
+      const falseRestriction = (): Decision => ({
+        kind: "wait",
+        reason: "model_not_allowed",
+        earliestResetAt: null,
+      });
+      expect(requirements(violationsFor(falseRestriction)).has("SUB-WAIT-01")).toBe(true);
+    });
+
     test("failing over across providers when the setting forbids it is caught (model:SUB-FAIL-03)", () => {
       const forceCrossProvider = (world: World, sessionId: string, now: number) => {
         const forced = (settings: Partial<SubscriptionSettings>) => ({

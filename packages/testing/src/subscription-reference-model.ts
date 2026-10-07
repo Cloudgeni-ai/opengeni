@@ -484,7 +484,12 @@ export function checkDecision(
         );
       }
     }
-  } else if (decision.reason !== "model_not_allowed") {
+  } else if (decision.reason === "model_not_allowed") {
+    // Only a real workspace model restriction justifies this reason.
+    if (modelAllowed(world, session, session.preferredModelId)) {
+      fail("SUB-WAIT-01", "waited for a model restriction although the model is allowed");
+    }
+  } else {
     const pinned = session.pinnedConnectionId
       ? byId(world.connections, session.pinnedConnectionId)
       : undefined;
