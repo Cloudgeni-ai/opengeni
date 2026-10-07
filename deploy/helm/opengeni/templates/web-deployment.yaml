@@ -8,7 +8,7 @@ metadata:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: web
 spec:
-  replicas: {{ .Values.web.replicaCount }}
+  {{- include "opengeni.replicas" (dict "root" . "name" (printf "%s-web" (include "opengeni.fullname" .)) "replicaCount" .Values.web.replicaCount "autoscaling" .Values.web.autoscaling) | indent 2 }}
   {{- with .Values.web.strategy }}
   strategy:
     {{- toYaml . | nindent 4 }}
@@ -84,6 +84,15 @@ spec:
           {{- if .Values.web.probes.liveness.enabled }}
           livenessProbe:
             {{- include "opengeni.httpProbe" (dict "probe" .Values.web.probes.liveness) | nindent 12 }}
+          {{- end }}
+          {{- if .Values.web.preStopDrainSeconds }}
+          lifecycle:
+            preStop:
+              # Hold the pod after it is marked for termination so the endpoints controller and
+              # ingress stop routing NEW requests to it before SIGTERM closes the server. The
+              # image has no shell, so this uses the native sleep action (k8s >= 1.30).
+              sleep:
+                seconds: {{ .Values.web.preStopDrainSeconds }}
           {{- end }}
           {{- with .Values.web.resources }}
           resources:

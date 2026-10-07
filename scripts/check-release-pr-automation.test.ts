@@ -3943,7 +3943,7 @@ describe("workflow contracts", () => {
     expect(plan.name).toBe("Explain change impact");
     expect(plan.needs).toBe("automation-admission");
     expect(plan.if).toBe(
-      "${{ !cancelled() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
+      "${{ !cancelled() && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
     expect(plan.outputs).toEqual(
       expect.objectContaining({
@@ -4400,7 +4400,9 @@ describe("workflow contracts", () => {
       "artifact-runtime",
       "images",
     ]);
-    expect(aggregate.if).toBe("${{ always() }}");
+    expect(aggregate.if).toBe(
+      "${{ always() && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}",
+    );
     expect(aggregate.permissions ?? ci.permissions).toEqual({
       contents: "read",
     });

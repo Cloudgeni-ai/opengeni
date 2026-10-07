@@ -74,6 +74,22 @@ export type ModalOrphanSweepResult = {
   examined: number;
   terminated: ModalOrphanSweepTermination[];
   skipped: number;
+  /**
+   * Provider/lease reconciliation observed by this pass, judged against the
+   * live-lease snapshot passed in (read before the listing). `unterminated`
+   * holds orphan candidates still running after the pass (termination skipped,
+   * postponed, or failed); `missingLiveLeaseInstanceIds` names live-lease
+   * instances absent from the listing. Both can include a lease transition that
+   * raced the listing, so a caller re-reads durable ownership before reporting
+   * them. Only meaningful when `complete` (the whole app listing was read; the
+   * termination budget can cut a pass short).
+   */
+  inventory: {
+    complete: boolean;
+    running: number;
+    unterminated: ModalOrphanSweepTermination[];
+    missingLiveLeaseInstanceIds: string[];
+  };
 };
 
 export type RevalidateModalOrphanTermination = (
@@ -1454,17 +1470,20 @@ export async function sweepModalOrphanSandboxes(
       // A new deployment has no Modal app until its first sandbox is created.
       // That is an empty provider inventory, not a failed orphan sweep.
       if (isModalNotFoundError(error)) {
-        return { examined: 0, terminated: [], skipped: 0 };
+        return emptyModalOrphanSweepResult(liveLeases);
       }
       throw error;
     }
     const appId = app.appId;
     if (!appId) {
-      return { examined: 0, terminated: [], skipped: 0 };
+      return emptyModalOrphanSweepResult(liveLeases);
     }
 
     let examined = 0;
     let skipped = 0;
+    const unterminated: ModalOrphanSweepTermination[] = [];
+    let complete = false;
+    const seenInstanceIds = new Set<string>();
     const terminated: ModalOrphanSweepTermination[] = [];
     let beforeTimestamp: number | undefined;
     while (terminated.length < maxTerminations) {
@@ -1477,10 +1496,14 @@ export async function sweepModalOrphanSandboxes(
       });
       const sandboxes = response.sandboxes ?? [];
       if (sandboxes.length === 0) {
+        complete = true;
         break;
       }
       for (const info of sandboxes) {
         examined += 1;
+        if (info.id) {
+          seenInstanceIds.add(info.id);
+        }
         const tags = tagsFromInfo(info);
         const leaseId = tags.opengeni_lease_id;
         const workspaceId = tags.opengeni_workspace_id;
@@ -1539,18 +1562,21 @@ export async function sweepModalOrphanSandboxes(
           sandbox = await modal.sandboxes.fromId(info.id);
         } catch {
           skipped += 1;
+          unterminated.push(candidate);
           continue;
         }
         if (options.revalidateTermination) {
           try {
             if (!(await options.revalidateTermination(candidate))) {
               skipped += 1;
+              unterminated.push(candidate);
               continue;
             }
           } catch {
             // Destructive provider cleanup fails closed when the fresh durable
             // ownership read is unavailable or otherwise inconclusive.
             skipped += 1;
+            unterminated.push(candidate);
             continue;
           }
         }
@@ -1559,6 +1585,7 @@ export async function sweepModalOrphanSandboxes(
           terminated.push(candidate);
         } catch {
           skipped += 1;
+          unterminated.push(candidate);
         }
         if (terminated.length >= maxTerminations) {
           break;
@@ -1566,11 +1593,47 @@ export async function sweepModalOrphanSandboxes(
       }
       beforeTimestamp = sandboxes[sandboxes.length - 1]?.createdAt;
       if (beforeTimestamp === undefined) {
+        complete = true;
         break;
       }
     }
-    return { examined, terminated, skipped };
+    return {
+      examined,
+      terminated,
+      skipped,
+      inventory: {
+        complete,
+        running: examined,
+        unterminated,
+        // The live-lease snapshot was read before the listing began, so an
+        // instance id it names already existed and a complete listing of
+        // running boxes contains it unless that box has stopped.
+        missingLiveLeaseInstanceIds: complete
+          ? liveLeases.flatMap((lease) =>
+              lease.instanceId && !seenInstanceIds.has(lease.instanceId) ? [lease.instanceId] : [],
+            )
+          : [],
+      },
+    };
   } finally {
     ownedClient?.close();
   }
+}
+
+function emptyModalOrphanSweepResult(
+  liveLeases: LiveModalSandboxLeaseAttribution[],
+): ModalOrphanSweepResult {
+  return {
+    examined: 0,
+    terminated: [],
+    skipped: 0,
+    inventory: {
+      complete: true,
+      running: 0,
+      unterminated: [],
+      missingLiveLeaseInstanceIds: liveLeases.flatMap((lease) =>
+        lease.instanceId ? [lease.instanceId] : [],
+      ),
+    },
+  };
 }

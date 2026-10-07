@@ -10,10 +10,10 @@ import {
 import {
   assertRuntimeDatabasePosture,
   isRetryableRuntimeDatabaseStartupError,
-  countSessionRecoveryBacklog,
   createDb,
   getContextCompactionPendingSummary,
   markSessionWorkflowWakeDelivered,
+  summarizeSessionRecoveryBacklog,
   type Database,
   type RuntimeDatabasePostureOptions,
 } from "@opengeni/db";
@@ -991,7 +991,7 @@ export async function createOpenGeniWorkerService(
     } else {
       sessionRecoveryMonitor = startSessionRecoveryMonitor({
         observability,
-        read: async () => await countSessionRecoveryBacklog(options.activityDependencies.db),
+        read: async () => await summarizeSessionRecoveryBacklog(options.activityDependencies.db),
       });
       contextCompactionPendingMonitor = startContextCompactionPendingMonitor({
         observability,
@@ -1214,8 +1214,6 @@ export async function startWorker() {
     rlsStrategy: settings.rlsStrategy,
     expectedRole: settings.runtimeDatabaseRole,
     targetSchema: settings.dbSchema.trim() || "public",
-    organizationTenancyCanonicalActivationEnabled:
-      settings.organizationTenancyCanonicalActivationEnabled,
   } as const;
   const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;

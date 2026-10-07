@@ -1,5 +1,20 @@
 // Types only: a value re-export would pull the contracts runtime into the root entry.
 export type {
+  AvailableOpenGeniSlackBots,
+  OpenGeniSlackBotOrganizationAccess,
+  UpdateOpenGeniSlackBotOrganizationAccess,
+} from "./types";
+export type {
+  ToolActionReview,
+  ToolReviewDetailsPage,
+  ToolReviewStatus,
+} from "@opengeni/contracts";
+export {
+  toolReviewAction,
+  toolReviewFields,
+  toolReviewDetails,
+} from "@opengeni/contracts/tool-review-presentation";
+export type {
   SubscriptionAccountSummary,
   SubscriptionPoolSettings,
   ClaudeSubscriptionSetupTokenRequest,
@@ -7,6 +22,7 @@ export type {
   ClaudeSubscriptionAccountsResponse,
 } from "@opengeni/contracts";
 export type {
+  ArtifactPinResponse,
   ArtifactCatalogKind,
   ArtifactCatalogItem,
   ArtifactCatalogListOptions,
@@ -128,7 +144,11 @@ export type {
   ExternalIdentityLinkPreview,
   ExternalIdentityLinkPage,
 } from "@opengeni/contracts/external-identities";
-export type { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "./types";
+export type {
+  ModelConnectionAccessKind,
+  ModelConnectionAccessPolicy,
+  ModelConnectionAccessResponse,
+} from "./types";
 export {
   OpenGeniToolCallError,
   OpenGeniToolReapprovalRequiredError,
@@ -340,9 +360,11 @@ export type {
   CodexRealtimeControllerStatus,
   CodexRealtimeMicrophoneState,
   CodexRealtimeOwnerStorage,
+  CodexRealtimeRefusal,
   CreateCodexRealtimeControllerOptions,
   RealtimeControllerTransportStarter,
 } from "./codex-realtime-controller";
+export { codexRealtimeRefusal } from "./codex-realtime-controller";
 export {
   createGatewayRealtimeTransportStarter,
   createXaiSubscriptionRealtimeTransportStarter,
@@ -621,6 +643,8 @@ export type {
   AgentToolCallOutputPayload,
   ApiKey,
   BillingBalance,
+  PromotionalCreditScope,
+  PromotionalCreditBalance,
   BillingEntitlementsResponse,
   BillingMode,
   BillingSummary,
@@ -731,6 +755,7 @@ export type {
   SessionRealtimeMode,
   SessionRealtimeModel,
   SessionRealtimeMutationResponse,
+  SessionRealtimeStopInstruction,
   SessionRealtimeState,
   WorkspaceModelCatalogModel,
   WorkspaceModelCatalogResponse,
@@ -744,6 +769,10 @@ export type {
   WorkspaceOpenRouterCustomModelsResponse,
   CreateWorkspaceOpenRouterCustomModelRequest,
   DeleteWorkspaceOpenRouterCustomModelRequest,
+  WorkspaceOpperCustomModel,
+  WorkspaceOpperCustomModelsResponse,
+  CreateWorkspaceOpperCustomModelRequest,
+  DeleteWorkspaceOpperCustomModelRequest,
   OrganizationModelProviderKind,
   ClaudeSubscriptionUsage,
   ClaudeSubscriptionOAuthStartResponse,

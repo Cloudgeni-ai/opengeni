@@ -447,6 +447,9 @@ export type ComputerInteractionControllerOptions = {
 /** Placement-resident ComputerSession mutation authority. Linux AT-SPI/X11,
  * macOS AX/ScreenCaptureKit, and later UIA adapters share this exact core. */
 export class ComputerInteractionController {
+  // Ephemeral causal metadata, never reconstructed from a terminal receipt.
+  // Native input additionally verifies and consumes its exact delivery proof.
+  private readonly firstClicks = new Map<string, ComputerActionCommandValue>();
   private readonly core: InteractionControllerCore<
     ComputerActionCommandValue,
     ComputerTargetValue,
@@ -458,7 +461,41 @@ export class ComputerInteractionController {
     const { computerSessionId, controllerGeneration } = options;
     this.core = new InteractionControllerCore({
       driver: options.driver,
-      ...(options.authority ? { authority: options.authority } : {}),
+      authority: {
+        authorizeDispatch: async (command) => {
+          await options.authority?.authorizeDispatch(command);
+          if (
+            command.action.type === "pointer" &&
+            command.action.action === "click" &&
+            (command.action.clickCount ?? 1) === 1
+          ) {
+            // Only a journal-admitted command reaches dispatch authority.
+            // Conflicting retries cannot replace an earlier operation's kind.
+            this.firstClicks.set(command.operationId, ComputerActionCommand.parse(command));
+            while (this.firstClicks.size > 512) {
+              this.firstClicks.delete(this.firstClicks.keys().next().value!);
+            }
+          }
+          if (command.action.type !== "pointer" || command.action.clickCount !== 2) return;
+          const firstId = command.action.continuationOfOperationId;
+          const first = firstId ? this.firstClicks.get(firstId) : null;
+          const receipt = firstId ? this.core.receipt(firstId) : null;
+          if (
+            !first ||
+            receipt?.state !== "completed" ||
+            first.computerSessionId !== command.computerSessionId ||
+            first.controllerGeneration !== command.controllerGeneration ||
+            first.targetId !== command.targetId ||
+            first.expectedTargetGeneration !== command.expectedTargetGeneration ||
+            JSON.stringify(first.actor) !== JSON.stringify(command.actor)
+          ) {
+            throw new InteractionControllerError(
+              "invalid_action",
+              "click continuation requires its exact completed first click",
+            );
+          }
+        },
+      },
       ...(options.maxJournalEntries !== undefined
         ? { maxJournalEntries: options.maxJournalEntries }
         : {}),

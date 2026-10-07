@@ -40,6 +40,10 @@ import {
 } from "@/components/capabilities/integration-experience";
 import type { IntegrationViewModel } from "./integration-view-model";
 import { McpAuthDiscoveryNotice } from "./mcp-auth-discovery-notice";
+import {
+  CatalogConnectedAccounts,
+  type CatalogConnectedAccountsProps,
+} from "./catalog-connected-accounts";
 import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
 import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
@@ -88,6 +92,7 @@ export function CatalogItemPage({
   setupUnavailable,
   fikenSetup,
   socialSetupAvailable = true,
+  connectionAccounts,
 }: {
   workspaceId: string;
   item: CapabilityCatalogItem;
@@ -109,6 +114,7 @@ export function CatalogItemPage({
   fikenSetup?: { oauthAvailable: boolean; tokenAvailable: boolean };
   /** Existing social rows stay manageable; any new OAuth attempt still needs provider readiness. */
   socialSetupAvailable?: boolean;
+  connectionAccounts?: Omit<CatalogConnectedAccountsProps, "item">;
 }) {
   const setupBlocked = !item.enabled && setupUnavailable !== undefined;
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
@@ -660,10 +666,12 @@ export function CatalogItemPage({
         setup
       )}
 
+      {connectionAccounts ? <CatalogConnectedAccounts item={item} {...connectionAccounts} /> : null}
+
       {workspaceId && hasConnectorToolPermissionTarget(item, health) ? (
         <DetailSection
           title="Approvals"
-          description="Choose which actions need your OK. Applies to new messages."
+          description="Choose which actions run automatically and which need your review."
         >
           <ConnectorToolPermissions
             key={`${workspaceId}:${item.id}`}

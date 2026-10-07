@@ -101,3 +101,11 @@ artifacts` job, where Helm is installed. Rendering proves manifest
 structure, not a live TLS handshake or operational telemetry export. See
 [`docs/deployment.md`](../../../docs/deployment.md) for release and deployment
 guidance.
+## Replicas and autoscaling
+
+When a workload's `autoscaling.enabled` is true (API, web, relay, control
+worker, turn worker), its HPA owns the replica count. The Deployment then keeps
+its live replica count on `helm upgrade` (via `lookup`) and omits `replicas`
+when rendered offline (fresh install, `helm template`, GitOps), so an upgrade
+never scales a Deployment back to `replicaCount` and kills pods with in-flight
+turns. `replicaCount` applies only when autoscaling is off.

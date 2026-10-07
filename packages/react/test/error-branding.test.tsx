@@ -249,7 +249,9 @@ describe("native branded-host error paths", () => {
       );
       expect(view.container.querySelector("textarea")!.value).toBe("A private ACME question");
       expect(
-        view.container.querySelector<HTMLButtonElement>("button[type='submit']")!.disabled,
+        view.container.querySelector<HTMLButtonElement>(
+          "[data-og-new-chat-composer] button[aria-label='Send']",
+        )!.disabled,
       ).toBe(false);
     } finally {
       await view.unmount();
@@ -668,7 +670,7 @@ describe("native branded-host error paths", () => {
             "[data-approval-id='approval'] button",
           ),
         ]
-          .find((button) => button.textContent === "Approve")!
+          .find((button) => button.textContent === "Approve action")!
           .click(),
       );
       await flush(20);
@@ -825,7 +827,7 @@ describe("native branded-host error paths", () => {
       });
       expect(uploads.hasUnresolved).toBe(true);
       expect(uploads.readyResources).toEqual([]);
-      expect(failure.message).toContain("OpenGeni");
+      expect(failure.message).toContain("Opengeni");
     } finally {
       await view.unmount();
     }

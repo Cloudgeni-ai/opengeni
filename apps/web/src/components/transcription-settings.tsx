@@ -16,8 +16,9 @@ import { Switch } from "@/components/ui/switch";
 export const voiceInputProviderLabels: Record<VoiceInputProviderId, string> = {
   "supergrok-subscription": "SuperGrok subscription",
   "codex-subscription": "Codex subscription",
-  openai: "OpenAI API · API billing",
-  "azure-openai": "Azure OpenAI · Azure billing",
+  openai: "OpenAI · Opengeni credits",
+  "azure-openai": "Azure OpenAI · Opengeni credits",
+  "azure-mai": "MAI Transcribe · Opengeni credits",
 };
 
 /** The Voice input row of Settings > General > New session defaults. */
@@ -57,10 +58,12 @@ export function VoiceInputPreferences({
   const capability = context.clientConfig.voiceInput;
   const [saving, setSaving] = useState(false);
   const enabled = resolveWorkspaceVoiceInputEnabled(workspace?.settings) ?? true;
-  const available = capability?.available === true;
-
   const preferences = workspace?.settings.voiceInput as WorkspaceVoiceInputSettings | undefined;
   const providers = capability?.providers ?? [];
+  // Settings stay editable while any provider is ready: `capability.available`
+  // honours the saved preference, so gating on it would lock an admin out of
+  // changing a preference whose provider stopped being available.
+  const available = capability?.available === true || providers.length > 0;
   const selected = preferences?.preferredProvider ?? null;
   const fallbackEnabled = preferences?.fallbackEnabled ?? true;
 
@@ -85,7 +88,7 @@ export function VoiceInputPreferences({
   }
 
   const reason = !available
-    ? "This deployment has no transcription provider. Your operator can add one."
+    ? "Voice input isn’t available in this workspace. Connect a supported subscription or ask your operator to enable it."
     : !canManage
       ? "Only workspace admins can change this."
       : undefined;
@@ -131,7 +134,10 @@ export function VoiceInputPreferences({
         />
       }
     >
-      {enabled && available && providers.length > 1 ? (
+      {enabled &&
+      available &&
+      // Also when the saved provider is gone, so it can be changed back.
+      (providers.length > 1 || (selected !== null && !providers.includes(selected))) ? (
         <>
           <SettingRow
             label="Transcription provider"

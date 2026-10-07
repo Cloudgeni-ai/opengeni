@@ -8,7 +8,7 @@ page exists so you pick the right one in one read.
 | --- | --- | --- | --- | --- |
 | **Organization MCP server** (`/v1/mcp`) | The person who connects an agent, on the sign-in page; owners and admins can disconnect any agent | One URL for everyone. Every public API action through three tools (find, describe, run), each running the real route in process as the caller | MCP OAuth sign-in acting as the person, capped by the connection's access setting; or an organization API key | An outside agent (Claude Code, Cursor, Codex) should do what a person can do across an organization |
 | **Unified workspace tool MCP** (`/v1/workspaces/:id/mcp`) | Workspace enables integrations; session policy may narrow agent attempts | Current-human requests expose the enabled first-party, Files, Docs, capability, API-integration, and Codex Apps tools through one canonical gateway; `OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS` remains a hard ceiling on the broad `opengeni` server across catalog, execution, and OAuth consent, without narrowing Docs or Files. Entries requiring one-shot human approval stay in the canonical catalog but are omitted from this adapter until MCP has a server-verifiable approval transport. Agent attempts retain their exact frozen selection | Existing OpenGeni bearer or standard MCP OAuth `mcp:access`, always intersected with live workspace authority | An MCP client needs the callable unified tool surface without provider-specific wrappers |
-| **Codemode** (`/v1/workspaces/:id/codemode`) | OpenGeni worker, from the exact tools prepared for one attempt | Immutable attempt-frozen projection of every admitted model tool; approval-required entries remain visible but cannot execute programmatically | Exact `agent_attempt` bearer: protected renewable file in managed sandboxes; in-memory, per-exec snapshot on Connected Machines. Execution stays in the owning worker and reuses the same resolved credentials/executor as model MCP | Attempt code needs typed, idempotent tool calls without a model round trip |
+| **Codemode** (`/v1/workspaces/:id/codemode`) | OpenGeni worker, from the exact tools prepared for one attempt | Immutable attempt-frozen projection of every admitted model tool; approval choices apply uniformly; capable clients receive durable pending handles for review | Exact `agent_attempt` bearer: protected renewable file in managed sandboxes; in-memory, per-exec snapshot on Connected Machines. Execution stays in the owning worker and reuses the same resolved credentials/executor as model MCP | Attempt code needs typed, idempotent tool calls without a model round trip |
 | **Workspace HTTP/SDK tools** (`/v1/workspaces/:id/tools/*`) | Current authenticated human | Live projection of the same unified gateway; `client.tools.forWorkspace(id)` provides catalog, direct typed calls, and declarations. Connection-backed entries that also require one-shot human approval are omitted until their provider adapter supplies side-effect-free credential/resource preflight | Current human's ordinary authenticated browser/API request | A browser or host application needs typed tools without speaking MCP |
 | **Site tool bridge** (`@opengeni/sdk/site`) | Immutable Site version requests exact identities; the current viewer remains authoritative | Parent-filtered projection over the live workspace HTTP/SDK gateway, carried on one document-retained iframe bootstrap `MessagePort`. Requested identities are only a maximum allowlist; publishing grants no authority. Top-level sandbox previews use the same client through a same-origin Codemode adapter | No credential enters Site code; the published parent uses its current session and the local Bun host retains the attempt bearer | Publisher-controlled Site code needs typed tools in either the published renderer or sandbox preview |
 | **Docs MCP** (`/mcp/docs`) | Nobody — built in | Dedicated compatibility endpoint; the same Docs implementation is also included in the unified gateway | Caller's bearer | A narrowly configured client needs only workspace document search |
@@ -16,6 +16,22 @@ page exists so you pick the right one in one read.
 | **Capability MCP servers** | Workspace admin (capabilities settings) | Workspace-wide; on for every session while enabled | Workspace-owned OAuth or admin-supplied headers, authenticated-encrypted at rest; ordinary projections are metadata-only. Dedicated permissioned plaintext reads are an approved release-held follow-up. Gmail and hosted Slack MCP support personal or workspace ownership; personal use follows the immutable initiating user | A third-party tool (e.g. a SaaS MCP) should be available to *all* sessions and schedules in a workspace |
 | **Per-session MCP servers** (`mcpServers` on session create) | The embedding host, per session | One session; static headers rotatable on every user turn; host connection refs resolved per request | Authenticated-encrypted headers with metadata-only ordinary projections, or a non-secret opaque `connectionRef` resolved by the standalone/host broker. Dedicated plaintext reads are an approved release-held follow-up | An embedding host injects its own tool server or binds an existing provider connection without duplicating it |
 | **Codex Apps MCP** | Deployment enables the feature; a scoped human explicitly designates one workspace credential; session policy selects it | Available only while that exact designation remains authorized; workspace-default sessions receive it as optional, while explicit/fixed sessions see it only when selected | Only the designated Apps credential, independent of inference | A compatible model should use connected ChatGPT apps without tying their authority to inference routing or silently widening an exact tool allowlist |
+
+### Workspace Streamable HTTP
+
+The unified `/v1/workspaces/:id/mcp` endpoint uses a fresh stateless
+JSON-response transport per POST. It does not offer a server-to-client SSE
+stream: authorized GET requests return `405 Method Not Allowed` with
+`Allow: POST`, without preparing tools. OAuth, workspace and bound-session
+authorization still run first; unsupported protocol-version headers return 400.
+POST initialization, notifications, tool calls and client-abort handling are
+unchanged. No MCP session ID is issued or required by this stateless endpoint.
+
+Unexpected API 5xx responses emit a content-free error log with the method,
+route pattern and response correlation ID. Thrown failures also retain a closed
+cause kind and diagnostic ID; the existing opt-in protected diagnostics sink
+receives bounded cause locations, never exception messages, request bodies or
+credentials.
 
 ### Organization MCP server
 
@@ -58,10 +74,18 @@ workspace, or selected ones). The connection then acts as that person:
   The person's own role still expands as usual, so Full access reaches
   everything the person can do.
 - Third-party provider sign-in (Codex, SuperGrok and Claude device or OAuth
-  steps, and integration OAuth starts) and actions outside the connected
-  organization (creating another organization, accepting an invitation) stay
-  with the person in the browser; calls return a hint to finish there.
+  steps, and integration OAuth starts) stays with the person in the browser;
+  calls return a hint to finish there. Actions no MCP caller can ever complete
+  because they need the person's own browser session (creating an
+  organization, listing their organization memberships and invitations,
+  accepting an invitation, organization recovery, and confirming an identity
+  link) are marked `browserOnly` in the catalog (`ACTION_CATALOG_BROWSER_ONLY`
+  in `scripts/public-api/action-catalog.ts`): search never returns them, and
+  describe or call answers with the reason without running anything.
   Organization API keys may call the same server and act as the organization.
+- `initialize` advertises `serverInfo` title `Opengeni` and the brand mark as
+  MCP `icons` (light and dark SVG data URIs, plus `/icon-512.png` on the public
+  origin when `OPENGENI_PUBLIC_BASE_URL` is set) for clients that render them.
 
 Connected agents are listed, changed and disconnected at
 `/v1/organizations/:id/mcp-connections` (browser only; SDK
@@ -234,7 +258,11 @@ verified on packaged artifacts; catalog authority does not certify an installed
 JavaScript client, and an optional client failure grants no additional access.
 The `read` command exits successfully when journal observation succeeds, even
 when the returned operation failed; inspect `operation.state` before using its
-result. Reads remain attempt-authorized and can be denied after an attempt ends.
+result. Reads require a current authorized attempt. A later attempt of the same logical
+turn can inspect the original handle; a token from the ended attempt cannot.
+Calls acknowledge `durableApproval` support. Waiting returns a compact receipt
+and stops polling. Human approval resumes the stored operation, so callers must
+not resubmit its arguments.
 On a Linux Docker build host, `bun scripts/test-codemode-image.ts <image>
 <absolute-native-binary> receipts` verifies the packaged clients against an
 owned loopback fixture, including credential modes and GET-only recovery. This
@@ -270,7 +298,7 @@ The retired Memory and reviewed-claim tools are not registered for new work.
 
 First-party OpenGeni MCP company-profile tools (separate organization policy):
 
-- `company_profile_propose` / `company_profile_confirm` - explicit organization-identity administration for an exact agent attempt whose live turn was initiated by the organization owner. The separate owner-managed organization policy defaults to Require approval: Off creates nothing, Require approval stages one inactive immutable identity/mission revision and returns the exact `request_human_input` payload for `confirm`, and Autonomous activates the proposal immediately through the existing compare-and-swap lifecycle and returns `status=activated`. Every mode retains exact live-owner admission and immutable receipts; this policy is independent of workspace Learning mode (see [`company-profile.md`](company-profile.md)).
+- `company_profile_propose` / `company_profile_confirm` - explicit organization-identity administration for an exact agent attempt whose live turn was initiated by the organization owner. The separate owner-managed organization policy (set on Knowledge > Agent learning) defaults to Review first (`suggest`): Off creates nothing, Review first stages one inactive immutable identity/mission revision and returns the exact `request_human_input` payload for `confirm`, and Automatic activates the proposal immediately through the existing compare-and-swap lifecycle and returns `status=activated`. Every mode retains exact live-owner admission and immutable receipts; this policy is independent of workspace Learning mode (see [`company-profile.md`](company-profile.md)).
 
 First-party OpenGeni MCP session monitoring tools (`sessions:read`):
 

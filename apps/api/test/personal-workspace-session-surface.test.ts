@@ -9,6 +9,7 @@ import { signDelegatedAccessToken } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
   acceptOrganizationInvitation,
+  completeSelfServiceOrganizationSetup,
   createApiKey,
   createOrganizationApiKey,
   revokeOrganizationApiKey,
@@ -364,22 +365,12 @@ async function seedSession(human: ManagedHuman, workspaceId: string): Promise<st
   return session.id;
 }
 
-async function activateSessionTenancy(human: ManagedHuman): Promise<void> {
-  if (!shared) throw new Error("test database unavailable");
-  await shared.admin`
-    insert into session_tenancy_activations (
-      account_id, activation_version, inventory_digest, parity_digest, activated_by
-    ) values (
-      ${human.accountId}, 1, ${"3".repeat(64)}, ${"4".repeat(64)}, 'api-test'
-    )`;
-}
-
 /**
  * Migration 0336 applies the same organization owner/admin product decision to a
  * private fork destination in a SHARED workspace that migration 0323 applies to
  * a private create, so a test that forks privately outside a personal workspace
- * has to represent an organization that enabled it. Activation alone deliberately
- * does not: an organization activated after 0323 starts disabled.
+ * has to represent an organization that has not disabled it. Since 0611 the
+ * setting defaults to enabled; this pins an explicit enabled row anyway.
  */
 async function enablePrivateSessions(human: ManagedHuman): Promise<void> {
   if (!shared) throw new Error("test database unavailable");
@@ -798,54 +789,30 @@ describe("managed-human session surface inside their own personal workspace", ()
       (await human.app.request(`${sessionsPath}/${session.id}`, { headers: nativeHeaders })).status,
     ).toBe(200);
   });
-  test("shared-workspace Only me requires the organization setting; a committed key still replays after disable", async () => {
+  test("a never-activated organization gets shared-workspace Only me by default; an owner disable gates fresh creates and a committed key still replays", async () => {
     if (!shared || !client) return;
     const owner = await provisionManagedHuman();
-    await activateSessionTenancy(owner);
     const endpoint = `http://x/v1/workspaces/${owner.legacyWorkspaceId}/sessions`;
     const headers = { cookie: owner.cookie, "content-type": "application/json" };
+    const capabilitiesUrl = `http://x/v1/workspaces/${owner.legacyWorkspaceId}/session-tenancy/capabilities`;
     const idempotencyKey = crypto.randomUUID();
     const request = {
       initialMessage: "private organization session",
       visibility: "private",
       idempotencyKey,
     };
+    const [receipts] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count from session_tenancy_activations
+      where account_id = ${owner.accountId}`;
+    expect(receipts?.count).toBe(0);
 
-    // Receipt present, owner/admin setting still disabled: fail closed with the
-    // precise not-enabled envelope and create nothing.
-    const disabledResponse = await owner.app.request(endpoint, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(request),
+    // No activation receipt and no owner/admin setting row: every organization
+    // is activated and Only me defaults to enabled (migration 0611).
+    const capabilitiesDefault = await owner.app.request(capabilitiesUrl, {
+      headers: { cookie: owner.cookie },
     });
-    expect(disabledResponse.status).toBe(409);
-    expect(await disabledResponse.json()).toEqual({
-      code: "SESSION_TENANCY_NOT_ACTIVATED",
-      message: "Private sessions are not enabled for this organization.",
-    });
-    const capabilitiesDisabled = await owner.app.request(
-      `http://x/v1/workspaces/${owner.legacyWorkspaceId}/session-tenancy/capabilities`,
-      { headers: { cookie: owner.cookie } },
-    );
-    expect(capabilitiesDisabled.status).toBe(200);
-    expect(await capabilitiesDisabled.json()).toEqual({
-      activated: false,
-      canCreatePrivate: false,
-      reason: "not_activated",
-    });
-
-    await updateOrganizationPrivateSessionSettings(client.db, {
-      organizationId: owner.accountId,
-      actorSubjectId: owner.subjectId,
-      enabled: true,
-      expectedVersion: 0,
-      operationId: crypto.randomUUID(),
-    });
-    const capabilitiesEnabled = await owner.app.request(
-      `http://x/v1/workspaces/${owner.legacyWorkspaceId}/session-tenancy/capabilities`,
-      { headers: { cookie: owner.cookie } },
-    );
-    expect(await capabilitiesEnabled.json()).toEqual({
+    expect(capabilitiesDefault.status).toBe(200);
+    expect(await capabilitiesDefault.json()).toEqual({
       activated: true,
       canCreatePrivate: true,
       reason: "available",
@@ -867,12 +834,22 @@ describe("managed-human session surface inside their own personal workspace", ()
       tenancy: { visibility: "private", authorityEpoch: 1, ownedByCurrentUser: true },
     });
 
+    // An explicit owner/admin disable fails fresh creates closed with the
+    // precise not-enabled envelope; the committed key still replays.
     await updateOrganizationPrivateSessionSettings(client.db, {
       organizationId: owner.accountId,
       actorSubjectId: owner.subjectId,
       enabled: false,
-      expectedVersion: 1,
+      expectedVersion: 0,
       operationId: crypto.randomUUID(),
+    });
+    const capabilitiesDisabled = await owner.app.request(capabilitiesUrl, {
+      headers: { cookie: owner.cookie },
+    });
+    expect(await capabilitiesDisabled.json()).toEqual({
+      activated: false,
+      canCreatePrivate: false,
+      reason: "not_activated",
     });
     const replayResponse = await owner.app.request(endpoint, {
       method: "POST",
@@ -904,10 +881,60 @@ describe("managed-human session surface inside their own personal workspace", ()
     });
   }, 180_000);
 
+  test("a fresh self-service signup creates Only me chats with no operator activation", async () => {
+    if (!shared || !client) return;
+    const auth = await createAuthHuman(false);
+    const setup = await completeSelfServiceOrganizationSetup(client.db, {
+      authUserId: auth.userId,
+      actorSubjectId: auth.subjectId,
+      organizationName: "Fresh signup",
+      operationId: crypto.randomUUID(),
+      requestFingerprint: "e".repeat(64),
+    });
+    const human = await resolveManagedHuman(auth, setup.organizationId);
+    expect(human.personalWorkspaceId).toBe(setup.personalWorkspaceId);
+    const [receipts] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count from session_tenancy_activations
+      where account_id = ${setup.organizationId}`;
+    expect(receipts?.count).toBe(0);
+
+    const capabilities = await human.app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/session-tenancy/capabilities`,
+      { headers: { cookie: human.cookie } },
+    );
+    expect(capabilities.status).toBe(200);
+    expect(await capabilities.json()).toEqual({
+      activated: true,
+      canCreatePrivate: true,
+      reason: "available",
+    });
+    const created = await human.app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/sessions`,
+      {
+        method: "POST",
+        headers: { cookie: human.cookie, "content-type": "application/json" },
+        body: JSON.stringify({
+          initialMessage: "my first private chat",
+          visibility: "private",
+          idempotencyKey: crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(created.status).toBe(202);
+    const body = (await created.json()) as { id: string };
+    const detail = await human.app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/sessions/${body.id}`,
+      { headers: { cookie: human.cookie } },
+    );
+    expect(await detail.json()).toMatchObject({
+      id: body.id,
+      tenancy: { visibility: "private", ownedByCurrentUser: true },
+    });
+  }, 180_000);
+
   test("PUT visibility and POST explicit fork activate only for the canonical owner cookie", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();
-    await activateSessionTenancy(human);
     const sessionId = await seedSession(human, human.personalWorkspaceId);
     const headers = { cookie: human.cookie, "content-type": "application/json" };
     const hostOperations: SessionAuthorizationOperation[] = [];
@@ -984,7 +1011,6 @@ describe("managed-human session surface inside their own personal workspace", ()
     const caller = await provisionManagedHuman();
     const sessionOwner = await inviteIntoOrganization(caller, "member");
     await addOrdinaryWorkspaceMember(caller, sessionOwner);
-    await activateSessionTenancy(caller);
     await enablePrivateSessions(caller);
 
     const sharedSessionId = await seedSession(sessionOwner, caller.legacyWorkspaceId);
@@ -1115,11 +1141,12 @@ describe("managed-human session surface inside their own personal workspace", ()
     }
     expect(hostOperations).toEqual(["session.visibility.write", "session.fork.create"]);
 
-    await shared.admin`
-      delete from session_tenancy_activations where account_id = ${caller.accountId}`;
+    // The organization never held an activation receipt (universal since
+    // 0611), so there is no activation pre-gate: missing and another owner's
+    // private targets keep the identical non-enumerating ordinary denial.
     for (const operation of ["visibility", "fork"] as const) {
       const facts = [];
-      for (const [index, targetId] of targetIds.entries()) {
+      for (const [index, targetId] of [targetIds[0]!, privateSessionId].entries()) {
         facts.push(
           await tenancyErrorFact(
             await requestTenancyOperation(
@@ -1128,22 +1155,14 @@ describe("managed-human session surface inside their own personal workspace", ()
               targetId,
               { cookie: caller.cookie },
               operation,
-              `unactivated-${operation}-${index}`,
+              `receiptless-${operation}-${index}`,
             ),
           ),
         );
       }
       expect(facts[1]).toEqual(facts[0]);
-      expect(facts[2]).toEqual(facts[0]);
-      expect(facts[0]).toMatchObject({
-        status: 409,
-        error: {
-          status: 409,
-          code: "conflict",
-          retryable: false,
-          details: { reason: "not_activated" },
-        },
-      });
+      expect(facts[0]).toMatchObject({ status: 404, error: { status: 404 } });
+      expect(JSON.stringify(facts[0])).not.toContain("not_activated");
     }
     expect(hostOperations).toEqual(["session.visibility.write", "session.fork.create"]);
   }, 180_000);
@@ -1153,7 +1172,6 @@ describe("managed-human session surface inside their own personal workspace", ()
     const caller = await provisionManagedHuman();
     const sourceOwner = await inviteIntoOrganization(caller, "member");
     await addOrdinaryWorkspaceMember(caller, sourceOwner);
-    await activateSessionTenancy(caller);
     await enablePrivateSessions(caller);
     const sourceSessionId = await seedSession(sourceOwner, caller.legacyWorkspaceId);
     const idempotencyKey = `api-private-source-replay-${crypto.randomUUID()}`;
@@ -1337,7 +1355,6 @@ describe("managed-human session surface inside their own personal workspace", ()
   test("persists and consumes the private create snapshot in the owner's own personal workspace", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();
-    await activateSessionTenancy(human);
     const text = "draft in my own private Personal workspace";
     const headers = { cookie: human.cookie, "content-type": "application/json" };
 
@@ -2002,7 +2019,6 @@ describe("managed personal-resource grant HTTP lifecycle", () => {
   test("returns RFC3339 expiry/revoke times, reissues expiry, and revokes without connections:read", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();
-    await activateSessionTenancy(human);
     const [membership] = await shared.admin<Array<{ id: string }>>`
       select id from organization_memberships
       where account_id = ${human.accountId} and subject_id = ${human.subjectId}`;

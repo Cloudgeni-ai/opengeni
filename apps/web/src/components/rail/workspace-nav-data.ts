@@ -8,7 +8,6 @@ export type WorkspaceConfigTarget =
   | "/workspaces/$workspaceId/machines"
   | "/workspaces/$workspaceId/plugins"
   | "/workspaces/$workspaceId/schedules"
-  | "/workspaces/$workspaceId/memory"
   | "/workspaces/$workspaceId/state"
   | "/workspaces/$workspaceId/artifacts"
   | "/workspaces/$workspaceId/settings";
@@ -51,7 +50,7 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     to: "/workspaces/$workspaceId/state",
     icon: "brain-circuit",
     label: "Knowledge",
-    description: "Knowledge, instructions, and skills",
+    description: "Knowledge, instructions, and agent learning",
   },
   {
     to: "/workspaces/$workspaceId/schedules",
@@ -102,18 +101,6 @@ export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
         icon: "laptop",
         label: "Machines",
         description: "Your own connected computers",
-      },
-    ],
-  },
-  {
-    id: "knowledge",
-    label: "Knowledge",
-    items: [
-      {
-        to: "/workspaces/$workspaceId/memory",
-        icon: "brain-circuit",
-        label: "Memory",
-        description: "Durable facts agents carry across sessions",
       },
     ],
   },

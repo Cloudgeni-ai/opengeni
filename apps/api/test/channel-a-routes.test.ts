@@ -16,6 +16,7 @@ import {
   ChannelAValidationError,
   BrowserControlTransportError,
   RoutingActiveRouteChangedError,
+  RoutingMutationOutputRejectedError,
   RoutingWorkspaceRootChangedError,
   NatsControlRpc,
   agentErrorToControlError,
@@ -318,6 +319,31 @@ describe("P4.4 Channel-A route discipline", () => {
       errorCode: "sandbox_channel_a_operation_failed",
     });
   });
+
+  test.each(["holder_fenced", "authority_revoked"])(
+    "physically settled output rejection %s remains nonretryable at the public boundary",
+    (reasonCode) => {
+      const error = new RoutingMutationOutputRejectedError("writeFiles", reasonCode);
+      const status = reasonCode === "authority_revoked" ? 403 : 409;
+      const mapped = mapChannelAError(error);
+      expect(mapped).toMatchObject({
+        status,
+        code: status === 403 ? "forbidden" : "conflict",
+        retryable: false,
+        outcomeUnknown: false,
+        details: {
+          code: "sandbox_mutation_output_rejected",
+          reasonCode,
+          physicalOutcome: "resolved",
+        },
+      });
+      expect(channelAOperationFailureDiagnostic(error)).toEqual({
+        reason: "request_rejected",
+        status,
+        errorCode: "sandbox_channel_a_operation_failed",
+      });
+    },
+  );
 
   test("request aborts map to a distinct 499 cancellation diagnostic", () => {
     const controller = new AbortController();

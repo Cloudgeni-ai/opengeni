@@ -5,7 +5,7 @@ import { Toaster } from "../src/components/ui/sonner";
 import "../src/styles.css";
 
 // Local fixture for the post-signup onboarding: a recording fake client, a
-// trial credit balance, and no real keys, workspaces or chats.
+// trial credit balance, and no real keys, workspaces, drafts or chats.
 const requests: Array<{ method: string; args: unknown[] }> = [];
 Object.assign(window, { onboardingRequests: requests });
 const record =
@@ -27,11 +27,20 @@ const client = {
   createVariableSet: record("createVariableSet", () => ({
     id: "44444444-4444-4444-8444-444444444444",
   })),
-  createSession: record(
-    "createSession",
-    () => ({ id: "55555555-5555-4555-8555-555555555555" }),
-    700,
-  ),
+  getNewSessionDraft: record("getNewSessionDraft", () => ({
+    revision: 0,
+    text: "",
+    resources: [],
+    tools: [],
+    toolsProvided: false,
+    model: "gpt-6-luna",
+    reasoningEffort: "xhigh",
+    latencyMode: "standard",
+    options: {},
+    selectionHistory: { projects: [] },
+    updatedAt: null,
+  })),
+  saveNewSessionDraft: record("saveNewSessionDraft", () => undefined, 700),
 };
 
 function Fixture() {
@@ -60,7 +69,9 @@ function Fixture() {
         onComplete={(destination) =>
           setLanded(
             destination
-              ? `Opened chat ${destination.sessionId} in workspace ${destination.workspaceId}`
+              ? destination.sessionId
+                ? `Opened chat ${destination.sessionId} in workspace ${destination.workspaceId}`
+                : `Opened a new chat in workspace ${destination.workspaceId}`
               : "Opened home",
           )
         }

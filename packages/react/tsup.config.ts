@@ -52,6 +52,11 @@ export default defineConfig({
   target: "es2022",
   dts: true,
   sourcemap: true,
+  // Every entry is browser UI (hooks, context, DOM). Marking the output as a
+  // client module lets a Next.js App Router Server Component render
+  // <OpenGeniChat /> directly instead of failing with
+  // "createContext is not a function" during prerender.
+  banner: { js: '"use client";' },
   clean: true,
   external,
   esbuildOptions(options) {

@@ -153,6 +153,57 @@ export async function waitForTurnOperation<T>(
   }
 }
 
+/**
+ * Upper bound for joining a cancelled attempt's in-flight provider establish.
+ * Worker shutdown cancels activities 5s after SIGTERM and force-stops 100s
+ * after it; this leaves room for the remaining finalization steps.
+ */
+export const PHYSICAL_SANDBOX_RESUME_DRAIN_TIMEOUT_MS = 60_000;
+
+/** Register the PHYSICAL lease acquire/provider establish promise, not the
+ * cancellable wrapper awaiting it. */
+export function trackPhysicalSandboxResume<T>(
+  inFlight: Set<Promise<unknown>>,
+  operation: Promise<T>,
+): Promise<T> {
+  inFlight.add(operation);
+  const settle = (): void => {
+    inFlight.delete(operation);
+  };
+  operation.then(settle, settle);
+  return operation;
+}
+
+/**
+ * Join every lease acquire/provider establish this attempt started, even after
+ * the turn-facing wrapper rejected on cancellation. An establish has no
+ * portable abort: after cancellation it still finishes its own exact cleanup
+ * (terminate an unpublished box and roll warming back to cold, or keep a
+ * published box and drop its holder). If the activity returned first, a
+ * shutting-down worker exited mid-cleanup and stranded a warming lease naming a
+ * terminated box; the replacement attempt then waited out the warming TTL and
+ * inherited a lost-workspace verdict. This wait is deliberately independent of
+ * the finalizer cancellation signal (cancellation is what started it) and is
+ * bounded so an uncooperative provider call cannot pin the activity.
+ */
+export async function drainPhysicalSandboxResumes(
+  inFlight: Set<Promise<unknown>>,
+  timeoutMs: number = PHYSICAL_SANDBOX_RESUME_DRAIN_TIMEOUT_MS,
+): Promise<"none" | "settled" | "timed_out"> {
+  if (inFlight.size === 0) return "none";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.allSettled([...inFlight]).then(() => "settled" as const),
+      new Promise<"timed_out">((resolve) => {
+        timer = setTimeout(() => resolve("timed_out"), Math.max(1, timeoutMs));
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -25,8 +25,71 @@ import {
   type BrowserWorkingRuntimeReceipt,
 } from "../src/working-runtime-journal";
 import type { SqliteInteractionOperationJournal } from "../src/operation-journal";
+import { UnsettledCleanupError } from "../src/cleanup-error";
 
 describe("BrowserSupervisor", () => {
+  test("propagates failed process cleanup during controller shutdown", async () => {
+    await withSupervisor(
+      async ({ supervisor }) => {
+        await supervisor.createSession({ ...reference(1), headed: false });
+        await expect(supervisor.close()).rejects.toThrow("browser supervisor shutdown failed");
+        expect(supervisor.isIdle()).toBe(false);
+      },
+      {
+        expectShutdownFailure: true,
+        driverHooks: {
+          close: () => {
+            throw new Error("owned process cleanup failed");
+          },
+        },
+      },
+    );
+  });
+
+  test.each([false, true])(
+    "retains failed creation cleanup only when unconfirmed (%s)",
+    async (failed) => {
+      await withSupervisor(
+        async ({ supervisor }) => {
+          await expect(
+            supervisor.createSession({ ...reference(3), headed: false }),
+          ).rejects.toThrow();
+          expect(supervisor.listSessions()).toEqual([]);
+          expect(supervisor.isIdle()).toBe(!failed);
+        },
+        {
+          expectShutdownFailure: failed,
+          driverHooks: {
+            start: () => {
+              throw new Error("fixture launch failed");
+            },
+            close: () => {
+              if (failed) throw new Error("fixture process stop failed");
+            },
+          },
+        },
+      );
+    },
+  );
+
+  test("retains cleanup failure from a factory which never returned a driver", async () => {
+    await withSupervisor(
+      async ({ supervisor }) => {
+        await expect(supervisor.createSession({ ...reference(4), headed: false })).rejects.toThrow(
+          "fixture factory cleanup failed",
+        );
+        expect(supervisor.listSessions()).toEqual([]);
+        expect(supervisor.isIdle()).toBe(false);
+      },
+      {
+        expectShutdownFailure: true,
+        onFactory: () => {
+          throw new UnsettledCleanupError([], "fixture factory cleanup failed");
+        },
+      },
+    );
+  });
+
   test("protects creation and pending shutdown even when active inventory is empty", async () => {
     const directory = await mkdtemp("/tmp/ogb-update-idle-");
     const started = deferred(),
@@ -1101,6 +1164,7 @@ async function withSupervisor(
     contexts: Map<string, BrowserSupervisorDriverContext>;
   }) => Promise<void>,
   options: {
+    expectShutdownFailure?: boolean;
     maxSessions?: number;
     ephemeralContextPoolEnabled?: boolean;
     onFactory?: () => void;
@@ -1141,7 +1205,9 @@ async function withSupervisor(
   try {
     await callback({ supervisor, contexts });
   } finally {
-    await supervisor.close();
+    if (options.expectShutdownFailure)
+      await expect(supervisor.close()).rejects.toThrow("browser supervisor shutdown failed");
+    else await supervisor.close();
     await rm(directory, { recursive: true, force: true });
   }
 }

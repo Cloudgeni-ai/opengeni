@@ -168,6 +168,7 @@ const client = {
   })),
   listWorkspaceGatewayCustomModels: mock(async () => ({ models: [] })),
   listWorkspaceOpenRouterCustomModels: mock(async () => ({ models: [] })),
+  listWorkspaceOpperCustomModels: mock(async () => ({ models: [] })),
   listWorkspaceClaudeCustomModels: mock(async () => ({ models: [] })),
   getWorkspaceModelCatalog: mock(async () => ({ models: [] })),
   getWorkspaceModelAccessPolicy: mock(async () => ({
@@ -652,6 +653,7 @@ describe("Models list", () => {
       expect(text).toContain(ACCOUNTS_SECTION);
       // Unconnected API-key providers are choices on Connect account, not rows.
       expect(text).not.toContain("OpenRouter");
+      expect(text).not.toContain("Opper");
       expect(text).not.toContain("Vercel AI Gateway");
       expect(text).not.toContain("ChatGPT plan");
       expect(button(view.container, "More actions for Codex")).toBeUndefined();
@@ -750,6 +752,7 @@ describe("Models list", () => {
       const text = view.container.textContent ?? "";
       expect(text).toContain("Pay with your ChatGPT plan");
       expect(text).toContain("Pay per token through OpenRouter");
+      expect(text).toContain("Pay per token through Opper");
       const codexRow = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")]
         .find((row) => row.textContent?.includes("Codex"))!
         .querySelector<HTMLElement>("[data-row-action]")!;
@@ -1307,6 +1310,72 @@ describe("One Models page for the organization and the workspace", () => {
           scope: "organizations",
           scopeId: "organization-a",
           kind: "openrouter",
+          connectionId: "current",
+        },
+        { ...openPolicy, allowedWorkspaces: ["workspace-a"], allowPersonalWorkspaces: false },
+      );
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("an organization Opper key connects through the generic provider rail with its workspace choice", async () => {
+    organizationAdmin = true;
+    routeOrganizationReads();
+    client.getModelConnectionAccess.mockImplementation(async () => ({
+      policy: openPolicy,
+      workspaces: [],
+      models: [],
+      personalWorkspacesSupported: false,
+    }));
+    const view = await render();
+    try {
+      await act(async () => navigateTo({ view: "connect-org:opper" }));
+      await flush();
+      expect(view.container.textContent).toContain(
+        "Organization API keys can't be used in Personal workspaces.",
+      );
+      const selected = [
+        ...view.container.querySelectorAll<HTMLElement>("[data-slot=choice-card]"),
+      ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+      await act(async () => selected.click());
+      await flush();
+      const personal = [
+        ...view.container.querySelectorAll<HTMLElement>("[role=checkbox], input[type=checkbox]"),
+      ].find((box) => box.closest("div")?.textContent?.includes("Personal workspaces"));
+      expect(
+        personal?.hasAttribute("disabled") || personal?.getAttribute("aria-disabled") === "true",
+      ).toBe(true);
+      const input = view.container.querySelector<HTMLInputElement>(
+        'input[aria-label="Organization Opper API key"]',
+      )!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+          input,
+          "op-test",
+        );
+        const reactPropsKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"));
+        const props = (
+          input as unknown as Record<
+            string,
+            { onChange?: (event: { target: HTMLInputElement }) => void }
+          >
+        )[reactPropsKey ?? ""];
+        props?.onChange?.({ target: input });
+      });
+      await act(async () => button(view.container, "Connect Opper")!.click());
+      await flush();
+      await flush();
+      expect(client.upsertOrganizationModelProviderConnection).toHaveBeenCalledWith(
+        "organization-a",
+        "opper",
+        expect.objectContaining({ apiKey: "op-test" }),
+      );
+      expect(client.updateModelConnectionAccess).toHaveBeenCalledWith(
+        {
+          scope: "organizations",
+          scopeId: "organization-a",
+          kind: "opper",
           connectionId: "current",
         },
         { ...openPolicy, allowedWorkspaces: ["workspace-a"], allowPersonalWorkspaces: false },

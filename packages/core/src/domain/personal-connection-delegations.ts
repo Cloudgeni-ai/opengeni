@@ -171,6 +171,7 @@ export function personalConnectionDelegationSourceForGrant(
 export async function listOwnConnectionAccountsForGrant(
   db: Database,
   grant: AccessGrant,
+  options: { includeInactive?: boolean } = {},
 ): Promise<ConnectionMetadata[]> {
   const source = personalConnectionDelegationSourceForGrant(grant);
   const workspace = (await listConnectionsMetadata(db, grant.workspaceId, null)).filter(
@@ -178,19 +179,20 @@ export async function listOwnConnectionAccountsForGrant(
       connection.subjectId === null &&
       connection.workspaceId === grant.workspaceId &&
       connection.accountId === grant.accountId &&
-      connection.status === "active",
+      (options.includeInactive === true || connection.status === "active"),
   );
   if (source.kind !== "subject") return workspace;
   const personal = await listOwnConnectionMetadata(db, {
     ...source,
     workspaceId: grant.workspaceId,
+    includeInactive: options.includeInactive === true,
   });
   return [...workspace, ...personal];
 }
 
 async function listOwnConnectionMetadata(
   db: Database,
-  input: { accountId: string; workspaceId: string; subjectId: string },
+  input: { accountId: string; workspaceId: string; subjectId: string; includeInactive?: boolean },
 ): Promise<ConnectionMetadata[]> {
   const accounts = await listOwnedConnectionAccounts(db, input);
   const connections: ConnectionMetadata[] = [];
@@ -208,7 +210,7 @@ async function listOwnConnectionMetadata(
       connection?.accountId === input.accountId &&
       connection.subjectId === input.subjectId &&
       connection.authorityId != null &&
-      connection.status === "active"
+      (input.includeInactive === true || connection.status === "active")
     )
       connections.push(connection);
   }

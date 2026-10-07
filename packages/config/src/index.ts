@@ -1,5 +1,14 @@
 export { managedUserEmailAllowed } from "./managed-user-admission";
+export * from "./realtime-voice-pricing";
+export * from "./web-search";
+import { EnvCreditPromotionPolicy } from "./credit-promotions";
+export {
+  CreditPromotionPolicy,
+  signupCreditModelIds,
+  promotionalCreditScope,
+} from "./credit-promotions";
 import { isRetiredNativeAtlassianTool } from "@opengeni/contracts/atlassian-native-retirement";
+import { modelLogoUrl } from "@opengeni/contracts/model-display";
 import {
   directModelConnectionSpec,
   BillingMode,
@@ -57,6 +66,24 @@ export { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import { z } from "zod";
+
+/**
+ * Default maximum provider silence on a generic OpenAI-compatible model stream
+ * while the worker is waiting for the next chunk. Matches the Codex transport
+ * and SuperGrok idle defaults (5 minutes): long enough for a reasoning model's
+ * silent thinking gaps, short enough that a wedged stream recovers the same
+ * turn instead of hanging until a worker roll.
+ */
+export const DEFAULT_MODEL_STREAM_IDLE_TIMEOUT_MS = 300_000;
+/**
+ * Default maximum wait across keepalive-only traffic (SSE comments, `ping` /
+ * `keepalive` events, repeated `response.in_progress`) for the next
+ * model-progress event on a generic model stream. A provider can keep a
+ * connection alive while its generation is wedged; this bounds that case.
+ * Ten minutes leaves room for a reasoning model's longest silent thinking
+ * window (reasoning summaries stream as progress).
+ */
+export const DEFAULT_MODEL_STREAM_PROGRESS_TIMEOUT_MS = 600_000;
 
 const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const registryId = /^[A-Za-z0-9_-]+$/;
@@ -386,30 +413,11 @@ const SettingsSchema = z.object({
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
     .optional(),
   productAccessMode: ProductAccessMode.default("local"),
-  // --- canonical organization-tenancy authority activation, default OFF ---
-  // The named PRE-ACTIVATION opt-out for the organization-tenancy program. FALSE (the
-  // default, and the value an operator leaves in place to decline or defer) means
-  // this deployment stays on the reversible legacy workspace-owned lane: no phase-F
-  // subsystem may switch its access decision to organization/membership authority
-  // ids. TRUE is an operator's explicit statement that the activation preconditions
-  // in docs/organization-tenancy.md have been proven for this deployment and that
-  // the one-way boundary is accepted.
-  //
-  // This is NOT a kill switch and NOT a rollback: once an activation migration has
-  // committed, setting it back to false does not restore the legacy authority - only
-  // forward recovery is available. It also grants and revokes nothing by itself;
-  // every individual authorization decision keeps its own fences.
-  //
-  // No runtime path reads it yet: canonical activation (phase F) is unshipped, so
-  // the flag exists to reserve the name, pin the safe default, and give every future
-  // activation slice one gate to consult. EnvBoolean (NOT z.coerce.boolean(), which
-  // coerces "false" -> true and would activate the moment an operator wrote the
-  // variable out to disable it).
-  organizationTenancyCanonicalActivationEnabled: EnvBoolean.default(false),
   billingMode: BillingMode.default("disabled"),
   // Explicit launch gate for the one-time $10 verified self-service signup grant.
   // A migration or deployment alone must not start issuing live credits.
   verifiedSignupTrialCreditsEnabled: EnvBoolean.default(false),
+  creditPromotionPolicy: EnvCreditPromotionPolicy,
   entitlementsMode: EntitlementsMode.default("none"),
   usageLimitsMode: UsageLimitsMode.default("none"),
   // Gate new allowance policies until every API/worker in the fleet enforces
@@ -420,6 +428,11 @@ const SettingsSchema = z.object({
   delegationSecret: z.string().optional(),
   defaultFirstPartyMcpTools: EnvFirstPartyMcpTools,
   allowedFirstPartyMcpTools: EnvFirstPartyMcpTools,
+  // Deployment fact: the isolated artifact materializer workload runs and
+  // drains export jobs. Without it an export is queued forever, so the export
+  // tools leave the first-party ceiling. Helm sets this from
+  // artifactMaterializer.enabled.
+  artifactMaterializerDeployed: EnvBoolean.default(false),
   // sandbox workspace scoped stream-token HMAC secret (sandbox contract §C.3 / stream-token availability contract).
   // When unset, the API falls back to `delegationSecret` (the same HMAC envelope
   // family, `ogs_` vs `ogd_` prefix). REQUIRED-WHEN-DESKTOP, but the absence of
@@ -737,6 +750,35 @@ const SettingsSchema = z.object({
   voiceInputAzureApiVersion: z.string().optional(),
   voiceInputAzureApiKey: z.string().optional(),
   voiceInputAzureAdToken: z.string().optional(),
+  // Hosted realtime voice is configured independently of dictation.
+  azureLiveEndpoint: z.string().url().optional(),
+  azureLiveApiKey: z.string().optional(),
+  azureLiveDeployment: z.string().default("gpt-live-1"),
+  azureLiveVoice: z.string().default("marin"),
+  // Credit price of deployment-funded live voice (RealtimeVoicePricing JSON).
+  // Required while credit billing is active, otherwise the model is withheld.
+  azureLivePricingJson: z.string().optional(),
+  // Managed AI Gateway live voice prices keyed by upstream model id.
+  aiGatewayRealtimePricingJson: z.string().optional(),
+  // Azure Speech credentials are explicit: a different resource can host MAI.
+  voiceInputMaiEndpoint: z.string().url().optional(),
+  voiceInputMaiApiKey: z.string().optional(),
+  voiceInputMaiApiVersion: z.string().default("2025-10-15"),
+  voiceInputMaiPricingJson: z.string().optional(),
+  voiceInputMaiModel: z.string().default("MAI-Transcribe-2"),
+  // Underlying model of the Azure deployment (for example gpt-4o-transcribe or
+  // whisper). Azure routes by deployment name, so this only selects built-in
+  // pricing and the provider-reported usage shape (Whisper requests
+  // verbose_json so Azure reports the billed audio duration). Defaults to the
+  // deployment name.
+  voiceInputAzureModel: z.string().trim().min(1).max(256).optional(),
+  // Opengeni credit pricing for deployment-funded voice input (`openai`,
+  // `azure-openai`). JSON VoiceInputPricing; overrides the built-in list price
+  // for the configured model. Validated at boot. When credit billing is active
+  // (OPENGENI_BILLING_MODE=stripe or OPENGENI_USAGE_LIMITS_MODE=managed) a
+  // deployment-funded provider without any pricing is not offered at all.
+  voiceInputOpenaiPricingJson: z.string().optional(),
+  voiceInputAzurePricingJson: z.string().optional(),
   // Legacy opt-in for undocumented ChatGPT /backend-api/transcribe. When
   // OPENGENI_CODEX_SUBSCRIPTION_ENABLED is true, Codex STT is included without
   // this flag. Set false and omit codex-subscription from PROVIDER_ORDER to
@@ -756,11 +798,23 @@ const SettingsSchema = z.object({
   // Managed OpenRouter credential. The curated model table is injected in
   // code/catalog-document resolution and never read from host provider JSON.
   openrouterApiKey: z.string().optional(),
+  // Managed Opper credential. Like OpenRouter, the reviewed Opper model table
+  // is injected by code/catalog-document resolution, never host provider JSON.
+  opperApiKey: z.string().optional(),
+  // Code-mode host override for the managed provider model lists
+  // (OPENGENI_MANAGED_MODELS_JSON): a partial catalog document carrying any of
+  // `gatewayModels`, `openrouterModels`, `opperModels`, each validated by the
+  // exact database catalog document entry schema. A present key replaces that
+  // provider's reviewed code table; an omitted key keeps it. Read only when
+  // modelCatalogSource is "code": database mode ignores it so the singleton
+  // document stays the sole membership authority.
+  managedModelsJson: z.string().optional(),
   // Internal, secret-free catalog overlays populated only by
   // applyModelCatalogDocument. They intentionally have no OPENGENI_* env
   // binding so database mode cannot be bypassed with a second source.
   resolvedGatewayModelsJson: z.string().optional(),
   resolvedOpenRouterModelsJson: z.string().optional(),
+  resolvedOpperModelsJson: z.string().optional(),
   resolvedCodexModelsJson: z.string().optional(),
   // Extra (non-built-in) model providers, declared by the host as a JSON
   // provider registry. Each entry carries its own base URL, API key, wire API
@@ -785,6 +839,29 @@ const SettingsSchema = z.object({
     .positive()
     .max(24 * 60 * 60_000)
     .default(XAI_RESPONSE_STREAM_IDLE_TIMEOUT_MS),
+  // Maximum silence between response bytes on a generic OpenAI-compatible
+  // model stream (built-in OpenAI/Azure and registry chat/responses providers).
+  // Not a request/run duration cap: every received byte resets the timer, and
+  // it measures only time spent waiting on the provider for the next chunk. A
+  // stalled stream fails as a retryable provider failure so finite same-turn
+  // recovery replaces it. A registry provider may override it with
+  // `streamIdleTimeoutMs`. Codex, SuperGrok, and Anthropic Messages own their
+  // transport-specific idle timers.
+  modelStreamIdleTimeoutMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(24 * 60 * 60_000)
+    .default(DEFAULT_MODEL_STREAM_IDLE_TIMEOUT_MS),
+  // Maximum wait across keepalive-only stream traffic for the next
+  // model-progress event (registry override: `streamProgressTimeoutMs`).
+  // Never shorter than modelStreamIdleTimeoutMs.
+  modelStreamProgressTimeoutMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(24 * 60 * 60_000)
+    .default(DEFAULT_MODEL_STREAM_PROGRESS_TIMEOUT_MS),
   // Expose the connected apps attached to a Codex subscription through the
   // synthetic codex_apps MCP server. Independent from subscription routing so
   // operators can use Codex models without exposing ChatGPT connectors.
@@ -859,6 +936,18 @@ const SettingsSchema = z.object({
   // merged with the MCP-server tools (getAllTools = [...mcpTools, ...tools])
   // and the sandbox capability tools, never replacing them.
   webSearchEnabled: EnvBoolean.default(true),
+  // Provider-agnostic web search (`web_search` / `web_fetch` agent tools,
+  // see ./web-search.ts). Inert until a provider is named; validated lazily so
+  // a misconfiguration withholds the tools instead of failing boot.
+  webSearchProvider: z.string().optional(),
+  webSearchApiKey: z.string().optional(),
+  webSearchBaseUrl: z.string().optional(),
+  webFetchProvider: z.string().optional(),
+  webFetchApiKey: z.string().optional(),
+  webFetchBaseUrl: z.string().optional(),
+  webSearchProviderMode: z.string().optional(),
+  webSearchPricingJson: z.string().optional(),
+  webSearchRequestTimeoutMs: z.coerce.number().int().positive().max(120_000).default(20_000),
   // Jev (TypeSafe's fast judge model) for worker-side agent tools. Without a
   // usable key every Jev-backed feature is off. The key stays on the server
   // (API and worker) and never reaches a sandbox or Connected Machine.
@@ -1677,16 +1766,28 @@ export function personalGitHubOAuthCallbackUrl(publicBaseUrl: string | undefined
 export type VoiceInputProviderId =
   | "openai"
   | "azure-openai"
+  | "azure-mai"
   | "codex-subscription"
   | "supergrok-subscription";
 
 export type VoiceInputProviderConfig =
+  | {
+      id: "azure-mai";
+      kind: "azure-mai";
+      pricing: VoiceInputPricing | null;
+      endpoint: string;
+      apiKey: string;
+      apiVersion: string;
+      model: string;
+    }
   | {
       id: "openai";
       kind: "openai";
       apiKey: string;
       baseUrl: string;
       model: string;
+      /** Deployment-funded: Opengeni pays upstream and charges credits. */
+      pricing: VoiceInputPricing | null;
     }
   | {
       id: "azure-openai";
@@ -1696,6 +1797,10 @@ export type VoiceInputProviderConfig =
       apiVersion: string;
       apiKey: string | null;
       adToken: string | null;
+      /** Underlying model (pricing + response shape); defaults to the deployment name. */
+      model: string;
+      /** Deployment-funded: Opengeni pays upstream and charges credits. */
+      pricing: VoiceInputPricing | null;
     }
   | {
       id: "codex-subscription";
@@ -1719,10 +1824,7 @@ export function usableJevApiKey(settings: Pick<Settings, "jevApiKey">): string |
 
 /** Deployment half of agent configuration: hard capability limits. */
 export function agentConfigDeploymentPolicy(
-  settings: Pick<
-    Settings,
-    "webSearchEnabled" | "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools"
-  >,
+  settings: FirstPartyMcpToolPolicySettings & Pick<Settings, "webSearchEnabled">,
 ): AgentConfigDeploymentLimits {
   return agentConfigDeploymentLimitsFromAllowlist(
     resolveFirstPartyMcpToolPolicy(settings).allowed,
@@ -1779,6 +1881,58 @@ export function isUsableVoiceInputSecret(value: string | null | undefined): valu
  * whether at least one non-experimental (or probed experimental) provider exists.
  */
 export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInputProviderConfig[] {
+  return voiceInputProviderRegistryWithIssues(settings).providers;
+}
+
+/** Why a credentialed deployment-funded voice provider is withheld. */
+export type VoiceInputPricingIssue = {
+  providerId: "openai" | "azure-openai" | "azure-mai";
+  env: string;
+  reason: "malformed" | "unpriced";
+  message: string;
+};
+
+/**
+ * Pricing problems that withhold a credentialed deployment-funded provider.
+ * A malformed PRICING_JSON never fails boot (workers share this config and
+ * must not crash-loop over a voice-only setting); the API logs each issue
+ * once at startup and the provider stays unavailable.
+ */
+export function voiceInputPricingIssues(settings: Settings): VoiceInputPricingIssue[] {
+  return voiceInputProviderRegistryWithIssues(settings).issues;
+}
+
+function voiceInputProviderPricing(
+  settings: Settings,
+  issues: VoiceInputPricingIssue[],
+  providerId: VoiceInputPricingIssue["providerId"],
+  env: string,
+  raw: string | undefined,
+  model: string,
+): { usable: true; pricing: VoiceInputPricing | null } | { usable: false } {
+  const resolved = safeResolveVoiceInputPricing(raw, model, env);
+  if (!resolved.ok) {
+    issues.push({ providerId, env, reason: "malformed", message: resolved.error });
+    return { usable: false };
+  }
+  if (!resolved.pricing && voiceInputCreditBillingActive(settings)) {
+    // Never serve unpriced deployment-paid audio on a credit-billed deployment.
+    issues.push({
+      providerId,
+      env,
+      reason: "unpriced",
+      message: `${env} is required: credit billing is active and model "${model}" has no built-in voice price`,
+    });
+    return { usable: false };
+  }
+  return { usable: true, pricing: resolved.pricing };
+}
+
+function voiceInputProviderRegistryWithIssues(settings: Settings): {
+  providers: VoiceInputProviderConfig[];
+  issues: VoiceInputPricingIssue[];
+} {
+  const issues: VoiceInputPricingIssue[] = [];
   const order = settings.voiceInputProviderOrder
     .split(",")
     .map((part) => part.trim())
@@ -1786,6 +1940,7 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
       (part): part is VoiceInputProviderId =>
         part === "openai" ||
         part === "azure-openai" ||
+        part === "azure-mai" ||
         part === "codex-subscription" ||
         part === "supergrok-subscription",
     );
@@ -1794,6 +1949,32 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
   for (const id of order) {
     if (seen.has(id)) continue;
     seen.add(id);
+    if (id === "azure-mai") {
+      if (
+        !settings.voiceInputMaiEndpoint ||
+        !isUsableVoiceInputSecret(settings.voiceInputMaiApiKey)
+      )
+        continue;
+      const priced = voiceInputProviderPricing(
+        settings,
+        issues,
+        "azure-mai",
+        "OPENGENI_VOICE_INPUT_MAI_PRICING_JSON",
+        settings.voiceInputMaiPricingJson,
+        settings.voiceInputMaiModel,
+      );
+      if (!priced.usable) continue;
+      providers.push({
+        id,
+        kind: "azure-mai",
+        pricing: priced.pricing,
+        endpoint: settings.voiceInputMaiEndpoint.replace(/\/+$/, ""),
+        apiKey: settings.voiceInputMaiApiKey,
+        apiVersion: settings.voiceInputMaiApiVersion,
+        model: settings.voiceInputMaiModel,
+      });
+      continue;
+    }
     if (id === "openai") {
       if (!settings.voiceInputOpenaiEnabled) continue;
       const apiKey = settings.voiceInputOpenaiApiKey ?? settings.openaiApiKey;
@@ -1807,9 +1988,19 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
       ) {
         continue;
       }
+      const priced = voiceInputProviderPricing(
+        settings,
+        issues,
+        "openai",
+        "OPENGENI_VOICE_INPUT_OPENAI_PRICING_JSON",
+        settings.voiceInputOpenaiPricingJson,
+        settings.voiceInputOpenaiModel,
+      );
+      if (!priced.usable) continue;
       providers.push({
         id: "openai",
         kind: "openai",
+        pricing: priced.pricing,
         apiKey,
         baseUrl: (
           settings.voiceInputOpenaiBaseUrl ??
@@ -1852,6 +2043,17 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
       ) {
         continue;
       }
+      const model = settings.voiceInputAzureModel ?? deployment;
+      const priced = voiceInputProviderPricing(
+        settings,
+        issues,
+        "azure-openai",
+        "OPENGENI_VOICE_INPUT_AZURE_PRICING_JSON",
+        settings.voiceInputAzurePricingJson,
+        model,
+      );
+      if (!priced.usable) continue;
+      const pricing = priced.pricing;
       providers.push({
         id: "azure-openai",
         kind: "azure-openai",
@@ -1860,6 +2062,8 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
         apiVersion,
         apiKey: isUsableVoiceInputSecret(apiKey) ? apiKey : null,
         adToken: isUsableVoiceInputSecret(adToken) ? adToken : null,
+        model,
+        pricing,
       });
       continue;
     }
@@ -1886,7 +2090,251 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
       });
     }
   }
-  return providers;
+  return { providers, issues };
+}
+
+/**
+ * Opengeni credit price for one deployment-funded transcription provider.
+ * Rates are upstream list prices in integer USD micros; `marginBps` (500 =
+ * +5%) is added on top, exactly like model pricing. `microsPerMinute` prices
+ * provider-reported audio duration (Whisper, `usage.type: "duration"`) and is
+ * a server-measured WAV duration when provider usage is absent. Token
+ * rates price `usage.type: "tokens"` (gpt-4o-transcribe family); `input`
+ * covers text input tokens and, unless `audioInput` is set, audio tokens.
+ */
+export type VoiceInputPricing = {
+  microsPerMinute: number;
+  inputMicrosPerMillionTokens?: number | undefined;
+  audioInputMicrosPerMillionTokens?: number | undefined;
+  outputMicrosPerMillionTokens?: number | undefined;
+  marginBps?: number | undefined;
+};
+
+const VoiceInputPricingSchema = z
+  .object({
+    microsPerMinute: z.number().int().positive().max(100_000_000),
+    inputMicrosPerMillionTokens: z.number().int().nonnegative().max(1_000_000_000).optional(),
+    audioInputMicrosPerMillionTokens: z.number().int().nonnegative().max(1_000_000_000).optional(),
+    outputMicrosPerMillionTokens: z.number().int().nonnegative().max(1_000_000_000).optional(),
+    marginBps: z.number().int().min(0).max(100_000).optional(),
+  })
+  .strict()
+  .superRefine((pricing, ctx) => {
+    const input = pricing.inputMicrosPerMillionTokens !== undefined;
+    const output = pricing.outputMicrosPerMillionTokens !== undefined;
+    if (input !== output) {
+      ctx.addIssue({
+        code: "custom",
+        message: "inputMicrosPerMillionTokens and outputMicrosPerMillionTokens are set together",
+      });
+    }
+    if (pricing.audioInputMicrosPerMillionTokens !== undefined && !input) {
+      ctx.addIssue({
+        code: "custom",
+        message: "audioInputMicrosPerMillionTokens requires the token input/output rates",
+      });
+    }
+  });
+
+/**
+ * Built-in list prices (OpenAI API pricing, "Transcription models" table)
+ * plus the default 5% Opengeni margin used for model pricing. Azure Global
+ * Standard deployments use the same list prices; set the provider
+ * PRICING_JSON when a deployment's contracted or regional price differs.
+ */
+export const defaultVoiceInputPricing: Readonly<Record<string, VoiceInputPricing>> = {
+  // Audio tokens are listed separately from text tokens on the model pages;
+  // set explicitly so the audio rate never silently follows a text-rate edit.
+  "gpt-4o-transcribe": {
+    microsPerMinute: 6_000,
+    inputMicrosPerMillionTokens: 2_500_000,
+    audioInputMicrosPerMillionTokens: 2_500_000,
+    outputMicrosPerMillionTokens: 10_000_000,
+    marginBps: 500,
+  },
+  "gpt-4o-transcribe-diarize": {
+    microsPerMinute: 6_000,
+    inputMicrosPerMillionTokens: 2_500_000,
+    audioInputMicrosPerMillionTokens: 2_500_000,
+    outputMicrosPerMillionTokens: 10_000_000,
+    marginBps: 500,
+  },
+  "gpt-4o-mini-transcribe": {
+    microsPerMinute: 3_000,
+    inputMicrosPerMillionTokens: 1_250_000,
+    audioInputMicrosPerMillionTokens: 1_250_000,
+    outputMicrosPerMillionTokens: 5_000_000,
+    marginBps: 500,
+  },
+  "gpt-transcribe": { microsPerMinute: 4_500, marginBps: 500 },
+  whisper: { microsPerMinute: 6_000, marginBps: 500 },
+  "whisper-1": { microsPerMinute: 6_000, marginBps: 500 },
+};
+
+/** Lowercased model with a dated snapshot suffix (`-2025-03-20`) removed. */
+export function canonicalVoiceInputModel(model: string): string {
+  return model
+    .trim()
+    .toLowerCase()
+    .replace(/-\d{4}-\d{2}-\d{2}$/, "");
+}
+
+/** Whisper reports its billed audio duration only in `verbose_json`. */
+export function voiceInputModelReportsDurationOnly(model: string): boolean {
+  return canonicalVoiceInputModel(model).startsWith("whisper");
+}
+
+/** Parse one provider pricing JSON. Throws a configuration error when malformed. */
+export function parseVoiceInputPricingJson(
+  raw: string | undefined,
+  env = "voice-input pricing JSON",
+): VoiceInputPricing | null {
+  if (raw === undefined || raw.trim() === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`${env} must be valid JSON`);
+  }
+  const result = VoiceInputPricingSchema.safeParse(parsed);
+  if (!result.success) {
+    throw new Error(
+      `${env} is invalid: ${result.error.issues.map((issue) => issue.message).join("; ")}`,
+    );
+  }
+  return result.data;
+}
+
+/** Explicit provider pricing JSON wins; otherwise the built-in list price for the model. */
+export function resolveVoiceInputPricing(
+  raw: string | undefined,
+  model: string,
+): VoiceInputPricing | null {
+  return (
+    parseVoiceInputPricingJson(raw) ??
+    defaultVoiceInputPricing[canonicalVoiceInputModel(model)] ??
+    null
+  );
+}
+
+/** Non-throwing {@link resolveVoiceInputPricing} for registry resolution. */
+export function safeResolveVoiceInputPricing(
+  raw: string | undefined,
+  model: string,
+  env?: string,
+): { ok: true; pricing: VoiceInputPricing | null } | { ok: false; error: string } {
+  let explicit: VoiceInputPricing | null;
+  try {
+    explicit = parseVoiceInputPricingJson(raw, env);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  return {
+    ok: true,
+    pricing: explicit ?? defaultVoiceInputPricing[canonicalVoiceInputModel(model)] ?? null,
+  };
+}
+
+/** Same predicate as model/credit limits: credit balance and debits are enforced. */
+export function voiceInputCreditBillingActive(
+  settings: Pick<Settings, "billingMode" | "usageLimitsMode">,
+): boolean {
+  return settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
+}
+
+/** Provider-reported transcription usage, normalized. Never client-reported. */
+export type VoiceInputUsage =
+  | {
+      kind: "tokens";
+      inputTokens: number;
+      audioInputTokens: number;
+      textInputTokens: number;
+      outputTokens: number;
+    }
+  | { kind: "duration"; seconds: number };
+
+export type VoiceInputCost = {
+  /** Upstream list cost before margin, rounded up to whole micros. */
+  providerCostMicros: number;
+  /** Opengeni credit price after margin, rounded up to whole micros. */
+  creditCostMicros: number;
+};
+
+/** True when token usage can be priced exactly. */
+export function voiceInputPricingHasTokenRates(pricing: VoiceInputPricing): boolean {
+  return (
+    pricing.inputMicrosPerMillionTokens !== undefined &&
+    pricing.outputMicrosPerMillionTokens !== undefined
+  );
+}
+
+/**
+ * Exact integer credit math. Token usage needs token rates; duration usage
+ * uses `microsPerMinute` at millisecond resolution. Both round up once, after
+ * summing, so a positive use never becomes a free debit.
+ */
+export function calculateVoiceInputCost(
+  pricing: VoiceInputPricing,
+  usage: VoiceInputUsage,
+): VoiceInputCost {
+  let numerator: bigint;
+  let denominator: bigint;
+  if (usage.kind === "tokens") {
+    if (
+      pricing.inputMicrosPerMillionTokens === undefined ||
+      pricing.outputMicrosPerMillionTokens === undefined
+    ) {
+      throw new Error("voice-input token usage requires token pricing");
+    }
+    for (const value of [
+      usage.inputTokens,
+      usage.audioInputTokens,
+      usage.textInputTokens,
+      usage.outputTokens,
+    ]) {
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new Error("voice-input token usage must be non-negative integers");
+      }
+    }
+    const audioRate =
+      pricing.audioInputMicrosPerMillionTokens ?? pricing.inputMicrosPerMillionTokens;
+    // Input tokens the provider did not attribute are priced as audio (never cheaper).
+    const unattributed = Math.max(
+      0,
+      usage.inputTokens - usage.audioInputTokens - usage.textInputTokens,
+    );
+    numerator =
+      BigInt(usage.audioInputTokens + unattributed) * BigInt(audioRate) +
+      BigInt(usage.textInputTokens) * BigInt(pricing.inputMicrosPerMillionTokens) +
+      BigInt(usage.outputTokens) * BigInt(pricing.outputMicrosPerMillionTokens);
+    denominator = 1_000_000n;
+  } else {
+    if (!Number.isFinite(usage.seconds) || usage.seconds < 0) {
+      throw new Error("voice-input duration must be a non-negative number of seconds");
+    }
+    numerator = BigInt(Math.ceil(usage.seconds * 1_000)) * BigInt(pricing.microsPerMinute);
+    denominator = 60_000n;
+  }
+  const margin = BigInt(10_000 + (pricing.marginBps ?? 0));
+  const provider = (numerator + denominator - 1n) / denominator;
+  const scaled = denominator * 10_000n;
+  const credit = (numerator * margin + scaled - 1n) / scaled;
+  if (credit > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error("voice-input cost exceeds the supported billing range");
+  }
+  return { providerCostMicros: Number(provider), creditCostMicros: Number(credit) };
+}
+
+/**
+ * Deployment-funded providers that have credentials but are withheld because
+ * credit billing is active and no price is known. The API logs these (and
+ * malformed pricing, see {@link voiceInputPricingIssues}) once at startup so
+ * an operator sees why voice input stayed unavailable.
+ */
+export function unpricedVoiceInputProviders(settings: Settings): VoiceInputProviderId[] {
+  return voiceInputPricingIssues(settings).flatMap((issue) =>
+    issue.reason === "unpriced" ? [issue.providerId] : [],
+  );
 }
 
 /** True when the deployment has at least one supported (non-experimental) provider. */
@@ -2177,6 +2625,8 @@ export const RegistryProviderKind = z.enum([
   "direct-azure-workspace",
   "openrouter-workspace",
   "openrouter-organization",
+  "opper-workspace",
+  "opper-organization",
   "anthropic-organization",
   "claude-subscription-organization",
   "anthropic-workspace",
@@ -2185,6 +2635,13 @@ export const RegistryProviderKind = z.enum([
 export type RegistryProviderKind = z.infer<typeof RegistryProviderKind>;
 
 /** A single model exposed by a registry provider. */
+const ModelLogoUrlSchema = z
+  .string()
+  .refine(
+    (value) => modelLogoUrl({ id: "", logoUrl: value }) !== null,
+    "model logoUrl must be an HTTPS URL without embedded credentials, at most 2048 characters",
+  );
+
 const RegistryModelSchema = z
   .object({
     id: z.string().min(1), // canonical OpenGeni product id
@@ -2192,6 +2649,7 @@ const RegistryModelSchema = z
     aliases: z.array(z.string().min(1)).optional(), // accepted input only; never sent upstream
     label: z.string().min(1).optional(), // display name; defaults to id
     shortLabel: z.string().min(1).max(64).optional(), // compact UI label; optional
+    logoUrl: ModelLogoUrlSchema.optional(),
     contextWindowTokens: z.number().int().positive().optional(),
     effectiveContextWindowTokens: z.number().int().positive().optional(),
     autoCompactTokenLimit: z.number().int().positive().optional(),
@@ -2279,6 +2737,20 @@ const RegistryProviderSchema = z
     label: z.string().min(1).optional(),
     api: ModelProviderApi.default("chat"),
     anthropic: AnthropicProviderOptions.optional(),
+    // Generic OpenAI-compatible stream silence bound; overrides the deployment
+    // `modelStreamIdleTimeoutMs` for this provider only.
+    streamIdleTimeoutMs: z
+      .number()
+      .int()
+      .positive()
+      .max(24 * 60 * 60_000)
+      .optional(),
+    streamProgressTimeoutMs: z
+      .number()
+      .int()
+      .positive()
+      .max(24 * 60 * 60_000)
+      .optional(),
     wireProfile: ModelProviderWireProfile.default("openai"),
     baseUrl: z.string().url(),
     apiKey: z.string().optional(), // inline key (pragmatic) ...
@@ -2354,6 +2826,14 @@ export const WORKSPACE_OPENROUTER_MODEL_ID_PREFIX = "workspace-openrouter/" as c
 export const ORGANIZATION_OPENROUTER_PROVIDER_ID = "organization-openrouter" as const;
 export const ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX = "organization-openrouter/" as const;
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1" as const;
+export const OPPER_PROVIDER_ID = "opper" as const;
+export const OPPER_MODEL_ID_PREFIX = "opper/" as const;
+export const WORKSPACE_OPPER_PROVIDER_ID = "workspace-opper" as const;
+export const WORKSPACE_OPPER_MODEL_ID_PREFIX = "workspace-opper/" as const;
+export const ORGANIZATION_OPPER_PROVIDER_ID = "organization-opper" as const;
+export const ORGANIZATION_OPPER_MODEL_ID_PREFIX = "organization-opper/" as const;
+/** Opper's OpenAI-compatible Chat Completions surface (Bearer key). */
+export const OPPER_BASE_URL = "https://api.opper.ai/v3/compat" as const;
 
 const RESERVED_MODEL_PROVIDER_IDS = new Set<string>([
   "openai",
@@ -2366,6 +2846,9 @@ const RESERVED_MODEL_PROVIDER_IDS = new Set<string>([
   OPENROUTER_PROVIDER_ID,
   WORKSPACE_OPENROUTER_PROVIDER_ID,
   ORGANIZATION_OPENROUTER_PROVIDER_ID,
+  OPPER_PROVIDER_ID,
+  WORKSPACE_OPPER_PROVIDER_ID,
+  ORGANIZATION_OPPER_PROVIDER_ID,
   "organization-anthropic",
   "organization-claude-subscription",
   "workspace-anthropic",
@@ -2430,6 +2913,7 @@ export const GatewayCatalogModel = z
     upstreamModelId: z.string().min(1),
     label: z.string().min(1),
     shortLabel: z.string().min(1).max(64).optional(),
+    logoUrl: ModelLogoUrlSchema.optional(),
     providers: z.array(z.string().min(1)).min(1),
     implicitCaching: z.boolean().default(false),
     vision: z.boolean().default(false),
@@ -2450,6 +2934,7 @@ export const OpenRouterCatalogModel = z
     upstreamModelId: z.string().min(1).endsWith(":free"),
     label: z.string().min(1),
     shortLabel: z.string().min(1).max(64).optional(),
+    logoUrl: ModelLogoUrlSchema.optional(),
     aliases: z.array(z.string().min(1)).default([]),
     capabilities: ModelCapabilitiesV1Schema,
     contextWindowTokens: z.number().int().positive().optional(),
@@ -2463,6 +2948,42 @@ export const OpenRouterCatalogModel = z
   })
   .strict();
 export type OpenRouterCatalogModel = z.infer<typeof OpenRouterCatalogModel>;
+
+/**
+ * One reviewed Opper route. `upstreamModelId` is Opper's exact catalogue id:
+ * a bare upstream name is a pool (Opper picks the serving provider), while a
+ * `provider/model` id pins one route and region. Curated entries pin a route.
+ * Code-defined entries may carry a reviewed price; database documents may not.
+ */
+export const OpperCatalogModel = z
+  .object({
+    upstreamModelId: z
+      .string()
+      .min(1)
+      .max(200)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:-]*)*$/u),
+    label: z.string().min(1),
+    shortLabel: z.string().min(1).max(64).optional(),
+    logoUrl: ModelLogoUrlSchema.optional(),
+    aliases: z.array(z.string().min(1)).default([]),
+    capabilities: ModelCapabilitiesV1Schema,
+    contextWindowTokens: z.number().int().positive().optional(),
+    effectiveContextWindowTokens: z.number().int().positive().optional(),
+    autoCompactTokenLimit: z.number().int().positive().optional(),
+    toolOutputTruncationTokens: z.number().int().positive().optional(),
+    /** Opper's advertised `max_output_tokens` for this route. Sent as
+     * `max_tokens` on every Chat request that does not set its own, because
+     * Opper otherwise caps output at 4,096 tokens, which hidden reasoning can
+     * exhaust before any answer. Must not exceed the route's real limit:
+     * Opper rejects (400), it does not clamp. */
+    maxOutputTokens: z.number().int().positive().optional(),
+    pricing: z.union([ModelPricingSchema, ModelPricingScheduleSchema]).optional(),
+    credentialSource: z.never().optional(),
+    billing: z.never().optional(),
+    apiKey: z.never().optional(),
+  })
+  .strict();
+export type OpperCatalogModel = z.infer<typeof OpperCatalogModel>;
 
 const DeploymentRegistryBaseUrl = z
   .string()
@@ -2511,6 +3032,10 @@ const DeploymentGatewayCatalogModelSchema = GatewayCatalogModel.safeExtend({
   pricing: z.never().optional(),
 }).strict();
 
+const DeploymentOpperCatalogModelSchema = OpperCatalogModel.safeExtend({
+  pricing: z.never().optional(),
+}).strict();
+
 const CodexCatalogModelSchema = RegistryModelSchema.safeExtend({
   retired: z.boolean().optional(),
   id: z.string().regex(/^codex\/[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
@@ -2545,6 +3070,10 @@ export const ModelCatalogDocument = z
     codexModels: z.array(CodexCatalogModelSchema).optional(),
     gatewayModels: z.array(DeploymentGatewayCatalogModelSchema).default([]),
     openrouterModels: z.array(OpenRouterCatalogModel).default([]),
+    /** Reviewed paid Opper routes. Membership only: price comes from Opper's
+     * per-response reported cost, with the reviewed code snapshot (or
+     * OPENGENI_MODEL_PRICING_JSON) as fallback/validation, never here. */
+    opperModels: z.array(DeploymentOpperCatalogModelSchema).default([]),
     modelNotes: z.record(z.string().min(1), ModelNote).default({}),
     billing: z.never().optional(),
     enabled: z.never().optional(),
@@ -2634,6 +3163,13 @@ export const ModelCatalogDocument = z
         "upstreamModelId",
       ]),
     );
+    document.opperModels.forEach((model, index) =>
+      add(`${OPPER_MODEL_ID_PREFIX}${model.upstreamModelId}`, [
+        "opperModels",
+        index,
+        "upstreamModelId",
+      ]),
+    );
     if (document.defaultModel && /[\u000A\u000D|]/u.test(document.defaultModel)) {
       context.addIssue({
         code: "custom",
@@ -2716,6 +3252,88 @@ function deploymentRegistryProvidersWithHostCredentials(
 }
 
 /** Pure secret-free database catalog overlay. getSettings remains env-only. */
+/**
+ * OPENGENI_MANAGED_MODELS_JSON: the managed-provider slice of a catalog
+ * document for code catalog mode. Each present array uses the database
+ * document's exact strict entry schema (so no entry may carry `pricing`,
+ * credentials, or billing) and replaces that provider's reviewed code table;
+ * an omitted array keeps it. Price authority stays with provider-reported
+ * cost (Gateway/Opper), the reviewed code snapshot, and
+ * OPENGENI_MODEL_PRICING_JSON, which boot validation requires for every
+ * credits-billed product without a reviewed price.
+ */
+export const ManagedModelsOverride = z
+  .object({
+    gatewayModels: z.array(DeploymentGatewayCatalogModelSchema).optional(),
+    openrouterModels: z.array(OpenRouterCatalogModel).optional(),
+    opperModels: z.array(DeploymentOpperCatalogModelSchema).optional(),
+  })
+  .strict()
+  .superRefine((override, context) => {
+    const unique = (
+      key: "gatewayModels" | "openrouterModels" | "opperModels",
+      ids: (model: { upstreamModelId: string }) => string[],
+    ) => {
+      const seen = new Set<string>();
+      (override[key] ?? []).forEach((model, index) => {
+        for (const id of ids(model)) {
+          if (seen.has(id)) {
+            context.addIssue({
+              code: "custom",
+              path: [key, index, "upstreamModelId"],
+              message: `duplicate ${key} model id ${id}`,
+            });
+          }
+          seen.add(id);
+        }
+      });
+    };
+    unique("gatewayModels", (model) => {
+      const gateway = model as GatewayCatalogModel;
+      return [gateway.upstreamModelId, gateway.productId, gateway.workspaceProductId];
+    });
+    unique("openrouterModels", (model) => [
+      model.upstreamModelId,
+      ...(model as OpenRouterCatalogModel).aliases,
+    ]);
+    unique("opperModels", (model) => [
+      model.upstreamModelId,
+      ...(model as OpperCatalogModel).aliases,
+    ]);
+  });
+export type ManagedModelsOverride = z.infer<typeof ManagedModelsOverride>;
+
+const parsedManagedModelsJson = new Map<string, ManagedModelsOverride>();
+
+/** Parse and validate OPENGENI_MANAGED_MODELS_JSON (memoized per raw value). */
+export function parseManagedModelsJson(raw: string): ManagedModelsOverride {
+  const cached = parsedManagedModelsJson.get(raw);
+  if (cached) return cached;
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch (error) {
+    throw new Error("OPENGENI_MANAGED_MODELS_JSON must be valid JSON", { cause: error });
+  }
+  const result = ManagedModelsOverride.safeParse(json);
+  if (!result.success) {
+    throw new Error(
+      `OPENGENI_MANAGED_MODELS_JSON is invalid: ${result.error.issues
+        .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+        .join("; ")}`,
+    );
+  }
+  if (parsedManagedModelsJson.size > 16) parsedManagedModelsJson.clear();
+  parsedManagedModelsJson.set(raw, result.data);
+  return result.data;
+}
+
+/** The code-mode managed model override; always empty in database mode. */
+function codeModeManagedModels(settings: Settings): ManagedModelsOverride {
+  if (settings.modelCatalogSource !== "code" || !settings.managedModelsJson?.trim()) return {};
+  return parseManagedModelsJson(settings.managedModelsJson);
+}
+
 export function applyModelCatalogDocument(settings: Settings, rawDocument: unknown): Settings {
   const document = parseModelCatalogDocument(rawDocument);
   const defaultModel = document.defaultModel ?? document.builtInModels[0]!;
@@ -2732,6 +3350,7 @@ export function applyModelCatalogDocument(settings: Settings, rawDocument: unkno
     ),
     resolvedGatewayModelsJson: JSON.stringify(document.gatewayModels),
     resolvedOpenRouterModelsJson: JSON.stringify(document.openrouterModels),
+    resolvedOpperModelsJson: JSON.stringify(document.opperModels),
     resolvedCodexModelsJson:
       document.codexModels === undefined ? undefined : JSON.stringify(document.codexModels),
     modelNotesJson: JSON.stringify(document.modelNotes),
@@ -2759,7 +3378,7 @@ export interface ResolvedModelProvider {
   anthropic?: z.infer<typeof AnthropicProviderOptions> | undefined;
   id: string; // "openai" | "azure" | registry id
   label: string;
-  kind: RegistryProviderKind | "openrouter-managed";
+  kind: RegistryProviderKind | "openrouter-managed" | "opper-managed";
   api: ModelProviderApi;
   wireProfile: ModelProviderWireProfile;
   builtin: boolean;
@@ -2769,12 +3388,16 @@ export interface ResolvedModelProvider {
   defaultHeaders?: Record<string, string> | undefined;
   publicDefaultQueryNames?: string[] | undefined;
   publicDefaultHeaderNames?: string[] | undefined;
+  /** Generic OpenAI-compatible stream silence bound override (ms). */
+  streamIdleTimeoutMs?: number | undefined;
+  /** Generic OpenAI-compatible keepalive-only progress bound override (ms). */
+  streamProgressTimeoutMs?: number | undefined;
   credentialSource: CredentialSourceV1;
   billing: BillingAttributionV1;
 }
 
 type InternalRegistryProvider = Omit<RegistryProvider, "kind"> & {
-  kind: RegistryProviderKind | "openrouter-managed";
+  kind: RegistryProviderKind | "openrouter-managed" | "opper-managed";
 };
 
 /** A single exposed model + the provider that serves it. */
@@ -2785,6 +3408,8 @@ export interface ConfiguredModel {
   label: string;
   /** Optional curated compact label for dense UI (e.g. mobile composer). */
   shortLabel?: string | undefined;
+  /** Optional HTTPS maker logo; display metadata does not change execution identity. */
+  logoUrl?: string | undefined;
   providerId: string;
   providerLabel: string;
   api: ModelProviderApi;
@@ -2838,6 +3463,23 @@ export const VERCEL_AI_GATEWAY_CONNECTION_DOMAIN = "ai-gateway.vercel.sh" as con
 export const VERCEL_AI_GATEWAY_CONNECTION_ROLE = "vercel_ai_gateway" as const;
 export const WORKSPACE_OPENROUTER_CONNECTION_DOMAIN = "openrouter.ai" as const;
 export const WORKSPACE_OPENROUTER_CONNECTION_ROLE = "openrouter" as const;
+export const WORKSPACE_OPPER_CONNECTION_DOMAIN = "api.opper.ai" as const;
+export const WORKSPACE_OPPER_CONNECTION_ROLE = "opper" as const;
+
+/**
+ * Opper issues separate management keys (`op-mak-…`) that its inference routes
+ * refuse with 403 ("management API keys cannot be used on inference routes").
+ * Reject them before they are stored so a connection never looks ready while
+ * every turn fails. Returns a user-facing explanation, or null when usable.
+ */
+export function opperCredentialProblem(apiKey: string): string | null {
+  const key = apiKey.trim();
+  if (!key) return "Enter an Opper API key.";
+  if (/^op-mak-/iu.test(key)) {
+    return "This is an Opper management key, which Opper does not accept for model requests. Create an API key (not a management key) at platform.opper.ai and connect that instead.";
+  }
+  return null;
+}
 
 export const CODEX_REALTIME_MODEL_ID = "gpt-live-1-boulder-alpha" as const;
 export const SUPERGROK_REALTIME_MODEL_ID = "supergrok/grok-voice-think-fast-2.0" as const;
@@ -2946,6 +3588,187 @@ export const OPENGENI_OPENROUTER_MODELS: readonly OpenRouterCatalogModel[] = [
   }),
 ];
 
+/** Shared Opper Chat capability envelope. Opper accepts every
+ * `reasoning_effort` value on every probed route (it ignores values a route
+ * does not support rather than failing), so the declared vocabulary is a
+ * product choice, never a request-validity guarantee. */
+function opperCapabilities(input: {
+  reasoning: Pick<
+    ModelCapabilitiesV1["reasoning"],
+    "upstream" | "runnable" | "efforts" | "defaultEffort"
+  >;
+  structuredOutput: CapabilitySupportV1;
+  image: boolean;
+  inputFileMediaTypes: string[];
+}): ModelCapabilitiesV1 {
+  return ModelCapabilitiesV1Schema.parse({
+    reasoning: { ...input.reasoning, required: false },
+    // OpenGeni sends ordinary OpenAI-compatible Chat function tools.
+    functionCalling: { upstream: "supported", runnable: true },
+    structuredOutput: {
+      upstream: input.structuredOutput,
+      runnable: input.structuredOutput === "supported",
+    },
+    hostedTools: {
+      webSearch: { upstream: "unknown", runnable: false },
+      xSearch: { upstream: "unknown", runnable: false },
+      codeExecution: { upstream: "unknown", runnable: false },
+      imageGeneration: { upstream: "unknown", runnable: false },
+    },
+    inputModalities: input.image ? ["text", "image"] : ["text"],
+    inputFileMediaTypes: input.inputFileMediaTypes,
+    outputModalities: ["text"],
+    transports: {
+      sse: { upstream: "supported", runnable: true },
+      responsesWebSocket: { upstream: "unsupported", runnable: false },
+      realtimeAudio: { upstream: "unsupported", runnable: false },
+    },
+    promptCaching: { upstream: "unknown", runnable: false, mode: "none" },
+    latencyModes: [{ id: "standard", upstream: "supported", runnable: true }],
+  });
+}
+
+/**
+ * Reviewed Opper starter route. Snapshot of Opper's catalogue
+ * (`GET https://api.opper.ai/v3/compat/models`) reviewed 2026-10-05 and probed
+ * live end to end. The route is provider-pinned (`provider/model`) to AWS
+ * Bedrock eu-north-1 (Stockholm) with no provider logging, so Opper never
+ * pools it onto a non-EU provider. `pricing` is Opper's listed supplier rate
+ * (USD per 1M tokens); turns debit Opper's exact reported cost +5% and use
+ * this rate only when cost metadata is absent. Hosts replace this list with
+ * OPENGENI_OPPER_MODELS_JSON (code mode) or the catalog document's
+ * `opperModels` (database mode).
+ */
+export const OPENGENI_OPPER_MODELS: readonly OpperCatalogModel[] = [
+  OpperCatalogModel.parse({
+    upstreamModelId: "aws/claude-opus-5-5",
+    label: "Claude Opus 5.5 (EU)",
+    shortLabel: "Opus 5.5",
+    aliases: [],
+    capabilities: opperCapabilities({
+      // Opper lists `reasoning.supported` low..max with no default for this
+      // route; `reasoning_effort` measurably changes hidden thinking length.
+      // Default medium matches the native Claude Opus 5.5 profile.
+      reasoning: {
+        upstream: "supported",
+        runnable: true,
+        efforts: ["low", "medium", "high", "xhigh", "max"],
+        defaultEffort: "medium",
+      },
+      // The route lists text/vision/tools/pdf/reasoning, not structured_output.
+      structuredOutput: "unknown",
+      image: true,
+      inputFileMediaTypes: ["application/pdf"],
+    }),
+    contextWindowTokens: 1_000_000,
+    // 1,000,000 minus Opper's 128,000 max output tokens.
+    effectiveContextWindowTokens: 872_000,
+    autoCompactTokenLimit: 800_000,
+    maxOutputTokens: 128_000,
+    pricing: {
+      // Opper list: $4.40 input / $0.22 cached input / $5.50 5-minute cache
+      // write / $22.00 output per 1M (Bedrock EU regional rate).
+      inputMicrosPerMillionTokens: 4_400_000,
+      cachedInputMicrosPerMillionTokens: 220_000,
+      cacheWriteMicrosPerMillionTokens: 5_500_000,
+      outputMicrosPerMillionTokens: 22_000_000,
+      marginBps: 500,
+    },
+  }),
+];
+
+/**
+ * Reviewed Opper list prices for routes a host may add through
+ * OPENGENI_OPPER_MODELS_JSON or the catalog document without its own
+ * OPENGENI_MODEL_PRICING_JSON entry. Price only: membership, labels,
+ * capabilities and limits always come from configuration.
+ */
+const REVIEWED_OPPER_MODEL_PRICING: Readonly<
+  Record<string, ModelPricing | ModelPricingScheduleV1>
+> = {
+  ...Object.fromEntries(
+    OPENGENI_OPPER_MODELS.flatMap((model) =>
+      model.pricing ? [[model.upstreamModelId, model.pricing] as const] : [],
+    ),
+  ),
+  // Reviewed 2026-10-05: $0.825 input / $0.0825 cached input / $4.125 output.
+  "vertexai/gemini-3.8-flash-eu": {
+    inputMicrosPerMillionTokens: 825_000,
+    cachedInputMicrosPerMillionTokens: 82_500,
+    outputMicrosPerMillionTokens: 4_125_000,
+    marginBps: 500,
+  },
+  // Reviewed 2026-10-05: $3.30 input / $0.33 cached / $4.125 cache write / $16.50 output.
+  "aws/claude-sonnet-4-6-eu": {
+    inputMicrosPerMillionTokens: 3_300_000,
+    cachedInputMicrosPerMillionTokens: 330_000,
+    cacheWriteMicrosPerMillionTokens: 4_125_000,
+    outputMicrosPerMillionTokens: 16_500_000,
+    marginBps: 500,
+  },
+};
+
+/** Keepalive-only progress bound for Opper streams: room for a full 128,000-
+ * token hidden-reasoning response at roughly 35 tokens per second. */
+export const OPPER_STREAM_PROGRESS_TIMEOUT_MS = 60 * 60_000;
+
+/** Opper's smallest advertised `max_output_tokens` across every Claude route
+ * in its 2026-10-05 catalogue (all 70 routes are 64,000 or more). */
+const OPPER_CLAUDE_FAMILY_MAX_OUTPUT_TOKENS = 64_000;
+
+function isOpperClaudeFamilyModel(upstreamModelId: string): boolean {
+  return /(?:^|[/.])claude-/iu.test(upstreamModelId);
+}
+
+function isOpperGeminiFamilyModel(upstreamModelId: string): boolean {
+  return /(?:^|[/.])gemini-/iu.test(upstreamModelId);
+}
+
+/**
+ * Capability envelope for a workspace/organization custom Opper id that is not
+ * in the configured deployment list. Deterministic and offline (the API and
+ * worker must derive the same frozen definition, so no live `GET /models`):
+ * - reasoning is runnable with low/medium/high, because Opper accepts any
+ *   effort on every probed route and ignores one a route does not support;
+ * - image input is on for the Claude and Gemini families, where every route
+ *   in Opper's catalogue lists vision; other families stay text-only;
+ * - typed file input stays off (OpenGeni sends documents to the sandbox).
+ */
+function opperCustomModelCapabilities(upstreamModelId: string): ModelCapabilitiesV1 {
+  return opperCapabilities({
+    reasoning: {
+      upstream: "unknown",
+      runnable: true,
+      efforts: ["low", "medium", "high"],
+      defaultEffort: "medium",
+    },
+    structuredOutput: "unknown",
+    image: isOpperClaudeFamilyModel(upstreamModelId) || isOpperGeminiFamilyModel(upstreamModelId),
+    inputFileMediaTypes: [],
+  });
+}
+
+/**
+ * `max_tokens` the Opper Chat adapter sends when a request sets none. Opper's
+ * own default is 4,096 output tokens, which hidden reasoning can exhaust before
+ * any answer, and Opper rejects (does not clamp) a value above the route's
+ * limit. A configured entry's `maxOutputTokens` wins; a Claude-family custom id
+ * gets the smallest Claude limit in Opper's catalogue; other ids keep Opper's
+ * default.
+ */
+export function opperMaxOutputTokens(
+  settings: Settings,
+  upstreamModelId: string,
+): number | undefined {
+  const configured = configuredOpperCatalogModels(settings).find(
+    (model) => model.upstreamModelId === upstreamModelId,
+  );
+  if (configured?.maxOutputTokens !== undefined) return configured.maxOutputTokens;
+  return isOpperClaudeFamilyModel(upstreamModelId)
+    ? OPPER_CLAUDE_FAMILY_MAX_OUTPUT_TOKENS
+    : undefined;
+}
+
 function defaultGatewayCatalogModels(): GatewayCatalogModel[] {
   return [
     {
@@ -2968,10 +3791,12 @@ function defaultGatewayCatalogModels(): GatewayCatalogModel[] {
 }
 
 function configuredGatewayCatalogModels(settings: Settings): GatewayCatalogModel[] {
-  if (settings.resolvedGatewayModelsJson === undefined) {
-    return defaultGatewayCatalogModels();
+  if (settings.resolvedGatewayModelsJson !== undefined) {
+    return z.array(GatewayCatalogModel).parse(JSON.parse(settings.resolvedGatewayModelsJson));
   }
-  return z.array(GatewayCatalogModel).parse(JSON.parse(settings.resolvedGatewayModelsJson));
+  const override = codeModeManagedModels(settings).gatewayModels;
+  if (override) return override.map((model) => GatewayCatalogModel.parse(model));
+  return defaultGatewayCatalogModels();
 }
 
 export function configuredGatewayUpstreamModelIds(settings: Settings): string[] {
@@ -2992,10 +3817,12 @@ export function configuredModelInputIdentities(settings: Settings): string[] {
 }
 
 function configuredOpenRouterCatalogModels(settings: Settings): OpenRouterCatalogModel[] {
-  if (settings.resolvedOpenRouterModelsJson === undefined) {
-    return [...OPENGENI_OPENROUTER_MODELS];
+  if (settings.resolvedOpenRouterModelsJson !== undefined) {
+    return z.array(OpenRouterCatalogModel).parse(JSON.parse(settings.resolvedOpenRouterModelsJson));
   }
-  return z.array(OpenRouterCatalogModel).parse(JSON.parse(settings.resolvedOpenRouterModelsJson));
+  const override = codeModeManagedModels(settings).openrouterModels;
+  if (override) return override.map((model) => OpenRouterCatalogModel.parse(model));
+  return [...OPENGENI_OPENROUTER_MODELS];
 }
 
 export function configuredOpenRouterUpstreamModelIds(settings: Settings): string[] {
@@ -3017,6 +3844,52 @@ export function configuredOpenRouterWorkspaceProductModelIds(settings: Settings)
 }
 
 export function configuredOpenRouterOrganizationProductModelIds(settings: Settings): string[] {
+  void settings;
+  return [];
+}
+
+/**
+ * Deployment Opper membership. A resolved database catalog document is the
+ * sole authority in database mode; OPENGENI_MANAGED_MODELS_JSON `opperModels`
+ * is read only in code mode, so it can never bypass the database document;
+ * otherwise the reviewed code starter table applies.
+ */
+function configuredOpperCatalogModels(settings: Settings): OpperCatalogModel[] {
+  if (settings.resolvedOpperModelsJson !== undefined) {
+    return z.array(OpperCatalogModel).parse(JSON.parse(settings.resolvedOpperModelsJson));
+  }
+  const override = codeModeManagedModels(settings).opperModels;
+  if (override) return override.map((model) => OpperCatalogModel.parse(model));
+  return [...OPENGENI_OPPER_MODELS];
+}
+
+/** Reviewed code price for one Opper upstream id, if any. */
+function reviewedOpperModelPricing(upstreamModelId: string): ModelPricingScheduleV1 | undefined {
+  const pricing = Object.hasOwn(REVIEWED_OPPER_MODEL_PRICING, upstreamModelId)
+    ? REVIEWED_OPPER_MODEL_PRICING[upstreamModelId]
+    : undefined;
+  return pricing === undefined ? undefined : normalizeModelPricingSchedule(pricing);
+}
+
+export function configuredOpperUpstreamModelIds(settings: Settings): string[] {
+  return configuredOpperCatalogModels(settings).map((model) => model.upstreamModelId);
+}
+
+function workspaceOpperProductId(modelId: string): string {
+  return `${WORKSPACE_OPPER_MODEL_ID_PREFIX}${
+    modelId.startsWith(OPPER_MODEL_ID_PREFIX)
+      ? modelId.slice(OPPER_MODEL_ID_PREFIX.length)
+      : modelId
+  }`;
+}
+
+export function configuredOpperWorkspaceProductModelIds(settings: Settings): string[] {
+  return configuredOpperCatalogModels(settings).flatMap((model) =>
+    [model.upstreamModelId, ...model.aliases].map(workspaceOpperProductId),
+  );
+}
+
+export function configuredOpperOrganizationProductModelIds(settings: Settings): string[] {
   void settings;
   return [];
 }
@@ -3476,11 +4349,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
     agentBetaVersion: optional("OPENGENI_AGENT_BETA_VERSION"),
     productAccessMode: optional("OPENGENI_PRODUCT_ACCESS_MODE"),
-    organizationTenancyCanonicalActivationEnabled: optional(
-      "OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED",
-    ),
     billingMode: optional("OPENGENI_BILLING_MODE"),
     verifiedSignupTrialCreditsEnabled: optional("OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED"),
+    creditPromotionPolicy: optional("OPENGENI_CREDIT_PROMOTION_POLICY_JSON"),
     entitlementsMode: optional("OPENGENI_ENTITLEMENTS_MODE"),
     usageLimitsMode: optional("OPENGENI_USAGE_LIMITS_MODE"),
     usageAllowancesEnabled: optional("OPENGENI_USAGE_ALLOWANCES_ENABLED"),
@@ -3489,6 +4360,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     delegationSecret: optional("OPENGENI_DELEGATION_SECRET"),
     defaultFirstPartyMcpTools: optional("OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS"),
     allowedFirstPartyMcpTools: optional("OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS"),
+    artifactMaterializerDeployed: optional("OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED"),
     streamTokenSecret: optional("OPENGENI_STREAM_TOKEN_SECRET"),
     streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
     workDiscoveryEnabled: optional("OPENGENI_WORK_DISCOVERY_ENABLED"),
@@ -3616,12 +4488,28 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     voiceInputAzureApiVersion: optional("OPENGENI_VOICE_INPUT_AZURE_API_VERSION"),
     voiceInputAzureApiKey: optional("OPENGENI_VOICE_INPUT_AZURE_API_KEY"),
     voiceInputAzureAdToken: optional("OPENGENI_VOICE_INPUT_AZURE_AD_TOKEN"),
+    azureLiveEndpoint: optional("OPENGENI_AZURE_LIVE_ENDPOINT"),
+    azureLiveApiKey: optional("OPENGENI_AZURE_LIVE_API_KEY"),
+    azureLiveDeployment: optional("OPENGENI_AZURE_LIVE_DEPLOYMENT"),
+    azureLiveVoice: optional("OPENGENI_AZURE_LIVE_VOICE"),
+    azureLivePricingJson: optional("OPENGENI_AZURE_LIVE_PRICING_JSON"),
+    aiGatewayRealtimePricingJson: optional("OPENGENI_AI_GATEWAY_REALTIME_PRICING_JSON"),
+    voiceInputMaiEndpoint: optional("OPENGENI_VOICE_INPUT_MAI_ENDPOINT"),
+    voiceInputMaiApiKey: optional("OPENGENI_VOICE_INPUT_MAI_API_KEY"),
+    voiceInputMaiApiVersion: optional("OPENGENI_VOICE_INPUT_MAI_API_VERSION"),
+    voiceInputMaiPricingJson: optional("OPENGENI_VOICE_INPUT_MAI_PRICING_JSON"),
+    voiceInputMaiModel: optional("OPENGENI_VOICE_INPUT_MAI_MODEL"),
+    voiceInputAzureModel: optional("OPENGENI_VOICE_INPUT_AZURE_MODEL"),
+    voiceInputOpenaiPricingJson: optional("OPENGENI_VOICE_INPUT_OPENAI_PRICING_JSON"),
+    voiceInputAzurePricingJson: optional("OPENGENI_VOICE_INPUT_AZURE_PRICING_JSON"),
     voiceInputCodexExperimentalEnabled: optional("OPENGENI_VOICE_INPUT_CODEX_EXPERIMENTAL"),
     modelPricingJson: optional("OPENGENI_MODEL_PRICING_JSON"),
     modelCatalogSource,
     modelCostPolicyJson,
     modelNotesJson: optional("OPENGENI_MODEL_NOTES_JSON"),
     openrouterApiKey: optional("OPENGENI_OPENROUTER_API_KEY"),
+    opperApiKey: optional("OPENGENI_OPPER_API_KEY"),
+    managedModelsJson: optional("OPENGENI_MANAGED_MODELS_JSON"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
     supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
@@ -3629,6 +4517,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     supergrokResponseStreamIdleTimeoutMs: optional(
       "OPENGENI_SUPERGROK_RESPONSE_STREAM_IDLE_TIMEOUT_MS",
     ),
+    modelStreamIdleTimeoutMs: optional("OPENGENI_MODEL_STREAM_IDLE_TIMEOUT_MS"),
+    modelStreamProgressTimeoutMs: optional("OPENGENI_MODEL_STREAM_PROGRESS_TIMEOUT_MS"),
     codexConnectedAppsEnabled: optional("OPENGENI_CODEX_CONNECTED_APPS_ENABLED"),
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
@@ -3646,6 +4536,15 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openaiReasoningEncryptedContent: optional("OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT"),
     openaiMaxRetries: optional("OPENGENI_OPENAI_MAX_RETRIES"),
     webSearchEnabled: optional("OPENGENI_WEB_SEARCH_ENABLED"),
+    webSearchProvider: optional("OPENGENI_WEB_SEARCH_PROVIDER"),
+    webSearchApiKey: optional("OPENGENI_WEB_SEARCH_API_KEY"),
+    webSearchBaseUrl: optional("OPENGENI_WEB_SEARCH_BASE_URL"),
+    webFetchProvider: optional("OPENGENI_WEB_FETCH_PROVIDER"),
+    webFetchApiKey: optional("OPENGENI_WEB_FETCH_API_KEY"),
+    webFetchBaseUrl: optional("OPENGENI_WEB_FETCH_BASE_URL"),
+    webSearchProviderMode: optional("OPENGENI_WEB_SEARCH_PROVIDER_MODE"),
+    webSearchPricingJson: optional("OPENGENI_WEB_SEARCH_PRICING_JSON"),
+    webSearchRequestTimeoutMs: optional("OPENGENI_WEB_SEARCH_REQUEST_TIMEOUT_MS"),
     jevApiKey: optional("OPENGENI_JEV_API_KEY"),
     jevBaseUrl: optional("OPENGENI_JEV_BASE_URL"),
     jevModel: optional("OPENGENI_JEV_MODEL"),
@@ -3937,8 +4836,26 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       }
     }
   }
+  warnRetiredOrganizationTenancyActivationSwitch(source);
   validateSettings(settings, source);
   return settings;
+}
+
+let retiredOrganizationTenancyActivationSwitchWarned = false;
+
+/**
+ * Session-tenancy activation is universal since migration 0611, so the former
+ * deployment switch is accepted and ignored. Deployments that still set it keep
+ * booting; the one-time warning tells the operator to delete it.
+ */
+function warnRetiredOrganizationTenancyActivationSwitch(source: NodeJS.ProcessEnv): void {
+  if (retiredOrganizationTenancyActivationSwitchWarned) return;
+  if (source.OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED === undefined) return;
+  retiredOrganizationTenancyActivationSwitchWarned = true;
+  console.warn(
+    "[config] OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED is retired and ignored: " +
+      "every organization is session-tenancy activated (migration 0611). Remove it from the deployment.",
+  );
 }
 
 const LOCAL_FIRST_PARTY_DELEGATION_SECRET = "opengeni-local-first-party-delegation-secret-v1";
@@ -3967,13 +4884,35 @@ export type FirstPartyMcpToolPolicy = {
   allowed: FirstPartyMcpToolNameType[];
 };
 
+export type FirstPartyMcpToolPolicySettings = Pick<
+  Settings,
+  "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools" | "artifactMaterializerDeployed"
+>;
+
+const EDITABLE_ARTIFACT_EXPORT_TOOLS: readonly FirstPartyMcpToolNameType[] = [
+  "editable_artifact_export",
+  "editable_artifact_export_status",
+];
+
+/**
+ * First-party tools whose backing workload this deployment does not run. They
+ * are absent from the ceiling (never offered) and an explicit request for one
+ * is dropped rather than rejected: it is a deployment fact, not a caller error.
+ */
+export function deploymentUnavailableFirstPartyMcpTools(
+  settings: Pick<Settings, "artifactMaterializerDeployed">,
+): ReadonlySet<FirstPartyMcpToolNameType> {
+  return new Set(settings.artifactMaterializerDeployed ? [] : EDITABLE_ARTIFACT_EXPORT_TOOLS);
+}
+
 /** Resolve the deployment's session-tool defaults and hard execution ceiling. */
 export function resolveFirstPartyMcpToolPolicy(
-  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+  settings: FirstPartyMcpToolPolicySettings,
 ): FirstPartyMcpToolPolicy {
+  const unavailable = deploymentUnavailableFirstPartyMcpTools(settings);
   const allowed = currentAgentLearningToolSelection(
     settings.allowedFirstPartyMcpTools ?? [...FIRST_PARTY_MCP_TOOL_NAMES],
-  ).filter((tool) => !isRetiredNativeAtlassianTool(tool));
+  ).filter((tool) => !isRetiredNativeAtlassianTool(tool) && !unavailable.has(tool));
   const allowedSet = new Set(allowed);
   const defaults = currentAgentLearningToolSelection(
     settings.defaultFirstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
@@ -3986,7 +4925,7 @@ export function resolveFirstPartyMcpToolPolicy(
 
 /** Apply the deployment ceiling to an existing durable session selection. */
 export function allowedFirstPartyMcpToolsForSession(
-  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+  settings: FirstPartyMcpToolPolicySettings,
   selected: readonly FirstPartyMcpToolNameType[] | null | undefined,
 ): FirstPartyMcpToolNameType[] {
   const policy = resolveFirstPartyMcpToolPolicy(settings);
@@ -4506,6 +5445,7 @@ function gatewayRegistryProvider(
       upstreamModelId: model.upstreamModelId,
       label: model.label,
       ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
+      ...(model.logoUrl ? { logoUrl: model.logoUrl } : {}),
       capabilities: gatewayModelCapabilities(settings, {
         implicitCaching: model.implicitCaching,
         vision: model.vision,
@@ -4611,6 +5551,7 @@ function openRouterRegistryProvider(
       aliases,
       label: model.label,
       ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
+      ...(model.logoUrl ? { logoUrl: model.logoUrl } : {}),
       capabilities: model.capabilities,
       ...(model.contextWindowTokens === undefined
         ? {}
@@ -4664,6 +5605,131 @@ function openRouterRegistryProvider(
   };
 }
 
+function opperRegistryProvider(
+  settings: Settings,
+  input:
+    | { kind: "opper-managed"; apiKey: string }
+    | {
+        kind: "opper-workspace" | "opper-organization";
+        apiKey?: string;
+        customModels?: readonly {
+          upstreamModelId: string;
+          label?: string | null;
+        }[];
+      },
+): InternalRegistryProvider | null {
+  const workspace = input.kind === "opper-workspace";
+  const organization = input.kind === "opper-organization";
+  const scoped = workspace || organization;
+  const curated = organization ? [] : configuredOpperCatalogModels(settings);
+  const upstreamIds = new Set(curated.map((model) => model.upstreamModelId));
+  const productIds = new Set(
+    parseModelProvidersJson(settings.modelProvidersJson)
+      .filter(
+        (provider) =>
+          provider.id !== WORKSPACE_OPPER_PROVIDER_ID &&
+          provider.id !== ORGANIZATION_OPPER_PROVIDER_ID,
+      )
+      .flatMap((provider) =>
+        provider.models.flatMap((model) => [model.id, ...(model.aliases ?? [])]),
+      ),
+  );
+  const models: RegistryProvider["models"] = curated.map((model) => {
+    const id = workspace
+      ? workspaceOpperProductId(model.upstreamModelId)
+      : `${OPPER_MODEL_ID_PREFIX}${model.upstreamModelId}`;
+    const aliases = workspace ? model.aliases.map(workspaceOpperProductId) : model.aliases;
+    productIds.add(id);
+    for (const alias of aliases) productIds.add(alias);
+    return {
+      id,
+      upstreamModelId: model.upstreamModelId,
+      aliases,
+      label: model.label,
+      ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
+      ...(model.logoUrl ? { logoUrl: model.logoUrl } : {}),
+      capabilities: model.capabilities,
+      ...(model.contextWindowTokens === undefined
+        ? {}
+        : { contextWindowTokens: model.contextWindowTokens }),
+      ...(model.effectiveContextWindowTokens === undefined
+        ? {}
+        : { effectiveContextWindowTokens: model.effectiveContextWindowTokens }),
+      ...(model.autoCompactTokenLimit === undefined
+        ? {}
+        : { autoCompactTokenLimit: model.autoCompactTokenLimit }),
+      toolOutputTruncationTokens:
+        model.toolOutputTruncationTokens ?? settings.modelToolOutputTruncationTokens,
+      // Price authority is the reviewed code snapshot (or a code-defined
+      // entry's own reviewed rate), never a database catalog document.
+      ...(() => {
+        const pricing = model.pricing ?? reviewedOpperModelPricing(model.upstreamModelId);
+        return pricing === undefined ? {} : { pricing };
+      })(),
+    };
+  });
+  if (scoped) {
+    // An organization custom id that names a configured deployment route
+    // inherits that reviewed definition (capabilities and limits); the
+    // workspace rail already lists those routes as curated products.
+    const configuredByUpstream = new Map(
+      configuredOpperCatalogModels(settings).map((model) => [model.upstreamModelId, model]),
+    );
+    for (const custom of input.customModels ?? []) {
+      const productId = `${workspace ? WORKSPACE_OPPER_MODEL_ID_PREFIX : ORGANIZATION_OPPER_MODEL_ID_PREFIX}${custom.upstreamModelId}`;
+      // Deployment membership wins over a workspace row with the same identity.
+      if (upstreamIds.has(custom.upstreamModelId) || productIds.has(productId)) continue;
+      upstreamIds.add(custom.upstreamModelId);
+      productIds.add(productId);
+      const reviewed = configuredByUpstream.get(custom.upstreamModelId);
+      models.push({
+        id: productId,
+        upstreamModelId: custom.upstreamModelId,
+        aliases: [],
+        label: custom.label?.trim() || reviewed?.label || custom.upstreamModelId,
+        ...(reviewed?.shortLabel && !custom.label?.trim()
+          ? { shortLabel: reviewed.shortLabel }
+          : {}),
+        capabilities:
+          reviewed?.capabilities ?? opperCustomModelCapabilities(custom.upstreamModelId),
+        ...(reviewed?.contextWindowTokens === undefined
+          ? {}
+          : { contextWindowTokens: reviewed.contextWindowTokens }),
+        ...(reviewed?.effectiveContextWindowTokens === undefined
+          ? {}
+          : { effectiveContextWindowTokens: reviewed.effectiveContextWindowTokens }),
+        ...(reviewed?.autoCompactTokenLimit === undefined
+          ? {}
+          : { autoCompactTokenLimit: reviewed.autoCompactTokenLimit }),
+        toolOutputTruncationTokens:
+          reviewed?.toolOutputTruncationTokens ?? settings.modelToolOutputTruncationTokens,
+      });
+    }
+  }
+  if (models.length === 0) return null;
+  return {
+    kind: input.kind,
+    id: workspace
+      ? WORKSPACE_OPPER_PROVIDER_ID
+      : organization
+        ? ORGANIZATION_OPPER_PROVIDER_ID
+        : OPPER_PROVIDER_ID,
+    label: workspace ? "Your Opper" : organization ? "Organization Opper" : "Opper",
+    api: "chat",
+    wireProfile: "openai",
+    baseUrl: OPPER_BASE_URL,
+    // Opper streams only SSE keepalives while a route thinks with hidden
+    // reasoning (Claude via Bedrock returns no reasoning deltas). A live
+    // `max`-effort Opus 5.5 request sent keepalives and no model progress for
+    // more than 10 minutes, so the deployment 10-minute progress bound would
+    // abort and replay legitimate thinking. The byte-silence bound still
+    // catches a dead connection.
+    streamProgressTimeoutMs: OPPER_STREAM_PROGRESS_TIMEOUT_MS,
+    ...(input.apiKey ? { apiKey: input.apiKey } : {}),
+    models,
+  };
+}
+
 function configuredRegistryProviders(settings: Settings): InternalRegistryProvider[] {
   const providers = parseModelProvidersJson(settings.modelProvidersJson);
   const injected: InternalRegistryProvider[] = providers.filter(
@@ -4686,6 +5752,10 @@ function configuredRegistryProviders(settings: Settings): InternalRegistryProvid
       })
     : null;
   if (openrouter) injected.push(openrouter);
+  const opper = settings.opperApiKey
+    ? opperRegistryProvider(settings, { kind: "opper-managed", apiKey: settings.opperApiKey })
+    : null;
+  if (opper) injected.push(opper);
   return injected;
 }
 
@@ -4821,6 +5891,84 @@ export function withWorkspaceOpenRouterCredential(
     provider.id === WORKSPACE_OPENROUTER_PROVIDER_ID ? { ...provider, apiKey } : provider,
   );
   return { ...catalogSettings, modelProvidersJson: JSON.stringify(providers) };
+}
+
+/** Static Opper catalog overlay; it contains no concrete workspace credential. */
+export function withWorkspaceOpperCatalogProvider(
+  settings: Settings,
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
+): Settings {
+  const providers = parseModelProvidersJson(settings.modelProvidersJson);
+  const withoutWorkspace = providers.filter(
+    (provider) => provider.id !== WORKSPACE_OPPER_PROVIDER_ID,
+  );
+  const provider = opperRegistryProvider(settings, {
+    kind: "opper-workspace",
+    customModels,
+  });
+  if (!provider) return settings;
+  return {
+    ...settings,
+    modelProvidersJson: JSON.stringify([...withoutWorkspace, provider]),
+  };
+}
+
+/** Runtime overlay after the worker resolves the workspace's encrypted Opper key. */
+export function withWorkspaceOpperCredential(
+  settings: Settings,
+  apiKey: string,
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
+): Settings {
+  if (!apiKey.trim()) {
+    throw new Error("workspace Opper credential is empty");
+  }
+  const catalogSettings = withWorkspaceOpperCatalogProvider(settings, customModels);
+  const providers = parseModelProvidersJson(catalogSettings.modelProvidersJson).map((provider) =>
+    provider.id === WORKSPACE_OPPER_PROVIDER_ID ? { ...provider, apiKey } : provider,
+  );
+  return { ...catalogSettings, modelProvidersJson: JSON.stringify(providers) };
+}
+
+/** Secret-free organization Opper catalog overlay. */
+export function withOrganizationOpperCatalogProvider(
+  settings: Settings,
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
+): Settings {
+  const providers = parseModelProvidersJson(settings.modelProvidersJson).filter(
+    (provider) => provider.id !== ORGANIZATION_OPPER_PROVIDER_ID,
+  );
+  const provider = opperRegistryProvider(settings, {
+    kind: "opper-organization",
+    customModels,
+  });
+  return provider
+    ? { ...settings, modelProvidersJson: JSON.stringify([...providers, provider]) }
+    : settings;
+}
+
+export function withOrganizationOpperCredential(
+  settings: Settings,
+  apiKey: string,
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
+): Settings {
+  if (!apiKey.trim()) throw new Error("organization Opper credential is empty");
+  const catalog = withOrganizationOpperCatalogProvider(settings, customModels);
+  const providers = parseModelProvidersJson(catalog.modelProvidersJson).map((provider) =>
+    provider.id === ORGANIZATION_OPPER_PROVIDER_ID ? { ...provider, apiKey } : provider,
+  );
+  return { ...catalog, modelProvidersJson: JSON.stringify(providers) };
 }
 
 /** Secret-free organization Vercel AI Gateway catalog overlay. */
@@ -5157,15 +6305,18 @@ function registryCredentialSource(provider: InternalRegistryProvider): Credentia
     case "direct-openai-workspace":
     case "direct-azure-workspace":
     case "openrouter-workspace":
+    case "opper-workspace":
     case "anthropic-workspace":
       return { kind: "workspace_connection", mechanism: "api_key" };
     case "vercel-gateway-organization":
     case "anthropic-organization":
     case "openrouter-organization":
+    case "opper-organization":
       return { kind: "organization_connection", mechanism: "api_key" };
     case "api-key":
     case "vercel-gateway-managed":
     case "openrouter-managed":
+    case "opper-managed":
       return { kind: "deployment", mechanism: "api_key" };
     default: {
       const _exhaustive: never = provider.kind;
@@ -5188,14 +6339,19 @@ function registryBilling(provider: InternalRegistryProvider): BillingAttribution
     case "direct-openai-workspace":
     case "direct-azure-workspace":
     case "openrouter-workspace":
+    case "opper-workspace":
     case "anthropic-workspace":
       return { upstreamPayer: "workspace", metering: "external" };
     case "vercel-gateway-organization":
     case "anthropic-organization":
     case "openrouter-organization":
+    case "opper-organization":
       return { upstreamPayer: "organization", metering: "external" };
     case "api-key":
     case "vercel-gateway-managed":
+    // Paid deployment Opper routes settle through the deployment's Opper
+    // account and debit OpenGeni credits, like managed AI Gateway.
+    case "opper-managed":
       return { upstreamPayer: "deployment", metering: "opengeni_credits" };
     default: {
       const _exhaustive: never = provider.kind;
@@ -5406,6 +6562,71 @@ function matchesAdditiveCapabilityDefinitionVersion(
   return false;
 }
 
+/** The one pre-enablement hosted web-search declaration an operator may upgrade from. */
+function webSearchPreEnablementState(): CapabilityStateV1 {
+  return { upstream: "unknown", runnable: false };
+}
+
+function matchesWebSearchEnablementDefinitionVersion(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+  policy: TurnExecutionPolicyV1,
+): boolean {
+  // An operator turning on hosted web search for an existing model changes
+  // only capabilities.hostedTools.webSearch from the exact unknown/off
+  // declaration to a runnable one. Reconstruct that single historical
+  // declaration and require every other current field to reproduce the frozen
+  // digest; never ignore the digest. Turning web search off, or changing any
+  // other capability, still fails closed. Do not compose this with the
+  // latency/input-modality subsets or the wire-profile, implicit-caching, or
+  // Claude-accounting migration exceptions.
+  if (!model.capabilities.hostedTools.webSearch.runnable) return false;
+  const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
+  const capabilities = {
+    ...model.capabilities,
+    hostedTools: { ...model.capabilities.hostedTools, webSearch: webSearchPreEnablementState() },
+  };
+  return (
+    policy.definitionVersion ===
+    definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider)
+  );
+}
+
+/**
+ * The executable model an accepted turn runs: the current definition, except
+ * that a turn frozen before hosted web search was enabled keeps its frozen
+ * tool set (no web_search) on every recovery attempt. Only the next accepted
+ * logical turn resolves the newly enabled tool. Call only with a policy that
+ * already passed assertTurnExecutionPolicyMatchesConfigV1.
+ */
+export function configuredModelForAcceptedTurnExecutionPolicy(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+  policy: TurnExecutionPolicyV1,
+): ConfiguredModel {
+  if (
+    policy.definitionVersion === model.definitionVersion ||
+    // Runtime test doubles may resolve a partial shape; a model without a
+    // runnable web-search declaration has nothing to withhold.
+    model.capabilities?.hostedTools?.webSearch?.runnable !== true ||
+    !matchesWebSearchEnablementDefinitionVersion(model, provider, policy)
+  ) {
+    return model;
+  }
+  return {
+    ...model,
+    capabilities: {
+      ...model.capabilities,
+      hostedTools: {
+        ...model.capabilities.hostedTools,
+        webSearch: webSearchPreEnablementState(),
+      },
+    },
+    hostedWebSearch: false,
+    definitionVersion: policy.definitionVersion,
+  };
+}
+
 /**
  * The built-in provider's stable id: "openai" on the OpenAI platform, "azure"
  * on Azure. Exported because the workspace model-policy gate must attribute
@@ -5470,6 +6691,12 @@ export function configuredProviders(
       defaultHeaders: provider.defaultHeaders,
       publicDefaultQueryNames: provider.publicDefaultQueryNames,
       publicDefaultHeaderNames: provider.publicDefaultHeaderNames,
+      ...(provider.streamIdleTimeoutMs !== undefined
+        ? { streamIdleTimeoutMs: provider.streamIdleTimeoutMs }
+        : {}),
+      ...(provider.streamProgressTimeoutMs !== undefined
+        ? { streamProgressTimeoutMs: provider.streamProgressTimeoutMs }
+        : {}),
       credentialSource: registryCredentialSource(provider),
       billing: registryBilling(provider),
     }),
@@ -5643,6 +6870,9 @@ export function policyProviderIdForModel(settings: Settings, modelId: string): s
   }
   if (canonicalModelId.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX)) {
     return WORKSPACE_OPENROUTER_PROVIDER_ID;
+  }
+  if (canonicalModelId.startsWith(WORKSPACE_OPPER_MODEL_ID_PREFIX)) {
+    return WORKSPACE_OPPER_PROVIDER_ID;
   }
   const configured = configuredModels(settings).find((model) => model.id === canonicalModelId);
   return configured?.providerId ?? builtinProviderId(settings);
@@ -5836,6 +7066,7 @@ export function configuredModels(
           id: model.id,
           aliases: [...(model.aliases ?? [])],
           label: model.label ?? productLabelForModelId(model.id),
+          ...(model.logoUrl ? { logoUrl: model.logoUrl } : {}),
           ...(model.shortLabel
             ? { shortLabel: model.shortLabel }
             : productShortLabelForModelId(model.id)
@@ -6045,6 +7276,16 @@ function settingsForTurnExecutionPolicy(settings: Settings, modelId: string): Se
       ? settings
       : withOrganizationOpenRouterCatalogProvider(settings);
   }
+  if (modelId.startsWith(WORKSPACE_OPPER_MODEL_ID_PREFIX)) {
+    return resolveModelProvider(settings, modelId)
+      ? settings
+      : withWorkspaceOpperCatalogProvider(settings);
+  }
+  if (modelId.startsWith(ORGANIZATION_OPPER_MODEL_ID_PREFIX)) {
+    return resolveModelProvider(settings, modelId)
+      ? settings
+      : withOrganizationOpperCatalogProvider(settings);
+  }
   return settings;
 }
 
@@ -6065,6 +7306,18 @@ export function resolveModelProviderForTurn(
 }
 
 /**
+ * The requested model cannot start new work: it is retired from new selection
+ * or absent from the configured catalog. Callers that own a durable refusal
+ * (for example a scheduled occurrence) record it instead of failing blindly.
+ */
+export class TurnExecutionPolicyModelUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TurnExecutionPolicyModelUnavailableError";
+  }
+}
+
+/**
  * Build a trusted, secret-safe execution policy from the normalized catalog.
  * The Codex overlay here contains static product/provider identity only; it
  * neither proves readiness nor chooses, decrypts, leases, or exposes an account.
@@ -6076,11 +7329,15 @@ export function resolveTurnExecutionPolicyV1(
   const catalogSettings = settingsForTurnExecutionPolicy(settings, input.modelId);
   const productModelId = canonicalizeConfiguredModelId(catalogSettings, input.modelId);
   if (!isModelAvailableForNewSelection(catalogSettings, productModelId)) {
-    throw new Error("Turn execution policy model is retired from new selection");
+    throw new TurnExecutionPolicyModelUnavailableError(
+      "Turn execution policy model is retired from new selection",
+    );
   }
   const resolved = resolveModelProvider(catalogSettings, productModelId);
   if (!resolved) {
-    throw new Error("Turn execution policy model is not present in the configured catalog");
+    throw new TurnExecutionPolicyModelUnavailableError(
+      "Turn execution policy model is not present in the configured catalog",
+    );
   }
   if (
     input.requestedModelId !== null &&
@@ -6208,7 +7465,8 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
     parsed.definitionVersion === legacyImplicitOpenAiDefinitionVersion ||
     parsed.definitionVersion ===
       legacyCodexAstraImplicitCachingDefinitionVersionFor(resolved.model, resolved.provider) ||
-    matchesAdditiveCapabilityDefinitionVersion(resolved.model, resolved.provider, parsed);
+    matchesAdditiveCapabilityDefinitionVersion(resolved.model, resolved.provider, parsed) ||
+    matchesWebSearchEnablementDefinitionVersion(resolved.model, resolved.provider, parsed);
   const identityMismatched =
     parsed.providerId !== resolved.provider.id ||
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||
@@ -6223,7 +7481,11 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   if (!definitionVersionMatches && !legacyClaudeAccountingMatches) {
     throw new TurnExecutionPolicyDefinitionMismatchError();
   }
-  return { policy: parsed, provider: resolved.provider, model: resolved.model };
+  return {
+    policy: parsed,
+    provider: resolved.provider,
+    model: configuredModelForAcceptedTurnExecutionPolicy(resolved.model, resolved.provider, parsed),
+  };
 }
 
 /**
@@ -6371,6 +7633,14 @@ function reviewedProviderModelPricing(
         priceId = DEFAULT_OPENROUTER_MODEL_ID;
       }
       break;
+    case "opper-managed":
+    case "opper-workspace":
+    case "opper-organization": {
+      // Only reviewed, provider-pinned curated routes carry a static rate.
+      // Custom slugs and pools need an explicit operator rate.
+      if (!configuredOpperUpstreamModelIds(settings).includes(upstream)) return undefined;
+      return reviewedOpperModelPricing(upstream);
+    }
     case "api-key":
       // Explicit deployments of the official APIs may use their own product
       // IDs. Custom gateways/proxies and Azure SKUs do not inherit API rates.
@@ -7541,6 +8811,28 @@ export function parseIntegrationsOauthClientsJson(
   return out;
 }
 
+/**
+ * The operator-registered client for one authorization server, matched by
+ * exact issuer/URL key first and then trailing-slash-insensitively. The OAuth
+ * start flow and the connector catalog's connectability projection share this
+ * so a catalog row is offered exactly when a start would find a client.
+ */
+export function findIntegrationsOauthClient(
+  configured: Readonly<Record<string, IntegrationOAuthClientConfig>>,
+  candidates: readonly string[],
+): IntegrationOAuthClientConfig | null {
+  const normalize = (value: string) => value.replace(/\/+$/, "");
+  for (const key of new Set(candidates.flatMap((candidate) => [candidate, normalize(candidate)]))) {
+    const entry = configured[key];
+    if (entry) return entry;
+  }
+  const normalizedCandidates = new Set(candidates.map(normalize));
+  for (const [key, entry] of Object.entries(configured)) {
+    if (normalizedCandidates.has(normalize(key))) return entry;
+  }
+  return null;
+}
+
 export const SocialOAuthClientConfigSchema = z.object({
   clientId: z.string().min(1),
   clientSecret: z.string().min(1).optional(),
@@ -8335,6 +9627,9 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     );
   }
   parseExposedPorts(settings.dockerExposedPorts);
+  // Malformed voice-input pricing deliberately does not fail boot: every
+  // process shares this config, and a voice-only typo must not crash-loop
+  // workers. The provider is withheld and the API logs voiceInputPricingIssues.
   sandboxEnvironmentVariableNames(settings);
   sandboxLifecycleHookIds(settings);
   // Fail fast on a malformed warm-rate table (P2.1).
@@ -8567,6 +9862,12 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     // deployment funding JSON is parsed here; env catalog and note inputs are
     // intentionally ignored until resolveCatalogSettings applies the singleton.
     parseModelCostPolicyJson(settings.modelCostPolicyJson);
+    if (settings.managedModelsJson?.trim()) {
+      console.warn(
+        "[opengeni] OPENGENI_MANAGED_MODELS_JSON is ignored because OPENGENI_MODEL_CATALOG_SOURCE=database; " +
+          "set gatewayModels/openrouterModels/opperModels in the deployment catalog document instead.",
+      );
+    }
   }
 }
 
@@ -8579,6 +9880,11 @@ export function validateModelCatalogSettings(
   const notes = parseModelNotesJson(settings.modelNotesJson);
   const registryProviders = parseModelProvidersJson(settings.modelProvidersJson);
   const builtinId = builtinProviderId(settings);
+  const opperKeyProblem =
+    settings.opperApiKey === undefined ? null : opperCredentialProblem(settings.opperApiKey);
+  if (opperKeyProblem) {
+    throw new Error(`OPENGENI_OPPER_API_KEY: ${opperKeyProblem}`);
+  }
   const providerIds = new Set<string>();
   for (const provider of registryProviders) {
     if (
@@ -8589,6 +9895,8 @@ export function validateModelCatalogSettings(
       provider.kind === "direct-azure-workspace" ||
       provider.kind === "openrouter-workspace" ||
       provider.kind === "openrouter-organization" ||
+      provider.kind === "opper-workspace" ||
+      provider.kind === "opper-organization" ||
       provider.kind === "anthropic-organization" ||
       provider.kind === "anthropic-workspace" ||
       provider.kind === "claude-subscription-workspace" ||
@@ -8630,6 +9938,19 @@ export function validateModelCatalogSettings(
   // validated even when managed billing is disabled.
   const models = configuredModels(settings, source);
   const defaultCatalogSettings = settingsForTurnExecutionPolicy(settings, settings.openaiModel);
+  const policy = settings.creditPromotionPolicy;
+  const promotionalModelIds = new Set([
+    ...(policy.defaultModelIds ?? []),
+    ...(policy.signupModelIds ?? []),
+    ...Object.values(policy.offers).flatMap((offer) => offer.eligibleModelIds ?? []),
+  ]);
+  for (const modelId of promotionalModelIds) {
+    if (!models.some((model) => model.id === modelId && model.cost === "credits")) {
+      throw new Error(
+        `Promotional credit model ${modelId} must be a canonical credits-billed model in the catalog`,
+      );
+    }
+  }
   const defaultCatalogModels =
     defaultCatalogSettings === settings ? models : configuredModels(defaultCatalogSettings, source);
   if (models.length === 0 && defaultCatalogModels.length === 0) {
@@ -8687,6 +10008,12 @@ export function validateModelCatalogSettings(
     deploymentProductIds.add(productId);
     noteProductIds.add(productId);
     noteProductIds.add(`${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}${model.upstreamModelId}`);
+  }
+  for (const model of configuredOpperCatalogModels(settings)) {
+    const productId = `${OPPER_MODEL_ID_PREFIX}${model.upstreamModelId}`;
+    deploymentProductIds.add(productId);
+    noteProductIds.add(productId);
+    noteProductIds.add(`${WORKSPACE_OPPER_MODEL_ID_PREFIX}${model.upstreamModelId}`);
   }
   if (settings.modelCatalogSource === "code") {
     for (const productId of Object.keys(costPolicy)) {

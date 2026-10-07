@@ -70,9 +70,37 @@ should use `SessionConversation` from `@opengeni/react` (or `/session-ui`) for
 a complete existing-session chat: `<SessionConversation sessionId={id} />`
 under `OpenGeniProvider`. A standalone product backs both with
 `createSessionProxyHandler`. It wires queue actions, composer drafts, model policy,
-Stop, tool approvals, attachments, human-input forms, optimistic delivery, and paged timeline history. It follows the host page's light/dark theme and background by default and hides the model picker unless the host opts in (see the `@opengeni/react` README).
+Stop, tool approvals, attachments, human-input forms, live voice, optimistic delivery, and paged timeline history. It follows the host page's light/dark theme and background by default and hides the model picker unless the host opts in (see the `@opengeni/react` README).
 `ChatComposer` alone is only the input surface. Hosts with deliberately custom
 flows can still compose the individual hooks and components.
+
+Embedded defaults keep Opengeni's own product choices out of the host's
+product. The Opengeni web app does not mount these surfaces and keeps its own
+behavior. Existing explicit settings keep working.
+
+| Default in `SessionConversation` / `OpenGeniChat` | How the host changes it |
+| --- | --- |
+| Live voice is off: a call spends the workspace's credits and asks for the microphone. | `realtimeVoice={true}` (or `conversationProps`), or `createSessionProxyHandler({ realtimeVoice: true })`, which reports `realtimeVoice: true` in the client config. Proxy `realtimeVoice: false` still refuses voice. |
+| The working indicator says "Thinking…" with a "Show details" action, not the console's playful copy. | `genieLoading` (`phrases`, `messages`, `orb`, or `render`); omitted fields keep the neutral defaults. `MessageTimeline` keeps the console copy. |
+| Anonymous visitors (`resolve` returns `visitor: true`) get no attach button; the proxy reports `fileUploads.enabled: false` and refuses the upload routes. | Proxy `visitorUploads: true`. Signed-in users follow `files` (and `files: false` now also reports uploads off). Agent-produced media still loads for visitors. |
+
+Live voice is the same realtime protocol the console uses, not a second
+transport. The proxy forwards the workspace realtime model catalog and the
+session `realtime` routes (begin, provider connect, heartbeat, connection
+activate, ledger sync, end) as the resolved user, after `authorizeSession`;
+`realtimeVoice: false` refuses them and reports `realtimeVoice: false` in the
+client config, while explicit `realtimeVoice: true` reports `true`, which also
+shows the stock voice button. Owner/connection/epoch proof, Steer-based delegation, transcript
+truth, credit admission, and per-minute metering stay in the API exactly as for
+the console. `beforeForwardMessage` receives `delivery: "realtime"` once when a
+call starts (refusal, MCP credential rotation through the standalone rotate
+route, including the `toolServer` token) and before each sync that carries
+delegation or finalized transcript entries (refusal, `modelContext` placed
+before the browser's on those entries; it must be stable across a retry,
+because ledger replay requires an identical entry). When voice is opted in
+(see the defaults table above), `SessionConversation` fetches the catalog and
+mounts the lazily loaded voice button only when a model is available;
+`realtimeVoice={false}` turns it off even when the proxy offers it.
 
 The host owns available space; `SessionConversation` fills its container by
 default. Use a sized page/panel with `min-height: 0` on intervening flex/grid
@@ -81,10 +109,26 @@ the panel bottom. Do not add a second timeline scroller or fixed/sticky composer
 
 Agent replies link files, sandbox paths, editable artifacts, and Sites with
 `artifact:`, `sandbox:`, and OpenGeni console paths that do not exist on the
-host origin. `SessionConversation` downloads retained files by default;
-sandbox paths require explicit proxy `sandboxFiles: true` and stay within the
+host origin. `SessionConversation` downloads retained files by default and
+displays generated images and video, published files, and screenshots through
+the same session scope (`createWorkspaceRetainedArtifactLoader`,
+`createSessionRetainedScreenshotLoader`, and
+`createWorkspaceRetainedVideoLoader` are its defaults and the web app's
+loaders); behind the proxy these need `files` (on by default) and an exact
+session association the API proves for every workspace-level artifact read.
+Sandbox paths require explicit proxy `sandboxFiles: true` and stay within the
 session working directory without following symlinks.
-`opengeni-site` fences render the console's inline Site preview, and
+The session goal shows in the conversation chrome with Pause, Resume, and
+Clear; the proxy forwards only the goal read (with its `?absent=null` opt-in, so
+a goal-less chat reads a 200 `null` instead of logging a failed 404),
+`{ status: "paused" | "active" }` updates, and the clear, its only `DELETE`. Sub-agent cards and child updates
+call `onOpenSession`; `OpenGeniChat` opens the child chat in place.
+The proxy's client config reports `sessionCreation`, `archive`, and
+`artifacts` (`false` when off), so the stock chat hides actions the proxy
+cannot serve; the composer microphone follows `voiceInput.available`
+(`voiceInput={false}` opts a conversation out).
+`opengeni-site` fences render the console's inline Site preview (a static
+"Site preview unavailable" card when the proxy reports `artifacts: false`), and
 `onOpenArtifact` plus `SessionArtifactViewer` (`@opengeni/react/artifacts`)
 open editable artifacts and Sites in a host container through the proxy's
 opt-in `artifacts: true`. The proxy checks exact session associations on every

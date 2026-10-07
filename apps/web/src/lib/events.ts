@@ -1,4 +1,10 @@
-import { buildTimeline, presentFailure, type TimelineItem } from "@opengeni/react";
+import {
+  buildTimeline,
+  parseProviderRecovery,
+  presentFailure,
+  type ProviderRecoveryFacts,
+  type TimelineItem,
+} from "@opengeni/react";
 
 import type { Session, SessionEvent, SessionStatus } from "@/types";
 import { isStructuralSandboxFailure } from "./sandbox-failure";
@@ -80,6 +86,8 @@ export type SessionFailureSummary = {
   failureCode?: string | null;
   /** Closed exhausted-provider-quota marker (`daily`, `monthly`, `credits`, `quota`). */
   quotaScope?: string | null;
+  /** Spent automatic same-turn recovery: the affected model/provider and condition. */
+  providerRecovery?: ProviderRecoveryFacts;
 };
 
 /** The stored failure text and code exactly as recorded (presentation input, never rewritten). */
@@ -87,18 +95,22 @@ function recordedFailureFacts(payload: Record<string, unknown>): {
   recordedDetail?: string;
   failureCode?: string;
   quotaScope?: string;
+  providerRecovery?: ProviderRecoveryFacts;
 } {
   const text = (key: string): string | null => {
     const value = payload[key];
-    return typeof value === "string" && value.trim() ? value.trim() : null;
+    return typeof value === "string" && value.trim() ? value : null;
   };
-  const parts = [text("error") ?? text("message"), text("lastRetryableError") ?? text("detail")];
+  const parts = [text("error") ?? text("message"), text("lastRetryableError"), text("detail")];
   const recorded = parts.filter(
     (part, index): part is string => part !== null && parts.indexOf(part) === index,
   );
-  const code = text("code");
-  const quotaScope = text("quotaScope");
+  const code = text("code")?.trim();
+  const quotaScope = text("quotaScope")?.trim();
+  const providerRecovery =
+    payload.recoveryExhausted === true ? parseProviderRecovery(payload) : null;
   return {
+    ...(providerRecovery ? { providerRecovery } : {}),
     ...(recorded.length > 0 ? { recordedDetail: recorded.join("\n") } : {}),
     ...(code ? { failureCode: code } : {}),
     ...(quotaScope ? { quotaScope } : {}),

@@ -84,6 +84,29 @@ const settings = testSettings({
 
 const mcp = (id: string): ToolRef => ({ kind: "mcp", id });
 
+function draftCreateDeps(): ApiRouteDeps {
+  const noop = async () => undefined;
+  return {
+    settings,
+    db,
+    bus: new MemoryEventBus(),
+    workflowClient: {
+      signalUserMessage: noop,
+      wakeSessionWorkflow: noop,
+      requestSessionWorkflowWakeDispatch: noop,
+      signalApprovalDecision: noop,
+      signalSessionControl: noop,
+      syncScheduledTask: noop,
+      deleteScheduledTaskSchedule: noop,
+      triggerScheduledTask: noop,
+    } as unknown as SessionWorkflowClient,
+    objectStorage: null,
+    githubStateSecret: "test",
+    documentIndexer: { indexDocument: noop },
+    getDocumentServices: () => ({}) as never,
+  } as unknown as ApiRouteDeps;
+}
+
 describe("core new-session draft hydration", () => {
   test("accepts the exact saved visibility when creating the first session turn", async () => {
     if (!available) return;
@@ -142,6 +165,84 @@ describe("core new-session draft hydration", () => {
     expect(session.initialTurnId).toBeString();
     expect(session.title).toBe(AUTOMATIC_SESSION_TITLE_FALLBACK);
     expect(session.titleSource).toBe("agent");
+  }, 180_000);
+
+  test("creates from a Customize-on draft that follows workspace connectors with exclusions", async () => {
+    if (!available) return;
+    // The composer saves "Customize on, no connector pinned" as an explicit
+    // empty tools array plus the exclusion list, while its create request
+    // omits `tools` and sends only the exclusions (workspace defaults). Both
+    // describe the same policy, so the exact-draft fence must accept them.
+    for (const excludedMcpServerIds of [[], ["docs"]]) {
+      const { grant } = await fixture();
+      const saved = await saveActorNewSessionDraft(
+        { db, settings, objectStorage: null },
+        grant,
+        grant.workspaceId!,
+        {
+          expectedRevision: 0,
+          text: "What messages can you read?",
+          resources: [],
+          tools: [],
+          toolsProvided: true,
+          model: settings.openaiModel,
+          reasoningEffort: settings.openaiReasoningEffort,
+          latencyMode: "standard",
+          options: { visibility: "workspace", excludedMcpServerIds },
+        },
+      );
+      expect(saved.toolsProvided).toBe(true);
+      const session = await createSessionForRequest(draftCreateDeps(), grant, grant.workspaceId!, {
+        initialMessage: saved.text,
+        visibility: "workspace",
+        resources: [],
+        excludedMcpServerIds,
+        model: saved.model,
+        reasoningEffort: saved.reasoningEffort,
+        latencyMode: saved.latencyMode,
+        expectedNewSessionDraftRevision: saved.revision,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      expect(session.toolPolicy.mode).toBe("workspace_default");
+      expect(session.toolPolicy.excludedMcpServerIds ?? []).toEqual(excludedMcpServerIds);
+      const consumed = await getActorNewSessionDraft({ db, settings }, grant, grant.workspaceId!);
+      expect(consumed.text).toBe("");
+      expect(consumed.revision).toBe(saved.revision + 1);
+    }
+  }, 180_000);
+
+  test("still rejects an exclusion-only create against a draft with pinned connectors", async () => {
+    if (!available) return;
+    const { grant } = await fixture();
+    const saved = await saveActorNewSessionDraft(
+      { db, settings, objectStorage: null },
+      grant,
+      grant.workspaceId!,
+      {
+        expectedRevision: 0,
+        text: "pinned connectors",
+        resources: [],
+        tools: [mcp("docs")],
+        toolsProvided: true,
+        model: settings.openaiModel,
+        reasoningEffort: settings.openaiReasoningEffort,
+        latencyMode: "standard",
+        options: { visibility: "workspace" },
+      },
+    );
+    await expect(
+      createSessionForRequest(draftCreateDeps(), grant, grant.workspaceId!, {
+        initialMessage: saved.text,
+        visibility: "workspace",
+        resources: [],
+        excludedMcpServerIds: [],
+        model: saved.model,
+        reasoningEffort: saved.reasoningEffort,
+        latencyMode: saved.latencyMode,
+        expectedNewSessionDraftRevision: saved.revision,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    ).rejects.toMatchObject({ status: 409 });
   }, 180_000);
 
   test("rejects a stale create before committing a visible session shell", async () => {

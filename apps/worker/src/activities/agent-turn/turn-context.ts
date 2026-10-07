@@ -68,6 +68,12 @@ export type AttemptIdentityState = {
   triggerEventId: string | undefined;
   executionGeneration: number;
   providerRecoveryCount: number;
+  providerRecoveryObservation?:
+    | import("./provider-recovery-metrics").ProviderRecoveryObservation
+    | undefined;
+  modelMetricRoute?: { provider: string; model: string };
+  /** Public display labels of the accepted model route, for recovery copy only. */
+  modelRoutePresentation?: { model: string; modelLabel: string; providerLabel: string };
   claudeAuthRecovery?: { credentialId: string; credentialVersion: number } | undefined;
   modelRequestStarted: boolean;
   redispatchesAtDispatch: number;
@@ -99,6 +105,9 @@ export type SandboxRuntimeState = {
   }>;
   turnSandboxProvisioner: TurnSandboxProvisioner<ResumedTurnSandbox> | null;
   resumeManagedGroupBox: (() => Promise<ResumedTurnSandbox>) | null;
+  /** Physical resumeBoxForTurn promises still running for this attempt; the
+   * finalizer joins them so a cancelled establish completes its own cleanup. */
+  inFlightSandboxResumes: Set<Promise<unknown>>;
   prefetchedManagedBox: Promise<ResumedTurnSandbox> | null;
   prefetchedManagedBoxResult: ResumedTurnSandbox | null;
   setupBoxSession: unknown;
@@ -149,6 +158,9 @@ export type EventingState = {
   firstModelRequestPreparationRecorded: boolean;
   firstModelRequestCheckpointAt: number | null;
   initialModelWireDispatch: InitialModelWireDispatchClock;
+  /** Diagnostic only: the current stream's timing hook for a native transport's
+   *  literal provider dispatch. Never joins, fences or fails the request. */
+  providerDispatchObserver: (() => void) | null;
   companyBrainContextContributions: readonly ModelContextContributionSummary[] | null;
   /** Skill ids in this turn's frozen, model-visible Skill index; telemetry only. */
   modelVisibleSkillIds: ReadonlySet<string> | null;
@@ -255,6 +267,7 @@ export function createTurnContext(input: {
       firstModelPreparationNestedSandboxPhases: [],
       turnSandboxProvisioner: null,
       resumeManagedGroupBox: null,
+      inFlightSandboxResumes: new Set(),
       prefetchedManagedBox: null,
       prefetchedManagedBoxResult: null,
       setupBoxSession: null,
@@ -297,6 +310,7 @@ export function createTurnContext(input: {
       firstModelRequestPreparationRecorded: false,
       firstModelRequestCheckpointAt: null,
       initialModelWireDispatch: new InitialModelWireDispatchClock(),
+      providerDispatchObserver: null,
       companyBrainContextContributions: null,
       modelVisibleSkillIds: null,
     },

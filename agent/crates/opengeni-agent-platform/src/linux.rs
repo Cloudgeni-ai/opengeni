@@ -29,14 +29,18 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 use x11rb::connection::{Connection as _, RequestConnection as _};
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ConfigureWindowAux, ConnectionExt as _, ImageFormat, InputFocus, MapState,
-    Screen, StackMode, Window,
+    Atom, AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux,
+    EventMask, ImageFormat, InputFocus, MapState, PropMode, Screen, StackMode, Window, WindowClass,
 };
+use x11rb::wrapper::ConnectionExt as _;
 
 use opengeni_agent_proto::v1::{self, Os};
 
 use crate::desktop::{CapturedFrame, DesktopBackend};
 use crate::error::{PlatformError, PlatformResult};
+
+#[path = "linux_input_route.rs"]
+mod input_route;
 
 /// The OS family this build targets.
 #[must_use]
@@ -126,6 +130,140 @@ pub struct LinuxWindowRect {
     pub height: u32,
 }
 
+/// A confirmed activation on this exact display and client identity.
+#[derive(Debug, Clone)]
+pub struct LinuxWindowActivation {
+    display_name: String,
+    window: LinuxWindow,
+    route: WindowActivationRoute,
+}
+
+/// Preserves whether a rejected activation crossed the focus side-effect boundary.
+#[derive(Debug)]
+pub struct LinuxWindowActivationError {
+    /// Exact platform failure, before or after dispatch.
+    pub error: PlatformError,
+    /// True once activation may have been delivered; callers must not blindly retry.
+    pub dispatched: bool,
+}
+
+impl LinuxWindowActivationError {
+    fn before(error: PlatformError) -> Self {
+        Self {
+            error,
+            dispatched: false,
+        }
+    }
+
+    fn after(error: PlatformError) -> Self {
+        Self {
+            error,
+            dispatched: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowActivationRoute {
+    Managed {
+        check_window: Window,
+        active_atom: Atom,
+        selection_owner: Window,
+    },
+    Unmanaged,
+}
+
+// These are independent server facts, including contradictory states that
+// must remain representable so activation can reject them.
+#[allow(clippy::struct_excessive_bools)]
+struct WindowManagerFacts {
+    check_window: Option<Window>,
+    check_confirmed: bool,
+    check_named: bool,
+    selection_owner: Window,
+    redirected: bool,
+    manager_hints: bool,
+    activation_advertised: bool,
+}
+
+fn activation_route(
+    facts: &WindowManagerFacts,
+    active_atom: Option<Atom>,
+) -> PlatformResult<WindowActivationRoute> {
+    if let Some(check_window) = facts.check_window {
+        if facts.check_confirmed
+            && facts.check_named
+            && facts.activation_advertised
+            && facts.selection_owner != x11rb::NONE
+            && facts.redirected
+        {
+            if let Some(active_atom) = active_atom {
+                return Ok(WindowActivationRoute::Managed {
+                    check_window,
+                    active_atom,
+                    selection_owner: facts.selection_owner,
+                });
+            }
+        }
+        return Err(PlatformError::Unsupported(
+            "window manager does not prove EWMH activation support".into(),
+        ));
+    }
+    if facts.selection_owner == x11rb::NONE && !facts.redirected && !facts.manager_hints {
+        return Ok(WindowActivationRoute::Unmanaged);
+    }
+    Err(PlatformError::Unsupported(
+        "window manager activation authority is unavailable".into(),
+    ))
+}
+
+fn same_activation_window(expected: &LinuxWindow, current: &LinuxWindow) -> bool {
+    expected.process_id.is_some()
+        && expected.id == current.id
+        && expected.process_id == current.process_id
+        && expected.bounds == current.bounds
+}
+
+fn active_window_from_property(
+    property_type: Atom,
+    format: u8,
+    bytes_after: u32,
+    values: &[Window],
+) -> Option<Window> {
+    // Some managers append an update timestamp to the scalar client ID. It
+    // carries no window authority; input focus must still belong to the exact
+    // first client. Bound the known scalar/one-timestamp representation.
+    if property_type != u32::from(AtomEnum::WINDOW)
+        || format != 32
+        || bytes_after != 0
+        || !(1..=2).contains(&values.len())
+    {
+        return None;
+    }
+    Some(values[0])
+}
+
+fn focus_descends_from(
+    mut focus: Window,
+    client: Window,
+    mut parent: impl FnMut(Window) -> Option<Window>,
+) -> bool {
+    let mut visited = BTreeSet::new();
+    for _ in 0..32 {
+        if focus == x11rb::NONE || focus == 1 || !visited.insert(focus) {
+            return false;
+        }
+        if focus == client {
+            return true;
+        }
+        let Some(next) = parent(focus) else {
+            return false;
+        };
+        focus = next;
+    }
+    false
+}
+
 impl LinuxDesktop {
     /// Opens the backend against `$DISPLAY` (or `:0` if unset), verifying a
     /// connection can actually be established and the `XTEST` extension is present.
@@ -176,7 +314,7 @@ impl LinuxDesktop {
     /// Returns a typed platform failure when the display cannot be queried.
     pub async fn windows(&self) -> PlatformResult<Vec<LinuxWindow>> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.windows_blocking())
+        crate::spawn_blocking_reserved(move || this.windows_blocking())
             .await
             .map_err(|error| PlatformError::os(format!("X11 window-list task join: {error}")))?
     }
@@ -190,7 +328,7 @@ impl LinuxDesktop {
     /// unavailable, or the backing pixmap cannot be read.
     pub async fn capture_window(&self, window_id: u32) -> PlatformResult<CapturedFrame> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.capture_window_blocking(window_id))
+        crate::spawn_blocking_reserved(move || this.capture_window_blocking(window_id))
             .await
             .map_err(|error| PlatformError::os(format!("X11 window capture task join: {error}")))?
     }
@@ -204,7 +342,7 @@ impl LinuxDesktop {
     /// the X11 capture task cannot complete.
     pub async fn capture_rgba(&self) -> PlatformResult<LinuxRgbaFrame> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.capture_rgba_blocking())
+        crate::spawn_blocking_reserved(move || this.capture_rgba_blocking())
             .await
             .map_err(|error| PlatformError::os(format!("X11 RGBA capture task join: {error}")))?
     }
@@ -218,7 +356,7 @@ impl LinuxDesktop {
     /// capture fails, or the X11 capture task cannot complete.
     pub async fn capture_window_rgba(&self, window_id: u32) -> PlatformResult<LinuxRgbaFrame> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.capture_window_rgba_blocking(window_id))
+        crate::spawn_blocking_reserved(move || this.capture_window_rgba_blocking(window_id))
             .await
             .map_err(|error| {
                 PlatformError::os(format!("X11 window RGBA capture task join: {error}"))
@@ -239,7 +377,7 @@ impl LinuxDesktop {
         inputs: Vec<v1::DesktopInput>,
     ) -> PlatformResult<()> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::spawn_blocking_reserved(move || {
             this.inject_window_blocking(window_id, expected_bounds, &inputs)
         })
         .await
@@ -261,9 +399,150 @@ impl LinuxDesktop {
         expected_bounds: LinuxWindowRect,
     ) -> PlatformResult<()> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.focus_window_blocking(window_id, expected_bounds))
+        crate::spawn_blocking_reserved(move || {
+            this.focus_window_blocking(window_id, expected_bounds)
+        })
+        .await
+        .map_err(|error| PlatformError::os(format!("X11 window focus task join: {error}")))?
+    }
+
+    /// Activates an exact observed client through its proven window manager,
+    /// or through input focus only on a positively unmanaged display.
+    ///
+    /// # Errors
+    ///
+    /// Identity/geometry or unsupported manager failures refuse before input.
+    /// Failed settlement after the one activation request preserves uncertainty.
+    pub async fn activate_window(
+        &self,
+        expected: LinuxWindow,
+    ) -> Result<LinuxWindowActivation, LinuxWindowActivationError> {
+        let this = self.clone();
+        crate::spawn_blocking_reserved(move || this.activate_window_blocking(expected))
             .await
-            .map_err(|error| PlatformError::os(format!("X11 window focus task join: {error}")))?
+            .map_err(|error| {
+                LinuxWindowActivationError::after(PlatformError::os(format!(
+                    "X11 window activation task join: {error}"
+                )))
+            })?
+    }
+
+    /// Rechecks one prior activation on the same display without posting input.
+    ///
+    /// # Errors
+    ///
+    /// Rejects changed identity, manager or active/input-focus ownership.
+    pub async fn verify_window_activation(
+        &self,
+        activation: LinuxWindowActivation,
+    ) -> PlatformResult<()> {
+        let this = self.clone();
+        crate::spawn_blocking_reserved(move || {
+            if this.display_name != activation.display_name {
+                return Err(PlatformError::NotFound(
+                    "window activation belongs to another display".into(),
+                ));
+            }
+            let (conn, screen) = this.connect()?;
+            verify_activation_state(&conn, &screen, &activation.window, activation.route)
+        })
+        .await
+        .map_err(|error| {
+            PlatformError::os(format!("X11 window activation verification join: {error}"))
+        })?
+    }
+
+    /// Reads exact client identity and current keyboard ownership without
+    /// requesting activation or replacing the caller's window authority.
+    ///
+    /// # Errors
+    /// Refuses a changed client, manager, geometry, or focus owner before input.
+    pub async fn current_window_activation(
+        &self,
+        expected: LinuxWindow,
+    ) -> PlatformResult<LinuxWindowActivation> {
+        let this = self.clone();
+        crate::spawn_blocking_reserved(move || {
+            let (conn, screen) = this.connect()?;
+            let route = read_activation_route(&conn, &screen)?;
+            verify_activation_state(&conn, &screen, &expected, route)?;
+            Ok(LinuxWindowActivation {
+                display_name: this.display_name.clone(),
+                window: expected,
+                route,
+            })
+        })
+        .await
+        .map_err(|error| {
+            PlatformError::os(format!("X11 exact window ownership task join: {error}"))
+        })?
+    }
+
+    /// Delivers a bounded batch only while the original activated client still
+    /// owns focus. Identity and ownership checks share the delivery connection.
+    ///
+    /// # Errors
+    /// Refuses changed ownership before delivery; failures after input retain
+    /// an ambiguous outcome and must never be blindly replayed.
+    pub async fn inject_activated_window(
+        &self,
+        activation: LinuxWindowActivation,
+        inputs: Vec<v1::DesktopInput>,
+    ) -> Result<(), LinuxWindowActivationError> {
+        let this = self.clone();
+        crate::spawn_blocking_reserved(move || {
+            if this.display_name != activation.display_name {
+                return Err(LinuxWindowActivationError::before(PlatformError::NotFound(
+                    "window input belongs to another display".into(),
+                )));
+            }
+            input_route::validate_input_size(&inputs)
+                .map_err(LinuxWindowActivationError::before)?;
+            let (conn, screen) = this.connect().map_err(LinuxWindowActivationError::before)?;
+            // The fresh delivery connection owns every temporary grab. Closing
+            // its socket on a hard deadline releases them even if an X reply
+            // stops arriving; an async timeout alone cannot stop blocking I/O.
+            let deadline = input_route::DeliveryDeadline::start(&conn)
+                .map_err(LinuxWindowActivationError::before)?;
+            let guard =
+                X11ServerGuard::acquire(&conn).map_err(LinuxWindowActivationError::before)?;
+            let prepared =
+                prepare_inputs(&conn, &inputs).map_err(LinuxWindowActivationError::before)?;
+            verify_activation_state(&conn, &screen, &activation.window, activation.route)
+                .map_err(LinuxWindowActivationError::before)?;
+            verify_window_input_owners(&conn, screen.root, activation.window.id, &prepared)
+                .map_err(LinuxWindowActivationError::before)?;
+            let routing =
+                input_route::preflight(&conn, screen.root, activation.window.id, &prepared)
+                    .map_err(LinuxWindowActivationError::before)?;
+            // A grab probe can emit focus/crossing notifications. Check the
+            // original authority again with only the empty XI1 slave keeper
+            // retained. The master route remains owned by the original client.
+            verify_activation_state(&conn, &screen, &activation.window, activation.route)
+                .map_err(LinuxWindowActivationError::before)?;
+            verify_window_input_owners(&conn, screen.root, activation.window.id, &prepared)
+                .map_err(LinuxWindowActivationError::before)?;
+            inject_prepared_inputs(&conn, screen.root, &prepared)
+                .map_err(LinuxWindowActivationError::after)?;
+            verify_activation_state(&conn, &screen, &activation.window, activation.route)
+                .map_err(LinuxWindowActivationError::after)?;
+            verify_window_input_owners(&conn, screen.root, activation.window.id, &prepared)
+                .map_err(LinuxWindowActivationError::after)?;
+            routing
+                .verify(&conn, screen.root)
+                .map_err(LinuxWindowActivationError::after)?;
+            routing
+                .release(&conn)
+                .map_err(LinuxWindowActivationError::after)?;
+            guard.release().map_err(LinuxWindowActivationError::after)?;
+            deadline.finish().map_err(LinuxWindowActivationError::after)
+        })
+        .await
+        .map_err(|error| {
+            LinuxWindowActivationError::after(PlatformError::os(format!(
+                "X11 exact window delivery task join: {error}"
+            )))
+        })?
     }
 
     /// Whether the connected display exposes the Composite extension required
@@ -311,7 +590,7 @@ impl DesktopBackend for LinuxDesktop {
         // x11rb is blocking; run the capture on the blocking pool so the async
         // runtime is never stalled by a slow GetImage.
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.capture_blocking())
+        crate::spawn_blocking_reserved(move || this.capture_blocking())
             .await
             .map_err(|e| PlatformError::os(format!("capture task join: {e}")))?
     }
@@ -319,7 +598,7 @@ impl DesktopBackend for LinuxDesktop {
     async fn inject(&self, input: &v1::DesktopInput) -> PlatformResult<()> {
         let this = self.clone();
         let input = input.clone();
-        tokio::task::spawn_blocking(move || this.inject_blocking(std::slice::from_ref(&input)))
+        crate::spawn_blocking_reserved(move || this.inject_blocking(std::slice::from_ref(&input)))
             .await
             .map_err(|e| PlatformError::os(format!("inject task join: {e}")))?
     }
@@ -532,6 +811,365 @@ impl LinuxDesktop {
         conn.flush()
             .map_err(|error| PlatformError::os(format!("flush X11 window focus: {error}")))
     }
+
+    fn activate_window_blocking(
+        &self,
+        expected: LinuxWindow,
+    ) -> Result<LinuxWindowActivation, LinuxWindowActivationError> {
+        let (conn, screen) = self.connect().map_err(LinuxWindowActivationError::before)?;
+        validate_activation_window(&conn, &screen, &expected)
+            .map_err(LinuxWindowActivationError::before)?;
+        let route =
+            read_activation_route(&conn, &screen).map_err(LinuxWindowActivationError::before)?;
+        let timestamp =
+            server_timestamp(&conn, &screen).map_err(LinuxWindowActivationError::before)?;
+        validate_activation_window(&conn, &screen, &expected)
+            .map_err(LinuxWindowActivationError::before)?;
+        if read_activation_route(&conn, &screen).map_err(LinuxWindowActivationError::before)?
+            != route
+        {
+            return Err(LinuxWindowActivationError::before(PlatformError::NotFound(
+                "window manager changed before activation".into(),
+            )));
+        }
+        match route {
+            WindowActivationRoute::Managed { active_atom, .. } => {
+                // This external desktop controller acts as a pager. It never
+                // impersonates the target application's own active window.
+                let event =
+                    ClientMessageEvent::new(32, expected.id, active_atom, [2, timestamp, 0, 0, 0]);
+                conn.send_event(
+                    false,
+                    screen.root,
+                    EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+                    event,
+                )
+                .map_err(|error| {
+                    LinuxWindowActivationError::after(PlatformError::os(format!(
+                        "request exact X11 activation: {error}"
+                    )))
+                })?
+                .check()
+                .map_err(|error| {
+                    LinuxWindowActivationError::after(PlatformError::os(format!(
+                        "send exact X11 activation: {error}"
+                    )))
+                })?;
+            }
+            WindowActivationRoute::Unmanaged => {
+                conn.set_input_focus(InputFocus::PARENT, expected.id, timestamp)
+                    .map_err(|error| {
+                        LinuxWindowActivationError::after(PlatformError::os(format!(
+                            "request unmanaged X11 focus: {error}"
+                        )))
+                    })?
+                    .check()
+                    .map_err(|error| {
+                        LinuxWindowActivationError::after(PlatformError::os(format!(
+                            "set unmanaged X11 focus: {error}"
+                        )))
+                    })?;
+            }
+        }
+        conn.flush().map_err(|error| {
+            LinuxWindowActivationError::after(PlatformError::os(format!(
+                "flush X11 activation: {error}"
+            )))
+        })?;
+        let mut consecutive = 0;
+        for attempt in 0..12 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            validate_activation_window(&conn, &screen, &expected)
+                .map_err(LinuxWindowActivationError::after)?;
+            if read_activation_route(&conn, &screen).map_err(LinuxWindowActivationError::after)?
+                != route
+            {
+                return Err(LinuxWindowActivationError::after(PlatformError::NotFound(
+                    "window manager changed during activation".into(),
+                )));
+            }
+            if activation_owns_focus(&conn, &screen, &expected, route)
+                .map_err(LinuxWindowActivationError::after)?
+            {
+                consecutive += 1;
+                if consecutive == 2 {
+                    return Ok(LinuxWindowActivation {
+                        display_name: self.display_name.clone(),
+                        window: expected,
+                        route,
+                    });
+                }
+            } else {
+                consecutive = 0;
+            }
+        }
+        // A manager may deliberately ignore/refuse its one request. Never force
+        // SetInputFocus or repeat activation after that refusal.
+        Err(LinuxWindowActivationError::after(PlatformError::Timeout(
+            "exact X11 window activation did not settle".into(),
+        )))
+    }
+}
+
+fn validate_activation_window(
+    conn: &x11rb::rust_connection::RustConnection,
+    screen: &Screen,
+    expected: &LinuxWindow,
+) -> PlatformResult<()> {
+    if expected.process_id.is_none() {
+        return Err(PlatformError::Unsupported(
+            "window activation requires an observed client process identity".into(),
+        ));
+    }
+    let attrs = conn
+        .get_window_attributes(expected.id)
+        .map_err(|error| {
+            PlatformError::os(format!("request exact X11 window attributes: {error}"))
+        })?
+        .reply()
+        .map_err(|error| {
+            PlatformError::NotFound(format!("exact X11 window disappeared: {error}"))
+        })?;
+    if attrs.map_state != MapState::VIEWABLE {
+        return Err(PlatformError::NotFound(
+            "exact X11 client is not viewable".into(),
+        ));
+    }
+    let current = inspect_window(
+        conn,
+        screen,
+        expected.id,
+        intern_existing_atom(conn, b"_NET_WM_PID")?,
+        intern_existing_atom(conn, b"_NET_WM_NAME")?,
+        intern_existing_atom(conn, b"UTF8_STRING")?,
+    )
+    .ok_or_else(|| {
+        PlatformError::NotFound("exact X11 client disappeared before activation".into())
+    })?;
+    if !same_activation_window(expected, &current) {
+        return Err(PlatformError::NotFound(
+            "exact X11 client identity or geometry changed".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn read_activation_route(
+    conn: &x11rb::rust_connection::RustConnection,
+    screen: &Screen,
+) -> PlatformResult<WindowActivationRoute> {
+    let check_atom = intern_existing_atom(conn, b"_NET_SUPPORTING_WM_CHECK")?;
+    let check_present = check_atom
+        .map(|property| property_present(conn, screen.root, property))
+        .transpose()?
+        .unwrap_or(false);
+    let check_window = check_atom
+        .map(|property| window_property(conn, screen.root, property))
+        .transpose()?
+        .and_then(|values| (values.len() == 1).then(|| values[0]));
+    let check_confirmed = check_window
+        .zip(check_atom)
+        .is_some_and(|(window, property)| {
+            window_property(conn, window, property).is_ok_and(|values| values == [window])
+        });
+    let check_named = check_window
+        .zip(intern_existing_atom(conn, b"_NET_WM_NAME")?)
+        .zip(intern_existing_atom(conn, b"UTF8_STRING")?)
+        .is_some_and(|((window, property), kind)| {
+            string_property(conn, window, property, kind).is_some_and(|name| !name.is_empty())
+        });
+    let supported_atom = intern_existing_atom(conn, b"_NET_SUPPORTED")?;
+    let supported_present = supported_atom
+        .map(|property| property_present(conn, screen.root, property))
+        .transpose()?
+        .unwrap_or(false);
+    let supported = supported_atom
+        .map(|property| {
+            let reply = conn
+                .get_property(
+                    false,
+                    screen.root,
+                    property,
+                    AtomEnum::ATOM,
+                    0,
+                    MAX_CLIENT_WINDOWS,
+                )
+                .map_err(|error| {
+                    PlatformError::os(format!("request X11 manager support: {error}"))
+                })?
+                .reply()
+                .map_err(|error| PlatformError::os(format!("read X11 manager support: {error}")))?;
+            Ok::<_, PlatformError>(reply.value32().map_or_else(Vec::new, Iterator::collect))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let active_atom = intern_existing_atom(conn, b"_NET_ACTIVE_WINDOW")?;
+    let index = conn
+        .setup()
+        .roots
+        .iter()
+        .position(|candidate| candidate.root == screen.root)
+        .ok_or_else(|| PlatformError::NotFound("X11 screen root changed".into()))?;
+    let selection = intern_existing_atom(conn, format!("WM_S{index}").as_bytes())?;
+    let selection_owner = if let Some(selection) = selection {
+        conn.get_selection_owner(selection)
+            .map_err(|error| PlatformError::os(format!("request X11 manager selection: {error}")))?
+            .reply()
+            .map_err(|error| PlatformError::os(format!("read X11 manager selection: {error}")))?
+            .owner
+    } else {
+        x11rb::NONE
+    };
+    let attrs = conn
+        .get_window_attributes(screen.root)
+        .map_err(|error| PlatformError::os(format!("request X11 root attributes: {error}")))?
+        .reply()
+        .map_err(|error| PlatformError::os(format!("read X11 root attributes: {error}")))?;
+    let active_hint = active_atom
+        .map(|property| property_present(conn, screen.root, property))
+        .transpose()?
+        .unwrap_or(false);
+    activation_route(
+        &WindowManagerFacts {
+            check_window,
+            check_confirmed,
+            check_named,
+            selection_owner,
+            redirected: attrs
+                .all_event_masks
+                .contains(EventMask::SUBSTRUCTURE_REDIRECT),
+            manager_hints: check_present || supported_present || active_hint,
+            activation_advertised: active_atom.is_some_and(|atom| supported.contains(&atom)),
+        },
+        active_atom,
+    )
+}
+
+fn property_present(
+    conn: &x11rb::rust_connection::RustConnection,
+    window: Window,
+    property: Atom,
+) -> PlatformResult<bool> {
+    let reply = conn
+        .get_property(false, window, property, AtomEnum::ANY, 0, 1)
+        .map_err(|error| PlatformError::os(format!("request X11 property presence: {error}")))?
+        .reply()
+        .map_err(|error| PlatformError::os(format!("read X11 property presence: {error}")))?;
+    Ok(reply.type_ != x11rb::NONE)
+}
+
+fn server_timestamp(
+    conn: &x11rb::rust_connection::RustConnection,
+    screen: &Screen,
+) -> PlatformResult<u32> {
+    let window = conn
+        .generate_id()
+        .map_err(|error| PlatformError::os(format!("allocate timestamp resource: {error}")))?;
+    let property = conn
+        .intern_atom(false, b"_OPENGENI_ACTIVATION_TIME")
+        .map_err(|error| PlatformError::os(format!("request timestamp atom: {error}")))?
+        .reply()
+        .map_err(|error| PlatformError::os(format!("read timestamp atom: {error}")))?
+        .atom;
+    conn.create_window(
+        0,
+        window,
+        screen.root,
+        0,
+        0,
+        1,
+        1,
+        0,
+        WindowClass::INPUT_ONLY,
+        0,
+        &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+    )
+    .map_err(|error| PlatformError::os(format!("create timestamp resource: {error}")))?
+    .check()
+    .map_err(|error| PlatformError::os(format!("confirm timestamp resource: {error}")))?;
+    let result = (|| {
+        conn.change_property8(PropMode::REPLACE, window, property, AtomEnum::INTEGER, &[1])
+            .map_err(|error| PlatformError::os(format!("request server timestamp: {error}")))?
+            .check()
+            .map_err(|error| {
+                PlatformError::os(format!("confirm server timestamp request: {error}"))
+            })?;
+        conn.flush()
+            .map_err(|error| PlatformError::os(format!("flush timestamp request: {error}")))?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            if let Some(x11rb::protocol::Event::PropertyNotify(event)) =
+                conn.poll_for_event().map_err(|error| {
+                    PlatformError::os(format!("read server timestamp event: {error}"))
+                })?
+            {
+                if event.window == window && event.atom == property && event.time != 0 {
+                    return Ok(event.time);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        Err(PlatformError::Timeout(
+            "X11 server timestamp did not arrive".into(),
+        ))
+    })();
+    if let Ok(cookie) = conn.destroy_window(window) {
+        let _ = cookie.check();
+    }
+    result
+}
+
+fn activation_owns_focus(
+    conn: &x11rb::rust_connection::RustConnection,
+    screen: &Screen,
+    window: &LinuxWindow,
+    route: WindowActivationRoute,
+) -> PlatformResult<bool> {
+    if let WindowActivationRoute::Managed { active_atom, .. } = route {
+        let reply = conn
+            .get_property(false, screen.root, active_atom, AtomEnum::WINDOW, 0, 2)
+            .map_err(|error| PlatformError::os(format!("request active X11 client: {error}")))?
+            .reply()
+            .map_err(|error| PlatformError::os(format!("read active X11 client: {error}")))?;
+        let values = reply.value32().map_or_else(Vec::new, Iterator::collect);
+        if active_window_from_property(reply.type_, reply.format, reply.bytes_after, &values)
+            != Some(window.id)
+        {
+            return Ok(false);
+        }
+    }
+    let focus = conn
+        .get_input_focus()
+        .map_err(|error| PlatformError::os(format!("request X11 input focus: {error}")))?
+        .reply()
+        .map_err(|error| PlatformError::os(format!("read X11 input focus: {error}")))?
+        .focus;
+    Ok(focus_descends_from(focus, window.id, |current| {
+        conn.query_tree(current)
+            .ok()?
+            .reply()
+            .ok()
+            .map(|reply| reply.parent)
+    }))
+}
+
+fn verify_activation_state(
+    conn: &x11rb::rust_connection::RustConnection,
+    screen: &Screen,
+    window: &LinuxWindow,
+    route: WindowActivationRoute,
+) -> PlatformResult<()> {
+    validate_activation_window(conn, screen, window)?;
+    if read_activation_route(conn, screen)? != route
+        || !activation_owns_focus(conn, screen, window, route)?
+    {
+        return Err(PlatformError::NotFound(
+            "exact window no longer owns active/input focus".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_redirected(state: &mut CompositeState, window: Window) -> PlatformResult<()> {
@@ -587,25 +1225,243 @@ fn name_window_pixmap(
     }
 }
 
+enum PreparedInput {
+    Pointer(v1::PointerEvent),
+    Key {
+        request: v1::KeyEvent,
+        events: Vec<(u8, u8)>,
+    },
+    Scroll(v1::ScrollEvent),
+}
+
+// Blocks ordinary client topology/focus changes across preflight and delivery.
+// This is not a device grab: hardware input and impervious XTEST clients remain
+// possible, so a failed postcheck still has an unknown physical outcome.
+struct X11ServerGuard<'a> {
+    conn: &'a x11rb::rust_connection::RustConnection,
+    released: bool,
+}
+
+impl<'a> X11ServerGuard<'a> {
+    fn acquire(conn: &'a x11rb::rust_connection::RustConnection) -> PlatformResult<Self> {
+        conn.grab_server()
+            .map_err(|error| PlatformError::os(format!("request X11 delivery guard: {error}")))?
+            .check()
+            .map_err(|error| PlatformError::os(format!("confirm X11 delivery guard: {error}")))?;
+        Ok(Self {
+            conn,
+            released: false,
+        })
+    }
+
+    fn release(mut self) -> PlatformResult<()> {
+        self.conn
+            .ungrab_server()
+            .map_err(|error| PlatformError::os(format!("release X11 delivery guard: {error}")))?
+            .check()
+            .map_err(|error| {
+                PlatformError::os(format!("confirm X11 delivery guard release: {error}"))
+            })?;
+        self.released = true;
+        Ok(())
+    }
+}
+
+impl Drop for X11ServerGuard<'_> {
+    fn drop(&mut self) {
+        if !self.released {
+            // One server-side disconnect cleanup releases the guard/grabs and
+            // registered XKB restoration. Do not reopen ordinary clients with
+            // temporary controls still armed on this fresh delivery connection.
+            let _ = rustix::net::shutdown(self.conn.stream(), rustix::net::Shutdown::Both);
+        }
+    }
+}
+
+fn verify_window_input_owners(
+    conn: &x11rb::rust_connection::RustConnection,
+    root: Window,
+    window: Window,
+    inputs: &[PreparedInput],
+) -> PlatformResult<()> {
+    use x11rb::protocol::res::ConnectionExt as _;
+    let points = inputs
+        .iter()
+        .filter_map(|input| match input {
+            PreparedInput::Pointer(pointer) => Some((pointer.x, pointer.y)),
+            PreparedInput::Scroll(scroll) => Some((scroll.x, scroll.y)),
+            PreparedInput::Key { .. } => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let keyboard = inputs
+        .iter()
+        .any(|input| matches!(input, PreparedInput::Key { .. }));
+    if points.is_empty() && !keyboard {
+        return Ok(());
+    }
+    // Window/PID properties alone cannot identify a foreign embedded child.
+    // XRes maps every resource to its actual owning client connection.
+    let clients = conn
+        .res_query_clients()
+        .map_err(|error| {
+            PlatformError::Unsupported(format!(
+                "X11 window client ownership is unavailable: {error}"
+            ))
+        })?
+        .reply()
+        .map_err(|error| {
+            PlatformError::Unsupported(format!(
+                "X11 window client ownership is unavailable: {error}"
+            ))
+        })?
+        .clients;
+    if keyboard {
+        let focused = conn
+            .get_input_focus()
+            .map_err(|error| PlatformError::os(format!("request X11 keyboard owner: {error}")))?
+            .reply()
+            .map_err(|error| PlatformError::os(format!("read X11 keyboard owner: {error}")))?
+            .focus;
+        // An XEmbed child can be a descendant of the intended window while
+        // belonging to an entirely different client. Ancestry is insufficient.
+        if !same_x11_client(window, focused, &clients) {
+            return Err(PlatformError::NotFound(
+                "window keyboard focus belongs to another client".into(),
+            ));
+        }
+    }
+    for (x, y) in points {
+        let mut current = root;
+        let mut visited = BTreeSet::new();
+        let mut original_seen = false;
+        let mut confirmed = false;
+        for _ in 0..64 {
+            if !visited.insert(current) {
+                break;
+            }
+            original_seen |= current == window;
+            let translated = conn
+                .translate_coordinates(
+                    root,
+                    current,
+                    i16::try_from(x).expect("point was preflighted"),
+                    i16::try_from(y).expect("point was preflighted"),
+                )
+                .map_err(|error| {
+                    PlatformError::os(format!("request X11 input point owner: {error}"))
+                })?
+                .reply()
+                .map_err(|error| {
+                    PlatformError::os(format!("read X11 input point owner: {error}"))
+                })?;
+            if !translated.same_screen {
+                break;
+            }
+            if translated.child == x11rb::NONE {
+                confirmed = original_seen && same_x11_client(window, current, &clients);
+                break;
+            }
+            current = translated.child;
+        }
+        if !confirmed {
+            return Err(PlatformError::NotFound(
+                "window input point is covered or belongs to another client".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn same_x11_client(
+    window: Window,
+    child: Window,
+    clients: &[x11rb::protocol::res::Client],
+) -> bool {
+    let owner = |resource| {
+        clients
+            .iter()
+            .find(|client| resource & !client.resource_mask == client.resource_base)
+            .map(|client| client.resource_base)
+    };
+    let expected = owner(window);
+    expected.is_some() && owner(child) == expected
+}
+
+// Resolve the entire batch on its delivery connection before any XTEST input.
+// A later unsupported glyph/chord must not turn an earlier emitted prefix into
+// a supposedly definite failure.
+fn prepare_inputs(
+    conn: &x11rb::rust_connection::RustConnection,
+    inputs: &[v1::DesktopInput],
+) -> PlatformResult<Vec<PreparedInput>> {
+    let mut mapping = None;
+    inputs
+        .iter()
+        .map(|input| match input.event.as_ref() {
+            Some(v1::desktop_input::Event::Pointer(pointer)) => {
+                validate_x11_point(pointer.x, pointer.y)?;
+                Ok(PreparedInput::Pointer(*pointer))
+            }
+            Some(v1::desktop_input::Event::Scroll(scroll)) => {
+                validate_x11_point(scroll.x, scroll.y)?;
+                Ok(PreparedInput::Scroll(*scroll))
+            }
+            Some(v1::desktop_input::Event::Key(key)) => {
+                if mapping.is_none() {
+                    mapping = Some(keyboard_mapping(conn).ok_or_else(|| {
+                        PlatformError::Unsupported("X11 keyboard mapping is unavailable".into())
+                    })?);
+                }
+                Ok(PreparedInput::Key {
+                    request: key.clone(),
+                    events: prepare_key(mapping.as_ref().expect("keymap was loaded"), key)?,
+                })
+            }
+            None => Err(PlatformError::os("DesktopInput carried no event")),
+        })
+        .collect()
+}
+
+fn validate_x11_point(x: i32, y: i32) -> PlatformResult<()> {
+    if i16::try_from(x).is_err() || i16::try_from(y).is_err() {
+        return Err(PlatformError::Unsupported(
+            "input point is outside X11 coordinate range".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn inject_inputs(
     conn: &x11rb::rust_connection::RustConnection,
     root: Window,
     inputs: &[v1::DesktopInput],
 ) -> PlatformResult<()> {
+    let prepared = prepare_inputs(conn, inputs)?;
+    inject_prepared_inputs(conn, root, &prepared)
+}
+
+fn inject_prepared_inputs(
+    conn: &x11rb::rust_connection::RustConnection,
+    root: Window,
+    inputs: &[PreparedInput],
+) -> PlatformResult<()> {
     for input in inputs {
-        let Some(event) = &input.event else {
-            return Err(PlatformError::os("DesktopInput carried no event"));
-        };
-        match event {
-            v1::desktop_input::Event::Pointer(p) => inject_pointer(conn, root, p)?,
-            v1::desktop_input::Event::Key(k) => inject_key(conn, root, k)?,
-            v1::desktop_input::Event::Scroll(s) => inject_scroll(conn, root, s)?,
+        match input {
+            PreparedInput::Pointer(pointer) => inject_pointer(conn, root, pointer)?,
+            PreparedInput::Key { events, .. } => {
+                for &(event, keycode) in events {
+                    if event == KEY_PRESS {
+                        key_press(conn, keycode)?;
+                    } else {
+                        key_release(conn, keycode)?;
+                    }
+                }
+            }
+            PreparedInput::Scroll(scroll) => inject_scroll(conn, root, scroll)?,
         }
     }
     conn.flush()
-        .map_err(|e| PlatformError::os(format!("XTEST flush: {e}")))?;
-    // A reply round-trip surfaces an asynchronous X error rather than only
-    // confirming that bytes entered the local socket buffer.
+        .map_err(|error| PlatformError::os(format!("XTEST flush: {error}")))?;
     conn.get_input_focus()
         .map_err(|error| PlatformError::os(format!("X11 input sync request: {error}")))?
         .reply()
@@ -628,7 +1484,9 @@ fn inject_pointer(
     // Every pointer event first moves to the target coordinate (XTEST motion uses
     // detail 0, the absolute root-relative position).
     conn.xtest_fake_input(MOTION_NOTIFY, 0, 0, root, x, y, 0)
-        .map_err(|e| PlatformError::os(format!("XTEST motion: {e}")))?;
+        .map_err(|e| PlatformError::os(format!("XTEST motion: {e}")))?
+        .check()
+        .map_err(|e| PlatformError::os(format!("XTEST motion result: {e}")))?;
 
     match p.action() {
         v1::PointerAction::Move | v1::PointerAction::Unspecified => {}
@@ -648,25 +1506,11 @@ fn inject_pointer(
     Ok(())
 }
 
-/// Maps a [`KeyEvent`](v1::KeyEvent) to XTEST key press/release. A keysym is
-/// resolved to a keycode via the connection's keymap; text typing presses each
-/// character's keysym in turn.
-fn inject_key(
-    conn: &x11rb::rust_connection::RustConnection,
-    _root: x11rb::protocol::xproto::Window,
-    k: &v1::KeyEvent,
-) -> PlatformResult<()> {
-    if k.is_text {
-        // Resolve the complete string before emitting anything. X11 exposes
-        // shifted glyphs (A, _, ?, …) on the same keycode as their base glyph;
-        // sending that keycode without Shift silently changes user input. A
-        // missing glyph must fail atomically rather than report success after
-        // dropping part of a password or command. Arbitrary UTF-8 remains
-        // available through the native clipboard write + paste path.
-        let mapping = keyboard_mapping(conn).ok_or_else(|| {
-            PlatformError::Unsupported("X11 keyboard mapping is unavailable".to_string())
-        })?;
-        let strokes = k
+/// Prepares key events from one complete immutable delivery keymap.
+fn prepare_key(mapping: &X11KeyboardMapping, key: &v1::KeyEvent) -> PlatformResult<Vec<(u8, u8)>> {
+    let mut events = Vec::new();
+    if key.is_text {
+        let strokes = key
             .key
             .chars()
             .map(|character| {
@@ -683,14 +1527,14 @@ fn inject_key(
                 })
             })
             .collect::<PlatformResult<Vec<_>>>()?;
-        let shift_keycode = if strokes.iter().any(|stroke| stroke.shift) {
+        let shift = if strokes.iter().any(|stroke| stroke.shift) {
             Some(
                 mapping
                     .resolve(0xffe1)
                     .map(|stroke| stroke.keycode)
                     .ok_or_else(|| {
                         PlatformError::Unsupported(
-                            "X11 keymap has shifted glyphs but no Shift key".to_string(),
+                            "X11 keymap has shifted glyphs but no Shift key".into(),
                         )
                     })?,
             )
@@ -699,60 +1543,49 @@ fn inject_key(
         };
         for stroke in strokes {
             if stroke.shift {
-                key_press(conn, shift_keycode.expect("shift keycode was preflighted"))?;
+                events.push((KEY_PRESS, shift.expect("shift was preflighted")));
             }
-            match k.action() {
-                v1::KeyAction::Down => key_press(conn, stroke.keycode)?,
-                v1::KeyAction::Up => key_release(conn, stroke.keycode)?,
+            match key.action() {
+                v1::KeyAction::Down => events.push((KEY_PRESS, stroke.keycode)),
+                v1::KeyAction::Up => events.push((KEY_RELEASE, stroke.keycode)),
                 v1::KeyAction::Press | v1::KeyAction::Unspecified => {
-                    key_press(conn, stroke.keycode)?;
-                    key_release(conn, stroke.keycode)?;
+                    events.push((KEY_PRESS, stroke.keycode));
+                    events.push((KEY_RELEASE, stroke.keycode));
                 }
             }
             if stroke.shift {
-                key_release(conn, shift_keycode.expect("shift keycode was preflighted"))?;
+                events.push((KEY_RELEASE, shift.expect("shift was preflighted")));
             }
         }
-        return Ok(());
+        return Ok(events);
     }
-
-    let keysyms = parse_named_key_chord(&k.key)?;
-    let keycodes = keysyms
-        .iter()
+    let keycodes = parse_named_key_chord(&key.key)?
+        .into_iter()
         .map(|keysym| {
-            keysym_to_keycode(conn, *keysym).ok_or_else(|| {
-                PlatformError::Unsupported(format!(
-                    "X11 keymap does not expose named key/chord component {keysym:#x}"
-                ))
-            })
+            mapping
+                .resolve(keysym)
+                .map(|stroke| stroke.keycode)
+                .ok_or_else(|| {
+                    PlatformError::Unsupported(format!(
+                        "X11 keymap does not expose named key/chord component {keysym:#x}"
+                    ))
+                })
         })
         .collect::<PlatformResult<Vec<_>>>()?;
-    match k.action() {
-        v1::KeyAction::Down => {
-            for keycode in &keycodes {
-                key_press(conn, *keycode)?;
-            }
-        }
-        v1::KeyAction::Up => {
-            for keycode in keycodes.iter().rev() {
-                key_release(conn, *keycode)?;
-            }
-        }
+    match key.action() {
+        v1::KeyAction::Down => events.extend(keycodes.iter().map(|&code| (KEY_PRESS, code))),
+        v1::KeyAction::Up => events.extend(keycodes.iter().rev().map(|&code| (KEY_RELEASE, code))),
         v1::KeyAction::Press | v1::KeyAction::Unspecified => {
-            let (key, modifiers) = keycodes
+            let (last, modifiers) = keycodes
                 .split_last()
-                .expect("validated named chord always contains one key");
-            for modifier in modifiers {
-                key_press(conn, *modifier)?;
-            }
-            key_press(conn, *key)?;
-            key_release(conn, *key)?;
-            for modifier in modifiers.iter().rev() {
-                key_release(conn, *modifier)?;
-            }
+                .expect("validated chord contains a key");
+            events.extend(modifiers.iter().map(|&code| (KEY_PRESS, code)));
+            events.push((KEY_PRESS, *last));
+            events.push((KEY_RELEASE, *last));
+            events.extend(modifiers.iter().rev().map(|&code| (KEY_RELEASE, code)));
         }
     }
-    Ok(())
+    Ok(events)
 }
 
 /// The maximum number of synthetic wheel clicks one scroll event may emit per
@@ -772,7 +1605,9 @@ fn inject_scroll(
     let x = i16::try_from(s.x).unwrap_or(0);
     let y = i16::try_from(s.y).unwrap_or(0);
     conn.xtest_fake_input(MOTION_NOTIFY, 0, 0, root, x, y, 0)
-        .map_err(|e| PlatformError::os(format!("XTEST scroll motion: {e}")))?;
+        .map_err(|e| PlatformError::os(format!("XTEST scroll motion: {e}")))?
+        .check()
+        .map_err(|e| PlatformError::os(format!("XTEST scroll motion result: {e}")))?;
 
     // Vertical: button 4 = up, 5 = down. Horizontal: 6 = left, 7 = right.
     let v_button = if s.delta_y < 0 { 4 } else { 5 };
@@ -806,28 +1641,36 @@ const MOTION_NOTIFY: u8 = 6;
 fn press(conn: &x11rb::rust_connection::RustConnection, button: u8) -> PlatformResult<()> {
     use x11rb::protocol::xtest::ConnectionExt as _;
     conn.xtest_fake_input(BUTTON_PRESS, button, 0, x11rb::NONE, 0, 0, 0)
-        .map_err(|e| PlatformError::os(format!("XTEST button press: {e}")))?;
+        .map_err(|e| PlatformError::os(format!("XTEST button press: {e}")))?
+        .check()
+        .map_err(|e| PlatformError::os(format!("XTEST button press result: {e}")))?;
     Ok(())
 }
 
 fn release(conn: &x11rb::rust_connection::RustConnection, button: u8) -> PlatformResult<()> {
     use x11rb::protocol::xtest::ConnectionExt as _;
     conn.xtest_fake_input(BUTTON_RELEASE, button, 0, x11rb::NONE, 0, 0, 0)
-        .map_err(|e| PlatformError::os(format!("XTEST button release: {e}")))?;
+        .map_err(|e| PlatformError::os(format!("XTEST button release: {e}")))?
+        .check()
+        .map_err(|e| PlatformError::os(format!("XTEST button release result: {e}")))?;
     Ok(())
 }
 
 fn key_press(conn: &x11rb::rust_connection::RustConnection, keycode: u8) -> PlatformResult<()> {
     use x11rb::protocol::xtest::ConnectionExt as _;
     conn.xtest_fake_input(KEY_PRESS, keycode, 0, x11rb::NONE, 0, 0, 0)
-        .map_err(|e| PlatformError::os(format!("XTEST key press: {e}")))?;
+        .map_err(|e| PlatformError::os(format!("XTEST key press: {e}")))?
+        .check()
+        .map_err(|e| PlatformError::os(format!("XTEST key press result: {e}")))?;
     Ok(())
 }
 
 fn key_release(conn: &x11rb::rust_connection::RustConnection, keycode: u8) -> PlatformResult<()> {
     use x11rb::protocol::xtest::ConnectionExt as _;
     conn.xtest_fake_input(KEY_RELEASE, keycode, 0, x11rb::NONE, 0, 0, 0)
-        .map_err(|e| PlatformError::os(format!("XTEST key release: {e}")))?;
+        .map_err(|e| PlatformError::os(format!("XTEST key release: {e}")))?
+        .check()
+        .map_err(|e| PlatformError::os(format!("XTEST key release result: {e}")))?;
     Ok(())
 }
 
@@ -902,13 +1745,6 @@ fn resolve_keysym(
         }
     }
     None
-}
-
-/// Resolves an X11 keysym to its physical keycode. Named key chords carry
-/// their modifiers explicitly, so this helper intentionally ignores level.
-fn keysym_to_keycode(conn: &x11rb::rust_connection::RustConnection, keysym: u32) -> Option<u8> {
-    let mapping = keyboard_mapping(conn)?;
-    mapping.resolve(keysym).map(|stroke| stroke.keycode)
 }
 
 /// Maps a small set of named keys to X11 keysyms (the keys the computer-use tool
@@ -1284,6 +2120,246 @@ fn encode_png(rgba: &[u8], width: u32, height: u32) -> PlatformResult<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_keymap() -> X11KeyboardMapping {
+        X11KeyboardMapping {
+            min_keycode: 10,
+            keysyms_per_keycode: 2,
+            keysyms: vec![
+                u32::from('a'),
+                u32::from('A'),
+                0xffe1,
+                0,
+                0xffe3,
+                0,
+                0xff0d,
+                0,
+            ],
+        }
+    }
+
+    #[test]
+    fn key_preflight_rejects_unmappable_text_and_complete_chords() {
+        let mapping = fixture_keymap();
+        let mut key = v1::KeyEvent {
+            key: "a🙂".into(),
+            is_text: true,
+            action: v1::KeyAction::Press.into(),
+        };
+        assert!(matches!(
+            prepare_key(&mapping, &key),
+            Err(PlatformError::Unsupported(_))
+        ));
+        key.is_text = false;
+        key.key = "Control+Escape".into();
+        assert!(matches!(
+            prepare_key(&mapping, &key),
+            Err(PlatformError::Unsupported(_))
+        ));
+        key.key = "Control+Enter".into();
+        assert_eq!(
+            prepare_key(&mapping, &key).unwrap(),
+            [
+                (KEY_PRESS, 12),
+                (KEY_PRESS, 13),
+                (KEY_RELEASE, 13),
+                (KEY_RELEASE, 12)
+            ]
+        );
+        key.is_text = true;
+        key.key = "aA".into();
+        assert_eq!(
+            prepare_key(&mapping, &key).unwrap(),
+            [
+                (KEY_PRESS, 10),
+                (KEY_RELEASE, 10),
+                (KEY_PRESS, 11),
+                (KEY_PRESS, 10),
+                (KEY_RELEASE, 10),
+                (KEY_RELEASE, 11)
+            ]
+        );
+    }
+
+    #[test]
+    fn input_point_requires_the_original_resource_owner_even_for_embedded_children() {
+        let clients = [
+            x11rb::protocol::res::Client {
+                resource_base: 0x0010_0000,
+                resource_mask: 0xfffff,
+            },
+            x11rb::protocol::res::Client {
+                resource_base: 0x0020_0000,
+                resource_mask: 0xfffff,
+            },
+        ];
+        assert!(same_x11_client(0x0010_0001, 0x0010_0020, &clients));
+        assert!(!same_x11_client(0x0010_0001, 0x0020_0020, &clients));
+        assert!(!same_x11_client(0x0010_0001, 0x0030_0020, &clients));
+        assert!(!same_x11_client(0x0030_0001, 0x0030_0020, &clients));
+        assert!(!same_x11_client(0x0010_0001, 0x0010_0020, &[]));
+    }
+
+    #[test]
+    fn out_of_range_input_is_refused_instead_of_moving_to_zero() {
+        assert!(validate_x11_point(32767, -32768).is_ok());
+        assert!(validate_x11_point(32768, 0).is_err());
+        assert!(validate_x11_point(0, -32769).is_err());
+    }
+
+    fn managed_activation_facts() -> WindowManagerFacts {
+        WindowManagerFacts {
+            check_window: Some(22),
+            check_confirmed: true,
+            check_named: true,
+            selection_owner: 23,
+            redirected: true,
+            manager_hints: true,
+            activation_advertised: true,
+        }
+    }
+
+    #[test]
+    fn activation_uses_only_verified_advertised_manager_authority() {
+        let facts = managed_activation_facts();
+        assert_eq!(
+            activation_route(&facts, Some(24)).unwrap(),
+            WindowActivationRoute::Managed {
+                check_window: 22,
+                active_atom: 24,
+                selection_owner: 23,
+            }
+        );
+        for defect in 0..6 {
+            let mut facts = managed_activation_facts();
+            let mut active_atom = Some(24);
+            match defect {
+                0 => facts.check_confirmed = false,
+                1 => facts.check_named = false,
+                2 => facts.activation_advertised = false,
+                3 => facts.selection_owner = x11rb::NONE,
+                4 => facts.redirected = false,
+                _ => active_atom = None,
+            }
+            assert!(matches!(
+                activation_route(&facts, active_atom),
+                Err(PlatformError::Unsupported(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn activation_never_forces_focus_when_manager_authority_is_ambiguous() {
+        let unmanaged = || WindowManagerFacts {
+            check_window: None,
+            check_confirmed: false,
+            check_named: false,
+            selection_owner: x11rb::NONE,
+            redirected: false,
+            manager_hints: false,
+            activation_advertised: false,
+        };
+        assert_eq!(
+            activation_route(&unmanaged(), None).unwrap(),
+            WindowActivationRoute::Unmanaged
+        );
+        for defect in 0..3 {
+            let mut facts = unmanaged();
+            match defect {
+                0 => facts.selection_owner = 23,
+                1 => facts.redirected = true,
+                _ => facts.manager_hints = true,
+            }
+            assert!(matches!(
+                activation_route(&facts, None),
+                Err(PlatformError::Unsupported(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn activation_identity_requires_known_client_process_and_exact_geometry() {
+        let expected = LinuxWindow {
+            id: 50,
+            process_id: Some(42),
+            title: "Example editor".into(),
+            bounds: LinuxWindowRect {
+                x: 10,
+                y: 20,
+                width: 420,
+                height: 180,
+            },
+        };
+        let mut current = expected.clone();
+        current.title = "Unsaved example editor".into();
+        assert!(same_activation_window(&expected, &current));
+        current.id += 1;
+        assert!(!same_activation_window(&expected, &current));
+        current = expected.clone();
+        current.process_id = Some(43);
+        assert!(!same_activation_window(&expected, &current));
+        current = expected.clone();
+        current.bounds.x += 1;
+        assert!(!same_activation_window(&expected, &current));
+        current = expected.clone();
+        current.process_id = None;
+        assert!(!same_activation_window(&current, &current));
+    }
+
+    #[test]
+    fn active_window_property_accepts_one_client_with_optional_timestamp() {
+        let kind = AtomEnum::WINDOW.into();
+        assert_eq!(active_window_from_property(kind, 32, 0, &[50]), Some(50));
+        assert_eq!(active_window_from_property(kind, 32, 0, &[50, 0]), Some(50));
+        assert_eq!(
+            active_window_from_property(kind, 32, 0, &[50, 123_456]),
+            Some(50)
+        );
+        assert_ne!(
+            active_window_from_property(kind, 32, 0, &[51, 50]),
+            Some(50)
+        );
+    }
+
+    #[test]
+    fn active_window_property_refuses_malformed_or_unbounded_values() {
+        let kind = AtomEnum::WINDOW.into();
+        assert_eq!(active_window_from_property(kind, 32, 0, &[]), None);
+        assert_eq!(active_window_from_property(kind, 32, 0, &[50, 0, 0]), None);
+        assert_eq!(active_window_from_property(kind, 32, 4, &[50, 0]), None);
+        assert_eq!(active_window_from_property(kind, 16, 0, &[50]), None);
+        assert_eq!(
+            active_window_from_property(AtomEnum::CARDINAL.into(), 32, 0, &[50]),
+            None
+        );
+        assert_eq!(active_window_from_property(x11rb::NONE, 32, 0, &[50]), None);
+    }
+
+    #[test]
+    fn settled_focus_must_be_exact_client_or_bounded_descendant() {
+        assert!(focus_descends_from(50, 50, |_| None));
+        assert!(focus_descends_from(52, 50, |id| match id {
+            52 => Some(51),
+            51 => Some(50),
+            _ => None,
+        }));
+        assert!(!focus_descends_from(51, 50, |_| Some(51)));
+        assert!(!focus_descends_from(51, 50, |_| None));
+        assert!(!focus_descends_from(x11rb::NONE, 50, |_| Some(50)));
+        assert!(!focus_descends_from(1, 50, |_| Some(50)));
+        assert!(!focus_descends_from(100, 50, |id| Some(id - 1)));
+    }
+
+    #[test]
+    fn activation_failure_keeps_dispatch_uncertainty() {
+        assert!(
+            !LinuxWindowActivationError::before(PlatformError::Unsupported("fixture".into()))
+                .dispatched
+        );
+        assert!(
+            LinuxWindowActivationError::after(PlatformError::Timeout("fixture".into())).dispatched
+        );
+    }
 
     #[test]
     fn button_codes_map_to_x11_numbers() {

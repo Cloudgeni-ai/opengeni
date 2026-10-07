@@ -28,6 +28,7 @@ import { publishDurableSessionEvents } from "@opengeni/events";
 import { CancelledFailure } from "@temporalio/activity";
 import { currentActivityContext } from "./streaming";
 import { deliverFailedChildTurnToParent, notifyParentOfChildIdle } from "./parent-wake";
+import { interactionInterventionMetricObserver } from "@opengeni/observability";
 import { recordTurnsQueuedGauge, recordWorkerDeathRecoveryMetrics } from "../observability-metrics";
 import {
   MAX_AUTOMATIC_PROVIDER_RECOVERIES,
@@ -747,8 +748,16 @@ export function createSessionStateActivities(
   async function expireSessionInteractionIntervention(
     input: ExpireSessionInteractionInterventionInput,
   ): Promise<ExpireSessionInteractionInterventionResult> {
-    const { db, bus } = await services();
+    const { db, bus, observability } = await services();
     const result = await expireSessionInteractionInterventionFn(db, input);
+    if (result.action === "expired" && result.intervention) {
+      // The unanswered-handoff timer settles here, never through the API.
+      interactionInterventionMetricObserver(observability)({
+        kind: result.intervention.kind,
+        outcome: "expired",
+        waitMs: Date.now() - result.intervention.createdAt.getTime(),
+      });
+    }
     if (result.events.length > 0) {
       await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
     }

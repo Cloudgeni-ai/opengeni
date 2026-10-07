@@ -17,6 +17,7 @@ export type PickerModelRow<TCatalog extends ClientModel = WorkspaceModelCatalogM
   billingClassLabel: string;
   selectable: boolean;
   unavailableReason: string | null;
+  fundingHint?: string | undefined;
   provider: string;
   providerLabel: string;
   catalog: TCatalog;
@@ -54,7 +55,11 @@ const AVAILABILITY_REASON_LABELS: Record<string, string> = {
 };
 
 export function billingClassForModel(model: ClientModel): PickerBillingClass {
-  if (model.provider === "organization-gateway" || model.provider === "organization-openrouter") {
+  if (
+    model.provider === "organization-gateway" ||
+    model.provider === "organization-openrouter" ||
+    model.provider === "organization-opper"
+  ) {
     return "organization_byok";
   }
   if (
@@ -62,7 +67,11 @@ export function billingClassForModel(model: ClientModel): PickerBillingClass {
     model.provider?.startsWith("workspace-azure-openai-")
   )
     return "byok";
-  if (model.provider === "workspace-gateway" || model.provider === "workspace-openrouter") {
+  if (
+    model.provider === "workspace-gateway" ||
+    model.provider === "workspace-openrouter" ||
+    model.provider === "workspace-opper"
+  ) {
     return "byok";
   }
   return modelPickerBillingClassFor(model);
@@ -211,6 +220,9 @@ export function advancedSourceSummary(model: ClientModel): string | null {
     if (model.provider === "workspace-openrouter") {
       return "Workspace OpenRouter connection";
     }
+    if (model.provider === "workspace-opper") {
+      return "Workspace Opper connection";
+    }
     if (model.provider === "workspace-gateway" || model.source === "workspace_gateway") {
       return "Workspace Vercel AI Gateway";
     }
@@ -228,9 +240,12 @@ function workspaceProviderPayerSummary(model: ClientModel): string {
   if (model.provider === "workspace-anthropic")
     return "Billed to the workspace Anthropic API account";
   if (model.provider === "workspace-claude-subscription")
-    return "Uses the workspace Claude subscription · no OpenGeni credits";
+    return "Uses the workspace Claude subscription · no Opengeni credits";
   if (model.provider === "workspace-openrouter") {
     return "Billed to the workspace OpenRouter account";
+  }
+  if (model.provider === "workspace-opper") {
+    return "Billed to the workspace Opper account";
   }
   if (model.provider === "workspace-gateway" || model.source === "workspace_gateway") {
     return "Billed to the workspace Vercel account";
@@ -242,9 +257,12 @@ function organizationProviderPayerSummary(model: ClientModel): string {
   if (model.provider === "organization-anthropic")
     return "Billed to the organization Anthropic API account";
   if (model.provider === "organization-claude-subscription")
-    return "Uses the connected Claude subscription · no OpenGeni credits";
+    return "Uses the connected Claude subscription · no Opengeni credits";
   if (model.provider === "organization-openrouter") {
     return "Billed to the organization OpenRouter account";
+  }
+  if (model.provider === "organization-opper") {
+    return "Billed to the organization Opper account";
   }
   if (model.provider === "organization-gateway") {
     return "Billed to the organization Vercel account";
@@ -274,6 +292,14 @@ export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerM
         billingClass,
         billingClassLabel: billingClassLabel(billingClass),
         selectable: catalog.availability.selectable,
+        fundingHint:
+          catalog.creditFunding === "promotional"
+            ? "Free credits"
+            : catalog.creditFunding === "general"
+              ? "Uses credits"
+              : catalog.creditFunding === "unavailable"
+                ? "Needs credits"
+                : undefined,
         unavailableReason: catalog.availability.selectable
           ? null
           : availabilityReasonLabel(catalog.availability.reason),

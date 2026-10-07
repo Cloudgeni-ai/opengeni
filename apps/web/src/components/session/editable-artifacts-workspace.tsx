@@ -7,7 +7,7 @@ import { lazy, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { EditableArtifactRoute } from "@/routes/editable-artifact";
-import { ArtifactLibrary } from "@/components/artifacts/artifact-library";
+import { ArtifactLibrary, type ArtifactPinAction } from "@/components/artifacts/artifact-library";
 import { defaultArtifactFilters, filterArtifactCatalog } from "@/lib/artifact-catalog";
 const RetainedArtifactRoute = lazy(() =>
   import("@/routes/retained-artifact").then((module) => ({
@@ -38,6 +38,7 @@ export function SessionEditableArtifactsWorkspace({
   initialSelectedArtifactId,
   openArtifactRequest,
   onSelectedArtifactIdChange,
+  onPin,
 }: Readonly<{
   workspaceId: string;
   sessionId?: string;
@@ -51,6 +52,7 @@ export function SessionEditableArtifactsWorkspace({
     requestId: number;
   } | null;
   onSelectedArtifactIdChange?: (artifactId: string | null) => void;
+  onPin?: ArtifactPinAction;
 }>) {
   const [selectedArtifactId, setSelectedArtifactId] = useState(
     () => initialSelectedArtifactId ?? artifacts[0]?.id ?? null,
@@ -122,6 +124,7 @@ export function SessionEditableArtifactsWorkspace({
           loading={status === "loading"}
           error={status === "error" ? new Error("The artifact list could not be refreshed.") : null}
           onRetry={onRetry}
+          onPin={onPin}
           onSelect={(item) => {
             const key = `${item.kind}:${item.id}`;
             setSelectedArtifactId(key);

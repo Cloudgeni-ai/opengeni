@@ -1,3 +1,4 @@
+import { slackToolReviewBlocks, slackToolReviewCanDecide } from "./slack-tool-review";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
   approvalIdentifier,
@@ -58,6 +59,7 @@ import {
   enqueueSlackAppHomeRefresh,
   enqueueSlackInteractionInbox,
   getConnectionMetadata,
+  getToolActionReview,
   getOrCreateSlackInteraction,
   getLatestSessionModelForSubject,
   getSession,
@@ -567,7 +569,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     } catch (error) {
       if (error instanceof SlackBotProviderError && error.code === "not_in_channel") {
         return c.text(
-          "OpenGeni is not a member of this channel. Add @OpenGeni, then run /opengeni again.",
+          "Opengeni is not a member of this channel. Add @OpenGeni, then run /opengeni again.",
           200,
         );
       }
@@ -580,7 +582,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       }
     }
     await enqueueNormalizedSlackInteraction(deps, installation, entry);
-    return c.text("OpenGeni accepted this task and will reply in a thread.", 200);
+    return c.text("Opengeni accepted this task and will reply in a thread.", 200);
   });
 
   app.post("/v1/integrations/slack/interactions", async (c) => {
@@ -1139,11 +1141,11 @@ async function publishSlackAppHome(
       refresh,
       renewLease,
       buildSlackAppHomeAccessBlocks({
-        title: link ? "OpenGeni access needed" : "Connect your OpenGeni account",
+        title: link ? "Opengeni access needed" : "Connect your Opengeni account",
         message: link
-          ? "Your Slack identity is linked, but it does not currently have access to this OpenGeni workspace."
+          ? "Your Slack identity is linked, but it does not currently have access to this Opengeni workspace."
           : "Link this Slack identity to see your active tasks, requests, and recent results here.",
-        actionLabel: link ? "Request access" : "Connect OpenGeni",
+        actionLabel: link ? "Request access" : "Connect Opengeni",
         actionUrl: slackAppHomeLinkUrl(
           deps,
           installation,
@@ -1188,10 +1190,10 @@ async function publishSlackAppHome(
       refresh,
       renewLease,
       buildSlackAppHomeAccessBlocks({
-        title: "OpenGeni access changed",
+        title: "Opengeni access changed",
         message:
-          "Your current OpenGeni access could not be verified. Reconnect before tasks are shown here.",
-        actionLabel: "Reconnect OpenGeni",
+          "Your current Opengeni access could not be verified. Reconnect before tasks are shown here.",
+        actionLabel: "Reconnect Opengeni",
         actionUrl: slackAppHomeLinkUrl(
           deps,
           installation,
@@ -1225,10 +1227,10 @@ async function publishSlackAppHome(
       refresh,
       renewLease,
       buildSlackAppHomeAccessBlocks({
-        title: "OpenGeni access changed",
+        title: "Opengeni access changed",
         message:
-          "Your current OpenGeni access could not be verified. Reconnect before tasks are shown here.",
-        actionLabel: "Reconnect OpenGeni",
+          "Your current Opengeni access could not be verified. Reconnect before tasks are shown here.",
+        actionLabel: "Reconnect Opengeni",
         actionUrl: slackAppHomeLinkUrl(
           deps,
           installation,
@@ -1253,10 +1255,10 @@ async function publishSlackAppHome(
       refresh,
       renewLease,
       buildSlackAppHomeAccessBlocks({
-        title: "OpenGeni access changed",
+        title: "Opengeni access changed",
         message:
           "Your current task access changed while this view was loading. Reopen Home to refresh it safely.",
-        actionLabel: "Open OpenGeni",
+        actionLabel: "Open Opengeni",
         actionUrl: slackWorkspaceUrl(deps, installation.workspaceId),
       }),
     );
@@ -1268,10 +1270,10 @@ async function publishSlackAppHome(
       refresh,
       renewLease,
       buildSlackAppHomeAccessBlocks({
-        title: "Refresh OpenGeni Home",
+        title: "Refresh Opengeni Home",
         message:
-          "Reopen Home to refresh your tasks safely. OpenGeni does not publish task data without Slack's current view version.",
-        actionLabel: "Open OpenGeni",
+          "Reopen Home to refresh your tasks safely. Opengeni does not publish task data without Slack's current view version.",
+        actionLabel: "Open Opengeni",
         actionUrl: slackWorkspaceUrl(deps, installation.workspaceId),
       }),
     );
@@ -1478,6 +1480,20 @@ export function startSlackInteractionPump(
     try {
       for (let index = 0; index < maxPerTick; index += 1) {
         if (!(await drainSlackInteractionsOnce(deps))) break;
+      }
+    } catch (error) {
+      // A failed claim (for example a database connection terminated during a
+      // deploy drain) leaves every durable interaction pending; the next tick
+      // retries it. It must never escape as an unhandled rejection, which the
+      // API fatal boundary turns into a process exit.
+      try {
+        deps.observability?.error("Slack interaction delivery claim failed", {
+          errorClass: error instanceof Error ? error.name : "SlackInteractionPumpError",
+          errorCode: safeErrorCode(error),
+          origin: "api",
+        });
+      } catch {
+        // An observer failure must not turn a recovered tick into a crash.
       }
     } finally {
       running = false;
@@ -1790,13 +1806,13 @@ export function renderSlackStartMessageLine(input: {
     : "";
   switch (input.origin.kind) {
     case "private_dm_message":
-      return `<${input.sessionUrl}|OpenGeni started a private task>${where} from the selected DM message. The source DM was not opened to the bot or made workspace-visible.`;
+      return `<${input.sessionUrl}|Opengeni started a private task>${where} from the selected DM message. The source DM was not opened to the bot or made workspace-visible.`;
     case "private_conversation":
-      return `<${input.sessionUrl}|OpenGeni started a private task>${where} from the selected Slack conversation. Results stay private unless a separate authorized publication is approved.`;
+      return `<${input.sessionUrl}|Opengeni started a private task>${where} from the selected Slack conversation. Results stay private unless a separate authorized publication is approved.`;
     case "reaction":
-      return `<${input.sessionUrl}|OpenGeni started this task>${where} from the :${input.origin.emoji}: reaction. If the request is unclear, OpenGeni will ask in this thread. Reply here to continue, or reply \`stop\` to stop.`;
+      return `<${input.sessionUrl}|Opengeni started this task>${where} from the :${input.origin.emoji}: reaction. If the request is unclear, Opengeni will ask in this thread. Reply here to continue, or reply \`stop\` to stop.`;
     case "task":
-      return `<${input.sessionUrl}|OpenGeni started this task>${where}.`;
+      return `<${input.sessionUrl}|Opengeni started this task>${where}.`;
   }
 }
 
@@ -4345,7 +4361,7 @@ async function executeSlackAction(
     });
     return {
       result: decision === "approve" ? "approved" : "rejected",
-      text: `${mention}${decision === "approve" ? "Approved once" : "Rejected"}. OpenGeni will continue from the durable task state.`,
+      text: `${mention}${decision === "approve" ? "Approved. Waiting to run." : "Declined. This action will not run."} ${openSessionText(deps, interaction.workspaceId, handle.sessionId)}`,
     };
   }
   if (handle.actionKind === "human_input_select" || handle.actionKind === "human_input_skip") {
@@ -4736,7 +4752,8 @@ function slackApprovalSummaries(payload: unknown): SlackApprovalSummary[] {
     .slice(0, MAX_SLACK_APPROVALS_PER_CARD);
 }
 
-async function slackApprovalCard(
+/** Byte-compatible repair only for an existing pre-review post ledger entry. */
+async function legacySlackApprovalCard(
   deps: ApiRouteDeps,
   interaction: SlackInteraction,
   event: SessionEvent,
@@ -4817,6 +4834,121 @@ async function slackApprovalCard(
       {
         type: "section",
         text: { type: "mrkdwn", text: `${mention}OpenGeni needs your approval.` },
+      },
+      ...blocks,
+    ],
+    operationId,
+  };
+}
+
+async function slackApprovalCard(
+  deps: ApiRouteDeps,
+  interaction: SlackInteraction,
+  event: SessionEvent,
+  mention: string,
+  requesterAuthorized: boolean,
+): Promise<{ text: string; blocks?: SlackMessageBlock[]; operationId: string }> {
+  const operationId = deterministicUuid(
+    slackPostSeed(interaction, `slack-delivery:${interaction.id}:${event.sequence}:approval`),
+  );
+  const approvals = slackApprovalSummaries(event.payload);
+  const link = interaction.sessionId
+    ? slackSessionUrl(deps, interaction.workspaceId, interaction.sessionId)
+    : null;
+  const fallback = `${mention}An action needs review.${link ? ` <${link}|Open the task to review>` : " Open the task to review it."}`;
+  // A linked requester does not prove that everyone in a channel may see mail.
+  // The provider-verified interaction route identifies a private bot DM.
+  const privateAudience =
+    requesterAuthorized &&
+    interaction.visibility === "private" &&
+    interaction.slackChannelId.startsWith("D");
+  if (
+    !privateAudience ||
+    !interaction.sessionId ||
+    !interaction.initiatingSlackUserId ||
+    approvals.length === 0
+  )
+    return { text: fallback, operationId };
+  const reviews = await Promise.all(
+    approvals.map((approval) =>
+      getToolActionReview(deps.db, {
+        accountId: interaction.accountId,
+        workspaceId: interaction.workspaceId,
+        sessionId: interaction.sessionId!,
+        approvalId: approval.id,
+      }),
+    ),
+  );
+  const reviewById = new Map(
+    reviews.flatMap((review) => (review ? [[review.id, review] as const] : [])),
+  );
+  const actionable = approvals.filter((approval) => {
+    const review = reviewById.get(approval.id);
+    return review && slackToolReviewCanDecide(review);
+  });
+  const specs = actionable
+    .flatMap((approval) => [
+      {
+        actionKind: "approval_approve" as const,
+        actionKey: `approval:${approval.id}:approve`,
+        targetId: approval.id,
+      },
+      {
+        actionKind: "approval_reject" as const,
+        actionKey: `approval:${approval.id}:reject`,
+        targetId: approval.id,
+      },
+    ])
+    .slice(0, MAX_SLACK_ACTIONS_PER_CARD);
+  const handles = specs.length
+    ? await reserveSlackInteractionActionHandles(deps.db, {
+        interaction,
+        sessionEventSequence: event.sequence,
+        messageOperationId: operationId,
+        expiresAt: new Date(Date.now() + SLACK_ACTION_TTL_MS),
+        actions: specs,
+      })
+    : [];
+  const byKey = new Map(handles.map((handle) => [handle.actionKey, handle]));
+  const blocks: SlackMessageBlock[] = [];
+  for (const approval of approvals) {
+    const approve = byKey.get(`approval:${approval.id}:approve`);
+    const reject = byKey.get(`approval:${approval.id}:reject`);
+    const review = reviewById.get(approval.id);
+    if (!review) continue;
+    blocks.push(...slackToolReviewBlocks(review, privateAudience));
+    // Render the original event deterministically, even after a decision. The
+    // signed handler checks live access and the canonical pending request; a
+    // stale button cannot approve again. Changing these bytes breaks replay of
+    // an uncertain Slack post under its durable operation id.
+    if (approve && reject) {
+      blocks.push({
+        type: "actions",
+        block_id: `opengeni_approval_${event.sequence}_${blocks.length}`,
+        elements: [
+          {
+            type: "button",
+            action_id: SLACK_ACTION_ID_BY_KIND.approval_approve,
+            value: approve.id,
+            text: { type: "plain_text", text: review.approveLabel.slice(0, 75), emoji: true },
+            style: "primary",
+          },
+          {
+            type: "button",
+            action_id: SLACK_ACTION_ID_BY_KIND.approval_reject,
+            value: reject.id,
+            text: { type: "plain_text", text: "Decline", emoji: true },
+          },
+        ],
+      });
+    }
+  }
+  return {
+    text: fallback,
+    blocks: [
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: fallback },
       },
       ...blocks,
     ],
@@ -5297,15 +5429,49 @@ async function deliverSlackSessionEvents(
         requester.mention,
         requester.authorized,
       );
-      await postDelivery(
-        client,
-        interaction,
-        event,
-        card.text,
-        "approval",
-        card.operationId,
-        card.blocks,
-      );
+      try {
+        await postDelivery(
+          client,
+          interaction,
+          event,
+          card.text,
+          "approval",
+          card.operationId,
+          card.blocks,
+        );
+      } catch (error) {
+        // The ledger refused changed bytes before any provider write. Preserve
+        // an existing old post identity across upgrade; never mint a new id
+        // and accidentally send a second approval card. Fresh posts always use
+        // the shared facts above. The legacy renderer is repair-only.
+        if (!(error instanceof SlackBotOperationConflictError)) throw error;
+        const prior = await getSlackBotPostOperation(
+          deps.db,
+          interaction.workspaceId,
+          interaction.connectionId,
+          card.operationId,
+        );
+        // A completed server-owned event delivery needs no new provider write,
+        // even when an older renderer used different bytes. The provider client
+        // above already rechecked current connection/channel authority.
+        if (prior?.status === "completed") continue;
+        const legacy = await legacySlackApprovalCard(
+          deps,
+          interaction,
+          event,
+          requester.mention,
+          requester.authorized,
+        );
+        await postDelivery(
+          client,
+          interaction,
+          event,
+          legacy.text,
+          "approval",
+          legacy.operationId,
+          legacy.blocks,
+        );
+      }
     } else if (event.type === "session.humanInput.requested") {
       const card = await slackHumanInputCard(
         deps,
@@ -5849,8 +6015,8 @@ async function slackInfoCommandResponse(
   ) {
     return ephemeralSlackResponse(
       link
-        ? `Your Slack identity is linked, but it does not currently have access to this OpenGeni workspace. Request access: ${linkUrl(deps, identity)}. No session was created.`
-        : `Link your Slack identity to OpenGeni before starting work: ${linkUrl(deps, identity)}. No session was created.`,
+        ? `Your Slack identity is linked, but it does not currently have access to this Opengeni workspace. Request access: ${linkUrl(deps, identity)}. No session was created.`
+        : `Link your Slack identity to Opengeni before starting work: ${linkUrl(deps, identity)}. No session was created.`,
     );
   }
   const workspace = await getWorkspace(deps.db, installation.workspaceId);
@@ -5875,9 +6041,9 @@ async function slackInfoCommandResponse(
   const workspaceName = (workspace?.name ?? "").trim().slice(0, 120);
   const destination = workspaceName
     ? `the *${escapeSlackMrkdwn(workspaceName)}* workspace`
-    : "your OpenGeni workspace";
+    : "your Opengeni workspace";
   const lines = [
-    "*Working with OpenGeni in Slack*",
+    "*Working with Opengeni in Slack*",
     "",
     ...(canControl
       ? [
@@ -5893,12 +6059,12 @@ async function slackInfoCommandResponse(
     ...(agentSchedules || schedules
       ? [
           `• *Repeat a task on a schedule:* ${[
-            ...(agentSchedules ? ["ask OpenGeni in its thread"] : []),
+            ...(agentSchedules ? ["ask Opengeni in its thread"] : []),
             ...(schedules ? [`open <${schedules}|Schedules>`] : []),
           ].join(", or ")}.`,
         ]
       : []),
-    `• *Where work lands:* ${destination}${workspaceUrl ? ` (<${workspaceUrl}|open OpenGeni>)` : ""}.`,
+    `• *Where work lands:* ${destination}${workspaceUrl ? ` (<${workspaceUrl}|open Opengeni>)` : ""}.`,
   ];
   const text = lines.join("\n");
   return ephemeralSlackResponse(text, [

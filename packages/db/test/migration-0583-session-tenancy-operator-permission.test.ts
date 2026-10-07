@@ -73,7 +73,7 @@ describe("migration 0583 inert operator permission preparation", () => {
     );
   });
 
-  test("is forced-RLS owner-only, receipt-gated, live-login-gated and truthful/idempotent", async () => {
+  test("is forced-RLS owner-only, live-login-gated and truthful/idempotent (receipt-free since 0611)", async () => {
     if (!owned || !owner) return;
     const accountId = await organization(false);
     const [role] = await owned.admin<{ superuser: boolean; bypass: boolean }[]>`
@@ -87,11 +87,11 @@ describe("migration 0583 inert operator permission preparation", () => {
       select enable_organization_private_sessions_from_activation(${accountId}::uuid, ARRAY['does_not_exist'])`,
       "22023",
     );
-    await expectState(
-      () => owner!`
-      select enable_organization_private_sessions_from_activation(${accountId}::uuid, ARRAY['opengeni_app'])`,
-      "55000",
-    );
+    // Migration 0611 made session tenancy universal: a receipt-less
+    // organization is no longer refused by the dormant operator seam.
+    const [receiptless] = await owner!<{ setting: Record<string, unknown> }[]>`
+      select enable_organization_private_sessions_from_activation(${accountId}::uuid, ARRAY['opengeni_app']) as setting`;
+    expect(receiptless!.setting).toMatchObject({ enabled: true, version: 1, changed: true });
     const activeId = await organization(true);
     const enabled = async () => {
       const [row] = await owner!<{ setting: Record<string, unknown> }[]>`
@@ -127,14 +127,15 @@ describe("migration 0583 inert operator permission preparation", () => {
   test("a later org failure rolls back earlier permission and audit writes", async () => {
     if (!owned || !owner) return;
     const first = await organization(true);
-    const second = await organization(false);
+    // An organization that does not exist fails the second call (P0002).
+    const second = crypto.randomUUID();
     await expectState(
       () =>
         owner!.begin(async (transaction) => {
           await transaction`select enable_organization_private_sessions_from_activation(${first}::uuid, ARRAY['opengeni_app'])`;
           await transaction`select enable_organization_private_sessions_from_activation(${second}::uuid, ARRAY['opengeni_app'])`;
         }),
-      "55000",
+      "P0002",
     );
     const [rows] = await owned.admin<{ settings: number; events: number }[]>`
       select (select count(*)::int from organization_private_session_settings where account_id = ${first}) as settings,

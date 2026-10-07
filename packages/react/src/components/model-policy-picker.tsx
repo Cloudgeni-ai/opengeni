@@ -1,7 +1,7 @@
 import { ClaudeMark } from "./claude-mark";
 import { GrokMark } from "./grok-mark";
 import { ChatGptMark, ModelMark, modelHasMark } from "./model-mark";
-import { modelDisplayName } from "@opengeni/sdk/model-display";
+import { modelDisplayName, modelLogoUrl } from "@opengeni/sdk/model-display";
 import type { ClientModel, LatencyMode, ReasoningEffort } from "@opengeni/sdk";
 import {
   ChevronDownIcon,
@@ -232,10 +232,12 @@ function billingClassForMissingSelection(modelId: string): PickerBillingClass {
   if (modelId.startsWith("organization-anthropic/")) return "organization_byok";
   if (modelId.startsWith("workspace-gateway/")) return "byok";
   if (modelId.startsWith("workspace-openrouter/")) return "byok";
-  // A deployment OpenRouter ID does not encode its workspace-facing cost.
+  if (modelId.startsWith("workspace-opper/")) return "byok";
+  // A deployment OpenRouter or Opper ID does not encode its workspace-facing cost.
   // Missing rows therefore use the credits-safe rail instead of falsely
   // claiming that an unknown former selection was externally funded.
   if (modelId.startsWith("openrouter/")) return "opengeni_credits";
+  if (modelId.startsWith("opper/")) return "opengeni_credits";
   if (modelId.startsWith("codex/")) return "codex_subscription";
   if (modelId.startsWith("supergrok/")) return "supergrok_subscription";
   return "opengeni_credits";
@@ -260,8 +262,8 @@ function applyCodexOnly(
 
 /**
  * The trigger shows who makes the chosen model. Subscription rails already
- * carry their maker's mark (ChatGPT, Claude, Grok), and explicit host branding
- * for a payment group always wins; otherwise API-key and deployment models show
+ * carry their maker's mark (ChatGPT, Claude, Grok). Configured catalog logos win
+ * in collapsed model presentation; otherwise explicit host branding wins and models show
  * the maker's logo instead of a generic key, falling back to the group mark.
  */
 function SelectedModelMark(input: {
@@ -281,6 +283,9 @@ function SelectedModelMark(input: {
         className="text-og-fg"
       />
     );
+  }
+  if (modelLogoUrl(model)) {
+    return <ModelMark model={model} className="text-og-fg" />;
   }
   if (
     presentation?.icon !== undefined ||
@@ -463,6 +468,9 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
   const selected = findPickerRow(rows, props.model);
   const needsModel =
     !rows.some((row) => row.selectable) && (rows.length > 0 || Boolean(props.connectModelsHref));
+  const selectedDescription = needsModel
+    ? messages.connectTitle
+    : [selected?.label ?? fallbackName(props), labelReasoningEffort(props.effort)].join(" · ");
 
   if (props.loading) {
     return (
@@ -491,6 +499,7 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
           onClick={() => setOpen(!open)}
           disabled={props.disabled}
           aria-label={messages.label}
+          aria-description={selectedDescription}
           className={cn(
             "og-root inline-flex h-8 min-w-[180px] max-w-full items-center gap-2 rounded-og-md border border-og-border bg-og-surface px-2.5 text-sm text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
             props.className,
@@ -537,6 +546,7 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
         onClick={() => setOpen(!open)}
         disabled={props.disabled}
         aria-label={messages.label}
+        aria-description={selectedDescription}
         className={cn(
           "og-root og-model-policy-trigger inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border px-2.5 text-og-control outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-11 max-sm:max-w-[7.5rem] max-sm:px-2",
           // With no usable model the pill is the one thing that unblocks the

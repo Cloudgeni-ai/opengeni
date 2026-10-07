@@ -51,11 +51,13 @@ export function ScheduleSlackPosting(props: {
   const [channelsError, setChannelsError] = useState<string | null>(null);
 
   useEffect(() => {
+    setBots(null);
+    setBotsError(null);
     if (!canRead) return;
     let current = true;
     void context.client
-      .listConnections(props.workspaceId)
-      .then((connections) => {
+      .listAvailableOpenGeniSlackBots(props.workspaceId)
+      .then(({ connections }) => {
         if (current) setBots(activeOpenGeniSlackBotConnections(connections));
       })
       .catch((error: unknown) => {
@@ -154,8 +156,7 @@ export function ScheduleSlackPosting(props: {
         : botsError
           ? `Couldn't load Slack connections. ${botsError}`
           : bots !== null && botOptions.length === 0 && !props.connectionId
-            ? "No Opengeni Slack bot is installed in this workspace. A task can post only through a " +
-              "bot installed in its own workspace, from Capabilities."
+            ? "No Opengeni bot is available. Install it in Capabilities, or ask an organization administrator to share an installed bot."
             : null;
   if (blocked) {
     return (

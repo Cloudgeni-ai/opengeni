@@ -1,4 +1,12 @@
 import { createHash } from "node:crypto";
+import {
+  apiIntegrationRequiredApprovals,
+  apiIntegrationToolMeaningUnchanged,
+} from "./api-integration-approvals";
+import {
+  resolveConnectorActionPolicy,
+  connectorActionPolicyDecision,
+} from "./connector-action-policy";
 
 import {
   assertOrganizationIntegrationAllowed,
@@ -505,6 +513,31 @@ async function installApiIntegrationInScope(
         const oldFacetInstallations = pluginInstallation
           ? await installedFacetRows(tx as unknown as Database, pluginInstallation.id)
           : [];
+        const oldApi = oldFacetInstallations.find((row) => row.kind === "api");
+        const [previousSpec] = oldApi
+          ? await tx
+              .select({
+                revision: schema.integrationSpecRevisions.spec,
+                baseUrl: schema.capabilityApiFacets.baseUrl,
+                authScheme: schema.capabilityApiFacets.authScheme,
+              })
+              .from(schema.integrationSpecRevisions)
+              .innerJoin(
+                schema.capabilityApiFacets,
+                eq(schema.capabilityApiFacets.facetId, schema.integrationSpecRevisions.apiFacetId),
+              )
+              .where(
+                and(
+                  eq(schema.integrationSpecRevisions.apiFacetId, oldApi.facetId),
+                  eq(schema.integrationSpecRevisions.status, "active"),
+                ),
+              )
+              .limit(1)
+          : [];
+        const previousRevision = previousSpec ? storedRevision(previousSpec.revision) : null;
+        const sameEndpoint =
+          previousSpec?.baseUrl === input.baseUrl &&
+          stableJson(previousSpec.authScheme) === stableJson(input.authScheme ?? {});
         let pluginInstallationGenerationAdvanced = false;
         if (pluginInstallation && pluginInstallation.pluginVersionId !== pluginVersion.id) {
           await assertCapabilityComponentVersionCanChange(tx as unknown as Database, {
@@ -579,30 +612,18 @@ async function installApiIntegrationInScope(
         if (pluginInstallationGenerationAdvanced) {
           await migrateApiIntegrationFacetInstallations(tx as unknown as Database, {
             workspaceId: input.workspaceId,
+            subjectId: input.subjectId,
             oldFacetInstallations,
             integrationFacetInstallationId: integrationFacetInstallation.id,
             apiFacetInstallationId: apiFacetInstallation.id,
             facetDefinitions,
             excludedRuntimeKey: runtimeServerId,
             revision: input.revision,
+            previousRevision,
+            sameEndpoint,
+            baseUrl: input.baseUrl,
           });
         }
-        const autoApprovedTools = autoApprovedToolIds(input, selectedTools);
-        const approvalRequiredTools = input.revision.tools
-          .filter(
-            (tool) =>
-              selectedTools.includes(tool.id) &&
-              tool.approvalMode === "ask" &&
-              !autoApprovedTools.has(tool.id),
-          )
-          .map((tool) => tool.id);
-        const nextConfig = {
-          baseServerId: input.serverId,
-          allowedTools: selectedTools,
-          requireApproval: approvalRequiredTools,
-          connectionKind: connection?.kind ?? null,
-          subjectScope: connection?.subjectId ? "subject" : connection ? "workspace" : "none",
-        };
         // This is the same advisory -> row prefix used by the binding upsert.
         // All preceding ensure writes are local to this transaction and roll
         // back if admission below denies a new acquisition.
@@ -620,6 +641,23 @@ async function installApiIntegrationInScope(
           )
           .for("update")
           .limit(1);
+        const nextConfig = {
+          baseServerId: input.serverId,
+          allowedTools: selectedTools,
+          requireApproval: apiIntegrationRequiredApprovals({
+            revision: input.revision,
+            previousRevision,
+            selectedTools,
+            previousConfig: previousBinding?.config ?? null,
+            sameAuthority:
+              sameEndpoint && previousBinding?.connectionId === (input.connectionId ?? null),
+            ...(input.autoApprovedTools === undefined
+              ? {}
+              : { autoApprovedTools: [...autoApprovedToolIds(input, selectedTools)] }),
+          }),
+          connectionKind: connection?.kind ?? null,
+          subjectScope: connection?.subjectId ? "subject" : connection ? "workspace" : "none",
+        };
         const bindingOwners = previousBinding
           ? await listIntegrationFacetBindingOwners(tx as unknown as Database, previousBinding.id)
           : [];
@@ -722,6 +760,35 @@ async function installApiIntegrationInScope(
             ? { expectedVersion: input.expectedInstanceVersion }
             : {}),
         });
+        await resetChangedApiToolPreferences(tx as unknown as Database, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+          serverId: runtimeServerId,
+          connectionId: input.connectionId ?? null,
+          baseUrl: input.baseUrl,
+          selectedTools,
+          previousRevision,
+          revision: input.revision,
+          sameEndpoint,
+        });
+        if (input.autoApprovedTools !== undefined)
+          await applyLegacyApiApprovalChoices(tx as unknown as Database, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId,
+            serverId: runtimeServerId,
+            connectionId: input.connectionId ?? null,
+            baseUrl: input.baseUrl,
+            choices: input.revision.tools
+              .filter((tool) => selectedTools.includes(tool.id) && tool.approvalMode === "ask")
+              .map((tool) => ({
+                toolName: tool.id,
+                policy: input.autoApprovedTools!.includes(tool.id)
+                  ? ("allow" as const)
+                  : ("ask" as const),
+              })),
+          });
         if (
           existingPluginInstallation &&
           !pluginInstallationGenerationAdvanced &&
@@ -1499,7 +1566,226 @@ export async function uninstallApiIntegration(
 type InstalledFacetRow = {
   id: string;
   kind: string;
+  facetId: string;
 };
+
+/** Compatibility input adapter: legacy exemptions write ordinary preferences. */
+async function applyLegacyApiApprovalChoices(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    serverId: string;
+    connectionId: string | null;
+    baseUrl: string;
+    choices: Array<{ toolName: string; policy: "allow" | "ask" }>;
+  },
+) {
+  if (!input.choices.length) return;
+  const connectionId =
+    input.connectionId ??
+    `session-mcp:${input.serverId}:${createHash("sha256").update(input.baseUrl, "utf8").digest("hex")}`;
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`connector-tool-permissions:${input.workspaceId}`}, 0))`,
+  );
+  const existing = await db
+    .select()
+    .from(schema.connectorActionPolicies)
+    .where(eq(schema.connectorActionPolicies.workspaceId, input.workspaceId));
+  const choices = input.choices.filter(
+    ({ toolName, policy }) =>
+      !existing.some(
+        (row) =>
+          row.connectionId === connectionId &&
+          row.serverId === input.serverId &&
+          row.toolName === toolName &&
+          row.actionName === "*" &&
+          row.policy === policy,
+      ),
+  );
+  const names = input.choices.map((choice) => choice.toolName);
+  const removedExceptions = await db
+    .delete(schema.connectorActionPolicies)
+    .where(
+      and(
+        eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+        eq(schema.connectorActionPolicies.connectionId, connectionId),
+        eq(schema.connectorActionPolicies.serverId, input.serverId),
+        inArray(schema.connectorActionPolicies.toolName, names),
+        ne(schema.connectorActionPolicies.actionName, "*"),
+      ),
+    )
+    .returning({
+      toolName: schema.connectorActionPolicies.toolName,
+      actionName: schema.connectorActionPolicies.actionName,
+    });
+  const added = choices.filter(
+    ({ toolName }) =>
+      !existing.some(
+        (row) =>
+          row.connectionId === connectionId &&
+          row.serverId === input.serverId &&
+          row.toolName === toolName &&
+          row.actionName === "*",
+      ),
+  );
+  if (existing.length - removedExceptions.length + added.length > 2048)
+    throw new Error("The workspace tool permission limit has been reached");
+  if (!choices.length && !removedExceptions.length) return;
+  if (choices.length)
+    await db
+      .insert(schema.connectorActionPolicies)
+      .values(
+        choices.map(({ toolName, policy }) => ({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          connectionId,
+          serverId: input.serverId,
+          toolName,
+          actionName: "*",
+          policy,
+          createdBySubjectId: input.subjectId,
+          updatedBySubjectId: input.subjectId,
+        })),
+      )
+      .onConflictDoUpdate({
+        target: [
+          schema.connectorActionPolicies.workspaceId,
+          schema.connectorActionPolicies.connectionId,
+          schema.connectorActionPolicies.serverId,
+          schema.connectorActionPolicies.toolName,
+          schema.connectorActionPolicies.actionName,
+        ],
+        set: {
+          policy: sql`excluded.policy`,
+          version: sql`${schema.connectorActionPolicies.version} + 1`,
+          updatedBySubjectId: input.subjectId,
+          updatedAt: new Date(),
+        },
+      });
+  await db.insert(schema.auditEvents).values({
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    action: "connector.action.preferences_changed",
+    targetType: "connector_action_policy",
+    targetId: connectionId,
+    metadata: {
+      source: "api_install_compatibility",
+      serverId: input.serverId,
+      choices,
+      removedExceptions,
+    },
+  });
+}
+
+/** A changed operation must not silently reuse Allow granted to its former
+ * meaning. The resulting Ask is an ordinary editable preference, never a floor. */
+async function resetChangedApiToolPreferences(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    serverId: string;
+    connectionId: string | null;
+    baseUrl: string;
+    selectedTools: readonly string[];
+    previousRevision: StoredApiIntegrationRevision | null;
+    revision: StoredApiIntegrationRevision;
+    sameEndpoint: boolean;
+  },
+) {
+  const changed = input.selectedTools.filter(
+    (id) =>
+      !input.sameEndpoint ||
+      !apiIntegrationToolMeaningUnchanged(input.previousRevision, input.revision, id),
+  );
+  if (!changed.length) return;
+  const connectionId =
+    input.connectionId ??
+    `session-mcp:${input.serverId}:${createHash("sha256").update(input.baseUrl, "utf8").digest("hex")}`;
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`connector-tool-permissions:${input.workspaceId}`}, 0))`,
+  );
+  const all = await db
+    .select()
+    .from(schema.connectorActionPolicies)
+    .where(eq(schema.connectorActionPolicies.workspaceId, input.workspaceId));
+  const policies = all.filter((row) => row.connectionId === connectionId);
+  let count = all.length;
+  for (const toolName of changed) {
+    const actions = new Set([
+      toolName,
+      ...policies
+        .filter(
+          (row) =>
+            (row.serverId === input.serverId || row.serverId === "*") &&
+            (row.toolName === toolName || row.toolName === "*") &&
+            row.actionName !== "*",
+        )
+        .map((row) => row.actionName),
+    ]);
+    for (const action of actions) {
+      const resolved = resolveConnectorActionPolicy(policies, {
+        connectionId,
+        serverId: input.serverId,
+        toolName,
+        actionName: action,
+      });
+      if (!resolved.managed || connectorActionPolicyDecision(resolved) !== "allow") continue;
+      const actionName = action === toolName && resolved.entry?.actionName === "*" ? "*" : action;
+      const existing = policies.find(
+        (row) =>
+          row.serverId === input.serverId &&
+          row.toolName === toolName &&
+          row.actionName === actionName,
+      );
+      if (!existing && ++count > 2048)
+        throw new Error("The workspace tool permission limit has been reached");
+      const [updated] = await db
+        .insert(schema.connectorActionPolicies)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          connectionId,
+          serverId: input.serverId,
+          toolName,
+          actionName,
+          policy: "ask",
+          createdBySubjectId: input.subjectId,
+          updatedBySubjectId: input.subjectId,
+        })
+        .onConflictDoUpdate({
+          target: [
+            schema.connectorActionPolicies.workspaceId,
+            schema.connectorActionPolicies.connectionId,
+            schema.connectorActionPolicies.serverId,
+            schema.connectorActionPolicies.toolName,
+            schema.connectorActionPolicies.actionName,
+          ],
+          set: {
+            policy: "ask",
+            version: sql`${schema.connectorActionPolicies.version} + 1`,
+            updatedBySubjectId: input.subjectId,
+            updatedAt: new Date(),
+          },
+        })
+        .returning();
+      if (updated)
+        await db.insert(schema.auditEvents).values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+          action: "connector.action.policy_reset",
+          targetType: "connector_action_policy",
+          targetId: updated.id,
+          metadata: { reason: "operation_changed", policy: "ask", version: updated.version },
+        });
+    }
+  }
+}
 
 async function installedFacetRows(
   db: Database,
@@ -1509,6 +1795,7 @@ async function installedFacetRows(
     .select({
       id: schema.capabilityFacetInstallations.id,
       kind: schema.capabilityFacets.kind,
+      facetId: schema.capabilityFacets.id,
     })
     .from(schema.capabilityFacetInstallations)
     .innerJoin(
@@ -1522,12 +1809,16 @@ async function migrateApiIntegrationFacetInstallations(
   db: Database,
   input: {
     workspaceId: string;
+    subjectId: string;
     oldFacetInstallations: InstalledFacetRow[];
     integrationFacetInstallationId: string;
     apiFacetInstallationId: string;
     facetDefinitions: ReadonlyMap<string, typeof schema.integrationFacetDefinitions.$inferSelect>;
     excludedRuntimeKey: string;
     revision: StoredApiIntegrationRevision;
+    previousRevision: StoredApiIntegrationRevision | null;
+    sameEndpoint: boolean;
+    baseUrl: string;
   },
 ): Promise<void> {
   if (input.oldFacetInstallations.length === 0) return;
@@ -1600,9 +1891,13 @@ async function migrateApiIntegrationFacetInstallations(
       ? (stringArray(config.allowedTools) ?? []).filter((tool) => available.has(tool))
       : [];
     const requireApproval = toolsConfig
-      ? input.revision.tools
-          .filter((tool) => selected.includes(tool.id) && tool.approvalMode === "ask")
-          .map((tool) => tool.id)
+      ? apiIntegrationRequiredApprovals({
+          revision: input.revision,
+          previousRevision: input.previousRevision,
+          selectedTools: selected,
+          previousConfig: config,
+          sameAuthority: input.sameEndpoint,
+        })
       : [];
     await db
       .update(schema.integrationFacetBindings)
@@ -1617,6 +1912,19 @@ async function migrateApiIntegrationFacetInstallations(
         updatedAt: new Date(),
       })
       .where(eq(schema.integrationFacetBindings.id, binding.id));
+    if (toolsConfig && binding.runtimeKey)
+      await resetChangedApiToolPreferences(db, {
+        accountId: binding.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        serverId: binding.runtimeKey,
+        connectionId: binding.connectionId,
+        baseUrl: input.baseUrl,
+        selectedTools: selected,
+        previousRevision: input.previousRevision,
+        revision: input.revision,
+        sameEndpoint: input.sameEndpoint,
+      });
   }
 }
 

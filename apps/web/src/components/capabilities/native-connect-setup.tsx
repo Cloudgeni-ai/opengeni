@@ -7,12 +7,13 @@ import {
   type ConnectInstallationTarget,
   type ConnectAttempt,
 } from "@opengeni/connect";
-import { ConnectSetup, ConnectionLogo } from "@opengeni/react/connect";
+import { ConnectSetup, ConnectionLogo, isOwnerApprovalPending } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { CapabilityDialogContent } from "./detail-dialog";
 import { Button } from "@/components/ui/button";
 import { selectGitHubConnectAccount } from "@/lib/github-connect-account";
+import { recordGitHubInstallRequest } from "@/lib/github-install-request";
 import {
   beginIntegrationConnect,
   connectAttemptOutcome,
@@ -140,6 +141,10 @@ export function NativeConnectSetup({
       const attempt = controller.getSnapshot().attempt;
       const outcome = attempt ? connectAttemptOutcome(attempt) : null;
       if (outcome) journey.current?.finish(outcome);
+      // A non-owner's request: remember it so the GitHub card can say it's
+      // waiting for an owner rather than offering the same dead end again.
+      if (attempt?.providerId === "github-app" && isOwnerApprovalPending(attempt))
+        recordGitHubInstallRequest(attempt.workspaceId);
       if (attempt?.state === "complete" && completedAttempt.current !== attempt.id) {
         completedAttempt.current = attempt.id;
         onComplete(attempt);

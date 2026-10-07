@@ -22,8 +22,6 @@ const integrationConsumers = [
   ".agents/skills/opengeni/SKILL.md",
   ".agents/skills/opengeni/references/client-integration.md",
   ".agents/skills/opengeni-client/SKILL.md",
-  ".agents/skills/opengeni-client/references/product-integration-shapes.md",
-  ".agents/skills/opengeni-client/references/api-workflows.md",
 ];
 const integrationGuide = [
   "organization API key",

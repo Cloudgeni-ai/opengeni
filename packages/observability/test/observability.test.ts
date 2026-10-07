@@ -451,7 +451,7 @@ describe("observability", () => {
       sourceKey: "source-1",
     });
     span.end({ attributes: { status: "idle", account_id: "account-1" } });
-    await Bun.sleep(0);
+    await obs.flush(); // spans batch on a short timer
 
     expect(exported).toHaveLength(1);
     expect(exported[0]!.url).toBe("http://collector:4318/v1/traces");
@@ -514,7 +514,7 @@ describe("observability", () => {
 
     const span = obs.startSpan("HTTP POST /v1/sessions", {});
     span.end({ error, attributes: { "custom.large": "x".repeat(2_000) } });
-    await Bun.sleep(0);
+    await obs.flush(); // spans batch on a short timer
 
     expect(exported).toHaveLength(1);
     const body = exported[0]!.body;
@@ -559,7 +559,7 @@ describe("observability", () => {
 
     const span = obs.startSpan("worker.hostile_status", {});
     expect(() => span.end({ error: hostile })).not.toThrow();
-    await Bun.sleep(0);
+    await obs.flush(); // spans batch on a short timer
 
     expect(exported).toHaveLength(1);
     const rendered = JSON.stringify(exported[0]!.body);
@@ -957,6 +957,54 @@ describe("observability", () => {
     });
     expect(JSON.parse(observed[0]!)).not.toHaveProperty("workspaceId");
     expect(JSON.parse(observed[1]!)).not.toHaveProperty("correlationId");
+  });
+
+  test("HTTP failure logs keep bounded request and cause context without error text or credentials", () => {
+    const sentinel = "HTTP_DIAGNOSTIC_SECRET_CANARY";
+    const observed: string[] = [];
+    const originalError = console.error;
+    console.error = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      obs.error("HTTP request failed", {
+        errorClass: "HttpOperationError",
+        errorCode: "internal_error",
+        status: 500,
+        method: "GET",
+        route: "/v1/workspaces/:workspaceId/mcp",
+        reasonKind: "TypeError",
+        diagnosticId: "00000000-0000-4000-8000-000000000001",
+        correlationId: "request-1",
+        error: new Error(sentinel),
+        errorMessage: sentinel,
+        authorization: sentinel,
+        cookie: sentinel,
+        body: sentinel,
+        sessionId: sentinel,
+      });
+      obs.error("HTTP request failed", {
+        errorClass: "HttpOperationError",
+        errorCode: "internal_error",
+        status: 500,
+        method: sentinel,
+        route: `/v1/workspaces/workspace/mcp?token=${sentinel}`,
+        reasonKind: sentinel,
+        diagnosticId: sentinel,
+      });
+    } finally {
+      console.error = originalError;
+    }
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      method: "GET",
+      route: "/v1/workspaces/:workspaceId/mcp",
+      reasonKind: "TypeError",
+      diagnosticId: "00000000-0000-4000-8000-000000000001",
+      correlationId: "request-1",
+    });
+    for (const field of ["method", "route", "reasonKind", "diagnosticId"]) {
+      expect(JSON.parse(observed[1]!)).not.toHaveProperty(field);
+    }
+    expect(observed.join("\n")).not.toContain(sentinel);
   });
 
   test("public fatal diagnostics retain only closed structural fields", () => {

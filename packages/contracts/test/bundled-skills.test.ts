@@ -4,6 +4,7 @@ import {
   ScheduledTaskAgentConfig,
   AutomationSessionTemplate,
   BundledSkillSelection,
+  bundledSkillSelectionForAgentConfig,
   resolveBundledSkillSelection,
   withBundledSkillSelectionMetadata,
   bundledSkillSelectionFromMetadata,
@@ -132,4 +133,20 @@ test("stored selection drops ids this build does not know, while input stays str
   expect(
     CreateSessionRequest.safeParse({ initialMessage: "Run", bundledSkillIds: [unknown] }).success,
   ).toBe(false);
+});
+
+test('a "none" agent freezes no bundled guides unless the request lists them', () => {
+  const none = { from: "none" } as const;
+  const all = { from: "all" } as const;
+  expect(bundledSkillSelectionForAgentConfig(undefined, none)).toEqual([]);
+  expect(bundledSkillSelectionForAgentConfig([projects], none)).toEqual([projects]);
+  expect(bundledSkillSelectionForAgentConfig([], none)).toEqual([]);
+  expect(bundledSkillSelectionForAgentConfig(undefined, all)).toBeUndefined();
+  expect(bundledSkillSelectionForAgentConfig([sites], all)).toEqual([sites]);
+  expect(bundledSkillSelectionForAgentConfig(undefined, null)).toBeUndefined();
+  expect(bundledSkillSelectionForAgentConfig(undefined, undefined)).toBeUndefined();
+  // A child of a "none" parent inherits the frozen empty selection.
+  expect(
+    resolveBundledSkillSelection(undefined, bundledSkillSelectionForAgentConfig(undefined, none)),
+  ).toEqual([]);
 });

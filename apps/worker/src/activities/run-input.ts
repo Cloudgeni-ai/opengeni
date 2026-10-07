@@ -81,6 +81,8 @@ export type TurnInputOptions = {
   unavailableSandboxFilesNote?: string;
   runCredentialsNote?: string;
   mcpAvailabilityNote?: string;
+  codemodeContinuationNote?: string;
+  programmaticApprovalAcknowledged?: boolean;
   knowledgeSourcePreparationNote?: string;
   providerApi: HistoryProviderApi;
   projectCanonicalHistory?: ModelHistoryAttachmentProjector;
@@ -305,12 +307,26 @@ function attachmentRefsFromItem(item: Record<string, unknown>): FileResourceRef[
 }
 
 function attachmentReceiptText(ref: FileResourceRef): string {
-  // The durable reference is immutable; live metadata/authority must not rewrite
-  // old receipt text. Pixel delivery remains subject to current file authority.
+  // The durable reference is immutable; live metadata must not rewrite old
+  // receipt text. Pixel delivery remains subject to current file authority.
   return (
     `[Attachment: fileId=${ref.fileId}; mountDirectory=${resourceMountPath(ref)}. ` +
     `Use the existing file there, or call files__files_get_download_url with this fileId and ` +
     `download it with the shell.]`
+  );
+}
+
+/** Receipt for an active reference that this turn's file-authority lookup did
+ * not return: another participant's file, or one that is no longer available
+ * (not ready, purged, or access revoked). The lookup cannot tell these apart,
+ * so the text stays neutral. The authority boundary is unchanged: no bytes and
+ * no fetch instruction, which would fail and lead the model to report the file
+ * as deleted. */
+function unavailableAttachmentReceiptText(ref: FileResourceRef): string {
+  return (
+    `[Attachment: fileId=${ref.fileId}. This file is not available to the current requester: ` +
+    `it may belong to another participant, or it may no longer be available. ` +
+    `Its contents are not included and it cannot be downloaded in this turn; do not guess which.]`
   );
 }
 
@@ -423,12 +439,20 @@ export function createModelHistoryAttachmentProjector(
         ? [...original.content]
         : [{ type: "input_text", text: String(original.content ?? "") }];
       const attachmentParts = refs.flatMap((ref) => {
-        const currentFile =
-          original[MODEL_ATTACHMENT_CATALOG_MARKER] === true ? undefined : fileById.get(ref.fileId);
+        const catalog = original[MODEL_ATTACHMENT_CATALOG_MARKER] === true;
+        const currentFile = catalog ? undefined : fileById.get(ref.fileId);
+        // Only an authority lookup that actually ran can exclude a reference.
+        // Legacy callers without a resolver and compacted catalogs, which never
+        // look up authority, keep the reference-only receipt.
+        const excluded =
+          !catalog &&
+          loadAuthorizedFiles !== undefined &&
+          resolvedFileIds.has(ref.fileId) &&
+          currentFile === undefined;
         const attachment = currentFile ? contentById.get(ref.fileId) : undefined;
         const receipt = {
           type: "input_text",
-          text: attachmentReceiptText(ref),
+          text: excluded ? unavailableAttachmentReceiptText(ref) : attachmentReceiptText(ref),
         };
         if (!attachment || attachment.kind !== "image") {
           return [receipt];
@@ -513,6 +537,7 @@ export async function turnInput(
     options.unavailableSandboxFilesNote,
     options.runCredentialsNote,
     options.mcpAvailabilityNote,
+    options.codemodeContinuationNote,
     options.knowledgeSourcePreparationNote,
   );
   if (trigger.type === "user.message") {
@@ -606,7 +631,7 @@ async function openSuffixMessageInput(
     trigger.sessionId,
     options.turnId,
   );
-  if (suffixRows.length === 0) {
+  if (suffixRows.length === 0 && !options.programmaticApprovalAcknowledged) {
     throw new Error("Open suffix resume has no interruption rows");
   }
   if (suffixRows.some((row) => row.resultItem == null)) {

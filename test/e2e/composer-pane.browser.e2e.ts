@@ -109,13 +109,11 @@ describe("console composer in a split desktop pane", () => {
   test("shared actions keep repositories, connectors, and variable sets reachable", async () => {
     await page.getByRole("button", { name: "More composer actions" }).click();
     // The menu body is optional lazy code; the loading shell is not action readiness.
-    await page.getByRole("menuitem", { name: "Chat settings", exact: true }).waitFor();
+    await page.getByRole("menuitem", { name: /^Chat settings\b/ }).waitFor();
     expect(await page.getByRole("menuitem", { name: /Repositories/ }).isVisible()).toBe(true);
     expect(await page.getByRole("menuitem", { name: /Connectors/ }).isVisible()).toBe(true);
     expect(await page.getByRole("menuitem", { name: /Variable sets/ }).isVisible()).toBe(true);
-    expect(await page.getByRole("menuitem", { name: "Chat settings", exact: true }).count()).toBe(
-      1,
-    );
+    expect(await page.getByRole("menuitem", { name: /^Chat settings\b/ }).count()).toBe(1);
     await page.keyboard.press("Escape");
   });
 
@@ -190,39 +188,73 @@ describe("console composer in a split desktop pane", () => {
     }
   }, 60_000);
 
-  test("settings share white popovers with Back, outside dismissal and a single voice picker", async () => {
-    for (const newSession of [false, true]) {
-      await page.setViewportSize({ width: 1000, height: 900 });
-      await page.goto(`${page.url().split("?")[0]}${newSession ? "?new-session" : ""}`, {
-        waitUntil: "networkidle",
-      });
-      await page.evaluate(() => document.documentElement.setAttribute("data-og-theme", "light"));
-      const plus = page.getByRole("button", { name: "More composer actions" });
-      await plus.click();
-      await page.getByRole("menuitem", { name: "Chat settings", exact: true }).waitFor();
-      const menu = page.getByRole("menu");
-      const white = await menu.evaluate((node) => getComputedStyle(node).backgroundColor);
-      expect(await page.getByRole("menuitem", { name: /Voice model/ }).count()).toBe(0);
-      await page.getByRole("menuitem", { name: "Chat settings", exact: true }).click();
-      await page.getByLabel("Knowledge", { exact: true }).waitFor();
-      expect(await page.getByRole("dialog").count()).toBe(0);
-      expect(await page.getByRole("button", { name: /close/i }).count()).toBe(0);
-      expect(await menu.evaluate((node) => getComputedStyle(node).backgroundColor)).toBe(white);
-      await page.getByLabel("Knowledge", { exact: true }).selectOption("off");
-      await page.screenshot({
-        path: `${root}/composer-settings-${newSession ? "new" : "existing"}.png`,
-      });
-      await page.getByRole("menuitem", { name: "Back", exact: true }).click();
-      await page.getByRole("menuitem", { name: "Chat settings", exact: true }).click();
-      expect(await page.getByLabel("Knowledge", { exact: true }).inputValue()).toBe("off");
-      await page.keyboard.press("Escape");
-      await menu.waitFor({ state: "hidden" });
-      await plus.click();
-      await page.mouse.click(950, 20);
-      await menu.waitFor({ state: "hidden" });
-      await page.setViewportSize({ width: 390, height: 800 });
-      await page.locator("main").evaluate((node) => (node.style.width = "calc(100vw - 48px)"));
-      expect(await page.getByRole("button", { name: /choose voice model/i }).count()).toBe(1);
-    }
+  test("existing-chat settings open the Agent tab instead of a duplicate popover", async () => {
+    await page.setViewportSize({ width: 1000, height: 900 });
+    await page.goto(page.url().split("?")[0], { waitUntil: "networkidle" });
+    const plus = page.getByRole("button", { name: "More composer actions" });
+    await plus.click();
+    const settings = page.getByRole("menuitem", { name: /^Chat settings\b/ });
+    await settings.waitFor();
+    expect(await settings.count()).toBe(1);
+    expect(await settings.textContent()).toContain("Agent tab");
+    expect(await page.getByRole("menuitem", { name: /Voice model/ }).count()).toBe(0);
+    await settings.click();
+    await page.getByRole("menu").waitFor({ state: "hidden" });
+    const agentTab = page.getByRole("region", { name: "Agent tab", exact: true });
+    const knowledge = agentTab.getByLabel("Knowledge", { exact: true });
+    await knowledge.waitFor();
+    expect(await page.getByRole("dialog").count()).toBe(0);
+    expect(await page.getByRole("button", { name: /close/i }).count()).toBe(0);
+    await knowledge.selectOption("off");
+    await agentTab
+      .getByRole("status")
+      .filter({ hasText: /^Saved\./ })
+      .waitFor();
+    await plus.click();
+    await settings.click();
+    await page.getByRole("menu").waitFor({ state: "hidden" });
+    expect(await agentTab.count()).toBe(1);
+    expect(await knowledge.inputValue()).toBe("off");
+    await page.screenshot({ path: `${root}/composer-settings-existing.png` });
+    await plus.click();
+    await page.mouse.click(950, 20);
+    await page.getByRole("menu").waitFor({ state: "hidden" });
+    await page.setViewportSize({ width: 390, height: 800 });
+    await page.locator("main").evaluate((node) => (node.style.width = "calc(100vw - 48px)"));
+    expect(await page.getByRole("button", { name: /choose voice model/i }).count()).toBe(1);
+  }, 60_000);
+
+  test("draft settings keep white popovers, Back, outside dismissal and a single voice picker", async () => {
+    await page.setViewportSize({ width: 1000, height: 900 });
+    await page.goto(`${page.url().split("?")[0]}?new-session`, {
+      waitUntil: "networkidle",
+    });
+    await page.evaluate(() => document.documentElement.setAttribute("data-og-theme", "light"));
+    const plus = page.getByRole("button", { name: "More composer actions" });
+    await plus.click();
+    await page.getByRole("menuitem", { name: "Chat settings", exact: true }).waitFor();
+    const menu = page.getByRole("menu");
+    const white = await menu.evaluate((node) => getComputedStyle(node).backgroundColor);
+    expect(await page.getByRole("menuitem", { name: /Voice model/ }).count()).toBe(0);
+    await page.getByRole("menuitem", { name: "Chat settings", exact: true }).click();
+    await page.getByLabel("Knowledge", { exact: true }).waitFor();
+    expect(await page.getByRole("dialog").count()).toBe(0);
+    expect(await page.getByRole("button", { name: /close/i }).count()).toBe(0);
+    expect(await menu.evaluate((node) => getComputedStyle(node).backgroundColor)).toBe(white);
+    await page.getByLabel("Knowledge", { exact: true }).selectOption("off");
+    await page.screenshot({
+      path: `${root}/composer-settings-new.png`,
+    });
+    await page.getByRole("menuitem", { name: "Back", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Chat settings", exact: true }).click();
+    expect(await page.getByLabel("Knowledge", { exact: true }).inputValue()).toBe("off");
+    await page.keyboard.press("Escape");
+    await menu.waitFor({ state: "hidden" });
+    await plus.click();
+    await page.mouse.click(950, 20);
+    await menu.waitFor({ state: "hidden" });
+    await page.setViewportSize({ width: 390, height: 800 });
+    await page.locator("main").evaluate((node) => (node.style.width = "calc(100vw - 48px)"));
+    expect(await page.getByRole("button", { name: /choose voice model/i }).count()).toBe(1);
   }, 60_000);
 });

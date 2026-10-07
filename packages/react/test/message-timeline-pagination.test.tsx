@@ -1540,6 +1540,9 @@ describe("MessageTimeline pagination affordances", () => {
   });
 
   test("unarmed scroll settle away from tip unpins (Vimium / PageUp)", async () => {
+    // Real engines expose scrollend, so the camera waits for it. The listener
+    // must be native: React 18 has no onScrollEnd prop and never calls one.
+    setScrollEndSupportForTests(true);
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
       frames.push(cb);
@@ -1592,6 +1595,7 @@ describe("MessageTimeline pagination affordances", () => {
 
     layout.restore();
     await r.unmount();
+    setScrollEndSupportForTests(null);
   });
 
   test("unarmed scroll-away falls back to one rAF leave when scrollend is missing", async () => {

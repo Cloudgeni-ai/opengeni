@@ -23,6 +23,13 @@ The existing OAuth bundle is unchanged: `gmail.readonly`, `gmail.compose` and
 
 Message search returns matching individual emails; thread search returns matching
 conversations, including messages within them that did not match the query.
+`search_messages` supports `messageFormat: "IDS_ONLY"`; `search_threads` supports
+`view: "IDS_ONLY"`. These return IDs and cursors without fetching each message.
+Collect every page and save the distinct selection before changing mail. Split
+batches at 1,000 IDs, with a separate durable operation per batch. A successful
+batch response acknowledges submission; it does not verify every message state.
+The Codemode package provides bounded collection and frozen batch-plan helpers.
+
 Search/draft/history pages are bounded to 50 entries; follow the returned opaque
 page token. Label listing defaults to user labels; `includeSystem: true` also
 includes system labels. Label updates default to PATCH, preserving omitted fields.
@@ -30,7 +37,7 @@ The replacement form uses `replace: true` and requires a complete name.
 
 Atomic label changes express archive (`removeLabelIds: ["INBOX"]`), read/unread
 (`UNREAD`), star (`STARRED`), importance (`IMPORTANT`) and spam (`SPAM`). Trash uses
-dedicated operations. User label deletion does not delete messages. Draft deletion
+dedicated operations or `addLabelIds: ["TRASH"]`; batch changes use the latter. User label deletion does not delete messages. Draft deletion
 permanently removes that unsent draft; permanent deletion of messages/threads is
 not exposed because it requires the broader full-mail scope.
 
@@ -76,7 +83,9 @@ bytes, preventing intervening edits from changing the approved send content.
 `update_draft` replaces the complete saved content, retaining the draft ID; an
 optional expected hash guards against replacing an independently edited draft.
 
-Every mailbox mutation retains the catalog's mandatory human approval floor.
+Every tool uses the selected account’s Allow / Ask first / Block choice.
+Catalog recommendations apply only when no choice exists. Already prepared
+reviews retain their original decision; ordinary new calls use the next attempt’s snapshot.
 No mutation is retried automatically after submission or an uncertain response.
 Read requests can refresh once after a provider 401; destination redirects are
 rejected. Cancellation propagates to requests and filesystem authority checks.
@@ -106,6 +115,6 @@ forwarding, delegation, or encryption and does not decrypt protected content.
 
 Runtime descriptors and scope classification live in `gmail-rest-tools.ts` and
 `gmail-rest-mcp.ts`; the curated catalog pins the allowed tools and approval
-floor. Existing explicit session/schedule selections remain ceilings. Update a
+recommendations. Existing explicit session/schedule selections remain ceilings. Update a
 selection deliberately when its old allowed tool list excludes new tools; adding
 implementation does not widen accepted historical authority.

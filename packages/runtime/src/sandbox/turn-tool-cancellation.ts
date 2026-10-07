@@ -7,6 +7,7 @@ import {
 } from "./exec-banner";
 import {
   RoutingMutationOutcomeUnknownError,
+  isRoutingMutationOutputRejectedError,
   renderRoutingMutationOutcomeUnknownToolResult,
   type RoutingCommandDispatchOptions,
 } from "./routing/routing-session";
@@ -94,6 +95,8 @@ type ActiveShellSession = {
   identity: ShellProcessIdentity | null;
   identityValidated: boolean;
   cancellation: Promise<void> | null;
+  /** Never adopt as a session background command; finalization stops it. */
+  turnScoped?: boolean;
 };
 
 type CommandCancellationSession = {
@@ -279,6 +282,27 @@ function modelWaitMs(value: unknown): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0
     ? Math.min(value, TURN_MAX_MODEL_WAIT_MS)
     : TURN_DEFAULT_MODEL_WAIT_MS;
+}
+
+const BARE_INTERACTIVE_SHELL =
+  /^(?:exec\s+)?(?:(?:\/usr)?\/bin\/)?(?:ba|z|da|k|a|fi)?sh(?:\s+(?:-[A-Zabd-z]+|--[a-z][a-z-]*))*$/;
+
+/**
+ * True when the command's final step starts a shell that only reads stdin (for
+ * example `bash --noprofile --norc`): a REPL the model drives with write_stdin
+ * during this turn. Such a shell never exits on its own, so adopting it as a
+ * session background command would keep the sandbox busy indefinitely after
+ * the turn. It stays turn-scoped instead and the ordinary finalization drain
+ * stops it. A `-c` command string, a script argument, or any other trailing
+ * token is not a bare shell and keeps normal background adoption.
+ */
+export function isBareInteractiveShellCommand(command: string): boolean {
+  const steps = command
+    .split(/\n|;|&&|\|\|/)
+    .map((step) => step.trim())
+    .filter((step) => step.length > 0 && !step.startsWith("#"));
+  const last = steps.at(-1);
+  return last !== undefined && BARE_INTERACTIVE_SHELL.test(last);
 }
 
 function execOutput(raw: string): string {
@@ -635,6 +659,7 @@ function retainedProcessSession(
  * tool's string result, keeping the run alive instead of failing the turn.
  */
 export function renderDirectToolFault(error: unknown, retainedProcessSessionId?: number): string {
+  if (isRoutingMutationOutputRejectedError(error)) throw error;
   if (error instanceof ProviderCommandInputOutcomeUnknownError) {
     return `Command input acknowledgement unavailable${retainedProcessSessionId === undefined ? "" : ` for session ID ${retainedProcessSessionId}`}. The input may have been accepted; its outcome is unknown and it was not resent. Do not resend stdin. Inspect the existing command with write_stdin using empty chars.`;
   }
@@ -1266,6 +1291,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   identity: null,
                   identityValidated: false,
                   cancellation: null,
+                  ...(isBareInteractiveShellCommand(parsed.cmd) ? { turnScoped: true } : {}),
                 });
                 pendingStart?.settle(retainedProcess.providerSessionId);
               }
@@ -1296,6 +1322,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 identity: null,
                 identityValidated: false,
                 cancellation: null,
+                // The exact marker kill is the finalization authority for a
+                // turn-scoped shell; op-stream (remote) launches have none.
+                ...(!useRemoteOpCancellation && isBareInteractiveShellCommand(parsed.cmd)
+                  ? { turnScoped: true }
+                  : {}),
               };
               // Provider retention preserves the physical process but does not
               // transfer it to the session. Keep it turn-owned and cancellable
@@ -1460,7 +1491,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   }): Promise<string> {
     const { state, startedAt, waitMs, maxOutputTokens } = input;
     const canAdoptInBackground =
-      state.processSession?.canAdoptRetainedProcessAsBackgroundCommand?.(state.sessionId) ?? true;
+      state.turnScoped !== true &&
+      (state.processSession?.canAdoptRetainedProcessAsBackgroundCommand?.(state.sessionId) ?? true);
     if (!state.typedHandleLoss && isExecSessionLostBanner(input.initialOutput, state.sessionId)) {
       this.shellSessions.delete(state.sessionId);
       return input.initialOutput;
@@ -1560,9 +1592,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       return `${renderDirectToolFault(observationFailure, state.sessionId)}${commandId ? `\nCommand ID: ${commandId}` : ""}\nOutput:\n${output}`;
     }
     if (!canAdoptInBackground) {
-      // Docker/local handles belong to this exact worker session. Keep the
-      // shell registered with the turn fence: finalization must stop and settle
-      // it. Returning control is not durable background-command adoption.
+      // Docker/local handles belong to this exact worker session, and a bare
+      // interactive shell waits on stdin forever. Keep the shell registered
+      // with the turn fence: finalization must stop and settle it. Returning
+      // control is not durable background-command adoption.
       return `${runningCommandBanner(state.sessionId, output)}\nThis process is turn-scoped; it will stop when this turn ends or is interrupted.\n`;
     }
     if (state.processSession?.adoptRetainedProcessAsBackgroundCommand) {

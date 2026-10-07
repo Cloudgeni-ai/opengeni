@@ -1,3 +1,4 @@
+import { modelLogoUrl } from "./model-display";
 import {
   ClaudeProviderAccountAuthoritySnapshotV1,
   WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -114,6 +115,7 @@ export * from "./editable-artifact-serialized-commit";
 export * from "./signup-attribution";
 export * from "./product-lifecycle-facts";
 export * from "./tool-catalog";
+export * from "./mcp-structured-content";
 export * from "./mcp-oauth";
 export * from "./tool-result-spill";
 export * from "./interaction";
@@ -1173,9 +1175,9 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
 } as const satisfies Partial<Record<FirstPartyMcpToolName, readonly [string, string]>>;
 
 /**
- * Connector-wide tools are explicit-only. Ordinary session omission selects
- * the non-connector catalog, while an explicit session policy may still select
- * any catalogued connector tool and remains independently permission-gated.
+ * Connector-wide tools are explicit-only except prepared bot sending. Ordinary
+ * chats may select the bot's explicit channel without borrowing a personal
+ * account; accepted turn/task policies and permission ceilings remain fixed.
  */
 export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
   (name) =>
@@ -1183,7 +1185,10 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&
-    !name.startsWith("slack_bot_") &&
+    (!name.startsWith("slack_bot_") ||
+      name === "slack_bot_list_channels" ||
+      name === "slack_bot_prepare_message" ||
+      name === "slack_bot_send_prepared_message") &&
     !name.startsWith("fiken_") &&
     !name.startsWith("atlassian_"),
 ) satisfies readonly FirstPartyMcpToolName[];
@@ -1860,6 +1865,9 @@ export const TranscriptionErrorCode = z.enum([
   "too_large",
   "invalid_audio",
   "unknown",
+  "insufficient_credits",
+  "allowance_exhausted",
+  "monthly_model_cost_limit",
 ]);
 export type TranscriptionErrorCode = z.infer<typeof TranscriptionErrorCode>;
 
@@ -2116,6 +2124,7 @@ export const VoiceInputProviderId = z.enum([
   "codex-subscription",
   "openai",
   "azure-openai",
+  "azure-mai",
 ]);
 export type VoiceInputProviderId = z.infer<typeof VoiceInputProviderId>;
 
@@ -2602,8 +2611,7 @@ export const UpdateWorkspaceSettingsRequest = z
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
     slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
     defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
-    // Agent defaults for new sessions; null clears them. Requires the agent
-    // configuration admission switch.
+    // Agent defaults for new sessions; null clears them.
     sessionAgentDefaults: WorkspaceAgentDefaults.nullable().optional(),
   })
   .passthrough();
@@ -2697,6 +2705,25 @@ export type WorkspaceOpenRouterCustomModelsResponse = z.infer<
   typeof WorkspaceOpenRouterCustomModelsResponse
 >;
 
+export const CreateWorkspaceOpperCustomModelRequest = CreateWorkspaceGatewayCustomModelRequest;
+export type CreateWorkspaceOpperCustomModelRequest = z.infer<
+  typeof CreateWorkspaceOpperCustomModelRequest
+>;
+
+export const DeleteWorkspaceOpperCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
+export type DeleteWorkspaceOpperCustomModelRequest = z.infer<
+  typeof DeleteWorkspaceOpperCustomModelRequest
+>;
+
+// Same row shape as the Gateway/OpenRouter custom model; no separate schema
+// so the public surface keeps one canonical name for it.
+export type WorkspaceOpperCustomModel = WorkspaceGatewayCustomModel;
+
+export const WorkspaceOpperCustomModelsResponse = z.object({
+  models: z.array(WorkspaceGatewayCustomModel),
+});
+export type WorkspaceOpperCustomModelsResponse = z.infer<typeof WorkspaceOpperCustomModelsResponse>;
+
 export const CreateOrganizationProviderCustomModelRequest =
   CreateWorkspaceGatewayCustomModelRequest;
 export type CreateOrganizationProviderCustomModelRequest = z.infer<
@@ -2721,6 +2748,7 @@ export const OrganizationModelProviderKind = z.enum([
   "openrouter",
   "anthropic",
   "claude_subscription",
+  "opper",
 ]);
 export type OrganizationModelProviderKind = z.infer<typeof OrganizationModelProviderKind>;
 export const OrganizationModelProviderConnectionResponse = z.object({
@@ -2812,7 +2840,7 @@ export const ServiceTurnInitiatorContext = TurnInitiatorContext.superRefine((val
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: [key],
-        message: `${key} is reserved OpenGeni initiator context`,
+        message: `${key} is reserved Opengeni initiator context`,
       });
     }
   }
@@ -5004,11 +5032,28 @@ export type GitHubAppApiPort = {
   }) => Promise<GitHubAppRepositoryBranchPage>;
 };
 
+export const PromotionalCreditScope = z.object({
+  label: z.string().trim().min(1).max(120),
+  eligibleModelIds: z.array(z.string().trim().min(1).max(200)).min(1).max(40),
+});
+export type PromotionalCreditScope = z.infer<typeof PromotionalCreditScope>;
+
+export const PromotionalCreditBalance = PromotionalCreditScope.extend({
+  grantId: z.string().uuid(),
+  remainingMicros: z.number().int().nonnegative(),
+  /** Also pays for dictation and live voice, like general credits (signup credits). */
+  coversVoice: z.boolean().optional(),
+});
+export type PromotionalCreditBalance = z.infer<typeof PromotionalCreditBalance>;
+
 export const BillingBalance = z.object({
   accountId: z.string().uuid(),
   balanceMicros: z.number().int(),
   currency: z.literal("usd"),
   updatedAt: z.string(),
+  /** General credits, including unrestricted legacy grants. May be negative after use. */
+  generalBalanceMicros: z.number().int().optional(),
+  promotionalCredits: z.array(PromotionalCreditBalance).optional(),
 });
 export type BillingBalance = z.infer<typeof BillingBalance>;
 
@@ -5039,6 +5084,7 @@ export const CreateCheckoutResponse = z.object({
   url: z.string().url(),
   /** The credits this checkout grants once it completes. */
   amountUsd: z.number().optional(),
+  promotionalScope: PromotionalCreditScope.optional(),
 });
 export type CreateCheckoutResponse = z.infer<typeof CreateCheckoutResponse>;
 
@@ -5056,6 +5102,7 @@ export const BillingCheckoutStatus = z.object({
     currency: z.literal("usd"),
     /** True when a coupon covered the whole checkout, so nothing was charged. */
     free: z.boolean(),
+    promotionalScope: PromotionalCreditScope.optional(),
   }),
   balance: BillingBalance.nullable(),
 });
@@ -6710,6 +6757,16 @@ export const SessionGoalContinuation = z.object({
 });
 export type SessionGoalContinuation = z.infer<typeof SessionGoalContinuation>;
 
+/** New admission pauses are specific; the wire field remains open for older peers. */
+export type GoalAdmissionPausedReason =
+  | "model_unavailable"
+  | "model_policy"
+  | "credits"
+  | "budget"
+  | "usage_limit"
+  | "usage_policy"
+  | "allowance";
+
 export const SessionGoal = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -7042,7 +7099,7 @@ export const CodexRealtimeWebrtcResponse = z
       .min(1)
       .max(1024 * 1024),
     version: CodexRealtimeWebrtcVersion,
-    model: z.literal("gpt-live-1-boulder-alpha"),
+    model: z.enum(["gpt-live-1-boulder-alpha", "opengeni-azure/gpt-live-1"]),
     connectionId: z.string().uuid(),
     connectionEpoch: z.number().int().positive(),
     startupFenceSequence: z.number().int().nonnegative(),
@@ -7199,6 +7256,7 @@ export const SyncSessionRealtimeLedgerResponse = z
 export type SyncSessionRealtimeLedgerResponse = z.infer<typeof SyncSessionRealtimeLedgerResponse>;
 
 export const SessionRealtimeModel = z.enum([
+  "opengeni-azure/gpt-live-1",
   "gpt-live-1-boulder-alpha",
   "supergrok/grok-voice-think-fast-2.0",
   "opengeni-gateway/openai/gpt-realtime-2.1",
@@ -7217,6 +7275,12 @@ export const WorkspaceRealtimeModelCatalogItem = z.object({
   description: z.string().min(1),
   available: z.boolean(),
   unavailableReason: z.string().nullable(),
+  /**
+   * Machine-readable reason when unavailable. Credit refusals use the same
+   * codes as voice input (`insufficient_credits`, `allowance_exhausted`,
+   * `monthly_model_cost_limit`).
+   */
+  unavailableCode: z.string().min(1).max(64).nullable().optional(),
   recommended: z.boolean(),
 });
 export type WorkspaceRealtimeModelCatalogItem = z.infer<typeof WorkspaceRealtimeModelCatalogItem>;
@@ -7272,9 +7336,21 @@ export const EndSessionRealtimeRequest = RenewSessionRealtimeRequest.extend({
 });
 export type EndSessionRealtimeRequest = z.infer<typeof EndSessionRealtimeRequest>;
 
+/**
+ * Server instruction to end a live call now. Deployment-funded voice returns
+ * it from a heartbeat when credits run out; the lease is then no longer
+ * extended, so the client should drain and end the call gracefully.
+ */
+export const SessionRealtimeStopInstruction = z.object({
+  code: z.string().min(1).max(64),
+  message: z.string().min(1).max(512),
+});
+export type SessionRealtimeStopInstruction = z.infer<typeof SessionRealtimeStopInstruction>;
+
 export const SessionRealtimeMutationResponse = z.object({
   mode: SessionRealtimeMode,
   replay: z.boolean(),
+  stop: SessionRealtimeStopInstruction.optional(),
 });
 export type SessionRealtimeMutationResponse = z.infer<typeof SessionRealtimeMutationResponse>;
 
@@ -8893,6 +8969,8 @@ type RenderableSessionSystemUpdate = Pick<
  */
 export type SessionSystemUpdateBatchRenderOptions = {
   deliveredAt?: Date | string | null;
+  /** Server-derived configuration facts, model memory only. */
+  selectionNotes?: Readonly<Record<string, string>>;
 };
 
 function renderSessionSystemUpdateDeliveredAt(
@@ -8930,6 +9008,9 @@ export function renderSessionSystemUpdateBatch(
         summary: update.summary,
         payload: update.payload,
         lineage: update.lineage,
+        ...(options.selectionNotes?.[update.id]
+          ? { selectionNote: options.selectionNotes[update.id] }
+          : {}),
       })),
     }),
   ].join("\n");
@@ -10426,7 +10507,8 @@ export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRu
  * means every occurrence is refused until the task or a resource it names
  * changes. Known reasons: `scheduled_authority_unavailable`,
  * `machine_target_unavailable`, `machine_enrollment_inactive`,
- * `variable_set_unavailable`, `rig_version_unavailable` (terminal) and
+ * `variable_set_unavailable`, `rig_version_unavailable`, `scheduled_model_unavailable`
+ * (terminal) and
  * `insufficient_credits`, `allowance_exhausted`, `monthly_model_cost_limit`, `monthly_agent_run_limit`
  * (transient). Readers must tolerate new reasons.
  */
@@ -11751,6 +11833,23 @@ export const ConnectionMetadata = z.object({
 });
 export type ConnectionMetadata = z.infer<typeof ConnectionMetadata>;
 
+/** Verified bot metadata available in the requested workspace. Credentials
+ * remain in the installation workspace; personal accounts are excluded. */
+export const AvailableOpenGeniSlackBots = z.object({
+  connections: z.array(ConnectionMetadata),
+  organizationSharedConnectionIds: z.array(z.string().uuid()),
+});
+export type AvailableOpenGeniSlackBots = z.infer<typeof AvailableOpenGeniSlackBots>;
+export const UpdateOpenGeniSlackBotOrganizationAccess = z.object({ enabled: z.boolean() }).strict();
+export type UpdateOpenGeniSlackBotOrganizationAccess = z.infer<
+  typeof UpdateOpenGeniSlackBotOrganizationAccess
+>;
+export const OpenGeniSlackBotOrganizationAccess = z.object({
+  enabled: z.boolean(),
+  generation: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+});
+export type OpenGeniSlackBotOrganizationAccess = z.infer<typeof OpenGeniSlackBotOrganizationAccess>;
+
 type PersonalSlackCanonicalConnection = Pick<
   ConnectionMetadata,
   "id" | "status" | "createdAt" | "updatedAt"
@@ -11826,6 +11925,9 @@ export const OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY =
   "openRouterCredentialOperationId" as const;
 export const OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY =
   "openRouterCredentialOperationDigest" as const;
+export const OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY = "opperCredentialOperationId" as const;
+export const OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY =
+  "opperCredentialOperationDigest" as const;
 
 export const CreateConnectionRequest = z.object({
   providerDomain: z.string().min(1),
@@ -12029,6 +12131,11 @@ export const CapabilityRuntime = z.object({
       ]),
     })
     .optional(),
+  // Server-derived connectability: present when the connector's OAuth
+  // authorization server refuses self-registration, so connecting needs an
+  // operator-registered client. `configured` is whether this deployment has
+  // one; connector surfaces offer the row only when it is true.
+  operatorOAuthClient: z.object({ configured: z.boolean() }).optional(),
 });
 export type CapabilityRuntime = z.infer<typeof CapabilityRuntime>;
 
@@ -16253,7 +16360,7 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
       // One agent configuration: capabilities, identity, instructions alias and
       // renderer. Omission keeps today's behavior (or inherits a configured
-      // parent). Children may only narrow. Behind the admission switch.
+      // parent). Children may only narrow.
       agent: AgentConfigRequest.optional(),
       // Third-party MCP servers attached only to this session. For an agent-created
       // child, omission snapshots its trusted immediate parent's server definitions,
@@ -18094,6 +18201,10 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     label: z.string(),
     /** Optional curated compact label for dense UI (e.g. mobile composer). */
     shortLabel: z.string().min(1).max(64).optional(),
+    logoUrl: z
+      .string()
+      .refine((value) => modelLogoUrl({ id: "", logoUrl: value }) !== null)
+      .optional(),
     provider: z.string(), // provider id
     providerLabel: z.string(),
     api: z.enum(["responses", "chat", "anthropic-messages"]),
@@ -18214,6 +18325,8 @@ export const WorkspaceModelCatalogModel =
   /* @__PURE__ */ defineModelContractSchema(() =>
     ClientModel.extend({
       credentialReadiness: ModelCredentialReadinessV1,
+      /** Current funding status, without exposing the organization's balance. */
+      creditFunding: z.enum(["promotional", "general", "unavailable"]).optional(),
       /** Exact workspace-policy verdict without exposing provider identity. */
       policyAllowed: z.boolean().optional(),
       availability: ModelAvailabilityV1,
@@ -18556,3 +18669,5 @@ export * from "./slack-rest-mcp";
 export * from "./skill-catalog-context";
 export * from "./sandbox-recovery";
 export * from "./modal-native-proof-v2";
+export { toolPolicyActionName, executableToolSchema } from "./tool-policy";
+export * from "./tool-action-review";

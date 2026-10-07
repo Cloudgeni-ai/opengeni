@@ -804,11 +804,10 @@ the reviewed tool surface:
 - `https://www.googleapis.com/auth/gmail.compose`
 - `https://www.googleapis.com/auth/gmail.modify`
 
-Those scopes support search/read, draft creation, approval-gated sending
-(`send_message`, `send_draft`), and the reviewed label and unlabel operations.
-The Google scope is broader than the exposed tools, but the reviewed surface
-does not expose a delete tool, and every send requires durable human approval
-first - not a workspace setting. Gmail OAuth is handled by the ordinary
+Those scopes support search/read, drafts, sending and mailbox organization.
+Permanent message deletion requires a broader scope and remains unavailable.
+Tool permissions use the selected account’s Allow / Ask first / Block choices;
+connector recommendations are defaults. Gmail OAuth is handled by the ordinary
 encrypted connection broker,
 with a narrow Google
 compatibility path: authorization requests ask for offline consent, Google
@@ -837,8 +836,8 @@ option; consolidated onto one path, they were removed rather than deprecated.
 The catalog pins 37 tools in the reviewed surface, including original-message
 and attachment downloads, draft editing/deletion, label management, inbox
 organization, history, imports and settings reads. See [Gmail](gmail.md) for the
-complete tool list, file receipts and watch setup. Every mailbox mutation
-requires the ordinary durable human approval floor; reads do not. The bridge's
+complete tool list, file receipts and watch setup. Sending and other mutations
+ask by default, and explicit tool choices control whether they run or ask. The bridge's
 credential broker binding permits only
 `https://gmail.googleapis.com/gmail/v1/users/me/...`: it cannot call another
 Google API or address another mailbox. Read-only calls may refresh after one
@@ -993,6 +992,36 @@ the bytes came from in `metadata.logoSource` (`vendored`, `integrations.sh`, or
 control characters from string fields, collapses duplicate `(domain, name)`
 clusters to the best deterministic row, skips known-dead demo domains, and
 quarantines flagged suspicious URLs in the batch details for manual review.
+
+### OAuth client requirements
+
+Some providers' authorization servers cannot be reached by OAuth
+self-registration from a hosted deployment: their metadata advertises neither
+dynamic client registration nor Client ID Metadata Documents, their
+registration endpoint refuses unknown clients, or they reject a deployment
+callback the provider has not allowlisted. `data/catalog/oauth-client-requirements.json`
+records those rows by canonical MCP URL with the authorization-server issuer,
+a reason, and the evidence. Listing a row there neither curates nor features
+it. The importer stamps `metadata.oauthClientRequirement = { issuer, reason }`,
+and the requirement facts are part of the `--if-changed` fingerprint.
+
+The capability catalog projects deployment connectability as
+`runtime.operatorOAuthClient.configured`, using the same issuer matcher the
+OAuth start uses to find an operator client in
+`OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` (`findIntegrationsOauthClient` in
+`@opengeni/config`). When it is `false`, the web Connectors page (Featured,
+Popular, Browse) and the embedded `ConnectionDiscovery` do not offer the row.
+A row stays reachable when it is already enabled, the workspace has a
+connection for it, or the connection list could not be read. To offer such a
+connector, register an OAuth client with the provider using the redirect URI
+`<OPENGENI_PUBLIC_BASE_URL>/v1/integrations/oauth/callback`, then add it to
+`OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` under the listed issuer. No catalog
+change is needed. Gmail and the hosted Slack MCP are not listed because their
+native Connect readiness already gates them.
+`bun scripts/catalog-oauth-client-requirements-probe.ts` reads public metadata
+and reports unlisted rows that advertise no self-registration. Registration
+refusals and redirect allowlists only appear when registration is attempted,
+so record those from a reviewed attempt.
 
 ### Vendored logos
 

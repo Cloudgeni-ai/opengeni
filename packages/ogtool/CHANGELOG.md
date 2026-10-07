@@ -1,5 +1,80 @@
 # @opengeni/ogtool
 
+## 1.4.4
+
+### Patch Changes
+
+- Updated dependencies [6384dbd]
+  - @opengeni/contracts@1.4.4
+  - @opengeni/codemode@1.4.4
+
+## 1.4.3
+
+### Patch Changes
+
+- @opengeni/codemode@1.4.3
+- @opengeni/contracts@1.4.3
+
+## 1.4.2
+
+### Patch Changes
+
+- @opengeni/codemode@1.4.2
+- @opengeni/contracts@1.4.2
+
+## 1.4.1
+
+### Patch Changes
+
+- Updated dependencies [fe1f64d]
+- Updated dependencies [9145bad]
+- Updated dependencies [f290348]
+  - @opengeni/codemode@1.4.1
+  - @opengeni/contracts@1.4.1
+
+## 1.4.0
+
+### Minor Changes
+
+- 08ce841: `ogtool call` prints a tool result's payload once: a text block that only repeats `structuredContent` as JSON is omitted, and `--full` prints the exact result. The rule is exported from `@opengeni/contracts` as `omitStructuredContentTextDuplicates` and is shared with the runtime's model-facing MCP projection and the native Connected Machine client.
+
+### Patch Changes
+
+- Updated dependencies [bd9521c]
+- Updated dependencies [08ce841]
+- Updated dependencies [673bb53]
+  - @opengeni/contracts@1.4.0
+  - @opengeni/codemode@1.4.0
+
+## 1.3.0
+
+### Patch Changes
+
+- 178b5ae: Unify connector Allow, Ask first and Block decisions across tool transports and settings. Add durable programmatic approval handles, exact stored-operation continuation, and shared review facts with portable React presentation and paginated protected details.
+
+  Add lightweight Gmail message selection and bounded pagination/chunk helpers. Preserve exact access checks, uncertain outcomes and existing client compatibility. Deploy matching API, worker and native runtime artifacts through the documented maintenance migration.
+
+- Updated dependencies [178b5ae]
+  - @opengeni/codemode@1.3.0
+
+## 1.2.0
+
+### Patch Changes
+
+- @opengeni/codemode@1.2.0
+
+## 1.1.0
+
+### Patch Changes
+
+- @opengeni/codemode@1.1.0
+
+## 1.0.2
+
+### Patch Changes
+
+- @opengeni/codemode@1.0.1
+
 ## 1.0.0
 
 ### Major Changes

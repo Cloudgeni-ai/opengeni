@@ -14,6 +14,7 @@ import {
   allowedFirstPartyMcpToolsForSession,
   resolveFirstPartyMcpToolPolicy,
   type Settings,
+  type FirstPartyMcpToolPolicySettings,
 } from "@opengeni/config";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -256,7 +257,7 @@ export function planScheduledTaskOpenGeniTools(input: {
     ScheduledTaskCreatorPolicy,
     "firstPartyMcpTools" | "firstPartyMcpPermissions"
   > | null;
-  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">;
+  settings: FirstPartyMcpToolPolicySettings;
   grantPermissions: readonly Permission[];
   grantPermissionMode?: AccessGrant["permissionMode"];
   permissionsRequiredByTools: FirstPartyToolPermissionRequirements;
@@ -745,7 +746,7 @@ export async function refreshScheduledTaskAccess(input: {
     if (plan.creatorFirstPartyPolicy.firstPartyMcpPermissions.length === 0) {
       throw new HTTPException(403, {
         message:
-          "You hold none of the permissions this schedule's OpenGeni tools need, so it cannot be refreshed with your access.",
+          "You hold none of the permissions this schedule's Opengeni tools need, so it cannot be refreshed with your access.",
       });
     }
     update.creatorFirstPartyPolicy = plan.creatorFirstPartyPolicy;

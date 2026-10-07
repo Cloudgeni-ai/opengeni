@@ -3065,6 +3065,54 @@ describe("retained-process terminal-owner reconciliation", () => {
       count: 1,
     });
   });
+
+  test("inventory counts an adopted background command as session-owned, not a terminal-owner backlog", async () => {
+    if (!available) return;
+    // A server the agent left running is session-owned once its turn ends.
+    const fixture = await promoteTurnProcess({
+      outcome: "completed",
+      backgroundCommand: "ollama serve",
+    });
+    const byState = async () =>
+      new Map(
+        (await countActiveRetainedProcessesByOwnerState(db)).map((row) => [row.ownerState, row]),
+      );
+
+    let owners = await byState();
+    expect(owners.get("background_running")).toEqual({
+      ownerState: "background_running",
+      activeCount: 1,
+      terminalOwnerCount: 0,
+    });
+    // Its completed launch turn no longer classifies it.
+    expect(owners.get("completed")).toBeUndefined();
+
+    // The claim path already classifies it the same way.
+    const claims = await claimTerminalRetainedProcesses(db, {
+      claimId: crypto.randomUUID(),
+      limit: 100,
+      claimTtlMs: 300_000,
+    });
+    expect(claims.find((claim) => claim.process.id === fixture.process.id)?.ownerState).toBe(
+      "background_running",
+    );
+
+    // A stop request that has not yet produced exit/loss proof is backlog.
+    await requestSessionBackgroundCommandCancellation(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      commandId: fixture.process.id,
+      subjectId: "user:test-owner",
+    });
+    owners = await byState();
+    expect(owners.get("background_running")).toBeUndefined();
+    expect(owners.get("background_stopping")).toEqual({
+      ownerState: "background_stopping",
+      activeCount: 1,
+      terminalOwnerCount: 1,
+    });
+  });
 });
 
 describe("retained-process metric contracts", () => {
@@ -3095,6 +3143,13 @@ describe("retained-process metric contracts", () => {
     expect(metrics).toMatch(
       /opengeni_retained_processes_active\{[^}]*owner_state="unknown"[^}]*\} 3/,
     );
+    for (const ownerState of ["background_running", "background_stopping"]) {
+      expect(metrics).toMatch(
+        new RegExp(
+          `opengeni_retained_processes_terminal_owner_backlog\\{[^}]*owner_state="${ownerState}"[^}]*\\} 0`,
+        ),
+      );
+    }
     expect(metrics).toMatch(
       /opengeni_retained_process_reconciliation_total\{[^}]*outcome="settlement_failed"[^}]*\} 1/,
     );

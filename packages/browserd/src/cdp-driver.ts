@@ -219,6 +219,8 @@ type TargetScreencast = {
 type TargetState = {
   targetId: string;
   sessionId: string;
+  authorityGeneration: string;
+  actionEffectCount: number;
   createdAt: string;
   frame: MainFrame;
   documentGeneration: string;
@@ -376,6 +378,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly states = new Map<string, TargetState>();
   private readonly firstSeenAt = new Map<string, string>();
   private readonly attaching = new Map<string, Promise<TargetState>>();
+  private readonly attachingSessions = new Map<string, string>();
+  private readonly targetPhysicalGenerations = new Map<string, string>();
   private connection: BrowserCdpConnection | null = null;
   private connectionPromise: Promise<BrowserCdpConnection> | null = null;
   private selectedTargetId: string | null = null;
@@ -579,6 +583,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     for (const unsubscribe of this.browserUnsubscribe.splice(0)) unsubscribe();
     for (const targetId of [...this.states.keys()]) this.removeState(targetId);
     this.firstSeenAt.clear();
+    this.attachingSessions.clear();
+    this.targetPhysicalGenerations.clear();
     this.ownedDownloads.clear();
     const connection = this.connection;
     this.connection = null;
@@ -626,6 +632,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     for (const unsubscribe of this.browserUnsubscribe.splice(0)) unsubscribe();
     for (const targetId of [...this.states.keys()]) this.removeState(targetId);
     this.firstSeenAt.clear();
+    this.attachingSessions.clear();
+    this.targetPhysicalGenerations.clear();
     this.ownedDownloads.clear();
     this.connection?.close();
     this.connection = null;
@@ -1062,6 +1070,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         );
       }
       let completedActions = 0;
+      const initialEffectCount = state.actionEffectCount;
       for (const action of actions) {
         try {
           if (
@@ -1090,12 +1099,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             }
             break;
           }
-          if (error instanceof InteractionDefiniteDriverError && completedActions === 0)
+          if (
+            error instanceof InteractionDefiniteDriverError &&
+            completedActions === 0 &&
+            state.actionEffectCount === initialEffectCount
+          )
             throw error;
           throw error instanceof InteractionDefiniteDriverError
             ? new InteractionOutcomeUnknownDriverError(
                 "outcome_unknown",
-                `browser action batch completed ${completedActions} action(s) before a later action failed (${error.code}); re-observe before continuing`,
+                `browser action sent input or completed ${completedActions} action(s) before a later failure (${error.code}); inspect the outcome before continuing and do not replay automatically`,
               )
             : error;
         }
@@ -1152,7 +1165,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       } catch (error) {
         // Input has already been dispatched. A closing popup or failed
         // follow-up read cannot prove that the mutation itself failed.
-        if (!(error instanceof InteractionDefiniteDriverError)) throw error;
+        const retiredSession =
+          (error instanceof CdpProtocolError &&
+            error.code === -32_001 &&
+            this.states.get(state.targetId) !== state) ||
+          (error instanceof InteractionControllerError &&
+            error.cause instanceof CdpSessionDetachedError);
+        // A native invalid-session reply after this exact attachment retired
+        // is target loss, not loss of the browser transport or healthy peers.
+        if (!(error instanceof InteractionDefiniteDriverError) && !retiredSession) throw error;
         throw new InteractionOutcomeUnknownDriverError(
           "outcome_unknown",
           "Browser input was sent, but the resulting page could not be observed. Check the current tabs before continuing; do not repeat the action automatically.",
@@ -1399,6 +1420,27 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         connection.on("Target.targetDestroyed", (event) => {
           if (typeof event.params.targetId === "string") this.removeState(event.params.targetId);
         }),
+        connection.on("Target.detachedFromTarget", (event) => {
+          const sessionId = event.params.sessionId;
+          if (typeof sessionId !== "string") return;
+          const targetId =
+            typeof event.params.targetId === "string"
+              ? event.params.targetId
+              : ([...this.states.values()].find((state) => state.sessionId === sessionId)
+                  ?.targetId ??
+                [...this.attachingSessions].find(([, attached]) => attached === sessionId)?.[0]);
+          if (
+            !targetId ||
+            (this.states.get(targetId)?.sessionId !== sessionId &&
+              this.attachingSessions.get(targetId) !== sessionId)
+          )
+            return;
+          // A new attachment must invalidate old controls even when the tab,
+          // loader and frame ids are unchanged. Other tabs keep their authority.
+          this.targetPhysicalGenerations.set(targetId, randomUUID());
+          this.attachingSessions.delete(targetId);
+          this.removeState(targetId, true);
+        }),
         connection.on("Browser.downloadWillBegin", (event) => {
           const frameId = typeof event.params.frameId === "string" ? event.params.frameId : null;
           const state = [...this.states.values()].find(
@@ -1484,6 +1526,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     for (const targetId of [...this.states.keys()]) this.removeState(targetId);
     this.firstSeenAt.clear();
     this.attaching.clear();
+    this.attachingSessions.clear();
+    this.targetPhysicalGenerations.clear();
     this.selectedTargetId = null;
     this.userAgentMetadataPromise = null;
     this.userAgent = "";
@@ -1519,7 +1563,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const connection = await this.ensureConnection();
     const info = await this.requireTargetInfo(connection, targetId);
     const state = await this.ensureTargetState(info);
-    const result = state.tail.then(async () => await operation(state, info));
+    const result = state.tail.then(async () => {
+      this.assertCurrentTargetState(state);
+      return await operation(state, info);
+    });
     state.tail = result.then(
       () => undefined,
       () => undefined,
@@ -1543,12 +1590,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   private async attachTarget(info: TargetInfo): Promise<TargetState> {
     const connection = await this.ensureConnection();
+    const authorityGeneration = this.targetPhysicalGeneration(info.targetId);
     const attached = await connection.send<{ sessionId?: unknown }>("Target.attachToTarget", {
       targetId: info.targetId,
       flatten: true,
     });
     if (typeof attached.sessionId !== "string") throw new Error("CDP did not attach the target");
     const sessionId = attached.sessionId;
+    this.attachingSessions.set(info.targetId, sessionId);
     let frame: MainFrame;
     try {
       await Promise.all([
@@ -1561,6 +1610,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       ]);
       await this.applyEmulation(connection, sessionId);
       frame = await this.mainFrame(sessionId);
+      if (
+        this.attachingSessions.get(info.targetId) !== sessionId ||
+        this.targetPhysicalGeneration(info.targetId) !== authorityGeneration
+      ) {
+        throw new InteractionControllerError(
+          "resource_unavailable",
+          "Browser tab detached during attachment",
+          true,
+        );
+      }
     } catch (error) {
       // Failed initialization never enters states, so normal target cleanup cannot
       // find it. Release only this CDP attachment; preserve the page and profile.
@@ -1568,21 +1627,26 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         .send("Target.detachFromTarget", { sessionId }, { timeoutMs: 500 })
         .catch(() => undefined);
       throw error;
+    } finally {
+      if (this.attachingSessions.get(info.targetId) === sessionId)
+        this.attachingSessions.delete(info.targetId);
     }
     const state: TargetState = {
       targetId: info.targetId,
       sessionId,
+      authorityGeneration,
+      actionEffectCount: 0,
       createdAt: this.firstSeen(info.targetId),
       frame,
       documentGeneration: documentGeneration(
         this.controllerGeneration,
-        this.physicalGeneration,
+        authorityGeneration,
         info.targetId,
         frame.loaderId,
       ),
       frameGeneration: frameGeneration(
         this.controllerGeneration,
-        this.physicalGeneration,
+        authorityGeneration,
         info.targetId,
         frame.id,
       ),
@@ -2013,6 +2077,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         visit(accessibility.roots);
       }
     }
+    this.assertCurrentTargetState(state);
     return BrowserObservation.parse({
       protocolVersion: INTERACTION_PROTOCOL_VERSION,
       observationId: `observation-${this.createId()}`,
@@ -2074,6 +2139,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         targetId: state.targetId,
         documentGeneration: state.documentGeneration,
       });
+      this.assertCurrentTargetState(state);
       state.accessibility = accessibility;
       return accessibility;
     }
@@ -2130,17 +2196,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   private async refreshFrame(state: TargetState, timeoutMs?: number): Promise<void> {
     const frame = await this.mainFrame(state.sessionId, timeoutMs);
+    this.assertCurrentTargetState(state);
     if (frame.loaderId !== state.frame.loaderId || frame.id !== state.frame.id) {
       state.frame = frame;
       state.documentGeneration = documentGeneration(
         this.controllerGeneration,
-        this.physicalGeneration,
+        state.authorityGeneration,
         state.targetId,
         frame.loaderId,
       );
       state.frameGeneration = frameGeneration(
         this.controllerGeneration,
-        this.physicalGeneration,
+        state.authorityGeneration,
         state.targetId,
         frame.id,
       );
@@ -2167,7 +2234,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // Target validation runs before dispatch. Preserve its bounded diagnosis
       // in the receipt without exposing arbitrary provider error text or
       // weakening document/frame fences on an unresponsive renderer.
-      if (!(error instanceof CdpTransportError)) throw error;
+      if (
+        !(error instanceof CdpTransportError) &&
+        !(error instanceof CdpSessionDetachedError) &&
+        !(error instanceof CdpProtocolError && error.code === -32_000)
+      )
+        throw error;
       const timeout = error instanceof CdpCommandTimeoutError;
       const failure = new InteractionControllerError(
         timeout ? "timeout" : "resource_unavailable",
@@ -2779,6 +2851,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             "browser locator is not a selectable control",
           );
         }
+        // This function returns false before any change for an invalid control.
+        // A true reply confirms a selection effect before later fencing checks.
+        state.actionEffectCount += 1;
         return;
       }
       case "check": {
@@ -2797,10 +2872,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       case "scroll":
         if (action.locator) {
           const node = await this.resolveLocator(state, action.locator);
-          await this.callOnNode(state, node.backendDOMNodeId, SCROLL_FUNCTION, [
-            { value: action.deltaX },
-            { value: action.deltaY },
-          ]);
+          await this.callOnNode(
+            state,
+            node.backendDOMNodeId,
+            SCROLL_FUNCTION,
+            [{ value: action.deltaX }, { value: action.deltaY }],
+            { potentialEffect: true },
+          );
         } else {
           await this.evaluateAction(
             state,
@@ -2830,7 +2908,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             "prompt text is valid only for a browser prompt dialog",
           );
         }
-        await this.sendTarget(state, "Page.handleJavaScriptDialog", {
+        await this.sendActionTarget(state, "Page.handleJavaScriptDialog", {
           accept: action.response === "accept",
           ...(action.promptText !== undefined ? { promptText: action.promptText } : {}),
         });
@@ -3850,7 +3928,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     backendDOMNodeId: number | null,
     functionDeclaration: string,
     args: Array<{ objectId?: string; value?: unknown }>,
-    options: { isolatedFrameId?: string } = {},
+    options: { isolatedFrameId?: string; potentialEffect?: boolean } = {},
   ): Promise<unknown> {
     if (backendDOMNodeId === null) {
       throw new InteractionDefiniteDriverError(
@@ -3888,15 +3966,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       const result = await this.sendActionTarget<{
         result?: unknown;
         exceptionDetails?: unknown;
-      }>(state, "Runtime.callFunctionOn", {
-        objectId,
-        functionDeclaration,
-        arguments: args.map((argument) =>
-          argument.objectId ? { objectId: argument.objectId } : { value: argument.value },
-        ),
-        returnByValue: true,
-        awaitPromise: true,
-      });
+      }>(
+        state,
+        "Runtime.callFunctionOn",
+        {
+          objectId,
+          functionDeclaration,
+          arguments: args.map((argument) =>
+            argument.objectId ? { objectId: argument.objectId } : { value: argument.value },
+          ),
+          returnByValue: true,
+          awaitPromise: true,
+        },
+        { potentialEffect: options.potentialEffect ?? false },
+      );
       if (result.exceptionDetails) throw new Error("browser element function failed");
       return isRecord(result.result) ? result.result.value : undefined;
     } finally {
@@ -3911,6 +3994,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     options?: { timeoutMs?: number; signal?: AbortSignal },
   ): Promise<T> {
     const connection = await this.ensureConnection();
+    this.assertCurrentTargetState(state);
     return await connection.send<T>(method, params, {
       sessionId: state.sessionId,
       ...options,
@@ -3921,8 +4005,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     method: string,
     params: Readonly<Record<string, unknown>> = {},
+    options: { potentialEffect?: boolean } = {},
   ): Promise<T> {
     const connection = await this.ensureConnection();
+    this.assertCurrentTargetState(state);
     let unsubscribe: () => void = () => undefined;
     const dialog = new Promise<{ kind: "dialog" }>((resolve) => {
       unsubscribe = connection.on(
@@ -3931,6 +4017,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         state.sessionId,
       );
     });
+    if (options.potentialEffect !== false && method !== "Page.getNavigationHistory")
+      state.actionEffectCount += 1;
     const command = connection.send<T>(method, params, {
       sessionId: state.sessionId,
     });
@@ -4006,9 +4094,22 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       "target",
       this.browserSessionId,
       this.controllerGeneration,
-      this.physicalGeneration,
+      this.targetPhysicalGeneration(targetId),
       targetId,
     );
+  }
+
+  private targetPhysicalGeneration(targetId: string): string {
+    return this.targetPhysicalGenerations.get(targetId) ?? this.physicalGeneration;
+  }
+
+  private assertCurrentTargetState(state: TargetState): void {
+    if (
+      this.states.get(state.targetId) !== state ||
+      this.targetPhysicalGeneration(state.targetId) !== state.authorityGeneration
+    ) {
+      throw new InteractionDefiniteDriverError("target_stale", "Browser tab attachment changed");
+    }
   }
 
   private contextScope(): { browserContextId?: string } {
@@ -4100,13 +4201,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state.frame = { id: frame.id, loaderId: frame.loaderId, url: frame.url };
     state.documentGeneration = documentGeneration(
       this.controllerGeneration,
-      this.physicalGeneration,
+      state.authorityGeneration,
       state.targetId,
       frame.loaderId,
     );
     state.frameGeneration = frameGeneration(
       this.controllerGeneration,
-      this.physicalGeneration,
+      state.authorityGeneration,
       state.targetId,
       frame.id,
     );
@@ -4153,13 +4254,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
-  private removeState(targetId: string): void {
+  private removeState(targetId: string, preserveFirstSeen = false): void {
     const state = this.states.get(targetId);
     if (!state) return;
     this.failAllScreencasts(state, new CdpTransportError("browser target closed"));
     for (const unsubscribe of state.unsubscribe) unsubscribe();
     this.states.delete(targetId);
-    this.firstSeenAt.delete(targetId);
+    if (!preserveFirstSeen) this.firstSeenAt.delete(targetId);
   }
 
   private protectedAuthQuiet(state: TargetState): boolean {

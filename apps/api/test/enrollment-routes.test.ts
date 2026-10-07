@@ -143,85 +143,91 @@ afterAll(async () => {
 }, 180_000);
 
 describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCredentials", () => {
-  test("renewal recovers expired credentials only with the current install key and live grant", async () => {
-    if (!available) throw new Error("renewal acceptance requires PostgreSQL");
-    const { accountId, workspaceId } = await freshWorkspace();
-    const keys = generateKeyPairSync("ed25519");
-    const rawKey = Buffer.from(keys.publicKey.export({ format: "jwk" }).x!, "base64url").toString(
-      "base64",
-    );
-    const enrollment = await createEnrollment(db, {
-      accountId,
-      workspaceId,
-      pubkey: rawKey,
-      exposure: "whole-machine",
-      hasDisplay: true,
-      allowScreenControl: false,
-      os: "macos",
-      arch: "aarch64",
-    });
-    const now = Math.floor(Date.now() / 1000);
-    const claims = {
-      workspaceId,
-      agentId: enrollment.id,
-      enrollmentId: enrollment.id,
-      credentialGeneration: enrollment.credentialGeneration,
-      subjectPrefix: `agent.${workspaceId}.${enrollment.id}`,
-      exp: now - 90 * 24 * 3600,
-    };
-    const expired = await signEnrollmentBearer(SIGNING_SECRET, claims);
-    expect(await verifyEnrollmentBearer(SIGNING_SECRET, expired)).toBeNull();
-    const app = appFor();
-    const request = (token = expired, signedAt = now, key = keys.privateKey, extra = {}) =>
-      app.request("/v1/enrollments/renew", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          bearer: token,
-          signedAt,
-          signature: sign(null, Buffer.from(enrollmentRenewalProof(token, signedAt)), key).toString(
-            "base64",
-          ),
-          ...extra,
-        }),
+  test.each(["test", "production"] as const)(
+    "renewal in %s recovers expired credentials only with the current install key and live grant",
+    async (environment) => {
+      if (!available) throw new Error("renewal acceptance requires PostgreSQL");
+      const { accountId, workspaceId } = await freshWorkspace();
+      const keys = generateKeyPairSync("ed25519");
+      const rawKey = Buffer.from(keys.publicKey.export({ format: "jwk" }).x!, "base64url").toString(
+        "base64",
+      );
+      const enrollment = await createEnrollment(db, {
+        accountId,
+        workspaceId,
+        pubkey: rawKey,
+        exposure: "whole-machine",
+        hasDisplay: true,
+        allowScreenControl: false,
+        os: "macos",
+        arch: "aarch64",
       });
-    const response = await request();
-    expect(response.status).toBe(200);
-    expect(response.headers.get("cache-control")).toBe("no-store");
-    const { credentials } = await response.json();
-    const renewed = await verifyEnrollmentBearer(SIGNING_SECRET, credentials.bearer);
-    expect(renewed!.exp).toBeGreaterThan(now + 29 * 24 * 3600);
-    expect(renewed).toEqual({ ...claims, exp: renewed!.exp });
-    expect(credentials.consentedScreenControl).toBe(false);
-    expect((await getEnrollment(db, workspaceId, enrollment.id))!.credentialGeneration).toBe(
-      enrollment.credentialGeneration,
-    );
-    // Stay outside the 120-second window even when HTTP requests cross a second boundary.
-    expect((await request(expired, now - 300)).status).toBe(401);
-    expect((await request(expired, now + 300)).status).toBe(401);
-    expect((await request(expired, now, generateKeyPairSync("ed25519").privateKey)).status).toBe(
-      401,
-    );
-    expect((await request(expired, now, keys.privateKey, { scope: "organization" })).status).toBe(
-      400,
-    );
-    expect((await request(await signEnrollmentBearer("another-deployment", claims))).status).toBe(
-      401,
-    );
-    expect(
-      (
-        await request(
-          await signEnrollmentBearer(SIGNING_SECRET, {
-            ...claims,
-            credentialGeneration: claims.credentialGeneration + 1,
+      const now = Math.floor(Date.now() / 1000);
+      const claims = {
+        workspaceId,
+        agentId: enrollment.id,
+        enrollmentId: enrollment.id,
+        credentialGeneration: enrollment.credentialGeneration,
+        subjectPrefix: `agent.${workspaceId}.${enrollment.id}`,
+        exp: now - 90 * 24 * 3600,
+      };
+      const expired = await signEnrollmentBearer(SIGNING_SECRET, claims);
+      expect(await verifyEnrollmentBearer(SIGNING_SECRET, expired)).toBeNull();
+      const app = appFor({ settings: { ...settings, environment } });
+      const request = (token = expired, signedAt = now, key = keys.privateKey, extra = {}) =>
+        app.request("/v1/enrollments/renew", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            bearer: token,
+            signedAt,
+            signature: sign(
+              null,
+              Buffer.from(enrollmentRenewalProof(token, signedAt)),
+              key,
+            ).toString("base64"),
+            ...extra,
           }),
-        )
-      ).status,
-    ).toBe(401);
-    await revokeEnrollment(db, { accountId, workspaceId, enrollmentId: enrollment.id });
-    expect((await request()).status).toBe(401);
-    expect((await getEnrollment(db, workspaceId, enrollment.id))!.status).toBe("revoked");
-  }, 180_000);
+        });
+      const response = await request();
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      const { credentials } = await response.json();
+      const renewed = await verifyEnrollmentBearer(SIGNING_SECRET, credentials.bearer);
+      expect(renewed!.exp).toBeGreaterThan(now + 29 * 24 * 3600);
+      expect(renewed).toEqual({ ...claims, exp: renewed!.exp });
+      expect(credentials.consentedScreenControl).toBe(false);
+      expect((await getEnrollment(db, workspaceId, enrollment.id))!.credentialGeneration).toBe(
+        enrollment.credentialGeneration,
+      );
+      // Stay outside the 120-second window even when HTTP requests cross a second boundary.
+      expect((await request(expired, now - 300)).status).toBe(401);
+      expect((await request(expired, now + 300)).status).toBe(401);
+      expect((await request(expired, now, generateKeyPairSync("ed25519").privateKey)).status).toBe(
+        401,
+      );
+      expect((await request(expired, now, keys.privateKey, { scope: "organization" })).status).toBe(
+        400,
+      );
+      expect((await request(await signEnrollmentBearer("another-deployment", claims))).status).toBe(
+        401,
+      );
+      expect(
+        (
+          await request(
+            await signEnrollmentBearer(SIGNING_SECRET, {
+              ...claims,
+              credentialGeneration: claims.credentialGeneration + 1,
+            }),
+          )
+        ).status,
+      ).toBe(401);
+      await revokeEnrollment(db, { accountId, workspaceId, enrollmentId: enrollment.id });
+      expect((await request()).status).toBe(401);
+      expect((await getEnrollment(db, workspaceId, enrollment.id))!.status).toBe("revoked");
+    },
+    180_000,
+  );
 
   test("the full flow lands an enrollment + sandbox and returns a signed bearer", async () => {
     if (!available) return;

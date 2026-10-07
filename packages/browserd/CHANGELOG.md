@@ -1,5 +1,84 @@
 # @opengeni/browserd
 
+## 0.2.15
+
+### Patch Changes
+
+- Updated dependencies [6384dbd]
+  - @opengeni/contracts@1.4.4
+  - @opengeni/interaction@1.4.4
+
+## 0.2.14
+
+### Patch Changes
+
+- @opengeni/contracts@1.4.3
+- @opengeni/interaction@1.4.3
+
+## 0.2.13
+
+### Patch Changes
+
+- @opengeni/contracts@1.4.2
+- @opengeni/interaction@1.4.2
+
+## 0.2.12
+
+### Patch Changes
+
+- Updated dependencies [9145bad]
+- Updated dependencies [f290348]
+  - @opengeni/contracts@1.4.1
+  - @opengeni/interaction@1.4.1
+
+## 0.2.11
+
+### Patch Changes
+
+- Updated dependencies [bd9521c]
+- Updated dependencies [08ce841]
+- Updated dependencies [673bb53]
+  - @opengeni/contracts@1.4.0
+  - @opengeni/interaction@1.4.0
+
+## 0.2.10
+
+### Patch Changes
+
+- Updated dependencies [178b5ae]
+- Updated dependencies [414d416]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/interaction@1.3.0
+
+## 0.2.9
+
+### Patch Changes
+
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/contracts@1.2.0
+  - @opengeni/interaction@1.2.0
+
+## 0.2.8
+
+### Patch Changes
+
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [411b3b5]
+- Updated dependencies [208dec1]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/interaction@1.1.0
+
+## 0.2.7
+
+### Patch Changes
+
+- Updated dependencies [4476ca7]
+- Updated dependencies [e16aa17]
+  - @opengeni/contracts@1.0.1
+  - @opengeni/interaction@1.0.1
+
 ## 0.2.6
 
 ### Patch Changes

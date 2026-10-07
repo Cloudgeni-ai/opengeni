@@ -1,6 +1,6 @@
 import { defineConfig } from "tsup";
 
-// @opengeni/runtime has eight public entry points:
+// @opengeni/runtime has nine public entry points:
 //   .             -> the full agent loop
 //   ./sandbox     -> the API-safe sandbox leaf
 //   ./skill-library -> immutable bundled skill metadata
@@ -9,6 +9,7 @@ import { defineConfig } from "tsup";
 //   ./github-rest-mcp -> the bounded dual-authority GitHub REST transport adapter
 //   ./slack-rest-mcp -> the bounded personal Slack REST transport adapter
 //   ./workspace-tool-gateway -> the canonical API-facing gateway preparation seam
+//   ./web-search  -> provider-agnostic web search and page fetch adapters
 //
 // The runtime ships `src/` as well as `dist/` because the bundled skill library
 // is data, not compiled JS; index.ts resolves it from src when running from dist.
@@ -22,6 +23,7 @@ export default defineConfig({
     "github-rest-mcp": "src/github-rest-mcp.ts",
     "slack-rest-mcp": "src/slack-rest-mcp.ts",
     "workspace-tool-gateway": "src/workspace-tool-gateway.ts",
+    "web-search/index": "src/web-search/index.ts",
   },
   format: ["esm"],
   target: "es2022",

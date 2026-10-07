@@ -12,6 +12,7 @@ import {
   nativeIntegrationVisible,
   type NativeConnectCatalog,
 } from "./native-connect-readiness";
+import { featuredConnectors } from "./featured-connectors";
 
 function catalog(providers: Array<[string, ConnectProvider["readiness"]]>): NativeConnectCatalog {
   return {
@@ -430,5 +431,55 @@ describe("native connection readiness", () => {
     expect(nativeCatalogItemVisible(fiken, catalog([["fiken-token", "available"]]))).toBe(true);
     expect(nativeCatalogItemVisible(fiken, catalog([["fiken-oauth", "available"]]))).toBe(true);
     expect(nativeCatalogItemVisible(fiken, catalog([]))).toBe(false);
+  });
+
+  test("a connector whose provider needs an unconfigured operator OAuth client is not offered", () => {
+    const asana = (patch: Partial<CapabilityCatalogItem> = {}) =>
+      item({
+        mcpUrl: "https://mcp.asana.com/v2/mcp",
+        source: "registry",
+        metadata: { curation: { curated: true, featured: true } },
+        runtime: { available: true, notes: null, operatorOAuthClient: { configured: false } },
+        ...patch,
+      });
+    const noAccounts = { connections: [], socialConnections: [] };
+    expect(nativeCatalogItemVisible(asana(), catalog([]), noAccounts)).toBe(false);
+    expect(nativeCatalogItemVisible(asana(), catalog([]))).toBe(false);
+    // Featured is derived from the visible connector set, so it drops out too.
+    expect(
+      featuredConnectors([asana()].filter((row) => nativeCatalogItemVisible(row, catalog([])))),
+    ).toEqual([]);
+    // A configured operator client, an enabled install, an existing account, or
+    // an unreadable account list keep the row reachable.
+    const configured = asana({
+      runtime: { available: true, notes: null, operatorOAuthClient: { configured: true } },
+    });
+    expect(nativeCatalogItemVisible(configured, catalog([]), noAccounts)).toBe(true);
+    expect(featuredConnectors([configured]).map((row) => row.mcpUrl)).toEqual([
+      "https://mcp.asana.com/v2/mcp",
+    ]);
+    expect(nativeCatalogItemVisible(asana({ enabled: true }), catalog([]), noAccounts)).toBe(true);
+    expect(
+      nativeCatalogItemVisible(asana(), catalog([]), {
+        connections: [
+          connection({
+            providerDomain: "mcp.asana.com",
+            metadata: { mcpUrl: "https://mcp.asana.com/v2/mcp" },
+          }),
+        ],
+        socialConnections: [],
+      }),
+    ).toBe(true);
+    expect(
+      nativeCatalogItemVisible(asana(), catalog([]), { connections: null, socialConnections: [] }),
+    ).toBe(true);
+    // Rows without the requirement keep the existing behavior.
+    expect(
+      nativeCatalogItemVisible(
+        item({ mcpUrl: "https://mcp.linear.app/mcp", source: "registry" }),
+        catalog([]),
+        noAccounts,
+      ),
+    ).toBe(true);
   });
 });

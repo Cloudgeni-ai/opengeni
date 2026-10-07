@@ -1,5 +1,59 @@
 # @opengeni/xai-subscription
 
+## 1.4.4
+
+### Patch Changes
+
+- @opengeni/network@1.4.4
+
+## 1.4.3
+
+### Patch Changes
+
+- @opengeni/network@1.4.3
+
+## 1.4.2
+
+### Patch Changes
+
+- @opengeni/network@1.4.2
+
+## 1.4.1
+
+### Patch Changes
+
+- @opengeni/network@1.4.1
+
+## 1.4.0
+
+### Patch Changes
+
+- @opengeni/network@1.4.0
+
+## 1.3.0
+
+### Patch Changes
+
+- @opengeni/network@1.3.0
+
+## 1.2.0
+
+### Patch Changes
+
+- @opengeni/network@1.2.0
+
+## 1.1.0
+
+### Patch Changes
+
+- @opengeni/network@1.1.0
+
+## 1.0.2
+
+### Patch Changes
+
+- @opengeni/network@1.0.1
+
 ## 1.0.0
 
 ### Major Changes

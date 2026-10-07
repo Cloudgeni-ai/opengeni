@@ -41,6 +41,22 @@ keys also work with the server, but the plugin never asks for one.
 There is deliberately no plugin-root `.mcp.json`: Claude's inline entry and the
 portable `mcp.json` are the only sources, so neither host sees a second copy.
 
+## Icons
+
+`assets/logo.png` and `assets/logo-dark.png` are the web app's 512 px brand
+mark (`apps/web/public/icon-512.png`) and its white recolor for dark themes.
+
+| Host | Field | Asset |
+| --- | --- | --- |
+| Claude (Anthropic plugin directory) | `.claude-plugin/plugin.json` `icon` | `logo.png`; Claude Code itself ignores it |
+| Codex, ChatGPT | `extensions["com.openai"].interface` `logo` / `logoDark`, `composerIcon` / `composerIconDark` | light / dark |
+| MCP clients that render `serverInfo.icons` (Codex app-server exposes them) | organization MCP `initialize` | see [MCP surfaces](mcp-surfaces.md#organization-mcp-server) |
+
+The interface object replaces Codex's defaults, so it also carries
+`developerName` and `websiteURL`. Claude's connector list does not read any of
+these: it shows Google's cached favicon for the MCP URL's registrable domain
+(`opengeni.ai`), which only a Google recrawl of that site updates.
+
 ## Claude Code
 
 ```bash
@@ -106,6 +122,7 @@ plugins/opengeni/
   .claude-plugin/plugin.json       # shared metadata + Claude's inline MCP entry
   plugin.json                      # Agent Plugins 1.0.0 portable entry point
   mcp.json                         # Agent Plugins 1.0.0 portable MCP entry
+  assets/logo.png, logo-dark.png   # brand mark for every host icon field
   skills/
     build-with-opengeni/
       SKILL.md
@@ -149,11 +166,15 @@ receipt. Cursor/ChatGPT GUI installation is not claimed as tested by that check.
 ## Official references
 
 Formats verified by direct HTTPS reads on **October 1, 2026**; MCP entries on
-**October 3, 2026**:
+**October 3, 2026**; icon fields on **October 4, 2026**:
 
 - [OpenAI packaging](https://developers.openai.com/plugins/build/plugins) and
   [submission reference](https://developers.openai.com/plugins/deploy/submission):
-  portable/compatibility layouts, root `mcp.json`, and manifest precedence.
+  portable/compatibility layouts, root `mcp.json`, manifest precedence, and
+  icon fields and image requirements.
+- [Claude directory listing fields](https://code.claude.com/docs/en/plugins/manifest-reference#directory-listing-fields)
+  (`icon`) and the open
+  [custom-connector icon issue](https://github.com/anthropics/claude-ai-mcp/issues/152).
 - [OpenAI Codex source](https://github.com/openai/codex): native CLI install
   arguments, `codex mcp login`, and app-server `plugin/read` inventory.
 - [Claude manifest reference](https://code.claude.com/docs/en/plugins/manifest-reference),

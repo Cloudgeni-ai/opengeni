@@ -2938,6 +2938,8 @@ export const ComputerSessionCapabilities = z
     screenCapture: z.boolean(),
     semanticActions: z.boolean(),
     pointerInput: z.boolean(),
+    /** A causal count-2 click requires its exact confirmed first operation. */
+    pointerClickContinuation: z.boolean().optional(),
     keyboardInput: z.boolean(),
     clipboard: z.boolean(),
     backgroundActions: z.boolean(),
@@ -3097,11 +3099,26 @@ export const ComputerAction = z.discriminatedUnion("type", [
       deltaX: z.number().finite().optional(),
       deltaY: z.number().finite().optional(),
       button: z.enum(["left", "right", "middle"]).optional(),
+      clickCount: z.union([z.literal(1), z.literal(2)]).optional(),
+      continuationOfOperationId: z.string().uuid().optional(),
     })
     .strict()
     .superRefine((action, context) => {
       const hasEnd = action.endX !== undefined || action.endY !== undefined;
       const hasDelta = action.deltaX !== undefined || action.deltaY !== undefined;
+      if (action.action !== "click" && action.clickCount !== undefined) {
+        context.addIssue({
+          code: "custom",
+          message: "pointer clickCount requires click",
+        });
+      }
+      if ((action.clickCount === 2) !== (action.continuationOfOperationId !== undefined)) {
+        context.addIssue({
+          code: "custom",
+          path: ["continuationOfOperationId"],
+          message: "clickCount 2 requires exactly one prior first-click operation",
+        });
+      }
       if (action.action === "drag" && (action.endX === undefined || action.endY === undefined)) {
         context.addIssue({
           code: "custom",
@@ -3198,6 +3215,13 @@ export const ComputerActionCommand = z
       });
     }
     if (command.action.type === "pointer") {
+      if (command.action.continuationOfOperationId === command.operationId) {
+        context.addIssue({
+          code: "custom",
+          path: ["action", "continuationOfOperationId"],
+          message: "a click cannot continue its own operation",
+        });
+      }
       if (command.expectedFrameId !== command.action.frameId) {
         context.addIssue({
           code: "custom",

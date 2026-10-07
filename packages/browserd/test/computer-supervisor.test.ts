@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { access, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { UnsettledCleanupError } from "../src/cleanup-error";
 import type {
   ComputerActionCommand,
   ComputerObservation,
@@ -19,6 +20,31 @@ const computerSessionId = "11111111-1111-4111-8111-111111111111";
 const controllerGeneration = "controller-1";
 
 describe("ComputerSupervisor", () => {
+  test.each([false, true])(
+    "retains nested creation cleanup only when unconfirmed (%s)",
+    async (failed) => {
+      const rootDirectory = await mkdtemp("/tmp/og-computer-failed-cleanup-");
+      const supervisor = await ComputerSupervisor.open({
+        rootDirectory,
+        environmentAllocator: fixtureEnvironmentAllocator(),
+        createDriver: async () => {
+          if (failed) throw new UnsettledCleanupError([], "fixture helper cleanup failed");
+          throw new Error("fixture launch failed cleanly");
+        },
+      });
+      try {
+        await expect(supervisor.createSession(options())).rejects.toThrow();
+        expect(supervisor.listSessions()).toEqual([]);
+        expect(supervisor.isIdle()).toBe(!failed);
+        if (failed) {
+          await expect(supervisor.close()).rejects.toThrow("computer supervisor shutdown failed");
+          await expect(supervisor.close()).rejects.toThrow("computer supervisor shutdown failed");
+        } else await supervisor.close();
+      } finally {
+        await rm(rootDirectory, { recursive: true, force: true });
+      }
+    },
+  );
   test.each([false, true])(
     "protects accepted create and pending shutdown from idle proof (shared seat: %s)",
     async (displaceExistingSessions) => {

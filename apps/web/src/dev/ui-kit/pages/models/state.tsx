@@ -29,7 +29,7 @@ export type Rotation = "spread" | "primary";
 export type Source = "organization" | "workspace";
 /** Today's four-option "Subscription source" select (question 13, answered no). */
 export type LegacySource = "automatic" | "organization" | "workspace" | "disabled";
-export type GatewayId = "vercel" | "openrouter";
+export type GatewayId = "vercel" | "openrouter" | "opper";
 
 /** The pending product questions for this page, with the alternative answer to preview. */
 export interface Questions {
@@ -133,6 +133,7 @@ function fromFixture(
 const GATEWAY_SUMMARY: Record<GatewayId, string> = {
   vercel: "Billed to your Vercel account.",
   openrouter: "Billed to your OpenRouter account.",
+  opper: "Billed to your Opper account.",
 };
 
 function gatewayFromFixture(id: GatewayId, connected?: boolean): GatewayState {
@@ -192,10 +193,12 @@ export function initialModelsData(): ModelsData {
       workspace: {
         vercel: gatewayFromFixture("vercel"),
         openrouter: gatewayFromFixture("openrouter"),
+        opper: gatewayFromFixture("opper"),
       },
       organization: {
         vercel: gatewayFromFixture("vercel", false),
         openrouter: gatewayFromFixture("openrouter", false),
+        opper: gatewayFromFixture("opper", false),
       },
     },
     defaultModelId: defaultModel.id,
@@ -289,6 +292,18 @@ export function modelChoices(
       });
     }
   }
+  const opper = data.gateways.workspace.opper;
+  if (opper.connected) {
+    for (const slug of opper.customModels) {
+      choices.push({
+        id: `opper:${slug}`,
+        label: slug,
+        payer: "Opper",
+        group: "Opper",
+        available: true,
+      });
+    }
+  }
   const vercel = data.gateways.workspace.vercel;
   if (vercel.connected) {
     choices.push({
@@ -300,13 +315,13 @@ export function modelChoices(
       available: true,
     });
   }
-  for (const model of modelCatalog.filter((each) => each.payer === "OpenGeni credits")) {
+  for (const model of modelCatalog.filter((each) => each.payer === "Opengeni credits")) {
     choices.push({
       id: model.id,
       label: model.label,
       payer: model.payer,
       description: model.description,
-      group: "OpenGeni credits",
+      group: "Opengeni credits",
       available: model.available,
       unavailableReason: model.unavailableReason,
     });

@@ -364,6 +364,11 @@ pub struct CodemodeCallArgs {
     /// Tool arguments as one JSON object. Defaults to `{}`.
     #[arg(default_value = "{}")]
     pub arguments: String,
+
+    /// Print the exact result. By default a text block that only repeats
+    /// `structuredContent` as JSON is omitted.
+    #[arg(long)]
+    pub full: bool,
 }
 
 /// Arguments for the `uninstall` subcommand.
@@ -728,6 +733,7 @@ mod tests {
             })) => {
                 assert_eq!(args.tool, "interaction.browser.observe");
                 assert!(args.arguments.contains("browserSessionId"));
+                assert!(!args.full);
             }
             other => panic!("expected codemode call, got {other:?}"),
         }

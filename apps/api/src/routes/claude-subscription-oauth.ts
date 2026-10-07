@@ -77,7 +77,7 @@ export function registerClaudeSubscriptionOAuthRoutes(
         browserSessionHash: await hashCodexBrowserSession("local:" + grant.subjectId),
       };
     throw new HTTPException(401, {
-      message: "Sign in to OpenGeni to connect Claude.",
+      message: "Sign in to Opengeni to connect Claude.",
     });
   }
   for (const organization of [false, true]) {

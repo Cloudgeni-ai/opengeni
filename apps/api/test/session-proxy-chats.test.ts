@@ -63,6 +63,16 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
+// The API's first-use membership defaults (the SDK's CONVERSATION_PERMISSIONS).
+const FIRST_USE_PERMISSIONS = [
+  "workspace:read",
+  "sessions:create",
+  "sessions:read",
+  "sessions:control",
+  "files:upload",
+  "files:read",
+  "mcp_servers:attach",
+] as const;
 const noop = async () => undefined;
 const productUrl = "https://product.example.test/api/opengeni";
 
@@ -357,6 +367,44 @@ test("a persisted cancellation before the first isolated grant remains fenced af
       model: "scripted-model",
     }),
   ).rejects.toMatchObject({ status: 403 });
+}, 60_000);
+
+test("a key without members:manage never admits a user on first use", async () => {
+  const f = await fixture(true);
+  const token = crypto.randomUUID();
+  await createOrganizationApiKey(db.db, {
+    accountId: f.accountId,
+    name: "Conversation-only key",
+    prefix: "test",
+    keyHash: createHash("sha256").update(token).digest("hex"),
+    permissions: [...FIRST_USE_PERMISSIONS, "workspace:create"],
+  });
+  const limited = new OpenGeniEmbeddingClient({
+    baseUrl: "http://fixture",
+    apiKey: token,
+    fetch: f.facadeOptions.fetch,
+  });
+  const stranger = limited.asUser(crypto.randomUUID(), { source: f.source });
+  await expect(stranger.getWorkspace(f.workspace.id)).rejects.toMatchObject({ status: 403 });
+}, 60_000);
+
+test("a per-user workspace stays single-user: another user gets 403, never a membership", async () => {
+  const f = await fixture(true);
+  const og = new OpenGeni(f.facadeOptions);
+  const workspaceId = await og.workspaceId({ user: f.owner.externalId });
+  expect(
+    (await f.service.listWorkspaceMembers(workspaceId)).map((member) => member.subjectId),
+  ).toEqual([f.owner.subjectId]);
+  const owner = og.client.asUser(f.owner.externalId, { source: f.source });
+  expect(await owner.getWorkspace(workspaceId)).toMatchObject({ id: workspaceId });
+  const intruder = og.client.asUser(f.other.externalId, { source: f.source });
+  await expect(intruder.getWorkspace(workspaceId)).rejects.toMatchObject({ status: 403 });
+  await expect(
+    intruder.createSession(workspaceId, { initialMessage: "let me in", model: "scripted-model" }),
+  ).rejects.toMatchObject({ status: 403 });
+  expect(
+    (await f.service.listWorkspaceMembers(workspaceId)).map((member) => member.subjectId),
+  ).toEqual([f.owner.subjectId]);
 }, 60_000);
 
 test("chats: private creates an external asUser-owned user_private session through the proxy", async () => {

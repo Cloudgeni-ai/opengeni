@@ -5,7 +5,7 @@ different "manage and fix problems as soon as they arise" question:
 
 | File | Board | Answers |
 | --- | --- | --- |
-| `streaming-health.json` | **OpenGeni · Streaming Health** | Is streaming sluggish, and *where* — the model, durable append, NATS publish, batching, or SSE connection/reconnect path? The TTFT chart carries the same 8-second warning line as the bundled alert. |
+| `streaming-health.json` | **OpenGeni · Streaming Health** | Is streaming sluggish, and *where* — the model, durable append, NATS publish, batching, or SSE connection/reconnect path? The absolute TTFT chart is an unalerted investigation view; the split panels separate OpenGeni pre-dispatch latency from provider TTFT (dispatch to first reasoning/answer delta) and show each provider's 30m p90 against its trailing 24h baseline, the inputs of `OpenGeniModelProviderTtftRegression`. |
 | `connected-machines.json` | **OpenGeni · Connected Machines** | Are Connected Machine control ops healthy — op outcomes, healed faults (the leading indicator), op latency, the fault taxonomy, and the payload wall? |
 | `worker-fleet.json` | **OpenGeni · Worker Fleet** | Is the fleet keeping up — turns inflight/queued, worker memory vs. limit, HPA replicas, sandbox leases, and whether compaction is firing against context pressure? |
 | `sandbox-health.json` | **OpenGeni · Sandbox Health** | Are provider operations, creates, lease recovery, checkpoint GC, deadline rotation, draining, and retained-process reconciliation healthy? |
@@ -102,6 +102,7 @@ observability:
 ```
 
 App series used here (non-exhaustive): `opengeni_stream_ttft_seconds`,
+`opengeni_model_provider_ttft_seconds`, `opengeni_model_request_pre_dispatch_seconds`,
 `opengeni_stream_inter_delta_gap_seconds`, `opengeni_stream_batch_flush_*`,
 `opengeni_session_event_append_seconds`, `opengeni_session_event_publish_seconds`,
 `opengeni_sse_connections_*`, `opengeni_sse_delivery_bound_events_total`,

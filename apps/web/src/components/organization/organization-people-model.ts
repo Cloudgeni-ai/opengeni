@@ -173,3 +173,19 @@ export function invitationDeliveryOutcome(invitation: OrganizationInvitation): s
       return `Saved the invitation to ${invitation.targetEmail}. The email hasn't gone out yet.`;
   }
 }
+
+/**
+ * An organization can hold hundreds of shared workspaces (an embedding product
+ * provisions one per tenant), so lists longer than this offer a name search.
+ */
+export const WORKSPACE_SEARCH_THRESHOLD = 8;
+
+/** Case-insensitive name match; an empty query keeps every workspace. */
+export function filterWorkspacesByName<T extends { name: string }>(
+  workspaces: readonly T[],
+  query: string,
+): T[] {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle) return [...workspaces];
+  return workspaces.filter((workspace) => workspace.name.toLocaleLowerCase().includes(needle));
+}
