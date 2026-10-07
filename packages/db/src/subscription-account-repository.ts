@@ -12,7 +12,10 @@ import type { Database } from "./database";
 import { rawRows, withWorkspaceSubjectRls, withRlsContext, setSubjectRlsContext } from "./database";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import * as schema from "./schema";
-import { withSubscriptionPoolSessionAccess } from "./subscription-session-access";
+import {
+  withPoolWakeServiceScopeInTransaction,
+  withSubscriptionPoolSessionAccess,
+} from "./subscription-session-access";
 
 import type { SubscriptionPoolTables } from "./subscription-pool-schema";
 
@@ -2442,6 +2445,12 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     );
   }
 
+  /**
+   * Wake every waiting capacity waiter of one exact pool scope in one
+   * workspace. The caller's subject resolves the pool; shared pools then wake
+   * in the service scope so other members' private waiters are reached too.
+   * Only a count is returned, never session rows or ids.
+   */
   async function wakeSubscriptionCapacityWaiters(
     db: Database,
     input: {
@@ -2464,55 +2473,63 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
           subjectId: input.subjectId,
           authoritySnapshot: snapshot,
         });
-        const rows = await scopedDb
-          .update(tables.capacityWaiters)
-          .set({
-            wakeRevision: sql`${tables.capacityWaiters.wakeRevision} + 1`,
-            lastWakeReason: input.reason,
-            nextCheckAt: now,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(tables.capacityWaiters.workspaceId, input.workspaceId),
-              eq(tables.capacityWaiters.status, "waiting"),
-              eq(tables.capacityWaiters.authorityScope, snapshot.scope),
-              ownerMembershipId === null
-                ? isNull(tables.capacityWaiters.ownerOrganizationMembershipId)
-                : eq(tables.capacityWaiters.ownerOrganizationMembershipId, ownerMembershipId),
-            ),
-          )
-          .returning({
-            id: tables.capacityWaiters.id,
-            accountId: tables.capacityWaiters.accountId,
-            sessionId: tables.capacityWaiters.sessionId,
-            workflowId: tables.capacityWaiters.workflowId,
-          });
-        for (const row of rows) {
-          await scopedDb
-            .insert(schema.sessionWorkflowWakeOutbox)
-            .values({
-              accountId: row.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: row.sessionId,
-              temporalWorkflowId: row.workflowId,
-              reason: provider + "_capacity",
-              nextAttemptAt: now,
+        const wake = async () => {
+          const rows = await scopedDb
+            .update(tables.capacityWaiters)
+            .set({
+              wakeRevision: sql`${tables.capacityWaiters.wakeRevision} + 1`,
+              lastWakeReason: input.reason,
+              nextCheckAt: now,
+              updatedAt: now,
             })
-            .onConflictDoUpdate({
-              target: schema.sessionWorkflowWakeOutbox.sessionId,
-              set: {
-                temporalWorkflowId: row.workflowId,
-                wakeRevision: sql`${schema.sessionWorkflowWakeOutbox.wakeRevision} + 1`,
-                reason: provider + "_capacity",
-                attempts: 0,
-                nextAttemptAt: sql`least(${schema.sessionWorkflowWakeOutbox.nextAttemptAt}, ${now.toISOString()}::timestamptz)`,
-                lastError: null,
-                updatedAt: now,
-              },
+            .where(
+              and(
+                eq(tables.capacityWaiters.workspaceId, input.workspaceId),
+                eq(tables.capacityWaiters.status, "waiting"),
+                eq(tables.capacityWaiters.authorityScope, snapshot.scope),
+                ownerMembershipId === null
+                  ? isNull(tables.capacityWaiters.ownerOrganizationMembershipId)
+                  : eq(tables.capacityWaiters.ownerOrganizationMembershipId, ownerMembershipId),
+              ),
+            )
+            .returning({
+              id: tables.capacityWaiters.id,
+              accountId: tables.capacityWaiters.accountId,
+              sessionId: tables.capacityWaiters.sessionId,
+              workflowId: tables.capacityWaiters.workflowId,
             });
-        }
-        return rows.length;
+          for (const row of rows) {
+            await scopedDb
+              .insert(schema.sessionWorkflowWakeOutbox)
+              .values({
+                accountId: row.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: row.sessionId,
+                temporalWorkflowId: row.workflowId,
+                reason: provider + "_capacity",
+                nextAttemptAt: now,
+              })
+              .onConflictDoUpdate({
+                target: schema.sessionWorkflowWakeOutbox.sessionId,
+                set: {
+                  temporalWorkflowId: row.workflowId,
+                  wakeRevision: sql`${schema.sessionWorkflowWakeOutbox.wakeRevision} + 1`,
+                  reason: provider + "_capacity",
+                  attempts: 0,
+                  nextAttemptAt: sql`least(${schema.sessionWorkflowWakeOutbox.nextAttemptAt}, ${now.toISOString()}::timestamptz)`,
+                  lastError: null,
+                  updatedAt: now,
+                },
+              });
+          }
+          return rows.length;
+        };
+        // Shared pools wake in the trusted service scope (the Codex rule): the
+        // caller's subject would hide other members' private waiters. A
+        // personal pool's waiters all belong to its owner, the caller.
+        return snapshot.scope === "user"
+          ? await wake()
+          : await withPoolWakeServiceScopeInTransaction(scopedDb, wake);
       },
     );
   }

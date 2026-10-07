@@ -24,6 +24,7 @@ import {
   setXaiSessionAccountPin,
   subscriptionPoolWorkerSubject,
   updateOrganizationPrivateSessionSettings,
+  wakeXaiCapacityWaiters,
   withSessionActivityRlsContext,
   withSessionRlsActorContext,
   withSubscriptionPoolSessionAccess,
@@ -41,15 +42,22 @@ import {
   setClaudeSessionAccountPin,
   setInitialActiveClaudeCredential,
   updateClaudeRotationSettings,
+  wakeClaudeCapacityWaiters,
   type ClaudeAccountSecret,
 } from "../src/claude-subscription-accounts";
 import { currentSessionRlsActorContext } from "../src/database";
-import { withTemporaryPoolSessionAccessInTransaction } from "../src/subscription-session-access";
+import {
+  withPoolWakeServiceScopeInTransaction,
+  withTemporaryPoolSessionAccessInTransaction,
+} from "../src/subscription-session-access";
 
 let shared: SharedTestDatabase;
 let client: DbClient;
 const encryptionKey = Buffer.alloc(32, 41);
-const authoritySnapshot = { version: 1, scope: "workspace" } as const;
+const authoritySnapshot: { version: 1; scope: "workspace" | "organization" } = {
+  version: 1,
+  scope: "workspace",
+};
 const visibilities: Visibility[] = ["user_private", "workspace_shared"];
 type Visibility = "user_private" | "workspace_shared";
 
@@ -684,4 +692,167 @@ test("temporary in-transaction pool session access restores the prior initiating
     afterError: "",
     kept: input.otherSubjectId,
   });
+}, 60_000);
+
+type GucSnapshot = { subjectId: string; initiatingHuman: string };
+async function readActorSettings(tx: Parameters<typeof withPoolWakeServiceScopeInTransaction>[0]) {
+  const [row] = await tx.execute<{ subject_id: string | null; initiating_human: string | null }>(
+    sql`select current_setting('opengeni.subject_id', true) as subject_id,
+      current_setting('opengeni.initiating_human_subject_id', true) as initiating_human`,
+  );
+  return {
+    subjectId: row?.subject_id ?? "",
+    initiatingHuman: row?.initiating_human ?? "",
+  } satisfies GucSnapshot;
+}
+
+for (const provider of ["claude", "xai"] as const) {
+  test(`${provider}: another member's shared-pool change wakes a private waiter of exactly that pool, without granting access to it`, async () => {
+    const arm = provider === "claude" ? armClaudeCapacityWait : armXaiCapacityWait;
+    const wake = provider === "claude" ? wakeClaudeCapacityWaiters : wakeXaiCapacityWaiters;
+    const worker = subscriptionPoolWorkerSubject(provider);
+    const armWaiter = async (input: Fixture) => {
+      const running = await turn(input, "user_private");
+      const armed = await arm(client.db, {
+        ...input,
+        ...running,
+        subjectId: worker,
+        earliestResetAt: null,
+        failurePayload: capacityFailure,
+      });
+      if (armed.action !== "waiting") throw new Error("Fixture failed to arm");
+      return { ...running, waiterId: armed.waiter.id };
+    };
+    const input = await fixture();
+    const mine = await armWaiter(input);
+    const elsewhere = await fixture();
+    const otherWorkspace = await armWaiter(elsewhere);
+    const table = sql.identifier(provider + "_capacity_waiters");
+    const revisions = async () =>
+      Object.fromEntries(
+        (
+          await shared.admin<{ id: string; wake_revision: number }[]>`
+            select id, wake_revision from ${shared.admin(provider + "_capacity_waiters")}
+            where id in (${mine.waiterId}, ${otherWorkspace.waiterId})`
+        ).map((row) => [row.id, Number(row.wake_revision)]),
+      );
+    expect(await revisions()).toEqual({ [mine.waiterId]: 1, [otherWorkspace.waiterId]: 1 });
+
+    // A different pool scope in the same workspace is not woken.
+    expect(
+      await wake(client.db, {
+        workspaceId: input.workspaceId,
+        subjectId: input.otherSubjectId,
+        authoritySnapshot: { version: 1, scope: "organization" },
+        reason: "fixture_other_scope",
+      }),
+    ).toBe(0);
+    expect(await revisions()).toEqual({ [mine.waiterId]: 1, [otherWorkspace.waiterId]: 1 });
+
+    // Member B changes the workspace pool inside B's own transaction.
+    const observed = await withWorkspaceSubjectRls(
+      client.db,
+      input.workspaceId,
+      input.otherSubjectId,
+      async (tx) => {
+        const woken = await wake(tx, {
+          workspaceId: input.workspaceId,
+          subjectId: input.otherSubjectId,
+          authoritySnapshot: input.authoritySnapshot,
+          reason: "fixture_reconnect",
+        });
+        const sessions = await tx.execute<{ id: string }>(
+          sql`select id from sessions where id = ${mine.sessionId}`,
+        );
+        const waiters = await tx.execute<{ id: string }>(
+          sql`select id from ${table} where id = ${mine.waiterId}`,
+        );
+        return {
+          woken,
+          settings: await readActorSettings(tx),
+          visibleSessions: [...sessions].length,
+          visibleWaiters: [...waiters].length,
+        };
+      },
+    );
+    expect(observed).toEqual({
+      woken: 1,
+      settings: { subjectId: input.otherSubjectId, initiatingHuman: "" },
+      visibleSessions: 0,
+      visibleWaiters: 0,
+    });
+    expect(await revisions()).toEqual({ [mine.waiterId]: 2, [otherWorkspace.waiterId]: 1 });
+    const [outbox] = await shared.admin<{ reason: string }[]>`
+      select reason from session_workflow_wake_outbox where session_id = ${mine.sessionId}`;
+    expect(outbox?.reason).toBe(provider + "_capacity");
+  }, 60_000);
+}
+
+test("the pool wake service scope clears and then restores the caller's actor settings", async () => {
+  const input = await fixture();
+  const mine = await turn(input, "user_private");
+  const observed = await withWorkspaceSubjectRls(
+    client.db,
+    input.workspaceId,
+    input.otherSubjectId,
+    async (tx) => {
+      await tx.execute(
+        sql`select set_config('opengeni.initiating_human_subject_id', ${input.otherSubjectId}, true)`,
+      );
+      const visibleCount = async () =>
+        [...(await tx.execute(sql`select id from sessions where id = ${mine.sessionId}`))].length;
+      const before = { ...(await readActorSettings(tx)), visible: await visibleCount() };
+      const inside = await withPoolWakeServiceScopeInTransaction(tx, async () => ({
+        ...(await readActorSettings(tx)),
+        visible: await visibleCount(),
+      }));
+      const afterSuccess = { ...(await readActorSettings(tx)), visible: await visibleCount() };
+      const thrown = await withPoolWakeServiceScopeInTransaction(tx, async () => {
+        throw new Error("fixture failure");
+      }).catch((error: unknown) => error);
+      const afterError = { ...(await readActorSettings(tx)), visible: await visibleCount() };
+      return { before, inside, afterSuccess, thrown, afterError };
+    },
+  );
+  const caller = { subjectId: input.otherSubjectId, initiatingHuman: input.otherSubjectId };
+  expect(observed).toEqual({
+    before: { ...caller, visible: 0 },
+    inside: { subjectId: "", initiatingHuman: "", visible: 1 },
+    afterSuccess: { ...caller, visible: 0 },
+    thrown: expect.any(Error),
+    afterError: { ...caller, visible: 0 },
+  });
+}, 60_000);
+
+test("an organization-pool change by another member wakes a private organization-scope waiter only", async () => {
+  const base = await fixture();
+  const input: Fixture = { ...base, authoritySnapshot: { version: 1, scope: "organization" } };
+  await shared.admin`insert into claude_rotation_settings (account_id, workspace_id, authority_scope) values (${base.accountId}, null, 'organization') on conflict do nothing`;
+  const running = await turn(input, "user_private");
+  const armed = await armClaudeCapacityWait(client.db, {
+    ...input,
+    ...running,
+    subjectId: subscriptionPoolWorkerSubject("claude"),
+    earliestResetAt: null,
+    failurePayload: capacityFailure,
+  });
+  if (armed.action !== "waiting") throw new Error("Fixture failed to arm");
+  const revision = async () =>
+    Number(
+      (
+        await shared.admin<{ wake_revision: number }[]>`
+          select wake_revision from claude_capacity_waiters where id = ${armed.waiter.id}`
+      )[0]!.wake_revision,
+    );
+  const wakeAs = async (scope: "workspace" | "organization") =>
+    await wakeClaudeCapacityWaiters(client.db, {
+      workspaceId: input.workspaceId,
+      subjectId: input.otherSubjectId,
+      authoritySnapshot: { version: 1, scope },
+      reason: "fixture_" + scope,
+    });
+  expect(await wakeAs("workspace")).toBe(0);
+  expect(await revision()).toBe(1);
+  expect(await wakeAs("organization")).toBe(1);
+  expect(await revision()).toBe(2);
 }, 60_000);

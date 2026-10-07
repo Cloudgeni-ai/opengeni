@@ -11,10 +11,11 @@ human, so a `user_private` session waits and resumes like a shared one.
 Previously arming failed with "Session not found", the workflow peek treated
 the waiting session as runnable, and recovery reported the waiter as stale so
 the session never resumed. The pool worker still cannot see any other member's
-private session. An immediate wake-up (for example after a member reconnects an
-account) runs as that member and does not reach another member's private
-waiter; that waiter resumes on its next periodic recheck, at most 60 seconds
-later. A wait that cannot be armed for a non-database reason now fails the turn
-with the explicit, retryable `<provider>_capacity_wait_unavailable` state.
+private session. An immediate wake-up after a member reconnects an account or
+changes a shared pool now reaches every waiter of that exact pool, including
+other members' private waiters, without giving that member access to them; it
+previously waited up to 60 seconds for the periodic recheck. A wait that cannot
+be armed for a non-database reason now fails the turn with the explicit,
+retryable `<provider>_capacity_wait_unavailable` state.
 
 No database migration or configuration change is required.
