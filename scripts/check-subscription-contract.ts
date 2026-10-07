@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { parseSync } from "oxc-parser";
+
 import {
   discoverTestFiles,
   E2E_TEST_PATTERN,
@@ -21,6 +23,10 @@ const DEFINITION_PATTERN = /^- \*\*(SUB-[A-Z]+-\d{2})\*\*/;
 const PENDING_PATTERN = /^pending \(([a-z][a-z0-9-]*)\)\.?$/;
 const WORK_ITEM_ROW = /^\| `([a-z][a-z0-9-]*)` \|/;
 const SELF_TEST = "scripts/check-subscription-contract.test.ts";
+/** Test-defining calls whose first string argument is a title. */
+const TITLE_CALLS = new Set(["test", "it", "describe"]);
+/** Modifiers that never run the test body, so their titles verify nothing. */
+const NOT_RUN_MODIFIERS = new Set(["skip", "todo"]);
 
 export type ContractRequirement = {
   id: string;
@@ -96,6 +102,66 @@ export function parseWorkItems(markdown: string): Set<string> {
   return items;
 }
 
+type AstNode = Record<string, unknown> & { type?: string };
+
+function walk(node: unknown, visit: (node: AstNode) => void): void {
+  if (!node || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    for (const child of node) walk(child, visit);
+    return;
+  }
+  const record = node as AstNode;
+  if (typeof record.type === "string") visit(record);
+  for (const key of Object.keys(record)) {
+    if (key !== "parent") walk(record[key], visit);
+  }
+}
+
+/**
+ * Whether a callee is `test`, `it` or `describe`, optionally with modifiers
+ * (`test.only`, `test.each([...])`, `describe.if(...)`), but not one that is
+ * skipped or a placeholder (`test.skip`, `test.todo`).
+ */
+function isTitledTestCall(callee: unknown): boolean {
+  let current = callee as AstNode | undefined;
+  while (current && (current.type === "MemberExpression" || current.type === "CallExpression")) {
+    if (current.type === "MemberExpression") {
+      const property = current.property as AstNode | undefined;
+      if (property?.type === "Identifier" && NOT_RUN_MODIFIERS.has(property.name as string)) {
+        return false;
+      }
+      current = current.object as AstNode;
+    } else {
+      current = current.callee as AstNode;
+    }
+  }
+  return current?.type === "Identifier" && TITLE_CALLS.has(current.name as string);
+}
+
+/**
+ * The titles of a test file: the first argument of every `test(`, `it(` and
+ * `describe(` call when it is a string or template literal. Comments, fixture
+ * strings and other code never count as a title.
+ */
+export function testTitles(path: string, source: string): string[] {
+  const titles: string[] = [];
+  walk(parseSync(path, source).program, (node) => {
+    if (node.type !== "CallExpression" || !isTitledTestCall(node.callee)) return;
+    const title = (node.arguments as AstNode[] | undefined)?.[0];
+    if (title?.type === "Literal" && typeof title.value === "string") titles.push(title.value);
+    else if (title?.type === "TemplateLiteral") {
+      // Interpolations are unknown at check time; never let an ID span one.
+      const quasis = title.quasis as { value: { cooked?: string | null; raw: string } }[];
+      titles.push(quasis.map((quasi) => quasi.value.cooked ?? quasi.value.raw).join("\n"));
+    }
+  });
+  return titles;
+}
+
+function titlesName(titles: readonly string[], id: string): boolean {
+  return titles.some((title) => [...title.matchAll(ID_PATTERN)].some((match) => match[0] === id));
+}
+
 export function checkSubscriptionContract(root: string): ContractFinding[] {
   const findings: ContractFinding[] = [];
   const contractFile = join(root, CONTRACT_PATH);
@@ -109,6 +175,15 @@ export function checkSubscriptionContract(root: string): ContractFinding[] {
     findings.push({ file: CONTRACT_PATH, line: 1, message: "no requirement IDs found" });
   }
   const defined = new Map<string, ContractRequirement>();
+  const titleCache = new Map<string, string[]>();
+  const titlesOf = (path: string) => {
+    let titles = titleCache.get(path);
+    if (!titles) {
+      titles = testTitles(path, readFileSync(join(root, path), "utf8"));
+      titleCache.set(path, titles);
+    }
+    return titles;
+  };
   for (const requirement of requirements) {
     if (defined.has(requirement.id)) {
       findings.push({
@@ -147,7 +222,7 @@ export function checkSubscriptionContract(root: string): ContractFinding[] {
           line: requirement.line,
           message: requirement.id + " names a test file that does not exist: " + path,
         });
-      } else if (!readFileSync(testFile, "utf8").includes(requirement.id)) {
+      } else if (!titlesName(titlesOf(path), requirement.id)) {
         findings.push({
           file: path,
           line: 1,

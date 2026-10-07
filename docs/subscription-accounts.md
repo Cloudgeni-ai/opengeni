@@ -23,14 +23,17 @@ for it until the matching requirement below is implemented:
   (unit `*.test.ts(x)`, integration `*.integration.ts` or end-to-end
   `*.e2e.ts`, anywhere CI discovers tests) that assert the requirement, or
   `pending` with the work item (see
-  [Work items](#work-items)) that will add them. A test asserts a requirement by naming its ID in the test title.
+  [Work items](#work-items)) that will add them. A test asserts a requirement
+  by naming its ID in its title: the first string argument of a `test`, `it`
+  or `describe` call. IDs in comments, other strings, or skipped and `todo`
+  tests do not count.
 - `bun run check:subscription-contract` runs as the `subscription-contract`
   source guard on every CI plan (full, focused and documentation-only), and
   `scripts/check-subscription-contract.test.ts` runs the same check as a unit
   test. It fails when an ID is duplicated, has no verification line, names a
-  missing test file, names a test file that does not mention the ID, names an
-  unknown work item, or when a test mentions an ID that this document does not
-  define.
+  missing test file, names a test file none of whose titles names the ID,
+  names an unknown work item, or when a test file mentions an ID (anywhere,
+  including comments) that this document does not define.
 - "Must" is a requirement. "Current state" notes describe main today and are
   informative only.
 

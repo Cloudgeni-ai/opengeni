@@ -6,6 +6,7 @@ import {
   checkSubscriptionContract,
   CONTRACT_PATH,
   parseContract,
+  testTitles,
 } from "./check-subscription-contract";
 
 const repositoryRoot = resolve(import.meta.dir, "..");
@@ -102,6 +103,46 @@ test("integration and end-to-end tests, including the root test tree, are verifi
         line: 1,
         message: "SUB-FIXTURE-07 is not defined in " + CONTRACT_PATH,
       },
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("test titles are the first string argument of test, it and describe calls", () => {
+  const source = [
+    "// SUB-FIXTURE-01 in a comment is not a title",
+    "/* SUB-FIXTURE-02 */",
+    'const fixture = "SUB-FIXTURE-03";',
+    'describe("SUB-FIXTURE-04 group", () => {',
+    "  it(`SUB-FIXTURE-05 template ${fixture}`, () => {});",
+    '  test.each([1, 2])("SUB-FIXTURE-06 row %d", () => {});',
+    '  test.only("SUB-FIXTURE-07 focused", () => {});',
+    '  test.skip("SUB-FIXTURE-08 skipped", () => {});',
+    '  test.todo("SUB-FIXTURE-09 placeholder");',
+    '  expect(run("SUB-FIXTURE-10")).toBe(true);',
+    "});",
+  ].join("\n");
+  expect(testTitles("fixture.test.ts", source)).toEqual([
+    "SUB-FIXTURE-04 group",
+    "SUB-FIXTURE-05 template \n",
+    "SUB-FIXTURE-06 row %d",
+    "SUB-FIXTURE-07 focused",
+  ]);
+});
+
+test("an ID mentioned only outside test titles does not verify a requirement", () => {
+  const root = fixtureRepository({
+    [CONTRACT_PATH]: "- **SUB-FIXTURE-01** Verification: `apps/x/test/comment.test.ts`.\n",
+    "apps/x/test/comment.test.ts": [
+      "// Covers SUB-FIXTURE-01.",
+      'test("behaves", () => expect("SUB-FIXTURE-01").toBeTruthy());',
+      'test.skip("SUB-FIXTURE-01 later", () => {});',
+    ].join("\n"),
+  });
+  try {
+    expect(checkSubscriptionContract(root).map((finding) => finding.message)).toEqual([
+      "does not name SUB-FIXTURE-01 in any test title",
     ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
