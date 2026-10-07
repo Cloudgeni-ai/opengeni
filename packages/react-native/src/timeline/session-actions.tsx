@@ -5,8 +5,8 @@ import {
   sessionDisplayTitle,
   sessionRenameSeed,
 } from "@opengeni/react/session-list-model";
-import { useEffect, useRef, useState, type ComponentRef } from "react";
-import { Pressable, Text, TextInput, View } from "react-native";
+import { useEffect, useRef, useState, type ComponentRef, type ReactNode } from "react";
+import { Alert, Pressable, Text, TextInput, View } from "react-native";
 import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
 import { BottomSheet } from "./sheet";
@@ -39,6 +39,11 @@ export interface SessionActionsProps {
   /** Host actions appended after Rename and Pin. */
   extraActions?: SessionAction[] | undefined;
   onActionFeedback?: (() => void) | undefined;
+  /**
+   * Present the actions in a host-native menu (a UIMenu on iOS) anchored to the
+   * trigger instead of the slide-up sheet. The host wraps `trigger`.
+   */
+  renderMenu?: ((input: { actions: SessionAction[]; trigger: ReactNode }) => ReactNode) | undefined;
 }
 
 export interface SessionAction {
@@ -47,6 +52,8 @@ export interface SessionAction {
   icon: NativeIconName;
   onPress: () => void;
   destructive?: boolean | undefined;
+  /** SF Symbol for a native menu. */
+  systemImage?: string | undefined;
 }
 
 export function SessionActionsButton(props: SessionActionsProps) {
@@ -79,10 +86,11 @@ export function SessionActionsButton(props: SessionActionsProps) {
       props.onChanged(updated);
     } catch (caught) {
       setPinnedOverride(null);
-      setError(
-        `Couldn't ${next ? "pin" : "unpin"} this chat. ${caught instanceof Error ? caught.message : ""}`.trim(),
-      );
-      setMenuOpen(true);
+      const message =
+        `Couldn't ${next ? "pin" : "unpin"} this chat. ${caught instanceof Error ? caught.message : ""}`.trim();
+      setError(message);
+      if (props.renderMenu) Alert.alert(message);
+      else setMenuOpen(true);
     }
   };
 
@@ -91,16 +99,18 @@ export function SessionActionsButton(props: SessionActionsProps) {
       key: "rename",
       label: "Rename",
       icon: "pencil",
+      systemImage: "pencil",
       onPress: () => {
         setMenuOpen(false);
-        // Let the action sheet finish dismissing before presenting the next one.
-        setTimeout(() => setRenaming(true), 350);
+        // Let a dismissing menu or sheet finish before presenting the next one.
+        setTimeout(() => setRenaming(true), props.renderMenu ? 50 : 350);
       },
     },
     {
       key: "pin",
       label: pinned ? "Unpin" : "Pin",
       icon: pinned ? "pin-off" : "pin",
+      systemImage: pinned ? "pin.slash" : "pin",
       onPress: () => {
         setMenuOpen(false);
         void togglePin();
@@ -115,6 +125,57 @@ export function SessionActionsButton(props: SessionActionsProps) {
     })),
   ];
 
+  const icon = (
+    <>
+      {pinned ? (
+        <View
+          style={{
+            position: "absolute",
+            top: 5,
+            right: 5,
+            width: 6,
+            height: 6,
+            borderRadius: 3,
+            backgroundColor: c["fg-muted"],
+          }}
+        />
+      ) : null}
+      <Icon name="ellipsis" size={20} color={c.fg} />
+    </>
+  );
+  const renameSheet = (
+    <RenameSheet
+      open={renaming}
+      session={props.session}
+      client={props.client}
+      onClose={() => setRenaming(false)}
+      onRenamed={(session) => {
+        setRenaming(false);
+        props.onActionFeedback?.();
+        props.onChanged(session);
+      }}
+    />
+  );
+  if (props.renderMenu) {
+    return (
+      <>
+        {props.renderMenu({
+          actions,
+          trigger: (
+            <View
+              accessible
+              accessibilityRole="button"
+              accessibilityLabel="Chat actions"
+              style={{ width: 36, height: 36, alignItems: "center", justifyContent: "center" }}
+            >
+              {icon}
+            </View>
+          ),
+        })}
+        {renameSheet}
+      </>
+    );
+  }
   return (
     <>
       <Pressable
@@ -131,20 +192,7 @@ export function SessionActionsButton(props: SessionActionsProps) {
           backgroundColor: pressed ? c.hover : "transparent",
         })}
       >
-        {pinned ? (
-          <View
-            style={{
-              position: "absolute",
-              top: 5,
-              right: 5,
-              width: 6,
-              height: 6,
-              borderRadius: 3,
-              backgroundColor: c["fg-muted"],
-            }}
-          />
-        ) : null}
-        <Icon name="ellipsis" size={20} color={c.fg} />
+        {icon}
       </Pressable>
       <BottomSheet
         open={menuOpen}
@@ -209,17 +257,7 @@ export function SessionActionsButton(props: SessionActionsProps) {
           </Pressable>
         ))}
       </BottomSheet>
-      <RenameSheet
-        open={renaming}
-        session={props.session}
-        client={props.client}
-        onClose={() => setRenaming(false)}
-        onRenamed={(session) => {
-          setRenaming(false);
-          props.onActionFeedback?.();
-          props.onChanged(session);
-        }}
-      />
+      {renameSheet}
     </>
   );
 }

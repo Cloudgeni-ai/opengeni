@@ -369,6 +369,7 @@ function Home() {
                 <ComposerPill
                   label={pill.name}
                   detail={pill.effort}
+                  fast={latencyMode === "fast"}
                   leading={<ModelMark model={model ?? ""} size={14} color={c.fg} />}
                   onPress={() => {
                     catalog.refresh();

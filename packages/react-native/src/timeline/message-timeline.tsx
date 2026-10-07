@@ -18,6 +18,7 @@ import {
   noticeDisplayText,
   noticeTone,
   QUESTION_NAV_MARGIN_PX,
+  recordedWaitSummaryText,
   questionNavTarget,
   readableWorkDefaultOpen,
   readableWorkShowsPreview,
@@ -76,6 +77,8 @@ export interface NativeMessageTimelineProps extends NativeActivityOptions {
   renderPreparing?: ((props: PreparingProps) => ReactNode) | undefined;
   /** Extra actions beside copy under a message (feedback, share, …). */
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
+  /** Files sent with a user message, shown above its bubble (images as previews). */
+  renderUserAttachments?: ((item: UserMessageItem) => ReactNode) | undefined;
   onCopy?: ((text: string) => void) | undefined;
   /** Rendered after the last group (pending questions, approvals, errors). */
   trailing?: ReactNode;
@@ -200,6 +203,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
     renderMarkdown: props.renderMarkdown,
     renderPreparing: props.renderPreparing,
     renderMessageActions: props.renderMessageActions,
+    renderUserAttachments: props.renderUserAttachments,
     onCopy: props.onCopy,
   };
   return (
@@ -368,6 +372,7 @@ type GroupContext = {
   renderMarkdown?: NativeMarkdownRenderer | undefined;
   renderPreparing?: ((props: PreparingProps) => ReactNode) | undefined;
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
+  renderUserAttachments?: ((item: UserMessageItem) => ReactNode) | undefined;
   onCopy?: ((text: string) => void) | undefined;
 };
 
@@ -623,6 +628,42 @@ function nativeClockTime(iso: string): string {
 function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
+  const [open, setOpen] = useState(false);
+  // An agent's own wait is ordinary progress, not a warning: a quiet line that
+  // discloses the reason, as on web.
+  if (item.recordedOutcome) {
+    return (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open }}
+        onPress={() => setOpen((value) => !value)}
+        style={{ paddingVertical: 4 }}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <View style={{ transform: [{ rotate: open ? "90deg" : "0deg" }] }}>
+            <Icon name="chevron-right" size={14} color={c["fg-muted"]} />
+          </View>
+          <Text style={{ ...fontStyle(theme), fontSize: theme.size.sm, color: c["fg-muted"] }}>
+            {recordedWaitSummaryText(item).replace(" at ", ", ")}
+          </Text>
+        </View>
+        {open ? (
+          <Text
+            style={{
+              ...fontStyle(theme),
+              marginTop: 4,
+              paddingLeft: 22,
+              fontSize: theme.size.sm,
+              lineHeight: 19,
+              color: c["fg-muted"],
+            }}
+          >
+            {item.text}
+          </Text>
+        ) : null}
+      </Pressable>
+    );
+  }
   const tone = noticeTone(item);
   const accent =
     tone === "failed"
@@ -747,38 +788,43 @@ function UserMessageRow({ item, context }: { item: UserMessageItem; context: Gro
   const failed = item.delivery?.state === "failed";
   return (
     <Animated.View entering={FadeIn.duration(180)} style={{ alignItems: "flex-end" }}>
-      <View style={{ maxWidth: "85%", alignItems: "flex-end" }}>
-        <View
-          style={{
-            backgroundColor: theme.colors["surface-2"],
-            borderWidth: 1,
-            borderColor: theme.colors.border,
-            borderTopLeftRadius: 14,
-            borderTopRightRadius: 14,
-            borderBottomLeftRadius: 14,
-            borderBottomRightRadius: 4,
-            paddingHorizontal: 16,
-            paddingVertical: 10,
-          }}
-        >
-          {item.text ? (
-            context.renderMarkdown ? (
-              context.renderMarkdown(item.text, { tone: "body" })
-            ) : (
-              <Text
-                selectable
-                style={{
-                  ...fontStyle(theme),
-                  fontSize: theme.size.md,
-                  lineHeight: 28,
-                  color: theme.colors.fg,
-                }}
-              >
-                {item.text}
-              </Text>
-            )
-          ) : null}
-        </View>
+      <View style={{ maxWidth: "85%", alignItems: "flex-end", gap: 6 }}>
+        {item.resources.some((resource) => resource.kind === "file")
+          ? context.renderUserAttachments?.(item)
+          : null}
+        {item.text ? (
+          <View
+            style={{
+              backgroundColor: theme.colors["surface-2"],
+              borderWidth: 1,
+              borderColor: theme.colors.border,
+              borderTopLeftRadius: 14,
+              borderTopRightRadius: 14,
+              borderBottomLeftRadius: 14,
+              borderBottomRightRadius: 4,
+              paddingHorizontal: 16,
+              paddingVertical: 10,
+            }}
+          >
+            {item.text ? (
+              context.renderMarkdown ? (
+                context.renderMarkdown(item.text, { tone: "body" })
+              ) : (
+                <Text
+                  selectable
+                  style={{
+                    ...fontStyle(theme),
+                    fontSize: theme.size.md,
+                    lineHeight: 28,
+                    color: theme.colors.fg,
+                  }}
+                >
+                  {item.text}
+                </Text>
+              )
+            ) : null}
+          </View>
+        ) : null}
         <MessageFooter
           text={item.text}
           occurredAt={item.occurredAt}

@@ -31,6 +31,8 @@ export {
 } from "./use-native-session";
 export {
   appendDictation,
+  isRetryableTranscriptionError,
+  NativeTranscriptionError,
   useNativeVoiceInput,
   type NativeVoiceInput,
   type NativeVoiceInputStatus,

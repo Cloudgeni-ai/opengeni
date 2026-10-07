@@ -99,6 +99,7 @@ export {
   noticeDisplayText,
   noticeIsResolvedApproval,
   noticeTone,
+  recordedWaitSummaryText,
 } from "./timeline/notice-presentation";
 export {
   QUESTION_NAV_HIDDEN_PX,
