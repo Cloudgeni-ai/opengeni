@@ -47,8 +47,11 @@ export function projectSessionRealtimeInitialItems(
     const transcript = continuityEntries
       .map((entry) => `${entry.role === "user" ? "USER" : "ASSISTANT"}: ${entry.text}`)
       .join("\n");
+    // Developer, not user: a voice provider treats user items as speech it may
+    // act on (Codex Live delegates them to the agent), so a user-role prompt
+    // was replayed into the chat as if the user had said it.
     messages.push({
-      role: "user",
+      role: "developer",
       text: REALTIME_CONTINUITY_PROMPT.replace("{{ recent_voice_transcript }}", transcript),
     });
   }
