@@ -487,4 +487,26 @@ describe("reference model scenarios", () => {
     expect(effective.values.personalConnectionsAllowed).toBe(true);
     expect(effective.sources.personalConnectionsAllowed).toBe("organization");
   });
+
+  test("model:SUB-SEL-03, model:SUB-ELIG-06: a Primary-first primary with unknown quota still takes new work; otherwise known capacity ranks first", () => {
+    const unknownPrimary: World = {
+      ...base(),
+      connections: base().connections.map((connection) =>
+        connection.id === "claude-a" ? { ...connection, quota: { kind: "unknown" } } : connection,
+      ),
+    };
+    expect(decide(unknownPrimary, "session-1", NOW)).toMatchObject({
+      kind: "run",
+      connectionId: "claude-a",
+      switch: "initial",
+    });
+    const spread: World = {
+      ...unknownPrimary,
+      settings: {
+        ...unknownPrimary.settings,
+        organization: { ...unknownPrimary.settings.organization, rotation: {} },
+      },
+    };
+    expect(decide(spread, "session-1", NOW)).toMatchObject({ connectionId: "claude-b" });
+  });
 });

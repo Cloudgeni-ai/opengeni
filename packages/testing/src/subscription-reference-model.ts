@@ -222,22 +222,26 @@ function boundSessions(world: World, connectionId: string): number {
   return world.sessions.filter((session) => session.binding?.connectionId === connectionId).length;
 }
 
-/** Rank servable connections for one model: known quota first, then rotation policy. */
+/**
+ * Rank servable connections for one model. In Primary first the primary takes
+ * new work whenever it can serve it, and unknown quota counts as able to serve
+ * (D-13, D-14, D-15). Every other choice ranks known capacity before unknown
+ * quota (D-14), then Spread balances load, then the connection id breaks ties.
+ */
 function pick(world: World, session: Session, candidates: Connection[]): Connection | null {
   if (candidates.length === 0) return null;
   const provider = candidates[0]!.provider;
   const rotation =
     effectiveSettings(world.settings, session.workspaceId).values.rotation[provider] ??
     ({ mode: "spread" } as Rotation);
+  if (rotation.mode === "primary_first") {
+    const primary = candidates.find((candidate) => candidate.id === rotation.primaryConnectionId);
+    if (primary) return primary;
+  }
   const ranked = [...candidates].sort((left, right) => {
     const known = Number(left.quota.kind === "unknown") - Number(right.quota.kind === "unknown");
     if (known !== 0) return known;
-    if (rotation.mode === "primary_first") {
-      const primary =
-        Number(right.id === rotation.primaryConnectionId) -
-        Number(left.id === rotation.primaryConnectionId);
-      if (primary !== 0) return primary;
-    } else {
+    if (rotation.mode === "spread") {
       const load = boundSessions(world, left.id) - boundSessions(world, right.id);
       if (load !== 0) return load;
     }

@@ -140,7 +140,10 @@ for it until the matching requirement below is implemented:
   their private sessions and Personal workspace. Shared team work is funded by
   organization connections. Verification: pending (personal-connections).
 - **SUB-ELIG-06** Unknown or stale quota stays unknown. Missing metadata never
-  manufactures availability or exhaustion. Verification: pending (verification-suite).
+  manufactures exhaustion: an account with unknown quota is eligible and
+  counts as able to serve. It never ranks ahead of an account with known
+  capacity, except that a Primary-first primary keeps precedence
+  (SUB-SEL-03, D-15). Verification: pending (verification-suite).
 
 ### Selection
 
@@ -151,7 +154,8 @@ for it until the matching requirement below is implemented:
   account when the organization pool is exhausted" (off by default).
   Verification: pending (personal-connections).
 - **SUB-SEL-03** Primary first places new work on the primary account while
-  it can serve the work; when it cannot, failover moves to the next eligible
+  it can serve the work (unknown quota counts as able to serve,
+  SUB-ELIG-06); when it cannot, failover moves to the next eligible
   account (SUB-FAIL-02). Spread distributes new sessions fairly across
   eligible accounts. Neither mode moves a session whose cache is warm.
   Verification: pending (shared-core).
@@ -383,6 +387,7 @@ by the implementer and recorded here; consequential ones are escalated.
 | D-12 | 2026-10-07 | Implementer decision: when a person has opted in to personal fallback, the same model on their personal account is tried before cross-provider failover, because keeping the model is what they opted into. |
 | D-13 | 2026-10-07 | Implementer decision: "Primary only" becomes "Primary first". The primary account takes new work while it can; a backup account is used when the primary cannot serve, instead of the work waiting while an idle eligible account exists. This removes the behaviour behind the original report of an unused second account. |
 | D-14 | 2026-10-07 | Implementer decision: unknown quota is eligible but ranked after accounts with known capacity, so missing metadata neither blocks work nor wins over known capacity. |
+| D-15 | 2026-10-07 | Implementer decision, precedence between D-13 and D-14: in Primary first, the primary takes new work whenever it can serve it, and unknown quota counts as able to serve. The known-capacity ranking of D-14 orders only the other accounts (and, in Spread, applies before load balancing), so a primary with unknown quota is not passed over for a backup. |
 
 ### Open decisions
 
