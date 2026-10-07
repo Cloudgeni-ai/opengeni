@@ -278,6 +278,9 @@ export interface RoutingSandboxSessionDeps {
     /** Exact candidate for a yielded process or a client-chosen unknown Start.
      * Unknown Start settlement retains this writer; it does not prove exit. */
     retainedProcess?: RoutingRetainedProcess;
+    /** Inline Channel-A filesystem execution is retained for exact settlement,
+     * but is not a model-visible session background command. */
+    retainedProcessPurpose?: "synchronous_filesystem";
   }) => Promise<void | RoutingMutationSettlementResult>;
   /** Admit one model/user-visible stdin mutation under the already-durable
    * retained process authority. Control polling and helper execs never call it. */
@@ -674,6 +677,8 @@ type PendingParentPromotion = Parameters<
   NonNullable<RoutingSandboxSessionDeps["afterMutation"]>
 >[0];
 
+type RetainedProcessPurpose = "synchronous_filesystem";
+
 type PendingProcessMutationSettlement = Parameters<
   NonNullable<RoutingSandboxSessionDeps["afterProcessMutation"]>
 >[0];
@@ -681,6 +686,8 @@ type PendingProcessMutationSettlement = Parameters<
 type RetainedProcessRecord = {
   process: RoutingRetainedProcess;
   backend: ResolvedActiveBackend;
+  /** Ephemeral routing intent; never persisted as part of the process identity. */
+  retainedProcessPurpose?: RetainedProcessPurpose;
   durable: boolean;
   pendingParentPromotion: PendingParentPromotion | null;
   pendingMutationSettlement: PendingProcessMutationSettlement | null;
@@ -1688,6 +1695,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     supervisionEligible = false,
     onMutationAdmissionRefused?: (error: unknown) => void,
     pinnedBackend?: ResolvedActiveBackend,
+    retainedProcessPurpose?: RetainedProcessPurpose,
   ): Promise<T> {
     const firstOperationObserver = this.deps.onFirstOperation;
     if (this.firstOperationClaimed || !firstOperationObserver) {
@@ -1699,6 +1707,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         supervisionEligible,
         onMutationAdmissionRefused,
         pinnedBackend,
+        retainedProcessPurpose,
       );
     }
     this.firstOperationClaimed = true;
@@ -1714,6 +1723,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         supervisionEligible,
         onMutationAdmissionRefused,
         pinnedBackend,
+        retainedProcessPurpose,
       );
       outcome = "completed";
       return result;
@@ -1764,6 +1774,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     supervisionEligible = false,
     onMutationAdmissionRefused?: (error: unknown) => void,
     pinnedBackend?: ResolvedActiveBackend,
+    retainedProcessPurpose?: RetainedProcessPurpose,
   ): Promise<T> {
     let attempt = 0;
     let lastError: unknown;
@@ -1891,6 +1902,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
                           admission,
                           outcome: "resolved",
                           retainedProcess: process,
+                          ...(retainedProcessPurpose ? { retainedProcessPurpose } : {}),
                         });
                         // Even a durable-but-authority-rejected reservation must
                         // never dispatch user work. Its exact row remains recoverable.
@@ -1906,7 +1918,10 @@ export class RoutingSandboxSession implements RoutableBackendSession {
                           throw new Error(
                             "Supervised launch reservation did not retain the exact invocation",
                           );
-                        this.registerRetainedProcess(process, backend).durable = true;
+                        const record = this.registerRetainedProcess(process, backend);
+                        if (retainedProcessPurpose)
+                          record.retainedProcessPurpose = retainedProcessPurpose;
+                        record.durable = true;
                       },
                     },
                     () => fn(backend.session, backend),
@@ -1949,8 +1964,16 @@ export class RoutingSandboxSession implements RoutableBackendSession {
                 : undefined
             : undefined;
         if (mutatesWorkspace && child) {
+          const childRecord = this.retainedProcesses.get(child.providerSessionId);
+          const childPurpose = childRecord?.retainedProcessPurpose;
           try {
-            await this.deps.afterMutation?.({ op, backend, admission, outcome: "resolved" });
+            await this.deps.afterMutation?.({
+              op,
+              backend,
+              admission,
+              outcome: "resolved",
+              ...(childPurpose ? { retainedProcessPurpose: childPurpose } : {}),
+            });
           } catch (cause) {
             throw new RoutingMutationOutcomeUnknownError(
               op,
@@ -1978,12 +2001,14 @@ export class RoutingSandboxSession implements RoutableBackendSession {
             providerCommand: error.command,
           };
           const record = this.registerRetainedProcess(process, backend);
+          if (retainedProcessPurpose) record.retainedProcessPurpose = retainedProcessPurpose;
           const settlement: PendingParentPromotion = {
             op,
             backend,
             admission,
             outcome: "outcome_unknown",
             retainedProcess: process,
+            ...(retainedProcessPurpose ? { retainedProcessPurpose } : {}),
           };
           record.pendingParentPromotion = settlement;
           try {
@@ -2044,6 +2069,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
               backend,
               admission,
               outcome: partialMutation ? "resolved" : "rejected",
+              ...(retainedProcessPurpose ? { retainedProcessPurpose } : {}),
             });
             settlementOutcome = "completed";
           } catch (settlementError) {
@@ -2111,6 +2137,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           ? this.retainedProcess(reservedProcess.providerSessionId)
           : this.registerRetainedProcess(retainedProcess, backend)
         : null;
+      if (retainedRecord && retainedProcessPurpose)
+        retainedRecord.retainedProcessPurpose = retainedProcessPurpose;
 
       if (mutatesWorkspace && this.deps.afterMutation && !reservedProcess) {
         const settlement: PendingParentPromotion = {
@@ -2120,6 +2148,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           outcome: "resolved",
           result,
           ...(retainedProcess ? { retainedProcess } : {}),
+          ...(retainedProcessPurpose ? { retainedProcessPurpose } : {}),
         };
         const settlementStartedAt = performance.now();
         let settlementOutcome: RoutingSandboxPhaseOutcome = "failed";
@@ -2380,6 +2409,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           eligibleForSupervision(input),
           undefined,
           backend,
+          "synchronous_filesystem",
         );
         const result =
           typeof raw === "string"
