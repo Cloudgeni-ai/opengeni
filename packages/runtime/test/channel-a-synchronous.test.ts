@@ -1,4 +1,4 @@
-// OPE-701: execute real filesystem scripts, then delay the adapter's terminal
+// Execute real filesystem scripts, then delay the adapter's terminal
 // receipt independently of their output. Output is not process-completion proof.
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";

@@ -105,7 +105,9 @@ test("API-direct synchronous and nested commands retain exact custody without fa
   } = {
     state: { manifest: { root: "/workspace" } },
     modal: {
-      cpClient: { workspaceNameLookup: async () => ({ workspaceName: "ope-701-test" }) },
+      cpClient: {
+        workspaceNameLookup: async () => ({ workspaceName: "filesystem-completion-test" }),
+      },
       profile: { serverUrl: "https://modal.test" },
       environmentName: () => "test",
     },
@@ -171,7 +173,7 @@ test("API-direct synchronous and nested commands retain exact custody without fa
         accountId: account.id,
         workspaceId: workspace.id,
         sessionId,
-        resourceSubjectId: "subject-ope-701-test",
+        resourceSubjectId: "subject-filesystem-completion-test",
         homeLease: {
           sandboxGroupId,
           leaseEpoch,

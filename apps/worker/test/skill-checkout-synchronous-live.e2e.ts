@@ -1,8 +1,8 @@
-// Opt-in OPE-701 source acceptance. This never provisions infrastructure,
+// Opt-in filesystem-completion source acceptance. This never provisions infrastructure,
 // reads connection/database credentials, or publishes a real workspace Skill.
-// OPENGENI_OPE701_ACCEPTANCE=deterministic: scripted model, NOT live inference.
-// OPENGENI_OPE701_ACCEPTANCE=codex: read-only existing CODEX_HOME/auth.json.
-// Both require OPENGENI_OPE701_CANDIDATE_SHA to pin the parent's ready checkout.
+// OPENGENI_FILESYSTEM_COMPLETION_ACCEPTANCE=deterministic: scripted model, NOT live inference.
+// OPENGENI_FILESYSTEM_COMPLETION_ACCEPTANCE=codex: read-only existing CODEX_HOME/auth.json.
+// Both require OPENGENI_FILESYSTEM_COMPLETION_CANDIDATE_SHA to pin the ready checkout.
 import { expect, test } from "bun:test";
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -54,8 +54,8 @@ import {
 import type { SkillSaveRequest } from "../src/activities/agent-turn/skill-save";
 
 const execFileAsync = promisify(execFile);
-const mode = process.env.OPENGENI_OPE701_ACCEPTANCE;
-const directory = "skills/ope-701-fixture";
+const mode = process.env.OPENGENI_FILESYSTEM_COMPLETION_ACCEPTANCE;
+const directory = "skills/filesystem-completion-fixture";
 const executeCommand = `bash ${directory}/scripts/fixture.sh`;
 const skillId = "11111111-1111-4111-8111-111111111701";
 const revisionId = "22222222-2222-4222-8222-222222222701";
@@ -64,7 +64,7 @@ const smallFiles = [
   {
     path: "SKILL.md",
     content:
-      "---\nname: ope-701-fixture\ndescription: Harmless filesystem acceptance fixture\n---\nRun scripts/fixture.sh. No external services or credentials are used.\n",
+      "---\nname: filesystem-completion-fixture\ndescription: Harmless filesystem acceptance fixture\n---\nRun scripts/fixture.sh. No external services or credentials are used.\n",
   },
   {
     path: "scripts/fixture.sh",
@@ -90,9 +90,8 @@ const publishArgs = {
 async function sourceIdentity() {
   const git = async (...args: string[]) => (await execFileAsync("git", args)).stdout.trim();
   const head = await git("rev-parse", "HEAD");
-  expect(process.env.OPENGENI_OPE701_CANDIDATE_SHA).toMatch(/^[0-9a-f]{40}$/u);
-  expect(head).toBe(process.env.OPENGENI_OPE701_CANDIDATE_SHA!);
-  expect(await git("branch", "--show-current")).toBe("fix/ope-701-filesystem-command-completion");
+  expect(process.env.OPENGENI_FILESYSTEM_COMPLETION_CANDIDATE_SHA).toMatch(/^[0-9a-f]{40}$/u);
+  expect(head).toBe(process.env.OPENGENI_FILESYSTEM_COMPLETION_CANDIDATE_SHA!);
   const sourcePaths = [
     "packages/runtime/src/sandbox/channel-a.ts",
     "packages/runtime/src/sandbox/routing/routing-session.ts",
@@ -183,8 +182,8 @@ function delayedTerminalBackend(native: ChannelASession) {
       throw new Error("Acceptance native process did not reach terminal proof.");
     const command: ModalRouterProviderCommand = {
       kind: "modal-router-v1",
-      sandboxId: "sb-ope-701-fixture",
-      taskId: "task-ope-701-fixture",
+      sandboxId: "sb-filesystem-completion-fixture",
+      taskId: "task-filesystem-completion-fixture",
       execId: crypto.randomUUID(),
       streams: {
         stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
@@ -302,7 +301,7 @@ for (const scenario of [
 ] as const) {
   const { route, multibatch } = scenario;
   test.skipIf(mode !== route)(
-    `OPE-701 candidate agent tool cycle (${route}, ${multibatch ? "multi-command batch" : "small"}; delayed terminal adapter, real local processes)`,
+    `Filesystem-completion agent tool cycle (${route}, ${multibatch ? "multi-command batch" : "small"}; delayed terminal adapter, real local processes)`,
     async () => {
       const source = await sourceIdentity();
       const files = multibatch
@@ -465,10 +464,11 @@ for (const scenario of [
           ],
         },
         { output: [functionCall("skill_publish", publishArgs, "publish-traversal")] },
-        { output: [assistantMessage("ope-701-fixture-ok")] },
+        { output: [assistantMessage("filesystem-completion-fixture-ok")] },
       ]);
       const modelId =
-        process.env.OPENGENI_OPE701_CODEX_MODEL ?? `codex/${CODEX_FALLBACK_MODEL_SLUGS[1]}`;
+        process.env.OPENGENI_FILESYSTEM_COMPLETION_CODEX_MODEL ??
+        `codex/${CODEX_FALLBACK_MODEL_SLUGS[1]}`;
       const provider = resolveModelProvider(settings, modelId)?.provider;
       if (codexContext) expect(provider?.kind).toBe("codex-subscription");
       const model = codexContext
@@ -477,13 +477,17 @@ for (const scenario of [
       const agent = buildOpenGeniAgent(settings, [], {
         model,
         skillCatalog: [
-          { id: skillId, name: "ope-701-fixture", description: "Harmless acceptance fixture" },
+          {
+            id: skillId,
+            name: "filesystem-completion-fixture",
+            description: "Harmless acceptance fixture",
+          },
         ],
         mcpServers: prepared.mcpServers,
         onToolCancellationFence: (value) => {
           fence = value;
         },
-        sessionInstructions: `Only handle this isolated fixture: call skill_checkout with skill ${skillId} and directory ${directory}; run exec_command with cmd ${executeCommand}; repeat the same checkout, then call skill_publish with ${JSON.stringify(publishArgs)}. Do not change files or use other services. Confirm all four tools succeeded before replying exactly ope-701-fixture-ok.`,
+        sessionInstructions: `Only handle this isolated fixture: call skill_checkout with skill ${skillId} and directory ${directory}; run exec_command with cmd ${executeCommand}; repeat the same checkout, then call skill_publish with ${JSON.stringify(publishArgs)}. Do not change files or use other services. Confirm all four tools succeeded before replying exactly filesystem-completion-fixture-ok.`,
       });
       try {
         const run = async () => {
@@ -515,7 +519,7 @@ for (const scenario of [
             }),
           );
         }
-        expect(result.finalOutput).toBe("ope-701-fixture-ok");
+        expect(result.finalOutput).toBe("filesystem-completion-fixture-ok");
         expect(results.map((item) => item.tool)).toEqual([
           "skill_checkout",
           "skill_checkout",

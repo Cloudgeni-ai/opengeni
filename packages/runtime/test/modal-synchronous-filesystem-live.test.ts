@@ -16,7 +16,7 @@ test.skipIf(process.env.OPENGENI_LIVE_MODAL_FILESYSTEM !== "1")(
     const client = createSandboxClient(
       testSettings({
         sandboxBackend: "modal",
-        modalAppName: "opengeni-ope701-filesystem-smoke",
+        modalAppName: "opengeni-filesystem-completion-smoke",
         modalImageRef: "python:3.12-slim",
         modalWorkspacePersistence: "tar",
         modalTimeoutSeconds: 300,
@@ -47,7 +47,7 @@ test.skipIf(process.env.OPENGENI_LIVE_MODAL_FILESYSTEM !== "1")(
       },
     });
     const service = new SandboxChannelAService({ session, workspaceRoot: "/workspace" });
-    const directory = ".agents/skills/ope701-live-fixture";
+    const directory = ".agents/skills/filesystem-completion-live-fixture";
     const files = Array.from({ length: 12 }, (_, index) => ({
       path: `support/${index}.txt`,
       content: `${index}\n${"fixture ".repeat(4096)}`,
