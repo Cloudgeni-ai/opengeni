@@ -188,6 +188,30 @@ describe("live Codex model availability", () => {
     });
   });
 
+  test("one unreachable pool account cannot hide models the reachable accounts serve", async () => {
+    const healthy = account();
+    const revoked = account({ isActive: false });
+    const f = fixture([healthy, revoked], {
+      [healthy.id]: ["gpt-6-sol", "gpt-6-astra"],
+      [revoked.id]: null,
+    });
+    const observed = await loadWorkspaceCodexModelAvailability(
+      db,
+      settings,
+      crypto.randomUUID(),
+      f.deps,
+    );
+    expect(model(observed, "codex/gpt-6-sol").availability).toMatchObject({
+      selectable: true,
+      status: "available",
+    });
+    // Reachable accounts still decide entitlement: none serves 6.1 Sol.
+    expect(model(observed, "codex/gpt-6.1-sol").availability).toMatchObject({
+      selectable: false,
+      reason: "not_entitled",
+    });
+  });
+
   test("cache coalesces provider reads but rechecks authority and credential revision", async () => {
     const a = account();
     const ws = crypto.randomUUID();
