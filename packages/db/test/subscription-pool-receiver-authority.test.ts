@@ -2,6 +2,8 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { getSettings } from "@opengeni/config";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
+  addSessionSystemUpdate,
+  applySessionTurnSettlement,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
@@ -13,6 +15,7 @@ import {
   steerAgentSessionInTransaction,
   submitHumanPromptInTransaction,
   upsertOrganizationXaiSubscription,
+  withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
   workspaceXaiSubscriptionActiveForAuthority,
   type DbClient,
@@ -252,26 +255,40 @@ async function message(
 ) {
   const scope = { accountId: input.accountId, workspaceId: input.workspaceId, targetSessionId };
   const actor = agentActor(sender.sessionId, sender.claimed);
-  const subjectId = sender.claimed.turn.initiatingHumanSubjectId ?? input.owner;
-  return await withWorkspaceSubjectSessionActivityRls(
-    client.db,
-    input.workspaceId,
-    subjectId,
-    (tx) =>
-      delivery === "message"
-        ? sendAgentMessageInTransaction(tx, {
-            ...scope,
-            operationKey: crypto.randomUUID(),
-            text: "Please take this over",
-            actor,
-          })
-        : steerAgentSessionInTransaction(tx, {
-            ...scope,
-            operationKey: crypto.randomUUID(),
-            instruction: "Change direction",
-            actor,
-          }),
+  // Production agent commands run without an ambient subject.
+  return await withWorkspaceSessionActivityRls(client.db, input.workspaceId, (tx) =>
+    delivery === "message"
+      ? sendAgentMessageInTransaction(tx, {
+          ...scope,
+          operationKey: crypto.randomUUID(),
+          text: "Please take this over",
+          actor,
+        })
+      : steerAgentSessionInTransaction(tx, {
+          ...scope,
+          operationKey: crypto.randomUUID(),
+          instruction: "Change direction",
+          actor,
+        }),
   );
+}
+
+async function complete(
+  input: Fixture,
+  sessionId: string,
+  claimed: Awaited<ReturnType<typeof claim>>,
+) {
+  const settled = await applySessionTurnSettlement(client.db, input.workspaceId, {
+    sessionId,
+    turnId: claimed.turn.id,
+    triggerEventId: claimed.turn.triggerEventId,
+    attemptId: claimed.attemptId,
+    turnStatus: "completed",
+    sessionStatus: "idle",
+    activeTurnId: null,
+    events: [],
+  } as never);
+  expect(settled.action).toBe("settled");
 }
 
 /** The accepted snapshot must reach the pool account the receiver can actually use. */
@@ -481,4 +498,117 @@ test("SUB-ACCESS-01: Agent messages never carry a personal pool into another hum
       })
     ).credentialId,
   ).toBe(ownerPersonal.xai);
+}, 180_000);
+
+test("SUB-ACCESS-01: the receiver's pool comes from its latest accepted work, not its queue position (Claude and SuperGrok)", async () => {
+  const input = await fixture();
+  const service = { type: "service" as const, subjectId: `service:bridge-${crypto.randomUUID()}` };
+  const sender = await humanSession(input, input.owner);
+  await prompt(input, sender.id, service);
+  const senderClaim = await claim(input, sender.id);
+
+  // Before the organization pool: a human turn (position 1) and an internal
+  // Agent-message turn (position 2) on the receiver, both frozen to workspace.
+  const receiver = await humanSession(input, input.owner);
+  await prompt(input, receiver.id, { type: "human", subjectId: input.owner });
+  await complete(input, receiver.id, await claim(input, receiver.id));
+  await message(input, { sessionId: sender.id, claimed: senderClaim }, receiver.id);
+  const internal = await claim(input, receiver.id);
+  expect(await turnAuthority(internal.turn.id)).toMatchObject({
+    claude: workspace,
+    xai: workspace,
+  });
+  await complete(input, receiver.id, internal);
+
+  // After the pool exists, a newer human Send (position 1 again) moves the
+  // receiver's accepted work to the organization pool.
+  const pools = await connectOrganizationPools(input);
+  await prompt(input, receiver.id, { type: "human", subjectId: input.owner });
+  const newest = await claim(input, receiver.id);
+  expect(await turnAuthority(newest.turn.id)).toMatchObject({
+    claude: organization,
+    xai: organization,
+  });
+  const positions = await shared.admin<{ id: string; position: string }[]>`
+    select id, position from session_turns where session_id = ${receiver.id} order by created_at`;
+  expect(Number(positions.at(-1)!.position)).toBeLessThan(
+    Math.max(...positions.map((row) => Number(row.position))),
+  );
+  await complete(input, receiver.id, newest);
+
+  await message(input, { sessionId: sender.id, claimed: senderClaim }, receiver.id);
+  const received = await claim(input, receiver.id);
+  const authority = await turnAuthority(received.turn.id);
+  expect(authority).toMatchObject({ claude: organization, xai: organization });
+  await expectSelects(input, authority, pools);
+}, 180_000);
+
+test("SUB-ACCESS-01: internal updates without causal authority resolve the organization pool (Claude and SuperGrok)", async () => {
+  const input = await fixture();
+  const pools = await connectOrganizationPools(input);
+  const receiver = await humanSession(input, input.owner);
+  const dedupeKey = `receiver-pool:${crypto.randomUUID()}`;
+  await addSessionSystemUpdate(client.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: receiver.id,
+    kind: "child_terminal_result",
+    classification: "success",
+    sourceId: crypto.randomUUID(),
+    dedupeKey,
+    summary: "Detached result",
+    payload: { type: "child_terminal_result", childSessionId: crypto.randomUUID(), status: "idle" },
+  });
+  const [update] = await shared.admin<{ claude: Snapshot; xai: Snapshot }[]>`
+    select claude_provider_account_authority_snapshot as claude,
+      xai_provider_account_authority_snapshot as xai
+    from session_system_updates where session_id = ${receiver.id} and dedupe_key = ${dedupeKey}`;
+  expect(update).toEqual({ claude: organization, xai: organization });
+  const received = await claim(input, receiver.id);
+  const authority = await turnAuthority(received.turn.id);
+  expect(authority).toMatchObject({ claude: organization, xai: organization, human: null });
+  await expectSelects(input, authority, pools);
+}, 180_000);
+
+test("SUB-ACCESS-01: a child receiver before its first turn keeps a personal pool only for its spawning human (Claude and SuperGrok)", async () => {
+  const input = await fixture();
+  const pools = await connectOrganizationPools(input);
+  await connectPersonalPools(input, input.owner);
+  const parent = await humanSession(input, input.owner);
+  await prompt(input, parent.id, { type: "human", subjectId: input.owner });
+  const parentClaim = await claim(input, parent.id);
+  const parentAuthority = await turnAuthority(parentClaim.turn.id);
+  expect(parentAuthority.claude.scope).toBe("user");
+  const child = await createSession(client.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    initialMessage: "",
+    parentSessionId: parent.id,
+    createdByActor: agentActor(parent.id, parentClaim),
+    initialClaudeProviderAccountAuthoritySnapshot: parentAuthority.claude,
+    initialXaiProviderAccountAuthoritySnapshot: parentAuthority.xai,
+    resources: [],
+    tools: [],
+    metadata: {},
+    model: `organization-claude-subscription/${upstreamModelId}`,
+    reasoningEffort: "low",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+  });
+
+  // The spawning human's own message keeps the child's inherited personal pool.
+  const same = await message(input, { sessionId: parent.id, claimed: parentClaim }, child.id);
+  expect(await updateAuthority(same.updateId)).toEqual({
+    claude: parentAuthority.claude,
+    xai: parentAuthority.xai,
+  });
+
+  // Another human's message falls back to the organization pool.
+  const member = await humanSession(input, input.member);
+  await prompt(input, member.id, { type: "human", subjectId: input.member });
+  const memberClaim = await claim(input, member.id);
+  const cross = await message(input, { sessionId: member.id, claimed: memberClaim }, child.id);
+  const crossAuthority = await updateAuthority(cross.updateId);
+  expect(crossAuthority).toEqual({ claude: organization, xai: organization });
+  await expectSelects(input, crossAuthority, pools);
 }, 180_000);

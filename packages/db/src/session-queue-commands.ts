@@ -2731,12 +2731,6 @@ export async function sendAgentMessageInTransaction(
   const session = await lockSession(db, input.workspaceId, input.targetSessionId);
   if (session.importedArchiveImportId)
     throw new ArchivedSessionImportError("SESSION_IMPORTED_READ_ONLY");
-  // The pool belongs to the receiving session's accepted work, not the sender.
-  const receiverAuthority = await receiverSubscriptionAuthorityInTransaction(db, {
-    workspaceId: input.workspaceId,
-    sessionId: input.targetSessionId,
-    causalHumanSubjectId: subscriptionCausalHuman,
-  });
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
       "QUEUE_PROMPT_STARTED",
@@ -2744,6 +2738,12 @@ export async function sendAgentMessageInTransaction(
       { queueVersion: session.queueVersion },
     );
   }
+  // The pool belongs to the receiving session's accepted work, not the sender.
+  const receiverAuthority = await receiverSubscriptionAuthorityInTransaction(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.targetSessionId,
+    causalHumanSubjectId: subscriptionCausalHuman,
+  });
   const effective = await evaluateSessionControl(db, input.workspaceId, input.targetSessionId, {
     workspaceControl,
   });
@@ -3021,12 +3021,6 @@ export async function steerAgentSessionInTransaction(
   const session = await lockSession(db, input.workspaceId, input.targetSessionId);
   if (session.importedArchiveImportId)
     throw new ArchivedSessionImportError("SESSION_IMPORTED_READ_ONLY");
-  // The pool belongs to the receiving session's accepted work, not the sender.
-  const receiverAuthority = await receiverSubscriptionAuthorityInTransaction(db, {
-    workspaceId: input.workspaceId,
-    sessionId: input.targetSessionId,
-    causalHumanSubjectId: subscriptionCausalHuman,
-  });
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
       "QUEUE_PROMPT_STARTED",
@@ -3034,6 +3028,12 @@ export async function steerAgentSessionInTransaction(
       { queueVersion: session.queueVersion },
     );
   }
+  // The pool belongs to the receiving session's accepted work, not the sender.
+  const receiverAuthority = await receiverSubscriptionAuthorityInTransaction(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.targetSessionId,
+    causalHumanSubjectId: subscriptionCausalHuman,
+  });
   const now = new Date();
   const updateId = crypto.randomUUID();
   // An Agent Steer is external input for the target's goal. A goal paused only

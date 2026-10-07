@@ -62,8 +62,10 @@ export async function sharedPoolSubscriptionAuthoritySnapshotsInTransaction(
 /**
  * Pool scope for agent-originated work delivered to `sessionId` (Agent Message,
  * Agent Steer, agent-submitted prompts). The pool belongs to the receiving
- * session's accepted work, never to the sender: it comes from the receiver's
- * latest accepted turn, or its frozen initial snapshot before any turn exists.
+ * session's accepted work, never to the sender. It comes from, in order: the
+ * receiver's execution-context turn (its latest started user/API turn, the
+ * same context the claim path uses for informational input), its most recently
+ * accepted turn, or its frozen initial snapshot before any turn exists.
  *
  * A user-scoped (personal) pool is retained only when its exact owner is the
  * same human who caused this work. Otherwise the receiver falls back to its
@@ -74,61 +76,99 @@ export async function receiverSubscriptionAuthorityInTransaction(
   db: Database,
   input: { workspaceId: string; sessionId: string; causalHumanSubjectId: string | null },
 ): Promise<Record<SubscriptionProvider, FrozenSubscriptionExecutionAuthority>> {
-  const [turn] = await db
+  const turnColumns = {
+    xai: schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
+    claude: schema.sessionTurns.claudeProviderAccountAuthoritySnapshot,
+    initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+    initiatorKind: schema.sessionTurns.initiatorKind,
+    initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+  };
+  const turnOwner = (turn: {
+    initiatingHumanSubjectId: string | null;
+    initiatorKind: string;
+    initiatorSubjectId: string;
+  }) =>
+    turn.initiatingHumanSubjectId ??
+    (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null);
+  const [session] = await db
     .select({
-      xai: schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
-      claude: schema.sessionTurns.claudeProviderAccountAuthoritySnapshot,
-      initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
-      initiatorKind: schema.sessionTurns.initiatorKind,
-      initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+      xai: schema.sessions.initialXaiProviderAccountAuthoritySnapshot,
+      claude: schema.sessions.initialClaudeProviderAccountAuthoritySnapshot,
+      createdByKind: schema.sessions.createdByKind,
+      createdBySubjectId: schema.sessions.createdBySubjectId,
+      parentSessionId: schema.sessions.parentSessionId,
+      parentTurnId: schema.sessions.parentTurnId,
+      executionContextTurnId: schema.sessions.executionContextTurnId,
     })
-    .from(schema.sessionTurns)
+    .from(schema.sessions)
     .where(
       and(
-        eq(schema.sessionTurns.workspaceId, input.workspaceId),
-        eq(schema.sessionTurns.sessionId, input.sessionId),
+        eq(schema.sessions.workspaceId, input.workspaceId),
+        eq(schema.sessions.id, input.sessionId),
       ),
     )
-    .orderBy(
-      desc(schema.sessionTurns.position),
-      desc(schema.sessionTurns.createdAt),
-      desc(schema.sessionTurns.id),
-    )
     .limit(1);
+  if (!session) throw new Error(`Receiving session not found: ${input.sessionId}`);
+  const [contextTurn] = session.executionContextTurnId
+    ? await db
+        .select(turnColumns)
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.workspaceId),
+            eq(schema.sessionTurns.sessionId, input.sessionId),
+            eq(schema.sessionTurns.id, session.executionContextTurnId),
+          ),
+        )
+        .limit(1)
+    : [];
+  const [turn] = contextTurn
+    ? [contextTurn]
+    : await db
+        .select(turnColumns)
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.workspaceId),
+            eq(schema.sessionTurns.sessionId, input.sessionId),
+          ),
+        )
+        // Acceptance order, not queue position: Send, Steer, internal and
+        // compaction turns assign positions independently of acceptance time.
+        .orderBy(
+          desc(schema.sessionTurns.createdAt),
+          desc(schema.sessionTurns.position),
+          desc(schema.sessionTurns.id),
+        )
+        .limit(1);
   let source: { xai: unknown; claude: unknown; owner: string | null };
   if (turn) {
-    source = {
-      xai: turn.xai,
-      claude: turn.claude,
-      owner:
-        turn.initiatingHumanSubjectId ??
-        (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null),
-    };
-  } else {
-    const [session] = await db
-      .select({
-        xai: schema.sessions.initialXaiProviderAccountAuthoritySnapshot,
-        claude: schema.sessions.initialClaudeProviderAccountAuthoritySnapshot,
-        createdByKind: schema.sessions.createdByKind,
-        createdBySubjectId: schema.sessions.createdBySubjectId,
-        parentTurnId: schema.sessions.parentTurnId,
-      })
-      .from(schema.sessions)
+    source = { xai: turn.xai, claude: turn.claude, owner: turnOwner(turn) };
+  } else if (session.parentSessionId && session.parentTurnId) {
+    // A child's initial snapshot is copied from its exact spawning parent turn,
+    // so that turn's human owns any personal scope in it.
+    const [parentTurn] = await db
+      .select(turnColumns)
+      .from(schema.sessionTurns)
       .where(
         and(
-          eq(schema.sessions.workspaceId, input.workspaceId),
-          eq(schema.sessions.id, input.sessionId),
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, session.parentSessionId),
+          eq(schema.sessionTurns.id, session.parentTurnId),
         ),
       )
       .limit(1);
-    if (!session) throw new Error(`Receiving session not found: ${input.sessionId}`);
-    // A child's initial snapshot is copied from its spawning parent turn, whose
-    // human is not recorded on the session row. Never treat it as owned here.
+    source = {
+      xai: session.xai,
+      claude: session.claude,
+      owner: parentTurn ? turnOwner(parentTurn) : null,
+    };
+  } else {
     source = {
       xai: session.xai,
       claude: session.claude,
       owner:
-        session.createdByKind === "subject" && !session.parentTurnId
+        session.createdByKind === "subject" && !session.parentSessionId
           ? session.createdBySubjectId
           : null,
     };

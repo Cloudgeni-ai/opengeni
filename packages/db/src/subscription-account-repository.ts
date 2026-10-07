@@ -834,6 +834,8 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
         .from(tables.rotationSettings)
         .where(
           and(
+            // Explicit tenant fence in addition to organization-scope RLS.
+            sql`${tables.rotationSettings.accountId} = opengeni_private.current_account_id()`,
             isNull(tables.rotationSettings.workspaceId),
             eq(tables.rotationSettings.authorityScope, "organization"),
             sql`${tables.rotationSettings.activeCredentialId} is not null`,
