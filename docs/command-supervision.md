@@ -116,15 +116,8 @@ command exits while both stream reads then reach EOF. When both streams are at
 EOF and the exit is still unknown, the same page polls again within its existing
 read budget. EOF alone is never exit proof: an exhausted budget or a failed
 re-poll keeps the bytes and leaves the exit unknown for the next page.
-
-Internal Channel-A commands (file writes, skill checkout and similar control
-work) read once. If such a command still yields a retained process, Channel-A
-keeps observing that exact process through the non-model-visible control read
-until exit proof or its bounded wait, so the routing layer settles it before the
-operation returns. A finished internal command is therefore never left for the
-reconciler to adopt as an agent-visible background command. Interactive PTYs
-keep their yielded session, and an unproven outcome keeps the existing
-unavailable error without replaying the command.
+Internal callers that read once (file writes, Skill checkout) therefore see a
+finished command's exit in that read instead of a stale running answer.
 
 ## Validation boundary
 
