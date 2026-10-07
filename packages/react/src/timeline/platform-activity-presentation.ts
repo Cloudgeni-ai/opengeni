@@ -99,7 +99,50 @@ export function startupDuration(durationMs: number | null): string | null {
   return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
 }
 
-/** The worker step title for a spawn or message, by status. */
+/**
+ * A title that names an agent: the words around the name stay quiet and the
+ * name carries the emphasis. `name` is null when no title is known, and
+ * `text` is then the generic fallback.
+ */
+export type AgentTitleParts = {
+  before: string;
+  name: string | null;
+  after: string;
+  text: string;
+};
+
+export function namedAgentTitle(
+  name: string | null | undefined,
+  before: string,
+  after: string,
+  fallback: string,
+): AgentTitleParts {
+  const trimmed = name?.trim() ? name.trim() : null;
+  return trimmed
+    ? { before, name: trimmed, after, text: `${before}${trimmed}${after}` }
+    : { before: "", name: null, after: "", text: fallback };
+}
+
+/** The worker step title for a spawn or message, by status, naming the agent when known. */
+export function workerRowTitleParts(
+  item: Pick<WorkerItem, "action" | "status">,
+  name?: string | null,
+): AgentTitleParts {
+  const fallback = workerRowTitle(item);
+  const spawn = item.action === "spawn";
+  switch (item.status) {
+    case "running":
+      return namedAgentTitle(name, spawn ? "Spawning " : "Messaging ", "", fallback);
+    case "failed":
+      return namedAgentTitle(name, spawn ? "Couldn't spawn " : "Couldn't message ", "", fallback);
+    case "cancelled":
+      return namedAgentTitle(name, spawn ? "Spawning " : "Messaging ", "", fallback);
+    default:
+      return namedAgentTitle(name, spawn ? "Spawned " : "Messaged ", "", fallback);
+  }
+}
+
+/** The generic worker step title for a spawn or message, by status. */
 export function workerRowTitle(item: Pick<WorkerItem, "action" | "status">): string {
   const running = item.status === "running";
   const failed = item.status === "failed";

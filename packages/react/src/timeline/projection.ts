@@ -771,13 +771,16 @@ export function buildTimeline(
           toolMatchesLeaf(name, WORKER_SPAWN_TOOL) ||
           toolMatchesLeaf(name, WORKER_MESSAGE_TOOL)
         ) {
+          const spawn = toolMatchesLeaf(name, WORKER_SPAWN_TOOL);
+          const title = spawn ? workerTitle(args) : null;
           items.push({
             kind: "worker",
             id: event.id,
             turnId,
             callId,
-            action: toolMatchesLeaf(name, WORKER_SPAWN_TOOL) ? "spawn" : "message",
+            action: spawn ? "spawn" : "message",
             prompt: workerPrompt(args),
+            ...(title ? { title } : {}),
             workerSessionId: extractSessionRef(args),
             failure: null,
             status: "running",
@@ -3339,6 +3342,19 @@ function workerPrompt(args: unknown): string | null {
     }
   }
   return null;
+}
+
+const WORKER_TITLE_MAX_LENGTH = 120;
+
+/** The optional `session_create` title, as one bounded display line. */
+function workerTitle(args: unknown): string | null {
+  const record = asRecord(typeof args === "string" ? tryParseJson(args) : args);
+  if (typeof record.title !== "string") return null;
+  const title = record.title.replace(/\s+/g, " ").trim();
+  if (!title) return null;
+  return title.length > WORKER_TITLE_MAX_LENGTH
+    ? `${title.slice(0, WORKER_TITLE_MAX_LENGTH - 1).trimEnd()}…`
+    : title;
 }
 
 function boundedWorkerFailureMessage(value: string): string | null {

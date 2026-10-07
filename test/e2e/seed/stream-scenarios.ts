@@ -664,7 +664,7 @@ const SCENARIO_WORKER_FLEET: StreamScenario = {
     },
     {
       kind: "message",
-      text: "Inbound cards landed: one **Worker completed**, one **Worker paused**, one **Worker failed**. Expand any for the full report; **View session** deep-links into the child.\n",
+      text: "Inbound cards landed: one **Worker completed**, one **Worker paused**, one **Worker failed**. Expand any for the full report; the arrow on each row opens the child.\n",
       stream: true,
       pacing: "fast",
     },

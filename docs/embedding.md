@@ -121,8 +121,10 @@ session working directory without following symlinks.
 The session goal shows in the conversation chrome with Pause, Resume, and
 Clear; the proxy forwards only the goal read (with its `?absent=null` opt-in, so
 a goal-less chat reads a 200 `null` instead of logging a failed 404),
-`{ status: "paused" | "active" }` updates, and the clear, its only `DELETE`. Sub-agent cards and child updates
-call `onOpenSession`; `OpenGeniChat` opens the child chat in place.
+`{ status: "paused" | "active" }` updates, and the clear, its only `DELETE`. Rows for spawning,
+messaging, and hearing from another agent call `onOpenSession`; `OpenGeniChat` opens the child
+chat in place. Those rows name the agent with the title it was spawned with; pass
+`resolveSessionTitle` to show current titles (the web app reads them from session lineage).
 The proxy's client config reports `sessionCreation`, `archive`, and
 `artifacts` (`false` when off), so the stock chat hides actions the proxy
 cannot serve; the composer microphone follows `voiceInput.available`
