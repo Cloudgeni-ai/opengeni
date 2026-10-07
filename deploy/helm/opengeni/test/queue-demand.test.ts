@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { run, testTool } from "./queue-demand-tooling";
+import { helmFixtureEnvironment, run, testTool } from "./queue-demand-tooling";
 
 const chart = resolve(import.meta.dir, "..");
 const tools = Promise.all([
@@ -49,10 +49,12 @@ async function render(
   capabilities = true,
   profiles: string[] = [],
   existingReplicas?: number,
+  inheritedEnvironment?: NodeJS.ProcessEnv,
 ) {
   const [helm] = await tools;
   const dir = await mkdtemp(join(tmpdir(), "opengeni-queue-render-"));
   const lookupRequests: string[] = [];
+  const lookupCredentialHeaders: string[] = [];
   // Real Helm server-side dry-run reads this owned fixture, never a live cluster.
   const lookupServer =
     existingReplicas === undefined
@@ -63,6 +65,15 @@ async function render(
           fetch(request) {
             const path = new URL(request.url).pathname;
             lookupRequests.push(`${request.method} ${path}`);
+            // Retain header names only, never authentication/impersonation values.
+            for (const name of [
+              "authorization",
+              "proxy-authorization",
+              "impersonate-user",
+              "impersonate-group",
+            ]) {
+              if (request.headers.has(name)) lookupCredentialHeaders.push(name);
+            }
             if (request.method !== "GET") return new Response(null, { status: 405 });
             switch (path) {
               case "/version":
@@ -127,19 +138,23 @@ async function render(
         }),
       );
     }
-    const result = await run([
-      helm,
-      "template",
-      "fixture",
-      chart,
-      "--namespace",
-      "fixture",
-      ...profiles.flatMap((profile) => ["-f", join(chart, profile)]),
-      "-f",
-      path,
-      ...(capabilities ? ["--api-versions", "monitoring.coreos.com/v1"] : []),
-      ...(lookupServer ? ["--is-upgrade", "--dry-run=server", "--kubeconfig", kubeconfig] : []),
-    ]);
+    const result = await run(
+      [
+        helm,
+        "template",
+        "fixture",
+        chart,
+        "--namespace",
+        "fixture",
+        ...profiles.flatMap((profile) => ["-f", join(chart, profile)]),
+        "-f",
+        path,
+        ...(capabilities ? ["--api-versions", "monitoring.coreos.com/v1"] : []),
+        ...(lookupServer ? ["--is-upgrade", "--dry-run=server", "--kubeconfig", kubeconfig] : []),
+      ],
+      undefined,
+      lookupServer ? helmFixtureEnvironment(kubeconfig, inheritedEnvironment) : undefined,
+    );
     const manifests =
       result.code === 0
         ? result.stdout
@@ -148,7 +163,7 @@ async function render(
             .map((doc) => Bun.YAML.parse(doc) as Manifest)
             .filter((doc) => doc?.kind)
         : [];
-    return { ...result, manifests, lookupRequests };
+    return { ...result, manifests, lookupRequests, lookupCredentialHeaders };
   } finally {
     lookupServer?.stop(true);
     await rm(dir, { recursive: true, force: true });
@@ -423,6 +438,87 @@ describe("queue demand schema v1 actual Helm rendering", () => {
       expect(hpa.behavior.scaleDown.selectPolicy).toBe("Disabled");
     }, 180_000);
   }
+
+  test("server-side Helm fixtures isolate inherited endpoint and authentication overrides", async () => {
+    const inheritedDir = await mkdtemp(join(tmpdir(), "opengeni-queue-inherited-"));
+    const inheritedRequests: string[] = [];
+    const inheritedServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        inheritedRequests.push(`${request.method} ${new URL(request.url).pathname}`);
+        return Response.json(
+          { kind: "Status", status: "Failure", reason: "NotFound", code: 404 },
+          { status: 404 },
+        );
+      },
+    });
+    try {
+      const inheritedEnvironment = {
+        ...process.env,
+        HOME: inheritedDir,
+        KUBECONFIG: join(inheritedDir, "inherited-kubeconfig.json"),
+        HELM_KUBEAPISERVER: inheritedServer.url.toString(),
+        HELM_KUBETOKEN: "fixture-only-inherited-token",
+        HELM_KUBECONTEXT: "inherited-context",
+        HELM_KUBECAFILE: join(inheritedDir, "inherited-ca.pem"),
+        HELM_KUBEASUSER: "inherited-user",
+        HELM_KUBEASGROUPS: "inherited-group",
+        HELM_KUBETLS_SERVER_NAME: "inherited.invalid",
+        HELM_KUBEINSECURE_SKIP_TLS_VERIFY: "true",
+        HELM_DRIVER: "sql",
+        HELM_DRIVER_SQL_CONNECTION_STRING: "fixture-only-unused-connection",
+        HELM_PLUGINS: join(inheritedDir, "inherited-plugins"),
+        KUBERNETES_SERVICE_HOST: "127.0.0.1",
+        KUBERNETES_SERVICE_PORT: String(inheritedServer.port),
+        HTTP_PROXY: inheritedServer.url.toString(),
+        HTTPS_PROXY: inheritedServer.url.toString(),
+        ALL_PROXY: inheritedServer.url.toString(),
+        http_proxy: inheritedServer.url.toString(),
+        https_proxy: inheritedServer.url.toString(),
+        all_proxy: inheritedServer.url.toString(),
+      };
+      const originalEnvironment = JSON.stringify(inheritedEnvironment);
+      const result = await render(
+        {
+          ...enabled,
+          worker: {
+            turns: {
+              replicaCount: 2,
+              autoscaling: {
+                enabled: true,
+                minReplicas: 2,
+                maxReplicas: 28,
+                queueDemand: { enabled: true },
+                behavior: { scaleDown: { selectPolicy: "Max" } },
+              },
+            },
+          },
+        },
+        true,
+        ["values.azure-managed.example.yaml"],
+        14,
+        inheritedEnvironment,
+      );
+      expect(inheritedRequests).toEqual([]);
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.lookupRequests).toContain(
+        "GET /apis/apps/v1/namespaces/fixture/deployments/fixture-worker-turns",
+      );
+      expect(result.lookupRequests.every((request) => request.startsWith("GET "))).toBe(true);
+      expect(result.lookupCredentialHeaders).toEqual([]);
+      expect(find(result.manifests, "Deployment", "fixture-worker-turns").spec.replicas).toBe(14);
+      expect(
+        find(result.manifests, "HorizontalPodAutoscaler", "fixture-worker-turns").spec.behavior
+          .scaleDown.selectPolicy,
+      ).toBe("Disabled");
+      // Check immutability without printing inherited environment values on failure.
+      expect(JSON.stringify(inheritedEnvironment) === originalEnvironment).toBe(true);
+    } finally {
+      inheritedServer.stop(true);
+      await rm(inheritedDir, { recursive: true, force: true });
+    }
+  }, 180_000);
 
   test("schema and prerequisite failures reject unsupported or unobservable opt-ins", async () => {
     for (const queueDemand of [
