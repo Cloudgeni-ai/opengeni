@@ -1935,6 +1935,14 @@ Post-write verification selects current tags and one immutable version manifest;
 each actual GET shares the original request quota, deadline and custody limits,
 including final complete-cohort qualification. Pre-write discovery is unchanged.
 An uncertain publication never automatically replays; signed-byte acceptance remains separate.
+For a completely acknowledged failed canary, the protected
+`reconcile-canary-publication.yml` controller can independently verify retained
+origin receipts, signed archive bytes and a fresh complete metadata cohort using
+GETs only. Historical source is immutable JSON input, never executable recovery
+code. Separate linked receipt/pin artifacts preserve the failed producer and
+missing original Site artifact, with `promotionEligible: false`; they require
+explicit manual staging consumer authority and do not change production controls.
+See the bounded protocol and trust-fetch exception in `CONTRIBUTING.md`.
 `reconcile-production-packages.yml` reconciles npm availability independently of acceptance.
 
 Commands: [`../AGENTS.md`](../AGENTS.md), [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
