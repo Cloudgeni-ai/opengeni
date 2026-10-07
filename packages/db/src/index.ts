@@ -8186,6 +8186,42 @@ export async function getRetainedScreenshotArtifactForToolCall(
   });
 }
 
+/** Recover a legacy damaged receipt's artifact id when its tool call has one
+ * exact screenshot in this session whose file the current file authority hides
+ * (see getWithheldRetainedScreenshotArtifactState). Returns only the id; the
+ * caller still applies the withheld lifecycle checks. */
+export async function getWithheldRetainedScreenshotArtifactIdForToolCall(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  toolCallId: string,
+): Promise<string | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        artifactId: schema.retainedScreenshotArtifacts.artifactId,
+        fileId: schema.files.id,
+      })
+      .from(schema.retainedScreenshotArtifacts)
+      .leftJoin(
+        schema.files,
+        and(
+          eq(schema.files.workspaceId, schema.retainedScreenshotArtifacts.workspaceId),
+          eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.retainedScreenshotArtifacts.workspaceId, workspaceId),
+          eq(schema.retainedScreenshotArtifacts.sessionId, sessionId),
+          eq(schema.retainedScreenshotArtifacts.toolCallId, toolCallId),
+        ),
+      )
+      .limit(2);
+    return rows.length === 1 && rows[0]!.fileId === null ? rows[0]!.artifactId : null;
+  });
+}
+
 export type RetainedScreenshotMaintenanceClaim = {
   action: "reconcile" | "delete";
   claimId: string;

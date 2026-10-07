@@ -16,6 +16,7 @@ import {
   RetainedScreenshotQuotaExceededError,
   getRetainedScreenshotArtifact,
   getRetainedScreenshotArtifactForToolCall,
+  getWithheldRetainedScreenshotArtifactIdForToolCall,
   getWithheldRetainedScreenshotArtifactState,
   isDatabasePersistenceFailure,
   isSessionEventPersistenceError,
@@ -921,8 +922,17 @@ async function materializeRetainedScreenshotHistoryWithCache(
       input.sessionId,
       callId,
     );
-    if (!artifact) throw new Error("Retained screenshot receipt cannot be recovered");
-    return reference(artifact);
+    if (artifact) return reference(artifact);
+    // The exact screenshot may exist with its file withheld from this requester.
+    // Carry only its id; dataUrlForReceipt re-applies the withheld lifecycle checks.
+    const withheldId = await getWithheldRetainedScreenshotArtifactIdForToolCall(
+      input.db,
+      input.workspaceId,
+      input.sessionId,
+      callId,
+    );
+    if (!withheldId) throw new Error("Retained screenshot receipt cannot be recovered");
+    return unavailable(withheldId, "pending");
   };
   const assertRetainedState = (
     artifactId: string,

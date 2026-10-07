@@ -815,7 +815,7 @@ describe("retained screenshot lifecycle fences", () => {
       type: "retained_artifact",
       artifact: { available: false, artifactId, reason: "pending" },
     });
-    const history = (artifactId: string) => [
+    const history = (artifactId: string, legacyToolCallId?: string) => [
       { type: "function_call_result", callId: "call-direct", output: marker(artifactId) },
       {
         type: "function_call_result",
@@ -825,23 +825,58 @@ describe("retained screenshot lifecycle fences", () => {
           { type: "input_image", image: marker(artifactId) },
         ],
       },
+      {
+        type: "function_call_result",
+        callId: "call-result-content",
+        output: { content: [{ type: "input_image", image: marker(artifactId) }] },
+      },
+      ...(legacyToolCallId
+        ? [
+            {
+              // Older canonical history could truncate the receipt fields.
+              type: "function_call_result",
+              callId: legacyToolCallId,
+              output: [
+                {
+                  type: "input_image",
+                  image: {
+                    type: "retained_artifact",
+                    artifact: {
+                      available: false,
+                      artifactId: "[omitted text field 1 ...]",
+                      reason: "[omitted text field 2 ...]",
+                    },
+                  },
+                },
+              ],
+            },
+          ]
+        : []),
     ];
-    const materialize = (artifactId: string, now?: Date) =>
+    const legacyToolCallId = `call-${prepared.artifactId}`;
+    const materialize = (artifactId: string, now?: Date, legacy?: string) =>
       materializeRetainedScreenshotHistory({
         db,
         objectStorage: memory.storage,
         workspaceId: fixture.workspaceId,
         sessionId: fixture.sessionId,
-        history: history(artifactId),
+        history: history(artifactId, legacy),
         ...(now ? { now } : {}),
       });
 
     // The owner still receives the pixels.
-    const own = await asMember(owner, () => materialize(prepared.artifactId));
+    const own = await asMember(owner, () =>
+      materialize(prepared.artifactId, undefined, legacyToolCallId),
+    );
     expect(String(own[0]?.output).startsWith("data:image/png;base64,")).toBeTrue();
+    expect(
+      String((own[3]?.output as Array<{ image?: string }>)[0]?.image).startsWith("data:image/png"),
+    ).toBeTrue();
 
     // Another participant's turn proceeds with a neutral receipt and no bytes.
-    const participantView = await asMember(participant, () => materialize(prepared.artifactId));
+    const participantView = await asMember(participant, () =>
+      materialize(prepared.artifactId, undefined, legacyToolCallId),
+    );
     const direct = String(participantView[0]?.output);
     expect(direct).toContain(prepared.artifactId);
     expect(direct).toContain("not available to the current requester");
@@ -852,6 +887,8 @@ describe("retained screenshot lifecycle fences", () => {
       { type: "input_text", text: "Image viewed" },
       { type: "input_text", text: direct },
     ]);
+    expect(participantView[2]?.output).toEqual({ content: [{ type: "input_text", text: direct }] });
+    expect(participantView[3]?.output).toEqual([{ type: "input_text", text: direct }]);
     // The authority boundary is unchanged.
     expect(
       await asMember(participant, () => getFile(db, fixture.workspaceId, prepared.artifactId)),
