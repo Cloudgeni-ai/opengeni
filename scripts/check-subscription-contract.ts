@@ -1,5 +1,13 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import {
+  discoverTestFiles,
+  E2E_TEST_PATTERN,
+  INTEGRATION_TEST_PATTERN,
+  OPT_IN_TESTS,
+  UNIT_TEST_PATTERN,
+} from "./ci/workspace";
 
 /**
  * Keeps docs/subscription-accounts.md honest: every requirement ID has a
@@ -12,8 +20,6 @@ const ID_PATTERN = /SUB-[A-Z]+-\d{2}/g;
 const DEFINITION_PATTERN = /^- \*\*(SUB-[A-Z]+-\d{2})\*\*/;
 const PENDING_PATTERN = /^pending \(([a-z][a-z0-9-]*)\)\.?$/;
 const WORK_ITEM_ROW = /^\| `([a-z][a-z0-9-]*)` \|/;
-const TEST_ROOTS = ["apps", "packages", "scripts", "examples"];
-const SKIPPED_DIRECTORIES = new Set(["node_modules", "dist", "build", ".turbo", "coverage"]);
 const SELF_TEST = "scripts/check-subscription-contract.test.ts";
 
 export type ContractRequirement = {
@@ -55,15 +61,25 @@ export function parseContract(markdown: string): ContractRequirement[] {
   return requirements;
 }
 
-function listTestFiles(root: string, directory: string, files: string[]): void {
-  if (!existsSync(directory)) return;
-  for (const entry of readdirSync(directory)) {
-    if (SKIPPED_DIRECTORIES.has(entry)) continue;
-    const path = join(directory, entry);
-    const stats = statSync(path);
-    if (stats.isDirectory()) listTestFiles(root, path, files);
-    else if (/\.test\.tsx?$/.test(entry)) files.push(relative(root, path));
-  }
+function isTestFile(path: string): boolean {
+  return (
+    UNIT_TEST_PATTERN.test(path) ||
+    INTEGRATION_TEST_PATTERN.test(path) ||
+    E2E_TEST_PATTERN.test(path)
+  );
+}
+
+/**
+ * Every unit, integration and end-to-end test file, discovered the same way CI
+ * discovers them (apps, packages, scripts, examples and the root `test/`
+ * tree), plus the opt-in tests CI runs only in dedicated gates.
+ */
+export function listTestFiles(root: string): string[] {
+  const discovered = discoverTestFiles(root);
+  const optIn = Object.keys(OPT_IN_TESTS).filter((path) => existsSync(join(root, path)));
+  return [
+    ...new Set([...discovered.unit, ...discovered.integration, ...discovered.e2e, ...optIn]),
+  ].sort();
 }
 
 /** Work item names declared in the contract's "Work items" table. */
@@ -125,7 +141,7 @@ export function checkSubscriptionContract(root: string): ContractFinding[] {
     }
     for (const path of requirement.verification.paths) {
       const testFile = join(root, path);
-      if (!/\.test\.tsx?$/.test(path) || !existsSync(testFile)) {
+      if (!isTestFile(path) || !existsSync(testFile)) {
         findings.push({
           file: CONTRACT_PATH,
           line: requirement.line,
@@ -140,9 +156,7 @@ export function checkSubscriptionContract(root: string): ContractFinding[] {
       }
     }
   }
-  const testFiles: string[] = [];
-  for (const testRoot of TEST_ROOTS) listTestFiles(root, join(root, testRoot), testFiles);
-  for (const path of testFiles) {
+  for (const path of listTestFiles(root)) {
     if (path === SELF_TEST) continue;
     const lines = readFileSync(join(root, path), "utf8").split("\n");
     lines.forEach((line, index) => {

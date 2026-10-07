@@ -20,7 +20,9 @@ for it until the matching requirement below is implemented:
 - Every requirement has a stable ID (`SUB-<AREA>-<NN>`). IDs are never reused
   or renumbered; a retired requirement keeps its ID and is marked retired.
 - Each requirement ends with a `Verification:` line. It lists the test files
-  that assert the requirement, or `pending` with the work item (see
+  (unit `*.test.ts(x)`, integration `*.integration.ts` or end-to-end
+  `*.e2e.ts`, anywhere CI discovers tests) that assert the requirement, or
+  `pending` with the work item (see
   [Work items](#work-items)) that will add them. A test asserts a requirement by naming its ID in the test title.
 - `bun run check:subscription-contract` runs as the `subscription-contract`
   source guard on every CI plan (full, focused and documentation-only), and

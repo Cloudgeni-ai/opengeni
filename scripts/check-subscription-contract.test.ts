@@ -84,3 +84,26 @@ test("a test-backed requirement passes when its test names the ID", () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("integration and end-to-end tests, including the root test tree, are verification and are scanned", () => {
+  const root = fixtureRepository({
+    [CONTRACT_PATH]: [
+      "- **SUB-FIXTURE-01** Verification: `test/integration/flow.integration.ts`.",
+      "- **SUB-FIXTURE-02** Verification: `apps/x/test/flow.e2e.ts`.",
+    ].join("\n"),
+    "test/integration/flow.integration.ts": 'test("SUB-FIXTURE-01 behaves", () => {});\n',
+    "apps/x/test/flow.e2e.ts": 'test("SUB-FIXTURE-02 behaves", () => {});\n',
+    "test/e2e/other.e2e.ts": 'test("SUB-FIXTURE-07 is not defined", () => {});\n',
+  });
+  try {
+    expect(checkSubscriptionContract(root)).toEqual([
+      {
+        file: "test/e2e/other.e2e.ts",
+        line: 1,
+        message: "SUB-FIXTURE-07 is not defined in " + CONTRACT_PATH,
+      },
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
