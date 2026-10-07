@@ -1,6 +1,6 @@
 import { ChatComposer, ComposerTranscriptionControl } from "@opengeni/react";
 import { createRoot } from "react-dom/client";
-import { useState, type ReactNode } from "react";
+import { lazy, Suspense, useState, type ReactNode } from "react";
 import { NewSessionRealtimeControl } from "@opengeni/react/realtime";
 import { ComposerMobilePlus } from "../src/components/composer-mobile-plus";
 import { NewSessionDraftSyncNotice } from "../src/components/new-session-draft-sync-notice";
@@ -19,6 +19,11 @@ import "../src/styles.css";
 const newSession = new URLSearchParams(location.search).has("new-session");
 const sendingPreview = new URLSearchParams(location.search).has("sending");
 const attachmentPreview = new URLSearchParams(location.search).has("attachment");
+const AgentLearningSettingsEditor = lazy(() =>
+  import("../src/components/knowledge/agent-learning-settings").then((module) => ({
+    default: module.AgentLearningSettingsEditor,
+  })),
+);
 
 function PickerFixture({ leading, label }: { leading?: ReactNode; label: string }) {
   return (
@@ -54,6 +59,7 @@ function Fixture() {
     newSession ? "Can you help me integrate an AI chat in the analytics dashboard?" : "",
   );
   const [sent, setSent] = useState(false);
+  const [agentTabOpen, setAgentTabOpen] = useState(false);
   return (
     <TooltipProvider>
       <main
@@ -113,6 +119,7 @@ function Fixture() {
                         sessionId: "session-fixture",
                         scope: "workspace",
                         canEdit: true,
+                        onOpen: () => setAgentTabOpen(true),
                       }
                     : undefined
                 }
@@ -160,6 +167,20 @@ function Fixture() {
           <NewSessionDraftSyncNotice />
         ) : null}
         {sent ? <p role="status">Preview only: Send was pressed.</p> : null}
+        {agentTabOpen ? (
+          // Only navigation is supplied by the fixture; settings stay the
+          // production editor, now reached through the existing chat's Agent tab.
+          <section aria-label="Agent tab">
+            <Suspense fallback={<p role="status">Loading chat settings</p>}>
+              <AgentLearningSettingsEditor
+                workspaceId="composer-fixture"
+                scope="workspace"
+                source={{ kind: "chat", id: "session-fixture" }}
+                canEdit
+              />
+            </Suspense>
+          </section>
+        ) : null}
       </main>
     </TooltipProvider>
   );

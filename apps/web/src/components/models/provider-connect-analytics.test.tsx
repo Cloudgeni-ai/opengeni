@@ -133,7 +133,7 @@ test("organization subscription model controls keep pool and legacy credentials 
 });
 
 test("the API-key provider Connect button carries the provider's connect label", async () => {
-  for (const action of ["connect_ai_gateway", "connect_openrouter"] as const) {
+  for (const action of ["connect_ai_gateway", "connect_openrouter", "connect_opper"] as const) {
     const state = {
       config: {
         title: "Provider",

@@ -109,7 +109,7 @@ test("a bare HTTP status classifies only 401, 402, 403 and 429", () => {
     retryUnhelpful: false,
   });
   expect(failedSessionCopy({ ...summary, reason: "429 Too Many Requests" }).reason).toBe(
-    "The model provider is rate limiting requests. Try again in a minute.",
+    "This model is throttled due to high demand. Try again in a few minutes.",
   );
   // Other statuses say nothing about the cause: keep the evidence in Details.
   for (const reason of [
@@ -146,9 +146,49 @@ test("provider rate limits separate daily limits and quota from transient thrott
     retryUnhelpful: false,
   });
   expect(failedSessionCopy(coded("429 Too Many Requests"))).toMatchObject({
-    reason: "The model provider is rate limiting requests. Try again in a minute.",
+    reason: "This model is throttled due to high demand. Try again in a few minutes.",
     retryUnhelpful: false,
   });
+});
+
+test("temporary model capacity failures offer the existing model picker, without promising a reset", () => {
+  for (const [failureCode, message, chooseMessage] of [
+    [
+      "provider_rate_limited",
+      "This model is throttled due to high demand. Try again in a few minutes.",
+      "This model is throttled due to high demand. Select a different model, or try again in a few minutes.",
+    ],
+    [
+      "provider_unavailable",
+      "This model is temporarily unavailable. Try again in a few minutes.",
+      "This model is temporarily unavailable. Select a different model, or try again in a few minutes.",
+    ],
+  ] as const) {
+    const failure = { ...summary, reason: "Temporary provider failure", failureCode };
+    expect(failedSessionCopy(failure, false, false, true).reason).toBe(chooseMessage);
+    expect(failedSessionCopy(failure, false, true, true).reason).toBe(message);
+    expect(failedSessionCopy(failure, false, false, false).reason).toBe(message);
+    expect(failedSessionCopy(failure, true, false, true).reason).toBe(
+      "This workspace is out of Opengeni credits.",
+    );
+  }
+});
+
+test("typed quota scope stays authoritative over a recorded rate-limit recovery streak", () => {
+  const failure = {
+    ...summary,
+    reason: "Automatic recovery stopped",
+    failureCode: "provider_rate_limited",
+    consecutiveRecoveryCount: 5,
+    quotaScope: "daily",
+    recordedDetail: "429 temporary rate limit",
+  };
+  expect(failedSessionCopy(failure, false, false, true).reason).toBe(
+    "This model's daily limit has been reached. Choose another model below.",
+  );
+  expect(failedSessionCopy({ ...failure, quotaScope: "credits" }).reason).toBe(
+    "The model provider account for this model is out of credits.",
+  );
 });
 
 test("an exhausted provider quota is terminal copy that points at the model picker", () => {
@@ -356,7 +396,7 @@ test("preclaim presentation preserves existing authored database and structural 
       structuralSandboxFailure: true,
     }),
   ).toEqual({ reason: authored, unavailableModel: false });
-  const database = "OpenGeni encountered a database error.";
+  const database = "Opengeni encountered a database error.";
   expect(
     failedSessionCopy({
       ...summary,

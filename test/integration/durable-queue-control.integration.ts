@@ -192,6 +192,9 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
           sessionId: session.id,
+          // The same human who started the work steers it, as the HTTP route
+          // does; their agent messages join that request's context.
+          actor: grant.subjectId,
           text: "urgent correction",
           resources: [],
           tools: [],

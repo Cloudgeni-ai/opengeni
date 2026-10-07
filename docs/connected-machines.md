@@ -582,6 +582,29 @@ oversized-reply wall does not apply on this path; output is instead bounded by
 the runner's retention quotas, and exceeding them fails typed with exact
 counters, never silently truncated.
 
+Foreground output can be released within a long turn once the exact tool's
+call/result receipt and structural output event are durable. The receipt preserves
+recovery while a parallel SDK call batch is still incomplete. Only completed
+operations owned by that tool are eligible: parallel results and unscoped setup
+work remain retained until their own durability boundary. Each final
+acknowledgement still follows journal persistence; failed persistence or publish
+keeps the frontier available for retry. Turn completion finalizes remaining
+accepted output. Durably adopted background commands keep their separate output
+capture and terminal-settlement lifecycle.
+
+Background output has an independent durable custody receipt containing its
+verified exit sequence and attach generation. It is recorded only after all
+retained bytes have been captured in PostgreSQL. A terminal-only reconciliation
+queue retries the final acknowledgement against the original operation and
+connection, including after worker loss; a newer enrollment route is never
+substituted. Already captured output takes priority over full replay, so older
+uncaptured results cannot delay final acknowledgements for saved results. Publish
+success leaves the obligation pending until an exact runner
+observation establishes that output is no longer retained. Completion input to
+the model remains independent. Legacy rows require full replay before a receipt
+can be recorded; output lost before capture is explicitly marked unavailable
+without manufacturing consumption or an acknowledgement.
+
 After process exit and pipe drain, the native runner releases both transport-sized
 read buffers before waiting for result collection. Retained output and the terminal
 record remain replayable until their normal acknowledgement/retention boundary;
@@ -698,6 +721,33 @@ installations may require their service manager to start the verified canonical
 executable path after the old process exits.
 `opengeni-agent run` is the explicit foreground alternative.
 
+Self-update requires settled accepted work across every connection. Relay pumps,
+PTY child/IO cleanup, blocking native actions, attached-browser commands and
+their original reply transport retain the opening reservation after a waiter or
+connection generation ends. A timeout or disconnected profile does not prove a
+physical command stopped, and the updater never fabricates a consumer ACK.
+Each counted reply carries its transport receipt in the same publication
+command. Success requires empty internal buffers and a flush of that stream;
+losing the stream fails its attached receipt before reconnect. A replacement
+socket cannot prove that the previous reply was sent.
+Controller admission is fenced atomically during its idle proof; failed or
+deferred updates release only their own fence. Missing settlement makes updates
+unavailable for the running process while ordinary work remains usable. Older
+controller builds without the update-admission transaction cannot authorize
+replacement from an unfenced idle snapshot. A lost fence-release reply retains
+its exact operation owner; ordinary scoped recovery retries only that release
+after host update admission has reopened. Failed helper/factory cleanup and
+forced or nonzero helper termination remain unsettled even after the original
+owner leaves active inventory. Helper EOF joins persistent capture producers;
+missing ScreenCaptureKit stop completion cannot become a successful shutdown.
+The current Windows command-group dependency cannot prove full-job
+exit; commands keep their ordinary results, but accepting a command fences
+subsequent self-update for that process. A positive same-job exit proof is
+required before normal Windows update eligibility can be restored. Unexpected
+controller exit and forced controller termination likewise preserve uncertainty
+after the old controller is removed from the active inventory. They cannot be
+made update-eligible by reconnecting or replacing the controller.
+
 Enrollment approval lasts until it is revoked; it is not a monthly login.
 The command and relay transport credentials last 30 days. The agent renews them
 with seven days remaining, using its existing install key and current enrollment
@@ -705,6 +755,9 @@ generation. A machine returning after a longer offline period uses the same
 renewal path. Revocation, removal and a superseding re-enrollment deny renewal;
 renewal cannot change ownership, scope or screen-control consent. Updated
 credentials load into the existing process, preserving host operations.
+The signed `/v1/enrollments/renew` machine protocol is outside the browser API
+contract-revision fence, like device polling and token exchange. Its install-key,
+enrollment-generation and revocation checks still apply in production.
 
 Deploy the API renewal endpoint before upgrading agents. An older API returns
 404 and the agent retries with jitter while retaining its existing credentials.
@@ -981,6 +1034,19 @@ remain enforced. Reuse honors
 explicit placement, identity, revision, network route and linked desktop choices.
 Debugger continuation pages are drained without treating a full page as lost
 history; actual sequence gaps still terminate the connection.
+
+An attached tab's debugger disconnect invalidates its cached target, document,
+frame and element authority without restarting Chrome or changing other tabs.
+A later read can reattach the same surviving tab with fresh fences. Chrome's
+`canceled_by_user` disconnect requires reconnecting the profile; it is never
+silently overridden. Detachment during pending input or other possible effects preserves an unknown
+outcome and blocks automatic reattachment until the profile reconnects. A late
+reply cannot revive the old attachment, and no input or navigation is replayed.
+Acknowledged partial input followed by a disconnect also remains outcome unknown.
+Queued navigation, DOM changes, emulation and unclassified commands cannot run
+under a replacement debugger attachment.
+Read-only disconnect failures use typed unavailable responses instead of a
+generic internal error.
 
 Native computer protocol version 3 separates `capture_still` (including JPEG and
 size options) from reading an explicitly started live stream. macOS helpers use

@@ -98,6 +98,28 @@ async function createUnderlyingOwnerLease(): Promise<UnderlyingOwnerLease> {
   return { ownerId, release: () => undefined };
 }
 
+/**
+ * Owner ids whose document still holds its Web Lock, or null when this browser
+ * cannot answer. A lock is released the moment its tab closes or crashes, so a
+ * recording whose owner is absent here is recoverable immediately instead of
+ * after the heartbeat stale window.
+ */
+export async function liveVoiceRecordingOwnerIds(): Promise<ReadonlySet<string> | null> {
+  if (!hasWebLocks() || typeof navigator.locks.query !== "function") return null;
+  try {
+    const snapshot = await navigator.locks.query();
+    const live = new Set<string>();
+    for (const lock of [...(snapshot.held ?? []), ...(snapshot.pending ?? [])]) {
+      if (lock.name?.startsWith(VOICE_RECORDING_OWNER_LOCK_PREFIX)) {
+        live.add(lock.name.slice(VOICE_RECORDING_OWNER_LOCK_PREFIX.length));
+      }
+    }
+    return live;
+  } catch {
+    return null;
+  }
+}
+
 function hasWebLocks(): boolean {
   return (
     typeof navigator !== "undefined" &&

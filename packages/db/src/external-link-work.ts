@@ -9,7 +9,7 @@ import { nestedPostgresSqlState } from "./persistence-errors";
 type Scope = { accountId: string; workspaceId: string };
 type Source =
   | { kind: "direct" }
-  | { kind: "causal" | "child"; turnId: string }
+  | { kind: "causal" | "child" | "agent"; turnId: string }
   | { kind: "scheduled"; taskId: string; taskRevision: number };
 
 /** Does not consult or resurrect the key used at creation. Its immutable
@@ -106,7 +106,7 @@ export async function captureExternalLinkTurnAuthority(
         source_kind, source_turn_id, source_task_id, source_task_revision)
       values (${input.turnId}::uuid, ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid,
         ${snapshot.actor.linkId}::uuid, ${snapshot.actor.linkRevision}, ${JSON.stringify(snapshot)}::jsonb, ${source.kind},
-        ${source.kind === "causal" || source.kind === "child" ? source.turnId : null}::uuid,
+        ${"turnId" in source ? source.turnId : null}::uuid,
         ${source.kind === "scheduled" ? source.taskId : null}::uuid,
         ${source.kind === "scheduled" ? source.taskRevision : null})`);
     },
@@ -119,7 +119,7 @@ export async function inheritExternalLinkTurnAuthority(
     sessionId: string;
     turnId: string;
     sourceTurnId: string;
-    kind: "causal" | "child";
+    kind: "causal" | "child" | "agent";
   },
 ): Promise<void> {
   const snapshot = await getExternalLinkTurnSnapshot(db, input, input.sourceTurnId);

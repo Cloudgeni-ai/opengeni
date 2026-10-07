@@ -1,6 +1,5 @@
 // Server-only examples. Import these functions into the product's provisioning
-// script after its normal .env loader. Never log a client, request credentials,
-// key-creation response, webhook response or provider response.
+// script after its normal .env loader.
 import type {
   AgentConfigRequest,
   CreateConnectionRequest,
@@ -11,6 +10,7 @@ import type {
 } from "@opengeni/sdk";
 import { OpenGeniClient } from "@opengeni/sdk";
 import { OpenGeniAutomationsClient } from "@opengeni/sdk/automations";
+import type { OpenGeni } from "@opengeni/sdk/chat";
 import {
   getWorkspaceAllowance,
   getWorkspaceAllowanceState,
@@ -23,10 +23,12 @@ import {
   testWorkspaceWebhook,
 } from "@opengeni/sdk/workspace-integrations";
 
+// The canonical product agent: only the session's own tools plus asking the
+// user. With sandboxBackend "none" it needs no empty tool/Skill lists, and the
+// renderer defaults to "opengeni" (set "markdown" only for a plain-Markdown UI).
 export const productAgent: AgentConfigRequest = {
   identity: "You are Acme's product assistant. Be brief and factual.",
   capabilities: "none",
-  renderer: "opengeni",
 };
 
 export function serverClient(env: Record<string, string | undefined>) {
@@ -49,6 +51,14 @@ export async function createSetupKey(admin: OpenGeniClient, organizationId: stri
   });
 }
 
+// The workspace the embedding proxy uses for this tenant (`resolve` returning
+// { user, tenant }), created on first use. Use it for workspace-level setup.
+export async function tenantWorkspaceId(og: OpenGeni, tenant: string) {
+  return await og.workspaceId({ tenant });
+}
+
+// Advanced: explicit provisioning when the product manages workspaces itself;
+// its `resolve` then returns { user, workspaceId }.
 export async function ensureProductWorkspace(
   og: OpenGeniClient,
   organizationId: string,
@@ -75,18 +85,19 @@ export async function ensureProductWorkspace(
   return { workspace, created: result.created, config };
 }
 
+// Optional: workspace defaults for sessions created without an `agent`. The
+// proxy's createSession hook already sets the agent per session.
 export async function configureAgent(og: OpenGeniClient, workspaceId: string) {
-  const config = await og.getClientConfig({ workspaceId });
-  if (config.agentConfig?.enabled !== true) return { configured: false as const };
   const before = await og.getWorkspace(workspaceId);
   // Read/merge desired settings in a real migration; don't write on every chat.
   if (JSON.stringify(before.settings.sessionAgentDefaults) !== JSON.stringify(productAgent)) {
     await og.updateWorkspaceSettings(workspaceId, { sessionAgentDefaults: productAgent });
   }
   const verified = await og.getWorkspace(workspaceId);
-  return { configured: true as const, defaults: verified.settings.sessionAgentDefaults };
+  return { defaults: verified.settings.sessionAgentDefaults };
 }
 
+// Advanced: the proxy admits resolved users on first use.
 export async function admitProductUser(
   og: OpenGeniClient,
   workspaceId: string,
@@ -112,7 +123,7 @@ export async function admitProductUser(
 export async function createProductConnection(
   og: OpenGeniClient,
   workspaceId: string,
-  request: CreateConnectionRequest, // Write-only credentials; never log.
+  request: CreateConnectionRequest,
 ) {
   const connection = await og.createConnection(workspaceId, request);
   const verified = (await og.listConnections(workspaceId)).find(
@@ -174,12 +185,6 @@ export async function configureSchedule(
   serverId: string,
   timeZone: string,
 ) {
-  const config = await og.getClientConfig({ workspaceId });
-  if (!config.agentConfig?.enabled) {
-    throw new Error(
-      "Minimal scheduled agents need agent configuration admission on this deployment",
-    );
-  }
   const setupKey = "acme-product:morning-summary";
   const matches = (await og.listScheduledTasks(workspaceId)).filter(
     (task) => task.metadata.developerSetupKey === setupKey,
@@ -298,18 +303,14 @@ export async function createSmokeSession(
   og: OpenGeniClient,
   workspaceId: string,
   idempotencyKey: string, // Saved before request, reused on ambiguous retries.
-  tools: CreateSessionRequest["tools"] = [],
+  tools?: CreateSessionRequest["tools"], // Verified product server refs, once wired.
 ) {
-  const config = await og.getClientConfig({ workspaceId });
   const session = await og.createSession(workspaceId, {
     initialMessage: "Reply SETUP_OK, then use the selected product read tool if available.",
     idempotencyKey,
+    agent: productAgent,
     sandboxBackend: "none",
-    tools,
-    bundledSkillIds: [],
-    ...(config.agentConfig?.enabled
-      ? { agent: productAgent }
-      : { instructions: productAgent.identity!, firstPartyMcpTools: [] }),
+    ...(tools ? { tools } : {}),
   });
   return {
     session: await og.getSession(workspaceId, session.id),

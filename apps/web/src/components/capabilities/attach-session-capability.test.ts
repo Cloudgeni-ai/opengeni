@@ -119,10 +119,7 @@ test("native OAuth return attaches freshly enabled tools and first-party names",
     }) as Awaited<ReturnType<OpenGeniBrowserClient["listCapabilities"]>>;
   await completeSessionCapabilityOAuth(h.client, "w", "s", "api:fiken");
   expect(h.updateSessionToolPolicy.mock.calls[0]?.[2]).toMatchObject({
-    tools: [
-      { kind: "mcp", id: "old" },
-      { kind: "mcp", id: "opengeni" },
-    ],
+    tools: [{ kind: "mcp", id: "old" }],
     firstPartyMcpTools: ["session_pause", "fiken_companies_list", "fiken_invoices_list"],
     expectedVersion: 7,
   });

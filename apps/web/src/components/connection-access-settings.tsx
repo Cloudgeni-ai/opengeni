@@ -30,6 +30,7 @@ export type ConnectionAccessKind =
   | "supergrok"
   | "vercel_gateway"
   | "openrouter"
+  | "opper"
   | "anthropic"
   | "claude_subscription";
 

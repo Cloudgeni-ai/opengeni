@@ -44,7 +44,7 @@ Commands:
 - `ogtool list [--json] [--query <substring>] [--limit <1..100>] [--offset <integer>]`
 - `ogtool list --full` — the previous full catalog JSON, including identity and schemas
 - `ogtool show <tool-path-or-model-name>` — one tool's details and schemas as JSON
-- `ogtool call <tool-path-or-model-name> [json-object]`
+- `ogtool call <tool-path-or-model-name> [json-object] [--full]` — the tool result as JSON. A text block that only repeats `structuredContent` as JSON is omitted, so the payload prints once; prose, differing text, annotated text, and non-text blocks stay. `--full` prints the exact result.
 - `ogtool declarations [output-file]`
 - `ogtool doctor`
 - `ogtool --version`

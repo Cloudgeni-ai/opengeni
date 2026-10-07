@@ -267,7 +267,7 @@ export default function SwitchSection() {
         >
           <SettingRow
             label="Let Codex chats switch to another provider when the Codex plan runs out mid-session"
-            description="When on, a chat that hits its Codex usage limit continues on OpenGeni credits or AI Gateway instead of waiting for the limit to reset."
+            description="When on, a chat that hits its Codex usage limit continues on Opengeni credits or AI Gateway instead of waiting for the limit to reset."
             control={<Switch {...version} />}
           />
         </StateCell>

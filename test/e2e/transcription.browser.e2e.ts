@@ -173,14 +173,14 @@ describe("native composer voice-input browser acceptance", () => {
 
     await page.getByRole("button", { name: "Start voice input" }).click();
     const stop = page.getByRole("button", { name: "Stop and transcribe" });
-    const cancel = page.getByRole("button", { name: "Cancel recording" });
+    const cancel = page.getByRole("button", { name: "Stop without transcribing" });
     await stop.waitFor();
 
     const audit = await page.locator(".og-composer-footer").evaluate((footer) => {
       const button = (label: string) =>
         footer.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
       const stopButton = button("Stop and transcribe");
-      const cancelButton = button("Cancel recording");
+      const cancelButton = button("Stop without transcribing");
       const stopRect = stopButton?.getBoundingClientRect();
       const cancelRect = cancelButton?.getBoundingClientRect();
       const footerRect = footer.getBoundingClientRect();
@@ -250,6 +250,50 @@ describe("native composer voice-input browser acceptance", () => {
     await context.close();
   });
 
+  test("embedded container composer keeps a saved recording readable at phone width", async () => {
+    const context = await browser.newContext({
+      viewport: { width: 360, height: 800 },
+      hasTouch: true,
+    });
+    const page = await context.newPage();
+    await page.goto(`${baseUrl}/transcription.html?theme=light&chrome=crowded&basis=container`, {
+      waitUntil: "networkidle",
+    });
+    await page.getByRole("button", { name: "Start voice input" }).click();
+    await page.getByRole("button", { name: "Stop and transcribe" }).waitFor();
+    // Longer than an accidental start: Escape keeps the dictation.
+    await page.waitForTimeout(3_500);
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Transcribe saved recording" }).waitFor();
+    const audit = await page.locator(".og-composer-footer").evaluate((footer) => {
+      const label = footer.querySelector<HTMLElement>(".og-transcription-recovered-label");
+      const send = footer.querySelector<HTMLElement>('button[aria-label="Send message"]');
+      const footerRect = footer.getBoundingClientRect();
+      const inside = (element: HTMLElement | null) => {
+        const rect = element?.getBoundingClientRect();
+        return Boolean(
+          rect &&
+          rect.width > 0 &&
+          rect.left >= footerRect.left - 1 &&
+          rect.right <= footerRect.right + 1,
+        );
+      };
+      return {
+        text: label?.textContent ?? null,
+        truncated: label ? label.scrollHeight > label.clientHeight + 1 : true,
+        labelInside: inside(label),
+        sendInside: inside(send),
+        overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      };
+    });
+    expect(audit.text).toBe("Recording saved on this device.");
+    expect(audit.truncated).toBe(false);
+    expect(audit.labelInside).toBe(true);
+    expect(audit.sendInside).toBe(true);
+    expect(audit.overflow).toBeLessThanOrEqual(1);
+    await context.close();
+  });
+
   test("reload recovers a timesliced recording without reopening the microphone", async () => {
     const context = await browser.newContext({ viewport: { width: 768, height: 960 } });
     const page = await context.newPage();
@@ -266,14 +310,17 @@ describe("native composer voice-input browser acceptance", () => {
     ).toBe("1");
 
     await page.reload({ waitUntil: "networkidle" });
-    await page.getByRole("button", { name: "Retry voice input" }).waitFor();
+    // The interrupted capture transcribes automatically but is never appended
+    // behind the user's back: it waits for an explicit insert.
+    const insert = page.getByRole("button", { name: "Insert saved transcript" });
+    await insert.waitFor();
     expect(
       await page.evaluate(() => document.documentElement.dataset.transcriptionMicRequests),
     ).toBeUndefined();
-    await page.getByRole("button", { name: "Retry voice input" }).click();
-    await page.waitForFunction(
-      () => document.documentElement.dataset.transcriptionUpload === "completed",
-    );
+    expect(
+      await page.getByText("Transcript saved. Insert it into your draft?").count(),
+    ).toBeGreaterThan(0);
+    await insert.click();
     expect(await page.getByRole("textbox", { name: "Message the agent" }).inputValue()).toBe(
       "Existing editable draft fixture transcript",
     );
@@ -295,7 +342,9 @@ describe("native composer voice-input browser acceptance", () => {
     await denied.getByRole("button", { name: "Start voice input" }).click();
     await denied
       .getByRole("alert")
-      .filter({ hasText: "Microphone permission was denied. Your draft was not changed." })
+      .filter({
+        hasText: "Microphone access is blocked. Allow it in site settings, then try again.",
+      })
       .waitFor();
     expect(await denied.getByRole("textbox", { name: "Message the agent" }).inputValue()).toBe(
       "Existing editable draft",
@@ -312,7 +361,7 @@ describe("native composer voice-input browser acceptance", () => {
       () => document.documentElement.dataset.transcriptionUpload === "started",
     );
     await hanging.keyboard.press("Escape");
-    await hanging.getByRole("button", { name: "Retry voice input" }).waitFor();
+    await hanging.getByRole("button", { name: "Transcribe saved recording" }).waitFor();
     expect(await hanging.getByRole("button", { name: "Discard saved recording" }).count()).toBe(1);
     expect(await hanging.getByRole("textbox", { name: "Message the agent" }).inputValue()).toBe(
       "Existing editable draft",

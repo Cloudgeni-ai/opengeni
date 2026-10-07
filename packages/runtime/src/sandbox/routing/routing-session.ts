@@ -27,6 +27,7 @@
 // real `readActiveSandbox` DAO + a backend resolver without coupling the leaf to
 // `@opengeni/db`.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { SandboxWorkspaceReadNotFoundError } from "@openai/agents/sandbox";
 import { SandboxFilesystemNotFoundError } from "modal";
 import type { ExposedPortEndpoint } from "../stream-port";
@@ -42,6 +43,7 @@ import {
   ProviderCommandStartRejectedError,
   ProviderCommandStartOutcomeUnknownError,
   ProviderCommandInputOutcomeUnknownError,
+  ProviderCommandObservationUnavailableError,
   type ProviderCommandPersistence,
   type ProviderCommandSession,
 } from "../provider-command-session";
@@ -78,6 +80,7 @@ import type {
 } from "../channel-a";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../exec-banner";
 import { withSandboxProviderOperation } from "../provider-operation-gate";
+import { hasModalCommandStartOutcomeUnknownBoundary } from "../providers/modal-command-start-errors";
 
 /** The per-session active-sandbox pointer the proxy re-reads on every op. Mirror
  *  of `@opengeni/db`'s `ActiveSandboxPointer` (structural, so the leaf does not
@@ -126,9 +129,10 @@ export interface RoutableBackendSession extends ProviderCommandSession {
   resolveExposedPort?(port: number): Promise<ExposedPortEndpoint>;
   serializeSessionState?(): Promise<unknown>;
   /** Release op-stream replay retention only after the caller has durably
-   * accepted every settled result. Routing proxies aggregate this hook across
+   * accepted the supplied tool results (or all settled results when omitted).
+   * Routing proxies aggregate this hook across
    * every Connected Machine backend reached during their lifetime. */
-  finalizeOpStreamOps?(): Promise<void>;
+  finalizeOpStreamOps?(toolCallIds?: readonly string[]): Promise<void>;
 }
 
 /** The resolved active backend for an epoch: the live session + the sandbox id it
@@ -512,6 +516,115 @@ export class RoutingMutationOutcomeUnknownError extends Error {
   ) {
     super(message, options);
     this.retainedProcess = options?.retainedProcess ?? null;
+    const scope = mutationOutputRejection.getStore();
+    if (scope && !scope.unknown) scope.unknown = this;
+  }
+}
+
+const mutationOutputRejection = new AsyncLocalStorage<{
+  error: RoutingMutationOutputRejectedError | null;
+  unknown: Error | null;
+}>();
+
+/** SDK fallbacks may render caught failures. Retain the actual typed rejection
+ * per invocation, stop its later dispatches, and rethrow it after rendering.
+ * Nested invocations share the fence; unrelated invocations never inherit it. */
+export async function withRoutingMutationOutputRejectionFence<T>(
+  invoke: () => Promise<T>,
+): Promise<T> {
+  if (mutationOutputRejection.getStore()) return await invoke();
+  const scope = {
+    error: null as RoutingMutationOutputRejectedError | null,
+    unknown: null as Error | null,
+  };
+  return await mutationOutputRejection.run(scope, async () => {
+    let result: T;
+    try {
+      result = await invoke();
+    } catch (error) {
+      const rejection = scope.unknown ? mutationOutputRejectionFailure(scope, { error }) : null;
+      if (rejection) throw rejection;
+      throw error;
+    }
+    const rejection = mutationOutputRejectionFailure(scope);
+    if (rejection) throw rejection;
+    return result;
+  });
+}
+
+function mutationOutputRejectionFailure(
+  scope: { error: RoutingMutationOutputRejectedError | null; unknown: Error | null } | undefined,
+  caught?: { error: unknown },
+): Error | null {
+  if (!scope?.error) return null;
+  // A settled item never proves that a different item or a partial provider
+  // batch completed. Keep both original typed errors when the SDK rendered them.
+  return scope.unknown
+    ? new AggregateError(
+        [
+          scope.unknown,
+          scope.error,
+          ...(caught && caught.error !== scope.unknown && caught.error !== scope.error
+            ? [caught.error]
+            : []),
+        ],
+        "Sandbox mutation uncertainty remains alongside rejected settled output; no operation was replayed",
+        caught ? { cause: caught.error } : undefined,
+      )
+    : scope.error;
+}
+
+function retainTypedMutationUncertainty(error: unknown): void {
+  const scope = mutationOutputRejection.getStore();
+  if (!scope || scope.unknown) return;
+  try {
+    if (
+      error instanceof RoutingMutationOutcomeUnknownError ||
+      error instanceof ProviderCommandStartOutcomeUnknownError ||
+      error instanceof ProviderCommandInputOutcomeUnknownError ||
+      error instanceof ProviderCommandObservationUnavailableError ||
+      hasModalCommandStartOutcomeUnknownBoundary(error)
+    ) {
+      if (error instanceof Error) scope.unknown = error;
+    }
+  } catch {
+    // A hostile provider graph cannot manufacture a typed boundary.
+  }
+}
+
+function assertNoCaughtMutationOutputRejection(): void {
+  const error = mutationOutputRejectionFailure(mutationOutputRejection.getStore());
+  if (error) throw error;
+}
+
+/** The exact provider outcome was durably settled, but mutable authority
+ * rejected its output. Physical certainty does not permit replay or acceptance. */
+export class RoutingMutationOutputRejectedError extends Error {
+  readonly name = "RoutingMutationOutputRejectedError";
+  readonly code = "sandbox_mutation_output_rejected";
+  readonly retryable = false;
+
+  constructor(
+    public readonly op: string,
+    public readonly reasonCode: string,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `Workspace mutation "${op}" was physically settled, but its output was rejected by ${reasonCode}; the operation was not replayed`,
+      options,
+    );
+    const scope = mutationOutputRejection.getStore();
+    if (scope && !scope.error) scope.error = this;
+  }
+}
+
+export function isRoutingMutationOutputRejectedError(
+  error: unknown,
+): error is RoutingMutationOutputRejectedError {
+  try {
+    return error instanceof RoutingMutationOutputRejectedError;
+  } catch {
+    return false;
   }
 }
 
@@ -826,14 +939,15 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * Callers own the durability point: worker turns invoke this after history is
    * persisted; one-off API calls invoke it after their result has been accepted
    * in memory. A failed backend stays registered so a later durability hook can
-   * retry it, while successful backends are forgotten immediately.
+   * retry it. Scoped hooks retain backends for other results; the complete
+   * boundary forgets successful backends.
    */
-  async finalizeOpStreamOps(): Promise<void> {
+  async finalizeOpStreamOps(toolCallIds?: readonly string[]): Promise<void> {
     const failures: unknown[] = [];
     for (const backend of [...this.opStreamBackends]) {
       try {
-        await backend.finalizeOpStreamOps?.();
-        this.opStreamBackends.delete(backend);
+        await backend.finalizeOpStreamOps?.(toolCallIds);
+        if (toolCallIds === undefined) this.opStreamBackends.delete(backend);
       } catch (error) {
         failures.push(error);
       }
@@ -1179,6 +1293,17 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       await this.deps.afterProcessMutation?.(pending);
       record.pendingMutationSettlement = null;
     } catch (error) {
+      const durableTerminal =
+        pending.outcome === "resolved" ? durableRetainedProcessTerminal(error) : null;
+      if (durableTerminal) {
+        // The retried settlement committed, but the process was durably
+        // settled terminal first and the pending output was rejected. Report
+        // the stored terminal truth; nothing is replayed.
+        record.pendingMutationSettlement = null;
+        record.pendingTerminal = null;
+        this.retainedProcesses.delete(record.process.providerSessionId);
+        return terminalResult(durableTerminal, record.process.providerSessionId);
+      }
       throw new RoutingMutationOutcomeUnknownError(
         pending.op,
         `Retained-process mutation ${pending.op} still lacks durable physical settlement; no later process mutation was admitted`,
@@ -1208,6 +1333,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   private async dispatchProcessMutationOnce(args: unknown): Promise<string> {
+    assertNoCaughtMutationOutputRejection();
     const providerSessionId = providerSessionIdFromArgs(args);
     if (providerSessionId === null) throw new RoutingRetainedProcessNotFoundError(-1);
     const record = this.retainedProcess(providerSessionId);
@@ -1306,6 +1432,19 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       try {
         await this.deps.afterProcessMutation(pending);
       } catch (error) {
+        if (isRoutingMutationOutputRejectedError(error)) throw error;
+        const durableTerminal = durableRetainedProcessTerminal(error);
+        if (durableTerminal) {
+          // The provider call returned and its admission is physically
+          // settled, but durable settlement (the reaper's exact-proof
+          // reconciliation) won the race and recorded the process terminal
+          // first, so this output was rejected. Mirror the admission race:
+          // forget the local route, report the stored terminal truth instead
+          // of the rejected provider bytes, and never replay the provider call.
+          this.retainedProcesses.delete(providerSessionId);
+          await this.deps.observeProcessTerminal?.(record);
+          return terminalResult(durableTerminal, providerSessionId);
+        }
         record.pendingMutationSettlement = pending;
         throw new RoutingMutationOutcomeUnknownError(
           op,
@@ -1607,6 +1746,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     let attempt = 0;
     let lastError: unknown;
     while (attempt <= this.maxFenceRetries) {
+      assertNoCaughtMutationOutputRejection();
       const resolutionStartedAt = performance.now();
       let resolutionOutcome: RoutingSandboxPhaseOutcome = "failed";
       let backend: ResolvedActiveBackend;
@@ -1947,6 +2087,10 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           }
           if (retainedRecord) retainedRecord.durable = true;
         } catch (error) {
+          if (isRoutingMutationOutputRejectedError(error) && !retainedRecord) {
+            this.invalidate(backend);
+            throw error;
+          }
           if (
             error instanceof RoutingMutationOutcomeUnknownError &&
             error.retainedProcess !== null
@@ -2073,6 +2217,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       outcome = "ok";
       return result;
     } catch (error) {
+      retainTypedMutationUncertainty(error);
       materializationFailureReason = materializationVerificationDiagnostic(error)?.reason;
       if (isReadOnlyPathProbeMiss(op, error)) {
         outcome = "not_found";

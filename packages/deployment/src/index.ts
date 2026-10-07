@@ -248,6 +248,21 @@ export const JEV_CODE_SEARCH_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_CODE_SEARCH_MODE",
 ];
 
+/** Provider-agnostic web search (`web_search` / `web_fetch` agent tools).
+ * Keys are server runtime secrets: the worker calls the provider and the keys
+ * never reach a sandbox. Unset keeps the tools off. */
+export const WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_WEB_SEARCH_PROVIDER",
+  "OPENGENI_WEB_SEARCH_API_KEY",
+  "OPENGENI_WEB_SEARCH_BASE_URL",
+  "OPENGENI_WEB_FETCH_PROVIDER",
+  "OPENGENI_WEB_FETCH_API_KEY",
+  "OPENGENI_WEB_FETCH_BASE_URL",
+  "OPENGENI_WEB_SEARCH_PROVIDER_MODE",
+  "OPENGENI_WEB_SEARCH_PRICING_JSON",
+  "OPENGENI_WEB_SEARCH_REQUEST_TIMEOUT_MS",
+];
+
 /** Public workspace MCP OAuth rollout settings. The enable switch is
  * deployment-sensitive because OAuth needs a canonical managed/local human
  * session and one stable public issuer origin. */
@@ -1499,9 +1514,11 @@ export function requiredRuntimeEnvVars(
     "OPENGENI_MODEL_CATALOG_SOURCE",
     "OPENGENI_MODEL_COST_POLICY_JSON",
     "OPENGENI_MODEL_NOTES_JSON",
+    "OPENGENI_MANAGED_MODELS_JSON",
     "OPENGENI_CREDITS_DEFAULT_MODEL",
     "OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT",
     "OPENGENI_OPENROUTER_API_KEY",
+    "OPENGENI_OPPER_API_KEY",
   ] as const) {
     if (env[key]) vars.push(key);
   }
@@ -2805,6 +2822,7 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_MODEL_CATALOG_SOURCE", env.OPENGENI_MODEL_CATALOG_SOURCE),
     valueEnv("OPENGENI_MODEL_COST_POLICY_JSON", env.OPENGENI_MODEL_COST_POLICY_JSON),
     valueEnv("OPENGENI_MODEL_NOTES_JSON", env.OPENGENI_MODEL_NOTES_JSON),
+    valueEnv("OPENGENI_MANAGED_MODELS_JSON", env.OPENGENI_MANAGED_MODELS_JSON),
     valueEnv("OPENGENI_CREDITS_DEFAULT_MODEL", env.OPENGENI_CREDITS_DEFAULT_MODEL),
     valueEnv(
       "OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT",
@@ -2835,6 +2853,9 @@ function runtimeEnvValues(
       : []),
     ...(env.OPENGENI_OPENROUTER_API_KEY
       ? [requiredEnv("OPENGENI_OPENROUTER_API_KEY", env.OPENGENI_OPENROUTER_API_KEY)]
+      : []),
+    ...(env.OPENGENI_OPPER_API_KEY
+      ? [requiredEnv("OPENGENI_OPPER_API_KEY", env.OPENGENI_OPPER_API_KEY)]
       : []),
   ];
 
@@ -2991,6 +3012,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of JEV_CODE_SEARCH_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
 

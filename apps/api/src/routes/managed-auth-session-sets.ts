@@ -1,4 +1,8 @@
-import { assertManagedUserAdmission, getManagedSession } from "@opengeni/core";
+import {
+  assertManagedUserAdmission,
+  getManagedSession,
+  withManagedAuthSessionLookup,
+} from "@opengeni/core";
 import { randomUUID } from "node:crypto";
 import {
   BeginManagedAuthLoginTransactionRequest,
@@ -197,10 +201,12 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
   app.post("/v1/auth/session-set/bootstrap", async (context) => {
     const body = await bodyAs(context, BootstrapManagedAuthSessionSetRequest);
     const { authority, actorEpoch } = await requireMutation(context, deps, body.expectedGeneration);
-    const ambient = await requireAvailable(deps).managedAuth!.api.getSession({
-      headers: context.req.raw.headers,
-      returnHeaders: true,
-    });
+    const ambient = await withManagedAuthSessionLookup(() =>
+      requireAvailable(deps).managedAuth!.api.getSession({
+        headers: context.req.raw.headers,
+        returnHeaders: true,
+      }),
+    );
     assertManagedUserAdmission(deps.managedAuth!, ambient.response?.user);
     const authSessionId = ambient.response?.session?.id;
     if (typeof authSessionId !== "string") {

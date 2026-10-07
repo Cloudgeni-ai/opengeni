@@ -1,35 +1,42 @@
 # Vue conversation: Harbor guest desk
 
 A genuinely non-React host: Vue 3 single-file components and a Composition API
-composable, Vite, and the existing Bun Fetch adapter for
-`createSessionProxyHandler`. It talks to a standalone service through the
-**published** `@opengeni/sdk@7.5.0`; no repository SDK aliases, React packages,
-runtime embedding, new backend framework, or public deployment are needed.
-The UI is Harbor's, not OpenGeni's.
+composable, Vite, and the packaged `createSessionProxyHandler` mounted on
+`Bun.serve`. Embedding Opengeni stays one backend route plus your own UI: the
+browser talks only to its own origin, and the proxy acts as your authenticated
+user with the server-held organization API key. It uses the **published**
+`@opengeni/sdk@1.1.0`; no repository SDK aliases, React packages, runtime
+embedding, new backend framework, or public deployment are needed. The UI is
+Harbor's, not Opengeni's. For a React product, mount `OpenGeniChat` from
+`@opengeni/react` behind the same proxy instead (see the
+[SDK README](../../packages/sdk/README.md#embed-the-conversation-default)).
 
 ## Install and run
 
-Requirements: Node 22.12+ (Vite), npm, Bun 1.3.10+, and an existing managed
-OpenGeni deployment with a server-held full-access organization API key.
+Requirements: Bun 1.3.10+, Node 22.12+ on `PATH` (`bun run` executes the
+Vite and `vue-tsc` CLIs with Node; `vue-tsc` does not typecheck `.vue` files
+under the Bun runtime), and an existing managed Opengeni deployment with a
+server-held full-access organization API key.
 The deployment needs agent configuration admission and human input enabled,
 session tenancy/private chats activated, and an available model/credits for the
 acting user. Single-user `local` access mode does not admit external actors.
 
 ```sh
 cd examples/vue-conversation/app
-npm ci --workspaces=false
+bun install --frozen-lockfile
 cp .env.example .env.local
 ```
 
-Fill the **server-only** `OPENGENI_API_BASE_URL`, `OPENGENI_API_KEY`, and
-`OPENGENI_ORGANIZATION_ID` in `.env.local`. Choose stable host tenant/user/source
-IDs. Generate an onboarding operation UUID with
+Fill the **server-only** `OPENGENI_API_BASE_URL` and `OPENGENI_API_KEY` in
+`.env.local`; the organization id is derived from an organization API key, so
+`OPENGENI_ORGANIZATION_ID` is needed only for a key that is not bound to one
+organization. Choose stable host tenant/user/source IDs. Generate an onboarding operation UUID with
 `bun -e 'console.log(crypto.randomUUID())'`, save it as
 `OPENGENI_MEMBER_OPERATION_ID` **before** the next command, and reuse it on
 retries. Do not put credentials in a `VITE_` variable or browser config.
 
 ```sh
-npm run onboard
+bun run onboard
 ```
 
 This explicit onboarding step ensures the tenant's organization workspace and
@@ -42,8 +49,8 @@ mapping, omit onboarding and use the already-admitted user/workspace.
 Run in two terminals from this directory:
 
 ```sh
-npm run server
-npm run dev
+bun run server
+bun run dev
 ```
 
 Open `http://127.0.0.1:3104` and select **Sign in to local demo**. Vite forwards
@@ -55,9 +62,9 @@ saved-request retry are visible.
 For the built app on a single origin:
 
 ```sh
-npm run build
+bun run build
 # Change HOST_ORIGIN in .env.local to http://127.0.0.1:4104 first.
-npm start
+bun run start
 ```
 
 Open `http://127.0.0.1:4104`. Only `/` and built `/assets/*` are served; source,
@@ -147,10 +154,11 @@ host; preview approval events are synthetic, not proof of a hotel booking.
 ## Verify and preview
 
 ```sh
-npm test
-npm run build
-# With npm run dev already listening (no API key/backend needed):
-npm run preview:check
+bun run test
+bun run typecheck
+bun run build
+# With bun run dev already listening (no API key/backend needed):
+bun run preview:check
 ```
 
 `app/src/visual-check.ts` renders the **actual** Vue components with clearly
@@ -158,14 +166,16 @@ synthetic HTTP/SSE fixtures. It verifies replay, refresh, create/send, approval,
 human input, error/retry, pause/resume and mobile layout, then writes desktop,
 decision and mobile PNGs into `/workspace/previews` in the managed sandbox,
 or `app/previews` on other hosts (override with `VUE_PREVIEW_OUTPUT`). Set
-`VUE_CHROMIUM` to an installed executable, or run `npx playwright install chromium`.
+`VUE_CHROMIUM` to an installed executable, or run `bunx playwright install chromium`.
 Without an override it uses the sandbox binary when present, otherwise
 Playwright's installed default browser, including on ordinary Linux hosts.
 No production or public host is provisioned. Synthetic checks are separate from
 live service/model execution, which needs the deployment prerequisites above.
 
-The standalone npm lock is intentional. The app is one level below the root
-Bun workspace glob so a root install cannot silently substitute the unpublished
-local SDK source. Run consumer commands from `app`, not root Bun scripts.
-Consumer checks use Bun's `.spec.ts` convention and the local `npm test` command;
-they are not discovered by the root workspace's `.test.ts`-only CI unit shards.
+The standalone `app/bun.lock` is intentional. The app is one level below the
+root Bun workspace glob (`examples/*`), so `bun install` in `app` resolves the
+published SDK from the registry and a root install cannot silently substitute
+the unpublished local SDK source. Run consumer commands from `app`, not root
+Bun scripts. Consumer checks use Bun's `.spec.ts` convention and the local
+`bun run test` command; they are not discovered by the root workspace's
+`.test.ts`-only CI unit shards.

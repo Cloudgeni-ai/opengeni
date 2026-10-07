@@ -293,6 +293,13 @@ export type UseSandboxWorkspaceTabsOptions = ClientOverride & {
    * attachment, and navigation callbacks are not activated.
    */
   surfaces?: readonly SandboxWorkspaceSurface[] | undefined;
+  /**
+   * Whether this viewer may read the workspace machine fleet
+   * (`GET /machines`, permission `enrollments:read`). Defaults to true. Pass
+   * false for a viewer without it: the dock then never requests the fleet and
+   * the machine chip derives from the session's own capabilities alone.
+   */
+  machinesEnabled?: boolean | undefined;
   /** Override the source-driven default tab (e.g. a host landing tab id). When
    *  omitted the workbench picks Changes-vs-Files from capture or live Git. */
   initialTab?: string | null | undefined;
@@ -397,6 +404,7 @@ export function useSandboxWorkspaceTabs(
   const initialTab = options.initialTab ?? null;
   const activeTab = options.activeTab ?? initialTab;
   const workspaceVisible = options.workspaceVisible ?? true;
+  const machinesEnabled = options.machinesEnabled ?? true;
   const requestedSurfaces = options.surfaces ?? WORKBENCH_SURFACES;
   const surfaceSet = new Set<SandboxWorkspaceSurface>(requestedSurfaces);
   const changesEnabled = surfaceSet.has(WORKBENCH_TAB_CHANGES);
@@ -465,7 +473,7 @@ export function useSandboxWorkspaceTabs(
     workspaceId,
     sessionId,
     pollIntervalMs: MACHINES_SESSION_POLL_MS,
-    enabled: machineSurfaceEnabled,
+    enabled: machineSurfaceEnabled && machinesEnabled,
   });
   const activeMachine: MachineView | null =
     machines.machines.find((m) => m.sandboxId === machines.activeSandboxId) ??
@@ -995,6 +1003,12 @@ export type SandboxWorkspaceProps = ClientOverride & {
    * Terminal, Browser, and Desktop. Disabled surfaces remain behaviorally dormant.
    */
   surfaces?: readonly SandboxWorkspaceSurface[] | undefined;
+  /**
+   * Whether this viewer may read the workspace machine fleet
+   * (`GET /machines`, permission `enrollments:read`). Defaults to true. Pass
+   * false for a viewer without it so the dock never requests the fleet.
+   */
+  machinesEnabled?: boolean | undefined;
   /** Host tabs injected BEFORE the workbench tabs (e.g. a "Run" landing tab). */
   leadingTabs?: WorkspaceTab[] | undefined;
   /** Host tabs injected AFTER the workbench tabs (e.g. a "Debug" tab). */
@@ -1060,6 +1074,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     events,
     primary,
     surfaces,
+    machinesEnabled,
     leadingTabs,
     trailingTabs,
     initialTab,
@@ -1180,6 +1195,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     sessionId,
     events,
     ...(surfaces ? { surfaces } : {}),
+    ...(machinesEnabled !== undefined ? { machinesEnabled } : {}),
     ...(initialTab ? { initialTab } : {}),
     activeTab: activeTabHint,
     workspaceVisible: collapsed !== true,

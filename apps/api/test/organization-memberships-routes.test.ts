@@ -7,6 +7,7 @@ import {
   createDb,
   createOrganizationInvitation,
   ensureManagedAccessForUserWithOrganizationMemberships,
+  ensureWorkspaceByExternalIdentity,
   getSelfServiceOrganizationOnboardingState,
   type DbClient,
 } from "@opengeni/db";
@@ -967,7 +968,7 @@ describe("organization membership routes", () => {
     }
   }, 120_000);
 
-  test("exposes owner-managed private-session settings behind readiness", async () => {
+  test("exposes owner-managed private-session settings for every organization", async () => {
     if (!shared || !client || !app) return;
     const membershipResponse = await app.request("http://x/v1/organization-memberships", {
       headers: { cookie: "session=present" },
@@ -1021,21 +1022,12 @@ describe("organization membership routes", () => {
     expect(initial.status).toBe(200);
     expect(await initial.json()).toMatchObject({
       organizationId: accountId,
-      enabled: false,
-      available: false,
+      // Universal session-tenancy activation (0611): no readiness receipt and
+      // Only me defaults to enabled until an owner/admin turns it off.
+      enabled: true,
+      available: true,
       version: 0,
     });
-
-    const beforeReadiness = await app.request(endpoint, {
-      method: "PATCH",
-      headers: { cookie: "session=present", "content-type": "application/json" },
-      body: JSON.stringify({
-        enabled: true,
-        expectedVersion: 0,
-        operationId: crypto.randomUUID(),
-      }),
-    });
-    expect(beforeReadiness.status).toBe(409);
 
     const memberShapedRequest = await app.request(endpoint, {
       method: "PATCH",
@@ -1049,23 +1041,19 @@ describe("organization membership routes", () => {
     });
     expect(memberShapedRequest.status).toBe(422);
 
-    await shared.admin`
-      insert into session_tenancy_activations (
-        account_id, activation_version, inventory_digest, parity_digest, activated_by
-      ) values (${accountId}, 1, ${"3".repeat(64)}, ${"4".repeat(64)}, 'api-settings-test')`;
-    const enabled = await app.request(endpoint, {
+    const disabled = await app.request(endpoint, {
       method: "PATCH",
       headers: { cookie: "session=present", "content-type": "application/json" },
       body: JSON.stringify({
-        enabled: true,
+        enabled: false,
         expectedVersion: 0,
         operationId: crypto.randomUUID(),
       }),
     });
-    expect(enabled.status).toBe(200);
-    expect(await enabled.json()).toMatchObject({
+    expect(disabled.status).toBe(200);
+    expect(await disabled.json()).toMatchObject({
       organizationId: accountId,
-      enabled: true,
+      enabled: false,
       available: true,
       version: 1,
       changed: true,
@@ -1417,6 +1405,85 @@ describe("organization membership routes", () => {
       { method: "DELETE", headers: { cookie: "session=present" } },
     );
     expect(missingDelete.status).toBe(404);
+  }, 180_000);
+
+  test("lets the owner grant themself access to a key-provisioned tenant workspace", async () => {
+    if (!shared || !client || !app) return;
+    const membershipResponse = await app.request("http://x/v1/organization-memberships", {
+      headers: { cookie: "session=present" },
+    });
+    const membershipBody = (await membershipResponse.json()) as {
+      memberships: Array<{ organizationId: string }>;
+    };
+    accountId = membershipBody.memberships[0]!.organizationId;
+    const [ownMembership] = await shared.admin<Array<{ id: string; role: string }>>`
+      select id, role from organization_memberships
+      where account_id = ${accountId} and subject_id = ${subjectId}`;
+    expect(ownMembership?.role).toBe("owner");
+    // The exact path an embedding backend takes with its organization key
+    // (`og.workspaceId({ tenant })`): no human is a member of the result.
+    const { workspace: tenant } = await ensureWorkspaceByExternalIdentity(client.db, {
+      accountId,
+      externalSource: "tenant",
+      externalId: `tenant-${crypto.randomUUID()}`,
+      name: "Embedded tenant",
+    });
+    expect(tenant.kind).toBe("shared");
+    const grantUrl = `http://x/v1/organizations/${accountId}/workspaces/${tenant.id}/members/${ownMembership!.id}`;
+    const grantBody = (role: string, expectedUpdatedAt: string | null) =>
+      JSON.stringify({ role, expectedUpdatedAt, operationId: crypto.randomUUID() });
+
+    const keyAttempt = await app.request(grantUrl, {
+      method: "PUT",
+      headers: { authorization: "Bearer og_test_key", "content-type": "application/json" },
+      body: grantBody("admin", null),
+    });
+    expect(keyAttempt.status).toBe(401);
+
+    const joined = await app.request(grantUrl, {
+      method: "PUT",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: grantBody("admin", null),
+    });
+    expect(joined.status).toBe(200);
+    const joinedAccess = (await joined.json()) as {
+      subjectId: string;
+      role: string;
+      updatedAt: string;
+      permissions: string[];
+    };
+    expect(joinedAccess).toMatchObject({ subjectId, role: "admin" });
+    expect(joinedAccess.permissions).toEqual(
+      expect.arrayContaining(["sessions:read", "members:manage"]),
+    );
+
+    const narrowed = await app.request(grantUrl, {
+      method: "PUT",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: grantBody("viewer", joinedAccess.updatedAt),
+    });
+    expect(narrowed.status).toBe(200);
+    const narrowedAccess = (await narrowed.json()) as { role: string; updatedAt: string };
+    expect(narrowedAccess.role).toBe("viewer");
+
+    const [events] = await shared.admin<Array<{ grants: number }>>`
+      select count(*)::int as grants from organization_workspace_lifecycle_events
+      where account_id = ${accountId} and workspace_id = ${tenant.id} and kind = 'grant'`;
+    expect(events?.grants).toBe(2);
+
+    const left = await app.request(`${grantUrl}/revoke`, {
+      method: "POST",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify({
+        expectedUpdatedAt: narrowedAccess.updatedAt,
+        operationId: crypto.randomUUID(),
+      }),
+    });
+    expect(left.status).toBe(200);
+    const [remaining] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count from workspace_memberships
+      where workspace_id = ${tenant.id} and subject_id = ${subjectId}`;
+    expect(remaining?.count).toBe(0);
   }, 180_000);
 
   test("refuses invitation creation before committing when setup delivery is unconfigured", async () => {

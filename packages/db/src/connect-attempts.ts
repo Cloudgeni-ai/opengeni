@@ -29,6 +29,41 @@ type Row = {
   external_continuation: unknown;
 };
 
+/**
+ * Content-free state transition of one Connect attempt, reported only after
+ * its transaction committed. `providerId` is caller-chosen; observers must
+ * bound it against a reviewed catalog before using it as a label.
+ */
+export type ConnectAttemptTransition = {
+  providerId: string;
+  previousState: Attempt["state"] | null;
+  state: Attempt["state"];
+  errorCode: string | null;
+};
+type ConnectAttemptTransitionObserver = (transition: ConnectAttemptTransition) => void;
+let connectAttemptTransitionObserver: ConnectAttemptTransitionObserver | null = null;
+
+/** Install the process-wide observer (the API sets one at startup). */
+export function setConnectAttemptTransitionObserver(
+  observer: ConnectAttemptTransitionObserver | null,
+): void {
+  connectAttemptTransitionObserver = observer;
+}
+
+function reportConnectAttemptTransition(previous: Attempt | null, next: Attempt): void {
+  if (previous && previous.state === next.state) return;
+  try {
+    connectAttemptTransitionObserver?.({
+      providerId: next.providerId,
+      previousState: previous?.state ?? null,
+      state: next.state,
+      errorCode: next.error?.code ?? null,
+    });
+  } catch {
+    // Telemetry never changes the committed setup outcome.
+  }
+}
+
 export class ConnectAttemptConflictError extends Error {
   readonly code = "CONNECT_ATTEMPT_CONFLICT";
   constructor(message = "Connect attempt changed; reload its current state") {
@@ -157,7 +192,8 @@ export async function beginConnectAttempt(
   if (value.workspaceId !== scope.workspaceId || value.revision !== 1)
     throw new ConnectAttemptConflictError();
   const key = createHash("sha256").update(input.idempotencyKey).digest("hex");
-  return scoped(db, scope, async (tx) => {
+  let created = false;
+  const result = await scoped(db, scope, async (tx) => {
     // Serialize per-actor creation and quota, not the provider's remote request.
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(
       ${`connect:${scope.workspaceId}:${scope.subjectId}`}, 0))`);
@@ -189,8 +225,11 @@ export async function beginConnectAttempt(
       returning *`,
     );
     if (!row) throw new Error("Connect attempt insert returned no result");
+    created = true;
     return projection(row, scope);
   });
+  if (created) reportConnectAttemptTransition(null, result);
+  return result;
 }
 
 export async function getConnectAttempt(
@@ -202,7 +241,8 @@ export async function getConnectAttempt(
   returnUrl: string;
   operationInFlight: boolean;
 }> {
-  return scoped(db, scope, async (tx) => {
+  let transition: [Attempt, Attempt] | null = null;
+  const result = await scoped(db, scope, async (tx) => {
     const row = await lockAttempt(tx, scope, id);
     const current = projection(row, scope);
     if (row.expired && !["complete", "cancelled", "expired", "uncertain"].includes(current.state)) {
@@ -215,6 +255,7 @@ export async function getConnectAttempt(
       await tx.execute(sql`update connect_attempts set projection = ${JSON.stringify(expired)}::jsonb,
         updated_at = now() where id = ${row.id}::uuid`);
       row.projection = expired;
+      transition = [current, expired];
     }
     return {
       attempt: projection(row, scope),
@@ -222,6 +263,8 @@ export async function getConnectAttempt(
       operationInFlight: row.operation_id !== null,
     };
   });
+  if (transition) reportConnectAttemptTransition(...(transition as [Attempt, Attempt]));
+  return result;
 }
 
 export async function listPendingConnectAttempts(
@@ -305,7 +348,8 @@ export async function finishConnectOperation(
   },
 ): Promise<Attempt> {
   validateOperation(input.operationId, input.inputDigest);
-  return scoped(db, scope, async (tx) => {
+  let transition: [Attempt, Attempt] | null = null;
+  const result = await scoped(db, scope, async (tx) => {
     const row = await lockAttempt(tx, scope, input.attemptId);
     const current = projection(row, scope);
     await input.authorize?.(
@@ -343,6 +387,9 @@ export async function finishConnectOperation(
     await tx.execute(sql`update connect_attempts set projection = ${JSON.stringify(next)}::jsonb,
       receipts = ${JSON.stringify(receipts)}::jsonb, operation_id = null, operation_digest = null,
       updated_at = now() where id = ${row.id}::uuid`);
+    transition = [current, next];
     return next;
   });
+  if (transition) reportConnectAttemptTransition(...(transition as [Attempt, Attempt]));
+  return result;
 }

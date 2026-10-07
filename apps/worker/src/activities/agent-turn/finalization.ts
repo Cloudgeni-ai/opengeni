@@ -43,6 +43,7 @@ import {
   type ResumedTurnSandbox,
 } from "../../sandbox-resume";
 import { createTurnCredentialLeases } from "./credential-leases";
+import { drainPhysicalSandboxResumes } from "./sandbox-provision";
 import { safeErrorDiagnostic, safeErrorForTelemetry } from "./errors";
 import {
   assertPhysicalToolQuiescenceForCancellation,
@@ -128,6 +129,11 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
       }
     },
     requestWorkerDrain: deps.requestWorkerDrain,
+    execution: {
+      workspaceId: deps.input.workspaceId,
+      sessionId: deps.input.sessionId,
+      attemptId: deps.input.attemptId,
+    },
   });
   try {
     monitor.enter("tool_writers");
@@ -773,6 +779,21 @@ async function finalizeTurnAttemptSteps(
     }
     monitor.enter("workspace_snapshot");
     await drainInFlightWarmSnapshot();
+    // Join any provider establish still running behind a cancelled wrapper
+    // (finalization already aborted provisioning when no box resolved). Its
+    // own exact cleanup (roll an unpublished box back to cold, or keep a
+    // published box and drop its holder) must commit before this activity can
+    // let a shutting-down worker exit. A late success is routed through
+    // releaseLateSandbox before the release targets are collected below.
+    monitor.enter("sandbox_provisioning");
+    if (sandboxState.inFlightSandboxResumes.size > 0) {
+      const drained = await drainPhysicalSandboxResumes(sandboxState.inFlightSandboxResumes);
+      if (drained === "timed_out") {
+        console.error(
+          "in-flight sandbox establish did not settle before finalization; the lease reaper owns its warming row",
+        );
+      }
+    }
     monitor.enter("sandbox_release");
     const sandboxReleaseTargets = new Set(sandboxState.lateSandboxesAwaitingWriterDrain);
     sandboxState.lateSandboxesAwaitingWriterDrain.clear();

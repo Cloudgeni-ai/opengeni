@@ -8,7 +8,7 @@ import {
   MailIcon,
   RefreshCwIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { toast } from "sonner";
 import type { ClientModel } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -38,7 +38,11 @@ import {
 } from "@/lib/api-error";
 import { includedDefaultModel } from "@/lib/model-access-onboarding";
 import { onboardingJourney, useOnboardingStep } from "@/lib/onboarding-analytics";
-import type { OnboardingUseCase } from "@/lib/onboarding-use-case";
+import {
+  storeOnboardingUseCase,
+  storedOnboardingUseCase,
+  type OnboardingUseCase,
+} from "@/lib/onboarding-use-case";
 import {
   loadModelAccessOnboarding,
   type StartingCreditsOnboarding,
@@ -49,6 +53,8 @@ import {
   type OrganizationInvitationContinuation,
 } from "@/lib/organization-invitation-continuation";
 import type { OrganizationInvitation } from "@/types";
+import { rememberPendingDeveloperSetup } from "@/lib/pending-developer-setup";
+import { rememberSignupUseCase } from "@/lib/signup-starter-set";
 
 export function OrganizationOnboardingPanel({
   onComplete,
@@ -113,7 +119,13 @@ export function OrganizationOnboardingPanel({
     organizationId: string;
     personalWorkspaceId: string;
   } | null>(null);
-  const [useCase, setUseCase] = useState<OnboardingUseCase | null>(initialUseCase ?? null);
+  const [useCase, setUseCaseState] = useState<OnboardingUseCase | null>(
+    () => initialUseCase ?? (previewState ? null : storedOnboardingUseCase()),
+  );
+  const setUseCase = (choice: OnboardingUseCase | null) => {
+    if (!previewState) storeOnboardingUseCase(choice);
+    setUseCaseState(choice);
+  };
   // "Add AI agents to my product" continues past the model step to developer setup.
   const [modelStepDone, setModelStepDone] = useState(false);
   const operationId = useRef(crypto.randomUUID());
@@ -287,6 +299,23 @@ export function OrganizationOnboardingPanel({
           ...(useCase ? { useCase } : {}),
         });
         onboardingJourney().completed("organization_name", "created");
+        // Durable from here on (signup use case + pending developer setup).
+        storeOnboardingUseCase(null);
+        // The new-chat page leads with suggestions for the answer.
+        if (useCase && activeEmail) {
+          rememberSignupUseCase({
+            account: activeEmail,
+            organizationId: created.organizationId,
+            useCase,
+          });
+        }
+        if (useCase === "embed" && activeEmail) {
+          rememberPendingDeveloperSetup({
+            account: activeEmail,
+            organizationId: created.organizationId,
+            organizationName: normalizedName,
+          });
+        }
         setCreatedSetup({
           organizationId: created.organizationId,
           personalWorkspaceId: created.personalWorkspaceId,
@@ -583,6 +612,40 @@ export function OrganizationOnboardingPanel({
         ) : null}
       </form>
     </section>,
+  );
+}
+
+/**
+ * The developer setup step again after a reload, a closed tab or another
+ * device: the person chose "Add AI agents to my product" and has not picked
+ * an option or skipped yet. It reuses a live setup key (its token was shown
+ * once) and offers to replace it rather than minting another.
+ */
+export function ResumedDeveloperSetup({
+  client,
+  organizationId,
+  organizationName,
+  activeEmail,
+  onSignOut,
+  onComplete,
+}: {
+  client: ComponentProps<typeof DeveloperSetupStep>["client"];
+  organizationId: string;
+  organizationName?: string | undefined;
+  activeEmail: string | null;
+  onSignOut?: (() => Promise<void> | void) | undefined;
+  onComplete: (destination?: OnboardingDestination) => void;
+}) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+      <OnboardingAccountHeader email={activeEmail} onSignOut={onSignOut} />
+      <DeveloperSetupStep
+        client={client}
+        organizationId={organizationId}
+        organizationName={organizationName}
+        onComplete={onComplete}
+      />
+    </div>
   );
 }
 

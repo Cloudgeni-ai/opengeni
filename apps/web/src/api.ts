@@ -16,6 +16,7 @@ import { securityReauthenticationPath } from "./lib/sign-in-feedback";
 import { noteClientRequestFailure } from "./lib/client-signals";
 import { signupAttribution, signupReturnPath } from "./lib/signup-attribution";
 import { browserAccountBridgeBlockersSnapshot } from "./lib/browser-account-bridge";
+import { decideVoiceDeployment, type VoiceDeploymentDecision } from "./lib/voice-deployment-guard";
 
 export function resolveApiBaseUrl(value: string | undefined): string {
   return (value ?? "").replace(/\/+$/, "");
@@ -918,7 +919,7 @@ export async function signUpEmail(input: {
       ...input,
       // The verification link returns here with a one-shot marker and the
       // first-touch campaign parameters; no browser storage is involved.
-      callbackURL: signupReturnPath("/", "email_verified"),
+      callbackURL: signupReturnPath(authReturnBase(), "email_verified"),
       // Normalized server-side into a closed acquisition-source metric label.
       ...(attribution ? { opengeniAttribution: attribution } : {}),
     }),
@@ -986,7 +987,10 @@ export async function sendVerificationEmail(input: {
 }): Promise<{ status: boolean }> {
   return await authRequest<{ status: boolean }>("/send-verification-email", {
     method: "POST",
-    body: JSON.stringify({ ...input, callbackURL: signupReturnPath("/", "email_verified") }),
+    body: JSON.stringify({
+      ...input,
+      callbackURL: signupReturnPath(authReturnBase(), "email_verified"),
+    }),
   });
 }
 
@@ -1001,13 +1005,24 @@ export async function signInEmail(input: {
   });
 }
 
+/**
+ * Where sign-in returns: home, or the agent sign-in page a signed-out person
+ * started from, so the agent's pending sign-in continues instead of being lost.
+ */
+function authReturnBase(): string {
+  if (typeof window === "undefined") return "/";
+  return window.location.pathname === "/connect-agent"
+    ? `${window.location.pathname}${window.location.search}`
+    : "/";
+}
+
 export async function startManagedSocialSignIn(provider: "google" | "github"): Promise<void> {
   const reauthentication = window.location.pathname === "/settings/security";
   const returnUrl = (path: string) => new URL(path, window.location.origin).toString();
   const callbackURL = returnUrl(
     reauthentication
       ? securityReauthenticationPath(window.location.search)
-      : signupReturnPath("/", `${provider}_signin`),
+      : signupReturnPath(authReturnBase(), `${provider}_signin`),
   );
   const attribution = reauthentication ? null : signupAttribution();
   const response = await authRequest<{ url?: unknown }>("/sign-in/social", {
@@ -1015,11 +1030,15 @@ export async function startManagedSocialSignIn(provider: "google" | "github"): P
     body: JSON.stringify({
       provider,
       callbackURL,
-      errorCallbackURL: reauthentication ? callbackURL : returnUrl(signupReturnPath("/")),
+      errorCallbackURL: reauthentication
+        ? callbackURL
+        : returnUrl(signupReturnPath(authReturnBase())),
       // Better Auth sends newly created accounts here instead of callbackURL.
       ...(reauthentication
         ? {}
-        : { newUserCallbackURL: returnUrl(signupReturnPath("/", `${provider}_signup`)) }),
+        : {
+            newUserCallbackURL: returnUrl(signupReturnPath(authReturnBase(), `${provider}_signup`)),
+          }),
       disableRedirect: true,
       // Kept in server-side OAuth state for the callback's sign-up metric.
       ...(attribution ? { additionalData: { opengeniAttribution: attribution } } : {}),
@@ -1126,8 +1145,14 @@ export async function resetPassword(input: {
   });
 }
 
-export async function fetchClientConfig(signal?: AbortSignal): Promise<ClientConfig> {
-  const config = await request<ClientConfig>("/v1/config/client", { signal });
+export async function fetchClientConfig(
+  signal?: AbortSignal,
+  workspaceId?: string,
+): Promise<ClientConfig> {
+  const path = workspaceId
+    ? `/v1/config/client?workspaceId=${encodeURIComponent(workspaceId)}`
+    : "/v1/config/client";
+  const config = await request<ClientConfig>(path, { signal });
   signal?.throwIfAborted();
   reloadIfStaleApiContract(config);
   reloadIfStaleDeployment(config);
@@ -1263,6 +1288,41 @@ function automaticReloadBlocked(): boolean {
     [...managedActorRequests].some((pendingRequest) => pendingRequest.mutation) ||
     browserAccountBridgeBlockersSnapshot().some(({ inspect }) => inspect() !== null)
   );
+}
+
+/** Whether live voice may start on this bundle, must reload first, or should prompt. */
+export async function checkVoiceDeployment(): Promise<VoiceDeploymentDecision> {
+  const config = await request<ClientConfig>("/v1/config/client");
+  return decideVoiceDeployment(
+    {
+      bundleRevision: bundleDeploymentRevision,
+      serverRevision: config.deploymentRevision ?? "",
+      bundleContract: OPENGENI_API_CONTRACT_REVISION,
+      serverContract: config.apiContractRevision ?? "",
+    },
+    {
+      reloadBlocked: voiceReloadBlocked(),
+      storage: typeof sessionStorage === "undefined" ? null : sessionStorage,
+    },
+  );
+}
+
+/**
+ * The user just asked for voice, so ordinary reads in flight may be dropped;
+ * unsent drafts, uploads, and mutations still keep the tab as it is.
+ */
+function voiceReloadBlocked(): boolean {
+  return (
+    typeof window === "undefined" ||
+    navigator.onLine === false ||
+    [...managedActorRequests].some((pendingRequest) => pendingRequest.mutation) ||
+    browserAccountBridgeBlockersSnapshot().some(({ inspect }) => inspect() !== null)
+  );
+}
+
+/** A stale tab that cannot reload right now says so plainly. */
+export function showVoiceUpdatePrompt(): void {
+  showApiUpdateNotice(false);
 }
 
 function reloadIfStaleDeployment(config: ClientConfig): void {

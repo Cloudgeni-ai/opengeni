@@ -161,6 +161,11 @@ pub trait ComputerAdapter: Send + Sync {
         Ok(())
     }
 
+    /// Join persistent native producers before reporting successful helper EOF.
+    async fn shutdown(&self) -> NativeAdapterResult<()> {
+        Ok(())
+    }
+
     /// Reads the graphical seat's bounded native text clipboard.
     async fn clipboard(&self) -> NativeAdapterResult<NativeClipboard>;
 

@@ -18,6 +18,10 @@ data:
   {{- if not (hasKey .Values.config "OPENGENI_MCP_INTERNAL_URL") }}
   OPENGENI_MCP_INTERNAL_URL: {{ printf "http://%s-api:%d/v1/workspaces/{workspaceId}/mcp" (include "opengeni.fullname" .) (.Values.api.service.port | int) | quote }}
   {{- end }}
+  {{- if not (hasKey .Values.config "OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED") }}
+  # API/worker offer Office-file export only when the materializer workload runs.
+  OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED: {{ .Values.artifactMaterializer.enabled | quote }}
+  {{- end }}
   {{- if .Values.nats.enabled }}
   OPENGENI_NATS_URL: {{ printf "nats://%s-nats:%d" (include "opengeni.fullname" .) (.Values.nats.clientPort | int) | quote }}
   {{- else if .Values.nats.url }}

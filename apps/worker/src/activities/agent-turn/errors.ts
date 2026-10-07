@@ -11,6 +11,7 @@ import {
   safeDatabaseErrorFacts,
   isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
+  DatabaseTransactionError,
   SandboxLeaseTransitionError,
 } from "@opengeni/db";
 import {
@@ -26,9 +27,14 @@ import {
   isModalTaskExecStartPreDispatchUnavailableError,
   isModalCommandStartOutcomeUnknownError,
   isProviderCommandObservationUnavailableError,
+  ProviderCommandInputOutcomeUnknownError,
+  ProviderCommandStartOutcomeUnknownError,
   isRoutingMutationOutcomeUnknownError,
+  isRoutingMutationOutputRejectedError,
   RoutingWorkspaceRootChangedError,
+  RoutingBackendRecoveryRequiredError,
   ResponsesStreamingTerminalError,
+  classifyModelStreamIdleTimeoutError,
   SandboxMaterializationVerificationError,
   materializationVerificationDiagnostic,
   type MaterializationVerificationDiagnostic,
@@ -88,6 +94,11 @@ import {
   MandatoryHistoryPersistenceError,
   type MandatoryHistoryPersistenceStage,
 } from "./quiescence";
+import {
+  MODEL_PROVIDER_RECOVERY_CODES,
+  providerRecoveryExhaustedMessage,
+  type ProviderCondition,
+} from "./provider-recovery-copy";
 
 // Retryable provider connectivity/5xx failures start quickly and back off to
 // this ceiling. Explicit rate limits retain the minute-granular fallback.
@@ -100,6 +111,11 @@ export const MAX_AUTOMATIC_PROVIDER_RECOVERIES = PROVIDER_CONNECTIVITY_BACKOFF_M
  * alone would spend every automatic recovery before the window resets.
  */
 export const PROVIDER_RATE_LIMIT_BACKOFF_MS = [10_000, 20_000, 40_000, 60_000, 120_000] as const;
+/** Positive-only spread: never shorten the provider's minimum delay. */
+export function providerRecoveryJitterMs(delayMs: number, sample: number): number {
+  const bounded = Number.isFinite(sample) ? Math.max(0, Math.min(sample, 1)) : 0;
+  return Math.floor(Math.min(5_000, delayMs * 0.2) * bounded);
+}
 export const POST_COMPACTION_CONTINUATION_EMPTY_CODE = "post_compaction_continuation_empty";
 
 export class PostCompactionContinuationEmptyError extends Error {
@@ -126,6 +142,7 @@ export function providerRecoveryResult(input: {
   failureCode: string | undefined;
   attemptNumber: number;
   retryAfterMs?: number | null;
+  jitterSample?: number;
 }): ProviderRecoveryResult {
   if (input.attemptNumber > MAX_AUTOMATIC_PROVIDER_RECOVERIES) {
     return {
@@ -171,7 +188,13 @@ export function providerRecoveryResult(input: {
         : PROVIDER_BACKPRESSURE_DELAY_MS;
   return {
     status: "recovering",
-    continueDelayMs,
+    continueDelayMs:
+      continueDelayMs +
+      (input.failureCode === "provider_rate_limited" ||
+      input.failureCode === "provider_unavailable" ||
+      input.failureCode === "upstream_connectivity_unavailable"
+        ? providerRecoveryJitterMs(continueDelayMs, input.jitterSample ?? 0)
+        : 0),
   };
 }
 
@@ -189,12 +212,47 @@ export function providerRecoveryExhaustedFailure<
 } {
   return {
     ...failure,
-    error: `Automatic same-turn recovery stopped after ${recovery.providerRecoveryCount} retries because the upstream dependency remained unavailable. Send a new message to retry after the dependency recovers.`,
+    error: providerRecoveryExhaustedMessage({
+      code: typeof failure.code === "string" ? failure.code : null,
+      providerCondition: isProviderCondition(failure.providerCondition)
+        ? failure.providerCondition
+        : null,
+      modelLabel: typeof failure.modelLabel === "string" ? failure.modelLabel : null,
+      providerLabel: typeof failure.providerLabel === "string" ? failure.providerLabel : null,
+      providerRecoveryCount: recovery.providerRecoveryCount,
+    }),
     retryable: false,
     recoveryExhausted: true,
     providerRecoveryCount: recovery.providerRecoveryCount,
     maxProviderRecoveryCount: recovery.maxProviderRecoveryCount,
     lastRetryableError: failure.error,
+  };
+}
+
+function isProviderCondition(value: unknown): value is ProviderCondition {
+  return (
+    value === "overloaded" ||
+    value === "unavailable" ||
+    value === "unresponsive" ||
+    value === "rate_limited"
+  );
+}
+
+/**
+ * Name the exact accepted model route on model-provider recovery evidence so a
+ * person learns which model is affected. Display labels only: the route's
+ * credentials, base URL and upstream ids never enter the event.
+ */
+export function withModelRoutePresentation<T extends { code?: string | undefined }>(
+  failure: T,
+  route: { model: string; modelLabel: string; providerLabel: string } | undefined,
+): T & { model?: string; modelLabel?: string; providerLabel?: string } {
+  if (!route || !failure.code || !MODEL_PROVIDER_RECOVERY_CODES.has(failure.code)) return failure;
+  return {
+    ...failure,
+    model: route.model,
+    modelLabel: route.modelLabel,
+    providerLabel: route.providerLabel,
   };
 }
 
@@ -367,7 +425,7 @@ export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
  * objects (including array containers), not queue positions/duplicate refs.
  * The separate link ceiling bounds huge duplicate arrays without truncating
  * them into permission. Cycles are harmless; overflow/unreadable edges hold. */
-function databaseRecoveryCauseGraph(error: unknown): Map<object, Set<object>> | null {
+function structuredRecoveryCauseGraph(error: unknown): Map<object, Set<object>> | null {
   const graph = new Map<object, Set<object>>();
   const queue: object[] = [];
   let links = 0;
@@ -401,16 +459,23 @@ function retryableDatabaseFailureCode(
   requireDatabaseProvenance = false,
 ): PostClaimDatabaseRecoveryDetail["code"] | null {
   try {
-    const graph = databaseRecoveryCauseGraph(error);
+    const graph = structuredRecoveryCauseGraph(error);
     if (!graph) return null;
     const transports = new Set<object>();
     const boundaries = new Set<object>();
     const ownDatabaseNodes = new Set<object>();
     const codes = new Set<PostClaimDatabaseRecoveryDetail["code"]>();
+    const ownChildren = (node: object): object[] =>
+      node instanceof DatabaseTransactionError
+        ? // Callback failures retained beside a failed rollback supply vetoes,
+          // never driver provenance for a provider's connection-looking error.
+          [...graph.get(node)!].filter((child) => child === node.cause)
+        : [...graph.get(node)!];
     // Ask the canonical transport predicate about ONLY this node's facts. Its
     // recursive search must not pair a DB sibling with an unrelated provider.
     for (const node of graph.keys()) {
-      if (isRoutingMutationOutcomeUnknownError(node)) return null;
+      if (isRoutingMutationOutcomeUnknownError(node) || isRoutingMutationOutputRejectedError(node))
+        return null;
       const record = node as Record<string, unknown>;
       if (
         requireDatabaseProvenance
@@ -429,7 +494,11 @@ function retryableDatabaseFailureCode(
           : isDatabaseConnectionSqlState(sqlState)
       )
         transports.add(node);
-      if (node instanceof DrizzleQueryError || isSessionEventPersistenceError(node)) {
+      if (
+        node instanceof DrizzleQueryError ||
+        node instanceof DatabaseTransactionError ||
+        isSessionEventPersistenceError(node)
+      ) {
         // Only actual errors raised at our ORM/typed persistence boundary own
         // their driver subtree. A PostgresError name, SDK wrapper or provider
         // socket by itself is never own-client provenance for a running turn.
@@ -437,7 +506,7 @@ function retryableDatabaseFailureCode(
         for (const source of queue) {
           if (ownDatabaseNodes.has(source)) continue;
           ownDatabaseNodes.add(source);
-          queue.push(...graph.get(source)!);
+          queue.push(...ownChildren(source));
         }
       }
     }
@@ -448,7 +517,7 @@ function retryableDatabaseFailureCode(
         if (seen.has(node)) continue;
         seen.add(node);
         if (transports.has(node)) return true;
-        queue.push(...graph.get(node)!);
+        queue.push(...ownChildren(node));
       }
       return false;
     };
@@ -457,7 +526,7 @@ function retryableDatabaseFailureCode(
     // order; a deeper transport/reset cannot override it either.
     for (const node of graph.keys()) {
       const record = node as Record<string, unknown>;
-      if (node instanceof DrizzleQueryError) {
+      if (node instanceof DrizzleQueryError || node instanceof DatabaseTransactionError) {
         boundaries.add(node);
         if (hasOwnTransport(node)) codes.add("db_failure");
       }
@@ -472,15 +541,20 @@ function retryableDatabaseFailureCode(
       const connectionOutage = requireDatabaseProvenance
         ? isRunningTurnDatabaseConnectionSqlState(sqlState)
         : isDatabaseConnectionSqlState(sqlState);
+      // PostgreSQL aborts a deadlock or serialization victim's whole
+      // transaction: unlike a lost connection, that write certainly did not
+      // commit, so it is at least as safe for exact-attempt recovery.
+      const rolledBack = isRetryablePersistenceSqlState(sqlState);
       const code = typed
         ? retryablePersistenceFailureCode(sqlState)
-        : connectionOutage || isRetryablePersistenceSqlState(sqlState)
+        : connectionOutage || rolledBack
           ? databaseFailureCode(sqlState)
           : null;
       if (
         !code ||
         (requireDatabaseProvenance &&
           !connectionOutage &&
+          !rolledBack &&
           !(sqlState === null && hasOwnTransport(node)))
       )
         return null;
@@ -501,6 +575,12 @@ function retryableDatabaseFailureCode(
 }
 
 const RUNNING_TURN_DATABASE_TRANSPORT_CODES = new Set([
+  // postgres.js reports these for a physically lost connection, including
+  // transaction cleanup after its socket has already closed. Own-client
+  // provenance and the unknown-outcome veto remain mandatory above.
+  "CONNECTION_CLOSED",
+  "CONNECTION_DESTROYED",
+  "CONNECTION_ENDED",
   "ECONNREFUSED",
   "ECONNRESET",
   "CONNECT_TIMEOUT",
@@ -569,12 +649,7 @@ export function postClaimDatabaseRecoveryFailure(input: {
   };
 }): ApplicationFailure | null {
   const code = retryableDatabaseFailureCode(input.error, input.requireDatabaseProvenance);
-  if (
-    !code ||
-    input.executionGeneration < 1 ||
-    (input.requireDatabaseProvenance && code !== "db_failure")
-  )
-    return null;
+  if (!code || input.executionGeneration < 1) return null;
   if (
     (input.sandboxSetupOutcomeUnknown && input.sandboxSetupRecoveryExhausted) ||
     ((input.sandboxSetupOutcomeUnknown || input.sandboxSetupRecoveryExhausted) &&
@@ -713,13 +788,56 @@ export function modelPreparationFailureEventPayload(error: unknown, durationMs: 
  * only those structural error links with a strict bound; never classify from
  * message text, which could originate in model or tool content.
  */
+/**
+ * Only the home resolver's positive pre-dispatch signal permits a fresh attempt.
+ * The same error class can also escape AFTER a provider mutation, so neither its
+ * retryable property nor message alone establishes replay safety. Inspect the
+ * complete bounded SDK cause graph and let uncertain peer outcomes veto this
+ * narrow recovery; unreadable or overflowing graphs fail closed.
+ */
+function isPreDispatchHomeBackendRecoveryRequired(error: unknown): boolean {
+  const graph = structuredRecoveryCauseGraph(error);
+  if (!graph) return false;
+  let found = false;
+  try {
+    for (const node of graph.keys()) {
+      if (
+        isRoutingMutationOutcomeUnknownError(node) ||
+        isRoutingMutationOutputRejectedError(node) ||
+        isRawProviderCommandOutcomeUnknown(node) ||
+        isModalCommandStartOutcomeUnknownError(node) ||
+        isProviderCommandObservationUnavailableError(node)
+      )
+        return false;
+      if (node instanceof RoutingBackendRecoveryRequiredError) {
+        if (
+          node.op !== "resolve_home_backend" ||
+          !Number.isSafeInteger(node.leaseEpoch) ||
+          node.leaseEpoch < 0 ||
+          !node.retryable ||
+          (node.recovery !== "pending" && node.recovery !== "superseded")
+        )
+          return false;
+        found = true;
+      }
+    }
+  } catch {
+    return false;
+  }
+  return found;
+}
+
 export function sandboxRouteTransitionCode(
   error: unknown,
 ):
   | "home_unavailable_this_turn"
   | "workspace_root_changed_this_turn"
   | "native_capabilities_changed_this_attempt"
+  | "home_backend_recovery_pending"
   | null {
+  if (isPreDispatchHomeBackendRecoveryRequired(error)) {
+    return "home_backend_recovery_pending";
+  }
   const pending: unknown[] = [error];
   const seen = new WeakSet<object>();
   let inspected = 0;
@@ -1086,19 +1204,48 @@ function isProviderSafetyRefusal(error: unknown): boolean {
   return providerSafetyRefusalDiagnostic(error) !== undefined;
 }
 
+/** Preserve the closest real HTTP status through SDK Error.cause wrappers. */
+function providerHttpStatus(error: unknown): number | undefined {
+  let current = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const value = current as { status?: unknown; statusCode?: unknown; cause?: unknown };
+    const status = Number(value.status ?? value.statusCode);
+    if (Number.isInteger(status) && status >= 100 && status < 600) return status;
+    current = value.cause;
+  }
+  return undefined;
+}
+
+/**
+ * A fetch-layer timeout: the runtime's DOMException `TimeoutError` (message
+ * "The operation timed out."), possibly wrapped by SDK/runner `cause` chains.
+ * Explicit cancellation (`AbortError`) is deliberately not matched.
+ */
+export function isTransportTimeoutError(error: unknown): boolean {
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const value = current as { name?: unknown; message?: unknown; cause?: unknown };
+    if (value.name === "TimeoutError" || value.message === "The operation timed out.") {
+      return true;
+    }
+    current = value.cause;
+  }
+  return false;
+}
+
 export function isTransientProviderError(error: unknown): boolean {
   if (error instanceof ResponsesStreamingTerminalError) {
     return error.category === "unavailable";
   }
   // A semantic refusal can arrive inside a 5xx transport envelope.
   if (isProviderSafetyRefusal(error)) return false;
-  const status =
-    typeof error === "object" && error !== null
-      ? Number(
-          (error as { status?: unknown; statusCode?: unknown }).status ??
-            (error as { statusCode?: unknown }).statusCode,
-        )
-      : undefined;
+  const status = providerHttpStatus(error);
   // A real HTTP status is AUTHORITATIVE: a 5xx is transient, and ANY other status
   // (4xx validation/auth/404, plus the 429 the earlier branches already handled) is
   // a request fault that must NOT auto-retry — even if its body happens to read like
@@ -1235,10 +1382,80 @@ function anthropicRequestDiagnostic(error: unknown): AnthropicRequestError | und
     : undefined;
 }
 
+function isRawProviderCommandOutcomeUnknown(error: unknown): boolean {
+  try {
+    return (
+      error instanceof ProviderCommandInputOutcomeUnknownError ||
+      error instanceof ProviderCommandStartOutcomeUnknownError
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function agentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
 ): ReturnType<typeof baseAgentRunFailurePayload> {
+  return withProviderCondition(error, classifyAgentRunFailurePayload(error, options));
+}
+
+/**
+ * Record the closed provider condition on a retryable model-provider failure so
+ * clients can say "overloaded" rather than a generic outage. Presentation
+ * evidence only: retry authority and pacing are decided by `code`.
+ */
+function withProviderCondition(
+  error: unknown,
+  failure: ReturnType<typeof baseAgentRunFailurePayload>,
+): ReturnType<typeof baseAgentRunFailurePayload> {
+  if (failure.code === "provider_rate_limited") {
+    return { ...failure, providerCondition: "rate_limited" };
+  }
+  if (failure.code !== "provider_unavailable") return failure;
+  if (failure.timeoutClass) return { ...failure, providerCondition: "unresponsive" };
+  return {
+    ...failure,
+    providerCondition: isProviderOverloadError(error, failure) ? "overloaded" : "unavailable",
+  };
+}
+
+/** HTTP 529, Anthropic `overloaded_error`, or explicit provider "overloaded" wording. */
+export function isProviderOverloadError(
+  error: unknown,
+  failure: { error?: string; detail?: string } = {},
+): boolean {
+  if (providerHttpStatus(error) === 529) return true;
+  const anthropic = anthropicRequestDiagnostic(error);
+  return [...collectErrorStrings(error), anthropic?.detail, failure.error, failure.detail].some(
+    (value) => typeof value === "string" && /\boverload(?:ed)?(?:_error)?\b/i.test(value),
+  );
+}
+
+function classifyAgentRunFailurePayload(
+  error: unknown,
+  options: { isCodexTurn?: boolean } = {},
+): ReturnType<typeof baseAgentRunFailurePayload> {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [];
+  const outputRejected = nodes.find(isRoutingMutationOutputRejectedError);
+  if (outputRejected) {
+    // A known receipt applies only to its own mutation. Uncertain peers retain
+    // their established terminal classification, regardless of SDK graph order.
+    const unknown = nodes.find(
+      (node) =>
+        isRoutingMutationOutcomeUnknownError(node) ||
+        isModalCommandStartOutcomeUnknownError(node) ||
+        isProviderCommandObservationUnavailableError(node) ||
+        isRawProviderCommandOutcomeUnknown(node),
+    );
+    if (unknown) return { ...baseAgentRunFailurePayload(unknown, options), retryable: false };
+    return {
+      error: outputRejected.message,
+      code: outputRejected.code,
+      retryable: false,
+    };
+  }
   const failure = baseAgentRunFailurePayload(error, options);
   const diagnostic = materializationVerificationDiagnostic(error);
   const anthropic = anthropicRequestDiagnostic(error);
@@ -1298,8 +1515,14 @@ function baseAgentRunFailurePayload(
   quotaScope?: ProviderQuotaScope;
   /** Closed Codex plan key on `codex_plan_entitlement` / `codex_request_rejected`. */
   planType?: string | null;
-  /** Product model id a `codex_plan_entitlement` failure refers to. */
+  /** Product model id a `codex_plan_entitlement` or model-provider recovery failure refers to. */
   model?: string | null;
+  /** Display label of the turn's model on model-provider recovery evidence. */
+  modelLabel?: string;
+  /** Display label of the serving provider on model-provider recovery evidence. */
+  providerLabel?: string;
+  /** Closed transient provider condition on `provider_unavailable` / `provider_rate_limited`. */
+  providerCondition?: ProviderCondition;
 } {
   if (error instanceof SandboxMaterializationVerificationError) {
     return {
@@ -1336,7 +1559,7 @@ function baseAgentRunFailurePayload(
     const database = safeDatabaseErrorFacts(postgresDriverError ?? error);
     const sqlState = postgresDriverError ? nestedPostgresSqlState(postgresDriverError) : null;
     return {
-      error: "OpenGeni encountered a database error.",
+      error: "Opengeni encountered a database error.",
       code: databaseFailureCode(sqlState),
       sqlState,
       ...(Object.keys(database).length > 0 ? { database } : {}),
@@ -1399,13 +1622,7 @@ function baseAgentRunFailurePayload(
     };
   }
   const message = error instanceof Error ? error.message : String(error);
-  const status =
-    typeof error === "object" && error !== null
-      ? Number(
-          (error as { status?: unknown; statusCode?: unknown }).status ??
-            (error as { statusCode?: unknown }).statusCode,
-        )
-      : undefined;
+  const status = providerHttpStatus(error);
   const code =
     typeof error === "object" && error !== null && "code" in error
       ? String((error as { code?: unknown }).code)
@@ -1604,6 +1821,39 @@ function baseAgentRunFailurePayload(
       ...(mcpTransportDiagnostic ? { mcpTransportDiagnostic } : {}),
     };
   }
+  // A generic model stream that went silent mid-response (typed idle bound) or
+  // a transport timeout ("The operation timed out." DOMException TimeoutError
+  // from the fetch layer) is a dead upstream connection, not a request fault:
+  // checkpoint durable truth and recover the same turn within the finite
+  // provider recovery budget. Codex/SuperGrok typed timeouts are classified
+  // above under their own transport policy.
+  const streamIdle = classifyModelStreamIdleTimeoutError(error);
+  if (streamIdle) {
+    const seconds =
+      streamIdle.idleTimeoutMs !== null ? Math.round(streamIdle.idleTimeoutMs / 1_000) : null;
+    const window = seconds !== null ? ` for ${seconds}s` : "";
+    return {
+      error:
+        streamIdle.kind === "progress"
+          ? `The model provider stream stalled: only keepalive traffic and no response progress${window}. The same turn will retry after a short delay.`
+          : `The model provider stopped sending response data${window}. The same turn will retry after a short delay.`,
+      code: "provider_unavailable",
+      retryable: true,
+      timeoutClass: streamIdle.kind === "progress" ? "progress_stream" : "idle_stream",
+      responseObserved: true,
+      detail: streamIdle.message,
+    };
+  }
+  if (status === undefined && isTransportTimeoutError(error)) {
+    return {
+      error:
+        "The model provider connection timed out. The same turn will retry after a short delay.",
+      code: "provider_unavailable",
+      retryable: true,
+      timeoutClass: "transport",
+      detail: message,
+    };
+  }
   if (code === UNKNOWN_MODEL_FINISH_REASON_CODE) {
     return {
       error:
@@ -1655,7 +1905,7 @@ function baseAgentRunFailurePayload(
     if (isExactStatuslessUpstreamConnectivityMessage(message)) {
       return {
         error:
-          "OpenGeni could not reach an upstream service. The same turn will retry after a short delay.",
+          "Opengeni could not reach an upstream service. The same turn will retry after a short delay.",
         code: "upstream_connectivity_unavailable",
         retryable: true,
       };

@@ -59,7 +59,7 @@ test.each(["low", "medium", "high", "xhigh", "max"] as const)(
       const req = request();
       req.modelSettings = { reasoning: { effort } };
       const body = buildAnthropicRequest(req, model, provider, false);
-      expect(body.thinking).toEqual({ type: "adaptive" });
+      expect(body.thinking).toEqual({ type: "adaptive", display: "summarized" });
       expect(body.output_config.effort).toBe(effort);
       expect(body.max_tokens).toBe(128_000);
     }

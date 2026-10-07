@@ -112,12 +112,6 @@ config:
   # dedicated setupAccountIngress to remain enabled so the request cannot fall
   # through the ordinarily logged/traced primary Ingress.
   OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED: "false"
-  # Canonical organization-tenancy authority activation. Pinned to the
-  # reversible pre-activation posture so an upgrade can never cross the one-way
-  # boundary implicitly. Flip to "true" only after proving the preconditions in
-  # docs/organization-tenancy.md; setting it back to "false" afterwards is not a
-  # rollback.
-  OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: "false"
   # See docs/deployment.md.
   OPENGENI_BILLING_MODE: disabled
   # The offer and both new resource charges require separate operator activation.
@@ -138,6 +132,10 @@ config:
   # Optional non-secret JSON values may be supplied here:
   # OPENGENI_MODEL_COST_POLICY_JSON: '{"model-id":"free"}'
   # OPENGENI_MODEL_NOTES_JSON: '{"model-id":"One-line agent guidance."}'
+  # Code-mode replacement for the managed Gateway/OpenRouter/Opper model lists
+  # (catalog-document entry schemas, no pricing; ignored in database mode).
+  # See docs/model-providers.md "Code-mode managed model lists":
+  # OPENGENI_MANAGED_MODELS_JSON: '{"opperModels":[{"upstreamModelId":"aws/claude-opus-5-5",...}]}'
   # Default for new work while an organization holds OpenGeni credits and has
   # no connected subscription (see docs/model-providers.md):
   # OPENGENI_CREDITS_DEFAULT_MODEL: gpt-6-luna
@@ -170,6 +168,8 @@ secret:
   # an ExternalSecret. Never commit real secrets in values.
   # OPENGENI_OPENROUTER_API_KEY enables the deployment-managed reviewed
   # OpenRouter catalog. It belongs here, never in config or catalog JSON.
+  # OPENGENI_OPPER_API_KEY likewise enables the reviewed Opper catalog
+  # (default: Claude Opus 5.5 EU).
   # Google Drive release-readiness configuration is demonstrated in
   # values.google-drive-readiness.example.yaml. When enabled, this Secret must
   # provide OPENGENI_INTEGRATIONS_STATE_SECRET,
@@ -224,11 +224,13 @@ api:
   extraVolumeMounts: []
   enabled: true
   replicaCount: 2
+  # Surge a replacement before removing a serving pod so capacity never drops during a
+  # rollout, and drain each terminating pod (preStop) before the server stops.
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 0
-      maxUnavailable: 1
+      maxSurge: 1
+      maxUnavailable: 0
   image:
     repository: opengeni-api
     # Empty tag resolves to the chart appVersion via the opengeni.image helper.
@@ -262,6 +264,9 @@ api:
   podAnnotations: {}
   priorityClassName: ""
   terminationGracePeriodSeconds: 30
+  # Seconds a terminating pod keeps serving in-flight requests after it leaves the Service
+  # endpoints and before SIGTERM. 0 omits the hook (clusters older than k8s 1.30).
+  preStopDrainSeconds: 10
   topologySpreadConstraints:
     enabled: true
     maxSkew: 1
@@ -603,11 +608,13 @@ web:
   # entries. It is mounted read-only; do not reuse the full runtime Secret.
   demoApiCredentialsSecret: ""
   replicaCount: 2
+  # Surge a replacement before removing a serving pod so capacity never drops during a
+  # rollout, and drain each terminating pod (preStop) before the server stops.
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 0
-      maxUnavailable: 1
+      maxSurge: 1
+      maxUnavailable: 0
   image:
     repository: opengeni-web
     # Empty tag resolves to the chart appVersion via the opengeni.image helper.
@@ -635,6 +642,9 @@ web:
   podAnnotations: {}
   priorityClassName: ""
   terminationGracePeriodSeconds: 30
+  # Seconds a terminating pod keeps serving in-flight requests after it leaves the Service
+  # endpoints and before SIGTERM. 0 omits the hook (clusters older than k8s 1.30).
+  preStopDrainSeconds: 10
   topologySpreadConstraints:
     enabled: true
     maxSkew: 1
@@ -1270,7 +1280,11 @@ observability:
     # Cumulative p95 startup SLOs, measured from the durable turn queue time.
     # Keep these aligned with the canonical Turn Startup dashboard annotations.
     turnStartupQueueP95Seconds: 5
-    turnStartupProviderDispatchP95Seconds: 60
+    # Accepted turn -> first provider dispatch is OpenGeni-owned latency, so it
+    # gets tight tiers: a warning (investigate) and a paging critical tier that
+    # replaces it. Normal p95 is a few seconds.
+    turnStartupProviderDispatchP95Seconds: 20
+    turnStartupProviderDispatchCriticalP95Seconds: 60
     turnStartupFirstByteP95Seconds: 120
     # Exclusive logical-turn first-byte completions divided by completed plus
     # terminal failed-without-byte milestones over the alert window. A failed
@@ -1278,6 +1292,19 @@ observability:
     # latency quantiles; later tool-loop failures cannot downgrade a success.
     turnStartupFirstByteAvailabilityRatio: 0.95
     turnStartupMinSamples: 5
+    # Per model request: SDK model entry -> literal provider dispatch (admission,
+    # durable history/audit checkpoints, credit revalidation). Ours; sub-second
+    # when healthy.
+    modelRequestPreDispatchP95Seconds: 2
+    modelRequestMinSamples: 20
+    # Provider time-to-first-token (dispatch -> first streamed delta) alerts only
+    # relative to that provider's own trailing 24h p90, never on an absolute
+    # number: the 30m p90 must exceed ratio x baseline AND the floor, with
+    # enough recent and baseline requests.
+    providerTtftRegressionRatio: 2
+    providerTtftRegressionFloorSeconds: 5
+    providerTtftRecentMinSamples: 30
+    providerTtftBaselineMinSamples: 200
     labels: {}
     annotations: {}
     rules: []

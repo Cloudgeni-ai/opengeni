@@ -14,8 +14,8 @@
   --_og-c-model-max: 16rem;
   --_og-c-model-x: 0.625rem;
   --_og-c-native-max: 180px;
-  --_og-c-recovered-max: 11rem;
-  --_og-c-error-max: 10rem;
+  --_og-c-recovered-max: 14rem;
+  --_og-c-error-max: 14rem;
   --og-model-policy-label-full-display: inline;
   --og-model-policy-label-short-display: none;
   --og-model-policy-effort-display: inline;
@@ -120,8 +120,8 @@
     --_og-c-model-max: 7.5rem;
     --_og-c-model-x: 0.5rem;
     --_og-c-native-max: 7.5rem;
-    --_og-c-recovered-max: 7rem;
-    --_og-c-error-max: 6rem;
+    --_og-c-recovered-max: 8rem;
+    --_og-c-error-max: 8rem;
     --og-model-policy-label-full-display: none;
     --og-model-policy-label-short-display: inline;
     --og-model-policy-effort-display: none;
@@ -159,6 +159,63 @@
     .og-composer-footer:has([data-transcription-capturing])
     .og-composer-actions {
     display: none;
+  }
+
+  [data-og-responsive-basis="container"]
+    .og-composer-footer:has([data-transcription-attention])
+    .og-composer-controls
+    > :not([data-transcription-attention]) {
+    display: none;
+  }
+
+  [data-og-responsive-basis="container"]
+    .og-composer-footer:has([data-transcription-attention])
+    .og-composer-actions
+    > :not(:is([data-analytics-action], :has([data-analytics-action]))) {
+    display: none;
+  }
+
+  [data-og-responsive-basis="container"]
+    [data-transcription-attention]
+    :is(.og-transcription-recovered-label, .og-transcription-error-label) {
+    max-width: 15rem;
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-height: 1.2;
+  }
+
+  [data-og-responsive-basis="container"]
+    .og-composer-footer:has([data-realtime-attention])
+    .og-composer-controls {
+    display: none;
+  }
+
+  [data-og-responsive-basis="container"]
+    .og-composer-footer:has([data-realtime-attention])
+    .og-composer-actions,
+  [data-og-responsive-basis="container"]
+    .og-composer-footer
+    .og-realtime-control:has([data-realtime-attention]),
+  [data-og-responsive-basis="container"] .og-composer-footer [data-realtime-attention] {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  [data-og-responsive-basis="container"]
+    .og-composer-footer:has([data-realtime-attention])
+    .og-composer-actions
+    > :not(:has([data-realtime-attention])) {
+    flex-shrink: 0;
+  }
+
+  [data-og-responsive-basis="container"]
+    .og-composer-footer
+    [data-realtime-attention]
+    .og-realtime-failure-label {
+    max-width: none;
+    -webkit-line-clamp: 3;
   }
 }
 

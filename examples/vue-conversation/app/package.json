@@ -8,12 +8,13 @@
     "server": "bun --env-file=.env.local src/server.ts",
     "onboard": "bun --env-file=.env.local src/onboard.ts",
     "start": "bun --env-file=.env.local src/server.ts",
+    "typecheck": "vue-tsc --noEmit",
     "build": "vue-tsc --noEmit && vite build",
     "test": "bun test src",
     "preview:check": "bun src/visual-check.ts"
   },
   "dependencies": {
-    "@opengeni/sdk": "7.5.0",
+    "@opengeni/sdk": "1.1.0",
     "vue": "3.5.43"
   },
   "devDependencies": {

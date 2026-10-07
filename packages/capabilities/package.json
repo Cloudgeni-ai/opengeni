@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/capabilities",
-  "version": "1.0.0",
+  "version": "1.4.4",
   "description": "Protocol-neutral capability integration compilers and local MCP adapters for OpenGeni.",
   "license": "Apache-2.0",
   "repository": {
@@ -36,6 +36,7 @@
   },
   "dependencies": {
     "@openai/agents": "0.14.3",
+    "@opengeni/contracts": "workspace:*",
     "@opengeni/network": "workspace:*",
     "graphql": "^16.12.0",
     "js-yaml": "4.1.1"

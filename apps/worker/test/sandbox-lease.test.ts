@@ -84,6 +84,7 @@ import {
   retainedProcessSettlementIdentity,
   SandboxRetainedProcessPromotionFencedError,
   SandboxWorkspaceMutationFencedError,
+  SandboxWorkspaceMutationOutputRejectedError,
   settleRetainedProcess,
   touchLeaseHolder,
   verifyWorkspaceMutationSettlement,
@@ -3262,6 +3263,14 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const stale = await settle().catch((error) => error);
     expect(stale).toBeInstanceOf(SandboxWorkspaceMutationFencedError);
     expect((stale as SandboxWorkspaceMutationFencedError).code).toBe("route_fenced");
+    expect(stale).toBeInstanceOf(SandboxWorkspaceMutationOutputRejectedError);
+    expect((stale as SandboxWorkspaceMutationOutputRejectedError).physicalSettlement).toEqual({
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      admission,
+      operation: "providerResolvedBeforeRouteMove",
+      outcome: "resolved",
+    });
 
     const [first] = await admin<{ providerOutcome: string | null; settledAt: Date | null }[]>`
       select provider_outcome as "providerOutcome", settled_at as "settledAt"
@@ -3290,6 +3299,23 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       from sandbox_workspace_mutation_admissions where id = ${admission.id}`;
     expect(afterReplay?.providerOutcome).toBe("resolved");
     expect(afterReplay?.settledAt?.getTime()).toBe(first?.settledAt?.getTime());
+    expect(replay).toBeInstanceOf(SandboxWorkspaceMutationOutputRejectedError);
+    const mismatch = await verifyWorkspaceMutationSettlement(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 11,
+      expectedInstanceId: "box-settlement-race",
+      admission: { ...admission, workspaceGeneration: admission.workspaceGeneration + 1 },
+      operation: "providerResolvedBeforeRouteMove",
+      outcome: "resolved",
+      routeKind: "active",
+      routeTargetId: null,
+      routeEpoch: 0,
+    }).catch((error) => error);
+    expect(mismatch).toBeInstanceOf(SandboxWorkspaceMutationFencedError);
+    expect(mismatch).not.toBeInstanceOf(SandboxWorkspaceMutationOutputRejectedError);
   }, 60_000);
 
   test("(1b-lock-order) settlement and retained promotion lock authority before admission", async () => {

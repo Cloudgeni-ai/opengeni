@@ -28,6 +28,9 @@ import {
 import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
+  WORKSPACE_OPPER_CONNECTION_DOMAIN,
+  WORKSPACE_OPPER_CONNECTION_ROLE,
+  opperCredentialProblem,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
 } from "@opengeni/config";
@@ -53,6 +56,8 @@ import {
   ListConnectionsResponse,
   OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+  OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+  OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   OpenGeniSlackBotInstallRequest,
   OAuthStartRequest,
   OAuthStartResponse,
@@ -208,9 +213,19 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/connections/accounts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
+    const includeInactive = c.req.query("includeInactive");
+    if (
+      includeInactive !== undefined &&
+      includeInactive !== "true" &&
+      includeInactive !== "false"
+    ) {
+      throw new HTTPException(400, { message: "includeInactive must be true or false" });
+    }
     return c.json(
       ListConnectionsResponse.parse({
-        connections: await listOwnConnectionAccountsForGrant(db, grant),
+        connections: await listOwnConnectionAccountsForGrant(db, grant, {
+          includeInactive: includeInactive === "true",
+        }),
       }),
     );
   });
@@ -329,6 +344,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       // integration credentials still require an explicit broker destination.
       if (!workspaceProviderKind && !directModelKey)
         assertBrokeredApiKeyCredential(payload.kind, payload.credential);
+      if (workspaceProviderKind === "opper") assertOpperCredential(payload.credential);
       const connection = workspaceProviderKind
         ? await (async () => {
             const provider = workspaceProviderApiKeyConnectionSpec(workspaceProviderKind);
@@ -1033,7 +1049,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             if (!destination.success || !destinationOnlyUpdate) {
               throw new HTTPException(422, {
                 message:
-                  "use the dedicated OpenGeni Slack bot reinstall flow to update this connection",
+                  "use the dedicated Opengeni Slack bot reinstall flow to update this connection",
               });
             }
             const destinationSelection = destination.data;
@@ -1129,7 +1145,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                 message:
                   targetWorkspaceProviderKind === "vercel_gateway"
                     ? "use the Vercel AI Gateway connect flow to create this connection"
-                    : "use the OpenRouter connect flow to create this connection",
+                    : targetWorkspaceProviderKind === "opper"
+                      ? "use the Opper connect flow to create this connection"
+                      : "use the OpenRouter connect flow to create this connection",
               });
             }
             assertNotDirectPersonalSlackOAuth(providerDomain, kind);
@@ -1212,6 +1230,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               metadata: existing.metadata,
               credential: payload.credential,
             });
+            if (existingWorkspaceProviderKind === "opper")
+              assertOpperCredential(payload.credential);
             const key = requireEnvironmentEncryption(settings);
             const grantedScopes = payload.grantedScopes ?? existing.grantedScopes;
             const expiresAt =
@@ -1590,7 +1610,7 @@ async function persistOpenGeniSlackBotConnection(input: {
     throw new SlackInstallCallbackError(
       422,
       "connection_conflict",
-      "connectionId is not an OpenGeni Slack bot connection",
+      "connectionId is not an Opengeni Slack bot connection",
       "principal_validation",
     );
   }
@@ -1895,7 +1915,20 @@ function workspaceProviderApiKeyConnectionKind(input: {
   ) {
     return "openrouter";
   }
+  if (
+    providerDomain === WORKSPACE_OPPER_CONNECTION_DOMAIN &&
+    input.metadata?.credentialRole === WORKSPACE_OPPER_CONNECTION_ROLE
+  ) {
+    return "opper";
+  }
   return null;
+}
+
+/** Opper management keys are refused by inference routes; never store one as a model key. */
+function assertOpperCredential(credential: Record<string, unknown>): void {
+  const apiKey = typeof credential.apiKey === "string" ? credential.apiKey : "";
+  const problem = opperCredentialProblem(apiKey);
+  if (problem) throw new HTTPException(422, { message: problem });
 }
 
 /**
@@ -1915,7 +1948,7 @@ function assertBrokeredApiKeyCredential(
 function assertNotReservedSlackBotMetadata(metadata: Record<string, unknown> | undefined): void {
   if (hasReservedOpenGeniSlackBotMetadata(metadata)) {
     throw new HTTPException(422, {
-      message: "OpenGeni Slack bot metadata is reserved for the dedicated connection flow",
+      message: "Opengeni Slack bot metadata is reserved for the dedicated connection flow",
     });
   }
 }
@@ -1980,6 +2013,8 @@ function workspaceProviderCredentialMetadata(
     [OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _openRouterOperationDigest,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _operationId,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _operationDigest,
+    [OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _opperOperationId,
+    [OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _opperOperationDigest,
     ...effectiveMetadata
   } = metadata ?? {};
   for (const role of ["anthropic", "claude_subscription"]) {

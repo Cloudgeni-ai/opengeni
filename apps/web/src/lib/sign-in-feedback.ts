@@ -87,6 +87,23 @@ export function clearSignInChangeFeedback(): void {
   window.dispatchEvent(new Event(signInFeedbackEvent));
 }
 
+const STALE_SIGN_IN_REQUEST_ERRORS = new Set([
+  "state_mismatch",
+  "state_not_found",
+  "invalid_state",
+  "session_expired",
+]);
+
+/**
+ * A stale-request code (a duplicate or late provider callback, or a leftover
+ * `error` from an earlier attempt). It describes an old sign-in request, so it
+ * is noise once the browser holds a valid session.
+ */
+export function isStaleSignInRequestCallbackError(search: string): boolean {
+  const errors = new URLSearchParams(search).getAll("error");
+  return errors.length === 1 && STALE_SIGN_IN_REQUEST_ERRORS.has(errors[0]!);
+}
+
 export function readSignInCallbackError(search: string): string | null {
   const params = new URLSearchParams(search);
   const errors = params.getAll("error");

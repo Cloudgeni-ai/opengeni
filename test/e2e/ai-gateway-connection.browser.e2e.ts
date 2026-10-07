@@ -167,6 +167,24 @@ describe(`AI Gateway custom model settings in ${browserEngine}`, () => {
     await waitForAriaLabelFocus(page, "Fixture focus target");
     expect(await openRouterSlug.inputValue()).toBe("fixture/deferred-failure");
 
+    const opperCard = providerCard(page, "opper");
+    await expectCustomModelCount(opperCard, "Opper", 2);
+    await opperCard.getByText("Your Opper account", { exact: true }).waitFor();
+    await opperCard
+      .getByText("Deployment-provided Opper models remain separate.", { exact: false })
+      .waitFor();
+    await opperCard.getByText("aws/claude-sonnet-4-6-eu", { exact: true }).waitFor();
+    const opperSlug = opperCard.getByLabel("Opper model id");
+    await opperSlug.fill("vertexai/gemini-3.8-flash-eu");
+    await opperCard.getByRole("button", { name: "Add model" }).click();
+    await expectReceipt(page, {
+      action: "create-model",
+      provider: "opper",
+      upstreamModelId: "vertexai/gemini-3.8-flash-eu",
+    });
+    await opperCard.getByText("vertexai/gemini-3.8-flash-eu", { exact: true }).waitFor();
+    await waitForAriaLabelFocus(page, "Opper model id");
+
     await assertAccessibleAndBounded(page);
     await page.screenshot({
       path: `${evidenceDir}desktop-1280x900.png`,
@@ -285,9 +303,10 @@ async function openFixture(page: Page, baseUrl: string): Promise<void> {
     .getByText("Vercel AI Gateway", { exact: true })
     .waitFor();
   await providerCard(page, "openrouter").getByText("OpenRouter", { exact: true }).waitFor();
+  await providerCard(page, "opper").getByText("Opper", { exact: true }).waitFor();
 }
 
-function providerCard(page: Page, provider: "vercel-ai-gateway" | "openrouter"): Locator {
+function providerCard(page: Page, provider: "vercel-ai-gateway" | "openrouter" | "opper"): Locator {
   return page.getByTestId(`${provider}-connection-card`);
 }
 

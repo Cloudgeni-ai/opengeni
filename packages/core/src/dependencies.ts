@@ -3,6 +3,7 @@ import type {
   ConnectionCredentialsPort,
   Document,
   DocumentAuthorityKind,
+  EntitlementsPort,
   GitHubAppApiPort,
   ScheduledTask,
   ScheduledTaskTriggerType,
@@ -155,6 +156,8 @@ export type AppDependencies = {
    */
   catalogSourceSettings?: Settings;
   db: Database;
+  /** Read-only host funding admission; unset uses the standalone billing ledger. */
+  entitlements?: EntitlementsPort | null;
   /**
    * Host-composed editable artifact engine. Standalone startup binds the same
    * native kernel/DB/object-store implementation; embedded hosts may inject an

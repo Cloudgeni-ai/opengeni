@@ -1,5 +1,27 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
 export type {
+  InsightsUsageRange,
+  InsightsUsageGroupBy,
+  InsightsUsagePayer,
+  InsightsUsageSource,
+  InsightsUsageTokens,
+  InsightsUsageClassMicros,
+  InsightsUsageMeasures,
+  InsightsUsageScope,
+  InsightsUsageGroup,
+  InsightsUsageSeriesPoint,
+  InsightsUsageFacets,
+  InsightsUsageResponse,
+  InsightsCall,
+  InsightsCallsResponse,
+  InsightsUsageWindowOptions,
+  WorkspaceInsightsUsageOptions,
+  OrganizationInsightsUsageOptions,
+  WorkspaceInsightsCallsOptions,
+  OrganizationInsightsCallsOptions,
+  InsightsCallsScope,
+} from "./insights-usage";
+export type {
   ClaudeSubscriptionOAuthStartResponse,
   ClaudeSubscriptionOAuthCompleteRequest,
   ClaudeSubscriptionOAuthCompleteResponse,
@@ -61,7 +83,7 @@ export type CodexRealtimeWebrtcRequest = {
 export type CodexRealtimeWebrtcResponse = {
   sdp: string;
   version: CodexRealtimeWebrtcVersion;
-  model: "gpt-live-1-boulder-alpha";
+  model: "gpt-live-1-boulder-alpha" | "opengeni-azure/gpt-live-1";
   connectionId: string;
   connectionEpoch: number;
   startupFenceSequence: number;
@@ -249,6 +271,7 @@ export type SyncSessionRealtimeLedgerResponse = {
 };
 
 export type SessionRealtimeModel =
+  | "opengeni-azure/gpt-live-1"
   | "gpt-live-1-boulder-alpha"
   | "supergrok/grok-voice-think-fast-2.0"
   | "opengeni-gateway/openai/gpt-realtime-2.1"
@@ -265,6 +288,8 @@ export type WorkspaceRealtimeModelCatalogItem = {
   description: string;
   available: boolean;
   unavailableReason: string | null;
+  /** Machine-readable reason when unavailable, e.g. `insufficient_credits`. */
+  unavailableCode?: string | null | undefined;
   recommended: boolean;
 };
 
@@ -311,9 +336,17 @@ export type EndSessionRealtimeRequest = RenewSessionRealtimeRequest & {
   reason: Extract<SessionRealtimeEndReason, "user_stop" | "browser_unload">;
 };
 
+/** Server instruction to end a live call now (for example, out of credits). */
+export type SessionRealtimeStopInstruction = {
+  code: string;
+  message: string;
+};
+
 export type SessionRealtimeMutationResponse = {
   mode: SessionRealtimeMode;
   replay: boolean;
+  /** Present on a heartbeat when the server stopped extending the lease. */
+  stop?: SessionRealtimeStopInstruction | undefined;
 };
 
 export type SessionStatus =
@@ -987,6 +1020,13 @@ export type OpenGeniSlackBotInstallRequest = {
   /** Existing OpenGeni Slack bot connection to reinstall in place. */
   connectionId?: string | undefined;
 };
+
+export type AvailableOpenGeniSlackBots = {
+  connections: ConnectionMetadata[];
+  organizationSharedConnectionIds: string[];
+};
+export type UpdateOpenGeniSlackBotOrganizationAccess = { enabled: boolean };
+export type OpenGeniSlackBotOrganizationAccess = { enabled: boolean; generation: number };
 
 export type FikenInstallRequest = {
   apiToken: string;
@@ -3605,6 +3645,8 @@ export type ClientModel = {
   label: string;
   /** Optional curated compact label for dense UI (e.g. mobile composer). */
   shortLabel?: string | undefined;
+  /** Optional HTTPS maker logo supplied by the model catalog. */
+  logoUrl?: string | undefined;
   /** Provider id (e.g. `openai`, `azure`, or a registry provider id). */
   provider: string;
   providerLabel: string;
@@ -3665,6 +3707,7 @@ export type ModelCredentialReadinessV1 = {
 
 export type WorkspaceModelCatalogModel = ClientModel & {
   credentialReadiness: ModelCredentialReadinessV1;
+  creditFunding?: "promotional" | "general" | "unavailable" | undefined;
   /** Exact workspace-policy verdict without exposing provider identity. */
   policyAllowed?: boolean | undefined;
   availability: ModelAvailabilityV1;
@@ -3724,11 +3767,32 @@ export type CreateWorkspaceOpenRouterCustomModelRequest = CreateWorkspaceGateway
 
 export type DeleteWorkspaceOpenRouterCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
 
+export type WorkspaceOpperCustomModel = WorkspaceGatewayCustomModel;
+
+export type WorkspaceOpperCustomModelsResponse = {
+  models: WorkspaceOpperCustomModel[];
+};
+
+export type CreateWorkspaceOpperCustomModelRequest = CreateWorkspaceGatewayCustomModelRequest;
+
+export type DeleteWorkspaceOpperCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
+
+/** Model connection kinds that carry a per-connection access policy. */
+export type ModelConnectionAccessKind =
+  | "codex"
+  | "supergrok"
+  | "vercel_gateway"
+  | "openrouter"
+  | "anthropic"
+  | "claude_subscription"
+  | "opper";
+
 export type OrganizationModelProviderKind =
   | "vercel_gateway"
   | "openrouter"
   | "anthropic"
-  | "claude_subscription";
+  | "claude_subscription"
+  | "opper";
 
 export type ClaudeUsageWindow = {
   id:
@@ -4259,16 +4323,44 @@ export type ClientConfig = {
   /** Session proxy sandbox-path download opt-in; absent on native deployments. */
   sandboxFiles?: boolean | undefined;
   /**
-   * Session proxy capability for the embedded artifact viewer; absent on
-   * native deployments. The live socket is ticket-authenticated and reached
-   * directly; the cache partition identifies the proxied user.
+   * `false` when a host's session proxy turns live voice off
+   * (`createSessionProxyHandler({ realtimeVoice: false })`), so UIs hide the
+   * voice button; `true` when the host explicitly offers it to end users
+   * (embedded stock UIs then show the button). Otherwise absent: availability
+   * comes from the workspace's realtime model catalog.
+   */
+  realtimeVoice?: boolean | undefined;
+  /**
+   * Session proxy only: the workspace the proxy resolved for this user, so a
+   * browser pointed at the proxy (`<OpenGeniChat baseUrl=... />`) needs no
+   * workspace id. Absent on native deployments and older proxies.
+   */
+  workspaceId?: string | undefined;
+  /**
+   * Session proxy capability for the embedded artifact viewer and inline Site
+   * previews; absent on native deployments. The live socket is
+   * ticket-authenticated and reached directly; the cache partition identifies
+   * the proxied user. `false` when the proxy does not serve artifacts, so
+   * stock UIs show Site previews as unavailable instead of failing on click.
    */
   artifacts?:
     | {
         editableLiveUrl: string;
         cachePartition: { accountId: string; principalId: string; authorizationEpoch: string };
       }
+    | false
     | undefined;
+  /**
+   * Session proxy only: whether the browser may start a chat (the proxy has a
+   * `createSession` hook). Stock UIs hide "New chat" when `false`; absent on
+   * native deployments and older proxies.
+   */
+  sessionCreation?: boolean | undefined;
+  /**
+   * Session proxy only: whether users may archive or restore their chats.
+   * Stock UIs hide "Archive" when `false`; absent on native deployments.
+   */
+  archive?: boolean | undefined;
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
   /**
@@ -4344,7 +4436,10 @@ export type TranscriptionRecordingErrorCode =
   | "unavailable"
   | "too_large"
   | "invalid_audio"
-  | "unknown";
+  | "unknown"
+  | "insufficient_credits"
+  | "allowance_exhausted"
+  | "monthly_model_cost_limit";
 
 export type TranscriptionRecordingState =
   | "uploading"
@@ -5037,6 +5132,7 @@ export type UpdateSlackChannelRoutesRequest = {
 };
 
 export type VoiceInputProviderId =
+  | "azure-mai"
   | "supergrok-subscription"
   | "codex-subscription"
   | "openai"
@@ -6186,6 +6282,7 @@ export type ScheduledTaskAdmissionRefusal = {
     | "machine_enrollment_inactive"
     | "variable_set_unavailable"
     | "rig_version_unavailable"
+    | "scheduled_model_unavailable"
     | "insufficient_credits"
     | "monthly_model_cost_limit"
     | "monthly_agent_run_limit"
@@ -7367,6 +7464,12 @@ export type CapabilityRuntime = {
           | "missing_verification";
       }
     | undefined;
+  /**
+   * Present when connecting needs an operator-registered OAuth client because
+   * the provider refuses self-registration; `configured` is whether this
+   * deployment has one. Connector surfaces offer the row only when true.
+   */
+  operatorOAuthClient?: { configured: boolean } | undefined;
 };
 
 export type CapabilityCatalogItem = {
@@ -8163,11 +8266,25 @@ export type BillingMode = "disabled" | "stripe";
 
 export type EntitlementsMode = "none" | "static" | "managed";
 
+export type PromotionalCreditScope = {
+  label: string;
+  eligibleModelIds: string[];
+};
+
+export type PromotionalCreditBalance = PromotionalCreditScope & {
+  grantId: string;
+  remainingMicros: number;
+  /** Also pays for dictation and live voice, like general credits (signup credits). */
+  coversVoice?: boolean | undefined;
+};
+
 export type BillingBalance = {
   accountId: string;
   balanceMicros: number;
   currency: "usd";
   updatedAt: string;
+  generalBalanceMicros?: number | undefined;
+  promotionalCredits?: PromotionalCreditBalance[] | undefined;
 };
 
 export const KNOWN_USAGE_EVENT_TYPES = [
@@ -8514,6 +8631,7 @@ export type CreateCheckoutResponse = {
   url: string;
   /** The credits this checkout grants once it completes. */
   amountUsd?: number | undefined;
+  promotionalScope?: PromotionalCreditScope | undefined;
 };
 
 /** Where one checkout stands, and whether its credits reached the balance. */
@@ -8526,6 +8644,7 @@ export type BillingCheckoutStatus = {
     currency: "usd";
     /** True when a coupon covered the whole checkout, so nothing was charged. */
     free: boolean;
+    promotionalScope?: PromotionalCreditScope | undefined;
   };
   balance: BillingBalance | null;
 };
@@ -8962,6 +9081,9 @@ export type ConnectorToolPermissionEntry = {
   permission: ConnectorToolPermission;
   inherited: boolean;
   approvalRequired: boolean;
+  source?: "recommended" | "connector_default" | "tool" | "action" | "conflict";
+  conditional?: boolean;
+  actionPermissions?: Array<{ actionName: string; permission: ConnectorToolPermission }>;
 };
 export type ConnectorToolPermissionsResponse = {
   connectionId: string;
@@ -8970,11 +9092,27 @@ export type ConnectorToolPermissionsResponse = {
   tools: ConnectorToolPermissionEntry[];
   discoveryError: string | null;
   canManage: boolean;
+  appliesTo?: "next_attempt";
+  revision?: string;
+  accountLabel?: string;
+  instanceKey?: string;
+  accounts?: Array<{
+    connectionId: string;
+    label: string;
+    scope: "personal" | "workspace" | "none";
+    instanceKey?: string;
+  }>;
 };
 export type UpdateConnectorToolPermissionsRequest = {
   connectionId: string;
-  permission: ConnectorToolPermission;
-} & ({ target: "default" } | { target: "tools"; toolNames: string[] });
+  permission: ConnectorToolPermission | null;
+  expectedRevision?: string;
+  instanceKey?: string;
+} & (
+  | { target: "default" }
+  | { target: "tools"; toolNames: string[] }
+  | { target: "action"; toolName: string; actionName: string }
+);
 
 /** Agent capability ids (see `@opengeni/contracts` agent-config). */
 export type AgentCapabilityId =
@@ -9109,3 +9247,8 @@ export type AgentConfigErrorCode =
   | "agent_config_widening"
   /** Returned only by older servers that predate always-on agent configuration. */
   | "agent_config_not_enabled";
+export type {
+  ToolActionReview,
+  ToolReviewDetailsPage,
+  ToolReviewStatus,
+} from "@opengeni/contracts";

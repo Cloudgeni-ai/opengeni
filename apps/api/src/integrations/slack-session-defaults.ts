@@ -217,7 +217,7 @@ export function otherDeploymentLinkContext(
   if (links.length === 0 || !webBaseUrl) return null;
   const ownHost = new URL(webBaseUrl).host.toLowerCase();
   return [
-    `Links to a different OpenGeni deployment (this one is ${ownHost}):`,
+    `Links to a different Opengeni deployment (this one is ${ownHost}):`,
     ...links.map((link) => `- ${link.url} is on ${link.host}.`),
     `Workspaces, sessions and files from another deployment do not exist here, so looking up their ids in this deployment always fails as not found. Tell the user the link is for ${[...new Set(links.map((link) => link.host))].join(" and ")}, not ${ownHost}, instead of reporting the session as missing or asking for access to it.`,
   ].join("\n");

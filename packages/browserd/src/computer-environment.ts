@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { InteractionControllerError } from "@opengeni/interaction";
 import { readWindowsSeat } from "./cua/windows-seat";
+import { UnsettledCleanupError } from "./cleanup-error";
 
 const START_TIMEOUT_MS = 10_000;
 const STOP_TIMEOUT_MS = 3_000;
@@ -208,7 +209,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
           "-geometry",
           "112x34+28+28",
           "-title",
-          "OpenGeni Sandbox",
+          "Opengeni Sandbox",
           "-bg",
           "#101318",
           "-fg",
@@ -276,31 +277,30 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
       drain(rfb.stderr);
       await waitForLoopbackPort(rfbPort, rfb, "virtual RFB server");
 
-      let closed = false;
+      let closePromise: Promise<void> | null = null;
       return {
         seatId: `linux-virtual:${context.computerSessionId}`,
         displayId,
         rfbPort,
         environment: sessionEnvironment,
         async close() {
-          if (closed) return;
-          closed = true;
-          const failures = await stopProcessGroups([...processes].reverse());
-          if (failures.length === 0) failures.push(...(await removeDirectories(directories)));
-          if (failures.length > 0) {
-            throw new AggregateError(failures, "virtual ComputerSession cleanup failed");
-          }
+          closePromise ??= (async () => {
+            const failures = await stopProcessGroups([...processes].reverse());
+            if (failures.length === 0) failures.push(...(await removeDirectories(directories)));
+            if (failures.length > 0)
+              throw new UnsettledCleanupError(failures, "virtual ComputerSession cleanup failed");
+          })();
+          await closePromise;
         },
       };
     } catch (error) {
       const cleanup = await stopProcessGroups([...processes].reverse());
       if (cleanup.length === 0) cleanup.push(...(await removeDirectories(directories)));
       if (cleanup.length > 0) {
-        const failure = new Error("virtual ComputerSession allocation and cleanup failed", {
-          cause: error,
-        });
-        Object.defineProperty(failure, "errors", { value: [error, ...cleanup] });
-        throw failure;
+        throw new UnsettledCleanupError(
+          [error, ...cleanup],
+          "virtual ComputerSession allocation and cleanup failed",
+        );
       }
       throw error;
     }

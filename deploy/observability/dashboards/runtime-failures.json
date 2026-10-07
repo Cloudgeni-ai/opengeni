@@ -509,8 +509,8 @@
     {
       "id": 7,
       "type": "timeseries",
-      "title": "MCP tool-call p95 by outcome",
-      "description": "Separates slow successful tools from timeout and transport tails.",
+      "title": "MCP tool-call p95 by outcome and tool",
+      "description": "Separates slow successful tools from timeout and transport tails, and names the slow first-party tool. Every connector and custom tool shares the bounded \"external\" tool series.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "options": {
@@ -522,6 +522,13 @@
           "refId": "A",
           "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])))",
           "legendFormat": "{{outcome}} p95",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le, tool) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])))",
+          "legendFormat": "tool {{tool}} p95",
           "editorMode": "code",
           "range": true
         }

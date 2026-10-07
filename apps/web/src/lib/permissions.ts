@@ -409,6 +409,26 @@ export function canManageWorkspaceSettings(
   );
 }
 
+/**
+ * A shared workspace's Members surface: the viewer's own members:manage grant,
+ * or (in a managed browser session) an active organization owner or admin of
+ * the workspace's organization, with or without a grant here. The API applies
+ * the same organization authority; Personal workspaces never qualify.
+ */
+export function canManageWorkspaceMembers(
+  context: AccessContext | null,
+  workspace: Pick<Workspace, "id" | "accountId" | "kind"> | null,
+  managedSession: boolean,
+): boolean {
+  if (!context || !workspace) return false;
+  if (hasWorkspacePermission(context, workspace.id, "members:manage")) return true;
+  return (
+    managedSession &&
+    workspace.kind === "shared" &&
+    organizationAdministrationAccountIds(context).includes(workspace.accountId)
+  );
+}
+
 export function organizationAdministrationAccountIds(accessContext: AccessContext): string[] {
   return accessContext.accountGrants
     .filter(

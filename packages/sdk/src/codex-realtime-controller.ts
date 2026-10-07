@@ -120,7 +120,38 @@ export type CodexRealtimeControllerSnapshot = {
   reconnectAttempt: number;
   diagnostic: CodexRealtimeDiagnostic | null;
   error: string | null;
+  /**
+   * Set when Opengeni refused or ended deployment-funded voice for credits or
+   * availability. Codes match voice input: `insufficient_credits`,
+   * `allowance_exhausted`, `monthly_model_cost_limit`, plus
+   * `realtime_voice_unavailable`. Cleared on the next start.
+   */
+  refusal?: CodexRealtimeRefusal | null;
 };
+
+export type CodexRealtimeRefusal = { code: string; message: string };
+
+const REALTIME_REFUSAL_CODES = new Set([
+  "insufficient_credits",
+  "allowance_exhausted",
+  "monthly_model_cost_limit",
+  "realtime_voice_unavailable",
+]);
+
+/** A definitive credit/availability refusal from Opengeni, with its plain message. */
+export function codexRealtimeRefusal(error: unknown): CodexRealtimeRefusal | null {
+  if (!(error instanceof OpenGeniApiError) || !error.code) return null;
+  if (!REALTIME_REFUSAL_CODES.has(error.code)) return null;
+  const message = apiErrorMessage(error);
+  return {
+    code: error.code,
+    message:
+      message ??
+      (error.code === "insufficient_credits"
+        ? "Live voice needs Opengeni credits. Add credits to continue."
+        : "Live voice is unavailable right now."),
+  };
+}
 
 export type CodexRealtimeControllerClient = {
   beginSessionRealtime(
@@ -178,6 +209,7 @@ export type CodexRealtimeOwnerStorage = Pick<Storage, "getItem" | "setItem" | "r
 
 /** Canonical browser-owner storage namespace for a public realtime model. */
 export function sessionRealtimeOwnerStorageNamespace(model: SessionRealtimeModel): string {
+  if (model === "opengeni-azure/gpt-live-1") return "azure-live-owner";
   if (model === "gpt-live-1-boulder-alpha") return "codex-realtime-owner";
   if (model === "supergrok/grok-voice-think-fast-2.0") return "xai-realtime-owner";
   return "gateway-realtime-owner";
@@ -355,6 +387,7 @@ export function createCodexRealtimeController(
     reconnectAttempt: 0,
     diagnostic: null,
     error: null,
+    refusal: null,
   };
   let active: ConnectionRuntime | null = null;
   let pendingAbort: AbortController | null = null;
@@ -371,6 +404,9 @@ export function createCodexRealtimeController(
   let generation = 0;
   let reconnectAttempt = 0;
   let recoveryTerminal = false;
+  // Whether this mode ever reached a live provider connection. A definitive
+  // failure before that ends the mode instead of leaving an empty call open.
+  let connectedInMode = false;
   let mutationTail = Promise.resolve();
   let connectionTask: Promise<void> | null = null;
   const acceptedDelegationItemIds = new Set(
@@ -699,6 +735,12 @@ export function createCodexRealtimeController(
     if (closed || stopping || isAbortError(error)) return;
     const message = safeError(error);
     if (error instanceof CodexRealtimeMicrophoneError) {
+      if (error.code !== "track_ended" && !connectedInMode) {
+        // No conversation exists yet: end the call and say how to fix the
+        // microphone instead of holding an empty "reconnecting" call open.
+        await endAfterFailure(microphoneFailureMessage(error), null);
+        return;
+      }
       if (error.code === "track_ended" && state.mode?.state === "active") {
         reconnectAttempt += 1;
         publish({
@@ -720,6 +762,11 @@ export function createCodexRealtimeController(
       transitionEnded("Realtime owner no longer exists");
       return;
     }
+    const refusal = codexRealtimeRefusal(error);
+    if (refusal) {
+      await endForRefusal(refusal);
+      return;
+    }
     if (error instanceof OpenGeniApiError && error.status === 409 && error.retryable && owner) {
       try {
         const reconciled = await begin(owner, true, false);
@@ -737,6 +784,9 @@ export function createCodexRealtimeController(
           return;
         }
       }
+    } else if (error instanceof OpenGeniApiError && !error.retryable && !connectedInMode) {
+      await endAfterFailure(message, null);
+      return;
     } else if (error instanceof OpenGeniApiError && !error.retryable) {
       stopTimers();
       if (!active) releaseMicrophone();
@@ -883,6 +933,15 @@ export function createCodexRealtimeController(
     });
     let connected: CodexRealtimeWebrtcSession;
     try {
+      // Persist a fragment provider's tail before the replacement broker reads
+      // its startup history, while the old connection still owns the ledger.
+      if (active?.transport.drain) {
+        await active.transport.drain();
+        await active.bridge.flush();
+      }
+      if (closed || stopping || abort.signal.aborted || pendingGeneration !== targetGeneration) {
+        throw abort.signal.reason ?? new DOMException("Aborted", "AbortError");
+      }
       const media = await ensureMicrophone(replaceMicrophone, abort.signal);
       const operationId = randomUUID();
       const commonTransportInput = {
@@ -1016,6 +1075,7 @@ export function createCodexRealtimeController(
         onFatal: (fatal) => onBridgeFatal(targetGeneration, bridge, fatal),
       });
       active = { generation: targetGeneration, transport: connected, bridge };
+      connectedInMode = true;
       connected.setOutputMuted(state.outputMuted);
       recoveryTerminal = false;
       pendingAbort = null;
@@ -1098,6 +1158,7 @@ export function createCodexRealtimeController(
   };
 
   const heartbeat = async (): Promise<void> => {
+    let stopInstruction: CodexRealtimeRefusal | null = null;
     await exclusive(async () => {
       const current = state.mode;
       if (!owner || !current || current.state !== "active") {
@@ -1121,6 +1182,43 @@ export function createCodexRealtimeController(
         return;
       }
       publish({ mode: result.mode, realtimeId: result.mode.id, error: null });
+      stopInstruction = result.stop ?? null;
+    });
+    // The server stopped extending the lease (for example, out of credits):
+    // drain and end gracefully inside the remaining lease.
+    const instruction = stopInstruction as CodexRealtimeRefusal | null;
+    stopInstruction = null;
+    if (instruction && !stopping && !closed) await endForRefusal(instruction);
+  };
+
+  /**
+   * End the call because Opengeni refused it, keep final speech, and leave a
+   * terminal, non-retrying state that explains why.
+   */
+  const endForRefusal = async (refusal: CodexRealtimeRefusal): Promise<void> =>
+    await endAfterFailure(refusal.message, refusal);
+
+  const endAfterFailure = async (
+    message: string,
+    refusal: CodexRealtimeRefusal | null,
+  ): Promise<void> => {
+    try {
+      await controller.stop();
+    } catch {
+      // The lease is no longer extended; a failed graceful end lapses on its own.
+      stopping = false;
+      closeBrowserResources();
+      clearOwner();
+    }
+    recoveryTerminal = false;
+    publish({
+      status: "error",
+      realtimeId: null,
+      mode: null,
+      bridge: null,
+      diagnostic: diagnostic("terminal_stop", message, false),
+      error: message,
+      refusal,
     });
   };
 
@@ -1176,6 +1274,7 @@ export function createCodexRealtimeController(
       closed = false;
       stopping = false;
       recoveryTerminal = false;
+      connectedInMode = false;
       const record: OwnerRecord = {
         version: OWNER_RECORD_VERSION,
         workspaceId: options.workspaceId,
@@ -1186,11 +1285,12 @@ export function createCodexRealtimeController(
       };
       owner = record;
       storage?.setItem(storageKey, JSON.stringify(record));
-      publish({ status: "starting", error: null, diagnostic: null });
+      publish({ status: "starting", error: null, diagnostic: null, refusal: null });
       try {
         await begin(record, false);
       } catch (error) {
         closeBrowserResources(false);
+        const refusal = codexRealtimeRefusal(error);
         const failedMode = state.mode as SessionRealtimeMode | null;
         if (failedMode?.state === "active") {
           await handleConnectionFailure(error, "reconnect", false);
@@ -1200,9 +1300,13 @@ export function createCodexRealtimeController(
             status: "error",
             realtimeId: null,
             mode: null,
-            error: safeError(error),
+            error: refusal?.message ?? safeError(error),
+            ...(refusal
+              ? { refusal, diagnostic: diagnostic("terminal_stop", refusal.message, false) }
+              : {}),
           });
         }
+        if (refusal) return;
         throw error;
       }
     },
@@ -1211,6 +1315,8 @@ export function createCodexRealtimeController(
         if (recoveryTerminal && state.mode?.state === "active") return;
         const record = readOwnerRecord(storage, storageKey, options);
         if (!record) {
+          // Keep a terminal failure readable after the server records the end.
+          if (state.status === "error" && !state.mode) return;
           transitionEnded();
           return;
         }
@@ -1234,7 +1340,10 @@ export function createCodexRealtimeController(
       if (lifecycle.state === "ended") {
         const record = readOwnerRecord(storage, storageKey, options);
         if (record && record.operationId !== lifecycle.operationId) {
-          if (connectionTask || state.status === "active") return;
+          // An earlier call's end is not news while this browser is starting
+          // its own call (for example, waiting on the microphone prompt):
+          // re-beginning would advance the lease and fail the pending start.
+          if (connectionTask || state.status === "active" || state.status === "starting") return;
           closed = false;
           stopping = false;
           owner = record;
@@ -1250,6 +1359,9 @@ export function createCodexRealtimeController(
           await connectionTask;
           return;
         }
+        // The server's end of a call that failed to start must not wipe the
+        // failure the user still needs to read.
+        if (state.status === "error" && !state.mode) return;
         if (state.realtimeId === null || lifecycle.realtimeId === state.realtimeId) {
           transitionEnded(`Realtime ended: ${lifecycle.reason}`);
         }
@@ -1337,6 +1449,7 @@ export function createCodexRealtimeController(
       connectionTask = null;
       void retiredTask?.catch(() => undefined);
       try {
+        await active?.transport.drain?.();
         await active?.bridge.sealAndFlush();
         closeBrowserResources();
         let current = state.mode;
@@ -1708,6 +1821,37 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
+function microphoneFailureMessage(error: CodexRealtimeMicrophoneError): string {
+  switch (error.code) {
+    case "permission_denied":
+      return "Microphone access is blocked. Allow it in site settings, then try again.";
+    case "device_not_found":
+      return "No microphone was found. Connect one, then try again.";
+    case "device_unavailable":
+      return "Your microphone is busy or unavailable. Close other apps using it, then try again.";
+    default:
+      return /timed out/i.test(error.message)
+        ? "Microphone access wasn't granted in time. Allow it when your browser asks, then try again."
+        : "The microphone could not start. Try again.";
+  }
+}
+
+/** The server's own message, without the transport prefix or reference id. */
+function apiErrorMessage(error: OpenGeniApiError): string | null {
+  try {
+    const body = JSON.parse(error.body) as Record<string, unknown>;
+    const nested =
+      body.error && typeof body.error === "object" ? (body.error as Record<string, unknown>) : body;
+    return typeof nested.message === "string" && nested.message ? nested.message : null;
+  } catch {
+    return null;
+  }
+}
+
 function safeError(error: unknown): string {
-  return error instanceof Error ? error.message : "Codex realtime browser controller failed";
+  if (error instanceof OpenGeniApiError) {
+    const message = apiErrorMessage(error);
+    if (message) return /[.!?]$/.test(message) ? message : `${message}.`;
+  }
+  return error instanceof Error ? error.message : "Live voice failed in this browser.";
 }

@@ -108,7 +108,9 @@ has origin `system`.
 After execution ends, every physical finalization stage has a five-minute
 containment deadline, including normally completed turns. This is not a
 run-length limit. Heartbeats report `finalizing` and the current bounded
-`finalizationStage`; Grafana exposes stage occupancy and thirty-second slow-stage observations;
+`finalizationStage`; slow and containment logs carry the same hashed attempt
+`correlationId` as worker execution, never raw session or attempt IDs or metric labels.
+Grafana exposes stage occupancy and thirty-second slow-stage observations;
 the bounded containment log and worker restarts identify actual exits.
 A stuck writer drain is never detached to release a successor. At the deadline,
 the host stops polling and requests the ordinary graceful worker shutdown. Other
@@ -372,9 +374,39 @@ Diagnostics distinguish permission, device, autoplay, negotiation, rotation,
 reconnect, lost-owner, and terminal-stop transitions without SDP, credentials,
 audio, or transcript bodies.
 
-Only provider `turn.done` events persist transcript truth: one complete
-role-bearing user or assistant entry per provider turn. Live transcript deltas
-remain non-authoritative. Each `delegation.created` carries the bounded finalized
+Deployment-funded live voice (hosted Azure GPT Live and the Opengeni-managed
+AI Gateway models) is credit-gated and time-metered; connected Codex, SuperGrok,
+and a workspace's own Gateway key are paid by the workspace and are not.
+`packages/core/src/domain/realtime-voice-billing.ts` owns it. While credit
+billing is active (`OPENGENI_BILLING_MODE=stripe` or
+`OPENGENI_USAGE_LIMITS_MODE=managed`) such a model is offered and startable only
+when configured, priced (`OPENGENI_AZURE_LIVE_PRICING_JSON`,
+`OPENGENI_AI_GATEWAY_REALTIME_PRICING_JSON`), and the account has spendable
+credits. Begin and every provider connection mint run the same admission and
+refusal codes as voice input (`insufficient_credits`, `allowance_exhausted`,
+`monthly_model_cost_limit`); an unpriced or unconfigured model is
+`realtime_voice_unavailable`. Metering uses only server-observed time: each
+issued connection is billed per started minute from its claim until it closed,
+bounded by the owner's last heartbeat (an expired lease is never billed past
+it) or the owner-proven end. Each (connection, minute) is one idempotent
+`model.cost` receipt plus one post-use debit, so Insights shows it. Settlement
+runs at mint, every heartbeat, and end. When the balance is no longer positive
+at a heartbeat, the server stops extending the lease and returns a `stop`
+instruction; the browser drains final speech and ends the call, and an ignoring
+client lapses within the remaining lease. A balance may end at most about one
+minute negative. The server cannot cut the provider media itself: a client that
+stops heartbeating keeps its provider connection open unbilled until the
+provider's own session limit.
+
+Codex persists provider `turn.done` events as complete role-bearing turns;
+its live transcript deltas remain non-authoritative. Azure GPT Live instead
+provides timed transcript fragments. Its adapter preserves their observed order
+as `transcript.segment` entries tagged `provider_fragments` and
+`application_segment`, without inventing finalized provider turns. The adapter
+drains through `session.closed` (or transport close), then persists received
+fragments before replacement startup history is read or the mode ends. A close
+timeout stays uncertain and retryable. Old provider-session delegation IDs become
+general context on the replacement; durable task identity remains unchanged. Each `delegation.created` carries the bounded finalized
 dialogue since the previous delegation and records its transcript fence. When
 voice ends, the browser first seals and durably drains every already-parsed V3
 event. The same end transaction then selects only finalized transcript after the
@@ -426,10 +458,10 @@ schedules, goal continuation, compaction, and coalesced internal batches use
 explicit service principals. An Agent Steer remains the causal initiator when
 authority-neutral ordinary machine notices coalesce into its inference; those
 notices cannot erase the steering subject merely because they arrived in the
-same batch. Child lifecycle, command and goal-continuation updates retain their
-exact target causal turn. Different originating turns may coalesce only when
-they resolve to the same receiving-session human and their frozen execution
-permissions match. Unresolved origins keep exact-turn isolation; Agent Steer
+same batch. Producer lineage retains each exact causal turn. Ordinary same-human
+agent messages and child results use the receiving request context described
+below; commands, goals and explicit-source lanes retain their frozen receipt
+checks. Unresolved origins keep exact-turn isolation; Agent Steer
 keeps its exact caller attempt. A malformed historical authority-bearing update also receives an
 isolated claim instead of borrowing a coalesced principal; Agent Steer lineage
 is complete only when the caller session, turn, attempt, and execution
@@ -588,8 +620,17 @@ activity reports retryable pre-claim failure but the control lane finds its
 exact active attempt, that durable attempt wins and is recovered.
 
 During an executing turn, own-client PostgreSQL connection outages use only
-`ECONNREFUSED`, `ECONNRESET`, `CONNECT_TIMEOUT`, or SQLSTATE `57P01`–`57P03`/`08xxx`
-through an actual ORM or typed persistence boundary, never a driver name alone.
+`CONNECTION_CLOSED`, `CONNECTION_DESTROYED`, `CONNECTION_ENDED`, `ECONNREFUSED`,
+`ECONNRESET`, `CONNECT_TIMEOUT`, or SQLSTATE `57P01`–`57P03`/`08xxx` through an
+actual ORM, typed persistence or own transaction boundary, never a driver name
+alone. RLS transaction admission/settlement preserves raw driver provenance;
+application callback errors remain unbranded, and rollback failures retain the
+callback's no-replay evidence. The postgres.js patch rejects late writes from
+a physically closed reserved connection as `CONNECTION_CLOSED`, fences stale
+transaction/reservation callbacks after pool reuse, clears unsent bytes and the
+rejected active query on close, releases closed-connection drain obligations,
+and preserves the existing Bun TLS drainage. It never replays a
+transaction whose commit acknowledgement was lost.
 These closed outage classes use the same
 exact-attempt DB-only recovery lane, including SDK function-tool `.error` and
 mandatory-history wrappers. The activity exits without `turn.failed`, without
@@ -603,6 +644,14 @@ Transport evidence belongs to its trusted DB source subtree, never an unrelated
 aggregate sibling. All permanent/uncertain DB and no-replay evidence vetoes
 regardless of sibling order. Duplicate references/cycles consume no extra node
 budget; an incomplete or overflowed cause graph grants no recovery authority.
+A deadlock or serialization victim (SQLSTATE `40P01`/`40001`) raised through
+the same own ORM/typed persistence boundary enters the same lane. PostgreSQL
+aborted that whole transaction, so unlike a lost connection nothing it wrote
+committed; an escaped rollback therefore no longer keeps a running turn
+terminal, and it is never a reason to replay a tool. Hot per-call writers
+(pending tool-call results and model-history appends) first retry their own
+exactly idempotent transaction on these SQLSTATEs; connector-ledger
+transactions take the canonical event-write prefix and retry the same way.
 
 Versioned control observers distinguish unavailable session reads from idle
 business state. Missing and RLS-hidden rows are indistinguishable; neither is
@@ -654,17 +703,27 @@ snapshot; runtime never substitutes the session creator, current browser user,
 worker identity, or another member's account. See
 [`supergrok-subscription.md`](supergrok-subscription.md).
 
-Ordinary agent messages, like Steer, inherit initiating-human identity from the
-exact admitted sender turn. Empty personal-connection selections or workspace
-provider scope do not erase that identity. Ordinary messages from different sender
-attempts may share a batch with each other and lifecycle results when their exact
-originating turns resolve to the same human and frozen execution permissions.
-Steer retains exact-caller isolation: messages from that same attempt can join its
-batch, with the replacement instruction last in both the timeline and persisted
-model context, including turns with a goal snapshot. Malformed historical message lineage cannot borrow another
-update's human. Genuine service-only source turns remain service-only. This
-preserves identity without expanding accepted connection selections or replacing
-the receiving session's tool configuration.
+Ordinary same-human agent messages and child lifecycle results are informational:
+when the receiving chat has a started request context, that context owns the
+turn's accepted accounts and provider selections. Sender tool/account choices do
+not narrow or widen it. The server advances `sessions.execution_context_turn_id`
+only on the first durable `turn.started` for accepted user/API work, including a
+child's initial request. Queue admission, refused startup, recovery, schedules,
+compaction and informational follow-ups do not move it. Execution-authority
+revocation clears it; an audience-only private-to-shared change preserves it.
+A new queued human request uses its own accepted context for joined input.
+
+Different humans, genuine service inputs and external-linked/developer-setup
+restrictions keep the explicit source lane. Missing historical context falls
+back to that lane without guessing the creator's or current default accounts.
+Steer retains exact-caller isolation; an authoritative human Steer can carry its
+older same-human agent Steer as context. Replacement instructions render last.
+The immutable receiving-context reference on a new informational turn is checked
+by SQL against its delivered inputs and the locked session pointer. Personal
+connection receipts preserve their accepted generations; physical credential
+use still checks live revocation. Known selected-tool differences produce a
+factual model-memory note, with no execution or ordinary timeline effect.
+See [durable agent inputs](durable-agent-inputs.md).
 
 The same accepted logical-turn boundary governs prompt policy and structured
 preferences. After claim, the owning attempt installs immutable instruction-
@@ -926,12 +985,30 @@ be reclaimed, and an expired post-execution claim settles outcome-unknown with
 its visible `agent.toolCall.output` in the same PostgreSQL commit as the
 terminal journal state.
 Concurrent first submissions serialize on the caller-owned operation id and
-converge to one creation plus one replay. Client abort is observer-only; server
+converge to one creation plus one replay. Every journal writer (submit, claim,
+execution start, and terminal settlement with its timeline output) takes the
+canonical session prefix before it locks or updates the journal row; a
+settlement that updated the row first deadlocked against the periodic
+re-notify of the same id. Submit and claim retry `40P01`/`40001` around their
+whole idempotent transaction; an exhausted victim is a typed retryable 503
+(`details.code: DATABASE_CONTENTION`, outcome known), which the client
+resubmits with the same id and bounded backoff. Client abort is observer-only; server
 cancellation remains owned by the attempt/turn lifecycle.
 Worker dispatch performs catalog, identity, approval, input-schema,
 authorization, and argument-sensitive connector-policy prepare before writing
-the execution-start marker. Ask, Block, unavailable policy, and rejected frozen
-connector authority therefore settle before the provider executor can run.
+the execution-start marker. Block, unavailable policy, and rejected frozen
+connector authority settle before the provider executor can run. Ask creates a
+linked `waiting_for_approval` operation when the client acknowledges durable
+approval support. Its compact handle exits client polling; the InputWaitYield
+receipt fences the next model dispatch until the waiting row is durable. The
+worker stores programmatic reviews separately from open SDK call identities,
+then settles requires_action. Human decisions use the existing transactional
+approval event and workflow wake. A resumed attempt checks the exact logical
+turn, caller, tool schema/effect and account, and claims the stored arguments
+without changing the original attempt/catalog provenance. Old attempt tokens
+stay invalid. The current attempt can read the same-turn handle. Rejection or
+stale semantics produce a terminal nonexecution receipt; a crossed execution
+marker is never automatically replayed.
 After the marker, the prepared gateway call performs durable connector begin at
 the executor boundary and completes the same request as `completed`,
 `not_executed`, or `uncertain`. Model MCP and Codemode use this same canonical
@@ -982,6 +1059,14 @@ of 10 s / 20 s / 40 s / 60 s / 120 s (`PROVIDER_RATE_LIMIT_BACKOFF_MS`). Without
 the floor, a one-second hint on a per-minute token limit spends every automatic
 recovery before the window resets. Other retryable classes keep their existing
 pacing.
+Ordinary model rate-limit, provider-unavailable and upstream-connectivity
+recoveries add positive-only random spread (up to 20% of the selected delay,
+capped at 5 s). The worker samples this once when settling the attempt; the
+returned delay and durable recovery event use the same value. Provider retry
+hints remain a lower bound. Subscription capacity waits retain their separate
+workflow jitter. Worker-owned main, compaction and title clients disable hidden
+OpenAI SDK retries before client resolution; the durable worker recovery budget
+owns retries. Standalone runtime clients retain `openaiMaxRetries`.
 An exhausted API-key provider quota is not a rate limit and is never retried:
 a daily or monthly allowance (OpenRouter `free-models-per-day`, requests or
 tokens per day), a used-up quota (`insufficient_quota`, "exceeded your current
@@ -1011,8 +1096,49 @@ its durable event cursor. The browser uses it independently of retained timeline
 pages; a newer accepted live failure supersedes it while detail refreshes. The
 banner displays `providerRecoveryCount` only as the final consecutive automatic
 retry streak, never as the total number of recoveries or failed turns. Missing
-historical counts remain unknown. Two indexed latest-event reads select this
+historical counts remain unknown.
+
+Provider recovery copy is presentation only. A model-route recovery
+(`provider_unavailable`, `provider_rate_limited`,
+`provider_unknown_finish_reason`, `post_compaction_continuation_empty`) records
+the accepted route's public display labels (`model`, `modelLabel`,
+`providerLabel`) on its `turn.recovery.requested` event and on the exhausted
+`turn.failed` event. `provider_unavailable` / `provider_rate_limited` also carry
+a closed `providerCondition` (`overloaded` for HTTP 529, Anthropic
+`overloaded_error` or provider "overloaded" wording; `unresponsive` for stream
+or transport timeouts; otherwise `unavailable` / `rate_limited`), and every
+recovery event carries `maxProviderRecoveryCount`. None of these fields changes
+retryability, pacing or the five-retry budget. The exhausted `error` names the
+model and condition, for example "Claude Opus 5.5 is overloaded at the provider
+(Amazon Bedrock). Opengeni retried 5 times without success. Try again in a few
+minutes, or switch to another model." `@opengeni/react`
+(`lib/provider-recovery.ts`) composes the same sentences from these fields for
+the live `ProviderRecoveryNotice` above the composer ("… — retrying (attempt 2
+of 5)…", shown only while the active turn is `recovering`, never as timeline
+rows) and for failure text, including legacy events without labels. Two indexed latest-event reads select this
 projection; detail polling never aggregates the session's lifetime event log.
+
+**Durable recovery observability.** The control worker reads one content-free,
+cross-workspace aggregate per minute,
+`opengeni_private.summarize_session_recovery_backlog()` (migration 0633; the
+older `count_session_recovery_backlog()` projects it), over sessions whose
+active turn is `recovering` with no active attempt and whose latest attempt
+closed `interrupted_recoverable`. It exports three gauges per bounded `state`
+(`quiescence_missing`, `projection_stale`): `opengeni_session_recovery_backlog`
+counts every such session, including ones legitimately sleeping in backoff;
+`opengeni_session_recovery_scheduled` counts those still inside the backoff
+their recovery request recorded; and
+`opengeni_session_recovery_oldest_overdue_seconds` is how long the single
+oldest one has been past its due time. A recovery is due at its exact attempt's
+close plus the `continueDelayMs` recorded on that attempt's
+`turn.recovery.requested` event (provider Retry-After floor, connectivity
+pacing, or zero for worker shutdown/loss); `quiescence_missing` is due at the
+close because the closing activity owes its receipt immediately. An effectively
+paused, already quiesced session is excluded until Resume. The critical
+`OpenGeniSessionRecoveryBacklogStale` alert fires only when one session stays
+more than 10 minutes past due (overdue > 5 min held for 5 min), so sustained
+429s that always keep some session in backoff do not page. Never alert on the
+backlog count alone.
 The initial session status and replay cursor come from one SQL statement
 snapshot, so a concurrent revival cannot pair an old failed status with a cursor
 that skips the revival event. Diagnostic text is decoded through the lossless
@@ -1025,6 +1151,23 @@ needed for the page. They retain the exact full event and durable cursor; one
 oversized event is delivered alone. Explicit continuation determines completion;
 a short page never substitutes for that durable read result.
 The downstream one-frame queue cannot substitute for this upstream read bound.
+
+Generic OpenAI-compatible model streams (the built-in OpenAI/Azure client and
+registry chat/responses providers) carry two stall bounds in
+`packages/runtime/src/model-stream-idle-timeout.ts`, measured only while the
+consumer is waiting for the next chunk: no response byte for
+`OPENGENI_MODEL_STREAM_IDLE_TIMEOUT_MS` (default 5 min), or no model-progress
+SSE event across keepalive-only traffic (comments, `ping`/`keepalive`, repeated
+`response.in_progress`) for `OPENGENI_MODEL_STREAM_PROGRESS_TIMEOUT_MS`
+(default 10 min, never below the byte bound). Registry providers may override
+either with `streamIdleTimeoutMs` / `streamProgressTimeoutMs`. Every byte or
+progress event resets its window, so neither is a model-call or run-length cap;
+they bound a wedged stream that would otherwise hold the turn `running` with no
+output. A stall raises a typed `ModelStreamIdleTimeoutError`; it and a
+fetch-layer `TimeoutError` ("The operation timed out.", raised by the runtime's
+own socket idle timeout) classify as retryable `provider_unavailable` and use
+the recovery below. Codex, SuperGrok, and Anthropic Messages keep their own
+transport timers and classification.
 
 Automatic same-turn provider/MCP recovery is finite: five
 consecutive replacement attempts may be scheduled, and a sixth retryable failure settles the
@@ -1051,6 +1194,18 @@ Every Steer commits a control wake revision, including when
 the recovering turn has no live attempt. A later coalesced Send cannot downgrade
 it to an ordinary queue signal, so the workflow interrupts the hold and processes
 the new direction immediately.
+
+Provider recovery telemetry records structural provider/model/cause labels:
+`opengeni_model_recovery_total` distinguishes scheduled, recovered and exhausted
+observations; `opengeni_model_recovery_delay_seconds` records scheduled waits;
+`opengeni_model_recovery_duration_seconds` records elapsed episodes through the
+first successful response, committed context compaction, or exhaustion,
+including preparation and request time. The start timestamp survives worker
+replacement in turn metadata and is cleared with the successful response or
+compaction checkpoint. Skipped compaction does not close recovery. These are
+operational observations, not billing or exactly-once audit counters. They include classified
+HTTP-200 stream failures rather than treating HTTP acceptance as model success.
+No request text, provider error detail, credential or session identity is a label.
 
 Codex-subscription turns add one explicit recovery boundary before the model
 run. The worker always selects and leases a credential atomically under the
@@ -1210,7 +1365,7 @@ Before model/tool work, a claimed turn inserts a first-class
 `session_turn_attempts` row containing its exact Temporal activity id, current
 trigger, monotonic dispatch generation, verified control revision, and write
 lease. The same claim snapshots every per-session MCP approval policy under the
-session lock and adopts the selected machine-input batch's exact personal-MCP
+session lock and freezes the selected execution owner's exact personal-MCP
 delegation snapshot. A real Temporal activity retry retains the activity id; a
 re-dispatch creates a new attempt and captures the then-current policy. Every
 event, model-history write, run-state write, compaction transition, tool receipt,
@@ -1237,6 +1392,20 @@ properties with JavaScript `undefined` values are omitted as wire-absent
 without mutating the SDK object, while undefined array entries and every other
 non-JSON graph fail with the exact offending path. The lossless database codec
 stays strict rather than silently changing arbitrary input.
+
+A newly committed completed-tool receipt, followed by its durable structural
+output event, permits final acknowledgement of that exact tool's completed
+Connected Machine foreground operations. It does not wait for parallel SDK
+history to stabilize: attempt-ending recovery preserves the recorded result.
+Missing or duplicate receipts do not permit this incremental release. The
+complete-turn durability hook remains the boundary for other accepted output;
+session-owned background output uses its separate lifecycle. A complete verified
+replay and awaited PostgreSQL output capture create an exact terminal custody
+receipt. Its independent reconciliation claim retries final acknowledgement on
+the immutable launch connection after worker loss, without executing again or
+observing model completion. Publish success is a retry milestone; only an exact
+native absence observation settles release. Missing retained output before
+capture is recorded as unavailable, never inferred consumed.
 
 Pending-call registration retries only PostgreSQL-confirmed deadlock (`40P01`)
 or serialization (`40001`) rollback, with three total attempts and 25/50 ms
@@ -1273,14 +1442,27 @@ For MCP, the runtime reads the complete provider `CallToolResult` through the
 SDK's `callToolResult` seam and carries a private duplicate only until the exact
 audit projection is durable. An HTTP-successful result with `isError: true`
 therefore remains a failed tool outcome in live SDK state, model-facing history,
-the pending receipt, the durable event, recovery, and the timeline. The physical
+the pending receipt, the durable event, recovery, and the timeline. The
+model-facing projection of a prefixed MCP result
+(`omitStructuredContentTextDuplicates` in
+`packages/contracts/src/mcp-structured-content.ts`, also used by the default
+`ogtool call` print) keeps the result envelope but drops
+a plain text block whose text is exactly a JSON serialization of
+`structuredContent` (the MCP backwards-compatibility copy), so the payload is
+not paid for twice. Prose, differing JSON, annotated text, non-text blocks, and
+text carrying integers beyond the safe range stay; the durable event keeps the
+exact result, and stored history rows are never rewritten. The physical
 invocation boundary also records
-`opengeni_mcp_tool_calls_total{outcome}` and
-`opengeni_mcp_tool_call_duration_seconds{outcome}` with one closed structural
+`opengeni_mcp_tool_calls_total{outcome,tool}` and
+`opengeni_mcp_tool_call_duration_seconds{outcome,tool}` with one closed structural
 outcome: `success`, `provider_declared_error`, `auth_needed`,
 `outcome_uncertain`, `timeout`, `cancelled`, `thrown_transport_error`, or
-`thrown_protocol_error`. Server, tool, tenant, request, error, and content values
-are deliberately absent from labels.
+`thrown_protocol_error`. `tool` is bounded (`mcpToolMetricLabel` in
+`packages/runtime/src/metrics.ts`): it is the tool name only for a verified
+first-party server calling a name in the fixed first-party catalog, and the
+single value `external` for every connector, API-integration, Codex Apps, and
+custom tool. Server, raw tool, tenant, request, error, and content values are
+deliberately absent from labels.
 
 First-party `session_create` and `session_send_message` failures return an MCP
 `isError` result with a bounded structured `{ error: { code, message } }`
@@ -1953,6 +2135,23 @@ than rapidly creating sibling boxes. `opengeni_sandbox_readiness_replacements_to
 still counted by `opengeni_sandbox_warming_timeouts_total`. Any later
 display/setup failure follows the same owned cleanup path.
 
+A cancelled creator (Pause, Steer, or a worker shutdown during a rolling
+deploy) owns its own cleanup. Before publication it terminates its unpublished
+box and rolls the exact warming epoch back to cold; after publication it never
+terminates the box and only drops its holder, so the replacement attempt resumes
+the same box by exact provider id. Because a provider establish has no portable
+abort, the turn finalizer joins every still-running physical establish (bounded
+at 60 seconds and independent of the finalizer cancellation signal) before the
+activity returns, so a shutting-down worker cannot exit mid-cleanup and strand a
+warming lease naming a terminated box. A cancelled sibling waiter stops polling
+immediately. If a creator dies hard anyway, the warming-death reaper drains the
+attributed instance; when that never-published instance (provider recovery
+still `creating`) is then missing, the cold commit keeps the pre-warming restore
+truth (pending archive restore, or nothing to restore) and records provider
+`not_created`/`replacement_failed`, never `unrecoverable`, and emits no
+provider-missing audit, operator event, or metric. Only a published box's loss
+before capture is a lost-workspace verdict.
+
 After a managed lease is warm, immutable Sandbox Environment setup has a second, setup-specific
 single-flight boundary. One worker claims the exact `(lease epoch, provider
 instance, setup spec hash)` receipt and runs the existing marker-guarded script;
@@ -2406,6 +2605,21 @@ before its output is accepted. Only a turn admission can use authoritative
 `session_turn_attempts.quiesced_at` for its exact attempt; direct and process
 authority remain capture blockers until settled.
 
+A resolved exact admission whose transaction committed before output acceptance
+failed raises `SandboxWorkspaceMutationOutputRejectedError` with its immutable
+physical receipt. Worker and direct routing preserve this distinction as
+`sandbox_mutation_output_rejected`, reject the output, and never replay provider
+work. Missing or contradictory receipts and failed commits remain unknown;
+savepoint release inside a caller-owned transaction cannot mint committed proof.
+A partially applied batch still forbids complete-batch replay even when its
+admission settles. SDK capability invocations retain the actual typed rejection
+through error-rendering fallbacks in an invocation-local async fence: nested
+calls retain it, later batch dispatch stops, and concurrent invocations remain
+independent. A caught uncertain item or partial provider batch stays in the typed
+failure graph and vetoes complete-invocation certainty; unknown-only tool results
+keep their existing inspection advice. This classification grants no recovery or public Retry authority,
+and does not rewrite existing events or conversation history.
+
 A yielded managed process first promotes its parent admission to retained state
 and creates the non-TTL process holder before the internal provider locator can
 leave the routing layer. The holder preserves exact cleanup authority while the
@@ -2422,7 +2636,15 @@ completion, Pause, Steer, and cancellation stop it and settle its process holder
 before workspace capture. It is not registered as a session background command,
 does not create terminal background notifications, and cannot be reused by a
 successor attempt. Never wait for an indefinitely running server to exit before
-returning control to its owning agent. A yielded
+returning control to its owning agent. On every managed backend, a yielded
+`exec_command` whose final step is a bare stdin-driven shell (`bash`,
+`sh -i`, `bash --noprofile --norc`; no `-c`, script, or other argument, as
+decided by `isBareInteractiveShellCommand` in
+`packages/runtime/src/sandbox/turn-tool-cancellation.ts`) takes the same
+turn-scoped path instead of adoption, also on later `write_stdin` reads: the
+agent drives it during the turn, and finalization stops it through the exact
+marker kill. Such a shell never exits on its own, so adopting it would keep the
+sandbox busy and block idle drain after the turn. A yielded
 Connected Machine exec likewise creates its session-owned background-command
 row before returning; that row freezes the physical control workspace,
 enrollment, connection instance, and op ID. The exact parent admission,
@@ -2679,6 +2901,19 @@ missing SDK map entry nor failure to recover terminal output proves command loss
 including when a completed entry aged out in its original adapter.
 
 Observation backoff does not suppress provider-lifecycle checks during rotation.
+
+**Closed-attempt command recovery.** A missing quiescence receipt can leave
+queued successor work behind legacy retained commands whose provider output is
+unobservable. Once the control activity verifies settlement of the exact
+Temporal dispatch, reconciliation may enroll a `quiescence_containment` drain.
+Enrollment requires no nonclosed attempt in the group, only unsupervised
+processes of that exact attempt, no independently adopted background command,
+and no other holder or open admission. It bypasses neither a live owner nor an
+unresolved interruption. The existing drain saves the workspace and terminates
+the exact provider before settling those commands lost and atomically queuing
+an owner workflow wake. Admission and the quiescence receipt stay fenced until
+physical settlement and exact reconciliation; missing output or an elapsed
+observation window is never substituted for termination proof.
 
 **Idle command containment.** A legacy retained command keeps its Modal box
 warm through a non-expiring process holder, so the zero-holder idle drain never
@@ -2967,6 +3202,13 @@ from the committed pointer and binds one exact root for its lifetime. There is
 no new user message, per-turn machine cwd query, silent fallback, path
 reinterpretation, or blind replay of an ambiguous operation.
 
+The same boundary recognizes the home resolver's typed
+`RoutingBackendRecoveryRequiredError` only for `resolve_home_backend` with
+`pending` or `superseded` recovery, before the requested provider operation
+is dispatched. Completed peer-tool receipts remain durable. A post-dispatch
+error, unresolved mutation, or incomplete/unreadable cause graph does not gain
+this recovery authority.
+
 A sandboxless attempt uses a plain Agent whose native capabilities cannot be
 added in place. If an authorized attachment commits an active machine pointer,
 the next provider-dispatch barrier first persists the complete preceding tool
@@ -3243,7 +3485,11 @@ recovery replays the stored bytes. The instructions never contain a clock.
    failure is a bounded `result_too_large` error and never puts the huge payload
    in history.
    Codemode callers skip the 1 MiB cap; the existing 16 MiB journal cap on
-   `session_attempt_codemode_calls` is unchanged. See
+   `session_attempt_codemode_calls` is unchanged. An attempt-gateway MCP result
+   is bounded only by the 8 MiB MCP transport cap before this seam, so a large
+   MCP read spills (or reaches Codemode exactly) instead of failing after the
+   provider already returned it; a direct non-gateway SDK MCP call keeps the
+   1 MiB exact-result bound. See
    `packages/runtime/src/tool-result-spill.ts` and
    `apps/worker/src/activities/agent-turn/tool-result-spill.ts`.
    The same per-caller seam applies model-only projections:
@@ -3343,6 +3589,19 @@ late PUT racing parent deletion is compensated by deleting the now-unowned key.
 Authenticated session artifact routes expose sanitized metadata and one bounded
 range at a time, and the SDK verifies assembled length and SHA before React
 renders an object URL.
+
+Model-history materialization reads a retained screenshot under the current
+turn's file authority. In a shared session, a screenshot another participant
+retained privately keeps its workspace-visible lifecycle row, but its file is
+hidden from this requester. Because generic file deletion is restricted while
+that row exists, such an image is withheld, not deleted. It is replaced in the
+model view with the same neutral "not available to the current requester"
+receipt as history attachments: no bytes, no fetch instruction. The turn
+proceeds, the authority boundary is unchanged, and canonical history keeps the
+marker, so a requester with access still receives the pixels. Lifecycle failures
+are unchanged for every requester: a missing row is still `deleted`, a
+non-ready or expired row still fails as before, and bytes that do not match the
+recorded size, SHA-256 or dimensions still fail closed as `invalid_content`.
 
 Generated images have a separate permanent workspace-file lifecycle. Adapter
 provider calls first cross a durable prepared/provider-started fence; after the
@@ -3784,10 +4043,22 @@ later turns; current authorization and tool availability remain independently
 enforced. Other unscoped synthetic system messages remain excluded.
 
 Attachment receipt text derives only from the durable file reference and mount
-directory. Resolving, losing, or renaming live file metadata does not rewrite
-that text. Active image bytes still require current authorized metadata and
-checksum-valid content; compacted attachment catalogs remain receipt-only.
+directory. Resolving or renaming live file metadata does not rewrite that text,
+and losing it does so only as described below. Active image bytes still require
+current authorized metadata and checksum-valid content; compacted attachment
+catalogs remain receipt-only.
 The receipt-format change incurs a one-time prefix change for existing histories.
+One exception: when this turn's file-authority lookup does not return an active
+reference (another participant's file in a shared session, or a file that is no
+longer available), its receipt says the file is not available to the current
+requester, without guessing which, and gives no download instruction. The model
+then neither attempts a failing fetch nor reports the file as deleted. The
+authority boundary is unchanged. The text is stable across retries and
+compaction for one requester, but it differs between requesters with and
+without access, so a requester switch in a shared session (or a file losing
+availability) changes that history item and the prompt prefix after it.
+Compacted catalogs and callers without an authority resolver keep the
+reference-only receipt.
 
 Service turns without a human file subject read shared attachments under an explicit
 null subject, clearing inherited private-file authority for that lookup. The reader

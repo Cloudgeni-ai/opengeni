@@ -182,6 +182,29 @@ describe("Insights usage dashboard", () => {
     }
   });
 
+  test("native session rows drill down using the session UUID", async () => {
+    const sessionId = "33333333-3333-4333-8333-333333333333";
+    nextUsage = fixtureUsage({ groupBy: "rootSession" });
+    nextUsage.groups = [
+      {
+        ...nextUsage.groups.find((group) => group.kind === "item")!,
+        key: `item:${sessionId}`,
+        label: "Example chat",
+      },
+    ];
+    const view = await render({ group: "rootSession" });
+    try {
+      await act(async () => rowAction(view.container, "Example chat")?.click());
+      expect(view.changes.at(-1)).toEqual({ root: sessionId });
+      const menu = view.container.querySelector<HTMLButtonElement>(
+        '[aria-label="More for Example chat"]',
+      );
+      expect(menu).not.toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("switching the group-by keeps the filters", async () => {
     nextUsage = fixtureUsage({ groupBy: "payer" });
     const view = await render({ group: "payer", prov: "anthropic" });

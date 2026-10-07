@@ -15,6 +15,7 @@ import {
   CAPABILITY_DESCRIPTORS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   FIRST_PARTY_MCP_TOOL_CAPABILITIES,
+  isDerivedAgentToolOwner,
   mergeResourceRefs,
   Permission,
   stableJson,
@@ -126,6 +127,11 @@ export type SessionDraft = {
    * defaults and sends no `agent` at all.
    */
   agentCapabilities?: AgentCapabilities;
+  /**
+   * This chat's own instructions, from a draft another page prepared (the
+   * signup setup chat). Not edited in the composer; sent as `agent.instructions`.
+   */
+  agentInstructions?: string;
 };
 
 /**
@@ -186,7 +192,7 @@ function explicitFirstPartyTools(
   return {
     firstPartyMcpTools: selected.filter((tool) => {
       const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
-      return owner === "runtime" || capabilityOn(values, owner);
+      return isDerivedAgentToolOwner(owner) || capabilityOn(values, owner);
     }),
   };
 }
@@ -573,9 +579,13 @@ export function newSessionDraftOptionsFromSessionDraft(
 }
 
 function agentExtras(draft: SessionDraft): { agent?: AgentConfigRequest } {
-  return draft.agentCapabilities === undefined
-    ? {}
-    : { agent: { capabilities: draft.agentCapabilities } };
+  if (draft.agentCapabilities === undefined && draft.agentInstructions === undefined) return {};
+  return {
+    agent: {
+      ...(draft.agentCapabilities !== undefined ? { capabilities: draft.agentCapabilities } : {}),
+      ...(draft.agentInstructions !== undefined ? { instructions: draft.agentInstructions } : {}),
+    },
+  };
 }
 
 /** Restore server-authoritative create options into the single UI draft form. */
@@ -630,6 +640,9 @@ export function sessionDraftFromNewSessionDraftOptions(
         : new Set(options.firstPartyMcpTools),
     ...(options.agent?.capabilities !== undefined
       ? { agentCapabilities: options.agent.capabilities }
+      : {}),
+    ...(options.agent?.instructions !== undefined
+      ? { agentInstructions: options.agent.instructions }
       : {}),
   };
 }

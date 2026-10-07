@@ -135,6 +135,7 @@ export const CLIENT_PAGES = [
   "variable-sets",
   "environments",
   "rigs",
+  "playground",
   "home",
   "session-link",
   "identity-link",

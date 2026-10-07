@@ -53,6 +53,42 @@ import {
 import { createSessionForRequest } from "../src/domain/sessions";
 import { resolveWorkspaceModelSelection } from "../src/model-catalog";
 
+test("scoped grants choose a funded credit model without overriding saved choices", () => {
+  const settings = hostedSettings();
+  const creditBalance = {
+    accountId: crypto.randomUUID(),
+    balanceMicros: 10_000_000,
+    generalBalanceMicros: 0,
+    currency: "usd" as const,
+    updatedAt: new Date().toISOString(),
+    promotionalCredits: [
+      {
+        grantId: crypto.randomUUID(),
+        label: "Welcome credits",
+        remainingMicros: 10_000_000,
+        eligibleModelIds: ["gpt-6-sol"],
+      },
+    ],
+  };
+  const input = {
+    settings,
+    selections: selections(settings),
+    workspaceDefaults: null,
+    creditsAvailable: true,
+    creditBalance,
+  };
+  expect(selectDefaultSessionModel(input).model).toBe("gpt-6-sol");
+  expect(
+    selectDefaultSessionModel({
+      ...input,
+      workspaceDefaults: {
+        model: "gpt-6-astra",
+        reasoningEffort: "high",
+      },
+    }).model,
+  ).toBe("gpt-6-astra");
+});
+
 // A deployment shaped like the hosted one: a free OpenRouter default, the
 // OpenGeni credits catalog, and both connected-subscription rails enabled.
 function hostedSettings(overrides: Partial<Settings> = {}): Settings {
@@ -889,6 +925,31 @@ describe("server-side default model resolution", () => {
       model: "codex/gpt-6-astra",
       source: "subscription",
     });
+  }, 180_000);
+
+  test("a scoped signup grant replaces an unfunded paid deployment default", async () => {
+    if (!available) return;
+    const settings = { ...hostedSettings(), openaiModel: "gpt-6-astra" };
+    const grant = await workspaceFixture();
+    await applyCreditLedgerEntry(db, {
+      accountId: grant.accountId,
+      amountMicros: 10_000_000,
+      type: "grant",
+      eligibleModelIds: ["gpt-6-sol"],
+      idempotencyKey: crypto.randomUUID(),
+    });
+    const context = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+    };
+    expect(await resolveDefaultSessionModel(db, settings, context)).toMatchObject({
+      model: "gpt-6-sol",
+      source: "credits",
+    });
+    expect(await getActorNewSessionDraft({ db, settings }, grant, grant.workspaceId)).toMatchObject(
+      { model: "gpt-6-sol", modelProvided: false },
+    );
   }, 180_000);
 
   test("a zero or negative balance falls back to the free default", async () => {

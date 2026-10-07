@@ -27,7 +27,9 @@ import {
   type OpenSandboxKubernetesInventory,
 } from "./opensandbox-kubernetes-inventory";
 import {
+  MCP_TOOL_METRIC_EXTERNAL_LABEL,
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
+  isMcpToolMetricLabel,
   modelUsageTokenCountOrNull,
   type RuntimeMetricsHooks,
   type SelfhostedOpObservation,
@@ -47,9 +49,17 @@ export type TurnTaskQueueStats = {
   tasksAddRate: number;
   tasksDispatchRate: number;
 };
+export type SessionRecoveryBacklogStateSummary = {
+  /** Every durable recovering session in this state with no active attempt. */
+  count: number;
+  /** Of those, sessions still inside the backoff their recovery request recorded. */
+  scheduled: number;
+  /** Seconds the single oldest candidate has been past its recovery due time; 0 when none is. */
+  oldestOverdueSeconds: number;
+};
 export type SessionRecoveryBacklog = {
-  quiescence_missing: number;
-  projection_stale: number;
+  quiescence_missing: SessionRecoveryBacklogStateSummary;
+  projection_stale: SessionRecoveryBacklogStateSummary;
 };
 export type ContextCompactionPendingSummary = {
   pendingCount: number;
@@ -231,17 +241,23 @@ export function runtimeMetricsHooksForObservability(
         labels: { outcome, backend },
       });
     },
-    onMcpToolCall: ({ outcome, durationSeconds }) => {
-      completedOperationSpan(observability, "worker.mcp.tool_call", durationSeconds, { outcome });
+    onMcpToolCall: ({ outcome, tool, durationSeconds }) => {
+      // Re-check the closed label set at the export boundary so a caller can
+      // never turn a raw user-defined tool name into a metric series.
+      const safeTool = isMcpToolMetricLabel(tool) ? tool : MCP_TOOL_METRIC_EXTERNAL_LABEL;
+      completedOperationSpan(observability, "worker.mcp.tool_call", durationSeconds, {
+        outcome,
+        tool: safeTool,
+      });
       observability.incrementCounter({
         name: "opengeni_mcp_tool_calls_total",
-        help: "Total physical MCP tool calls by bounded structural outcome.",
-        labels: { outcome },
+        help: "Total physical MCP tool calls by bounded structural outcome and first-party tool (other tools are 'external').",
+        labels: { outcome, tool: safeTool },
       });
       observability.observeHistogram({
         name: "opengeni_mcp_tool_call_duration_seconds",
-        help: "MCP tool-call duration in seconds by bounded structural outcome.",
-        labels: { outcome },
+        help: "MCP tool-call duration in seconds by bounded structural outcome and first-party tool (other tools are 'external').",
+        labels: { outcome, tool: safeTool },
         value: durationSeconds,
       });
     },
@@ -847,14 +863,27 @@ export function startTurnCapacityMonitor(input: {
 
 export function recordSessionRecoveryBacklogGauges(
   observability: Observability,
-  counts: SessionRecoveryBacklog,
+  backlog: SessionRecoveryBacklog,
 ): void {
   for (const state of ["quiescence_missing", "projection_stale"] as const) {
+    const summary = backlog[state];
     observability.setGauge({
       name: "opengeni_session_recovery_backlog",
-      help: "Current durable recovering-session obligations with no active attempt, by bounded reconciliation state.",
+      help: "Current durable recovering-session obligations with no active attempt, by bounded reconciliation state. Includes sessions legitimately sleeping in their recorded recovery backoff.",
       labels: { state },
-      value: nonnegativeFinite(counts[state]),
+      value: nonnegativeFinite(summary.count),
+    });
+    observability.setGauge({
+      name: "opengeni_session_recovery_scheduled",
+      help: "Durable recovering sessions still inside the recovery backoff (provider Retry-After or connectivity pacing) their recovery request recorded, by bounded reconciliation state.",
+      labels: { state },
+      value: nonnegativeFinite(summary.scheduled),
+    });
+    observability.setGauge({
+      name: "opengeni_session_recovery_oldest_overdue_seconds",
+      help: "Seconds the single oldest durable recovering session with no active attempt has been past its recovery due time, by bounded reconciliation state; 0 when none is overdue.",
+      labels: { state },
+      value: nonnegativeFinite(summary.oldestOverdueSeconds),
     });
   }
 }
@@ -898,8 +927,8 @@ export function startSessionRecoveryMonitor(input: {
     if (stopped || running) return;
     running = input
       .read()
-      .then((counts) => {
-        recordSessionRecoveryBacklogGauges(input.observability, counts);
+      .then((backlog) => {
+        recordSessionRecoveryBacklogGauges(input.observability, backlog);
         lastSuccessAt = now();
         lastReadSucceeded = true;
         recordStatus();
@@ -1071,6 +1100,8 @@ export const SANDBOX_INVENTORY_PROJECTION_DOMAINS = [
   "retained_processes",
   "expired_drains",
   "opensandbox_kubernetes",
+  "modal_provider",
+  "interaction_idle",
 ] as const;
 
 export type SandboxInventoryProjectionDomain =
@@ -1151,7 +1182,9 @@ export function recordActiveUserGauges(
 /**
  * Positive credit grants observed by the ledger trigger since migration 0565,
  * by closed class. These are cumulative database totals published as gauges by
- * every control worker: aggregate with `max()` across pods, then `increase()`.
+ * every control worker: aggregate with `max()` across pods, then subtract the
+ * same expression `offset` by the window. A per-pod `increase()` sees only one
+ * pod's lifetime and undercounts across control-worker restarts.
  * Counting in the database covers the grants no application process writes:
  * the verified-signup trial grant (a setup trigger) and operator grants.
  */
@@ -1226,6 +1259,49 @@ export function recordVerifiedSignupTrialDeploymentFlagGauge(
     help: "Whether the OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED master opt-in is on (1) or off (0) in this deployment's configuration.",
     value: enabled ? 1 : 0,
   });
+}
+
+/**
+ * Provider-side Modal inventory reconciled against live leases by the orphan
+ * sweep: `running` = every running box in the app, `unleased` = running boxes
+ * no live lease protects (orphans, counted before termination), and
+ * `lease_missing_instance` = warm leases whose exact provider instance is no
+ * longer running (zombies).
+ */
+export function recordModalSandboxInventoryGauges(
+  observability: Observability,
+  inventory: { running: number; unleased: number; liveLeaseInstancesMissing: number },
+): void {
+  const states = {
+    running: inventory.running,
+    unleased: inventory.unleased,
+    lease_missing_instance: inventory.liveLeaseInstancesMissing,
+  };
+  for (const [state, value] of Object.entries(states)) {
+    observability.setGauge({
+      name: "opengeni_modal_sandbox_inventory",
+      help: "Running Modal sandboxes reconciled against live sandbox leases by the orphan sweep.",
+      labels: { state },
+      value: Math.max(0, value),
+    });
+  }
+}
+
+/** Warm leases held only by Browser/Computer interaction holders, by time since
+ * the newest interaction activity. Such boxes never drain on their own until the
+ * interaction session ends or the provider deadline. */
+export function recordInteractionOnlyLeaseGauges(
+  observability: Observability,
+  counts: Record<string, number>,
+): void {
+  for (const [idleBucket, value] of Object.entries(counts)) {
+    observability.setGauge({
+      name: "opengeni_sandbox_leases_interaction_only",
+      help: "Warm sandbox leases held only by Browser/Computer sessions, by time since last interaction activity.",
+      labels: { idle_bucket: idleBucket },
+      value: Math.max(0, value),
+    });
+  }
 }
 
 export function recordSandboxOrphansTerminated(observability: Observability, count: number): void {
@@ -1308,6 +1384,7 @@ export function recordSandboxDeadlineRotationsRequested(
 export const SANDBOX_COMMAND_CONTAINMENT_OUTCOMES = [
   "idle_enrolled",
   "deadline_enrolled",
+  "quiescence_enrolled",
   "resumed_enrolled",
   "not_eligible",
   "inspection_failed",
@@ -1428,6 +1505,11 @@ export function recordSandboxRotationBacklogGauges(
 }
 
 const RETAINED_PROCESS_OWNER_STATES = [
+  // Session-owned background commands (migration 0637). Running is live
+  // session work after its launch turn ended; stopping already has a stop
+  // request, so it still counts as terminal-owner backlog.
+  "background_running",
+  "background_stopping",
   "direct",
   "queued",
   "running",
@@ -1475,7 +1557,7 @@ export function recordRetainedProcessInventoryGauges(
     });
     observability.setGauge({
       name: "opengeni_retained_processes_terminal_owner_backlog",
-      help: "Current active retained processes whose exact owner attempt is terminal.",
+      help: "Current active retained processes whose owner is gone: a closed launch attempt or released direct request, or a background command already asked to stop. A running session background command is never counted.",
       labels: { owner_state: ownerState },
       value: count.terminal,
     });
@@ -1567,6 +1649,138 @@ export function recordCreditMicros(
     labels: { kind },
     amount: amountMicros,
   });
+}
+
+// ── Per-model usage and money ───────────────────────────────────────────────
+// `model` is the deployment catalog product id (resolved by the caller), or
+// `custom` for a workspace-owned model. The recorder bounds it again: a value
+// outside a conservative id shape becomes `custom`, and after
+// MAX_MODEL_METRIC_LABELS distinct values per process every new value becomes
+// `other`, so a catalog change or a bug can never grow the series count without
+// bound. Account, workspace, user and session ids are never labels here.
+
+/** Who pays the upstream provider for the call. */
+export type ModelUsagePayer = "deployment" | "external";
+
+const MODEL_METRIC_LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
+const MAX_MODEL_METRIC_LABELS = 64;
+const modelMetricLabels = new WeakMap<Observability, Set<string>>();
+
+export function boundedModelMetricLabel(observability: Observability, model: string): string {
+  if (model === "custom" || model === "other") return model;
+  if (!MODEL_METRIC_LABEL_PATTERN.test(model)) return "custom";
+  let seen = modelMetricLabels.get(observability);
+  if (!seen) {
+    seen = new Set<string>();
+    modelMetricLabels.set(observability, seen);
+  }
+  if (seen.has(model)) return model;
+  if (seen.size >= MAX_MODEL_METRIC_LABELS) return "other";
+  seen.add(model);
+  return model;
+}
+
+function nonnegativeSafeInteger(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+/**
+ * One authoritative model response, by provider and catalog model. Recorded
+ * behind the same durable usage-event fence as the provider-only cache metrics,
+ * so a duplicate or late response is not counted twice.
+ *   - `opengeni_model_responses_total{provider,model,priced}` — responses with
+ *     reported usage; `priced="false"` means no provider cost estimate exists.
+ *   - `opengeni_model_tokens_total{provider,model,type}` — `input` (all prompt
+ *     tokens, including cached and cache-write), `cached_input` and
+ *     `cache_write` (subsets of `input`), `output`, and `reasoning` (a subset
+ *     of `output`).
+ *   - `opengeni_model_provider_cost_micros_total{provider,model,payer,pricing_source}`
+ *     — estimated upstream cost in USD micros: configured list price, or the
+ *     gateway-reported cost. `payer="external"` is a customer-paid subscription
+ *     or key, so that cost is a list-price equivalent Opengeni does not pay.
+ */
+export function recordModelResponseUsage(
+  observability: Observability,
+  input: {
+    provider: string;
+    model: string;
+    payer: ModelUsagePayer;
+    tokens: {
+      inputTokens: number | null;
+      cachedTokens: number | null;
+      cacheWriteTokens: number | null;
+      outputTokens: number | null;
+      reasoningTokens: number | null;
+    };
+    estimatedProviderCostMicros: number | null;
+    pricingSource: "configured_list_price" | "gateway_reported" | null;
+  },
+): void {
+  const model = boundedModelMetricLabel(observability, input.model);
+  const base = { provider: input.provider, model };
+  const priced = input.pricingSource !== null && input.estimatedProviderCostMicros !== null;
+  observability.incrementCounter({
+    name: "opengeni_model_responses_total",
+    help: "Authoritative model responses with reported usage, by provider, catalog model and whether a cost estimate exists.",
+    labels: { ...base, priced: priced ? "true" : "false" },
+  });
+  const tokenTypes = [
+    ["input", input.tokens.inputTokens],
+    ["cached_input", input.tokens.cachedTokens],
+    ["cache_write", input.tokens.cacheWriteTokens],
+    ["output", input.tokens.outputTokens],
+    ["reasoning", input.tokens.reasoningTokens],
+  ] as const;
+  for (const [type, value] of tokenTypes) {
+    const amount = modelUsageTokenCountOrNull(value);
+    if (amount === null || amount === 0) continue;
+    incrementBoundedModelCacheCounter(observability, {
+      name: "opengeni_model_tokens_total",
+      help: "Tokens of authoritative model responses by provider, catalog model and token type (cached_input and cache_write are subsets of input; reasoning is a subset of output).",
+      provider: input.provider,
+      labels: { ...base, type },
+      amount,
+    });
+  }
+  const cost = nonnegativeSafeInteger(input.estimatedProviderCostMicros);
+  if (priced && input.pricingSource !== null && cost > 0) {
+    observability.incrementCounter({
+      name: "opengeni_model_provider_cost_micros_total",
+      help: "Estimated upstream provider cost in USD micros by provider, catalog model, payer and pricing source.",
+      labels: { ...base, payer: input.payer, pricing_source: input.pricingSource },
+      amount: cost,
+    });
+  }
+}
+
+/**
+ * Credits actually debited for one model response, recorded once when the
+ * ledger row is inserted (an idempotent replay debits 0 and records nothing).
+ * `funding="promotional"` is the part paid by scoped promotional grants
+ * (verified-signup trial, scoped coupon offers); `funding="general"` is the
+ * rest, paid from general credit: purchased credits plus any unscoped grant.
+ */
+export function recordModelCreditsCharged(
+  observability: Observability | undefined,
+  input: { provider: string; model: string; debitedMicros: number; grantDebitedMicros: number },
+): void {
+  if (!observability) return;
+  const debited = nonnegativeSafeInteger(input.debitedMicros);
+  if (debited === 0) return;
+  const promotional = Math.min(debited, nonnegativeSafeInteger(input.grantDebitedMicros));
+  const model = boundedModelMetricLabel(observability, input.model);
+  for (const [funding, amount] of [
+    ["promotional", promotional],
+    ["general", debited - promotional],
+  ] as const) {
+    if (amount === 0) continue;
+    observability.incrementCounter({
+      name: "opengeni_model_credits_charged_micros_total",
+      help: "Credit micros debited for model usage by provider, catalog model and funding (promotional grant or general credit).",
+      labels: { provider: input.provider, model, funding },
+      amount,
+    });
+  }
 }
 
 const MODEL_REQUEST_PHASE_BUCKETS = [
@@ -1866,6 +2080,7 @@ function completedOperationSpan(
     outcome: string;
     provider?: string;
     backend?: string;
+    tool?: string;
     correlationId?: string | undefined;
   },
 ): void {
@@ -2102,34 +2317,61 @@ function contentDeltaClass(type: SessionEventType): StreamDeltaClass | null {
   return null;
 }
 
-// TTFT and inter-delta live on a human-perceptible scale (tens of ms to a few
-// seconds), so they get their own SHORT buckets — the default duration buckets
-// (which run to 3600s) would collapse every real streaming value into one bucket.
-const STREAM_TTFT_BUCKETS = [0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1, 1.5, 2, 3, 5, 10];
+// TTFT lives on a human-perceptible scale, but reasoning models legitimately
+// think for tens of seconds before their first streamed token. The finite
+// buckets therefore run well past 10s: a top bucket at 10s made every slower
+// first token land in +Inf, so p50/p99 saturated at exactly "10" and hid how
+// slow the tail really was.
+const STREAM_TTFT_BUCKETS = [
+  0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1, 1.5, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 300,
+];
 const STREAM_INTER_DELTA_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.35, 0.5, 1, 2, 5];
+// OpenGeni's own per-request work before the provider sees bytes: admission,
+// durable history/audit checkpoints, request build. Normally milliseconds to a
+// second; tens of seconds means our database or consumer is the bottleneck.
+const MODEL_REQUEST_PRE_DISPATCH_BUCKETS = [
+  0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120,
+];
+
+/** First streamed content of a provider response. `any` is the first reasoning
+ *  or answer delta; `text` is the first answer-text delta. They overlap — never
+ *  sum across `content`. */
+export type ProviderFirstContent = "any" | "text";
 
 /**
- * Per-turn stream-timing tracker fed every normalized runtime event in push order.
- * It emits two model-responsiveness SLIs from the worker's seat on the stream:
+ * Per-stream timing tracker fed every normalized runtime event in push order,
+ * plus two producer-side hooks. It separates OUR latency from the PROVIDER's:
  *
- *   - `opengeni_stream_ttft_seconds{provider}` — time from a model (re)start to its
- *     first streamed content delta. The anchor starts at construction (≈ runStream
- *     start, so the first observation is "how long until text appears") and re-arms
- *     on every non-content event (a tool call, a completed message, a usage frame),
- *     so a post-tool response measures the model's restart latency, NOT our own
- *     tool-execution time.
+ *   - `opengeni_stream_ttft_seconds{provider}` — user-perceived (re)start latency:
+ *     time from a stream start / structural boundary (tool call, tool result,
+ *     completed message, usage frame) to the first streamed content delta. It
+ *     mixes our between-call work with provider time; keep it for the absolute
+ *     dashboard view, not for provider alerting.
+ *   - `opengeni_model_request_pre_dispatch_seconds{provider}` — OUR per-request
+ *     latency: SDK model entry (the first admission check) to the literal
+ *     provider dispatch. Covers admission, the durable history checkpoint,
+ *     credit revalidation, the durable request audit and request build.
+ *   - `opengeni_model_provider_ttft_seconds{provider,content}` — the PROVIDER's
+ *     latency: literal dispatch to the first streamed `any` (reasoning or text)
+ *     delta and to the first answer `text` delta. Includes network, provider
+ *     queueing, prompt prefill and reasoning before the first streamed token.
  *   - `opengeni_stream_inter_delta_gap_seconds{provider,class}` — gap between
- *     consecutive content deltas of the SAME class. The run resets on any
- *     non-content event so a gap never spans a tool call or a model boundary — it
- *     measures only the choppiness of a live token stream.
+ *     consecutive content deltas of the SAME class, reset at every structural
+ *     event so a gap never spans a tool call or a model boundary.
  *
- * Purely observational and clock-injectable; it never touches the events it sees.
+ * Dispatch timing deliberately survives structural events: the consumer may
+ * still be persisting the previous response's tool results when the producer
+ * dispatches the next request, but the next request's first delta always
+ * follows its own dispatch. Purely observational and clock-injectable.
  */
 export class StreamTimingMetrics {
   private readonly now: () => number;
   private ttftAnchor: number;
   private ttftArmed = true;
   private readonly lastDeltaAt = new Map<StreamDeltaClass, number>();
+  private modelEntryAt: number | null = null;
+  private dispatchedAt: number | null = null;
+  private readonly providerFirstRecorded = new Set<ProviderFirstContent>();
 
   constructor(
     private readonly observability: Observability,
@@ -2137,6 +2379,31 @@ export class StreamTimingMetrics {
   ) {
     this.now = options.now ?? (() => performance.now());
     this.ttftAnchor = this.now();
+  }
+
+  /** Producer side: the SDK entered a model request (first admission check).
+   *  Admission can be re-entered for the same request; keep the earliest. */
+  onModelRequestEntry(): void {
+    if (this.modelEntryAt === null) this.modelEntryAt = this.now();
+  }
+
+  /** Producer side: request bytes are about to leave this process. */
+  onProviderDispatch(): void {
+    const at = this.now();
+    if (this.modelEntryAt !== null) {
+      this.observability.observeHistogram({
+        name: "opengeni_model_request_pre_dispatch_seconds",
+        help: "Seconds of OpenGeni work from SDK model-request entry to literal provider dispatch.",
+        buckets: MODEL_REQUEST_PRE_DISPATCH_BUCKETS,
+        labels: { provider: this.options.provider },
+        value: Math.max(0, (at - this.modelEntryAt) / 1000),
+      });
+      this.modelEntryAt = null;
+    }
+    // A transport retry re-dispatches the same request; the first delta then
+    // belongs to the latest dispatch.
+    this.dispatchedAt = at;
+    this.providerFirstRecorded.clear();
   }
 
   onEvent(type: SessionEventType): void {
@@ -2154,12 +2421,16 @@ export class StreamTimingMetrics {
     if (this.ttftArmed) {
       this.observability.observeHistogram({
         name: "opengeni_stream_ttft_seconds",
-        help: "Seconds from a model (re)start to its first streamed content delta.",
+        help: "Seconds from a stream start or structural boundary to the next streamed content delta (user-perceived; includes OpenGeni between-call work).",
         buckets: STREAM_TTFT_BUCKETS,
         labels: { provider: this.options.provider },
         value: Math.max(0, (at - this.ttftAnchor) / 1000),
       });
       this.ttftArmed = false;
+    }
+    if (this.dispatchedAt !== null) {
+      this.observeProviderFirst("any", at);
+      if (deltaClass === "message") this.observeProviderFirst("text", at);
     }
     const last = this.lastDeltaAt.get(deltaClass);
     if (last !== undefined) {
@@ -2172,6 +2443,18 @@ export class StreamTimingMetrics {
       });
     }
     this.lastDeltaAt.set(deltaClass, at);
+  }
+
+  private observeProviderFirst(content: ProviderFirstContent, at: number): void {
+    if (this.dispatchedAt === null || this.providerFirstRecorded.has(content)) return;
+    this.providerFirstRecorded.add(content);
+    this.observability.observeHistogram({
+      name: "opengeni_model_provider_ttft_seconds",
+      help: "Seconds from literal provider dispatch to the first streamed content delta (any = reasoning or text, text = answer text).",
+      buckets: STREAM_TTFT_BUCKETS,
+      labels: { provider: this.options.provider, content },
+      value: Math.max(0, (at - this.dispatchedAt) / 1000),
+    });
   }
 }
 

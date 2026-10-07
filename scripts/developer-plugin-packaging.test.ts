@@ -80,7 +80,7 @@ describe("shared OpenGeni package", () => {
     const portable = json("plugins/opengeni/plugin.json");
     for (const manifest of [claude, portable]) {
       expect(manifest.name).toBe("opengeni");
-      expect(manifest.version).toBe("0.2.0");
+      expect(manifest.version).toBe("0.3.1");
       expect(manifest).not.toHaveProperty("skills");
       const { mcpServers: _claudeMcp, ...rest } = manifest;
       noTransport(rest);
@@ -166,14 +166,35 @@ describe("shared OpenGeni package", () => {
 
   test("plugin metadata is shared and needs no install-time settings", () => {
     const manifest = json("plugins/opengeni/.claude-plugin/plugin.json");
-    expect(manifest.displayName).toBe("OpenGeni");
+    expect(manifest.displayName).toBe("Opengeni");
     expect(manifest.author).toEqual({
-      name: "OpenGeni",
+      name: "Opengeni",
       url: "https://opengeni.ai",
     });
     expect(manifest.homepage).toBe("https://docs.opengeni.ai/guides/coding-agents");
     // The skills read OPENGENI_* from the project's env; no plugin settings are required.
     expect(manifest.userConfig).toBeUndefined();
+  });
+
+  test("every host icon field names a contained square brand PNG", () => {
+    // Claude's directory reads `icon`; Codex/ChatGPT read the `com.openai` interface.
+    const claude = json("plugins/opengeni/.claude-plugin/plugin.json");
+    const ui = json("plugins/opengeni/plugin.json").extensions["com.openai"].interface;
+    expect(claude.icon).toBe("./assets/logo.png");
+    expect(ui.logo).toBe(claude.icon);
+    expect(ui.composerIcon).toBe(claude.icon);
+    expect(ui.logoDark).toBe("./assets/logo-dark.png");
+    expect(ui.composerIconDark).toBe(ui.logoDark);
+    const light = readFileSync(contained(join(pluginRoot, claude.icon)));
+    const dark = readFileSync(contained(join(pluginRoot, ui.logoDark)));
+    for (const png of [light, dark]) {
+      expect(png.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+      const width = png.readUInt32BE(16);
+      expect(png.readUInt32BE(20)).toBe(width);
+      expect(width).toBeGreaterThanOrEqual(48);
+      expect(width).toBeLessThanOrEqual(4096);
+    }
+    expect(dark.equals(light)).toBe(false);
   });
 
   test("all catalogs use the same identity and nested repository-relative source", () => {
@@ -242,7 +263,7 @@ describe("shared OpenGeni package", () => {
     "plugins/opengeni/skills/build-with-opengeni/opengeni-client/SKILL.md",
   ])("client setup handoff stays portable in %s", (path) => {
     const text = readFileSync(join(root, path), "utf8");
-    const handoffs = [...text.matchAll(/\[OpenGeni developer setup\]\(([^)\s]+)\)/g)];
+    const handoffs = [...text.matchAll(/\[(?:OpenGeni|Opengeni) developer setup\]\(([^)\s]+)\)/g)];
     expect(handoffs).toHaveLength(1);
     expect(new URL(handoffs[0]![1]!).href).toBe("https://docs.opengeni.ai/guides/developer-plugin");
   });
@@ -295,7 +316,7 @@ describe("shared OpenGeni package", () => {
     expect(guide).not.toContain("opengeni-developer@");
     const page = readFileSync(join(root, "docs-site/guides/developer-plugin.mdx"), "utf8");
     expect(page).toContain("opengeni@opengeni");
-    expect(page).toContain("has not been published");
+    expect(page).toContain("plugin marketplace add Cloudgeni-ai/opengeni");
     expect(page).toContain(ORGANIZATION_MCP_URL);
     expect(
       json("docs-site/docs.json").navigation.groups.flatMap(

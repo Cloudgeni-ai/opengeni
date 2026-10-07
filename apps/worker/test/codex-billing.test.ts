@@ -49,7 +49,7 @@ describe("worker ensureRunAllowed — codex bypass", () => {
     try {
       await expect(
         ensureRunAllowed(billedSettings(), db, ACCOUNT, WORKSPACE, /* isCodexTurn */ false),
-      ).rejects.toThrow("insufficient OpenGeni credits");
+      ).rejects.toThrow("insufficient Opengeni credits");
     } finally {
       restore();
     }

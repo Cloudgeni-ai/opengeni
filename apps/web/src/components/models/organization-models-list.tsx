@@ -71,12 +71,13 @@ import { accountKey, type GatewayId } from "@/lib/models-route";
    workspaces use, read-only: only owners and admins add accounts.
    -------------------------------------------------------------------------- */
 
-export const GATEWAYS: readonly GatewayId[] = ["anthropic", "openrouter", "vercel"];
+export const GATEWAYS: readonly GatewayId[] = ["anthropic", "openrouter", "opper", "vercel"];
 
 /** The catalog provider id of an organization key's models. */
 const ORGANIZATION_CATALOG_PROVIDER: Record<GatewayId, string> = {
   vercel: "organization-gateway",
   openrouter: "organization-openrouter",
+  opper: "organization-opper",
   anthropic: "organization-anthropic",
   claude_subscription: "organization-claude-subscription",
 };
@@ -84,6 +85,7 @@ const ORGANIZATION_CATALOG_PROVIDER: Record<GatewayId, string> = {
 const ORGANIZATION_KIND = {
   vercel: "vercel_gateway",
   openrouter: "openrouter",
+  opper: "opper",
   anthropic: "anthropic",
   claude_subscription: "claude_subscription",
 } as const;

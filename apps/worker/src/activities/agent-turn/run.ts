@@ -385,6 +385,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       getModelRunSettings: () => eventing.modelRunSettings,
       getExecutionGeneration: () => attempt.executionGeneration,
     });
+    // Diagnostic only: a timing observer can never fence or fail a request.
+    const observeProviderDispatch = () => {
+      try {
+        eventing.providerDispatchObserver?.();
+      } catch {
+        // Metrics emission must never affect a model call.
+      }
+    };
     const checkpointBeforeProviderDispatch = async () => {
       await awaitModelCallAdmission();
       await checkpointHistoryBeforeProviderDispatch(historySink, {
@@ -682,6 +690,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     }, // latest wins; flushed once in finally
                     beforeProviderDispatch: () => {
                       leases.codex.assertUsable();
+                      observeProviderDispatch();
                     },
                     onRequestPreparationDiagnostic: (phase) => {
                       if (
@@ -959,6 +968,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       },
                     },
                   ]);
+                  // SuperGrok places bytes on the wire immediately after this
+                  // awaited audit returns.
+                  if (event.phase === "started") observeProviderDispatch();
                   attempt.providerRecoveryCount = providerRecoveryCountAfterModelRequestPhase(
                     attempt.providerRecoveryCount,
                     event.phase,
@@ -1090,6 +1102,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ),
             );
           const compactionPrep = await prepareCompaction({
+            entitlements,
             input,
             settings: capabilitySettings,
             db,

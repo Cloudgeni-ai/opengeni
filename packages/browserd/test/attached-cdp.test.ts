@@ -8,6 +8,7 @@ class FakeBridge implements AttachedBrowserBridgeTransport {
   readonly commands: Array<Record<string, unknown>> = [];
   closed = false;
   pollCount = 0;
+  eventSent = false;
 
   async request<T = unknown>(payload: Readonly<Record<string, unknown>>): Promise<T> {
     this.commands.push({ ...payload });
@@ -33,7 +34,10 @@ class FakeBridge implements AttachedBrowserBridgeTransport {
       case "debugger.poll": {
         this.pollCount += 1;
         if (this.pollCount === 1) return { events: [], cursor: 5, truncated: false } as T;
-        if (this.pollCount === 2) {
+        if (!this.commands.some((command) => command.type === "debugger.attach"))
+          return { events: [], cursor: 5, truncated: false } as T;
+        if (!this.eventSent) {
+          this.eventSent = true;
           return {
             events: [
               {
@@ -104,21 +108,21 @@ describe("AttachedChromeCdpConnection", () => {
       targetId: "7",
       flatten: true,
     });
-    expect(attached.sessionId).toBe("attached:7");
+    expect(attached.sessionId).toStartWith("attached:7:");
 
     const navigated = new Promise<void>((resolveEvent) => {
       connection.on(
         "Page.frameNavigated",
         (event) => {
-          expect(event.sessionId).toBe("attached:7");
+          expect(event.sessionId).toBe(attached.sessionId);
           expect(event.params).toEqual({ frame: { id: "main" } });
           resolveEvent();
         },
-        "attached:7",
+        attached.sessionId,
       );
     });
     await expect(
-      connection.send("Page.getFrameTree", {}, { sessionId: "attached:7" }),
+      connection.send("Page.getFrameTree", {}, { sessionId: attached.sessionId }),
     ).resolves.toEqual({ frameTree: { frame: { id: "main" } } });
     await navigated;
     expect(bridge.commands).toContainEqual(

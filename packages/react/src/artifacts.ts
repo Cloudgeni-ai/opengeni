@@ -1,5 +1,6 @@
 export { inlineHtmlDocument } from "./components/artifacts/inline-html-document";
 export { isRetainedImageContentType, useRetainedImageObjectUrl } from "./timeline/retained-image";
+export { PatchApplyCommand, isPatchFilename } from "./timeline/patch-apply-command";
 export {
   ArtifactBadge,
   ArtifactLabelsProvider,

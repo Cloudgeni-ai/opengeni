@@ -3,11 +3,13 @@ import {
   codeSearchDeploymentPolicy,
   resolveModelProviderForTurn,
   resolveFirstPartyDelegationSecret,
+  webSearchToolPlan,
   type Settings,
 } from "@opengeni/config";
 import {
   AGENT_SKILL_MANAGE_TOOL_NAMES,
   AUTOMATIC_SESSION_TITLE_FALLBACK,
+  bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   FIRST_PARTY_IN_PROCESS_TOOL_NAMES,
   type FirstPartyMcpToolName,
@@ -233,12 +235,14 @@ export async function workspaceSessionToolPolicyContext(
   workspaceId: string,
   settings: Settings,
   subjectId?: string,
+  /** An in-flight read of this exact workspace a caller already started. */
+  workspaceRead?: ReturnType<typeof requireWorkspace>,
 ): Promise<{ workspaceServerIds: string[]; workspaceDefaultServerIds: string[] }> {
   const [runtimeSettings, workspace] = await Promise.all([
     settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings, {
       ...(subjectId ? { subjectId } : {}),
     }),
-    requireWorkspace(db, workspaceId),
+    workspaceRead ?? requireWorkspace(db, workspaceId),
   ]);
   return {
     workspaceServerIds: sortedIds(runtimeSettings.mcpServers.map((server) => server.id)),
@@ -324,6 +328,8 @@ export async function workspaceSessionEffectiveToolsContext(
   workspaceId: string,
   subjectId: string,
   sessions: readonly Session[],
+  /** An in-flight read of this exact workspace a caller already started. */
+  workspaceRead?: ReturnType<typeof requireWorkspace>,
 ): Promise<SessionEffectiveToolsContext> {
   const configured = sessions.filter((session) => session.agent != null);
   const baseline: SessionEffectiveToolsContext = {
@@ -334,7 +340,7 @@ export async function workspaceSessionEffectiveToolsContext(
   };
   if (configured.length === 0) return baseline;
   const [workspace, catalog, descriptors, sandboxes, routerHistory] = await Promise.all([
-    requireWorkspace(deps.db, workspaceId),
+    workspaceRead ?? requireWorkspace(deps.db, workspaceId),
     resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
       accountId: configured[0]!.accountId,
       workspaceId,
@@ -395,14 +401,19 @@ export async function workspaceSessionEffectiveToolsContext(
 
 function sessionHasSkills(session: Session, context: SessionEffectiveToolsContext): boolean {
   if (context.hasWorkspaceSkills || session.skills.length > 0) return true;
-  // Undefined is the worker's bundled default. Explicit [] means no bundles.
-  if (session.bundledSkillIds === undefined) return true;
+  // Undefined is the worker's bundled default. Explicit [] means no bundles,
+  // and a "none" agent without an explicit list has none (as in the worker).
+  const bundledSkillIds = bundledSkillSelectionForAgentConfig(
+    session.bundledSkillIds,
+    session.agent,
+  );
+  if (bundledSkillIds === undefined) return true;
   const tools = new Set(
     resolveAgentToolFamilies(session.agent).firstPartyTools(
       allowedFirstPartyMcpToolsForSession(context.settings, session.firstPartyMcpTools),
     ),
   );
-  return session.bundledSkillIds.some((id) => {
+  return bundledSkillIds.some((id) => {
     if (
       [
         "builtin:opengeni-documents",
@@ -437,9 +448,18 @@ export function sessionEffectiveToolProjectionInput(
   const supportsImages =
     model?.model.api === "responses" && model.model.capabilities.inputModalities.includes("image");
   const hostedToolNames: AgentFunctionToolName[] = [];
+  // Same plan the worker applies: provider web_search/web_fetch where the
+  // model has no hosted search (or the operator chose `replace`).
+  const webSearchPlan = context
+    ? webSearchToolPlan(context.settings, {
+        hostedWebSearch: model?.model.hostedWebSearch ?? context.settings.webSearchEnabled,
+        transportHostedSearch: model?.provider.kind === "xai-subscription",
+      })
+    : { hostedWebSearch: false, providerTools: [] };
   if (model?.provider.kind === "xai-subscription") {
     if (context?.settings.webSearchEnabled) hostedToolNames.push("web_search", "x_search");
-  } else if (model?.model.hostedWebSearch) hostedToolNames.push("web_search");
+  } else if (model?.model.hostedWebSearch && webSearchPlan.hostedWebSearch)
+    hostedToolNames.push("web_search");
   const mediaAttachment =
     context?.mediaAttachments?.get(session.id) ??
     (context?.objectStorageAvailable === false
@@ -454,6 +474,7 @@ export function sessionEffectiveToolProjectionInput(
         "skill_read",
         ...AGENT_SKILL_MANAGE_TOOL_NAMES,
         ...media.runtime,
+        ...webSearchPlan.providerTools,
       ]
     : [];
   const sandboxToolNames: AgentFunctionToolName[] = sandboxAvailable
@@ -479,7 +500,7 @@ export function sessionEffectiveToolProjectionInput(
     (!session.title?.trim() || session.title.trim() === AUTOMATIC_SESSION_TITLE_FALLBACK);
   const firstPartyMcpTools =
     context && toolRefs.some((ref) => ref.id === "opengeni")
-      ? resolveAgentToolFamilies(session.agent)
+      ? resolveAgentToolFamilies(session.agent, { sandboxAttached: sandboxAvailable })
           .firstPartyTools(
             allowedFirstPartyMcpToolsForSession(context.settings, session.firstPartyMcpTools),
           )
@@ -512,7 +533,9 @@ export function sessionEffectiveToolProjectionInput(
         firstPartyModelNames.set(name, `interaction__${name}`);
         if (
           !firstPartyMcpTools.includes(name) &&
-          resolveAgentToolFamilies(session.agent).allowsFirstPartyTool(name) &&
+          resolveAgentToolFamilies(session.agent, {
+            sandboxAttached: sandboxAvailable,
+          }).allowsFirstPartyTool(name) &&
           session.firstPartyMcpTools.includes(name)
         )
           firstPartyMcpTools.push(name);
@@ -541,6 +564,7 @@ export function sessionEffectiveToolProjectionInput(
     "skill_read",
     "request_human_input",
     "list_models",
+    ...webSearchPlan.providerTools,
     ...(toolRefs.some((ref) => ref.id === "opengeni" && ref.eager === true) ||
     !progressiveDisclosure
       ? firstPartyMcpTools.filter((name) => !interactionNames.has(name) || !progressiveDisclosure)
@@ -555,12 +579,13 @@ export function sessionEffectiveToolProjectionInput(
         : []),
     ]),
     hasSkills: context ? sessionHasSkills(session, context) : false,
-    webSearch: hostedToolNames.includes("web_search"),
+    webSearch: hostedToolNames.includes("web_search") || webSearchPlan.providerTools.length > 0,
     humanInput: context?.humanInputEnabled ?? false,
     media: media.toolsKnown ? media.hosted.length + media.runtime.length > 0 : undefined,
     routerInHistory:
       context?.routerInHistory === true ||
       context?.routerHistorySessionIds?.has(session.id) === true,
+    ...(context ? { sandboxAttached: sandboxAvailable } : {}),
   };
   const families = resolveAgentToolFamilies(session.agent, environment);
   environment.hasDeferredTools =

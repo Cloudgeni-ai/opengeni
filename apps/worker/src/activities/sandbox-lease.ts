@@ -53,6 +53,7 @@ import {
   recordRecoveredModalProviderCreate,
   markWarmBillingStopCutoff,
   listMeterableWarmLeases,
+  countInteractionOnlyWarmLeasesByIdle,
   listSandboxViewerForceDrainWorkspaceIds,
   markSandboxCheckpointArtifactDeletePending,
   persistDrainSnapshot,
@@ -82,9 +83,12 @@ import {
   type LeaseSnapshot,
 } from "@opengeni/db";
 import {
+  claimConnectedCommandOutputReleases,
   claimConnectedMachineSessionBackgroundCommands,
   deferConnectedMachineBackgroundCommandReconciliation,
   recordConnectedMachineBackgroundCommandProof,
+  recordConnectedCommandOutputConsumption,
+  settleConnectedCommandOutputReleaseClaim,
   type ConnectedMachineBackgroundCommandClaim,
   type ConnectedMachineBackgroundCommandProof,
 } from "@opengeni/db/session-background-commands";
@@ -171,6 +175,8 @@ import {
   type RetainedProcessReconciliationOutcome,
   type SandboxInventoryProjectionDomain,
   recordSandboxLeaseGauges,
+  recordModalSandboxInventoryGauges,
+  recordInteractionOnlyLeaseGauges,
   recordSandboxOrphansTerminated,
   recordSandboxCommandContainment,
   recordSandboxProviderMissingBeforeCapture,
@@ -763,6 +769,7 @@ export function createSandboxLeaseActivities(
       // immutable launch locators must reconcile even when managed ownership is
       // disabled, otherwise an exact runner exit/loss proof can remain stranded.
       await reconcileConnectedMachineBackgroundCommands(db, settings, observability, service.bus);
+      await reconcileConnectedCommandOutputReleases(db, settings, observability, service.bus);
 
       // Disabling new lease ownership cannot strand a previously dispatched
       // operation. This only attributes a positive receipt; normal draining
@@ -978,6 +985,9 @@ type ConnectedCommandReconciliationOutcome =
   | "proof_checkpoint_failed"
   | "settled_exited"
   | "settled_lost"
+  | "output_unavailable"
+  | "output_ack_published"
+  | "output_released"
   | "settlement_failed"
   | "defer_failed";
 
@@ -1178,6 +1188,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
       );
     await forEachWithConcurrency(claims, SANDBOX_MAINTENANCE_ITEM_CONCURRENCY, async (claim) => {
       let proof = claim.proof;
+      let outputReplay: Awaited<ReturnType<OpStreamExecClient["readExisting"]>> | null = null;
       const connectionKey = JSON.stringify([
         claim.controlWorkspaceId,
         claim.enrollmentId,
@@ -1235,7 +1246,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
               retryClock: defaultSelfhostedRetryClock,
               journal: { attachGeneration: () => String(Date.now()), persistSettled: () => {} },
             });
-            await replayConnectedCommandOutput(
+            outputReplay = await replayConnectedCommandOutput(
               client,
               claim.opId,
               Boolean(proof),
@@ -1297,6 +1308,18 @@ export async function reconcileConnectedMachineBackgroundCommands(
         if (!settlement.settled) {
           throw new Error("Connected command settlement lost its exact claim or proof");
         }
+        const receipt =
+          outputReplay?.outputReceipt ??
+          (outputReplay?.status === "running" ? outputReplay.terminal?.outputReceipt : undefined);
+        const terminal =
+          outputReplay?.status === "completed" ? outputReplay : outputReplay?.terminal;
+        if (proof.outcome === "exited" && receipt && terminal) {
+          await recordConnectedCommandOutputConsumption(db, {
+            ...claim,
+            receipt,
+            exitCode: terminal.outcome.response.exitCode,
+          });
+        }
         if (settlement.events.length > 0) {
           try {
             await bus.publish(claim.workspaceId, claim.sessionId, settlement.events);
@@ -1326,7 +1349,7 @@ export async function replayConnectedCommandOutput(
   opId: string,
   terminalKnown: boolean,
   capture: Parameters<OpStreamExecClient["readExisting"]>[2],
-): Promise<void> {
+): Promise<Awaited<ReturnType<OpStreamExecClient["readExisting"]>>> {
   // A completed operation can need several bounded reads to replay its retained
   // frames. Keep the reader's integrity checkpoint until the exit is verified;
   // replacing it after each partial read would restart forever at frame one.
@@ -1334,7 +1357,7 @@ export async function replayConnectedCommandOutput(
   while (true) {
     const before = capturedThrough;
     const replay = await client.readExisting(opId, terminalKnown ? 5_000 : 250, capture);
-    if (!terminalKnown || replay.status === "completed" || replay.terminal) return;
+    if (!terminalKnown || replay.status === "completed" || replay.terminal) return replay;
     // Quiet jobs can retain many heartbeat frames (or an incomplete UTF-8
     // chunk). These are real replay progress even when capture receives no
     // stdout/stderr. Use the reader's verified, contiguous protocol frontier.
@@ -1346,6 +1369,141 @@ export async function replayConnectedCommandOutput(
       throw new Error("Connected command terminal output replay has not reached its exit frontier");
     }
   }
+}
+
+/** Drain the durable terminal-output obligation independently of the launching
+ * attempt or model completion notice. Existing terminal rows receive no inferred
+ * receipt: they must replay and capture all retained bytes before any final ACK. */
+export async function reconcileConnectedCommandOutputReleases(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  observability: ActivityServices["observability"],
+  bus: ActivityServices["bus"],
+  controlRpcOverride?: ControlRpc,
+): Promise<void> {
+  const dueBefore = new Date();
+  const deadline = Date.now() + settings.sandboxLeaseReaperPeriodMs;
+  const controlRpc =
+    controlRpcOverride ?? new NatsControlRpc(async () => bus.getRequestConnection());
+  do {
+    let claims: Awaited<ReturnType<typeof claimConnectedCommandOutputReleases>>;
+    try {
+      claims = await claimConnectedCommandOutputReleases(db, {
+        claimId: crypto.randomUUID(),
+        dueBefore,
+        limit: CONNECTED_COMMAND_RECONCILIATION_LIMIT,
+        claimTtlMs: CONNECTED_COMMAND_RECONCILIATION_CLAIM_TTL_MS,
+      });
+    } catch (error) {
+      recordConnectedCommandReconciliation(observability, "claim_failed");
+      observability.warn("sandbox reaper: connected-command output claim failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    await forEachWithConcurrency(claims, SANDBOX_MAINTENANCE_ITEM_CONCURRENCY, async (claim) => {
+      try {
+        if (!bus.getOpStreamConnection)
+          throw new Error("Connected command output transport unavailable");
+        const rpcSubject = subjectFor(
+          claim.controlWorkspaceId,
+          claim.enrollmentId,
+          claim.connectionInstanceId,
+        );
+        const controlTimeoutMs = Math.min(
+          settings.sandboxSelfhostedControlTimeoutMs,
+          RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
+        );
+        const client = new OpStreamExecClient({
+          workspaceId: claim.controlWorkspaceId,
+          agentId: claim.enrollmentId,
+          connectionInstanceId: claim.connectionInstanceId,
+          epoch: 0,
+          controlRpc,
+          rpcSubject,
+          transport: new NatsOpStreamTransport(async () => bus.getOpStreamConnection?.() ?? null),
+          controlTimeoutMs,
+          retryClock: defaultSelfhostedRetryClock,
+          journal: {
+            attachGeneration: () => String(Date.now()),
+            persistSettled: () => {
+              throw new Error("Background output release requires its database receipt");
+            },
+          },
+        });
+        let receipt = claim.receipt;
+        if (!receipt) {
+          const status = await querySelfhostedOp({
+            controlRpc,
+            rpcSubject,
+            opId: claim.opId,
+            controlTimeoutMs,
+          });
+          if (status.state === OpState.OP_STATE_LOST) {
+            if (
+              !(await settleConnectedCommandOutputReleaseClaim(db, {
+                claim,
+                outcome: "unavailable",
+                retryAfterMs: 0,
+              }))
+            )
+              throw new Error("Connected command output loss no longer owns its exact claim");
+            recordConnectedCommandReconciliation(observability, "output_unavailable");
+            return;
+          }
+          if (status.state !== OpState.OP_STATE_COMPLETE)
+            throw new Error("Terminal command output returned a live operation");
+          const replay = await replayConnectedCommandOutput(
+            client,
+            claim.opId,
+            true,
+            async (frames) =>
+              captureConnectedCommandOutput(db, claim, bus)(claim.commandId, frames),
+          );
+          const terminal = replay.status === "completed" ? replay : replay.terminal;
+          receipt =
+            replay.outputReceipt ??
+            (replay.status === "running" ? replay.terminal?.outputReceipt : undefined) ??
+            null;
+          if (!terminal || !receipt)
+            throw new Error("Connected command output replay has no complete custody receipt");
+          await recordConnectedCommandOutputConsumption(db, {
+            ...claim,
+            receipt,
+            exitCode: terminal.outcome.response.exitCode,
+          });
+        }
+        const outcome = await client.releaseCapturedOutput(claim.opId, receipt);
+        if (
+          !(await settleConnectedCommandOutputReleaseClaim(db, {
+            claim,
+            outcome,
+            retryAfterMs: outcome === "published" ? settings.sandboxLeaseReaperPeriodMs : 0,
+          }))
+        )
+          throw new Error("Connected command output release no longer owns its exact claim");
+        recordConnectedCommandReconciliation(
+          observability,
+          outcome === "published" ? "output_ack_published" : "output_released",
+        );
+      } catch (error) {
+        await settleConnectedCommandOutputReleaseClaim(db, {
+          claim,
+          outcome: "retry",
+          retryAfterMs: Math.min(
+            5 * 60_000,
+            Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000) *
+              2 ** Math.min(4, claim.reconcileAttempts - 1),
+          ),
+        }).catch(() => false);
+        observability.warn("sandbox reaper: connected-command output release deferred", {
+          commandId: claim.commandId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
+    if (claims.length < CONNECTED_COMMAND_RECONCILIATION_LIMIT) break;
+  } while (Date.now() < deadline);
 }
 
 export async function probeConnectedMachineBackgroundCommand(
@@ -2533,6 +2691,17 @@ async function refreshQueueLeaseAndCreditGauges(
         );
       },
     ),
+    refreshSandboxInventoryGauge(
+      observability,
+      "interaction_idle",
+      "interaction-only-lease",
+      async () => {
+        recordInteractionOnlyLeaseGauges(
+          observability,
+          await countInteractionOnlyWarmLeasesByIdle(db, await listMeterableWarmLeases(db)),
+        );
+      },
+    ),
     refreshSandboxInventoryGauge(observability, "expired_drains", "expired-draining", async () => {
       recordExpiredDrainingSandboxLeaseGauges(
         observability,
@@ -2721,6 +2890,29 @@ export function modalOrphanTerminationStillEligible(
   if (latest.some((lease) => lease.liveness === "warming" && lease.instanceId === null)) {
     return false;
   }
+  return modalOrphanCandidateStillUnowned(latest, candidate);
+}
+
+/** Live leases still WARM on an instance the complete listing did not show.
+ * A draining lease legitimately loses its box mid-drain (capture, terminate,
+ * then cold), and warming has not published a box yet, so only a warm lease
+ * whose exact box is gone is a zombie. */
+export function countWarmModalLeasesMissingInstance(
+  latest: Awaited<ReturnType<typeof listLiveModalSandboxLeaseAttributions>>,
+  missingInstanceIds: string[],
+): number {
+  return missingInstanceIds.filter((instanceId) =>
+    latest.some((lease) => lease.liveness === "warm" && lease.instanceId === instanceId),
+  ).length;
+}
+
+/** Whether no live lease owns the candidate box by exact instance or by its
+ * attribution tags. Unlike termination eligibility this ignores the pending
+ * create postponement: a postponed orphan is still running without a lease. */
+export function modalOrphanCandidateStillUnowned(
+  latest: Awaited<ReturnType<typeof listLiveModalSandboxLeaseAttributions>>,
+  candidate: ModalOrphanSweepTermination,
+): boolean {
   if (latest.some((lease) => lease.instanceId === candidate.sandboxId)) {
     return false;
   }
@@ -2770,6 +2962,31 @@ async function sweepModalOrphansForConfiguredBackend(
       return modalOrphanTerminationStillEligible(latest, candidate);
     },
   });
+  // Only a complete listing is an inventory; a pass cut short by the
+  // termination budget leaves the previous projection to age out as stale.
+  // Re-read durable ownership after the listing so a lease that started or
+  // finished while the app was being listed is not reported as a leak.
+  if (result.inventory.complete) {
+    try {
+      const latest = await listLiveModalSandboxLeaseAttributions(db);
+      recordModalSandboxInventoryGauges(observability, {
+        running: result.inventory.running,
+        unleased: result.inventory.unterminated.filter((candidate) =>
+          modalOrphanCandidateStillUnowned(latest, candidate),
+        ).length,
+        liveLeaseInstancesMissing: countWarmModalLeasesMissingInstance(
+          latest,
+          result.inventory.missingLiveLeaseInstanceIds,
+        ),
+      });
+      recordSandboxInventoryProjectionSuccess(observability, "modal_provider");
+    } catch (error) {
+      recordSandboxInventoryProjectionFailure(observability, "modal_provider");
+      observability.warn("sandbox reaper: Modal inventory ownership re-read failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   for (const terminated of result.terminated) {
     observability.warn("sandbox reaper: terminated Modal orphan sandbox", {
       sandboxId: terminated.sandboxId,
@@ -3369,15 +3586,18 @@ async function terminateDrainableBox(
   // with draining->cold. Until this succeeds, arrivals remain fenced by that
   // exact claim; a timestamp or a failed provider call can never reopen a box
   // while termination may still be in flight.
-  const { wentCold, backgroundCommandEvents } = await confirmDrainCold(db, {
-    accountId,
-    workspaceId: row.workspaceId,
-    sandboxGroupId: row.sandboxGroupId,
-    expectedEpoch: row.leaseEpoch,
-    ...(captureClaim ? { expectedCaptureId: captureClaim.id } : {}),
-    providerMissingBeforeCapture: providerMissing,
-    idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
-  });
+  const { wentCold, unpublishedProviderLost, backgroundCommandEvents } = await confirmDrainCold(
+    db,
+    {
+      accountId,
+      workspaceId: row.workspaceId,
+      sandboxGroupId: row.sandboxGroupId,
+      expectedEpoch: row.leaseEpoch,
+      ...(captureClaim ? { expectedCaptureId: captureClaim.id } : {}),
+      providerMissingBeforeCapture: providerMissing,
+      idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
+    },
+  );
   // The command terminal events and agent inputs are already durable in the
   // cold commit; this is only best-effort live fanout.
   await publishDurableSessionEvents(bus, row.workspaceId, backgroundCommandEvents, (error) => {
@@ -3390,7 +3610,9 @@ async function terminateDrainableBox(
     // Only the exact successful cold commit counts provider loss. A missing
     // probe, a stale capture, a failed commit, or a retried child is not another
     // observed loss. Keep this outside the best-effort session event writer.
-    if (providerMissing) {
+    // An unpublished warming replacement (its creator died before warm
+    // publication) held no workspace; its absence is not a capture loss.
+    if (providerMissing && !unpublishedProviderLost) {
       recordSandboxProviderMissingBeforeCapture(observability, backend);
     }
     if (lease.unobservableCommandDrainIds?.length) {

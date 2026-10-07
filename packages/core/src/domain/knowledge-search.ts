@@ -4,7 +4,7 @@ import {
   applyCreditDebitAfterUse,
   checkWorkspaceAllowance,
   creditDebitAttributionForTurn,
-  getBillingBalance,
+  getSpendableCreditBalance,
   listKnowledgeEntries,
   recordUsageEvent,
   sumUsageQuantity,
@@ -29,7 +29,7 @@ const MAX_PAID_QUERY_MICROS_PER_MONTH = 1_000_000;
 export class KnowledgeVectorFundingError extends Error {
   readonly code = "knowledge_vector_funding_required";
   constructor() {
-    super("Knowledge vector search needs OpenGeni credits; keyword search remains available.");
+    super("Knowledge vector search needs Opengeni credits; keyword search remains available.");
     this.name = "KnowledgeVectorFundingError";
   }
 }
@@ -190,7 +190,7 @@ export async function searchKnowledgeEntries(
     context.accountId,
     context.workspaceId,
     async (lockedDb) => {
-      const balance = await getBillingBalance(lockedDb, context.accountId);
+      const balance = await getSpendableCreditBalance(lockedDb, context.accountId);
       if (balance.balanceMicros <= 0)
         return keywordFallback(lockedDb, new KnowledgeVectorFundingError(), "awaiting_funding");
       const attribution =

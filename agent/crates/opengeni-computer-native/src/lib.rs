@@ -11,9 +11,13 @@ mod adapter;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod captured_frames;
 mod clipboard;
+#[cfg(any(target_os = "linux", test))]
+mod linux_pointer;
 mod model;
 mod rpc;
 mod tree;
+#[cfg(any(target_os = "linux", test))]
+mod window_input_fences;
 
 #[cfg(target_os = "linux")]
 mod linux;

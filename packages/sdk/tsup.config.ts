@@ -34,6 +34,7 @@ export default defineConfig({
     "src/session-history-import.ts",
     "src/session-list-entries.ts",
     "src/usage-allowances.ts",
+    "src/insights-usage.ts",
     "src/artifacts.ts",
     "src/memory-slack.ts",
     "src/automations.ts",
@@ -67,5 +68,6 @@ export default defineConfig({
     "@opengeni/contracts/plugin-discovery",
     "@opengeni/contracts/workspace-integration-wire",
     "@opengeni/contracts/model-display",
+    "@opengeni/contracts/tool-review-presentation",
   ],
 });

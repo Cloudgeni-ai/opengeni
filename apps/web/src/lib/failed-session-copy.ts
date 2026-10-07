@@ -1,3 +1,4 @@
+import { providerRecoverySubject } from "@opengeni/react";
 import type { SessionFailureSummary } from "./events";
 
 /**
@@ -16,6 +17,12 @@ type KnownFailure = {
   message: string;
   retryUnhelpful: boolean;
   suggestModel: boolean;
+  /**
+   * Whole headline when another model can be chosen, for transient refusals
+   * whose remedy reads as a choice. Otherwise " Choose another model below."
+   * is appended to `message`.
+   */
+  chooseModelMessage?: string;
 };
 export type KnownFailureKind =
   | "provider_credentials"
@@ -71,15 +78,19 @@ const QUOTA: KnownFailure = {
 };
 const RATE_LIMITED: KnownFailure = {
   kind: "rate_limited",
-  message: "The model provider is rate limiting requests. Try again in a minute.",
+  message: "This model is throttled due to high demand. Try again in a few minutes.",
+  chooseModelMessage:
+    "This model is throttled due to high demand. Select a different model, or try again in a few minutes.",
   retryUnhelpful: false,
-  suggestModel: false,
+  suggestModel: true,
 };
 const PROVIDER_ERROR: KnownFailure = {
   kind: "provider_error",
-  message: "The model provider had a temporary error.",
+  message: "This model is temporarily unavailable. Try again in a few minutes.",
+  chooseModelMessage:
+    "This model is temporarily unavailable. Select a different model, or try again in a few minutes.",
   retryUnhelpful: false,
-  suggestModel: false,
+  suggestModel: true,
 };
 
 const UNKNOWN_FAILURE = "The session stopped unexpectedly.";
@@ -217,6 +228,29 @@ export function failedSessionCopy(
       ...(detail && detail !== recorded ? { detail } : {}),
     };
   }
+  // Spent automatic recovery on a recorded model route: name the model and the
+  // provider condition. Legacy events without the route keep the classified
+  // copy below; the exact recorded text stays behind Details either way.
+  const recovery = failure.providerRecovery;
+  if (
+    recovery?.modelRoute &&
+    recovery.modelLabel &&
+    !creditExhausted &&
+    !failure.safetyRefusal &&
+    !failure.quotaScope
+  ) {
+    const subject = providerRecoverySubject(recovery);
+    return {
+      reason: modelChanged
+        ? `${subject}. Retry to continue with the selected model.`
+        : canChooseModel
+          ? `${subject}. Select a different model, or try again in a few minutes.`
+          : `${subject}. Try again in a few minutes.`,
+      unavailableModel: false,
+      retryUnhelpful: false,
+      ...(diagnostic ? { detail: diagnostic } : {}),
+    };
+  }
   // Require an explicit claim about the model itself, not e.g. its connection
   // or service being unavailable.
   const unavailableModel =
@@ -226,18 +260,26 @@ export function failedSessionCopy(
   const known =
     creditExhausted || failure.safetyRefusal || unavailableModel
       ? null
-      : classifyProviderFailure(
-          failure.recordedDetail ?? recorded ?? "",
-          failure.failureCode,
-          failure.quotaScope,
-        );
+      : (quotaScopeFailure(failure.quotaScope) ??
+        // A recorded recovery streak proves the worker paced this transient
+        // refusal. Provider quota wording alone must not override that typed
+        // decision (e.g. Gemini's per-minute quota); legacy failures with an
+        // unknown streak retain their existing text fallback.
+        (failure.failureCode === "provider_rate_limited" &&
+        failure.consecutiveRecoveryCount !== null
+          ? RATE_LIMITED
+          : classifyProviderFailure(
+              failure.recordedDetail ?? recorded ?? "",
+              failure.failureCode,
+              failure.quotaScope,
+            )));
   if (known) {
     const detail = diagnostic;
+    const suggest = known.suggestModel && canChooseModel && !modelChanged;
     return {
-      reason:
-        known.suggestModel && canChooseModel && !modelChanged
-          ? `${known.message} Choose another model below.`
-          : known.message,
+      reason: suggest
+        ? (known.chooseModelMessage ?? `${known.message} Choose another model below.`)
+        : known.message,
       unavailableModel: false,
       retryUnhelpful: known.retryUnhelpful,
       ...(detail && detail !== known.message ? { detail } : {}),

@@ -20,7 +20,7 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
-for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter"] as const) {
+for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter", "opper"] as const) {
   test(`${kind} workspace access stays editable before restrictions and after resetting to all models`, async () => {
     let policy = {
       allowedModels: null as string[] | null,

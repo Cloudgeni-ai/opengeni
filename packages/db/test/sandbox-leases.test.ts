@@ -5010,6 +5010,197 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     }
   }, 60_000);
 
+  // Production 2026-10-05: a worker shutdown cancelled the spawner after Modal
+  // create returned. It terminated its unpublished box but died before
+  // failWarmingToCold, so the warming-death reaper drained the attributed
+  // instance, found it missing, and the replacement attempt failed every turn
+  // with restore_unrecoverable although no workspace had ever existed.
+  for (const archived of [false, true]) {
+    test(`(8a-unpublished) a missing UNPUBLISHED warming box does not poison the group (archive=${archived})`, async () => {
+      if (!available) return;
+      const { accountId, workspaceId, groupId } = await freshWorkspace();
+      const scope = { accountId, workspaceId, sandboxGroupId: groupId };
+      let archiveRevision: string | null = null;
+      if (archived) {
+        // A prior published box drained with a complete durable archive.
+        await acquireLease(db, {
+          ...scope,
+          kind: "turn",
+          holderId: "archived-owner",
+          backend: "modal",
+          leaseTtlMs: 45_000,
+        });
+        await commitWarmingToWarm(db, {
+          ...scope,
+          expectedEpoch: 0,
+          instanceId: "sb-archived-source",
+          resumeBackendId: "modal",
+          resumeState: {
+            backendId: "modal",
+            sessionState: { providerState: { sandboxId: "sb-archived-source" } },
+          },
+          leaseTtlMs: 45_000,
+        });
+        await releaseLeaseHolder(db, {
+          ...scope,
+          kind: "turn",
+          holderId: "archived-owner",
+          idleGraceMs: 0,
+        });
+        const draining = (await readLease(db, workspaceId, groupId))!;
+        const archive = Buffer.from("UNPUBLISHED_WARMING_ARCHIVE").toString("base64");
+        const descriptor = archiveDescriptor(archive, 1_900_000_000_000);
+        archiveRevision = descriptor.revision;
+        const captureId = crypto.randomUUID();
+        const claim = await claimWorkspaceArchiveCapture(db, {
+          ...scope,
+          captureId,
+          expectedEpoch: draining.leaseEpoch,
+          expectedInstanceId: "sb-archived-source",
+          liveness: "draining",
+          captureTimeoutMs: 60_000,
+          minIntervalMs: 0,
+        });
+        expect(claim.status).toBe("claimed");
+        const persisted = await persistDrainSnapshotRaw(db, {
+          ...scope,
+          expectedEpoch: draining.leaseEpoch,
+          expectedInstanceId: "sb-archived-source",
+          expectedWorkspaceGeneration: 0,
+          captureId,
+          workspaceArchive: archive,
+          workspaceArchiveMeta: descriptor,
+        });
+        expect(persisted.wrote).toBe(true);
+        expect(
+          (
+            await confirmDrainCold(db, {
+              ...scope,
+              expectedEpoch: draining.leaseEpoch,
+              expectedCaptureId: captureId,
+            })
+          ).wentCold,
+        ).toBe(true);
+      }
+
+      // The dying attempt wins the cold->warming election and records its box.
+      const dying = await acquireLease(db, {
+        ...scope,
+        kind: "turn",
+        holderId: "turn-attempt:dying",
+        backend: "modal",
+        leaseTtlMs: 45_000,
+        warmingLeaseTtlMs: 120_000,
+      });
+      expect(dying.role).toBe("spawner");
+      const rematerializationId = archived ? crypto.randomUUID() : null;
+      if (rematerializationId) {
+        const begun = await beginSandboxRematerialization(db, {
+          ...scope,
+          expectedEpoch: dying.lease.leaseEpoch,
+          rematerializationId,
+        });
+        expect(begun.status).toBe("started");
+      }
+      const recorded = await recordWarmingSandboxCreated(db, {
+        ...scope,
+        expectedEpoch: dying.lease.leaseEpoch,
+        rematerializationId,
+        instanceId: "sb-unpublished",
+        resumeBackendId: "modal",
+        resumeState: {
+          backendId: "modal",
+          sessionState: { providerState: { sandboxId: "sb-unpublished" } },
+        },
+        leaseTtlMs: 45_000,
+        warmingLeaseTtlMs: 120_000,
+      });
+      expect(recorded.recorded).toBe(true);
+      const generationBefore = (
+        await admin<{ workspace_generation: string }[]>`
+          select workspace_generation from sandbox_leases
+          where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`
+      )[0]!.workspace_generation;
+
+      // Its worker exits before publication or failWarmingToCold: the warming
+      // lease expires and the reaper converts it to an immediate drain (c2).
+      await releaseLeaseHolder(db, {
+        ...scope,
+        kind: "turn",
+        holderId: "turn-attempt:dying",
+        idleGraceMs: 0,
+      });
+      await admin`
+        update sandbox_leases set expires_at = now() - interval '1 second'
+        where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+      const reaped = await reapStaleLeaseHolders(db, {
+        workspaceId,
+        viewerHolderTtlMs: 90_000,
+        idleGraceMs: 45_000,
+      });
+      const drained = reaped.drained.find((row) => row.sandboxGroupId === groupId);
+      expect(drained?.instanceId).toBe("sb-unpublished");
+
+      // The replacement attempt arrives while the reaper owns the box.
+      const waiting = await acquireLease(db, {
+        ...scope,
+        kind: "turn",
+        holderId: "turn-attempt:replacement",
+        backend: "modal",
+        leaseTtlMs: 45_000,
+      });
+      expect(waiting).toMatchObject({ role: "fenced", reason: "provider_recovery_in_progress" });
+
+      // The reaper's provider probe returns typed NotFound.
+      const cold = await confirmDrainCold(db, {
+        ...scope,
+        expectedEpoch: drained!.leaseEpoch,
+        providerMissingBeforeCapture: true,
+      });
+      expect(cold).toMatchObject({ wentCold: true, unpublishedProviderLost: true });
+
+      const lease = (await readLease(db, workspaceId, groupId))!;
+      expect(lease.liveness).toBe("cold");
+      expect(lease.instanceId).toBeNull();
+      expect(lease.recovery.restore.status).not.toBe("unrecoverable");
+      expect(lease.recovery.workspace.status).not.toBe("unrecoverable");
+      expect(lease.recovery.provider.status).not.toBe("missing");
+      if (archived) {
+        expect(lease.recovery.archive.status).toBe("available");
+        expect(lease.recovery.restore).toMatchObject({
+          status: "pending",
+          selectedRevision: archiveRevision,
+        });
+      } else {
+        expect(lease.recovery.archive.status).toBe("none");
+        expect(lease.recovery.restore.status).toBe("not_required");
+      }
+      // No lost-workspace evidence was minted for a box that never existed
+      // as a workspace, and no generation moved.
+      const audits = await admin<{ n: number }[]>`
+        select count(*)::int as n from audit_events
+        where workspace_id = ${workspaceId} and target_id = ${groupId}
+          and action = 'sandbox.provider_missing_before_capture'`;
+      expect(audits[0]?.n).toBe(0);
+      const generationAfter = (
+        await admin<{ workspace_generation: string }[]>`
+          select workspace_generation from sandbox_leases
+          where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`
+      )[0]!.workspace_generation;
+      expect(generationAfter).toBe(generationBefore);
+
+      const retry = await acquireLease(db, {
+        ...scope,
+        kind: "turn",
+        holderId: "turn-attempt:replacement",
+        backend: "modal",
+        leaseTtlMs: 45_000,
+      });
+      expect(retry.role).toBe("spawner");
+      expect(retry.lease.leaseEpoch).toBeGreaterThan(drained!.leaseEpoch);
+    }, 60_000);
+  }
+
   test("(8b) a provider-loss cold commit adopts the exact late capture callback", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();

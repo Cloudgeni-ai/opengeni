@@ -601,7 +601,7 @@ describe("managed organization onboarding", () => {
       "email_verification",
       "email_verification",
     ]);
-    const ignore = "If you did not create an OpenGeni account, ignore this email.";
+    const ignore = "If you did not create an Opengeni account, ignore this email.";
     for (const message of sent) {
       expect(message.to).toBe(user.email);
       expect(message.text).toContain(ignore);

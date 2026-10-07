@@ -67,6 +67,7 @@ import {
   scheduledTurnMcpServerIds,
   hasPermission,
   requireExplicitPermissionDelegation,
+  createWebSearchBilling,
 } from "@opengeni/core";
 import { loadWorkspaceEnvironmentForRunWithCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
@@ -82,6 +83,7 @@ import { createTurnMediaArtifacts } from "./media-artifacts";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import {
+  bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   resolveAgentToolFamilies,
   type ResourceRef,
@@ -115,6 +117,7 @@ import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { createListModelsAttemptToolDefinition } from "./list-models";
 import { createRefreshCredentialsAttemptToolDefinition } from "./refresh-credentials";
 import { codeSearchToolDefinitions, codeSearchWorkspaceFromChannel } from "./code-search";
+import { turnWebSearchPlan, webSearchToolDefinitions } from "./web-search";
 import { createWorkspaceSkillTools } from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
@@ -596,7 +599,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     session.firstPartyMcpPermissions,
     linkedAuthority,
   );
-  const toolFamilies = resolveAgentToolFamilies(session.agent);
+  // Background-command tools need compute: the effective route of this turn,
+  // a managed sandbox or an attached Connected Machine, not the durable home.
+  const toolFamilies = resolveAgentToolFamilies(session.agent, {
+    sandboxAttached: (activeSandboxBackend ?? groupBoxBackend) !== "none",
+  });
   const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
     allowedFirstPartyMcpToolsForSession(runSettings, session.firstPartyMcpTools),
   );
@@ -669,7 +676,9 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     }),
   ]);
   const bundledSkills = loadConfiguredBundledSkills({
-    bundledSkillIds: session.bundledSkillIds,
+    // Rows that could not freeze the "none" default at create (scheduled
+    // generated sessions, pre-existing rows) get the same rule here.
+    bundledSkillIds: bundledSkillSelectionForAgentConfig(session.bundledSkillIds, session.agent),
     firstPartyTools: selectedFirstPartyMcpTools,
     videoGenerationEnabled:
       skillConfiguration.defaultModelId !== null && skillConfiguration.enabledModelIds.length > 0,
@@ -879,6 +888,22 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   const attemptToolFamilies = resolveAgentToolFamilies(session.agent, {
     hasSkills: skillCatalog.length > 0,
   });
+  // Provider web search: only where the turn has no hosted search (or the
+  // operator chose `replace`), only when a provider is configured, and only
+  // when the session's agent configuration allows web search (filtered below).
+  const webSearchTools = webSearchToolDefinitions({
+    settings: runSettings,
+    tools: turnWebSearchPlan(resolvedModel, runSettings).providerTools,
+    scope: {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      attemptId: input.attemptId,
+    },
+    billing: createWebSearchBilling({ db, settings: runSettings }),
+    observability,
+  });
   const attemptToolDefinitions = [
     ...(operationReadStore
       ? [
@@ -969,6 +994,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       ? [googleDrivePublicationTool]
       : []),
     ...codeSearchTools,
+    ...webSearchTools,
   ].filter((tool) => attemptToolFamilies.allowsFunctionTool(tool.modelName));
   recordTurnStartupPhase(observability, {
     phase: "tool_context_preparation",
@@ -1227,6 +1253,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       {},
       (name) => mcpToolDisplayMetadata(tools.mcpServers, name),
       (entry) => toolFamilyForCatalogIdentity(entry, runSettings.mcpServers),
+      tools.inputWaitYield,
     );
     eventing.codemodeDispatcher.start();
   };

@@ -13,6 +13,7 @@ import {
   type WorkspaceSessionDefaults,
   type XaiProviderAccountAuthoritySnapshotV1,
   type ClaudeProviderAccountAuthoritySnapshotV1,
+  type BillingBalance,
 } from "@opengeni/contracts";
 import {
   getScheduledTaskXaiProviderAccountAuthoritySnapshot,
@@ -21,16 +22,13 @@ import {
   getWorkspace,
   getWorkspaceConnectionModelRestrictions,
   getWorkspaceModelPolicy,
-  getWorkspaceProviderApiKeyConnectionMetadata,
-  listWorkspaceProviderCustomModels,
-  listOrganizationModelProviderCustomModelsForWorkspace,
-  listWorkspaceGatewayCustomModels,
-  listWorkspaceOpenRouterCustomModels,
-  organizationModelProviderConnectionActiveForWorkspace,
+  getOrganizationModelProviderCatalogForWorkspace,
+  listConnectionsMetadata,
+  listWorkspaceProviderCustomModelsByKind,
   workspaceCodexSubscriptionActive,
-  workspaceOpenRouterConnectionActive,
-  workspaceVercelAiGatewayConnectionActive,
-  organizationHoldsCredits,
+  workspaceProviderApiKeyConnectionMetadataFromConnections,
+  getBillingBalance,
+  spendableCreditMicros,
   workspaceXaiSubscriptionActive,
   workspaceXaiSubscriptionActiveForAuthority,
   XaiAuthorityPoolInactiveError,
@@ -39,6 +37,7 @@ import {
   workspaceClaudeSubscriptionActiveForAuthority,
   type ConnectionModelRestrictions,
   type Database,
+  type WorkspaceCustomModelProviderKind,
 } from "@opengeni/db";
 import {
   isWorkspaceModelAdmissible,
@@ -112,16 +111,22 @@ export type DefaultSessionModelInput = {
    * `organizationHoldsCredits`).
    */
   creditsAvailable: boolean;
+  creditBalance?: BillingBalance;
 };
 
 function creditsCandidate(
-  input: Pick<DefaultSessionModelInput, "settings" | "selections">,
+  input: Pick<DefaultSessionModelInput, "settings" | "selections" | "creditBalance">,
 ): DefaultModelSelection | null {
+  const selections = input.creditBalance
+    ? input.selections.filter(
+        (selection) => spendableCreditMicros(input.creditBalance!, selection.model.id) > 0,
+      )
+    : input.selections;
   const fallbackEffort = input.settings.openaiReasoningEffort;
-  const deployment = findSelection(input.selections, input.settings.openaiModel);
-  const configured = findSelection(input.selections, input.settings.creditsDefaultModel);
+  const deployment = findSelection(selections, input.settings.openaiModel);
+  const configured = findSelection(selections, input.settings.creditsDefaultModel);
   if (deployment?.availability.selectable && deployment.model.cost === "credits") {
-    // An operator's paid deployment default is never replaced. When it is the
+    // A funded paid deployment default is preserved. When it is the
     // credits default model itself, credit holders get the credits default
     // effort rather than the deployment-wide fallback effort.
     if (configured?.model.id !== deployment.model.id) return null;
@@ -146,7 +151,7 @@ function creditsCandidate(
       source: "credits",
     };
   }
-  const first = input.selections.find(
+  const first = selections.find(
     (selection) => selection.availability.selectable && selection.model.cost === "credits",
   );
   return first
@@ -175,8 +180,8 @@ function creditsCandidate(
  *    configured credits default (`OPENGENI_CREDITS_DEFAULT_MODEL`, effort
  *    clamped to what the model supports), or the first selectable
  *    credits-billed model when that one is not selectable. When the
- *    deployment default is already a selectable credits-billed model it is
- *    never replaced: it keeps the deployment effort, except that it takes the
+ *    deployment default is already a funded, selectable credits-billed model it
+ *    keeps the deployment effort, except that it takes the
  *    credits default effort when it is the credits default model itself.
  * 4. `deployment`: the deployment default with the deployment reasoning effort
  *    when stably admissible; otherwise the first stably admissible catalog
@@ -247,6 +252,7 @@ export function creditsDefaultSessionModel(input: {
   settings: Settings;
   selections: readonly WorkspaceModelSelection[];
   workspaceSettings: unknown;
+  creditBalance?: BillingBalance;
 }): DefaultModelSelection | null {
   if (input.settings.billingMode !== "stripe") return null;
   return selectDefaultSessionModel({
@@ -254,6 +260,7 @@ export function creditsDefaultSessionModel(input: {
     selections: input.selections,
     workspaceDefaults: resolveWorkspaceSessionDefaults(input.workspaceSettings),
     creditsAvailable: true,
+    ...(input.creditBalance ? { creditBalance: input.creditBalance } : {}),
   });
 }
 
@@ -279,13 +286,14 @@ export async function resolveDefaultSessionModelForSelections(
   if (
     withoutCredits.source !== "deployment" ||
     input.settings.billingMode !== "stripe" ||
-    creditsCandidate(decision) === null
+    !input.selections.some(
+      (selection) => selection.availability.selectable && selection.model.cost === "credits",
+    )
   ) {
     return withoutCredits;
   }
-  return (await organizationHoldsCredits(db, input.accountId))
-    ? selectDefaultSessionModel({ ...decision, creditsAvailable: true })
-    : withoutCredits;
+  const creditBalance = await getBillingBalance(db, input.accountId);
+  return selectDefaultSessionModel({ ...decision, creditsAvailable: true, creditBalance });
 }
 
 export type WorkspaceModelSelectionContext = {
@@ -411,82 +419,44 @@ export async function loadWorkspaceModelSelectionInput(
   options: { observeAvailability?: boolean } = {},
 ): Promise<WorkspaceModelSelectionInput> {
   const { accountId, workspaceId } = context;
-  const restrictionsRead = (async () =>
-    connectionRestrictionsAndXaiReadiness(db, settings, context))();
-  const claudePoolRead = (async () =>
-    loadWorkspaceClaudeSubscriptionReadiness(db, settings, context))();
+  // The exact provider set the catalog route reads. A disabled Claude
+  // subscription contributes no catalog entry, so its rows are not read.
+  const providerKinds: WorkspaceCustomModelProviderKind[] = [
+    "vercel_gateway",
+    "openrouter",
+    "opper",
+    ...CLAUDE_CONNECTION_KINDS.filter(
+      (kind) => kind !== "claude_subscription" || settings.claudeSubscriptionEnabled,
+    ),
+  ];
   const inputRead = (async () =>
     Promise.all([
-      restrictionsRead,
-      claudePoolRead,
+      connectionRestrictionsAndXaiReadiness(db, settings, context),
+      loadWorkspaceClaudeSubscriptionReadiness(db, settings, context),
       getWorkspaceModelPolicy(db, workspaceId),
       workspaceCodexSubscriptionActive(db, settings, workspaceId),
       options.observeAvailability === false
         ? Promise.resolve({})
         : loadWorkspaceCodexModelAvailability(db, settings, workspaceId),
-      workspaceVercelAiGatewayConnectionActive(db, workspaceId),
-      listWorkspaceGatewayCustomModels(db, { accountId, workspaceId }),
-      workspaceOpenRouterConnectionActive(db, workspaceId),
-      listWorkspaceOpenRouterCustomModels(db, { accountId, workspaceId }),
-      organizationModelProviderConnectionActiveForWorkspace(db, {
-        accountId,
-        workspaceId,
-        providerKind: "vercel_gateway",
-      }),
-      organizationModelProviderConnectionActiveForWorkspace(db, {
-        accountId,
-        workspaceId,
-        providerKind: "openrouter",
-      }),
-      listOrganizationModelProviderCustomModelsForWorkspace(db, {
-        accountId,
-        workspaceId,
-        providerKind: "vercel_gateway",
-      }),
-      listOrganizationModelProviderCustomModelsForWorkspace(db, {
-        accountId,
-        workspaceId,
-        providerKind: "openrouter",
-      }),
     ]))();
-  const claudeConnections: ClaudeConnectionCatalog = {};
-  const workspaceClaudeConnections: ClaudeConnectionCatalog = {};
   // Transaction handles share one backend and LOCAL scope. Preserve the old
   // batch ordering there rather than introduce concurrent nested savepoints.
   if (typeof (db as Database & { rollback?: unknown }).rollback === "function") await inputRead;
-  // Catalog metadata does not depend on the other providers' policy/readiness
-  // batch. Only subscription activation joins its exact existing pool read.
-  // These helpers keep their separate root-pool RLS scopes; no shared transaction.
+  // One scoped read per catalog family (workspace connection metadata,
+  // workspace custom models, organization provider readiness + models) instead
+  // of one scoped transaction per provider kind. The batched readers keep each
+  // provider's filters, bound and overflow error, exactly as the workspace
+  // model catalog route reads them.
   const catalogRead = (async () =>
-    Promise.all(
-      CLAUDE_CONNECTION_KINDS.map(async (kind) => {
-        if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled) return;
-        const [active, models, metadata, workspaceModels] = await Promise.all([
-          kind === "claude_subscription"
-            ? claudePoolRead.then((pool) => pool.organization)
-            : organizationModelProviderConnectionActiveForWorkspace(db, {
-                accountId,
-                workspaceId,
-                providerKind: kind,
-              }),
-          listOrganizationModelProviderCustomModelsForWorkspace(db, {
-            accountId,
-            workspaceId,
-            providerKind: kind,
-          }),
-          kind === "claude_subscription"
-            ? Promise.resolve(null)
-            : getWorkspaceProviderApiKeyConnectionMetadata(db, workspaceId, kind),
-          listWorkspaceProviderCustomModels(db, { accountId, workspaceId, providerKind: kind }),
-        ]);
-        claudeConnections[kind] = { active, models };
-        workspaceClaudeConnections[kind] = {
-          active:
-            kind === "claude_subscription" ? (await claudePoolRead).workspace : metadata !== null,
-          models: workspaceModels,
-        };
+    Promise.all([
+      listConnectionsMetadata(db, workspaceId, null),
+      listWorkspaceProviderCustomModelsByKind(db, { accountId, workspaceId, providerKinds }),
+      getOrganizationModelProviderCatalogForWorkspace(db, {
+        accountId,
+        workspaceId,
+        providerKinds,
       }),
-    ))();
+    ]))();
   // Observe both batches before admission resumes or fails. Retain the previous
   // input-batch error precedence even if the independent catalog fails first.
   const [inputResult, catalogResult] = await Promise.allSettled([inputRead, catalogRead]);
@@ -494,19 +464,31 @@ export async function loadWorkspaceModelSelectionInput(
   if (catalogResult.status === "rejected") throw catalogResult.reason;
   const [
     { restrictions: connectionModelRestrictions, xaiSubscriptionActive },
-    _claudePool,
+    claudePool,
     policy,
     codexSubscriptionActive,
     observations,
-    workspaceGatewayConnectionActive,
-    workspaceGatewayCustomModels,
-    openRouterConnectionActive,
-    workspaceOpenRouterCustomModels,
-    organizationGatewayConnectionActive,
-    organizationOpenRouterConnectionActive,
-    organizationGatewayCustomModels,
-    organizationOpenRouterCustomModels,
   ] = inputResult.value;
+  const [workspaceConnections, workspaceCustomModels, organizationProviders] = catalogResult.value;
+  const workspaceConnectionActive = (kind: WorkspaceCustomModelProviderKind) =>
+    workspaceProviderApiKeyConnectionMetadataFromConnections(workspaceConnections, kind) !== null;
+  const claudeConnections: ClaudeConnectionCatalog = {};
+  const workspaceClaudeConnections: ClaudeConnectionCatalog = {};
+  for (const kind of CLAUDE_CONNECTION_KINDS) {
+    if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled) continue;
+    claudeConnections[kind] = {
+      active:
+        kind === "claude_subscription"
+          ? claudePool.organization
+          : organizationProviders[kind].active,
+      models: organizationProviders[kind].models,
+    };
+    workspaceClaudeConnections[kind] = {
+      active:
+        kind === "claude_subscription" ? claudePool.workspace : workspaceConnectionActive(kind),
+      models: workspaceCustomModels[kind],
+    };
+  }
   return {
     claudeConnections,
     workspaceClaudeConnections,
@@ -516,14 +498,18 @@ export async function loadWorkspaceModelSelectionInput(
     codexSubscriptionActive,
     observations,
     xaiSubscriptionActive,
-    workspaceGatewayConnectionActive,
-    workspaceGatewayCustomModels,
-    workspaceOpenRouterConnectionActive: openRouterConnectionActive,
-    workspaceOpenRouterCustomModels,
-    organizationGatewayConnectionActive,
-    organizationOpenRouterConnectionActive,
-    organizationGatewayCustomModels,
-    organizationOpenRouterCustomModels,
+    workspaceGatewayConnectionActive: workspaceConnectionActive("vercel_gateway"),
+    workspaceGatewayCustomModels: workspaceCustomModels.vercel_gateway,
+    workspaceOpenRouterConnectionActive: workspaceConnectionActive("openrouter"),
+    workspaceOpenRouterCustomModels: workspaceCustomModels.openrouter,
+    organizationGatewayConnectionActive: organizationProviders.vercel_gateway.active,
+    organizationOpenRouterConnectionActive: organizationProviders.openrouter.active,
+    organizationGatewayCustomModels: organizationProviders.vercel_gateway.models,
+    organizationOpenRouterCustomModels: organizationProviders.openrouter.models,
+    workspaceOpperConnectionActive: workspaceConnectionActive("opper"),
+    workspaceOpperCustomModels: workspaceCustomModels.opper ?? [],
+    organizationOpperConnectionActive: organizationProviders.opper?.active === true,
+    organizationOpperCustomModels: organizationProviders.opper?.models ?? [],
   };
 }
 

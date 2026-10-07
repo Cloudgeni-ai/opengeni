@@ -3,7 +3,12 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { isDeepStrictEqual } from "node:util";
 import { withLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
-import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import {
+  environmentsEncryptionKeyBytes,
+  findIntegrationsOauthClient,
+  parseIntegrationsOauthClientsJson,
+  type Settings,
+} from "@opengeni/config";
 import { pinnedFetch } from "@opengeni/network";
 import {
   CapabilityCatalogItem,
@@ -102,6 +107,7 @@ export async function buildCapabilityCatalog(input: {
     listEnabledMcpCapabilityServers(input.db, input.workspaceId),
   ]);
   const runnableCapabilityIds = new Set(runnableMcpServers.map((server) => server.capabilityId));
+  const operatorOAuthClientConfigured = operatorOAuthClientResolver(input.settings);
   const catalogInstallations = capabilityInstallations.filter(
     (installation) => installation.kind === "mcp",
   );
@@ -164,12 +170,48 @@ export async function buildCapabilityCatalog(input: {
               },
             }
           : projected;
-      return applyCapabilityLifecycle(runtimeProjected);
+      return applyCapabilityLifecycle(
+        applyOperatorOAuthClientRequirement(runtimeProjected, operatorOAuthClientConfigured),
+      );
     })
     .sort(compareCatalogItems);
   return {
     items,
     installations: catalogInstallations,
+  };
+}
+
+/**
+ * `metadata.oauthClientRequirement` is stamped by the catalog import from
+ * `data/catalog/oauth-client-requirements.json` for providers that refuse
+ * OAuth self-registration. Whether the row can connect here is a deployment
+ * fact, so the catalog projects it rather than every surface guessing. The
+ * matcher is the one the OAuth start uses to find an operator client.
+ */
+function operatorOAuthClientResolver(settings: Settings): (issuer: string) => boolean {
+  let configured: ReturnType<typeof parseIntegrationsOauthClientsJson> = {};
+  try {
+    configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
+  } catch {
+    // Startup validates this setting; a malformed value can configure nothing.
+  }
+  return (issuer) => findIntegrationsOauthClient(configured, [issuer]) !== null;
+}
+
+export function applyOperatorOAuthClientRequirement(
+  item: CapabilityCatalogItem,
+  configured: (issuer: string) => boolean,
+): CapabilityCatalogItem {
+  if (item.kind !== "mcp") return item;
+  const requirement = item.metadata.oauthClientRequirement;
+  const issuer =
+    requirement && typeof requirement === "object" && !Array.isArray(requirement)
+      ? (requirement as Record<string, unknown>).issuer
+      : undefined;
+  if (typeof issuer !== "string" || !issuer) return item;
+  return {
+    ...item,
+    runtime: { ...item.runtime, operatorOAuthClient: { configured: configured(issuer) } },
   };
 }
 
@@ -779,9 +821,9 @@ function mcpProbeErrorMessage(error: unknown, endpointUrl: string): string {
       normalized,
     )
   ) {
-    return `OpenGeni could not reach a valid Streamable HTTP MCP server at ${endpoint}. Check the endpoint URL or choose a different catalog entry.`;
+    return `Opengeni could not reach a valid Streamable HTTP MCP server at ${endpoint}. Check the endpoint URL or choose a different catalog entry.`;
   }
-  return `OpenGeni could not initialize ${endpoint}. Check the endpoint configuration or try again.`;
+  return `Opengeni could not initialize ${endpoint}. Check the endpoint configuration or try again.`;
 }
 
 function safeEndpointLabel(endpointUrl: string): string {
@@ -1192,7 +1234,7 @@ function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] 
             available: true,
             mcpServerId: server.id,
             transport: "streamable-http",
-            notes: "Managed by this OpenGeni deployment through OPENGENI_MCP_SERVERS.",
+            notes: "Managed by this Opengeni deployment through OPENGENI_MCP_SERVERS.",
           },
           metadata: {
             mcpServerId: server.id,
@@ -1328,7 +1370,7 @@ function fikenCatalogItem(fikenConnections: ConnectionMetadata[]): CapabilityCat
     runtime: {
       available: true,
       mcpServerId: "opengeni",
-      notes: "Fiken access is provided through OpenGeni's first-party fiken tools.",
+      notes: "Fiken access is provided through Opengeni's first-party fiken tools.",
     },
     enabled: fikenEnabled,
     enabledReason: fikenEnabled
@@ -1371,11 +1413,11 @@ function providerIntegrationCatalogItems(
         available: true,
         mcpServerId: "opengeni",
         notes:
-          "OpenGeni's social provider adapter routes every call through an exact visible account Connection.",
+          "Opengeni's social provider adapter routes every call through an exact visible account Connection.",
       },
       enabled,
       enabledReason: socialConnectionSummary(counts),
-      provenance: "OpenGeni provider adapter",
+      provenance: "Opengeni provider adapter",
       metadata: {
         providerAdapter: "social",
         provider: definition.provider,
@@ -1400,7 +1442,7 @@ export function nativeConnectionCapabilityRecommendations(): CapabilityCatalogIt
       kind: "api",
       source: "built_in",
       name: "GitHub App",
-      description: "Connect repositories through OpenGeni's GitHub resource picker.",
+      description: "Connect repositories through Opengeni's GitHub resource picker.",
       category: "source-control",
       tags: ["github", "repositories", "source-control"],
       homepageUrl: "https://github.com",

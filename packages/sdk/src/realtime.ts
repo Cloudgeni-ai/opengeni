@@ -1,3 +1,4 @@
+import { createAzureLiveTransportStarter } from "./azure-live-transport";
 /**
  * Public, provider-neutral realtime browser SDK.
  *
@@ -34,7 +35,7 @@ export type SessionRealtimeClientLike = CodexRealtimeControllerClient & {
   ): Promise<WorkspaceRealtimeModelCatalogResponse>;
 };
 
-export type SessionRealtimeTransportKind = "codex" | "gateway" | "xai-subscription";
+export type SessionRealtimeTransportKind = "codex" | "gateway" | "xai-subscription" | "azure-live";
 
 /** Provider-neutral names for the existing, battle-tested controller projection. */
 export type SessionRealtimeController = CodexRealtimeController;
@@ -57,6 +58,7 @@ export type CreateSessionRealtimeControllerOptions = Omit<
 export function sessionRealtimeTransportKind(
   model: SessionRealtimeModel,
 ): SessionRealtimeTransportKind {
+  if (model === "opengeni-azure/gpt-live-1") return "azure-live";
   if (model === "gpt-live-1-boulder-alpha") return "codex";
   if (model === "supergrok/grok-voice-think-fast-2.0") return "xai-subscription";
   return "gateway";
@@ -74,11 +76,18 @@ export function createSessionRealtimeController(
   return createCodexRealtimeController({
     ...options,
     ownerStorageNamespace: sessionRealtimeOwnerStorageNamespace(options.model),
-    ...(transport === "gateway"
-      ? { startTransport: createGatewayRealtimeTransportStarter() }
-      : transport === "xai-subscription"
-        ? { startTransport: createXaiSubscriptionRealtimeTransportStarter() }
-        : {}),
+    ...(transport === "azure-live"
+      ? {
+          startTransport: createAzureLiveTransportStarter({
+            remoteAudio: options.remoteAudio,
+            createPeerConnection: options.createPeerConnection,
+          }),
+        }
+      : transport === "gateway"
+        ? { startTransport: createGatewayRealtimeTransportStarter() }
+        : transport === "xai-subscription"
+          ? { startTransport: createXaiSubscriptionRealtimeTransportStarter() }
+          : {}),
   });
 }
 

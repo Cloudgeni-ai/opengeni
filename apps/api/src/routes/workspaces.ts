@@ -1,3 +1,9 @@
+import { AZURE_LIVE_MODEL_ID } from "../azure-live";
+import {
+  createRealtimeVoiceBilling,
+  deploymentRealtimeVoice,
+  realtimeVoiceOfferProblem,
+} from "@opengeni/core";
 import { withDirectModelProviders } from "@opengeni/config";
 import { listConnectionsMetadata } from "@opengeni/db";
 import {
@@ -34,6 +40,9 @@ import {
   WorkspaceGatewayCustomModelsResponse,
   WorkspaceOpenRouterCustomModel,
   WorkspaceOpenRouterCustomModelsResponse,
+  WorkspaceOpperCustomModelsResponse,
+  CreateWorkspaceOpperCustomModelRequest,
+  DeleteWorkspaceOpperCustomModelRequest,
   WorkspaceRealtimeModelCatalogResponse,
   WorkspaceInferenceControlRequest,
   Workspace,
@@ -48,6 +57,8 @@ import {
 import { loadWorkspaceCodexModelAvailability } from "@opengeni/core";
 import {
   allWorkspacePermissions,
+  getBillingBalance,
+  spendableCreditMicros,
   createWorkspace,
   ensureWorkspaceByExternalIdentity,
   findWorkspaceByExternalIdentity,
@@ -87,6 +98,12 @@ import {
   WorkspaceExternalIdentityConflictError,
   WorkspaceGatewayCustomModelLimitError,
   WorkspaceOpenRouterCustomModelLimitError,
+  WorkspaceOpperCustomModelLimitError,
+  WorkspaceOpperCustomModelHistoryLimitError,
+  listWorkspaceProviderCustomModels,
+  createWorkspaceProviderCustomModel,
+  deleteWorkspaceProviderCustomModel,
+  replayWorkspaceProviderCustomModelCreate,
   WorkspaceLimitExceededError,
 } from "@opengeni/db";
 import { boundWorkspaceControlHttpPage } from "@opengeni/events";
@@ -104,6 +121,7 @@ import {
   listExternalActorWorkspaces,
   addExternalWorkspaceMemberForRequest,
   requireAccessGrant,
+  requireWorkspaceMemberManagementAuthority,
   requireWorkspaceSettingsGrant,
   requireFreshAccessGrant,
   resolveWorkspaceCatalogSettings,
@@ -136,6 +154,9 @@ import {
   configuredModelInputIdentities,
   configuredOpenRouterUpstreamModelIds,
   configuredOpenRouterWorkspaceProductModelIds,
+  configuredOpperUpstreamModelIds,
+  configuredOpperWorkspaceProductModelIds,
+  WORKSPACE_OPPER_MODEL_ID_PREFIX,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   sandboxImageAllowlist,
@@ -536,6 +557,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const providerKinds: WorkspaceCustomModelProviderKind[] = [
       "vercel_gateway",
       "openrouter",
+      "opper",
       ...CLAUDE_CONNECTION_KINDS.filter(
         (kind) =>
           kind !== "claude_subscription" || resolvedCatalog.settings.claudeSubscriptionEnabled,
@@ -617,29 +639,46 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       organizationOpenRouterConnectionActive: organizationProviders.openrouter.active,
       organizationGatewayCustomModels: organizationProviders.vercel_gateway.models,
       organizationOpenRouterCustomModels: organizationProviders.openrouter.models,
+      workspaceOpperConnectionActive: workspaceConnectionActive("opper"),
+      workspaceOpperCustomModels: workspaceCustomModels.opper,
+      organizationOpperConnectionActive: organizationProviders.opper.active,
+      organizationOpperCustomModels: organizationProviders.opper.models,
     });
     // The same precedence the server applies when a new chat, API create, or
     // scheduled occurrence names no model; published so pickers show it.
     const workspaceSettings = workspace?.settings ?? {};
+    const creditBalance =
+      deps.settings.billingMode === "stripe"
+        ? await getBillingBalance(deps.db, grant.accountId)
+        : undefined;
     const defaultSelection = await resolveDefaultSessionModelForSelections(deps.db, {
       settings: workspaceCatalogSettings,
       accountId: grant.accountId,
       workspaceSettings,
       selections,
     });
+    const catalog = projectWorkspaceModelCatalog(selections, {
+      defaultSelection,
+      creditsSelection: creditsDefaultSessionModel({
+        settings: workspaceCatalogSettings,
+        selections,
+        workspaceSettings,
+      }),
+    });
+    if (creditBalance) {
+      for (const model of catalog.models) {
+        if (model.cost !== "credits") continue;
+        model.creditFunding = creditBalance.promotionalCredits?.some(
+          (credit) => credit.remainingMicros > 0 && credit.eligibleModelIds.includes(model.id),
+        )
+          ? "promotional"
+          : spendableCreditMicros(creditBalance, model.id) > 0
+            ? "general"
+            : "unavailable";
+      }
+    }
     c.header("cache-control", "private, no-store");
-    return c.json(
-      WorkspaceModelCatalogResponse.parse(
-        projectWorkspaceModelCatalog(selections, {
-          defaultSelection,
-          creditsSelection: creditsDefaultSessionModel({
-            settings: workspaceCatalogSettings,
-            selections,
-            workspaceSettings,
-          }),
-        }),
-      ),
-    );
+    return c.json(WorkspaceModelCatalogResponse.parse(catalog));
   });
 
   app.get("/v1/workspaces/:workspaceId/gateway-custom-models", async (c) => {
@@ -918,6 +957,147 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.body(null, 204);
   });
 
+  app.get("/v1/workspaces/:workspaceId/opper-custom-models", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const models = await listWorkspaceProviderCustomModels(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      providerKind: "opper",
+    });
+    c.header("cache-control", "private, no-store");
+    return c.json(
+      WorkspaceOpperCustomModelsResponse.parse({
+        models: models.map(projectWorkspaceOpenRouterCustomModel),
+      }),
+    );
+  });
+
+  app.post("/v1/workspaces/:workspaceId/opper-custom-models", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const parsed = CreateWorkspaceOpperCustomModelRequest.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      throw new HTTPException(422, { message: "invalid Opper custom model" });
+    }
+    const requestHash = workspaceCustomModelRequestHash({
+      action: "create",
+      upstreamModelId: parsed.data.upstreamModelId,
+      label: parsed.data.label ?? null,
+    });
+    const replay = await replayWorkspaceProviderCustomModelCreate(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      providerKind: "opper",
+      operationId: parsed.data.operationId,
+      requestHash,
+    });
+    if (replay.outcome === "conflict") {
+      throw new HTTPException(409, {
+        message: "Opper custom model operation conflicts with current state",
+      });
+    }
+    if (replay.outcome === "success") {
+      return c.json(projectWorkspaceOpenRouterCustomModel(replay.model), 201);
+    }
+    const catalog = await deps.resolveCatalogSettings();
+    if (configuredOpperUpstreamModelIds(catalog.settings).includes(parsed.data.upstreamModelId)) {
+      throw new HTTPException(422, {
+        message: "Opper model is already included in the deployment catalog",
+      });
+    }
+    const customProductId = `${WORKSPACE_OPPER_MODEL_ID_PREFIX}${parsed.data.upstreamModelId}`;
+    const deploymentProductIds = new Set([
+      ...configuredModelInputIdentities(catalog.settings),
+      ...configuredOpperWorkspaceProductModelIds(catalog.settings),
+    ]);
+    if (deploymentProductIds.has(customProductId)) {
+      throw new HTTPException(422, {
+        message: "Opper model product id conflicts with the deployment catalog",
+      });
+    }
+    try {
+      const model = await createWorkspaceProviderCustomModel(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        providerKind: "opper",
+        upstreamModelId: parsed.data.upstreamModelId,
+        label: parsed.data.label ?? null,
+        operationId: parsed.data.operationId,
+        requestHash,
+        createdBySubjectId: grant.subjectId,
+      });
+      if (!model || model.retiredAt) {
+        throw new HTTPException(409, {
+          message: "Opper custom model operation conflicts with current state",
+        });
+      }
+      return c.json(projectWorkspaceOpenRouterCustomModel(model), 201);
+    } catch (error) {
+      if (
+        error instanceof WorkspaceOpperCustomModelLimitError ||
+        error instanceof WorkspaceOpperCustomModelHistoryLimitError
+      ) {
+        throw new HTTPException(422, { message: error.message });
+      }
+      if (nestedPostgresSqlState(error) === "23505") {
+        throw new HTTPException(422, {
+          message: "Opper custom model already exists",
+        });
+      }
+      throw error;
+    }
+  });
+
+  app.delete("/v1/workspaces/:workspaceId/opper-custom-models/:customModelId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const customModelId = c.req.param("customModelId");
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        customModelId,
+      )
+    ) {
+      throw new HTTPException(422, {
+        message: "invalid Opper custom model id",
+      });
+    }
+    const parsed = DeleteWorkspaceOpperCustomModelRequest.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      throw new HTTPException(422, {
+        message: "invalid Opper custom model deletion",
+      });
+    }
+    const removed = await deleteWorkspaceProviderCustomModel(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      providerKind: "opper",
+      customModelId,
+      expectedVersion: parsed.data.expectedVersion,
+      operationId: parsed.data.operationId,
+      requestHash: workspaceCustomModelRequestHash({
+        action: "delete",
+        customModelId,
+        expectedVersion: parsed.data.expectedVersion,
+      }),
+    });
+    if (removed.outcome === "not_found") {
+      throw new HTTPException(404, {
+        message: "Opper custom model not found",
+      });
+    }
+    if (removed.outcome === "conflict") {
+      throw new HTTPException(409, {
+        message: "Opper custom model changed; reload and retry",
+      });
+    }
+    return c.body(null, 204);
+  });
+
   app.get("/v1/workspaces/:workspaceId/realtime-model-catalog", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
@@ -935,16 +1115,52 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         : { available: false, unavailableReason: credentialReason };
     };
     const gatewayModels = Object.values(AI_GATEWAY_REALTIME_MODELS);
-    const models = [
-      ...gatewayModels.map((model, index) => ({
+    // Deployment-funded voice is listed only when this deployment can offer
+    // it (configured, and priced while credits are enforced). Hosted GPT Live
+    // replaces the managed Gateway choices when configured.
+    const managedCandidates = [
+      {
+        id: AZURE_LIVE_MODEL_ID,
+        label: "GPT Live 1",
+        description: "Realtime voice with session delegation",
+      },
+      ...gatewayModels.map((model) => ({
         id: model.managedModelId,
         label: model.label,
-        provider: "OpenGeni" as const,
         description: model.description,
-        ...availability(
-          Boolean(deps.settings.vercelAiGatewayApiKey),
-          "OpenGeni Gateway voice is not configured",
-        ),
+      })),
+    ]
+      .filter((model) => {
+        const voice = deploymentRealtimeVoice(deps.settings, model.id);
+        return voice !== null && realtimeVoiceOfferProblem(deps.settings, voice) === null;
+      })
+      .filter((model, _index, offered) =>
+        offered.some((candidate) => candidate.id === AZURE_LIVE_MODEL_ID)
+          ? model.id === AZURE_LIVE_MODEL_ID
+          : true,
+      );
+    const creditStanding =
+      managedCandidates.length > 0
+        ? await createRealtimeVoiceBilling({
+            db: deps.db,
+            settings: deps.settings,
+          }).creditStanding(grant.accountId)
+        : "none";
+    const hasCredits = creditStanding === "spendable";
+    const models = [
+      ...managedCandidates.map((model, index) => ({
+        ...model,
+        provider: "OpenGeni" as const,
+        ...(hasCredits
+          ? { available: true, unavailableReason: null, unavailableCode: null }
+          : {
+              available: false,
+              unavailableReason:
+                creditStanding === "promotional_only"
+                  ? "Promotional credits don't cover live voice. Add credits to use it."
+                  : "Add Opengeni credits to use live voice",
+              unavailableCode: "insufficient_credits",
+            }),
         recommended: index === 0,
       })),
       {
@@ -1138,14 +1354,19 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/members", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    await requireWorkspaceMemberManagementAuthority(c, deps, workspaceId, "workspace:read");
     const members = await listWorkspacePeople(deps, workspaceId);
     return c.json(workspaceMembersResponse(members));
   });
 
   app.get("/v1/workspaces/:workspaceId/member-candidates", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
+    const { grant } = await requireWorkspaceMemberManagementAuthority(
+      c,
+      deps,
+      workspaceId,
+      "members:manage",
+    );
     try {
       return c.json(
         ListWorkspaceMemberCandidatesResponse.parse({
@@ -1163,7 +1384,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/members", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
+    const { grant } = await requireWorkspaceMemberManagementAuthority(
+      c,
+      deps,
+      workspaceId,
+      "members:manage",
+    );
     const payload = await parseRequestJson(c, AddWorkspaceMemberRequest);
     requireApiKeyDelegationContext(await requireAccessContext(c, deps), payload.permissions);
     requireExplicitPermissionDelegation(grant, payload.permissions);
@@ -1216,7 +1442,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.patch("/v1/workspaces/:workspaceId/members/:subjectId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
+    const { grant } = await requireWorkspaceMemberManagementAuthority(
+      c,
+      deps,
+      workspaceId,
+      "members:manage",
+    );
     const subjectId = decodeURIComponent(c.req.param("subjectId"));
     const payload = await parseRequestJson(c, UpdateWorkspaceMemberRequest);
     requireApiKeyDelegationContext(await requireAccessContext(c, deps), payload.permissions);
@@ -1256,7 +1487,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/members/:subjectId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
+    const { grant, organizationAdministrator } = await requireWorkspaceMemberManagementAuthority(
+      c,
+      deps,
+      workspaceId,
+      "members:manage",
+    );
     const subjectId = decodeURIComponent(c.req.param("subjectId"));
     const members = await listWorkspaceMembers(deps.db, workspaceId);
     // Never remove yourself, and never remove the last administering member.
@@ -1271,6 +1507,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId,
       actorSubjectId: grant.subjectId,
       targetSubjectId: subjectId,
+      // An organization owner/admin acting without their own workspace grant
+      // proves that authority through the organization capability instead.
+      ...(organizationAdministrator
+        ? { requireOrganizationSharedWorkspaceAdministration: true }
+        : {}),
     });
     return c.body(null, 204);
   });

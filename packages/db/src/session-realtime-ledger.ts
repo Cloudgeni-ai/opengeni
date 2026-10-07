@@ -1176,10 +1176,15 @@ async function admitRealtimeDelegationInTransaction(
     delegationItemId: incoming.delegationItemId!,
     ledgerEntryId: entryId,
   };
-  const inputTranscript = incoming.payload?.inputTranscript;
-  if (typeof inputTranscript !== "string" || inputTranscript.trim().length === 0) {
-    throw new Error("Realtime delegation input transcript is required");
-  }
+  // Some providers (Azure Live) delegate without echoing the user's words. The
+  // work instructions in `incoming.text` still carry the transcript delta, so a
+  // missing echo only changes the display label; it must never fail the sync
+  // batch, which the browser would retry forever.
+  const rawInputTranscript = incoming.payload?.inputTranscript;
+  const inputTranscript =
+    typeof rawInputTranscript === "string" && rawInputTranscript.trim().length > 0
+      ? rawInputTranscript
+      : "Voice request";
   const admitted = await submitHumanPromptInTransaction(db, {
     accountId,
     workspaceId: input.workspaceId,

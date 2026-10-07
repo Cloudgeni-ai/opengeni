@@ -131,7 +131,7 @@ export function buildOpenGeniSlackBotManifest(
   const slashCommand = normalizedSlackCommand(options.slashCommand);
   const shortcutName = normalizedSlackManifestText(
     options.shortcutName,
-    "Open in OpenGeni",
+    "Open in Opengeni",
     "shortcut name",
     35,
   );
@@ -147,7 +147,7 @@ export function buildOpenGeniSlackBotManifest(
       slash_commands: [
         {
           command: slashCommand,
-          description: "Start an OpenGeni task in this channel",
+          description: "Start an Opengeni task in this channel",
           should_escape: false,
           url: `${baseUrl}/v1/integrations/slack/commands`,
         },
@@ -155,7 +155,7 @@ export function buildOpenGeniSlackBotManifest(
       shortcuts: [
         {
           callback_id: "opengeni_message",
-          description: "Start an OpenGeni task from this Slack message",
+          description: "Start an Opengeni task from this Slack message",
           name: shortcutName,
           type: "message",
         },
