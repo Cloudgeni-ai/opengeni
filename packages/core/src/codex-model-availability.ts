@@ -118,11 +118,16 @@ export async function loadWorkspaceCodexModelAvailability(
         const permitted = live.filter(({ account }) =>
           connectionModelAllowed(account.allowedModelIds, model.id),
         );
-        // The allocator may choose any permitted candidate, so all must support it.
+        // The allocator may choose any permitted candidate, so every reachable
+        // one must support it. An account whose catalog read fails (revoked
+        // token, provider outage) proves nothing about entitlement; letting it
+        // veto would make one broken login hide every model the healthy
+        // accounts serve. A turn leased to it quarantines it and fails over.
+        const reachable = permitted.filter(({ ok }) => ok);
         const supported =
-          permitted.length > 0 &&
-          permitted.every(({ ok, slugs }) => ok && slugs.includes(model.upstreamModelId));
-        const uncertain = permitted.find(({ ok }) => !ok);
+          reachable.length > 0 &&
+          reachable.every(({ slugs }) => slugs.includes(model.upstreamModelId));
+        const uncertain = reachable.length === 0 ? permitted.find(({ ok }) => !ok) : undefined;
         return [
           model.definitionVersion,
           {

@@ -21,11 +21,18 @@ import * as schema from "./schema";
  *   `opengeni.initiating_human_subject_id` setting is the session owner.
  *
  * Switching to a pool-worker subject must therefore never change who can see
- * the session the run belongs to. The helpers below re-establish the exact
- * turn's frozen initiating human (`session_turns.initiating_human_subject_id`)
- * alongside the pool-worker subject. That admits only sessions owned by that
- * human, which is exactly the access the accepted turn already carried, so the
- * pool worker gains no general visibility of private sessions.
+ * the session the run belongs to. Two rules keep it that way:
+ *
+ * - Waiter writes for shared pools (arm and reconcile, in
+ *   `withScopedCapacityWaiterRls`, and the wake below) run with no subject,
+ *   as Codex waiters do; their pool policies do not read the subject.
+ * - Operations that must act as the pool-worker subject (the waiter lookup,
+ *   lease acquisition, session pins, last-account metadata and the
+ *   in-transaction waiter peek) re-establish the exact turn's frozen
+ *   initiating human (`session_turns.initiating_human_subject_id`) alongside
+ *   it. That admits only sessions owned by that human, which is exactly the
+ *   access the accepted turn already carried, so the pool worker gains no
+ *   general visibility of private sessions.
  */
 
 export type SubscriptionPoolProvider = "claude" | "xai";
@@ -108,8 +115,8 @@ async function readFrozenInitiatingHuman(
  *   human is null). The restored human is never combined with a different
  *   subject, so an ambient actor can never gain another member's private
  *   session visibility through this helper.
- * - Otherwise (no ambient actor: background recovery, wake handlers, failure
- *   settlement) the exact turn's frozen initiating human is re-established
+ * - Otherwise (no ambient actor, for example the capacity workflow's waiter
+ *   lookup) the exact turn's frozen initiating human is re-established
  *   together with the pool-worker subject for the duration of `fn`, so
  *   private and shared sessions behave identically. Pass the acting `turnId`;
  *   without it the session's active turn is used. A turn with no initiating

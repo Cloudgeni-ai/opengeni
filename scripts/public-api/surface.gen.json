@@ -30357,6 +30357,17 @@
       "sessionRepoLabel": "value",
       "SessionStatusTone": "type"
     },
+    "@opengeni/react/session-realtime": {
+      "CODEX_LIVE_MODEL": "value",
+      "codexRealtimeAdmissionAllowed": "value",
+      "codexRealtimeAdmissionBlocker": "value",
+      "RealtimeControllerClient": "type",
+      "RealtimeModelOption": "type",
+      "SessionRealtimeControllerFactory": "type",
+      "sessionRealtimeLifecycleIsActive": "value",
+      "useRealtimeModelSelection": "value",
+      "useSessionRealtime": "value"
+    },
     "@opengeni/react/session-ui": {
       "AllowanceLabels": "type",
       "AllowanceScope": "type",
@@ -30470,6 +30481,7 @@
     },
     "@opengeni/react/timeline-model": {
       "ActivityGroup": "type",
+      "AgentTitleParts": "type",
       "answersFromDrafts": "value",
       "applyPatchOpsFromToolItem": "value",
       "applyPatchPresentation": "value",
@@ -30503,6 +30515,7 @@
       "isApplyPatch": "value",
       "isPreparingWork": "value",
       "mcpToolLeaf": "value",
+      "namedAgentTitle": "value",
       "noticeDisplayText": "value",
       "noticeIsResolvedApproval": "value",
       "noticeTone": "value",
@@ -30561,6 +30574,7 @@
       "WebSearchResult": "type",
       "withComputePreview": "value",
       "workerRowTitle": "value",
+      "workerRowTitleParts": "value",
       "writeStdinPresentation": "value"
     },
     "@opengeni/react/tokens.css": {

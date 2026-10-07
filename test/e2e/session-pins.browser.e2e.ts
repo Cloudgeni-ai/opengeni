@@ -2818,11 +2818,19 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await page.goto(parentUrl);
       await page.getByTestId("failed-session-banner").waitFor();
       const delivered = page.locator("details[data-og-machine-input-batch]");
-      await delivered.getByText("2 agent results received", { exact: true }).click();
+      // The pill names the child from session lineage once it is known; a
+      // result only means the child went idle, so it never says "finished".
+      const deliveredLabel = (await delivered.locator("summary").first().textContent()) ?? "";
       expect(
-        await delivered.getByRole("button", { name: "View session", exact: true }).count(),
-      ).toBe(2);
-      await delivered.getByRole("button", { name: "View session", exact: true }).first().click();
+        ["2 agent results received", "2 updates from "].some((label) =>
+          deliveredLabel.startsWith(label),
+        ),
+      ).toBe(true);
+      expect(deliveredLabel).not.toContain("finished");
+      await delivered.locator("summary").first().click();
+      const openChild = delivered.getByRole("button", { name: /^Open / });
+      expect(await openChild.count()).toBe(2);
+      await openChild.first().click();
       await page.waitForURL(`**/sessions/${child.id}`);
       expect(new URL(page.url()).pathname.endsWith(child.id)).toBe(true);
       await page.goBack();

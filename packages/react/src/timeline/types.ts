@@ -174,6 +174,12 @@ export type WorkerItem = {
   action: "spawn" | "message";
   /** The worker's initial message / the message sent to it, when parseable. */
   prompt: string | null;
+  /**
+   * The title the manager gave a spawned worker (`session_create` `title`),
+   * when present. Hosts can supply a live title for any session id; this is
+   * the timeline's own fallback so a spawn names its agent even offline.
+   */
+  title?: string | null | undefined;
   /** The target/spawned worker session id, when parseable from args/output. */
   workerSessionId: string | null;
   /** Bounded structured failure retained from session_create/session_send_message. */

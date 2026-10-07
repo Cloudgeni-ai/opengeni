@@ -133,7 +133,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
     requiresControlRevalidation: true,
   },
-  "packages/db/src/index.ts#armXaiCapacityWaitInSessionContext": {
+  "packages/db/src/index.ts#armXaiCapacityWait": {
     inserts: 1,
     contract: "canonical",
     requiresControlRevalidation: true,
@@ -142,7 +142,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "owned_suffix",
   },
-  "packages/db/src/index.ts#reconcileXaiCapacityWaitInSessionContext": {
+  "packages/db/src/index.ts#reconcileXaiCapacityWait": {
     inserts: 1,
     contract: "canonical",
     requiresControlRevalidation: true,
@@ -391,7 +391,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   appendTimeline: ["importArchivedSession", "appendArchivedSessionEvents"],
   cancelSessionSubtreeInTransaction: ["mutateSessionControlInTransaction"],
   supersedeCodexCapacityWaitInTransaction: ["reconcileCodexCapacityWait"],
-  supersedeXaiCapacityWaitInTransaction: ["reconcileXaiCapacityWaitInSessionContext"],
+  supersedeXaiCapacityWaitInTransaction: ["reconcileXaiCapacityWait"],
   projectPausedRecovery: ["commitSessionAttemptQuiescence"],
   recordSessionAttemptQuiescenceInTransaction: [
     "commitSessionAttemptQuiescence",
@@ -404,7 +404,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   ],
   closePendingSessionToolCallsInTransaction: [
     "armCodexCapacityWait",
-    "armXaiCapacityWaitInSessionContext",
+    "armXaiCapacityWait",
     "cancelSessionSubtreeInTransaction",
     "failSessionWorkBeforeAttemptClaim",
     "supersedeSessionCurrentDirectionInTransaction",
@@ -478,10 +478,7 @@ const expectedChildLifecycleNoticeProducers: Record<string, string[]> = {
     "applySessionTurnSettlement",
     "failSessionWorkBeforeAttemptClaim",
   ],
-  enqueueChildWaitingCapacityOutboxTx: [
-    "armCodexCapacityWait",
-    "armXaiCapacityWaitInSessionContext",
-  ],
+  enqueueChildWaitingCapacityOutboxTx: ["armCodexCapacityWait", "armXaiCapacityWait"],
   enqueueChildProgressOutboxTx: ["recordSessionGoalProgressWithEvent"],
 };
 const expectedControlPlaneChildOutboxWrappers: Record<string, string[]> = {
@@ -668,7 +665,80 @@ const sessionActivityGateWrappers = [
   "withWorkspaceSessionEventActivityRls",
   "retryWorkspaceSessionEventActivityPersistence",
   "withSessionCodexCapacityMutation",
+  "withScopedCapacityWaiterRls",
 ];
+
+function expectScopedCapacityWaiterActivityBoundary(source: string): string {
+  const sourceFile = parseSourceFile("capacity-waiter.ts", source);
+  const wrappers: t.Function[] = [];
+  const visit = (node: t.Node): void => {
+    if (isFunctionDeclaration(node) && node.id?.name === "withScopedCapacityWaiterRls") {
+      wrappers.push(node);
+    }
+    forEachChild(node, visit);
+  };
+  visit(sourceFile.program);
+  expect(wrappers).toHaveLength(1);
+  const wrapper = wrappers[0]!;
+  expect(namedEnclosingFunction(wrapper, true)?.name).toBe(
+    "createScopedSubscriptionCapacityWaiters",
+  );
+  expect(source.slice(wrapper.start, wrapper.body!.start)).toContain(
+    "fn: (db: SessionActivityDatabase) => Promise<T>",
+  );
+  expect(wrapper.body!.body).toHaveLength(2);
+  const [guard, dispatch] = wrapper.body!.body;
+  expect(guard).toMatchObject({
+    type: "IfStatement",
+    test: {
+      type: "UnaryExpression",
+      operator: "!",
+      argument: {
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          object: { type: "Identifier", name: "subjectId" },
+          property: { type: "Identifier", name: "trim" },
+        },
+        arguments: [],
+      },
+    },
+    consequent: { type: "BlockStatement", body: [{ type: "ThrowStatement" }] },
+    alternate: null,
+  });
+  const gatedBranch = (name: string, args: string[]) => ({
+    type: "AwaitExpression",
+    argument: {
+      type: "CallExpression",
+      callee: { type: "Identifier", name },
+      arguments: args.map((argument) => ({ type: "Identifier", name: argument })),
+    },
+  });
+  expect(dispatch).toMatchObject({
+    type: "ReturnStatement",
+    argument: {
+      type: "ConditionalExpression",
+      test: {
+        type: "BinaryExpression",
+        operator: "===",
+        left: {
+          type: "MemberExpression",
+          object: { type: "Identifier", name: "snapshot" },
+          property: { type: "Identifier", name: "scope" },
+        },
+        right: { type: "Literal", value: "user" },
+      },
+      consequent: gatedBranch("withWorkspaceSubjectSessionActivityRls", [
+        "db",
+        "workspaceId",
+        "subjectId",
+        "fn",
+      ]),
+      alternate: gatedBranch("withWorkspaceSessionActivityRls", ["db", "workspaceId", "fn"]),
+    },
+  });
+  return source.slice(wrapper.start, wrapper.end);
+}
 
 function hasSessionActivityBoundary(node: t.Node, source: string): boolean {
   let ancestor = parentNodes.get(node);
@@ -1062,6 +1132,25 @@ function insertPositions(functionNode: FunctionLikeDeclaration): number[] {
 }
 
 describe("session_events writer inventory", () => {
+  test("scoped capacity waiters retain activity admission in both authority branches", () => {
+    const source = readFileSync(join(repoRoot, "packages/db/src/index.ts"), "utf8");
+    const wrapper = expectScopedCapacityWaiterActivityBoundary(source);
+    const fixture = `function createScopedSubscriptionCapacityWaiters() { ${wrapper} }`;
+    for (const [gated, ungated] of [
+      ["withWorkspaceSubjectSessionActivityRls", "withWorkspaceSubjectRls"],
+      ["withWorkspaceSessionActivityRls", "withWorkspaceRls"],
+    ]) {
+      expect(() =>
+        expectScopedCapacityWaiterActivityBoundary(fixture.replaceAll(gated!, ungated!)),
+      ).toThrow();
+    }
+    expect(() =>
+      expectScopedCapacityWaiterActivityBoundary(
+        fixture.replace("if (!subjectId.trim())", "if (false)"),
+      ),
+    ).toThrow();
+  });
+
   test("nested factory writers cannot borrow sibling lock or gate evidence", () => {
     const sourceFile = parseSourceFile(
       "factory.ts",

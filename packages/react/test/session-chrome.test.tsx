@@ -966,12 +966,13 @@ describe("SessionChrome", () => {
     const links = [...panel.querySelectorAll("button")].filter(
       (button) => button.textContent === "View session",
     );
-    expect(links).toHaveLength(2);
+    // Typed child receipts and the agent message (sent by that session) link;
+    // an untyped source never does.
+    expect(links).toHaveLength(3);
     await act(async () => {
-      links[0]?.click();
-      links[1]?.click();
+      for (const link of links) link.click();
     });
-    expect(opened).toEqual([childId, childId]);
+    expect(opened).toEqual([childId, childId, childId]);
     expect(panel.textContent).toContain(inputs[1]!.summary);
     expect(panel.querySelectorAll("li")).toHaveLength(4);
   });

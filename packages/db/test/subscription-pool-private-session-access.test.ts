@@ -614,13 +614,16 @@ test("a turn without an initiating human restores nothing and private sessions s
     }),
   );
   expect(observed).toEqual({ actor: undefined, visible: [] });
+  // Lease acquisition is a wrapped path: it fails closed instead of borrowing
+  // anyone's access. (Shared-pool arm and reconcile do not use the turn's
+  // human; they run without a subject, see withScopedCapacityWaiterRls.)
   await expect(
-    armClaudeCapacityWait(client.db, {
+    acquireXaiCredentialLease(client.db, {
       ...input,
-      ...serviceTurn,
-      subjectId: worker,
-      earliestResetAt: null,
-      failurePayload: capacityFailure,
+      sessionId: serviceTurn.sessionId,
+      turnId: serviceTurn.turnId,
+      subjectId: subscriptionPoolWorkerSubject("xai"),
+      holderId: "fixture-holder-" + randomUUID(),
     }),
   ).rejects.toThrow();
 }, 60_000);

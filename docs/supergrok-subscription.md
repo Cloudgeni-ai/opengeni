@@ -85,10 +85,12 @@ snapshot. Private work additionally requires the exact initiating human.
 Pool authority is additive to session access, never a replacement for it.
 Shared (organization or workspace) pools are read and written under the
 synthetic pool-worker database subject (`worker:xai-workspace`, or
-`worker:claude-workspace` for the Claude pool that shares this code). Every
-capacity-wait arm, periodic recovery, workflow peek, lease, pin and
-last-account operation that runs under that subject without an ambient actor
-re-establishes the acting turn's frozen `initiating_human_subject_id`
+`worker:claude-workspace` for the Claude pool that shares this code). Arming
+and reconciling a shared pool's capacity wait run without a subject
+(`withScopedCapacityWaiterRls`), like Codex waiters; a personal pool acts as
+its initiating human. The waiter lookup, workflow peek, lease, pin and
+last-account operations that run as the pool-worker subject without an ambient
+actor re-establish the acting turn's frozen `initiating_human_subject_id`
 (`withSubscriptionPoolSessionAccess` in
 `packages/db/src/subscription-session-access.ts`). A `user_private` session
 therefore arms, waits and resumes exactly like a shared one, while the pool

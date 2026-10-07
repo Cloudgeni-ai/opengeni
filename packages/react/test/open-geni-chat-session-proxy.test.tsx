@@ -653,7 +653,7 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
 
   test("a sub-agent's chat opens in place from its card", async () => {
     const chat = await mountStockChat();
-    expect(await chat.click(/^View session$/)).toBe(true);
+    expect(await chat.click(/^Open agent session$/)).toBe(true);
     await flush(300);
     expect(chat.browser).toContain(`200 GET /v1/workspaces/${WS}/sessions/${CHILD}`);
     expect(chat.browser).toContain(`200 GET /v1/workspaces/${WS}/sessions/${CHILD}/events`);

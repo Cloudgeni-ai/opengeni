@@ -33,6 +33,7 @@ import {
   wakeXaiCapacityWaiters,
   xaiCredentialShardIndex,
   withSessionActivityRlsContext,
+  withSessionRlsActorContext,
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "../src";
@@ -135,6 +136,7 @@ async function seedSessionTurn(
   fixture: WorkspaceFixture,
   authoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 = workspaceSnapshot,
   executionGeneration = 1,
+  privateOwnerSubjectId: string | null = null,
 ): Promise<{
   sessionId: string;
   turnId: string;
@@ -146,6 +148,12 @@ async function seedSessionTurn(
   const turnId = crypto.randomUUID();
   const attemptId = crypto.randomUUID();
   const workflowId = `xai-${sessionId}`;
+  const [ownerMembership] = privateOwnerSubjectId
+    ? await shared.admin<{ id: string }[]>`
+        select id from organization_memberships
+        where account_id = ${fixture.accountId} and subject_id = ${privateOwnerSubjectId}`
+    : [];
+  if (privateOwnerSubjectId && !ownerMembership) throw new Error("private owner has no membership");
   await withSessionActivityRlsContext(
     client!.db,
     { accountId: fixture.accountId, workspaceId: fixture.workspaceId },
@@ -187,6 +195,19 @@ async function seedSessionTurn(
         )`);
     },
   );
+  if (ownerMembership) {
+    // Seed the private owner as the test administrator; the runtime under test
+    // gets no lifecycle capability or relaxed session RLS.
+    await shared.admin.begin(async (admin) => {
+      await admin`set local session_replication_role = replica`;
+      await admin`
+        update sessions
+        set visibility = 'user_private',
+          owner_organization_membership_id = ${ownerMembership.id},
+          owner_subject_id = ${privateOwnerSubjectId}
+        where id = ${sessionId}`;
+    });
+  }
   return { sessionId, turnId, attemptId, workflowId };
 }
 
@@ -1214,6 +1235,94 @@ describe("migration 0234 xAI subscription authority", () => {
     } finally {
       await app.end();
     }
+  }, 180_000);
+
+  test("quarantines and waits on a member's private session in a workspace pool", async () => {
+    if (!shared || !client) return;
+    const fixture = await seedWorkspace();
+    const [ownerSubjectId] = fixture.subjects;
+    const revoked = await createXaiSubscriptionCredential(client.db, {
+      ...fixture,
+      subjectId: ownerSubjectId!,
+      secret: { version: 1, accessToken: "revoked-token", refreshToken: "revoked-refresh" },
+      encryptionKey,
+      providerAccountId: `revoked-${crypto.randomUUID()}`,
+    });
+    const turn = await seedSessionTurn(fixture, workspaceSnapshot, 1, ownerSubjectId!);
+    // The worker leases and arms workspace and organization pools as its
+    // synthetic pool subject, which is not the private session's owner. Leasing
+    // runs inside the turn's actor context; failure settlement and capacity
+    // reconciliation run outside it.
+    const workerSubjectId = "worker:xai-workspace";
+    const lease = await withSessionRlsActorContext(
+      { subjectId: "service:agent-turn", initiatingHumanSubjectId: ownerSubjectId! },
+      async () =>
+        await acquireXaiCredentialLease(client!.db, {
+          ...fixture,
+          ...turn,
+          subjectId: workerSubjectId,
+          holderId: "holder:private-session",
+          authoritySnapshot: workspaceSnapshot,
+        }),
+    );
+    expect(lease.credentialId).toBe(revoked.account.id);
+    const armed = await armXaiCapacityWait(client.db, {
+      ...fixture,
+      subjectId: workerSubjectId,
+      sessionId: turn.sessionId,
+      turnId: turn.turnId,
+      attemptId: turn.attemptId,
+      workflowId: turn.workflowId,
+      authoritySnapshot: workspaceSnapshot,
+      earliestResetAt: null,
+      failurePayload: {
+        error: "The serving SuperGrok account requires reconnection",
+        code: "xai_relogin_required",
+      },
+      leaseFence: { holderId: lease.holderId!, generation: lease.generation! },
+      credentialQuarantine: {
+        kind: "status",
+        status: "needs_relogin",
+        lastError: "model request remained unauthorized after refresh",
+      },
+    });
+    expect(armed.action).toBe("waiting");
+    if (armed.action !== "waiting") throw new Error("private-session xAI waiter did not arm");
+    expect(armed.events.map((event) => event.type)).toEqual([
+      "turn.capacity_waiting",
+      "session.status.changed",
+    ]);
+    const [waiting] = await shared.admin<{ status: string }[]>`
+      select status from sessions where id = ${turn.sessionId}`;
+    expect(waiting?.status).toBe("waiting_capacity");
+    const [quarantined] = await shared.admin<{ status: string }[]>`
+      select status from xai_subscription_credentials where id = ${revoked.account.id}`;
+    expect(quarantined?.status).toBe("needs_relogin");
+    const reconcileInput = {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: turn.sessionId,
+      waiterId: armed.waiter.id,
+      generation: armed.waiter.generation,
+    };
+    expect(await reconcileXaiCapacityWait(client.db, reconcileInput)).toMatchObject({
+      action: "waiting",
+    });
+
+    await createXaiSubscriptionCredential(client.db, {
+      ...fixture,
+      subjectId: ownerSubjectId!,
+      secret: { version: 1, accessToken: "healthy-token", refreshToken: "healthy-refresh" },
+      encryptionKey,
+      providerAccountId: `healthy-${crypto.randomUUID()}`,
+    });
+    expect(await reconcileXaiCapacityWait(client.db, reconcileInput)).toMatchObject({
+      action: "resumed",
+      waiter: { status: "resumed", lastWakeReason: "capacity_available" },
+    });
+    const [recovering] = await shared.admin<{ status: string }[]>`
+      select status from sessions where id = ${turn.sessionId}`;
+    expect(recovering?.status).toBe("recovering");
   }, 180_000);
 
   test("records exact native PostgreSQL RLS, ACL, owner, and search-path posture", async () => {
