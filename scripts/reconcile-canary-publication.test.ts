@@ -708,10 +708,20 @@ describe("bounded GET-only recovery", () => {
         },
       });
     };
-    const verify = async (_store: RecoveryStore, _origin: Origin, archive: { file: string }) => {
+    const verify = async (
+      _store: RecoveryStore,
+      _origin: Origin,
+      archive: { file: string },
+      bundle: { file: string },
+    ) => {
+      if (!/\.(json|jsonl)$/.test(bundle.file))
+        throw new Error("Bundle file extension not supported by the verifier");
       const pkg = f.packages.find((p) =>
         f.archives.get(p.name)!.equals(readFileSync(join(store.directory, archive.file))),
       )!;
+      expect(
+        normalizeBundle(JSON.parse(readFileSync(join(store.directory, bundle.file), "utf8"))),
+      ).toEqual(normalizeBundle(provenance(pkg).bundle));
       return provenance(pkg).verified;
     };
     return { f, root, store, requests, request, verify };

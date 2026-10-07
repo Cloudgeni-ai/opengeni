@@ -105,7 +105,7 @@ describe("ordinary-session realtime context projection", () => {
     ]);
   });
 
-  test("adds prior voice continuity as inert role-labeled context", () => {
+  test("adds prior voice continuity as inert developer context, never as user speech", () => {
     const projected = projectSessionRealtimeInitialItems(
       [{ position: 0, item: { type: "message", role: "user", content: "Durable request." } }],
       [
@@ -114,7 +114,8 @@ describe("ordinary-session realtime context projection", () => {
       ],
     );
     expect(projected[0]).toEqual({ role: "user", text: "Durable request." });
-    expect(projected[1]).toMatchObject({ role: "user" });
+    // A user-role item is speech the provider may delegate to the agent.
+    expect(projected[1]).toMatchObject({ role: "developer" });
     expect(projected[1]?.text).toContain("Remain completely silent when this session starts.");
     expect(projected[1]?.text).toContain("USER: What happened?");
     expect(projected[1]?.text).toContain("ASSISTANT: I delegated the check.");
