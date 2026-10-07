@@ -3,11 +3,16 @@ import { getSettings } from "@opengeni/config";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   addSessionSystemUpdate,
+  appendSessionEvents,
   applySessionTurnSettlement,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  createSessionGoal,
   createXaiSubscriptionCredential,
+  requestSessionCompaction,
+  requestSessionTurnRecovery,
+  settleSessionInputWait,
   resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
   selectXaiCredentialForUse,
   sendAgentMessageInTransaction,
@@ -15,6 +20,7 @@ import {
   steerAgentSessionInTransaction,
   submitHumanPromptInTransaction,
   upsertOrganizationXaiSubscription,
+  waitForSessionInputWithEvent,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
   workspaceXaiSubscriptionActiveForAuthority,
@@ -611,4 +617,248 @@ test("SUB-ACCESS-01: a child receiver before its first turn keeps a personal poo
   const crossAuthority = await updateAuthority(cross.updateId);
   expect(crossAuthority).toEqual({ claude: organization, xai: organization });
   await expectSelects(input, crossAuthority, pools);
+}, 180_000);
+
+test.each(["organization", "user"] as const)("SUB-ACCESS-01: Claude and SuperGrok %s accepted pool snapshots survive same-turn recovery", async (scope) => {
+  const input = await fixture();
+  await connectOrganizationPools(input);
+  if (scope === "user") await connectPersonalPools(input, input.owner);
+  const session = await humanSession(input, input.owner);
+  await prompt(input, session.id, { type: "human", subjectId: input.owner });
+  const accepted = await claim(input, session.id);
+  const frozen = await turnAuthority(accepted.turn.id);
+  expect(frozen.claude.scope).toBe(scope);
+  expect(frozen.xai.scope).toBe(scope);
+
+  if (scope === "organization") {
+    // A changed live pool must not alter an already accepted organization turn.
+    await connectPersonalPools(input, input.owner);
+    expect(
+      await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(client.db, {
+        workspaceId: input.workspaceId,
+        subjectId: input.owner,
+      }),
+    ).toMatchObject({ scope: "user" });
+    expect(
+      await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(client.db, {
+        workspaceId: input.workspaceId,
+        subjectId: input.owner,
+      }),
+    ).toMatchObject({ scope: "user" });
+  }
+
+  const recovered = await requestSessionTurnRecovery(client.db, input.workspaceId, {
+    sessionId: session.id,
+    turnId: accepted.turn.id,
+    attemptId: accepted.attemptId,
+    triggerEventId: accepted.turn.triggerEventId,
+    reason: "worker_restart",
+  });
+  expect(recovered.action).toBe("recovering");
+  const retry = await claim(input, session.id);
+  expect(retry.turn.id).toBe(accepted.turn.id);
+  expect(await turnAuthority(retry.turn.id)).toEqual(frozen);
+}, 180_000);
+
+test.each(["organization", "user"] as const)("SUB-ACCESS-01: Claude and SuperGrok %s accepted pool snapshots reach goal continuations and compaction turns", async (scope) => {
+  const input = await fixture();
+  await connectOrganizationPools(input);
+  if (scope === "user") await connectPersonalPools(input, input.owner);
+
+  const compactSession = await humanSession(input, input.owner);
+  await prompt(input, compactSession.id, { type: "human", subjectId: input.owner });
+  const started = await claim(input, compactSession.id);
+  const compactAuthority = await turnAuthority(started.turn.id);
+  expect(compactAuthority.claude.scope).toBe(scope);
+  expect(compactAuthority.xai.scope).toBe(scope);
+  // Persist the canonical start marker that makes this the session's actual
+  // latest started work for maintenance executions such as compaction.
+  await appendSessionEvents(client.db, input.workspaceId, compactSession.id, [
+    {
+      type: "turn.started",
+      turnId: started.turn.id,
+      turnGeneration: started.turn.executionGeneration,
+      turnAttemptId: started.attemptId,
+      payload: { triggerEventId: started.turn.triggerEventId },
+    },
+  ]);
+  await complete(input, compactSession.id, started);
+  await requestSessionCompaction(client.db, input.workspaceId, compactSession.id);
+  const compacted = await claim(input, compactSession.id);
+  expect(compacted.turn.source).toBe("compaction");
+  const compactedAuthority = await turnAuthority(compacted.turn.id);
+  expect(compactedAuthority.claude).toEqual(compactAuthority.claude);
+  expect(compactedAuthority.xai).toEqual(compactAuthority.xai);
+
+  const goalSession = await humanSession(input, input.owner);
+  await createSessionGoal(client.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: goalSession.id,
+    text: "Continue the accepted work",
+    createdBy: "agent",
+  });
+  await prompt(input, goalSession.id, { type: "human", subjectId: input.owner });
+  const goalStart = await claim(input, goalSession.id);
+  const goalAuthority = await turnAuthority(goalStart.turn.id);
+  expect(goalAuthority.claude.scope).toBe(scope);
+  expect(goalAuthority.xai.scope).toBe(scope);
+  if (scope === "organization") await connectPersonalPools(input, input.owner);
+  await complete(input, goalSession.id, goalStart);
+  const continuation = await import("../src").then(({ materializeGoalContinuation }) =>
+    materializeGoalContinuation(client.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: goalSession.id,
+      workflowId: `session-${goalSession.id}`,
+      budgetBlocked: null,
+      policy: {
+        model: `organization-claude-subscription/${upstreamModelId}`,
+        reasoningEffort: "low",
+        latencyMode: "standard",
+        tools: [],
+        sandboxBackend: "none",
+      },
+      prompt: (goal) => `Continue ${goal.text}`,
+    }),
+  );
+  expect(continuation.action).toBe("continue");
+  if (continuation.action !== "continue") throw new Error("Goal continuation was not materialized");
+  expect(await updateAuthority(continuation.update.id)).toEqual({
+    claude: goalAuthority.claude,
+    xai: goalAuthority.xai,
+  });
+  const continued = await claim(input, goalSession.id);
+  expect(await turnAuthority(continued.turn.id)).toMatchObject({
+    claude: goalAuthority.claude,
+    xai: goalAuthority.xai,
+    human: input.owner,
+  });
+}, 180_000);
+
+test.each(["organization", "user"] as const)("SUB-ACCESS-01: coalesced child, background-command, and wait-timeout updates deliver with the accepted Claude and SuperGrok %s pool", async (scope) => {
+  const input = await fixture();
+  await connectOrganizationPools(input);
+  if (scope === "user") await connectPersonalPools(input, input.owner);
+  const session = await humanSession(input, input.owner);
+  await shared.admin`
+    update sessions set temporal_workflow_id = ${`session-${session.id}`} where id = ${session.id}`;
+  await prompt(input, session.id, { type: "human", subjectId: input.owner });
+  const accepted = await claim(input, session.id);
+  const frozen = await turnAuthority(accepted.turn.id);
+  expect(frozen.claude.scope).toBe(scope);
+  expect(frozen.xai.scope).toBe(scope);
+
+  const commandId = crypto.randomUUID();
+  const updates = [
+    {
+      kind: "child_terminal_result" as const,
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `sub-access-child:${crypto.randomUUID()}`,
+      lineage: {
+        parentTurnId: accepted.turn.id,
+        parentSessionId: session.id,
+        ...(scope === "user"
+          ? { xaiAuthoritySubjectId: input.owner, claudeAuthoritySubjectId: input.owner }
+          : {}),
+      },
+      ...(scope === "user"
+        ? {
+            xaiProviderAccountAuthoritySnapshot: frozen.xai,
+            claudeProviderAccountAuthoritySnapshot: frozen.claude,
+          }
+        : {}),
+      summary: "Child completed",
+      payload: {
+        type: "child_terminal_result" as const,
+        childSessionId: crypto.randomUUID(),
+        status: "idle" as const,
+      },
+    },
+    {
+      kind: "background_command_result" as const,
+      sourceId: commandId,
+      dedupeKey: `sub-access-command:${commandId}`,
+      lineage: {
+        causalTurnId: accepted.turn.id,
+        ...(scope === "user"
+          ? { xaiAuthoritySubjectId: input.owner, claudeAuthoritySubjectId: input.owner }
+          : {}),
+      },
+      ...(scope === "user"
+        ? {
+            xaiProviderAccountAuthoritySnapshot: frozen.xai,
+            claudeProviderAccountAuthoritySnapshot: frozen.claude,
+          }
+        : {}),
+      summary: "Background command completed",
+      payload: {
+        type: "background_command_result" as const,
+        commandId,
+        state: "exited" as const,
+        exitCode: 0,
+        reason: "Completed",
+        outputLocator: { eventType: "sandbox.command.output.delta" as const, commandId },
+      },
+    },
+  ];
+  const dedupeKeys: string[] = [];
+  for (const update of updates) {
+    await addSessionSystemUpdate(client.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: session.id,
+      ...update,
+      classification: "info",
+    });
+    dedupeKeys.push(update.dedupeKey);
+  }
+  const wait = await waitForSessionInputWithEvent(client.db, input.workspaceId, session.id, {
+    reason: "Waiting for child work",
+    timeoutSeconds: 60,
+    command: {
+      accountId: input.accountId,
+      actor: agentActor(session.id, accepted),
+      operationKey: crypto.randomUUID(),
+    },
+  });
+  await complete(input, session.id, accepted);
+  await shared.admin`
+    update sessions set input_wait_until = now() - interval '1 second'
+    where id = ${session.id} and input_wait_turn_id = ${wait.waitTurnId}`;
+  expect(
+    await settleSessionInputWait(client.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: session.id,
+      waitTurnId: wait.waitTurnId,
+      disposition: "timeout",
+    }),
+  ).toMatchObject({ action: "timeout" });
+  dedupeKeys.push(`session-input-wait-timeout:${wait.waitTurnId}`);
+  const inserted = await shared.admin<{ id: string; kind: string }[]>`
+    select id, kind from session_system_updates
+    where session_id = ${session.id} and dedupe_key = any(${dedupeKeys}::text[])
+    order by created_at, id`;
+  expect(inserted.map((row) => row.kind)).toEqual([
+    "child_terminal_result",
+    "background_command_result",
+    "session_wait_timeout",
+  ]);
+  for (const row of inserted) {
+    const authority = await updateAuthority(row.id);
+    expect(authority.claude).toEqual(frozen.claude);
+    expect(authority.xai).toEqual(frozen.xai);
+  }
+
+  const delivered = await claim(input, session.id);
+  const deliveredAuthority = await turnAuthority(delivered.turn.id);
+  expect(deliveredAuthority.claude).toEqual(frozen.claude);
+  expect(deliveredAuthority.xai).toEqual(frozen.xai);
+  const rows = await shared.admin<{ id: string; state: string; delivered_turn_id: string | null }[]>`
+    select id, state, delivered_turn_id from session_system_updates
+    where id = any(${inserted.map((row) => row.id)}::uuid[])`;
+  expect(rows.map(({ state, delivered_turn_id }) => ({ state, delivered_turn_id }))).toEqual(
+    inserted.map(() => ({ state: "delivered", delivered_turn_id: delivered.turn.id })),
+  );
 }, 180_000);

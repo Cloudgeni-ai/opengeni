@@ -269,7 +269,9 @@ for it until the matching requirement below is implemented:
   message or Agent Steer takes the receiving session's pool, not the
   sender's, and non-human acceptance resolves the workspace or organization
   pool instead of assuming workspace scope.
-  Verification: pending (accepted-scope-propagation).
+  Verification: `packages/db/test/subscription-pool-receiver-authority.test.ts`,
+  `apps/worker/test/scheduled-task-personal-authority.test.ts`, and
+  `packages/db/test/codex-credential-leases.test.ts`.
 - **SUB-ACCESS-02** Pool authority is additive to session access. Using a
   shared pool never changes who can see a session.
   Verification: `packages/db/test/subscription-pool-private-session-access.test.ts`.

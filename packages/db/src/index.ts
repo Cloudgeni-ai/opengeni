@@ -34,7 +34,10 @@ import {
   type TurnAttemptFenceRejectReason,
 } from "./session-attempt-fence";
 export type { TurnAttemptFenceRejectReason } from "./session-attempt-fence";
-import { ToolReviewContext } from "@opengeni/contracts";
+import {
+  CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY,
+  ToolReviewContext,
+} from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
 import {
@@ -69831,6 +69834,7 @@ export async function materializeGoalContinuation(
               schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
             claudeProviderAccountAuthoritySnapshot:
               schema.sessionTurns.claudeProviderAccountAuthoritySnapshot,
+            metadata: schema.sessionTurns.metadata,
           })
           .from(schema.sessionTurns)
           .where(
@@ -69942,6 +69946,9 @@ export async function materializeGoalContinuation(
               causalTurn.claudeProviderAccountAuthoritySnapshot,
             )
           : sharedGoalPool!.claude;
+        const causalCodexPolicy = causalTurn
+          ? readCodexCredentialPolicySnapshotV1(causalTurn.metadata)
+          : { kind: "absent" as const };
         const xaiAuthoritySubjectId =
           causalTurn && xaiProviderAccountAuthoritySnapshot.scope === "user"
             ? (causalTurn.initiatingHumanSubjectId ??
@@ -70003,6 +70010,12 @@ export async function materializeGoalContinuation(
                       : {}),
                     ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
                     ...(claudeAuthoritySubjectId ? { claudeAuthoritySubjectId } : {}),
+                    ...(causalCodexPolicy.kind === "valid"
+                      ? {
+                          [CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY]:
+                            causalCodexPolicy.policy,
+                        }
+                      : {}),
                   },
                   personalConnectionDelegations,
                   mcpAccountBindings: parseAcceptedMcpAccountBindings(
@@ -74849,6 +74862,30 @@ export async function claimSessionWorkForAttempt(
               credentialRestriction: "developer_setup",
             };
           }
+          const baseInternalTurnMetadata = frozenTurnExecutionPolicy
+            ? metadataWithTurnExecutionPolicyV1(
+                {
+                  internalUpdateCount: delivered.count,
+                  ...(routingGoalUpdate ? { goalId: routingGoalUpdate.payload.goalId } : {}),
+                  ...(scheduledEffectiveMcpServerIds ? { scheduledEffectiveMcpServerIds } : {}),
+                },
+                frozenTurnExecutionPolicy,
+              )
+            : {
+                internalUpdateCount: delivered.count,
+                ...(routingGoalUpdate ? { goalId: routingGoalUpdate.payload.goalId } : {}),
+                ...(scheduledEffectiveMcpServerIds ? { scheduledEffectiveMcpServerIds } : {}),
+              };
+          const continuationCodexPolicy = routingGoalUpdate
+            ? readCodexCredentialPolicySnapshotV1(routingGoalUpdate.lineage)
+            : { kind: "absent" as const };
+          const acceptedInternalTurnMetadata =
+            continuationCodexPolicy.kind === "valid"
+              ? metadataWithCodexCredentialPolicySnapshotV1(
+                  baseInternalTurnMetadata,
+                  continuationCodexPolicy.policy,
+                )
+              : baseInternalTurnMetadata;
           await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
           const [internalTurn] = await tx
             .insert(schema.sessionTurns)
@@ -74876,28 +74913,7 @@ export async function claimSessionWorkForAttempt(
                   sandboxBackend,
                   sandboxOs,
                   metadata: metadataWithTurnDispatchAttempt(
-                    frozenTurnExecutionPolicy
-                      ? metadataWithTurnExecutionPolicyV1(
-                          {
-                            internalUpdateCount: delivered.count,
-                            ...(routingGoalUpdate
-                              ? { goalId: routingGoalUpdate.payload.goalId }
-                              : {}),
-                            ...(scheduledEffectiveMcpServerIds
-                              ? { scheduledEffectiveMcpServerIds }
-                              : {}),
-                          },
-                          frozenTurnExecutionPolicy,
-                        )
-                      : {
-                          internalUpdateCount: delivered.count,
-                          ...(routingGoalUpdate
-                            ? { goalId: routingGoalUpdate.payload.goalId }
-                            : {}),
-                          ...(scheduledEffectiveMcpServerIds
-                            ? { scheduledEffectiveMcpServerIds }
-                            : {}),
-                        },
+                    acceptedInternalTurnMetadata,
                     { id: input.dispatchId, generation: 1, triggerEventId },
                   ),
                   ...initiatorColumns(internalInitiator),
