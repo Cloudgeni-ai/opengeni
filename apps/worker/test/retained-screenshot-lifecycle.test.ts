@@ -869,8 +869,10 @@ describe("retained screenshot lifecycle fences", () => {
       materialize(prepared.artifactId, undefined, legacyToolCallId),
     );
     expect(String(own[0]?.output).startsWith("data:image/png;base64,")).toBeTrue();
+    const ownLegacy = own[3]?.output;
+    if (!Array.isArray(ownLegacy)) throw new Error("expected recovered content array");
     expect(
-      String((own[3]?.output as Array<{ image?: string }>)[0]?.image).startsWith("data:image/png"),
+      String((ownLegacy[0] as { image?: string }).image).startsWith("data:image/png"),
     ).toBeTrue();
 
     // Another participant's turn proceeds with a neutral receipt and no bytes.
