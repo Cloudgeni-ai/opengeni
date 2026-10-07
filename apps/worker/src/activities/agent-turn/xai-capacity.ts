@@ -1,4 +1,4 @@
-import { connectionModelAllowed } from "@opengeni/db";
+import { connectionModelAllowed, subscriptionPoolWorkerSubject } from "@opengeni/db";
 import {
   getSessionGoal,
   acquireXaiCredentialLease,
@@ -17,6 +17,10 @@ import {
 import { publishDurableSessionEvents } from "@opengeni/events";
 
 import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
+import {
+  subscriptionCapacityArmingDiagnostic,
+  subscriptionCapacityArmingFailure,
+} from "./subscription-capacity-arming";
 import { refreshExhaustedXaiQuota } from "../xai-quota";
 
 async function selectScopedSubscriptionTurnCapacity(
@@ -57,7 +61,7 @@ async function selectScopedSubscriptionTurnCapacity(
     const subjectId =
       authoritySnapshot.scope === "user"
         ? turn.initiatingHumanSubjectId
-        : "worker:" + provider + "-workspace";
+        : subscriptionPoolWorkerSubject(provider);
     if (!subjectId) {
       throw new Error("User-scoped " + name + " work has no frozen initiating human");
     }
@@ -65,6 +69,7 @@ async function selectScopedSubscriptionTurnCapacity(
       workspaceId: input.workspaceId,
       subjectId,
       sessionId: input.sessionId,
+      turnId: turn.id,
       authoritySnapshot,
     });
     if (!claude)
@@ -175,27 +180,54 @@ async function selectScopedSubscriptionTurnCapacity(
         allocatorEnabled === 0
           ? "All connected " + name + " subscription accounts are disabled for allocation"
           : "All connected " + name + " subscription accounts are temporarily unavailable";
-      const armed = await armWait(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId,
-        sessionId: input.sessionId,
-        turnId: turn.id,
-        attemptId: input.attemptId,
-        workflowId: input.workflowId,
-        authoritySnapshot,
-        goalId: activeGoal?.id ?? null,
-        goalVersion: activeGoal?.version ?? null,
-        earliestResetAt,
-        failurePayload: {
-          error,
-          code:
-            allocatorEnabled === 0
-              ? provider + "_allocator_disabled"
-              : provider + "_capacity_unavailable",
-          detail: "waiting for an eligible account, reconnect, pin change, or quota reset",
-        },
-      });
+      let armed: Awaited<ReturnType<typeof armWait>>;
+      try {
+        armed = await armWait(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          attemptId: input.attemptId,
+          workflowId: input.workflowId,
+          authoritySnapshot,
+          goalId: activeGoal?.id ?? null,
+          goalVersion: activeGoal?.version ?? null,
+          earliestResetAt,
+          failurePayload: {
+            error,
+            code:
+              allocatorEnabled === 0
+                ? provider + "_allocator_disabled"
+                : provider + "_capacity_unavailable",
+            detail: "waiting for an eligible account, reconnect, pin change, or quota reset",
+          },
+        });
+      } catch (armError) {
+        const failure = subscriptionCapacityArmingFailure(provider, armError);
+        if (!failure) throw armError;
+        deps.observability.warn(
+          "Subscription capacity wait could not be armed; failing the turn",
+          subscriptionCapacityArmingDiagnostic(provider, armError),
+        );
+        if (
+          !(await eventing.settle!({
+            events: [
+              { type: "turn.failed", payload: failure },
+              { type: "session.status.changed", payload: { status: "idle" } },
+            ],
+            turnStatus: "failed",
+            sessionStatus: "idle",
+            activeTurnId: null,
+          }))
+        ) {
+          return { exit: claimedResult({ status: "cancelled" }) };
+        }
+        control.turnMetricOutcome = "failed";
+        control.activityStatus = "idle";
+        control.activityError = armError;
+        return { exit: claimedResult({ status: "idle" }) };
+      }
       if (armed.action === "waiting") {
         await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
         control.turnMetricOutcome = "recovering";
@@ -250,6 +282,7 @@ async function selectScopedSubscriptionTurnCapacity(
         workspaceId: input.workspaceId,
         subjectId,
         sessionId: input.sessionId,
+        turnId: turn.id,
         authoritySnapshot,
         credentialId: providerTurn[credentialKey],
         pinSource: "policy",
@@ -268,6 +301,7 @@ async function selectScopedSubscriptionTurnCapacity(
         workspaceId: input.workspaceId,
         subjectId,
         sessionId: input.sessionId,
+        turnId: turn.id,
         authoritySnapshot,
         credentialId: null,
         pinSource: null,
@@ -286,6 +320,7 @@ async function selectScopedSubscriptionTurnCapacity(
       workspaceId: input.workspaceId,
       subjectId,
       sessionId: input.sessionId,
+      turnId: turn.id,
       authoritySnapshot,
       credentialId: providerTurn[credentialKey],
     });

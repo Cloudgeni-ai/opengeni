@@ -732,6 +732,15 @@ function retryablePersistenceFailureCode(
 }
 
 /**
+ * True when an error is a structured database failure that the exact-attempt
+ * database recovery path owns. Callers that translate other failures into
+ * user-visible states must rethrow these unchanged.
+ */
+export function isPostClaimDatabaseRecoveryCandidate(error: unknown): boolean {
+  return retryableDatabaseFailureCode(error, true) !== null;
+}
+
+/**
  * Carry one exact claimed attempt into the workflow's DB-only
  * recovery lane. Permanent database/state failures remain terminal. The
  * running-turn lane additionally requires a closed own-client outage class;

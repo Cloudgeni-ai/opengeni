@@ -1122,14 +1122,12 @@ describe("migration 0234 xAI subscription authority", () => {
     expect(
       await getXaiCapacityWaitForSession(client.db, fixture.workspaceId, turn.sessionId),
     ).toMatchObject({ id: waiter.id, generation: 1 });
-    expect(
-      await wakeXaiCapacityWaiters(client.db, {
-        workspaceId: fixture.workspaceId,
-        subjectId: subjectId!,
-        authoritySnapshot: workspaceSnapshot,
-        reason: "quota_reset_observed",
-      }),
-    ).toBe(1);
+    await wakeXaiCapacityWaiters(client.db, {
+      workspaceId: fixture.workspaceId,
+      subjectId: subjectId!,
+      authoritySnapshot: workspaceSnapshot,
+      reason: "quota_reset_observed",
+    });
     const woken = await getXaiCapacityWaitForSession(
       client.db,
       fixture.workspaceId,

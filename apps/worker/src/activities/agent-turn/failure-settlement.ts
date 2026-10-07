@@ -37,6 +37,10 @@ import {
   selectCodexCredentialLeaseForTurn,
   type CodexRotationStrategy,
 } from "../codex-rotation";
+import {
+  subscriptionCapacityArmingDiagnostic,
+  subscriptionCapacityArmingFailure,
+} from "./subscription-capacity-arming";
 import { TurnExecutionPolicyDefinitionMismatchError, type Settings } from "@opengeni/config";
 import {
   classifyCodexEncryptedArtifactRejection,
@@ -1696,49 +1700,79 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
             : scopedProvider + "_account_rate_limited",
       detail: "the same accepted turn is waiting for another eligible account",
     };
-    const armed = await armScopedWait(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      subjectId: scopedLease.subjectId,
-      sessionId: input.sessionId,
-      turnId: attempt.turnId,
-      attemptId: input.attemptId,
-      workflowId: input.workflowId,
-      authoritySnapshot: scopedAuthority,
-      goalId: activeGoal?.id ?? null,
-      goalVersion: activeGoal?.version ?? null,
-      earliestResetAt: cooldownUntil,
-      failurePayload,
-      leaseFence: {
-        holderId: scopedLease.holderId,
-        generation: scopedLease.generation,
-      },
-      ...(claudeFailure
-        ? {
-            expectedCredentialVersion: providerTurn.effectiveClaudeCredentialVersion!,
-            ...(claudeTokenFence ? { credentialTokenFence: claudeTokenFence } : {}),
-          }
-        : {}),
-      ...(!claudeFailure || scopedFailure.kind !== "rate_limit"
-        ? {
-            credentialQuarantine:
-              scopedFailure.kind === "auth"
-                ? {
-                    kind: "status",
-                    status: "needs_relogin",
-                    lastError: "model request remained unauthorized after refresh",
-                  }
-                : scopedFailure.kind === "forbidden"
+    let armed: Awaited<ReturnType<typeof armScopedWait>>;
+    try {
+      armed = await armScopedWait(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: scopedLease.subjectId,
+        sessionId: input.sessionId,
+        turnId: attempt.turnId,
+        attemptId: input.attemptId,
+        workflowId: input.workflowId,
+        authoritySnapshot: scopedAuthority,
+        goalId: activeGoal?.id ?? null,
+        goalVersion: activeGoal?.version ?? null,
+        earliestResetAt: cooldownUntil,
+        failurePayload,
+        leaseFence: {
+          holderId: scopedLease.holderId,
+          generation: scopedLease.generation,
+        },
+        ...(claudeFailure
+          ? {
+              expectedCredentialVersion: providerTurn.effectiveClaudeCredentialVersion!,
+              ...(claudeTokenFence ? { credentialTokenFence: claudeTokenFence } : {}),
+            }
+          : {}),
+        ...(!claudeFailure || scopedFailure.kind !== "rate_limit"
+          ? {
+              credentialQuarantine:
+                scopedFailure.kind === "auth"
                   ? {
                       kind: "status",
-                      status: "error",
-                      lastError: "model request was forbidden for this credential",
+                      status: "needs_relogin",
+                      lastError: "model request remained unauthorized after refresh",
                     }
-                  : { kind: "cooldown", until: cooldownUntil! },
-          }
-        : {}),
-      now,
-    });
+                  : scopedFailure.kind === "forbidden"
+                    ? {
+                        kind: "status",
+                        status: "error",
+                        lastError: "model request was forbidden for this credential",
+                      }
+                    : { kind: "cooldown", until: cooldownUntil! },
+            }
+          : {}),
+        now,
+      });
+    } catch (armError) {
+      // A wait that cannot be armed must surface as an explicit state, never
+      // as a generic activity failure. Database failures keep their own
+      // exact-attempt recovery path.
+      const failure = subscriptionCapacityArmingFailure(scopedProvider, armError);
+      if (!failure) throw armError;
+      observability.warn(
+        "Subscription capacity wait could not be armed; failing the turn",
+        subscriptionCapacityArmingDiagnostic(scopedProvider, armError),
+      );
+      if (
+        !(await eventing.settle!({
+          events: [
+            { type: "turn.failed", payload: failure },
+            { type: "session.status.changed", payload: { status: "idle" } },
+          ],
+          turnStatus: "failed",
+          sessionStatus: "idle",
+          activeTurnId: null,
+        }))
+      ) {
+        return claimedResult({ status: "cancelled" });
+      }
+      control.turnMetricOutcome = "failed";
+      control.activityStatus = "idle";
+      control.activityError = armError;
+      return claimedResult({ status: "idle" });
+    }
     if (armed.action === "waiting") {
       scopedLease.held = false;
       if (!claudeFailure) providerTurn.xaiCredentialQuarantined = true;

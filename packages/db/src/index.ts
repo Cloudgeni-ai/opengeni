@@ -67,6 +67,12 @@ export {
   type ModalNativeLiveOriginResult,
 } from "./modal-native-live-origin";
 export { SubscriptionAccountChangedError } from "./subscription-account-conflict";
+export {
+  isSubscriptionPoolWorkerSubject,
+  subscriptionPoolWorkerSubject,
+  withSubscriptionPoolSessionAccess,
+  type SubscriptionPoolProvider,
+} from "./subscription-session-access";
 import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import {
   claudeSubscriptionAccountRepository,
@@ -229,6 +235,11 @@ import {
 import { ResolvedAgentConfig } from "@opengeni/contracts";
 import { scanSessionMessages } from "./session-message-search";
 import { withDatabaseStatementTimeout } from "./database";
+import {
+  subscriptionPoolWorkerSubject,
+  withSubscriptionPoolSessionAccess,
+  withTemporaryPoolSessionAccessInTransaction,
+} from "./subscription-session-access";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./scheduled-slack-bot-messages";
@@ -28322,21 +28333,32 @@ function createScopedSubscriptionCapacityWaiters(options: {
     const subjectId =
       snapshot.scope === "user" ? turn.initiatingHumanSubjectId : options.workerSubject;
     if (!subjectId) return null;
-    return await withTemporarySubjectRls(tx, subjectId, async () => {
-      const [row] = await tx
-        .select()
-        .from(tables.capacityWaiters)
-        .where(
-          and(
-            eq(tables.capacityWaiters.workspaceId, workspaceId),
-            eq(tables.capacityWaiters.sessionId, sessionId),
-            eq(tables.capacityWaiters.blockedTurnId, turn.id),
-            eq(tables.capacityWaiters.status, "waiting"),
-          ),
-        )
-        .limit(1);
-      return row ? mapXaiCapacityWaiter(row) : null;
-    });
+    // The pool-worker subject must not hide the caller's own private session:
+    // keep the turn's initiating human, which the caller just read itself.
+    return await withTemporarySubjectRls(
+      tx,
+      subjectId,
+      async () =>
+        await withTemporaryPoolSessionAccessInTransaction(
+          tx,
+          subjectId === options.workerSubject ? turn.initiatingHumanSubjectId : null,
+          async () => {
+            const [row] = await tx
+              .select()
+              .from(tables.capacityWaiters)
+              .where(
+                and(
+                  eq(tables.capacityWaiters.workspaceId, workspaceId),
+                  eq(tables.capacityWaiters.sessionId, sessionId),
+                  eq(tables.capacityWaiters.blockedTurnId, turn.id),
+                  eq(tables.capacityWaiters.status, "waiting"),
+                ),
+              )
+              .limit(1);
+            return row ? mapXaiCapacityWaiter(row) : null;
+          },
+        ),
+    );
   }
 
   async function resolveXaiPoolMembershipInTransaction(
@@ -28881,21 +28903,26 @@ function createScopedSubscriptionCapacityWaiters(options: {
   ): Promise<XaiCapacityWait | null> {
     const authority = await resolveXaiWaiterSubject(db, workspaceId, sessionId);
     if (!authority) return null;
-    return await withWorkspaceSubjectRls(db, workspaceId, authority.subjectId, async (scopedDb) => {
-      const [row] = await scopedDb
-        .select()
-        .from(tables.capacityWaiters)
-        .where(
-          and(
-            eq(tables.capacityWaiters.workspaceId, workspaceId),
-            eq(tables.capacityWaiters.sessionId, sessionId),
-            eq(tables.capacityWaiters.blockedTurnId, authority.turnId),
-            eq(tables.capacityWaiters.status, "waiting"),
-          ),
-        )
-        .limit(1);
-      return row ? mapXaiCapacityWaiter(row) : null;
-    });
+    return await withSubscriptionPoolSessionAccess(
+      db,
+      { workspaceId, subjectId: authority.subjectId, sessionId, turnId: authority.turnId },
+      async () =>
+        await withWorkspaceSubjectRls(db, workspaceId, authority.subjectId, async (scopedDb) => {
+          const [row] = await scopedDb
+            .select()
+            .from(tables.capacityWaiters)
+            .where(
+              and(
+                eq(tables.capacityWaiters.workspaceId, workspaceId),
+                eq(tables.capacityWaiters.sessionId, sessionId),
+                eq(tables.capacityWaiters.blockedTurnId, authority.turnId),
+                eq(tables.capacityWaiters.status, "waiting"),
+              ),
+            )
+            .limit(1);
+          return row ? mapXaiCapacityWaiter(row) : null;
+        }),
+    );
   }
 
   async function supersedeXaiCapacityWaitInTransaction(
@@ -29387,7 +29414,7 @@ const xaiCapacityRepository = createScopedSubscriptionCapacityWaiters({
   provider: "xai",
   label: "SuperGrok",
   wireProvider: "supergrok-subscription",
-  workerSubject: "worker:xai-workspace",
+  workerSubject: subscriptionPoolWorkerSubject("xai"),
   snapshotColumn: "xaiProviderAccountAuthoritySnapshot",
   resolvePoolFunction: "resolve_xai_authority_pool",
   tables: {
@@ -29405,7 +29432,7 @@ const claudeCapacityRepository = createScopedSubscriptionCapacityWaiters({
   provider: "claude",
   label: "Claude",
   wireProvider: "claude-subscription",
-  workerSubject: "worker:claude-workspace",
+  workerSubject: subscriptionPoolWorkerSubject("claude"),
   snapshotColumn: "claudeProviderAccountAuthoritySnapshot",
   resolvePoolFunction: "resolve_claude_authority_pool",
   tables: claudeSubscriptionTables,
