@@ -31,6 +31,7 @@
       "@opengeni/runtime",
       "@opengeni/sdk",
       "@opengeni/storage",
+      "@opengeni/subscriptions",
       "@opengeni/tool-gateway",
       "@opengeni/worker-bundle",
       "@opengeni/xai-subscription"

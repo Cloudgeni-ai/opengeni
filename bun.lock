@@ -808,6 +808,15 @@
         "typescript": "7.0.2",
       },
     },
+    "packages/subscriptions": {
+      "name": "@opengeni/subscriptions",
+      "version": "1.4.4",
+      "devDependencies": {
+        "@opengeni/testing": "workspace:*",
+        "tsup": "^8.5.0",
+        "typescript": "7.0.2",
+      },
+    },
     "packages/testing": {
       "name": "@opengeni/testing",
       "version": "0.1.0",
@@ -820,6 +829,7 @@
         "@opengeni/events": "workspace:*",
         "@opengeni/observability": "workspace:*",
         "@opengeni/runtime": "workspace:*",
+        "@opengeni/subscriptions": "workspace:*",
         "@opengeni/worker-bundle": "workspace:*",
         "@temporalio/client": "^1.17.0",
         "nats": "^2.29.3",
@@ -1668,6 +1678,8 @@
     "@opengeni/sdk": ["@opengeni/sdk@workspace:packages/sdk"],
 
     "@opengeni/storage": ["@opengeni/storage@workspace:packages/storage"],
+
+    "@opengeni/subscriptions": ["@opengeni/subscriptions@workspace:packages/subscriptions"],
 
     "@opengeni/testing": ["@opengeni/testing@workspace:packages/testing"],
 

@@ -423,6 +423,12 @@ by the implementer and recorded here; consequential ones are escalated.
 | D-19 | 2026-10-07 | Q-01 resolved after design review: remote compaction keeps no cleartext to convert at failover time, so cross-provider failover relies on portable compaction (SUB-FAIL-09). |
 | D-20 | 2026-10-07 | Q-03 resolved after design review: any in-scope connection can be designated for Codex Apps by an organization administrator or the connection's delegated manager, in every routing mode; reset-credit redemption stays human-only from a browser session for those same people, not "whoever connected it". |
 | D-21 | 2026-10-07 | Implementer decision: Spread uses a deterministic hash of the session id over eligible accounts (known capacity first), so placement needs no lock across sessions and a session lands on the same account every time. |
+| D-22 | 2026-10-07 | Implementer decision: a wait reports the earliest future time at which something the session may use (its explicit choice, or an account it may use automatically) can serve it, counting quota resets and per-model cooldowns. Resets that have passed, and resets of accounts that could not serve the work anyway, are never reported. |
+| D-23 | 2026-10-07 | Implementer decision: the Spread hash of D-21 is 32-bit FNV-1a over the UTF-16 code units of `<session id>\|<connection id>`, finished with the murmur3 32-bit finalizer, and the lowest value wins. Raw FNV-1a split three sequentially named accounts 50/25/25, which is not fair spreading. |
+| D-24 | 2026-10-07 | Implementer decision: an explicit choice that can never serve the session's model waits with its own reason (`pinned_account_ineligible`) instead of looking like a temporary outage. That covers an account that is gone, no longer authorized for this work, of another provider, or not entitled or allowed for the model (SUB-ACCESS-06). An unhealthy, paused, exhausted or cooling-down chosen account waits as `pinned_account_unavailable` (SUB-SEL-04). |
+| D-25 | 2026-10-07 | Implementer decision: workspace overrides of per-provider and per-model settings (rotation, provider switches, fallback order) apply entry by entry, and provider switches field by field, so overriding one provider never resets another. |
+| D-26 | 2026-10-07 | Implementer decision: a provider switched off for the workspace (SUB-SET-06) and a compaction mode that ties a session to one provider (SUB-FAIL-09) restrict models exactly like the workspace model restriction of D-17. When the lock is what keeps a usable model away, the wait says so. |
+| D-27 | 2026-10-07 | Implementer decision, following SUB-STICK-02 and SUB-STICK-03: turning personal fallback off (by the owner or the organization) stops new automatic selections of personal accounts but is not a forced move. A session whose cache is warm on its owner's personal account keeps it and moves at its next re-selection point. Sharing the session (SUB-STICK-07), revoking the account or the owner leaving (SUB-STICK-03, SUB-ACCESS-06) still move it at once, and disabling personal connections (SUB-OWN-05) moves it at its next safe point. |
 
 ### Open decisions
 
@@ -433,8 +439,11 @@ by the implementer and recorded here; consequential ones are escalated.
 ## Verification
 
 The executable reference model of this contract is
-`packages/testing/src/subscription-reference-model.ts`. It is written from
-this document, not from production code. `decide` returns the contract's
+`packages/subscriptions/src/reference-model.ts`, published separately as
+`@opengeni/subscriptions/reference` so production shadow comparisons can run
+`checkDecision`; tests import it through `@opengeni/testing`. It is written
+from this document, not from production code, and production placement never
+imports it. `decide` returns the contract's
 placement for a session (run on an account and model, or wait with a reason);
 `checkDecision` checks any decision, including one made by production code,
 against the contract's invariants, labelling each violation with the
@@ -449,8 +458,17 @@ generate thousands of worlds and
 include a mutation gate: ignoring a pin, switching while the cache is warm,
 using a personal account without an explicit choice, waiting while capacity
 exists and crossing providers when forbidden are each caught by a named
-requirement. Production conformance tests compare the shared core's decisions
-against the model.
+requirement. Production conformance tests
+(`packages/subscriptions/test/reference-conformance.test.ts` and
+`reference-bridge.test.ts`) require every decision of the shared core's policy
+package, `@opengeni/subscriptions`, to pass `checkDecision` and to equal the
+model's decision. They run over generated reference worlds, multi-turn
+trajectories, scripted scenarios
+(`packages/testing/src/subscription-reference-worlds.ts`) and generated
+production inputs that use features the model lacks (provider switches,
+frozen personal authority, compaction locks, quota shapes), bridged to the
+model. Requirements stay `pending` until production placement runs on the
+core.
 
 The evidence gates for the whole programme (work item `verification-suite`) are: complete
 requirement-to-test coverage (this document reaches no `pending` entries),

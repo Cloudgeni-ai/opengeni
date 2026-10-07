@@ -5,6 +5,11 @@
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./subscription-reference-model": "./src/subscription-reference-model.ts",
+    "./subscription-reference-worlds": "./src/subscription-reference-worlds.ts"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
@@ -17,6 +22,7 @@
     "@opengeni/events": "workspace:*",
     "@opengeni/observability": "workspace:*",
     "@opengeni/runtime": "workspace:*",
+    "@opengeni/subscriptions": "workspace:*",
     "@opengeni/worker-bundle": "workspace:*",
     "@temporalio/client": "^1.17.0",
     "nats": "^2.29.3",
