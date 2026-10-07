@@ -108,6 +108,17 @@ labels: cancellation intent, retained/missing proof, provider failure, and block
 checkpoint. Invocation IDs, socket paths, credentials, and command text are not
 metric labels.
 
+## Exit observation for router commands
+
+A native router page reads stdout, stderr and the provider exit poll together.
+The poll is a point-in-time status, so it can answer "running" just before the
+command exits while both stream reads then reach EOF. When both streams are at
+EOF and the exit is still unknown, the same page polls again within its existing
+read budget. EOF alone is never exit proof: an exhausted budget or a failed
+re-poll keeps the bytes and leaves the exit unknown for the next page.
+Internal callers that read once (file writes, Skill checkout) therefore see a
+finished command's exit in that read instead of a stale running answer.
+
 ## Validation boundary
 
 Native failure tests cover descendant adoption, leader-first exit, signal
