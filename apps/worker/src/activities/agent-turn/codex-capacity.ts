@@ -43,7 +43,7 @@ import type {
 } from "../types";
 import { recordTurnStartupPhase } from "../../observability-metrics";
 import {
-  runSubscriptionCoreShadow,
+  startSubscriptionCoreShadow,
   subscriptionCoreShadowRequest,
 } from "./subscription-core-shadow";
 import { createTurnCredentialLeases } from "./credential-leases";
@@ -582,15 +582,16 @@ export async function selectCodexTurnCapacity(
         });
       }
 
-      // Shared subscription core shadow: read-only, bounded and fail-open; it
-      // never changes the lease, wait or failover decided above.
-      await runSubscriptionCoreShadow({
+      // Shared subscription core shadow: started in the background, bounded
+      // and fail-open; it never delays the turn or changes the lease, wait or
+      // failover decided above.
+      void startSubscriptionCoreShadow({
         enabled: settings.subscriptionCoreShadowEnabled,
         timeoutMs: settings.subscriptionCoreShadowTimeoutMs,
         db,
         observability,
         signal: deps.cancellationSignal,
-        request: subscriptionCoreShadowRequest(deps, "codex", turnId, null),
+        request: () => subscriptionCoreShadowRequest(deps, "codex", turnId, null),
         legacy: {
           selectedConnectionId: providerTurn.effectiveCodexCredentialId,
           reusedLease: leased.reused,

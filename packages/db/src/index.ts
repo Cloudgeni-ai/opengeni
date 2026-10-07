@@ -1005,7 +1005,11 @@ export {
   type UserLookup,
   type UserProfileLookup,
 } from "./database";
-export { currentSessionRlsActorIdentityKey, withSessionRlsActorContext } from "./database";
+export {
+  currentSessionRlsActorIdentityKey,
+  currentSessionRlsActorInitiatingHumanSubjectId,
+  withSessionRlsActorContext,
+} from "./database";
 export { withDatabaseTimingObserver, type DatabaseTimingObservation } from "./database-timing";
 export {
   BROKERED_CREDENTIAL_SHAPE_HINT,

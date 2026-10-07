@@ -96,6 +96,17 @@ export function currentSessionRlsActorIdentityKey(): string | null {
   ]);
 }
 
+/**
+ * The ambient session RLS actor's frozen initiating human: `undefined` when
+ * there is no actor, `null` when the actor has no human. Reads that must act
+ * for the turn's human take it from here, never from a caller argument.
+ */
+export function currentSessionRlsActorInitiatingHumanSubjectId(): string | null | undefined {
+  const actor = sessionRlsActorContext.getStore();
+  if (!actor) return undefined;
+  return actor.initiatingHumanSubjectId ?? null;
+}
+
 export async function withSessionRlsActorContext<T>(
   actor: SessionRlsActorContext,
   fn: () => Promise<T>,

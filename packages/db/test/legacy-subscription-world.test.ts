@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { emptyClaudeUsage } from "@opengeni/config";
+import { sql } from "drizzle-orm";
 import { decidePlacement } from "@opengeni/subscriptions";
 import {
   createDb,
@@ -13,10 +14,12 @@ import {
   loadLegacySubscriptionPlacementWorld,
   transitionSessionVisibility,
   updateOrganizationPrivateSessionSettings,
+  withRlsContext,
   withSessionRlsActorContext,
   type DbClient,
   type LegacyPlacementWorldRequest,
 } from "../src";
+import { rawRows } from "../src/database";
 
 // Real PostgreSQL under the restricted application role, so FORCE RLS applies.
 setDefaultTimeout(120_000);
@@ -110,6 +113,20 @@ async function session(workspaceId: string, accountId: string, subjectId?: strin
   return { sessionId: created.id, turnId: crypto.randomUUID() };
 }
 
+/** Another active organization member who also belongs to `workspaceId`. */
+async function coMember(accountId: string, workspaceId: string): Promise<string> {
+  const subjectId = `user:legacy-world-member-${crypto.randomUUID()}`;
+  const [personal] = await shared!.admin<{ id: string }[]>`
+    insert into workspaces (account_id, name) values (${accountId}, 'Member personal') returning id`;
+  await shared!.admin`
+    insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+    values (${accountId}, ${subjectId}, 'member', 'active', ${personal!.id})`;
+  await shared!.admin`
+    insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+    values (${accountId}, ${workspaceId}, ${subjectId}, 'member', '[]'::jsonb)`;
+  return subjectId;
+}
+
 async function codexCredential(input: {
   accountId: string;
   workspaceId: string | null;
@@ -143,7 +160,6 @@ function request(
     reasoningLevel: "medium",
     modelPolicyProviderId: "codex-subscription",
     authorityScope: null,
-    initiatingHumanSubjectId: null,
     now: new Date(),
     statementTimeoutMs: 5_000,
     ...patch,
@@ -310,13 +326,10 @@ describe("legacy subscription world", () => {
       ).toEqual({ status: "skipped", reason: "session_not_visible" });
 
       const loaded = await asTurn(setup.owner, () =>
-        loadLegacySubscriptionPlacementWorld(
-          client!.db,
-          request(base, { initiatingHumanSubjectId: setup.owner }),
-        ),
+        loadLegacySubscriptionPlacementWorld(client!.db, request(base)),
       );
       if (loaded.status !== "loaded") throw new Error("expected a loaded world: " + loaded.reason);
-      // A Personal workspace's account is its owner's personal connection (D-15).
+      // A Personal workspace's account is its owner's personal connection (D-18).
       expect(loaded.input.workspace).toMatchObject({
         kind: "personal",
         ownerMembershipId: setup.owner,
@@ -374,7 +387,6 @@ describe("legacy subscription world", () => {
         provider: "xai" as const,
         productModelId: "supergrok/test-model",
         authorityScope: "user" as const,
-        initiatingHumanSubjectId: setup.owner,
       };
       const loaded = await asTurn(setup.owner, () =>
         loadLegacySubscriptionPlacementWorld(client!.db, request(base, xai)),
@@ -408,6 +420,135 @@ describe("legacy subscription world", () => {
     },
   );
 
+  realTest(
+    "a co-member sees neither another member's private session nor their personal accounts, and unassigned organization accounts stay hidden",
+    async () => {
+      const setup = await fixture();
+      const workspaceId = setup.grantWorkspaceId;
+      const member = await coMember(setup.accountId, workspaceId);
+      const xaiSecret = { version: 1 as const, accessToken: "test-access-token" };
+      const ownerPersonal = await createXaiSubscriptionCredential(client!.db, {
+        accountId: setup.accountId,
+        workspaceId,
+        subjectId: setup.owner,
+        scope: "user",
+        encryptionKey,
+        secret: xaiSecret,
+        providerAccountId: "owner-personal",
+      });
+      const memberPersonal = await createXaiSubscriptionCredential(client!.db, {
+        accountId: setup.accountId,
+        workspaceId,
+        subjectId: member,
+        scope: "user",
+        encryptionKey,
+        secret: xaiSecret,
+        providerAccountId: "member-personal",
+      });
+      const workspaceAccount = await createXaiSubscriptionCredential(client!.db, {
+        accountId: setup.accountId,
+        workspaceId,
+        subjectId: setup.owner,
+        scope: "workspace",
+        encryptionKey,
+        secret: xaiSecret,
+        providerAccountId: "workspace",
+      });
+      // Organization accounts assigned to another workspace only.
+      const [xaiElsewhere] = await shared!.admin<{ id: string }[]>`
+        insert into xai_subscription_credentials
+          (account_id, workspace_id, authority_scope, credential_encrypted, allowed_workspace_ids)
+        values (${setup.accountId}, null, 'organization', 'v1:enc', ${[setup.otherWorkspaceId]})
+        returning id`;
+      const [claudeElsewhere] = await shared!.admin<{ id: string }[]>`
+        insert into claude_subscription_credentials
+          (account_id, workspace_id, authority_scope, credential_encrypted, allowed_workspace_ids)
+        values (${setup.accountId}, null, 'organization', 'v1:enc', ${[setup.otherWorkspaceId]})
+        returning id`;
+      // ...and ones assigned here, which must be visible, so the check above is not vacuous.
+      const [xaiHere] = await shared!.admin<{ id: string }[]>`
+        insert into xai_subscription_credentials
+          (account_id, workspace_id, authority_scope, credential_encrypted, allowed_workspace_ids)
+        values (${setup.accountId}, null, 'organization', 'v1:enc', ${[workspaceId]})
+        returning id`;
+      const [claudeHere] = await shared!.admin<{ id: string }[]>`
+        insert into claude_subscription_credentials
+          (account_id, workspace_id, authority_scope, credential_encrypted, allowed_workspace_ids)
+        values (${setup.accountId}, null, 'organization', 'v1:enc', ${[workspaceId]})
+        returning id`;
+      const [claudeMine] = await shared!.admin<{ id: string }[]>`
+        insert into claude_subscription_credentials (account_id, workspace_id, credential_encrypted)
+        values (${setup.accountId}, ${workspaceId}, 'v1:enc') returning id`;
+
+      const { sessionId, turnId } = await session(workspaceId, setup.accountId, setup.owner);
+      await transitionSessionVisibility(client!.db, {
+        workspaceId,
+        sessionId,
+        actorSubjectId: setup.owner,
+        targetVisibility: "user_private",
+        expectedAuthorityEpoch: 1,
+        operationKey: `legacy-world-member-${sessionId}`,
+      });
+      const base = { accountId: setup.accountId, workspaceId, sessionId, turnId };
+      const xai = (scope: "user" | "workspace" | "organization") =>
+        request(base, {
+          provider: "xai",
+          productModelId: "supergrok/test-model",
+          authorityScope: scope,
+        });
+
+      // A real co-member of the workspace cannot read the owner's private session.
+      expect(
+        await asTurn(member, () => loadLegacySubscriptionPlacementWorld(client!.db, xai("user"))),
+      ).toEqual({ status: "skipped", reason: "session_not_visible" });
+
+      const subjectNow = () =>
+        withRlsContext(client!.db, { accountId: setup.accountId, workspaceId }, async (scoped) => {
+          const [row] = await rawRows<{ subject: string | null }>(
+            scoped,
+            sql`select current_setting('opengeni.subject_id', true) as subject`,
+          );
+          return row?.subject ?? null;
+        });
+      await asTurn(setup.owner, async () => {
+        const before = await subjectNow();
+        // The owner's personal pool: their own row only, never the co-member's.
+        const personal = await loadLegacySubscriptionPlacementWorld(client!.db, xai("user"));
+        if (personal.status !== "loaded") throw new Error("expected a loaded world");
+        const personalIds = personal.input.connections.map((connection) => connection.id);
+        expect(personalIds).toContain(ownerPersonal.account.id);
+        expect(personalIds).toContain(workspaceAccount.account.id);
+        expect(personalIds).not.toContain(memberPersonal.account.id);
+        expect(personalIds).not.toContain(xaiElsewhere!.id);
+        // The pool's subject switch does not outlive the load.
+        expect(await subjectNow()).toBe(before);
+
+        // A workspace-scope turn reads no personal rows at all.
+        for (const scope of ["workspace", "organization"] as const) {
+          const loaded = await loadLegacySubscriptionPlacementWorld(client!.db, xai(scope));
+          if (loaded.status !== "loaded") throw new Error("expected a loaded world");
+          const ids = loaded.input.connections.map((connection) => connection.id);
+          expect(ids).toEqual([workspaceAccount.account.id, xaiHere!.id]);
+          expect(loaded.input.session.personalAuthority).toEqual([]);
+        }
+
+        const claude = await loadLegacySubscriptionPlacementWorld(
+          client!.db,
+          request(base, {
+            provider: "claude",
+            productModelId: "claude/test-model",
+            upstreamModelId: "claude-test-model",
+            authorityScope: "workspace",
+          }),
+        );
+        if (claude.status !== "loaded") throw new Error("expected a loaded world");
+        const claudeIds = claude.input.connections.map((connection) => connection.id);
+        expect(claudeIds).toEqual([claudeHere!.id, claudeMine!.id]);
+        expect(claudeIds).not.toContain(claudeElsewhere!.id);
+      });
+    },
+  );
+
   realTest("maps Claude per-model cooldowns from the usage table and waits for them", async () => {
     const setup = await fixture();
     const workspaceId = setup.grantWorkspaceId;
@@ -433,7 +574,6 @@ describe("legacy subscription world", () => {
             productModelId: "claude/test-model",
             upstreamModelId: "claude-test-model",
             authorityScope: "workspace",
-            initiatingHumanSubjectId: setup.owner,
           },
         ),
       ),

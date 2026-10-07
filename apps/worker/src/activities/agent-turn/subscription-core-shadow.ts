@@ -14,10 +14,12 @@
  * - the legacy decision inputs the Codex fleet shadow omits, with per-session
  *   stable aliases instead of connection ids.
  *
- * It never changes placement: every failure, timeout and cancellation is
- * swallowed and counted, the database work is one bounded read-only
- * transaction under the turn's own session actor, and a deadline bounds the
- * time it can add to the turn.
+ * It never changes placement and never delays the turn: callers start it in
+ * the background (`startSubscriptionCoreShadow`), at most
+ * `SUBSCRIPTION_CORE_SHADOW_MAX_IN_FLIGHT` run per process, every failure,
+ * timeout and cancellation is swallowed and counted, and the database work is
+ * one bounded transaction of SELECT statements under the turn's own session
+ * actor that starts no statement after its deadline.
  */
 import { createHash } from "node:crypto";
 import {
@@ -216,13 +218,18 @@ function debugRecord(
   };
 }
 
+export type SubscriptionCoreShadowRequest = Omit<
+  LegacyPlacementWorldRequest,
+  "now" | "statementTimeoutMs" | "deadlineAt" | "signal"
+>;
+
 /** The shadow's world request for a turn, from the capacity phase's own inputs. */
 export function subscriptionCoreShadowRequest(
-  deps: Pick<CapacityPhaseDeps, "input" | "turn" | "turnExecutionPolicy">,
+  deps: Pick<CapacityPhaseDeps, "input" | "turnExecutionPolicy">,
   provider: LegacyPlacementWorldRequest["provider"],
   turnId: string,
   authorityScope: LegacyPlacementWorldRequest["authorityScope"],
-): SubscriptionCoreShadowDeps["request"] {
+): SubscriptionCoreShadowRequest {
   const policy = deps.turnExecutionPolicy;
   return {
     accountId: deps.input.accountId,
@@ -236,22 +243,51 @@ export function subscriptionCoreShadowRequest(
     // The same provider identity the authoritative workspace model gate uses.
     modelPolicyProviderId: policy.providerId,
     authorityScope,
-    initiatingHumanSubjectId: deps.turn.initiatingHumanSubjectId ?? null,
   };
 }
 
 export const SUBSCRIPTION_CORE_SHADOW_LOG_INTERVAL_MS = 10 * 60_000;
+/** Debug records per process per minute, across all keys. */
+export const SUBSCRIPTION_CORE_SHADOW_MAX_LOGS_PER_MINUTE = 30;
+/** Shadow comparisons running at once per process; more are skipped as `busy`. */
+export const SUBSCRIPTION_CORE_SHADOW_MAX_IN_FLIGHT = 2;
 const defaultLogThrottle = createLogThrottle({
   intervalMs: SUBSCRIPTION_CORE_SHADOW_LOG_INTERVAL_MS,
   maxKeys: 1_024,
 });
+
+/** A fixed-window cap on debug records per process, across all throttle keys. */
+export function createShadowLogRateCap(maxPerMinute: number, now: () => number = Date.now) {
+  let windowStartedAt = -Infinity;
+  let used = 0;
+  return {
+    take(): boolean {
+      const at = now();
+      if (at - windowStartedAt >= 60_000) {
+        windowStartedAt = at;
+        used = 0;
+      }
+      if (used >= maxPerMinute) return false;
+      used += 1;
+      return true;
+    },
+  };
+}
+const defaultLogRateCap = createShadowLogRateCap(SUBSCRIPTION_CORE_SHADOW_MAX_LOGS_PER_MINUTE);
+
+let inFlight = 0;
+/** Shadow comparisons currently running in this process (tests and diagnostics). */
+export function subscriptionCoreShadowInFlight(): number {
+  return inFlight;
+}
 
 export type SubscriptionCoreShadowDeps = {
   enabled: boolean;
   timeoutMs: number;
   db: Database;
   observability: Pick<Observability, "incrementCounter" | "observeHistogram" | "info">;
-  request: Omit<LegacyPlacementWorldRequest, "now" | "statementTimeoutMs" | "deadlineAt">;
+  /** Built inside the fail-open boundary, so a malformed input is only counted. */
+  request: () => SubscriptionCoreShadowRequest;
   legacy: SubscriptionCoreShadowLegacy;
   signal?: AbortSignal | undefined;
   now?: () => Date;
@@ -260,6 +296,8 @@ export type SubscriptionCoreShadowDeps = {
     request: LegacyPlacementWorldRequest,
   ) => Promise<LegacyPlacementWorldResult>;
   logThrottle?: LogThrottle;
+  logRateCap?: { take(): boolean };
+  maxInFlight?: number;
 };
 
 export type SubscriptionCoreShadowResult =
@@ -274,6 +312,23 @@ const TIMED_OUT = Symbol("subscription-core-shadow-timeout");
 const CANCELLED = Symbol("subscription-core-shadow-cancelled");
 
 /**
+ * Start the shadow comparison in the background and return at once. The turn
+ * never waits for it; the returned promise (which never rejects) is for tests.
+ */
+export function startSubscriptionCoreShadow(
+  deps: SubscriptionCoreShadowDeps,
+): Promise<SubscriptionCoreShadowResult> {
+  try {
+    if (!deps.enabled) return Promise.resolve({ outcome: "disabled" });
+    const running = runSubscriptionCoreShadow(deps);
+    running.catch(() => undefined);
+    return running;
+  } catch {
+    return Promise.resolve({ outcome: "skipped", reason: "error" });
+  }
+}
+
+/**
  * Run the shadow comparison. Never throws and never changes placement; the
  * result is returned for tests only.
  */
@@ -281,7 +336,7 @@ export async function runSubscriptionCoreShadow(
   deps: SubscriptionCoreShadowDeps,
 ): Promise<SubscriptionCoreShadowResult> {
   if (!deps.enabled) return { outcome: "disabled" };
-  const provider = deps.request.provider as SubscriptionCoreShadowProvider;
+  let provider: SubscriptionCoreShadowProvider = "codex";
   const startedAt = performance.now();
   const finish = (
     observation: SubscriptionCoreShadowObservation,
@@ -303,53 +358,82 @@ export async function runSubscriptionCoreShadow(
     reason: Extract<SubscriptionCoreShadowObservation, { outcome: "skipped" }>["reason"],
   ) => finish({ outcome: "skipped", reason }, { outcome: "skipped", reason });
 
+  const maxInFlight = deps.maxInFlight ?? SUBSCRIPTION_CORE_SHADOW_MAX_IN_FLIGHT;
+  let admitted = false;
+  let released = false;
+  // The slot is held until the database load itself settles, so an abandoned
+  // load still counts against the cap.
+  const release = () => {
+    if (admitted && !released) {
+      released = true;
+      inFlight -= 1;
+    }
+  };
+  let loadStarted = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
+  // Stops the load before its next statement once the shadow stops waiting.
+  const stop = new AbortController();
   try {
+    const request = deps.request();
+    provider = request.provider as SubscriptionCoreShadowProvider;
     if (deps.signal?.aborted) return skip("cancelled");
+    if (inFlight >= maxInFlight) return skip("busy");
+    inFlight += 1;
+    admitted = true;
     const timeoutMs = Math.max(1, Math.floor(deps.timeoutMs));
     const now = (deps.now ?? (() => new Date()))();
     const load = deps.load ?? loadLegacySubscriptionPlacementWorld;
+    const deadline = new Promise<typeof TIMED_OUT>((resolve) => {
+      timer = setTimeout(() => {
+        stop.abort();
+        resolve(TIMED_OUT);
+      }, timeoutMs);
+    });
+    const cancelled = new Promise<typeof CANCELLED>((resolve) => {
+      onAbort = () => {
+        stop.abort();
+        resolve(CANCELLED);
+      };
+      deps.signal?.addEventListener("abort", onAbort, { once: true });
+    });
+    loadStarted = true;
     const loading = load(deps.db, {
-      ...deps.request,
+      ...request,
       now,
       statementTimeoutMs: timeoutMs,
       deadlineAt: Date.now() + timeoutMs,
+      signal: stop.signal,
     });
-    // An abandoned load still settles (its own statement timeout and
-    // deadline bound it); its late failure must never surface.
-    loading.catch(() => undefined);
-    const deadline = new Promise<typeof TIMED_OUT>((resolve) => {
-      timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
-    });
-    const cancelled = new Promise<typeof CANCELLED>((resolve) => {
-      onAbort = () => resolve(CANCELLED);
-      deps.signal?.addEventListener("abort", onAbort, { once: true });
-    });
+    // An abandoned load still settles (its statement timeout and deadline
+    // bound it); its late failure must never surface.
+    loading.then(release, release);
     const loaded = await Promise.race([loading, deadline, cancelled]);
     if (loaded === TIMED_OUT) return skip("timeout");
     if (loaded === CANCELLED) return skip("cancelled");
     if (loaded.status === "skipped") return skip(loaded.reason);
     const comparison = compareSubscriptionCoreShadow(loaded, deps.legacy);
     const throttle = deps.logThrottle ?? defaultLogThrottle;
+    const rateCap = deps.logRateCap ?? defaultLogRateCap;
     const notable =
       comparison.parity === "not_authorized" ||
       comparison.parity === "unknown_connection" ||
       comparison.violations.length > 0;
     const admission = throttle.admit(
       [
-        deps.request.workspaceId,
+        request.workspaceId,
         provider,
         comparison.parity,
+        comparison.parityReasons[0] ?? "-",
         comparison.placement,
         notable ? "notable" : "routine",
       ].join(":"),
     );
-    if (admission) {
+    if (admission && rateCap.take()) {
       deps.observability.info("Subscription core shadow comparison", {
-        workspaceId: deps.request.workspaceId,
-        sessionId: deps.request.sessionId,
-        turnId: deps.request.turnId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        turnId: request.turnId,
         provider,
         ...debugRecord(loaded, deps.legacy, comparison),
         ...(admission.suppressedCount > 0 ? { suppressedCount: admission.suppressedCount } : {}),
@@ -369,7 +453,9 @@ export async function runSubscriptionCoreShadow(
   } catch {
     return skip(deps.signal?.aborted ? "cancelled" : "error");
   } finally {
+    if (!loadStarted) release();
     if (timer) clearTimeout(timer);
     if (onAbort) deps.signal?.removeEventListener("abort", onAbort);
+    stop.abort();
   }
 }

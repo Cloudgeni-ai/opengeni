@@ -892,7 +892,7 @@ const SettingsSchema = z.object({
   // the timeout; it never changes placement.
   // OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED, OPENGENI_SUBSCRIPTION_CORE_SHADOW_TIMEOUT_MS
   subscriptionCoreShadowEnabled: EnvBoolean.default(true),
-  subscriptionCoreShadowTimeoutMs: z.coerce.number().int().min(10).max(5_000).default(250),
+  subscriptionCoreShadowTimeoutMs: z.coerce.number().int().min(10).max(1_000).default(250),
   // Multi-account P3 (auto-rotation): an account is "near exhaustion" — ineligible to be
   // rotated TO — when EITHER usage window (5h/weekly) is at/over this percent. Default 90 to
   // match the UI danger flip (UsageBar danger at pct >= 90). OPENGENI_CODEX_ROTATION_NEAR_EXHAUSTION_PCT.

@@ -15,14 +15,18 @@
  *   legacy read of those pools does), so those worlds cannot run READ ONLY.
  * - It runs only under the ambient session RLS actor of the turn (the same
  *   session-access rules as the turn itself) and never with an empty subject,
- *   so it cannot read a private session the turn could not read. Personal
- *   (user-scope) Claude/SuperGrok credentials are read under the turn's
- *   initiating human, exactly like the legacy selector reads its user pool.
+ *   so it cannot read a private session the turn could not read. The human it
+ *   acts for comes only from that actor. A personal (user-scope)
+ *   Claude/SuperGrok pool is read as that human, exactly like the legacy
+ *   selector reads it; other pools never read personal rows.
+ * - It starts no transaction or statement after `deadlineAt` or once `signal`
+ *   aborts, and each statement is bounded by the statement timeout, capped at
+ *   the time left when the transaction starts.
  * - Bounded: at most `LEGACY_WORLD_MAX_CONNECTIONS` connections per provider.
  * - It returns identifiers and policy facts only; credential material is
  *   never selected.
  */
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { claudeSubscriptionCapacity } from "@opengeni/config";
 import { ClaudeSubscriptionUsage, evaluateWorkspaceModelPolicy } from "@opengeni/contracts";
 import type {
@@ -41,7 +45,7 @@ import {
   readCodexPlanEntitlementExclusion,
 } from "./codex-plan-entitlement";
 import {
-  currentSessionRlsActorIdentityKey,
+  currentSessionRlsActorInitiatingHumanSubjectId,
   rawRows,
   setSubjectRlsContext,
   withRlsContext,
@@ -74,11 +78,13 @@ export type LegacyPlacementWorldRequest = {
   modelPolicyProviderId: string;
   /** Claude/SuperGrok: the turn's frozen pool scope. Null for Codex. */
   authorityScope: "workspace" | "organization" | "user" | null;
-  initiatingHumanSubjectId: string | null;
   now: Date;
+  /** Upper bound for each statement; also bounded by the time left to `deadlineAt`. */
   statementTimeoutMs: number;
-  /** Epoch ms after which no query is started (the caller stopped waiting). */
+  /** Epoch ms after which no transaction or statement is started (the caller stopped waiting). */
   deadlineAt?: number;
+  /** Aborting stops the read before its next statement. */
+  signal?: AbortSignal;
   claudeCacheTtlMs?: number;
 };
 
@@ -274,7 +280,7 @@ function legacyOwnership(input: {
         input.userScopeOwner ?? "membership:" + (row.owner_organization_membership_id ?? "unknown"),
     };
   }
-  // Workspace scope: a Personal workspace's account belongs to its owner (D-15).
+  // Workspace scope: a Personal workspace's account belongs to its owner (D-18).
   if (input.personalWorkspaceOwner !== null) {
     return { kind: "personal", ownerMembershipId: input.personalWorkspaceOwner };
   }
@@ -298,22 +304,34 @@ export async function loadLegacySubscriptionPlacementWorld(
   db: Database,
   request: LegacyPlacementWorldRequest,
 ): Promise<LegacyPlacementWorldResult> {
-  if (currentSessionRlsActorIdentityKey() === null) {
-    return { status: "skipped", reason: "no_session_actor" };
-  }
+  // The turn's own session actor decides what is visible; the human it acts
+  // for comes only from that actor, never from the caller.
+  const human = currentSessionRlsActorInitiatingHumanSubjectId();
+  if (human === undefined) return { status: "skipped", reason: "no_session_actor" };
+  const deadlineAt = request.deadlineAt ?? Number.POSITIVE_INFINITY;
+  const guard = () => {
+    if (request.signal?.aborted || Date.now() > deadlineAt) {
+      throw new LegacyPlacementWorldDeadlineError();
+    }
+  };
+  // Never take a connection for a read nobody waits for.
+  guard();
   const now = request.now.getTime();
   const timeoutMs = Math.max(1, Math.floor(request.statementTimeoutMs));
   return await withRlsContext(
     db,
     { accountId: request.accountId, workspaceId: request.workspaceId },
     async (scoped) => {
-      if (request.deadlineAt !== undefined && Date.now() > request.deadlineAt) {
-        throw new LegacyPlacementWorldDeadlineError();
-      }
-      await scoped.execute(sql`select set_config('statement_timeout', ${`${timeoutMs}ms`}, true)`);
-      const sessionRows = await rawRows<SessionRow>(
-        scoped,
-        sql`
+      guard();
+      // No statement outlives the caller's deadline by more than this bound,
+      // and no statement starts after it.
+      const budgetMs = Math.max(1, Math.floor(Math.min(timeoutMs, deadlineAt - Date.now())));
+      await scoped.execute(sql`select set_config('statement_timeout', ${`${budgetMs}ms`}, true)`);
+      const read = async <T extends Record<string, unknown>>(query: SQL): Promise<T[]> => {
+        guard();
+        return await rawRows<T>(scoped, query);
+      };
+      const sessionRows = await read<SessionRow>(sql`
         select s.visibility, s.owner_subject_id, s.codex_pinned_credential_id,
           s.codex_pin_source, s.codex_last_credential_id, s.codex_compaction_mode,
           get_workspace_kind(${request.accountId}::uuid, ${request.workspaceId}::uuid)
@@ -332,17 +350,19 @@ export async function loadLegacySubscriptionPlacementWorld(
         where s.workspace_id = ${request.workspaceId}::uuid
           and s.id = ${request.sessionId}::uuid
         limit 1
-      `,
-      );
+      `);
       const session = sessionRows[0];
       if (!session) return { status: "skipped", reason: "session_not_visible" } as const;
 
       const provider = request.provider;
       const sessionOwner = session.owner_subject_id ?? "unowned:" + request.sessionId;
       const workspaceKind = session.workspace_kind === "personal" ? "personal" : "shared";
-      // A Personal workspace has exactly one member, its owner, who owns its sessions.
-      const personalWorkspaceOwner = workspaceKind === "personal" ? sessionOwner : null;
-      const human = request.initiatingHumanSubjectId;
+      // A Personal workspace has exactly one member, its owner, who owns its
+      // sessions. A session without a recorded owner leaves the owner unknown:
+      // its accounts then stay workspace accounts, as today, instead of being
+      // attributed to an invented person.
+      const personalWorkspaceOwner =
+        workspaceKind === "personal" ? (session.owner_subject_id ?? null) : null;
       const lastModelCallAt = epoch(session.last_model_call_at);
 
       const modelPolicy: LegacyPlacementInputs["workspaceModelPolicy"] = !session.has_model_policy
@@ -374,30 +394,27 @@ export async function loadLegacySubscriptionPlacementWorld(
           LegacyPlacementInputs["codexMode"]
         >;
         codexMode = mode;
-        const [effective] = await rawRows<{ source: string }>(
-          scoped,
-          sql`select resolve_workspace_codex_subscription_source(${request.accountId}::uuid, ${request.workspaceId}::uuid) as source`,
-        );
-        const [snapshot] = await rawRows<{ source: string | null }>(
-          scoped,
-          sql`
+        // The turn's frozen accepted source, else today's effective source.
+        const [accepted_] = await read<{ source: string | null }>(sql`
           select coalesce(
-            turn.metadata -> 'codexCredentialPolicySnapshotV1' ->> 'source',
-            (select binding.source from codex_turn_source_bindings binding
-              where binding.turn_id = turn.id)
+            (select coalesce(
+                turn.metadata -> 'codexCredentialPolicySnapshotV1' ->> 'source',
+                (select binding.source from codex_turn_source_bindings binding
+                  where binding.turn_id = turn.id))
+              from session_turns turn
+              where turn.workspace_id = ${request.workspaceId}::uuid
+                and turn.session_id = ${request.sessionId}::uuid
+                and turn.id = ${request.turnId}::uuid),
+            resolve_workspace_codex_subscription_source(
+              ${request.accountId}::uuid, ${request.workspaceId}::uuid)
           ) as source
-          from session_turns turn
-          where turn.workspace_id = ${request.workspaceId}::uuid and turn.id = ${request.turnId}::uuid
-        `,
-        );
-        const accepted = snapshot?.source ?? effective?.source ?? "workspace";
+        `);
+        const accepted = accepted_?.source ?? "workspace";
         source =
           accepted === "organization" || accepted === "disabled"
             ? accepted
             : ("workspace" as const);
-        const rows = await rawRows<CodexCredentialRow>(
-          scoped,
-          sql`
+        const rows = await read<CodexCredentialRow>(sql`
           select id, workspace_id, authority_scope, owner_organization_membership_id, status,
             allocator_enabled, allowed_model_ids, allowed_workspace_ids,
             allow_personal_workspaces, plan_type, plan_entitlement_exclusion,
@@ -410,12 +427,12 @@ export async function loadLegacySubscriptionPlacementWorld(
               or (authority_scope = 'organization' and organization_id = ${request.accountId}::uuid))
           order by created_at, id
           limit ${LEGACY_WORLD_MAX_CONNECTIONS + 1}
-        `,
-        );
+        `);
         truncated = rows.length > LEGACY_WORLD_MAX_CONNECTIONS;
         const bounded = rows.slice(0, LEGACY_WORLD_MAX_CONNECTIONS);
         const local = bounded.filter((row) => row.authority_scope !== "organization");
-        hasLocalAccounts = local.some((row) => row.authority_scope === "workspace");
+        // As resolve_workspace_codex_subscription_source counts them.
+        hasLocalAccounts = local.length > 0;
         poolOrder = (
           source === "organization"
             ? bounded.filter((row) => row.authority_scope === "organization")
@@ -477,16 +494,13 @@ export async function loadLegacySubscriptionPlacementWorld(
             quota,
           };
         });
-        const rotationRows = await rawRows<RotationRow>(
-          scoped,
-          sql`
+        const rotationRows = await read<RotationRow>(sql`
           select 'workspace' as scope, active_credential_id, rotation_enabled
             from codex_rotation_settings where workspace_id = ${request.workspaceId}::uuid
           union all
           select 'organization' as scope, active_credential_id, rotation_enabled
             from organization_codex_rotation_settings where account_id = ${request.accountId}::uuid
-        `,
-        );
+        `);
         // Only the rows for the pool in effect are mapped (design 5.2).
         const workspaceRotation = rotationRows.find((row) => row.scope === "workspace");
         const organizationRotation = rotationRows.find((row) => row.scope === "organization");
@@ -512,10 +526,16 @@ export async function loadLegacySubscriptionPlacementWorld(
         const tables = POOL_TABLES[provider];
         const scope = request.authorityScope ?? "workspace";
         source = scope;
-        // Personal (user-scope) rows are visible only to their owner, which is
-        // how the legacy selector reads a user pool; the turn's human stays the
-        // initiating human, so session visibility is unchanged.
-        if (human) await setSubjectRlsContext(scoped, human);
+        // A user pool is read as its owner, the turn's human, exactly like the
+        // legacy selector reads it; other pools never read personal rows
+        // (their row security would also record a capability row per personal
+        // credential). The initiating human stays set, so session visibility
+        // is unchanged.
+        const readsUserPool = scope === "user" && human !== null;
+        if (readsUserPool) {
+          guard();
+          await setSubjectRlsContext(scoped, human);
+        }
         const usageColumns =
           provider === "claude"
             ? sql`usage.snapshot as usage_snapshot, usage.model_cooldowns as usage_model_cooldowns,
@@ -526,9 +546,7 @@ export async function loadLegacySubscriptionPlacementWorld(
           provider === "claude"
             ? sql`left join claude_subscription_account_usage usage on usage.credential_id = credential.id`
             : sql``;
-        const rows = await rawRows<PoolCredentialRow>(
-          scoped,
-          sql`
+        const rows = await read<PoolCredentialRow>(sql`
           select credential.id, credential.workspace_id, credential.authority_scope,
             credential.owner_organization_membership_id, credential.status,
             credential.allocator_enabled, credential.allowed_model_ids,
@@ -540,10 +558,10 @@ export async function loadLegacySubscriptionPlacementWorld(
           where credential.account_id = ${request.accountId}::uuid
             and (credential.workspace_id = ${request.workspaceId}::uuid
               or (credential.authority_scope = 'organization' and credential.workspace_id is null))
+            and (${readsUserPool} or credential.authority_scope <> 'user')
           order by credential.created_at, credential.id
           limit ${LEGACY_WORLD_MAX_CONNECTIONS + 1}
-        `,
-        );
+        `);
         truncated = rows.length > LEGACY_WORLD_MAX_CONNECTIONS;
         const bounded = rows.slice(0, LEGACY_WORLD_MAX_CONNECTIONS);
         hasLocalAccounts = bounded.some((row) => row.authority_scope === "workspace");
@@ -621,16 +639,13 @@ export async function loadLegacySubscriptionPlacementWorld(
             quota,
           };
         });
-        const rotationRows = await rawRows<RotationRow>(
-          scoped,
-          sql`
+        const rotationRows = await read<RotationRow>(sql`
           select authority_scope as scope, active_credential_id, rotation_enabled
           from ${tables.rotation}
           where account_id = ${request.accountId}::uuid
             and ((workspace_id = ${request.workspaceId}::uuid and authority_scope = 'workspace')
               or (workspace_id is null and authority_scope = 'organization'))
-        `,
-        );
+        `);
         const workspaceRotation = rotationRows.find((row) => row.scope === "workspace");
         const organizationRotation = rotationRows.find((row) => row.scope === "organization");
         rotationRow =
@@ -647,9 +662,7 @@ export async function loadLegacySubscriptionPlacementWorld(
               : organizationRotation
             : rotationRow,
         );
-        const [pinRow] = await rawRows<PinRow>(
-          scoped,
-          sql`
+        const [pinRow] = await read<PinRow>(sql`
           select pinned_credential_id, pin_source, last_credential_id
           from ${tables.pins}
           where workspace_id = ${request.workspaceId}::uuid
@@ -657,15 +670,14 @@ export async function loadLegacySubscriptionPlacementWorld(
             and authority_scope = ${scope}
           order by updated_at desc
           limit 1
-        `,
-        );
+        `);
         pin = pinOf(pinRow?.pinned_credential_id ?? null, pinRow?.pin_source ?? null);
         lastConnectionId = pinRow?.last_credential_id ?? null;
       }
 
       // Frozen personal authority (design 3.7): a user-scope snapshot for this
       // provider, and the Personal-workspace owner's own work, whose accounts
-      // become their personal connections with fallback on (D-15).
+      // become their personal connections with fallback on (D-18).
       const personalAuthority: PersonalAuthority[] = [];
       if (human && (request.authorityScope === "user" || personalWorkspaceOwner === human)) {
         personalAuthority.push({ provider, ownerMembershipId: human });

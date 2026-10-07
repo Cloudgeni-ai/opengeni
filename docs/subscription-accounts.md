@@ -480,15 +480,21 @@ placement world for that session and turn from today's tables through the
 legacy adapter (`packages/db/src/legacy-subscription-world.ts`). It then runs
 the core's placement and the reference model's `checkDecision` on it.
 
-It never changes placement:
+It never changes placement and never delays the turn:
 
+- it starts in the background after the legacy selection, and at most two run
+  at once per worker process; further turns skip it (`busy`);
 - it fails open on every error, timeout and cancellation;
 - it reads under the turn's own session actor, so a private session is visible
-  only through its frozen initiating human and never through an empty subject;
-- it runs one SELECT-only transaction bounded by
-  `OPENGENI_SUBSCRIPTION_CORE_SHADOW_TIMEOUT_MS` (default 250 ms), which is
-  `READ ONLY` for Codex. Claude and SuperGrok row security records its own
-  transient capability row, exactly as legacy reads of those pools do.
+  only through its frozen initiating human and never through an empty subject.
+  A personal (user-scope) pool is read as that human, as the legacy selector
+  reads it; other pools never read personal rows;
+- its statements are SELECTs in one transaction, bounded by
+  `OPENGENI_SUBSCRIPTION_CORE_SHADOW_TIMEOUT_MS` (default 250 ms, at most
+  1000 ms), and no statement starts after that deadline. The transaction is
+  `READ ONLY` for Codex. For Claude and SuperGrok, the credentials' row
+  security records and removes its own transient capability row, exactly as
+  legacy reads of those pools do, so those reads are not `READ ONLY`.
 
 `OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED=false` turns it off; it is on by
 default. It records only content-free data, in fixed-label metrics:

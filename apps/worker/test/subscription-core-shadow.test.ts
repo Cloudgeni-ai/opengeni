@@ -1,12 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { Database, LegacyPlacementInputs, LegacyPlacementWorldResult } from "@opengeni/db";
+import {
+  currentSessionRlsActorInitiatingHumanSubjectId,
+  withSessionRlsActorContext,
+  type Database,
+  type LegacyPlacementInputs,
+  type LegacyPlacementWorldResult,
+} from "@opengeni/db";
 import { createLogThrottle } from "@opengeni/observability";
 import type { PlacementInput, SubscriptionConnection } from "@opengeni/subscriptions";
 import {
   compareSubscriptionCoreShadow,
+  createShadowLogRateCap,
   runSubscriptionCoreShadow,
+  startSubscriptionCoreShadow,
+  subscriptionCoreShadowInFlight,
   shadowConnectionAlias,
   type SubscriptionCoreShadowDeps,
 } from "../src/activities/agent-turn/subscription-core-shadow";
@@ -131,7 +140,7 @@ function deps(
     timeoutMs: 200,
     db: {} as Database,
     observability: recorder,
-    request: {
+    request: () => ({
       accountId: "33333333-3333-4333-8333-333333333333",
       workspaceId: WORKSPACE,
       sessionId: SESSION,
@@ -142,12 +151,14 @@ function deps(
       reasoningLevel: "high",
       modelPolicyProviderId: "codex-subscription",
       authorityScope: null,
-      initiatingHumanSubjectId: "user:owner",
-    },
+    }),
     legacy: { selectedConnectionId: LOCAL_A, reusedLease: false },
     now: () => new Date(NOW),
     load: async (_db, request) => await load(request),
     logThrottle: createLogThrottle({ intervalMs: 60_000, maxKeys: 16 }),
+    logRateCap: createShadowLogRateCap(100),
+    // Never-settling test loads keep their slots; caps are tested explicitly.
+    maxInFlight: 1_000,
     ...patch,
   };
   return { deps: value, recorder };
@@ -332,6 +343,113 @@ describe("subscription core shadow", () => {
       reason: "cancelled",
     });
     expect(loaded).toBe(false);
+  });
+
+  test("SUB-COMPAT-03: the turn never waits for the shadow, and the load is told to stop at the deadline", async () => {
+    let seen: { signal?: AbortSignal; deadlineAt?: number; statementTimeoutMs?: number } = {};
+    const { deps: input } = deps(
+      (request) => {
+        seen = request as typeof seen;
+        return new Promise(() => undefined);
+      },
+      { timeoutMs: 20 },
+    );
+    const startedAt = performance.now();
+    const running = startSubscriptionCoreShadow(input);
+    // Returned synchronously: placement continues before the load settles.
+    expect(performance.now() - startedAt).toBeLessThan(15);
+    expect(seen.signal?.aborted).toBe(false);
+    expect(seen.statementTimeoutMs).toBe(20);
+    expect(seen.deadlineAt).toBeLessThanOrEqual(Date.now() + 20);
+    expect(await running).toEqual({ outcome: "skipped", reason: "timeout" });
+    expect(seen.signal?.aborted).toBe(true);
+  });
+
+  test("SUB-COMPAT-03: an abandoned load keeps its in-flight slot until it settles", async () => {
+    let settle: () => void = () => undefined;
+    const { deps: input } = deps(
+      () =>
+        new Promise<LegacyPlacementWorldResult>((_resolve, reject) => {
+          settle = () => reject(new Error("statement timeout"));
+        }),
+      { timeoutMs: 10 },
+    );
+    const before = subscriptionCoreShadowInFlight();
+    expect(await startSubscriptionCoreShadow(input)).toEqual({
+      outcome: "skipped",
+      reason: "timeout",
+    });
+    expect(subscriptionCoreShadowInFlight()).toBe(before + 1);
+    settle();
+    await Bun.sleep(0);
+    expect(subscriptionCoreShadowInFlight()).toBe(before);
+  });
+
+  test("SUB-COMPAT-03: the background load still runs under the turn's session actor", async () => {
+    const seen: (string | null | undefined)[] = [];
+    const { deps: input } = deps(async () => {
+      await Bun.sleep(1);
+      seen.push(currentSessionRlsActorInitiatingHumanSubjectId());
+      return { status: "loaded", ...world() };
+    });
+    const running = withSessionRlsActorContext(
+      { subjectId: "service:agent-turn", initiatingHumanSubjectId: "user:owner" },
+      async () => startSubscriptionCoreShadow(input),
+    );
+    expect((await running).outcome).toBe("compared");
+    // Outside any actor the shadow's own load sees none (and the real load skips).
+    await startSubscriptionCoreShadow(input);
+    expect(seen).toEqual(["user:owner", undefined]);
+  });
+
+  test("SUB-COMPAT-03: at most the in-flight cap runs at once; the rest are skipped as busy", async () => {
+    const releases: (() => void)[] = [];
+    const slow = deps(
+      () =>
+        new Promise<LegacyPlacementWorldResult>((resolve) => {
+          releases.push(() => resolve({ status: "loaded", ...world() }));
+        }),
+      { maxInFlight: subscriptionCoreShadowInFlight() + 2, timeoutMs: 5_000 },
+    );
+    const before = subscriptionCoreShadowInFlight();
+    const first = startSubscriptionCoreShadow(slow.deps);
+    const second = startSubscriptionCoreShadow(slow.deps);
+    expect(subscriptionCoreShadowInFlight()).toBe(before + 2);
+    expect(await startSubscriptionCoreShadow(slow.deps)).toEqual({
+      outcome: "skipped",
+      reason: "busy",
+    });
+    for (const release of releases) release();
+    expect((await first).outcome).toBe("compared");
+    expect((await second).outcome).toBe("compared");
+    expect(subscriptionCoreShadowInFlight()).toBe(before);
+    expect(releases).toHaveLength(2);
+  });
+
+  test("SUB-COMPAT-03: a request that cannot be built is counted, not thrown", async () => {
+    const { deps: input, recorder } = deps(async () => ({ status: "loaded", ...world() }), {
+      request: () => {
+        throw new Error("missing execution policy");
+      },
+    });
+    expect(await startSubscriptionCoreShadow(input)).toEqual({
+      outcome: "skipped",
+      reason: "error",
+    });
+    expect(counter(recorder, "opengeni_subscription_core_shadow_skips_total")).toHaveLength(1);
+  });
+
+  test("debug events are capped per process across all throttle keys", async () => {
+    const cap = createShadowLogRateCap(1);
+    const first = deps(async () => ({ status: "loaded", ...world() }), { logRateCap: cap });
+    await runSubscriptionCoreShadow(first.deps);
+    const other = deps(async () => ({ status: "loaded", ...world() }), {
+      logRateCap: cap,
+      legacy: { selectedConnectionId: null, reusedLease: false },
+    });
+    await runSubscriptionCoreShadow(other.deps);
+    expect(first.recorder.logs).toHaveLength(1);
+    expect(other.recorder.logs).toHaveLength(0);
   });
 
   test("the debug event is throttled per workspace and outcome", async () => {

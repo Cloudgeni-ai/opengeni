@@ -1569,6 +1569,7 @@ export const SUBSCRIPTION_CORE_SHADOW_REQUIREMENTS = [
   "checker_error",
 ] as const;
 export const SUBSCRIPTION_CORE_SHADOW_SKIPS = [
+  "busy",
   "no_session_actor",
   "session_not_visible",
   "timeout",
@@ -1643,6 +1644,10 @@ const SUBSCRIPTION_CORE_SHADOW_PARITY_REASON_SET = new Set<string>(
   SUBSCRIPTION_CORE_SHADOW_PARITY_REASONS,
 );
 
+const SUBSCRIPTION_CORE_SHADOW_DURATION_BUCKETS = [
+  0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1,
+];
+
 export function recordSubscriptionCoreShadow(
   observability: Pick<Observability, "incrementCounter" | "observeHistogram">,
   provider: SubscriptionCoreShadowProvider,
@@ -1654,6 +1659,7 @@ export function recordSubscriptionCoreShadow(
     help: "Shared subscription core shadow comparison duration by provider, including skips.",
     labels: { provider },
     value: durationSeconds,
+    buckets: SUBSCRIPTION_CORE_SHADOW_DURATION_BUCKETS,
   });
   if (observation.outcome === "skipped") {
     observability.incrementCounter({
