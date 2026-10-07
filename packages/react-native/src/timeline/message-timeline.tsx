@@ -161,6 +161,20 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
     load: props.onLoadOlder,
   };
   const viewportHeight = useRef(0);
+  // Older rows arrive above the reader. Keep the reader's place by moving the
+  // offset by the added height (UIKit's maintainVisibleContentPosition fights
+  // the reader's drag while live rows re-lay out, so it isn't used).
+  const contentHeight = useRef(0);
+  const firstGroupKey = useRef<string | null>(null);
+  const prepended = useRef(false);
+  const nextFirstKey = groups[0] ? groupKey(groups[0]) : null;
+  if (nextFirstKey !== firstGroupKey.current) {
+    const previous = firstGroupKey.current;
+    if (previous !== null && groups.some((group) => groupKey(group) === previous)) {
+      prepended.current = true;
+    }
+    firstGroupKey.current = nextFirstKey;
+  }
   const requestOlder = useCallback(() => {
     const { hasOlder, loading, load } = history.current;
     if (!hasOlder || loading || !load) return;
@@ -217,6 +231,16 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   );
   const onContentSizeChange = useCallback(
     (_width: number, height: number) => {
+      const added = height - contentHeight.current;
+      contentHeight.current = height;
+      if (prepended.current) {
+        prepended.current = false;
+        if (!following.current && added > 0) {
+          scrollY.current += added;
+          scrollRef.current?.scrollTo({ y: scrollY.current, animated: false });
+          return;
+        }
+      }
       if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
       // A short window can't be scrolled, so it could never reach the top: keep loading.
       if (viewportHeight.current > 0 && height < viewportHeight.current + OLDER_HISTORY_PREFETCH_PX)
@@ -266,9 +290,6 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                   viewportHeight.current = event.nativeEvent.layout.height;
                   if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
                 }}
-                // Prepending older rows keeps the reader's first visible row in place
-                // (index 0 is the top loader, so anchor on the first real row).
-                maintainVisibleContentPosition={{ minIndexForVisible: 1 }}
                 scrollEventThrottle={32}
                 onContentSizeChange={onContentSizeChange}
                 keyboardDismissMode="interactive"
