@@ -269,7 +269,7 @@ for it until the matching requirement below is implemented:
   message or Agent Steer takes the receiving session's pool, not the
   sender's, and non-human acceptance resolves the workspace or organization
   pool instead of assuming workspace scope.
-  Verification: `packages/db/test/subscription-pool-receiver-authority.test.ts`.
+  Verification: pending (accepted-scope-propagation).
 - **SUB-ACCESS-02** Pool authority is additive to session access. Using a
   shared pool never changes who can see a session.
   Verification: `packages/db/test/subscription-pool-private-session-access.test.ts`.
@@ -328,7 +328,7 @@ for it until the matching requirement below is implemented:
   routed never excludes, replaces or widens it; an unavailable designated
   credential is reported with its own reason at most once per turn, and the
   designation can be cleared in every routing mode.
-  Verification: `apps/api/test/codex-redemption-routes.test.ts`, `packages/db/test/codex-token-resolver.test.ts`.
+  Verification: `apps/api/test/codex-redemption-routes.test.ts`, `packages/db/test/codex-token-resolver.test.ts`, `packages/runtime/test/runtime.test.ts`.
 - **SUB-APPS-02** Reset-credit redemption keeps its explicit human-controlled
   boundary and is never triggered by automatic selection or failover.
   Verification: pending (shared-core).
