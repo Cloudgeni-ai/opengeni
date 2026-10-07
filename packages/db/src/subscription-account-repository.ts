@@ -2179,7 +2179,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
         workspaceId: input.workspaceId,
         subjectId: input.subjectId,
         sessionId: input.sessionId,
-        turnId: null,
+        turnId: input.turnId ?? null,
       },
       async () => await setSubscriptionSessionAccountPinInSessionContext(db, input),
     );
@@ -2188,6 +2188,8 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
   async function setSubscriptionSessionAccountPinInSessionContext(
     db: Database,
     input: {
+      /** The acting turn; restores its frozen initiating human for pool-worker subjects. */
+      turnId?: string | null;
       accountId: string;
       workspaceId: string;
       subjectId: string;
@@ -2270,7 +2272,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
         workspaceId: input.workspaceId,
         subjectId: input.subjectId,
         sessionId: input.sessionId,
-        turnId: null,
+        turnId: input.turnId ?? null,
       },
       async () => await getSubscriptionSessionAccountPinInSessionContext(db, input),
     );
@@ -2279,6 +2281,8 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
   async function getSubscriptionSessionAccountPinInSessionContext(
     db: Database,
     input: {
+      /** The acting turn; restores its frozen initiating human for pool-worker subjects. */
+      turnId?: string | null;
       workspaceId: string;
       subjectId: string;
       sessionId: string;
@@ -2326,7 +2330,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
         workspaceId: input.workspaceId,
         subjectId: input.subjectId,
         sessionId: input.sessionId,
-        turnId: null,
+        turnId: input.turnId ?? null,
       },
       async () => await recordSubscriptionSessionLastAccountInSessionContext(db, input),
     );
@@ -2335,6 +2339,8 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
   async function recordSubscriptionSessionLastAccountInSessionContext(
     db: Database,
     input: {
+      /** The acting turn; restores its frozen initiating human for pool-worker subjects. */
+      turnId?: string | null;
       accountId: string;
       workspaceId: string;
       subjectId: string;

@@ -17,9 +17,11 @@ import {
   getClaudeCapacityWaitForSession,
   getOrganizationPrivateSessionSettings,
   getXaiCapacityWaitForSession,
+  getXaiSessionAccountPin,
   peekSessionWork,
   reconcileClaudeCapacityWait,
   reconcileXaiCapacityWait,
+  setXaiSessionAccountPin,
   subscriptionPoolWorkerSubject,
   updateOrganizationPrivateSessionSettings,
   withSessionActivityRlsContext,
@@ -543,6 +545,44 @@ for (const provider of ["claude", "xai"] as const) {
       });
       if (provider === "claude") expect(leased.credentialId).not.toBeNull();
       else expect(leased.credentialId).toBeNull();
+    },
+    60_000,
+  );
+
+  test.each(visibilities)(
+    `${provider} %s session pin uses the acting turn, not the session's active turn`,
+    async (visibility) => {
+      const input = await fixture();
+      const credentialId = provider === "claude" ? (await pool(input)).a.account.id : null;
+      const running = await turn(input, visibility);
+      // The acting turn is no longer the session's active turn.
+      await shared.admin`update sessions set active_turn_id = null where id = ${running.sessionId}`;
+      const setPin = provider === "claude" ? setClaudeSessionAccountPin : setXaiSessionAccountPin;
+      const getPin = provider === "claude" ? getClaudeSessionAccountPin : getXaiSessionAccountPin;
+      const worker = {
+        ...input,
+        sessionId: running.sessionId,
+        turnId: running.turnId,
+        subjectId: subscriptionPoolWorkerSubject(provider),
+      };
+      const pin = await setPin(client.db, {
+        ...worker,
+        credentialId,
+        pinSource: credentialId ? "policy" : null,
+        expectedVersion: null,
+      });
+      expect((await getPin(client.db, worker))?.id).toBe(pin.id);
+      if (credentialId) {
+        const recorded = await recordClaudeSessionLastAccount(client.db, {
+          ...worker,
+          credentialId,
+        });
+        expect(recorded.lastCredentialId).toBe(credentialId);
+      }
+      if (visibility === "user_private") {
+        // Without the acting turn nothing is restored and the private pin stays hidden.
+        expect(await getPin(client.db, { ...worker, turnId: null })).toBeNull();
+      }
     },
     60_000,
   );

@@ -66,6 +66,7 @@ async function selectScopedSubscriptionTurnCapacity(
       workspaceId: input.workspaceId,
       subjectId,
       sessionId: input.sessionId,
+      turnId: turn.id,
       authoritySnapshot,
     });
     if (!claude)
@@ -274,6 +275,7 @@ async function selectScopedSubscriptionTurnCapacity(
         workspaceId: input.workspaceId,
         subjectId,
         sessionId: input.sessionId,
+        turnId: turn.id,
         authoritySnapshot,
         credentialId: providerTurn[credentialKey],
         pinSource: "policy",
@@ -292,6 +294,7 @@ async function selectScopedSubscriptionTurnCapacity(
         workspaceId: input.workspaceId,
         subjectId,
         sessionId: input.sessionId,
+        turnId: turn.id,
         authoritySnapshot,
         credentialId: null,
         pinSource: null,
@@ -310,6 +313,7 @@ async function selectScopedSubscriptionTurnCapacity(
       workspaceId: input.workspaceId,
       subjectId,
       sessionId: input.sessionId,
+      turnId: turn.id,
       authoritySnapshot,
       credentialId: providerTurn[credentialKey],
     });
