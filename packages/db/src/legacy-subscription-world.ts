@@ -546,6 +546,9 @@ export async function loadLegacySubscriptionPlacementWorld(
           provider === "claude"
             ? sql`left join claude_subscription_account_usage usage on usage.credential_id = credential.id`
             : sql``;
+        // Row security admits only the acting human's own personal rows (the
+        // app role cannot read memberships to re-check owners); the co-member
+        // test pins this.
         const rows = await read<PoolCredentialRow>(sql`
           select credential.id, credential.workspace_id, credential.authority_scope,
             credential.owner_organization_membership_id, credential.status,

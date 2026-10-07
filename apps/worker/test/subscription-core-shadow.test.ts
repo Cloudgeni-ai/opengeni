@@ -392,11 +392,16 @@ describe("subscription core shadow", () => {
       seen.push(currentSessionRlsActorInitiatingHumanSubjectId());
       return { status: "loaded", ...world() };
     });
-    const running = withSessionRlsActorContext(
+    // Started, not awaited, inside the actor block, which returns first.
+    let running: Promise<{ outcome: string }> | undefined;
+    await withSessionRlsActorContext(
       { subjectId: "service:agent-turn", initiatingHumanSubjectId: "user:owner" },
-      async () => startSubscriptionCoreShadow(input),
+      async () => {
+        running = startSubscriptionCoreShadow(input);
+      },
     );
-    expect((await running).outcome).toBe("compared");
+    expect(seen).toEqual([]);
+    expect((await running!).outcome).toBe("compared");
     // Outside any actor the shadow's own load sees none (and the real load skips).
     await startSubscriptionCoreShadow(input);
     expect(seen).toEqual(["user:owner", undefined]);

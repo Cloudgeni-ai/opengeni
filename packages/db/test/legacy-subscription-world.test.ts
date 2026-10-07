@@ -520,8 +520,31 @@ describe("legacy subscription world", () => {
         expect(personalIds).toContain(workspaceAccount.account.id);
         expect(personalIds).not.toContain(memberPersonal.account.id);
         expect(personalIds).not.toContain(xaiElsewhere!.id);
-        // The pool's subject switch does not outlive the load.
+        expect(
+          personal.input.connections.find(
+            (connection) => connection.id === ownerPersonal.account.id,
+          )?.ownership,
+        ).toEqual({ kind: "personal", ownerMembershipId: setup.owner });
         expect(await subjectNow()).toBe(before);
+        // Nested in an outer transaction, the pool's subject switch does not
+        // outlive the load either.
+        await withRlsContext(
+          client!.db,
+          { accountId: setup.accountId, workspaceId },
+          async (outer) => {
+            const subject = async () =>
+              (
+                await rawRows<{ subject: string | null }>(
+                  outer,
+                  sql`select current_setting('opengeni.subject_id', true) as subject`,
+                )
+              )[0]?.subject ?? null;
+            const outerBefore = await subject();
+            const nested = await loadLegacySubscriptionPlacementWorld(outer, xai("user"));
+            expect(nested.status).toBe("loaded");
+            expect(await subject()).toBe(outerBefore);
+          },
+        );
 
         // A workspace-scope turn reads no personal rows at all.
         for (const scope of ["workspace", "organization"] as const) {
