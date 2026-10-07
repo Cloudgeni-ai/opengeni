@@ -174,7 +174,7 @@ for it until the matching requirement below is implemented:
 - **SUB-SEL-04** A manual pin to an account is binding: the session waits for
   that account instead of moving. Verification: pending (shared-core).
 - **SUB-SEL-05** Selection is atomic and concurrency-safe: concurrent
-  reservations cannot oversubscribe a Primary-only account or bypass fairness.
+  reservations cannot oversubscribe the primary account or bypass fairness.
   Verification: pending (verification-suite).
 
 ### Stickiness and the prompt cache
