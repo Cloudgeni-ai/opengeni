@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import type { ModalRouterProviderCommand } from "@opengeni/contracts";
 import { SandboxChannelAService, type ChannelASession } from "../src/sandbox/channel-a";
 import { installModalCommandSession } from "../src/sandbox/providers/modal-command-session";
+import { ModalCommandControl } from "../src/sandbox/providers/modal-command-control";
 import {
   RoutingSandboxSession,
   RoutingMutationOutcomeUnknownError,
@@ -13,12 +14,77 @@ import {
   SynchronousCommandOutcomeUnknownError,
 } from "../src/sandbox/synchronous-command";
 
-function fixture(exitCode = 0) {
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function nativeModalControl(
+  starts: Array<{ cmd: string; id: string }>,
+  entered: ReturnType<typeof deferred>,
+  available: ReturnType<typeof deferred>,
+  exitCode: number,
+) {
+  const control = ModalCommandControl.forSandbox(
+    {
+      version: () => "0.9.0",
+      cpClient: { sandboxGetTaskId: async () => ({ taskId: "task-original" }) },
+    } as never,
+    "sb-original",
+    "/workspace",
+  );
+  const reads = { stdout: 0, stderr: 0, poll: 0 };
+  // Replace only the authenticated transport entry. The native control's Start,
+  // raw byte reduction, SDK adapter formatting/capture, and routing are real.
+  const router = {
+    start: async (args: { execId: string; commandArgs: string[] }) => {
+      starts.push({ id: args.execId, cmd: args.commandArgs.join(" ") });
+    },
+    read: async (identity: { execId: string }, stream: "stdout" | "stderr", offset: number) => {
+      expect(identity.execId).toBe(starts[0]!.id);
+      const terminal = reads[stream]++ > 0;
+      expect(offset).toBe(terminal && stream === "stdout" ? 6 : 0);
+      if (terminal) {
+        entered.resolve();
+        await available.promise;
+      }
+      return {
+        bytes: Buffer.from(
+          terminal
+            ? (stream === "stdout" ? "x" : "y").repeat(2_000)
+            : stream === "stdout"
+              ? "prefix"
+              : "",
+        ),
+        eof: terminal,
+      };
+    },
+    poll: async () => {
+      if (reads.poll++ === 0) return null;
+      await available.promise;
+      return exitCode;
+    },
+    close: () => {},
+  };
+  const cache = control as unknown as {
+    routers: Map<string, Promise<{ router: typeof router; users: number; refreshAt: number }>>;
+  };
+  cache.routers.set(
+    "task-original",
+    Promise.resolve({ router, users: 0, refreshAt: Date.now() + 60_000 }),
+  );
+  return control;
+}
+
+function fixture(exitCode = 0, sharedTerminal = false) {
   const session: ChannelASession = {
     // Unadmitted read/private work stays on this exact SDK setup observer.
-    execCommand: async (args) => {
+    exec: async (args) => {
       const marker = args.cmd.match(/__OPENGENI_FS_CONFINED_OK__/u)?.[0] ?? "";
-      return `Process exited with code 0\n\nOutput:\n${marker}`;
+      return { stdout: marker, stderr: "", exitCode: 0 };
     },
     writePlacementPrivate: async () => {},
     deletePlacementPrivate: async () => {},
@@ -38,78 +104,106 @@ function fixture(exitCode = 0) {
   }> = [];
   const adoptedBackground: Array<{ processId: string; command: string | undefined }> = [];
   let failObservation = false;
+  let failSettlement = false;
   let activeSandboxId: string | null = null;
   let generation = 0;
-  installModalCommandSession(session, {
-    start: async (args) => {
-      const command: ModalRouterProviderCommand = {
-        kind: "modal-router-v1",
-        sandboxId: "sb-original",
-        taskId: "task-original",
-        execId: crypto.randomUUID(),
-        streams: {
-          stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
-          stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
-        },
-      };
-      starts.push({ cmd: args.cmd, id: command.execId });
-      return command;
+  const terminalEntered = deferred();
+  const terminalAvailable = deferred();
+  const native = sharedTerminal
+    ? nativeModalControl(starts, terminalEntered, terminalAvailable, exitCode)
+    : null;
+  installModalCommandSession(
+    session,
+    native ?? {
+      start: async (args) => {
+        const command: ModalRouterProviderCommand = {
+          kind: "modal-router-v1",
+          sandboxId: "sb-original",
+          taskId: "task-original",
+          execId: crypto.randomUUID(),
+          streams: {
+            stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+            stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+          },
+        };
+        starts.push({ cmd: args.cmd, id: command.execId });
+        return command;
+      },
+      read: async (value) => {
+        if (value.kind !== "modal-router-v1") throw new Error("unexpected legacy command");
+        const index = readIndexes.get(value.execId) ?? 0;
+        if (failObservation && index > 0)
+          throw new Error("same invocation temporarily unobservable");
+        readIndexes.set(value.execId, index + 1);
+        if (sharedTerminal && index === 1) {
+          terminalEntered.resolve();
+          await terminalAvailable.promise;
+        }
+        const invocation = starts.find((item) => item.id === value.execId)!;
+        const importMarker = invocation.cmd.match(
+          /__OPENGENI_WORKSPACE_IMPORT_[0-9a-f]+_OK__/u,
+        )?.[0];
+        const output = importMarker
+          ? `${importMarker}\tcreated`
+          : "__OGF_W__0____OPENGENI_FS_BATCH_OK__ €";
+        const stdout = sharedTerminal
+          ? index === 0
+            ? "prefix"
+            : "x".repeat(2_000)
+          : index === 0
+            ? output
+            : "";
+        const stderr = sharedTerminal
+          ? index === 0
+            ? ""
+            : "y".repeat(2_000)
+          : index === 0 && !importMarker
+            ? "diagnostic"
+            : "";
+        const command = structuredClone(value);
+        const terminal = index >= (sharedTerminal ? 1 : 2);
+        // EOF is available one page before authenticated exit evidence.
+        for (const stream of ["stdout", "stderr"] as const) {
+          command.streams[stream].byteOffset += Buffer.byteLength(
+            stream === "stdout" ? stdout : stderr,
+          );
+          command.streams[stream].eof = index >= 1;
+          command.streams[stream].exitCode = terminal ? exitCode : null;
+        }
+        return {
+          command,
+          expected: value,
+          exitCode: terminal ? exitCode : null,
+          chunks: [
+            ...(stdout
+              ? [
+                  {
+                    stream: "stdout" as const,
+                    chunkId: `${value.execId}:${index}:stdout`,
+                    text: stdout,
+                  },
+                ]
+              : []),
+            ...(stderr
+              ? [
+                  {
+                    stream: "stderr" as const,
+                    chunkId: `${value.execId}:${index}:stderr`,
+                    text: stderr,
+                  },
+                ]
+              : []),
+          ],
+        };
+      },
+      write: async () => {
+        throw new Error("synchronous observation must not send input");
+      },
+      readProbe: async () => {
+        throw new Error("not a materialization test");
+      },
     },
-    read: async (value) => {
-      if (value.kind !== "modal-router-v1") throw new Error("unexpected legacy command");
-      const index = readIndexes.get(value.execId) ?? 0;
-      if (failObservation && index > 0) throw new Error("same invocation temporarily unobservable");
-      readIndexes.set(value.execId, index + 1);
-      const invocation = starts.find((item) => item.id === value.execId)!;
-      const importMarker = invocation.cmd.match(/__OPENGENI_WORKSPACE_IMPORT_[0-9a-f]+_OK__/u)?.[0];
-      const output = importMarker
-        ? `${importMarker}\tcreated`
-        : "__OGF_W__0____OPENGENI_FS_BATCH_OK__ €";
-      const stdout = index === 0 ? output : index === 1 ? "" : "";
-      const stderr = index === 0 && !importMarker ? "diagnostic" : "";
-      const command = structuredClone(value);
-      const terminal = index >= 2;
-      // EOF is available one page before authenticated exit evidence.
-      for (const stream of ["stdout", "stderr"] as const) {
-        command.streams[stream].byteOffset += Buffer.byteLength(
-          stream === "stdout" ? stdout : stderr,
-        );
-        command.streams[stream].eof = index >= 1;
-        command.streams[stream].exitCode = terminal ? exitCode : null;
-      }
-      return {
-        command,
-        expected: value,
-        exitCode: terminal ? exitCode : null,
-        chunks: [
-          ...(stdout
-            ? [
-                {
-                  stream: "stdout" as const,
-                  chunkId: `${value.execId}:${index}:stdout`,
-                  text: stdout,
-                },
-              ]
-            : []),
-          ...(stderr
-            ? [
-                {
-                  stream: "stderr" as const,
-                  chunkId: `${value.execId}:${index}:stderr`,
-                  text: stderr,
-                },
-              ]
-            : []),
-        ],
-      };
-    },
-    write: async () => {
-      throw new Error("synchronous observation must not send input");
-    },
-    readProbe: async () => {
-      throw new Error("not a materialization test");
-    },
-  });
+  );
   const backend = { session, sandboxId: null, kind: "modal", activeEpoch: 0 };
   const route = new RoutingSandboxSession({
     defaultResolved: backend,
@@ -158,6 +252,10 @@ function fixture(exitCode = 0) {
       expect(command.streams.stdout.eof && command.streams.stderr.eof).toBe(true);
       expect(command.streams.stdout.exitCode).toBe(exitCode);
       expect(proof.exitCode).toBe(exitCode);
+      if (failSettlement) {
+        failSettlement = false;
+        throw new Error("terminal settlement temporarily unavailable");
+      }
       settled.push(process.providerSessionId);
     },
     adoptProcessAsBackgroundCommand: async ({ process, command }) => {
@@ -178,6 +276,14 @@ function fixture(exitCode = 0) {
     enclosingPurposes,
     retainedPromotions,
     adoptedBackground,
+    terminalEntered: terminalEntered.promise,
+    releaseTerminal: terminalAvailable.resolve,
+    close: async () => {
+      await native?.close();
+    },
+    failSettlementOnce: () => {
+      failSettlement = true;
+    },
     failObservation: () => {
       failObservation = true;
     },
@@ -186,6 +292,63 @@ function fixture(exitCode = 0) {
     },
   };
 }
+
+test.each([false, true])(
+  "concurrent terminal readers preserve the Modal adapter page across settlement retry %s",
+  async (retrySettlement) => {
+    const f = fixture(0, true);
+    if (retrySettlement) f.failSettlementOnce();
+    const initialCaptured = deferred();
+    const beginSynchronousRead = deferred();
+    const synchronousReadEntered = deferred();
+    const completion = f.route
+      .execSynchronous({ cmd: "filesystem once", maxOutputTokens: 1 }, async (session, args) => {
+        const exec = session.exec!.bind(session);
+        session.exec = async (input) => {
+          const result = await exec(input);
+          initialCaptured.resolve();
+          await beginSynchronousRead.promise;
+          return result;
+        };
+        const read = session.writeStdinForProcessControl!.bind(session);
+        session.writeStdinForProcessControl = (input) => {
+          const pending = read(input);
+          synchronousReadEntered.resolve();
+          return pending;
+        };
+        return await executeSynchronousCommand(session, args);
+      })
+      .finally(() => f.close());
+    await initialCaptured.promise;
+    const external = f.route.writeStdinForProcessControl({ sessionId: 1, maxOutputTokens: 1 });
+    const externalResult = external.catch((error: unknown) => error);
+    await f.terminalEntered;
+    beginSynchronousRead.resolve();
+    // The synchronous collector is now waiting on the same in-flight provider read.
+    await synchronousReadEntered.promise;
+    f.releaseTerminal();
+    const banner = await externalResult;
+    if (retrySettlement) expect(banner).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    else {
+      expect(banner).toBeString();
+      expect(banner as string).not.toContain("x".repeat(2_000));
+    }
+    const result = await completion;
+    expect(result).toMatchObject({
+      stdout: `prefix${"x".repeat(2_000)}`,
+      stderr: "y".repeat(2_000),
+      exitCode: 0,
+    });
+    expect(f.starts).toHaveLength(1);
+    expect(f.settled).toEqual([1]);
+    const command = [...f.commands.values()][0]!;
+    expect(command.streams.stdout.byteOffset).toBe(2_006);
+    expect(command.streams.stderr.byteOffset).toBe(2_000);
+    expect(f.captured.map((page) => page.stdout).join("")).toBe(result.stdout);
+    expect(f.captured.map((page) => page.stderr).join("")).toBe(result.stderr);
+    expect(f.route.hasRetainedProcess(1)).toBe(false);
+  },
+);
 
 test.each([0, 7])(
   "raw Modal receipt is retained/captured before observing the original terminal exit %s",
@@ -288,7 +451,7 @@ test("multi-file composite imports keep outer confinement with fresh exact retai
   expect(f.adoptedBackground).toEqual([]);
 });
 
-test("read-only SDK handles are observed on the resolved backend before route validation", async () => {
+test("read-only SDK yielded handles fail closed without consuming a banner-only reader", async () => {
   let swapped = false;
   let starts = 0;
   let reads = 0;
@@ -315,9 +478,13 @@ test("read-only SDK handles are observed on the resolved backend before route va
     },
     maxFenceRetries: 0,
   });
-  await expect(route.execReadOnly({ cmd: "read" })).rejects.toThrow("route changed");
+  await expect(route.execReadOnly({ cmd: "read" })).rejects.toMatchObject({
+    code: "synchronous_command_outcome_unknown",
+    sessionId: 2_147_483_648,
+    output: { stdout: "prefix", stderr: "" },
+  });
   expect(starts).toBe(1);
-  expect(reads).toBe(1);
+  expect(reads).toBe(0);
 });
 
 test("composite observation loss closes only its enclosing callback and leaves the exact child writer retained", async () => {

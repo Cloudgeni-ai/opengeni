@@ -48,6 +48,7 @@ import {
   ProviderCommandObservationUnavailableError,
   type ProviderCommandPersistence,
   type ProviderCommandSession,
+  type ProviderCommandOutput,
 } from "../provider-command-session";
 import type { SandboxProviderCommand } from "@opengeni/contracts";
 import { hasTypedExecHandleLoss, parseExecResponseBanner } from "../exec-banner";
@@ -683,6 +684,15 @@ type PendingProcessMutationSettlement = Parameters<
   NonNullable<RoutingSandboxSessionDeps["afterProcessMutation"]>
 >[0];
 
+type ProcessReadSnapshot = (result: string, page: ProviderCommandOutput | null) => void;
+
+type SharedProcessRead = {
+  result: Promise<string>;
+  /** Copied before capture removes the provider's receipt. This grants output
+   * to concurrent observers, not another ACK or provider invocation. */
+  snapshot?: { result: string; page: ProviderCommandOutput | null };
+};
+
 type RetainedProcessRecord = {
   process: RoutingRetainedProcess;
   backend: ResolvedActiveBackend;
@@ -694,6 +704,7 @@ type RetainedProcessRecord = {
   pendingTerminal: {
     proof: RoutingRetainedProcessTerminalProof;
     result: string;
+    page: ProviderCommandOutput | null;
   } | null;
   settlement: Promise<void> | null;
   backgroundAdoption: Promise<void> | null;
@@ -927,7 +938,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * that exact resolved route so pointer movement can never redirect stdin,
    * polling, or process-group helpers to another box. */
   private readonly retainedProcesses = new Map<number, RetainedProcessRecord>();
-  private readonly processControlReads = new Map<number, Promise<string>>();
+  private readonly processControlReads = new Map<number, SharedProcessRead>();
   private readonly commandOwnerBackends = new Set<RoutableBackendSession>();
   /** Every backend whose settled op-stream results may still need a final ack.
    * Keep old epoch targets too: a mid-turn swap must not orphan the machine the
@@ -1254,8 +1265,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     proof: RoutingRetainedProcessTerminalProof,
     result: string,
   ): Promise<void> {
-    record.pendingTerminal ??= { proof, result };
-    const pending = record.pendingTerminal;
+    const pending = this.rememberTerminalPage(record, proof, result);
     if (
       pending.proof.outcome !== proof.outcome ||
       pending.proof.exitCode !== proof.exitCode ||
@@ -1302,7 +1312,21 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     }
   }
 
-  private async flushPendingProcessMutation(record: RetainedProcessRecord): Promise<string | null> {
+  private rememberTerminalPage(
+    record: RetainedProcessRecord,
+    proof: RoutingRetainedProcessTerminalProof,
+    result: string,
+  ): NonNullable<RetainedProcessRecord["pendingTerminal"]> {
+    if (record.pendingTerminal) return record.pendingTerminal;
+    const page = record.backend.session.getProviderCommandOutput?.(result);
+    record.pendingTerminal = { proof, result, page: page ? structuredClone(page) : null };
+    return record.pendingTerminal;
+  }
+
+  private async flushPendingProcessMutation(
+    record: RetainedProcessRecord,
+    snapshot?: ProcessReadSnapshot,
+  ): Promise<string | null> {
     const pending = record.pendingMutationSettlement;
     if (!pending) return null;
     try {
@@ -1332,7 +1356,11 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         record.process.providerSessionId,
         record.backend.session,
       );
-      if (proof) record.pendingTerminal ??= { proof, result: pending.result };
+      snapshot?.(
+        pending.result,
+        record.backend.session.getProviderCommandOutput?.(pending.result) ?? null,
+      );
+      if (proof) this.rememberTerminalPage(record, proof, pending.result);
       await this.captureRetainedOutput(record, pending.result);
       if (proof) {
         await this.settleRetainedProcess(record, proof, pending.result);
@@ -1343,24 +1371,28 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   private async dispatchProcessMutation(args: unknown): Promise<string> {
-    return await this.runRetainedProcessOperation(args, true, () =>
-      this.dispatchProcessMutationOnce(args),
+    return await this.runRetainedProcessOperation(args, true, (snapshot) =>
+      this.dispatchProcessMutationOnce(args, snapshot),
     );
   }
 
-  private async dispatchProcessMutationOnce(args: unknown): Promise<string> {
+  private async dispatchProcessMutationOnce(
+    args: unknown,
+    snapshot: ProcessReadSnapshot,
+  ): Promise<string> {
     assertNoCaughtMutationOutputRejection();
     const providerSessionId = providerSessionIdFromArgs(args);
     if (providerSessionId === null) throw new RoutingRetainedProcessNotFoundError(-1);
     const record = this.retainedProcess(providerSessionId);
     await this.captureRetainedOutput(record);
-    const priorTerminal = await this.flushPendingProcessMutation(record);
+    const priorTerminal = await this.flushPendingProcessMutation(record, snapshot);
     if (priorTerminal !== null) {
       await this.deps.observeProcessTerminal?.(record);
       return priorTerminal;
     }
     if (record.pendingTerminal) {
       const terminal = record.pendingTerminal;
+      snapshot(terminal.result, terminal.page);
       await this.settleRetainedProcess(record, terminal.proof, terminal.result);
       await this.deps.observeProcessTerminal?.(record);
       return terminal.result;
@@ -1436,6 +1468,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       }
       throw error;
     }
+    snapshot(result, record.backend.session.getProviderCommandOutput?.(result) ?? null);
     if (this.deps.afterProcessMutation) {
       const pending: PendingProcessMutationSettlement = {
         op,
@@ -1470,7 +1503,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       }
     }
     const proof = retainedProcessTerminalProof(result, providerSessionId, record?.backend.session);
-    if (proof) record.pendingTerminal ??= { proof, result };
+    if (proof) this.rememberTerminalPage(record, proof, result);
     await this.captureRetainedOutput(record, result);
     if (proof) {
       await this.settleRetainedProcess(record, proof, result);
@@ -1482,40 +1515,51 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   private async dispatchProcessControl(
     args: unknown,
     modelVisible = false,
-    onPage?: (session: RoutableBackendSession, result: string) => void,
+    onPage?: ProcessReadSnapshot,
   ): Promise<string> {
-    return await this.runRetainedProcessOperation(args, modelVisible, () =>
-      this.dispatchProcessControlOnce(args, modelVisible, onPage),
+    return await this.runRetainedProcessOperation(
+      args,
+      modelVisible,
+      (snapshot) => this.dispatchProcessControlOnce(args, modelVisible, snapshot),
+      onPage,
     );
   }
 
   private async runRetainedProcessOperation(
     args: unknown,
     modelVisible: boolean,
-    operation: () => Promise<string>,
+    operation: (snapshot: ProcessReadSnapshot) => Promise<string>,
+    onPage?: ProcessReadSnapshot,
   ): Promise<string> {
     const providerSessionId = providerSessionIdFromArgs(args);
     if (providerSessionId === null) throw new RoutingRetainedProcessNotFoundError(-1);
     const existing = this.processControlReads.get(providerSessionId);
     const record = this.retainedProcesses.get(providerSessionId);
+    const shared: SharedProcessRead = { result: Promise.resolve("") };
+    const snapshot: ProcessReadSnapshot = (result, page) => {
+      shared.snapshot = { result, page: page ? structuredClone(page) : null };
+      onPage?.(result, shared.snapshot.page);
+    };
     const pending = (async () => {
       if (existing) {
-        const result = await existing.catch(() => null);
+        const result = await existing.result.catch(() => null);
         if (
           result !== null &&
           retainedProcessTerminalProof(result, providerSessionId, record?.backend.session)
         ) {
+          if (existing.snapshot?.result === result) snapshot(result, existing.snapshot.page);
           if (modelVisible && record) await this.deps.observeProcessTerminal?.(record);
           return result;
         }
       }
-      return await operation();
+      return await operation(snapshot);
     })();
-    this.processControlReads.set(providerSessionId, pending);
+    shared.result = pending;
+    this.processControlReads.set(providerSessionId, shared);
     try {
       return await pending;
     } finally {
-      if (this.processControlReads.get(providerSessionId) === pending)
+      if (this.processControlReads.get(providerSessionId) === shared)
         this.processControlReads.delete(providerSessionId);
     }
   }
@@ -1523,7 +1567,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   private async dispatchProcessControlOnce(
     args: unknown,
     modelVisible: boolean,
-    onPage?: (session: RoutableBackendSession, result: string) => void,
+    onPage: ProcessReadSnapshot,
   ): Promise<string> {
     const providerSessionId = providerSessionIdFromArgs(args);
     if (providerSessionId === null) throw new RoutingRetainedProcessNotFoundError(-1);
@@ -1547,13 +1591,14 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       args = { ...args, chars: "" };
     }
     await this.captureRetainedOutput(record);
-    const priorTerminal = await this.flushPendingProcessMutation(record);
+    const priorTerminal = await this.flushPendingProcessMutation(record, onPage);
     if (priorTerminal !== null) {
       if (modelVisible) await this.deps.observeProcessTerminal?.(record);
       return priorTerminal;
     }
     if (record.pendingTerminal) {
       const terminal = record.pendingTerminal;
+      onPage(terminal.result, terminal.page);
       await this.settleRetainedProcess(record, terminal.proof, terminal.result);
       if (modelVisible) await this.deps.observeProcessTerminal?.(record);
       return terminal.result;
@@ -1564,9 +1609,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const result = await this.invokeProviderOperation("writeStdin", record.backend, () =>
       write.call(record.backend.session, args),
     );
-    onPage?.(record.backend.session, result);
+    onPage(result, record.backend.session.getProviderCommandOutput?.(result) ?? null);
     const proof = retainedProcessTerminalProof(result, providerSessionId, record?.backend.session);
-    if (proof) record.pendingTerminal ??= { proof, result };
+    if (proof) this.rememberTerminalPage(record, proof, result);
     await this.captureRetainedOutput(record, result);
     if (proof) {
       await this.settleRetainedProcess(record, proof, result);
@@ -2426,9 +2471,18 @@ export class RoutingSandboxSession implements RoutableBackendSession {
             : (raw as ChannelAExecResult);
         const page = pages.get(raw);
         if (page) pages.set(result, page);
+        else if (typeof raw === "string") {
+          // A banner can supply a locator/status, never complete separate
+          // streams. Do not make its projection look like native raw output.
+          delete result.stdout;
+          delete result.stderr;
+        }
         return result;
       },
-      writeStdin: async (input) => await this.dispatchProcessControl(input, false, snapshot),
+      writeStdin: async (input) =>
+        await this.dispatchProcessControl(input, false, (result, page) => {
+          if (page) pages.set(result, page);
+        }),
       getProviderCommandOutput: (result) => pages.get(result) ?? null,
       supportsPty: () => Boolean(backend.session.supportsPty?.()),
       commandCancellationTransport: async () => {
@@ -2446,7 +2500,10 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       hasRetainedProcess: (handle) => this.hasRetainedProcess(handle),
       reconcileRetainedProcess: (handle) => this.reconcileRetainedProcess(handle),
       retainedProcessHasTypedHandleLoss: (handle) => this.retainedProcessHasTypedHandleLoss(handle),
-      writeStdinForProcessControl: (input) => this.dispatchProcessControl(input, false, snapshot),
+      writeStdinForProcessControl: (input) =>
+        this.dispatchProcessControl(input, false, (result, page) => {
+          if (page) pages.set(result, page);
+        }),
       execCommandForProcessControl: (handle, input) =>
         this.execCommandForProcessControl(handle, input),
     };

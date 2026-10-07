@@ -10,6 +10,7 @@ import {
   type ChannelASession,
 } from "../src/sandbox";
 import { hostShellSession } from "./isolated-git-home-fixture";
+import { synchronousOutputFixture } from "./synchronous-output-fixture";
 
 setDefaultTimeout(30_000);
 const roots: string[] = [];
@@ -43,6 +44,7 @@ function fixture(
   mkdirSync(root);
   const shell = hostShellSession(join(base, "home"), { cwd: root, shell: "bash" });
   const commands: ChannelAExecArgs[] = [];
+  const output = synchronousOutputFixture();
   const reads: number[] = [];
   const settled: number[] = [];
   const yielded = deferred<number>();
@@ -64,6 +66,7 @@ function fixture(
     pages: string[];
   } | null = null;
   const session: ChannelASession = {
+    getProviderCommandOutput: output.getProviderCommandOutput,
     exec: async (args) => {
       // Starting a new batch before the previous authenticated receipt is a
       // regression even if the previous batch has printed its success marker.
@@ -83,24 +86,37 @@ function fixture(
       if (!options.hold?.(args)) active.released.resolve();
       yielded.resolve(handle);
       yieldGate(handle).resolve();
-      return {
-        stdout: native.stdout.slice(0, splitAt),
-        stderr: native.stderr,
-        exitCode: null,
-        sessionId: handle,
-      };
+      output.reset();
+      return output.record(
+        {
+          stdout: native.stdout.slice(0, splitAt),
+          stderr: native.stderr,
+          exitCode: null,
+          sessionId: handle,
+        },
+        native.stdout.slice(0, splitAt),
+        native.stderr,
+      );
     },
     writeStdin: async (args) => {
       expect(args.chars ?? "").toBe("");
       if (!active || active.handle !== args.sessionId) throw new Error("wrong command identity");
       reads.push(args.sessionId);
       if (options.observationError) throw options.observationError;
-      if (active.pages.length) return banner(active.handle, active.pages.shift()!);
+      if (active.pages.length) {
+        const text = active.pages.shift()!;
+        return output.record(banner(active.handle, text), text);
+      }
       await active.released.promise;
       const terminal = active;
       active = null;
       settled.push(terminal.handle);
-      return banner(terminal.handle, "", terminal.exitCode);
+      return output.record(
+        banner(terminal.handle, "", terminal.exitCode),
+        "",
+        "",
+        terminal.exitCode,
+      );
     },
   };
   const events: unknown[] = [];

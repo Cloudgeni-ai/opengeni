@@ -12,6 +12,7 @@ import {
   createTurnToolCancellationController,
 } from "../src/sandbox/turn-tool-cancellation";
 import { mcpToolErrorOutput } from "../src/index";
+import { synchronousOutputFixture } from "./synchronous-output-fixture";
 
 function running(handle: number, output = ""): string {
   return `Process running with session ID ${handle}\n\nOutput:\n${output}`;
@@ -44,17 +45,25 @@ test("native terminal execution keeps the original arguments and separate stream
 test("collects all pages of the same command, including split markers and eventual nonzero", async () => {
   let starts = 0;
   let reads = 0;
-  const pages = [running(42, "_BATCH_OK__"), running(42, " €"), exited(7, " tail")];
+  const pages = ["_BATCH_OK__", " €", " tail"];
+  const output = synchronousOutputFixture();
   const result = await executeSynchronousCommand(
     {
+      getProviderCommandOutput: output.getProviderCommandOutput,
       execCommand: async () => {
         starts++;
-        return running(42, "__OPENGENI_FS");
+        return output.record(running(42, "__OPENGENI_FS"), "__OPENGENI_FS");
       },
       writeStdin: async (args) => {
         expect(args.sessionId).toBe(42);
         expect(args.chars).toBe("");
-        return pages[reads++]!;
+        const text = pages[reads++]!;
+        return output.record(
+          reads === 3 ? exited(7, text) : running(42, text),
+          text,
+          "",
+          reads === 3 ? 7 : null,
+        );
       },
     },
     { cmd: "write once" },
@@ -105,11 +114,13 @@ test("exit before EOF is not terminal and stream pages are not a banner's trunca
 
 test("unknown observation preserves locator/output and never starts again or advises a retry", async () => {
   let starts = 0;
+  const output = synchronousOutputFixture();
   const error = await executeSynchronousCommand(
     {
+      getProviderCommandOutput: output.getProviderCommandOutput,
       execCommand: async () => {
         starts++;
-        return running(44, "already written");
+        return output.record(running(44, "already written"), "already written");
       },
       writeStdin: async () => {
         throw new Error("read transport unavailable");
@@ -126,32 +137,41 @@ test("unknown observation preserves locator/output and never starts again or adv
 });
 
 test("missing or changed observation handles never license fallback execution", async () => {
+  const output = synchronousOutputFixture();
   await expect(
     executeSynchronousCommand({ exec: async () => ({ exitCode: null }) }, { cmd: "work" }),
   ).rejects.toMatchObject({ code: "synchronous_command_outcome_unknown", sessionId: null });
   await expect(
     executeSynchronousCommand(
       {
-        execCommand: async () => running(45),
-        writeStdin: async () => running(46, "different process"),
+        getProviderCommandOutput: output.getProviderCommandOutput,
+        execCommand: async () => output.record(running(45), ""),
+        writeStdin: async () =>
+          output.record(running(46, "different process"), "different process"),
       },
       { cmd: "work" },
     ),
   ).rejects.toMatchObject({ sessionId: 45, output: { stdout: "", stderr: "" } });
 });
 
-test("CRLF banners preserve exact body bytes and legacy handle loss is not successful exit zero", async () => {
+test("trusted pages preserve exact CRLF bytes and legacy handle loss is not successful exit zero", async () => {
+  const output = synchronousOutputFixture();
   const result = await executeSynchronousCommand(
     {
-      execCommand: async () => "Process exited with code 0\r\n\r\nOutput:\r\nbody\r\n",
+      getProviderCommandOutput: output.getProviderCommandOutput,
+      execCommand: async () =>
+        output.record("Process exited with code 0\r\n\r\nOutput:\r\nbody\r\n", "body\r\n", "", 0),
     },
     { cmd: "read" },
   );
   expect(result.stdout).toBe("body\r\n");
+  output.reset();
   await expect(
     executeSynchronousCommand(
       {
-        execCommand: async () => running(49, "__OPENGENI_FS_BATCH_OK__"),
+        getProviderCommandOutput: output.getProviderCommandOutput,
+        execCommand: async () =>
+          output.record(running(49, "__OPENGENI_FS_BATCH_OK__"), "__OPENGENI_FS_BATCH_OK__"),
         writeStdin: async () => exited(0, "write_stdin failed: session not found: 49"),
       },
       { cmd: "write" },

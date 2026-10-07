@@ -18,6 +18,9 @@ export type SynchronousCommandPage = {
   exitCode: number | null;
   sessionId?: number;
   wallTimeSeconds: number;
+  /** Only presentation output or an unsupported yielded reader is available.
+   * Preserve the handle, but do not consume that reader's output. */
+  collectionUnavailable?: boolean;
   outputCursor?: {
     identity: string;
     expected: { stdout: number; stderr: number };
@@ -63,15 +66,6 @@ export function synchronousCommandPage(
     );
   }
   const banner = typeof raw === "string" ? parseExecResponseBanner(raw) : null;
-  const delimiter = typeof raw === "string" ? /\r?\nOutput:\r?\n/u.exec(raw) : null;
-  const framedOutput =
-    typeof raw === "string"
-      ? delimiter
-        ? raw.slice(delimiter.index + delimiter[0].length)
-        : raw.startsWith("Output:\n")
-          ? raw.slice(8)
-          : raw
-      : "";
   const command = page?.command;
   const streamsComplete =
     command?.kind !== "modal-router-v1" ||
@@ -83,8 +77,8 @@ export function synchronousCommandPage(
           .map((chunk) => chunk.text)
           .join("")
       : typeof raw === "string"
-        ? framedOutput
-        : (raw.stdout ?? raw.output ?? ""),
+        ? ""
+        : (raw.stdout ?? ""),
     stderr: page
       ? page.chunks
           .filter((chunk) => chunk.stream === "stderr")
@@ -110,6 +104,16 @@ export function synchronousCommandPage(
         ? { sessionId: raw.sessionId }
         : {}),
     wallTimeSeconds: typeof raw === "string" ? 0 : (raw.wallTimeSeconds ?? 0),
+    ...(page
+      ? page.streamFidelity === "merged"
+        ? { collectionUnavailable: true }
+        : {}
+      : typeof raw === "string" ||
+          typeof raw.stdout !== "string" ||
+          typeof raw.stderr !== "string" ||
+          typeof raw.sessionId === "number"
+        ? { collectionUnavailable: true }
+        : {}),
     ...(command?.kind === "modal-router-v1"
       ? {
           outputCursor: {
@@ -176,6 +180,13 @@ export async function observeSynchronousCommand(
   let page = initial;
   let cursor = initial.outputCursor;
   while (true) {
+    if (page.collectionUnavailable) {
+      throw new SynchronousCommandOutcomeUnknownError(
+        sessionId,
+        { stdout, stderr },
+        new Error("Command adapter cannot prove lossless separate output collection"),
+      );
+    }
     if (page.sessionId === undefined && page.exitCode !== null) {
       return {
         stdout,
@@ -194,8 +205,8 @@ export async function observeSynchronousCommand(
       }
       if (
         cursor &&
-        page.outputCursor &&
-        (cursor.identity !== page.outputCursor.identity ||
+        (!page.outputCursor ||
+          cursor.identity !== page.outputCursor.identity ||
           cursor.next.stdout !== page.outputCursor.expected.stdout ||
           cursor.next.stderr !== page.outputCursor.expected.stderr)
       ) {
@@ -207,6 +218,13 @@ export async function observeSynchronousCommand(
       }
     } catch (cause) {
       throw new SynchronousCommandOutcomeUnknownError(sessionId, { stdout, stderr }, cause);
+    }
+    if (page.collectionUnavailable) {
+      throw new SynchronousCommandOutcomeUnknownError(
+        sessionId,
+        { stdout, stderr },
+        new Error("Command adapter returned output without lossless separate stream proof"),
+      );
     }
     stdout += page.stdout;
     stderr += page.stderr;
