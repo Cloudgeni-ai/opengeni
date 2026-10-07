@@ -422,6 +422,7 @@ describe("synchronous internal filesystem completion", () => {
     let nativeReads = 0;
     let nativeLists = 0;
     const service = new SandboxChannelAService({
+      workspaceRoot: "/workspace",
       session: {
         readFile: async () => {
           nativeReads++;
