@@ -1,6 +1,11 @@
+import { isSessionId } from "../timeline/agent-identity";
 import type { MachineInputMember } from "../timeline/types";
 
-/** Source IDs are routing coordinates only for typed child updates, never parsed from prose. */
+/**
+ * Source IDs are routing coordinates only for typed agent updates (child
+ * lifecycle notices, agent messages, and agent directions), never parsed from
+ * prose.
+ */
 export function ChildSessionLink({
   kind,
   sourceId,
@@ -10,8 +15,12 @@ export function ChildSessionLink({
 }) {
   if (
     !onOpenSession ||
-    !kind.startsWith("child_") ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sourceId)
+    !(
+      kind.startsWith("child_") ||
+      kind === "agent_message" ||
+      kind === "agent_steer_instruction"
+    ) ||
+    !isSessionId(sourceId)
   ) {
     return null;
   }

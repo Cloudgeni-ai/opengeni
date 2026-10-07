@@ -104,6 +104,12 @@ export type SessionConversationProps = ClientOverride &
      */
     onOpenSession?: ((sessionId: string) => void) | undefined;
     /**
+     * Current title for a session id, used to name the agents this
+     * conversation spawns, messages, and hears from. Without it, agents keep
+     * the title they were spawned with, or generic labels.
+     */
+    resolveSessionTitle?: ((sessionId: string) => string | null | undefined) | undefined;
+    /**
      * Inline previews for assistant `opengeni-site` / `opengeni-html` fences.
      * Defaults to the OpenGeni preview. Behind a session proxy without its
      * `artifacts` option, Sites show as unavailable without a request; `false`
@@ -225,6 +231,7 @@ function Conversation({
   resolveLink,
   onOpenArtifact,
   onOpenSession,
+  resolveSessionTitle,
   renderInteractiveBlock,
   toolRegistry,
   renderAllowanceExhausted,
@@ -445,6 +452,7 @@ function Conversation({
           {...(toolRegistry ? { toolRegistry } : {})}
           {...retainedLoaders}
           {...(onOpenSession ? { onOpenSession } : {})}
+          {...(resolveSessionTitle ? { resolveSessionTitle } : {})}
           events={feed.events}
           items={conversationTimeline(feed.timeline, queue, composer)}
           turnSummary={{ rolling: true }}

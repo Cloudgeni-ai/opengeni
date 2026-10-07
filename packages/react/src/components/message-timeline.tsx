@@ -39,6 +39,7 @@ import {
   CheckCircle2Icon,
   CheckIcon,
   ChevronRightIcon,
+  CornerDownRightIcon,
   PauseCircleIcon,
   PauseIcon,
   MessageCircleQuestionIcon,
@@ -53,7 +54,6 @@ import {
 } from "lucide-react";
 import type { ComponentType, CSSProperties } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { Collapsible } from "radix-ui";
 import {
   Component,
   Suspense,
@@ -148,11 +148,22 @@ import { TimelineAnnotationSourceRootContext } from "./timeline-annotation-revea
 import { GeneratedVideoPlayer } from "./generated-video-player";
 import {
   MACHINE_INPUT_META,
+  agentMemberSessionId,
+  agentMemberText,
+  agentMemberTitle,
   cleanMachineInputSummary,
+  isAgentMember,
   machineInputBatchLabel,
   machineInputSummaryIsUseful,
   readableMachineInputSource,
 } from "./machine-input-display";
+import { AgentRow, AgentRowSection, AgentRowText } from "../timeline/agent-row";
+import {
+  AgentIdentityProvider,
+  useAgentIdentity,
+  type ResolveSessionTitle,
+} from "../timeline/agent-identity";
+import { namedAgentTitle, type AgentTitleParts } from "../timeline/platform-activity-presentation";
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
 import {
   noticeDisplayText,
@@ -202,6 +213,13 @@ export type MessageTimelineProps = {
   renderInteractiveBlock?: MarkdownProps["renderInteractiveBlock"];
   /** Drill into a spawned worker session. */
   onOpenSession?: ((sessionId: string) => void) | undefined;
+  /**
+   * Name the agents this session spawns, messages, and hears from. Return the
+   * current display title for a session id, or null when unknown; the
+   * timeline falls back to the title given at spawn, then to generic copy.
+   * Keep the function identity stable across renders.
+   */
+  resolveSessionTitle?: ResolveSessionTitle | undefined;
   /**
    * Deep-link a memory row (a `memory.saved` / `memory.corrected` step) to its
    * record in the host's memory pane. Opt-in, exactly like `onReconnect`: the
@@ -571,6 +589,7 @@ export function MessageTimeline({
   renderMessageActions,
   renderMessageText,
   onOpenSession,
+  resolveSessionTitle,
   onMemoryClick,
   onReconnect,
   renderAuthNeeded,
@@ -2970,7 +2989,17 @@ export function MessageTimeline({
     </AllowancePresentationProvider>
   );
   // Agent-authored object links resolve through the host, never the console.
-  return <OpenGeniLinkProvider resolveLink={resolveLink}>{timeline}</OpenGeniLinkProvider>;
+  return (
+    <OpenGeniLinkProvider resolveLink={resolveLink}>
+      <AgentIdentityProvider
+        items={resolvedItems}
+        resolveSessionTitle={resolveSessionTitle}
+        onOpenSession={onOpenSession}
+      >
+        {timeline}
+      </AgentIdentityProvider>
+    </OpenGeniLinkProvider>
+  );
 }
 
 type KeyedTimelineGroup = {
@@ -4423,56 +4452,47 @@ function AgentMessageRow({
 }
 
 /**
- * A worker session reporting back to its manager. The child's completion arrives
- * as a `user.message` carrying a `childCompletion` payload (the raw message text
- * used to render as an "ugly" user bubble); it projects to a `worker-completion`
- * item and draws here as a quietly-confident card — an inbound result, not
- * something the human said. One glyph + one line carry the outcome; the worker's
- * full report, evidence, and any paused reason live behind a collapsed
- * disclosure, and a "View session" affordance deep-links into the child.
- *
- * Color follows the timeline's restraint: green only for a completed goal, the
- * waiting hue only for a paused one, red only for a failed child — everything
- * else is a neutral inbound card.
+ * A worker session reporting back to its manager in older history: the child's
+ * completion arrived as a `user.message` carrying a `childCompletion` payload.
+ * It draws as the same named agent row as every other inbound agent update:
+ * the outcome and goal on the row, the report, evidence, and any paused
+ * reason behind the disclosure, and a deep link into the child.
  */
 type WorkerCompletionMeta = {
-  label: string;
+  title: AgentTitleParts;
   icon: ComponentType<{ className?: string }>;
-  iconClass: string;
-  /** The 2px left-accent hue — color spent only on the exceptional outcomes. */
-  accentClass: string;
+  failed: boolean;
 };
 
-function workerCompletionMeta(item: WorkerCompletionItem): WorkerCompletionMeta {
+function workerCompletionMeta(
+  item: WorkerCompletionItem,
+  name: string | null,
+): WorkerCompletionMeta {
   if (item.childStatus === "failed") {
     return {
-      label: "Worker failed",
+      title: namedAgentTitle(name, "", " failed", "Worker failed"),
       icon: XCircleIcon,
-      iconClass: "text-og-status-failed",
-      accentClass: "border-og-status-failed/60",
+      failed: true,
     };
   }
   if (item.goalStatus === "paused") {
     return {
-      label: "Worker paused",
+      title: namedAgentTitle(name, "", " paused", "Worker paused"),
       icon: PauseCircleIcon,
-      iconClass: "text-og-status-waiting",
-      accentClass: "border-og-status-waiting/50",
+      failed: false,
     };
   }
   if (item.goalStatus === "completed") {
     return {
-      label: "Worker completed",
+      title: namedAgentTitle(name, "", " completed its goal", "Worker completed"),
       icon: CheckCircle2Icon,
-      iconClass: "text-og-status-idle",
-      accentClass: "border-og-status-idle/45",
+      failed: false,
     };
   }
   return {
-    label: "Worker reported back",
+    title: namedAgentTitle(name, "Result from ", "", "Worker reported back"),
     icon: BotIcon,
-    iconClass: "text-og-accent",
-    accentClass: "border-og-border-strong",
+    failed: false,
   };
 }
 
@@ -4484,14 +4504,12 @@ function WorkerCompletionRow({
   onOpenSession?: ((sessionId: string) => void) | undefined;
 }) {
   const enter = useEntranceAnimation();
-  const [open, setOpen] = useState(false);
-  const meta = workerCompletionMeta(item);
+  const identity = useAgentIdentity();
+  const meta = workerCompletionMeta(item, identity.titleFor(item.childSessionId));
   const Icon = meta.icon;
-  // The worker's own report is the substance behind the fold; evidence and any
-  // paused reason sit alongside it as quieter, labelled context.
   // "Paused because" only when the outcome actually IS a pause — completion
   // payloads can carry a leftover pausedReason/rationale from earlier in the
-  // worker's life, and a "Worker completed" card must not show a pause section.
+  // worker's life, and a completed row must not show a pause section.
   const showPausedReason =
     item.childStatus !== "failed" && item.goalStatus === "paused" && !!item.pausedReason?.trim();
   const details: { label: string; value: string; muted?: boolean }[] = [
@@ -4503,75 +4521,27 @@ function WorkerCompletionRow({
       ? [{ label: "Paused because", value: item.pausedReason!.trim(), muted: true }]
       : []),
   ];
-  const hasDetails = details.length > 0;
   return (
     <div className={cn(enter && "animate-og-enter", "min-w-0")}>
-      {/* An inbound result, not a bubble: a 2px left accent carries the outcome —
-          no full frame, no surface fill. The report unfolds flush beneath. */}
-      <div className={cn("flex flex-col gap-2 border-l-2 pl-3", meta.accentClass)}>
-        <div className="flex items-start gap-2.5">
-          <span className={cn("mt-0.5 shrink-0", meta.iconClass)}>
-            <Icon className="size-4" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <p className="text-og-base leading-5 text-og-fg">
-              <span className="font-medium">{meta.label}</span>
-              {item.goalText ? (
-                <span className="text-og-fg-muted"> · {truncate(item.goalText, 90)}</span>
-              ) : null}
-            </p>
-          </div>
-          {item.childSessionId && onOpenSession ? (
-            <button
-              type="button"
-              onClick={() => onOpenSession(item.childSessionId)}
-              className={cn(
-                "-my-0.5 -mr-1 inline-flex shrink-0 items-center gap-1 rounded-og-sm px-2 py-1 text-og-sm font-medium text-og-fg-muted pointer-coarse:py-2",
-                "outline-hidden transition-colors duration-150 hover:bg-og-surface-2 hover:text-og-fg",
-                "focus-visible:ring-2 focus-visible:ring-og-accent",
-              )}
-            >
-              View session
-              <ArrowRightIcon className="size-3.5" />
-            </button>
-          ) : null}
-        </div>
-        {hasDetails ? (
-          <Collapsible.Root open={open} onOpenChange={setOpen}>
-            <Collapsible.Trigger asChild>
-              <button
-                type="button"
-                className={cn(
-                  "group/wc -mx-1 inline-flex w-fit items-center gap-1 rounded-og-sm px-1 py-0.5 text-og-xs font-medium text-og-fg-subtle",
-                  "outline-hidden transition-colors duration-150 hover:text-og-fg-muted focus-visible:ring-2 focus-visible:ring-og-accent",
-                )}
-              >
-                <ChevronRightIcon className="size-3 transition-transform duration-150 ease-og-in-out group-data-[state=open]/wc:rotate-90" />
-                {open ? "Hide details" : "Show details"}
-              </button>
-            </Collapsible.Trigger>
-            <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-og-collapse data-[state=open]:animate-og-expand">
-              <div className="ml-1 mt-1.5 flex flex-col gap-2.5">
-                {details.map((detail) => (
-                  <div key={detail.label} className="min-w-0">
-                    <p className="mb-1 text-og-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle">
-                      {detail.label}
-                    </p>
-                    <p
-                      className={cn(
-                        "whitespace-pre-wrap break-words text-og-sm leading-6",
-                        detail.muted ? "text-og-fg-subtle" : "text-og-fg-muted",
-                      )}
-                    >
-                      {detail.value}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </Collapsible.Content>
-          </Collapsible.Root>
-        ) : null}
-      </div>
+      <AgentRow
+        icon={<Icon />}
+        title={meta.title}
+        preview={item.goalText ? truncate(item.goalText, 240) : null}
+        previewLines={2}
+        sessionId={item.childSessionId}
+        onOpenSession={onOpenSession ?? identity.onOpenSession}
+        failed={meta.failed}
+      >
+        {details.length > 0 ? (
+          <>
+            {details.map((detail) => (
+              <AgentRowSection key={detail.label} label={detail.label} muted={detail.muted}>
+                {detail.value}
+              </AgentRowSection>
+            ))}
+          </>
+        ) : undefined}
+      </AgentRow>
     </div>
   );
 }
@@ -4691,7 +4661,8 @@ function MachineInputBatchRow({
   loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
 }) {
   const enter = useEntranceAnimation();
-  const label = machineInputBatchLabel(item.members);
+  const identity = useAgentIdentity();
+  const label = machineInputBatchLabel(item.members, identity.titleFor);
   const single = item.members.length === 1 ? item.members[0]! : null;
   if (single?.kind === "media_generation_result" && single.result) {
     return (
@@ -4702,8 +4673,13 @@ function MachineInputBatchRow({
     );
   }
   const singleSummary = single ? cleanMachineInputSummary(single.summary) : "";
+  // An agent's words live in its named row behind the pill; the pill already
+  // says who it is from, so nothing repeats beneath it.
   const showCollapsedSummary =
-    !item.compact && single != null && machineInputSummaryIsUseful(single.kind, singleSummary);
+    !item.compact &&
+    single != null &&
+    !isAgentMember(single) &&
+    machineInputSummaryIsUseful(single.kind, singleSummary);
 
   return (
     <div className={cn(enter && "animate-og-enter", "flex flex-col items-center gap-1.5")}>
@@ -4726,18 +4702,26 @@ function MachineInputBatchRow({
             <span className="truncate">{label}</span>
           </span>
         </summary>
-        <div className="mx-auto mt-2 w-full max-w-lg space-y-2 border-t border-og-border/50 pt-2">
+        <div className="mx-auto mt-2 w-full max-w-lg space-y-1.5 border-t border-og-border/50 pt-2">
           <p className="text-og-xs text-og-fg-subtle">
             Received <time dateTime={item.occurredAt}>{formatClockTime(item.occurredAt)}</time>
           </p>
-          {item.members.map((member) => (
-            <MachineInputRow
-              key={member.id}
-              member={member}
-              onOpenSession={onOpenSession}
-              loadVideoArtifactPlayback={loadVideoArtifactPlayback}
-            />
-          ))}
+          {groupMachineInputMembers(item.members).map((group) =>
+            group.kind === "agent" ? (
+              <AgentMemberRow
+                key={group.members[0]!.id}
+                members={group.members}
+                onOpenSession={onOpenSession}
+              />
+            ) : (
+              <MachineInputRow
+                key={group.member.id}
+                member={group.member}
+                onOpenSession={onOpenSession}
+                loadVideoArtifactPlayback={loadVideoArtifactPlayback}
+              />
+            ),
+          )}
         </div>
       </details>
       {showCollapsedSummary ? (
@@ -4746,6 +4730,87 @@ function MachineInputBatchRow({
         </p>
       ) : null}
     </div>
+  );
+}
+
+type MachineInputMemberGroup =
+  | { kind: "agent"; members: MachineInputBatchItem["members"] }
+  | { kind: "other"; member: MachineInputBatchItem["members"][number] };
+
+/**
+ * Agent members get named rows; repeated progress notes from one agent fold
+ * into its single row (latest note shown, earlier ones behind the disclosure).
+ */
+function groupMachineInputMembers(
+  members: MachineInputBatchItem["members"],
+): MachineInputMemberGroup[] {
+  const groups: MachineInputMemberGroup[] = [];
+  const progressBySource = new Map<string, MachineInputBatchItem["members"]>();
+  for (const member of members) {
+    if (!isAgentMember(member)) {
+      groups.push({ kind: "other", member });
+      continue;
+    }
+    if (member.kind === "child_progress") {
+      const existing = progressBySource.get(member.sourceId);
+      if (existing) {
+        existing.push(member);
+        continue;
+      }
+      const bucket = [member];
+      progressBySource.set(member.sourceId, bucket);
+      groups.push({ kind: "agent", members: bucket });
+      continue;
+    }
+    groups.push({ kind: "agent", members: [member] });
+  }
+  return groups;
+}
+
+function agentMemberIcon(member: MachineInputBatchItem["members"][number]): ReactNode {
+  if (member.kind === "child_terminal_result" && member.classification === "failure") {
+    return <XCircleIcon />;
+  }
+  if (member.kind === "child_paused") return <PauseCircleIcon />;
+  return <CornerDownRightIcon />;
+}
+
+/** One named row for an update sent by (or about) another agent. */
+function AgentMemberRow({
+  members,
+  onOpenSession,
+}: {
+  members: MachineInputBatchItem["members"];
+  onOpenSession?: ((sessionId: string) => void) | undefined;
+}) {
+  const identity = useAgentIdentity();
+  const latest = members[members.length - 1]!;
+  const sessionId = agentMemberSessionId(latest);
+  const title = agentMemberTitle(latest, identity.titleFor(sessionId));
+  const texts = members.map((member) => agentMemberText(member));
+  const latestText = texts[texts.length - 1]!;
+  const bodies = texts
+    .map((text, index) => ({ id: members[index]!.id, body: text.body }))
+    .filter((entry) => entry.body.length > 0);
+  return (
+    <AgentRow
+      icon={agentMemberIcon(latest)}
+      title={title}
+      preview={latestText.preview ? truncate(latestText.preview, 320) : null}
+      previewLines={2}
+      meta={members.length > 1 ? `+${members.length - 1} earlier` : null}
+      sessionId={sessionId}
+      onOpenSession={onOpenSession ?? identity.onOpenSession}
+      failed={latest.kind === "child_terminal_result" && latest.classification === "failure"}
+    >
+      {bodies.length > 0 ? (
+        <>
+          {bodies.map((entry) => (
+            <AgentRowText key={entry.id}>{entry.body}</AgentRowText>
+          ))}
+        </>
+      ) : undefined}
+    </AgentRow>
   );
 }
 
