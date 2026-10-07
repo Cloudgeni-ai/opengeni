@@ -927,3 +927,27 @@ test("an organization administrator outside the workspace wakes the organization
   await wakeAs(await organizationAdminOutsideWorkspace(input));
   expect(await claudeWakeRevision(waiterId)).toBe(2);
 }, 60_000);
+
+test("a wake stays in its workspace even on a connection that bypasses RLS", async () => {
+  const input = await fixture();
+  const [second] = await shared.admin<{ id: string }[]>`
+    insert into workspaces (account_id, name) values (${input.accountId}, 'Second fixture') returning id`;
+  await shared.admin`insert into workspace_inference_controls (workspace_id, account_id) values (${second!.id}, ${input.accountId})`;
+  for (const subjectId of [input.subjectId, input.otherSubjectId])
+    await shared.admin`insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions) values (${input.accountId}, ${second!.id}, ${subjectId}, 'owner', '[]'::jsonb)`;
+  const here = await armPrivateClaudeWaiter(input);
+  const elsewhere = await armPrivateClaudeWaiter({ ...input, workspaceId: second!.id });
+  const bypass = createDb(shared.adminUrl);
+  try {
+    await wakeClaudeCapacityWaiters(bypass.db, {
+      workspaceId: input.workspaceId,
+      subjectId: input.otherSubjectId,
+      authoritySnapshot: input.authoritySnapshot,
+      reason: "fixture_bypass_wake",
+    });
+  } finally {
+    await bypass.close();
+  }
+  expect(await claudeWakeRevision(here)).toBe(2);
+  expect(await claudeWakeRevision(elsewhere)).toBe(1);
+}, 60_000);
