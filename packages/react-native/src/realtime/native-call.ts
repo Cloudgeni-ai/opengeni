@@ -67,6 +67,11 @@ export type NativeRealtimeCall = {
   speaker: boolean;
   route: NativeCallAudioRoute | null;
   error: string | null;
+  /**
+   * Whether the system shows this call (CallKit). False when the platform has
+   * no call service or refused the call; voice then runs as an in-app call.
+   */
+  systemCall: boolean;
   canStart: boolean;
   start(): Promise<void>;
   end(): Promise<void>;
@@ -89,6 +94,8 @@ function randomCallId(): string {
  * reports an outgoing call and starts voice; the call shows connected once
  * voice is live; hanging up anywhere (app, lock screen, headset) stops voice,
  * and voice ending or failing ends the call. Mute is mirrored both ways.
+ * If the system refuses the call (no call service, a region without CallKit,
+ * the simulator), voice still starts as an in-app call.
  */
 export function useNativeRealtimeCall(options: {
   realtime: NativeCallRealtime;
@@ -102,7 +109,10 @@ export function useNativeRealtimeCall(options: {
   const [speaker, setSpeakerState] = useState(false);
   const [route, setRoute] = useState<NativeCallAudioRoute | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [systemCall, setSystemCall] = useState(false);
   const callIdRef = useRef<string | null>(null);
+  /** The call id the system knows about; null for an in-app call. */
+  const systemCallRef = useRef<string | null>(null);
   const connectedRef = useRef<string | null>(null);
   const realtimeRef = useRef(realtime);
   realtimeRef.current = realtime;
@@ -113,12 +123,15 @@ export function useNativeRealtimeCall(options: {
     async (reason: "ended" | "failed") => {
       const id = callIdRef.current;
       if (!id) return;
+      const reported = systemCallRef.current === id;
       callIdRef.current = null;
+      systemCallRef.current = null;
       connectedRef.current = null;
       setCallId(null);
       setEnding(false);
       setSpeakerState(false);
-      await call?.endCall(id, reason).catch(() => undefined);
+      setSystemCall(false);
+      if (reported) await call?.endCall(id, reason).catch(() => undefined);
     },
     [call],
   );
@@ -140,9 +153,11 @@ export function useNativeRealtimeCall(options: {
       if (event.callId !== callIdRef.current) return;
       if (event.type === "ended") {
         callIdRef.current = null;
+        systemCallRef.current = null;
         connectedRef.current = null;
         setCallId(null);
         setEnding(false);
+        setSystemCall(false);
         void realtimeRef.current.stop().catch(() => undefined);
       } else if (event.type === "muteChanged") {
         realtimeRef.current.setInputMuted(event.muted);
@@ -155,7 +170,7 @@ export function useNativeRealtimeCall(options: {
     const id = callIdRef.current;
     if (id && status === "active" && connectedRef.current !== id) {
       connectedRef.current = id;
-      call?.reportConnected(id);
+      if (systemCallRef.current === id) call?.reportConnected(id);
     }
   }, [call, status, callId]);
 
@@ -180,8 +195,19 @@ export function useNativeRealtimeCall(options: {
     callIdRef.current = id;
     setCallId(id);
     setError(null);
+    if (call) {
+      try {
+        await call.startCall({ callId: id, title: options.title, target: options.target ?? null });
+        if (callIdRef.current === id) {
+          systemCallRef.current = id;
+          setSystemCall(true);
+        }
+      } catch {
+        // The system refused the call; talk anyway, without the system call UI.
+      }
+    }
+    if (callIdRef.current !== id) return;
     try {
-      await call?.startCall({ callId: id, title: options.title, target: options.target ?? null });
       await current.start();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not start the call.");
@@ -201,7 +227,7 @@ export function useNativeRealtimeCall(options: {
     (next: boolean) => {
       realtimeRef.current.setInputMuted(next);
       const id = callIdRef.current;
-      if (id) void call?.setMuted(id, next).catch(() => undefined);
+      if (id && systemCallRef.current === id) void call?.setMuted(id, next).catch(() => undefined);
     },
     [call],
   );
@@ -230,6 +256,7 @@ export function useNativeRealtimeCall(options: {
     speaker,
     route,
     error,
+    systemCall,
     canStart: !callId && realtime.canStart,
     start,
     end,

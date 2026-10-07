@@ -38,6 +38,7 @@ function CallLabBody({ params }: { params: Params }) {
     speaker,
     route: speaker ? "speaker" : "receiver",
     error: params.error ?? null,
+    systemCall: true,
     canStart: false,
     start: async () => undefined,
     end: async () => undefined,
