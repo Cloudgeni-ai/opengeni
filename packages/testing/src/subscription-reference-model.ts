@@ -373,15 +373,30 @@ function earliestReset(
   session: Session,
   models: ModelId[],
   personalFallback: boolean,
+  now: number,
 ): number | null {
   let earliest: number | null = null;
   for (const connection of world.connections) {
-    if (connection.quota.kind !== "exhausted") continue;
     if (connection.ownership.kind === "personal" && !personalFallback) continue;
     if (!isAuthorized(world, session, connection)) continue;
-    if (!models.some((modelId) => connection.entitledModels.includes(modelId))) continue;
-    earliest =
-      earliest === null ? connection.quota.resetsAt : Math.min(earliest, connection.quota.resetsAt);
+    for (const modelId of models) {
+      const model = byId(world.models, modelId);
+      if (
+        !model ||
+        model.provider !== connection.provider ||
+        !connection.entitledModels.includes(modelId) ||
+        (connection.allowedModelIds != null && !connection.allowedModelIds.includes(modelId))
+      ) {
+        continue;
+      }
+      const cooldownUntil = connection.modelCooldowns?.[modelId] ?? -Infinity;
+      const quotaUntil =
+        connection.quota.kind === "exhausted" ? connection.quota.resetsAt : -Infinity;
+      const availableAt = Math.max(cooldownUntil, quotaUntil);
+      if (availableAt > now) {
+        earliest = earliest === null ? availableAt : Math.min(earliest, availableAt);
+      }
+    }
   }
   return earliest;
 }
@@ -475,7 +490,7 @@ export function decide(world: World, sessionId: string, now: number): Decision {
   return {
     kind: "wait",
     reason: "no_eligible_capacity",
-    earliestResetAt: earliestReset(world, session, allowedModels, personalFallback),
+    earliestResetAt: earliestReset(world, session, allowedModels, personalFallback, now),
   };
 }
 

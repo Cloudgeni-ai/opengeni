@@ -665,6 +665,28 @@ describe("reference model scenarios", () => {
     expect(decide(restricted, "session-1", NOW)).toMatchObject({ connectionId: "claude-b" });
   });
 
+  test("model:SUB-WAIT-02: a cooldown-only wait reports the earliest eligible model cooldown", () => {
+    const cooled: World = {
+      ...base(),
+      sessions: base().sessions.map((session) => ({ ...session, onlyThisModel: true })),
+      connections: base().connections.map((connection) =>
+        connection.provider === "claude"
+          ? {
+              ...connection,
+              modelCooldowns: {
+                "claude/model-a": NOW + (connection.id === "claude-a" ? 60_000 : 30_000),
+              },
+            }
+          : connection,
+      ),
+    };
+    expect(decide(cooled, "session-1", NOW)).toEqual({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+      earliestResetAt: NOW + 30_000,
+    });
+  });
+
   test("model:SUB-SEL-03, model:SUB-SEL-05: Spread places each session deterministically and spreads sessions across accounts without a cross-session lock", () => {
     const spreadWorld = (sessionIds: string[]): World => ({
       ...base(),
