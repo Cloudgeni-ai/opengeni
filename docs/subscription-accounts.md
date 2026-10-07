@@ -185,7 +185,10 @@ for it until the matching requirement below is implemented:
 - **SUB-STICK-06** At a re-selection point only automatic choices are
   re-evaluated; an explicit choice is kept. Verification: pending (cache-stickiness).
 - **SUB-STICK-07** A session that was started on a personal account and is
-  later shared returns to organization accounts at its next cold-cache point.
+  later shared stops using that account at once, even while its cache is
+  warm: SUB-ELIG-05 takes precedence over stickiness, so the personal account
+  is out of scope for the shared session (SUB-STICK-03). Its next turn moves
+  to an eligible organization account, or waits if none can serve.
   Verification: pending (cache-stickiness).
 
 ### Exhaustion and failover

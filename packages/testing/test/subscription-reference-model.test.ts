@@ -538,4 +538,49 @@ describe("reference model scenarios", () => {
     expect(nearestReasoningLevel(codexA, "unlisted", codexA)).toBe("medium");
     expect(nearestReasoningLevel(codexB, "unlisted", codexB)).toBe("medium");
   });
+
+  test("model:SUB-STICK-07, model:SUB-ELIG-05: a session shared while warm on a personal account leaves it at once", () => {
+    const privateOnPersonal: World = {
+      ...base(),
+      connections: [
+        ...base().connections,
+        {
+          ...shared("personal-claude", "claude"),
+          ownership: { kind: "personal", ownerId: "person-a" },
+        },
+      ],
+      sessions: base().sessions.map((session) => ({
+        ...session,
+        visibility: "private" as const,
+        binding: { connectionId: "personal-claude", modelId: "claude/model-a", lastUsedAt: NOW },
+      })),
+    };
+    // Private and warm: the personal account the session runs on is kept.
+    expect(decide(privateOnPersonal, "session-1", NOW + 1_000)).toMatchObject({
+      connectionId: "personal-claude",
+      switch: "sticky",
+    });
+    const nowShared: World = {
+      ...privateOnPersonal,
+      sessions: privateOnPersonal.sessions.map((session) => ({
+        ...session,
+        visibility: "shared" as const,
+      })),
+    };
+    // Shared while the cache is still warm: it moves to an organization account now.
+    expect(decide(nowShared, "session-1", NOW + 1_000)).toMatchObject({
+      kind: "run",
+      connectionId: "claude-a",
+      switch: "failover_same_provider",
+    });
+    // Staying on the personal account is reported as an eligibility violation.
+    const stayed = checkDecision(nowShared, "session-1", NOW + 1_000, {
+      kind: "run",
+      connectionId: "personal-claude",
+      modelId: "claude/model-a",
+      reasoningLevel: "max",
+      switch: "sticky",
+    });
+    expect(stayed.length).toBeGreaterThan(0);
+  });
 });
