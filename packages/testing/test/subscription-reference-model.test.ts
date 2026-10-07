@@ -625,4 +625,31 @@ describe("reference model scenarios", () => {
       earliestResetAt: NOW + 10_000,
     });
   });
+
+  test("model:SUB-SEL-03: Spread does not count the deciding session's own binding as load", () => {
+    const session = base().sessions[0]!;
+    const world: World = {
+      ...base(),
+      settings: {
+        ...base().settings,
+        organization: { ...base().settings.organization, rotation: {} },
+      },
+      sessions: [
+        {
+          ...session,
+          binding: { connectionId: "claude-b", modelId: "claude/model-a", lastUsedAt: 0 },
+        },
+        {
+          ...session,
+          id: "session-2",
+          binding: { connectionId: "claude-a", modelId: "claude/model-a", lastUsedAt: NOW },
+        },
+      ],
+    };
+    // claude-a carries another session; claude-b carries only this one, so it is the lighter.
+    expect(decide(world, "session-1", NOW)).toMatchObject({
+      kind: "run",
+      connectionId: "claude-b",
+    });
+  });
 });

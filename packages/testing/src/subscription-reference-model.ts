@@ -218,8 +218,11 @@ export function canServe(
 
 // Selection
 
-function boundSessions(world: World, connectionId: string): number {
-  return world.sessions.filter((session) => session.binding?.connectionId === connectionId).length;
+/** Other sessions bound to a connection; the deciding session is not its own load. */
+function boundSessions(world: World, connectionId: string, exceptSessionId: string): number {
+  return world.sessions.filter(
+    (session) => session.id !== exceptSessionId && session.binding?.connectionId === connectionId,
+  ).length;
 }
 
 /**
@@ -242,7 +245,8 @@ function pick(world: World, session: Session, candidates: Connection[]): Connect
     const known = Number(left.quota.kind === "unknown") - Number(right.quota.kind === "unknown");
     if (known !== 0) return known;
     if (rotation.mode === "spread") {
-      const load = boundSessions(world, left.id) - boundSessions(world, right.id);
+      const load =
+        boundSessions(world, left.id, session.id) - boundSessions(world, right.id, session.id);
       if (load !== 0) return load;
     }
     return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
