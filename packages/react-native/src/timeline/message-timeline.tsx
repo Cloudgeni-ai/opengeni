@@ -875,7 +875,15 @@ function CollapsibleUserText({ children }: { children: ReactNode }) {
   return (
     <View>
       <View style={collapsed ? { maxHeight: USER_MESSAGE_COLLAPSED_PX, overflow: "hidden" } : null}>
-        <View onLayout={(event) => setHeight(event.nativeEvent.layout.height)}>{children}</View>
+        {/* Measure only while unclipped: inside the clip the content is laid out
+            shorter, and re-measuring there would flip collapse on and off. */}
+        <View
+          onLayout={(event) => {
+            if (!collapsed) setHeight(event.nativeEvent.layout.height);
+          }}
+        >
+          {children}
+        </View>
         {collapsed ? (
           <View
             pointerEvents="none"
