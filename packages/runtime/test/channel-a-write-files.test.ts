@@ -602,4 +602,64 @@ describe("internal commands whose first observation is stale", () => {
     expect(opened.execSessionId).toBe(9);
     expect(reads).toEqual([]);
   });
+
+  type RunResult = { stdout: string; exitCode: number | null; sessionId?: number };
+  const runInternal = (svc: SandboxChannelAService, cmd: string) =>
+    (svc as unknown as { run(args: ChannelAExecArgs): Promise<RunResult> }).run({ cmd });
+
+  test("a session-lost reply with an exit status header is loss, not the command's exit", async () => {
+    const session: ChannelASession = {
+      exec: async () => ({ stdout: "partial", stderr: "", exitCode: null, sessionId: 41 }),
+      hasRetainedProcess: () => true,
+      writeStdinForProcessControl: async () =>
+        "Process exited with code 1\n\nOutput:\nwrite_stdin failed: session not found: 41",
+    };
+    const result = await runInternal(service(session), "work");
+    expect(result).toMatchObject({ stdout: "partial", exitCode: null, sessionId: 41 });
+  });
+
+  test("multi-page Modal control reads join output once and settle the exact process", async () => {
+    const state = { reads: 0, settled: [] as number[], adopted: [] as number[] };
+    const pages = [
+      "Provider output receipt: r1\nProcess running with session ID 41\nOutput:\n1",
+      "Provider output receipt: r2\nProcess running with session ID 41\nOutput:\n2",
+      "Provider output receipt: r3\nProcess exited with code 0\nOutput:\nz",
+    ];
+    const backend = {
+      execCommand: async () =>
+        "Provider output receipt: r0\nProcess running with session ID 41\nOutput:\na",
+      writeStdin: async (args: unknown) => {
+        expect((args as { chars?: string }).chars).toBe("");
+        return pages[state.reads++]!;
+      },
+    };
+    const routing = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: backend as never,
+        sandboxId: "sb-test",
+        kind: "modal",
+        leaseEpoch: 1,
+        providerInstanceId: "instance",
+        activeEpoch: 0,
+      }),
+      beforeMutation: async () => ({}),
+      afterMutation: async () => undefined,
+      settleProcess: async ({ process }) => {
+        state.settled.push(process.providerSessionId);
+      },
+      adoptProcessAsBackgroundCommand: async ({ process }) => {
+        state.adopted.push(process.providerSessionId);
+        return {} as never;
+      },
+    });
+    const result = await runInternal(service(routing as unknown as ChannelASession), "work");
+    expect(result.stdout).toBe("a12z");
+    expect(result.exitCode).toBe(0);
+    expect(result.sessionId).toBeUndefined();
+    expect(state.reads).toBe(3);
+    expect(state.settled).toEqual([41]);
+    expect(state.adopted).toEqual([]);
+    expect(routing.hasRetainedProcess(41)).toBe(false);
+  });
 });

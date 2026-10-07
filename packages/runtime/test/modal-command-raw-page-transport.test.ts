@@ -56,7 +56,8 @@ async function fixture(
     | "cancel"
     | "failure"
     | "poll-before-eof"
-    | "eof-without-exit" = "normal",
+    | "eof-without-exit"
+    | "hung-repoll" = "normal",
 ) {
   const directory = mkdtempSync(join(tmpdir(), "modal-raw-page-tls-"));
   const key = join(directory, "server.key"),
@@ -99,7 +100,7 @@ async function fixture(
     polls = 0,
     readsEnded = 0;
   const pollAfterReads: boolean[] = [];
-  let terminal = mode !== "split" && mode !== "eof-without-exit" && mode !== "poll-before-eof";
+  let terminal = mode === "normal" || mode === "bounded" || mode === "cancel" || mode === "failure";
   const entered = (call: any, method: string) => {
     expect(call.metadata.get("authorization")).toEqual(["Bearer raw-page-test-token"]);
     expect(call.request.taskId).toBe("task-original");
@@ -142,7 +143,7 @@ async function fixture(
         const offset = Number(call.request.offset),
           stream = call.request.fileDescriptor;
         if (mode === "cancel") return;
-        if (mode === "poll-before-eof") {
+        if (mode === "poll-before-eof" || mode === "hung-repoll") {
           // The command finishes only after the concurrent point-in-time poll
           // was answered "running"; its streams then reach EOF.
           void until(() => polls === 1, "the first concurrent poll").then(() => {
@@ -192,6 +193,8 @@ async function fixture(
         if (mode === "cancel" || mode === "failure") return;
         pollAfterReads.push(readsEnded === 2);
         polls++;
+        // Only the race-losing concurrent poll answers; the re-poll hangs.
+        if (mode === "hung-repoll" && polls > 1) return;
         finish();
         callback(null, terminal ? { code: 0 } : {});
       },
@@ -344,6 +347,34 @@ test("EOF without a provider exit stays unknown and re-polls only within the rea
   const terminal = await f.control.readRaw(raw.command, 1_000);
   expect(terminal.exit).toEqual({ source: "router_poll", code: 0 });
   expect(f.requests.filter((request) => request.method === "read").length).toBe(reads);
+  await f.drained();
+});
+
+test("a hung re-poll near the read deadline keeps the page and leaves the exit unknown", async () => {
+  const f = await fixture("hung-repoll");
+  const expected = cursor();
+  const started = performance.now();
+  const raw = await f.control.readRaw(expected, 150);
+  // Bounded by the read deadline plus a small grace, far below the outer
+  // waitMs + 5 s budget that would otherwise discard the whole page.
+  expect(performance.now() - started).toBeLessThan(2_000);
+  expect(Buffer.from(raw.streams.stdout.bytes)).toEqual(f.stdout);
+  expect(raw.streams.stdout.eof).toBe(true);
+  expect(raw.streams.stderr.eof).toBe(true);
+  expect(raw.exit).toEqual({ source: "router_poll", code: null });
+  expect(f.stats().polls).toBe(2);
+  // The hung re-poll was cancelled at its bound rather than left outstanding.
+  await f.drained();
+});
+
+test("caller cancellation during a post-EOF re-poll propagates instead of returning a page", async () => {
+  const f = await fixture("hung-repoll");
+  const cancellation = new AbortController();
+  const reason = new Error("caller cancelled during re-poll");
+  const pending = f.control.readRaw(cursor(), 5_000, cancellation.signal).catch((error) => error);
+  await until(() => f.stats().polls === 2, "the post-EOF re-poll");
+  cancellation.abort(reason);
+  expect(await pending).toBe(reason);
   await f.drained();
 });
 

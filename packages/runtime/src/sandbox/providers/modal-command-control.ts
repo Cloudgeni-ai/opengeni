@@ -44,6 +44,8 @@ type RouterEntry = {
   idle?: ReturnType<typeof setTimeout>;
 };
 type RouterLookup = { controller: AbortController; waiters: number; settled: boolean };
+/** A post-EOF exit re-poll may finish this long after the read deadline. */
+const REPOLL_GRACE_MS = 250;
 type ControlObservation = { command: ModalRouterProviderCommand; output: string };
 type SupervisionControlResult = {
   state: "idle" | "running" | "quiescent";
@@ -854,7 +856,10 @@ export class ModalCommandControl {
    * still running. After both streams reach EOF, poll again within this read's
    * existing budget. EOF is not exit proof: a re-poll fault or an exhausted
    * budget keeps the observed bytes and reports the exit as still unknown, and
-   * only caller cancellation propagates. */
+   * only caller cancellation propagates. Re-poll faults are deliberately not
+   * classified here; the next page's concurrent poll classifies the same
+   * provider state. Each re-poll is bounded by the read deadline so a slow
+   * poll cannot exhaust the outer budget and discard the page. */
   private async pollAfterEof(
     router: ModalCommandRouterWire,
     command: ModalRouterProviderCommand,
@@ -864,9 +869,14 @@ export class ModalCommandControl {
     let pause = 10;
     for (;;) {
       signal.throwIfAborted();
+      const budget = deadline - performance.now();
+      if (budget <= 0) return null;
       let exit: number | null;
       try {
-        exit = await router.poll(command, signal);
+        exit = await router.poll(
+          command,
+          AbortSignal.any([signal, AbortSignal.timeout(Math.ceil(budget) + REPOLL_GRACE_MS)]),
+        );
       } catch {
         signal.throwIfAborted();
         return null;

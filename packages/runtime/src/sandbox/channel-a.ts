@@ -21,6 +21,7 @@
 // `createEditor` for text when `exec` is absent.
 
 import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import { confinedFileReadCommand, parseConfinedFileRead } from "./confined-file-read";
 import { constants as zlibConstants, createGunzip } from "node:zlib";
 import type {
@@ -378,6 +379,10 @@ const REPOSITORY_DISCOVERY_TRUNCATED_SENTINEL = "__OPENGENI_REPOSITORY_DISCOVERY
 const INTERNAL_COMMAND_SETTLE_MIN_WAIT_MS = 30_000;
 /** One bounded control read while settling a yielded internal command. */
 const INTERNAL_COMMAND_SETTLE_SLICE_MS = 2_000;
+/** A "running" control read faster than this did not wait for output; pause
+ * before the next read instead of spinning. */
+const INTERNAL_COMMAND_SETTLE_FAST_READ_MS = 100;
+const INTERNAL_COMMAND_SETTLE_PAUSE_MS = 250;
 
 /** Raw ripgrep stdout kept on the box before encoding. */
 export const CODE_SEARCH_RG_MAX_BYTES = 64 * 1024 * 1024;
@@ -698,10 +703,11 @@ export class SandboxChannelAService {
     sessionId?: number;
     wallTimeSeconds: number;
   }> {
+    const startedAt = performance.now();
     const withRunAs = this.runAs ? { ...args, runAs: this.runAs } : args;
     if (this.session.exec) {
       const r = await this.session.exec(withRunAs);
-      return await this.settleRetainedInternalCommand(args, {
+      return await this.settleRetainedInternalCommand(args, startedAt, {
         stdout: r.stdout ?? r.output ?? "",
         stderr: r.stderr ?? "",
         exitCode: r.exitCode ?? null,
@@ -720,7 +726,7 @@ export class SandboxChannelAService {
       // pty/write 409) even on backends (Modal) whose only exec surface is
       // execCommand. We DON'T close over the banner for stdout (that is stripped).
       const sessionId = parseExecBannerSessionId(raw);
-      return await this.settleRetainedInternalCommand(args, {
+      return await this.settleRetainedInternalCommand(args, startedAt, {
         stdout: stripExecBanner(raw),
         stderr: "",
         exitCode: parseExecBannerExitCode(raw),
@@ -738,13 +744,15 @@ export class SandboxChannelAService {
    * would report a false failure, and the reconciler would later adopt the
    * finished command into the agent's background commands. Keep observing the
    * exact retained process through the non-model-visible control read until
-   * its exit, within the caller's wait, so the routing layer settles it
-   * durably before this operation returns. Interactive PTYs keep their
-   * yielded session; an unproven outcome keeps the original running result,
-   * which every internal caller already treats as unavailable.
+   * its exit, within the caller's wait measured from the command's start, so
+   * the routing layer settles it durably before this operation returns.
+   * Interactive PTYs keep their yielded session; a lost, malformed or
+   * otherwise unproven outcome keeps the original running result, which every
+   * internal caller already treats as unavailable.
    */
   private async settleRetainedInternalCommand(
     args: ChannelAExecArgs,
+    commandStartedAt: number,
     result: Awaited<ReturnType<SandboxChannelAService["run"]>>,
   ): Promise<Awaited<ReturnType<SandboxChannelAService["run"]>>> {
     const sessionId = result.sessionId;
@@ -756,13 +764,14 @@ export class SandboxChannelAService {
       session.hasRetainedProcess?.(sessionId) !== true
     )
       return result;
-    const startedAt = performance.now();
+    const settleStartedAt = performance.now();
     const deadline =
-      startedAt + Math.max(args.yieldTimeMs ?? 0, INTERNAL_COMMAND_SETTLE_MIN_WAIT_MS);
+      commandStartedAt + Math.max(args.yieldTimeMs ?? 0, INTERNAL_COMMAND_SETTLE_MIN_WAIT_MS);
     let stdout = result.stdout;
     for (;;) {
       const remaining = deadline - performance.now();
       if (remaining <= 0) return { ...result, stdout };
+      const readStartedAt = performance.now();
       let page: string;
       try {
         page = await session.writeStdinForProcessControl({
@@ -774,18 +783,24 @@ export class SandboxChannelAService {
       } catch {
         return { ...result, stdout };
       }
+      // Some adapters report a vanished process as an exit status followed by
+      // a session-not-found body. That is loss, not the command's exit code.
+      if (isExecSessionLostBanner(page, sessionId, session)) return { ...result, stdout };
       const banner = parseExecResponseBanner(page);
       if (banner.kind === "exited") {
         return {
           stdout: stdout + stripExecBanner(page),
           stderr: result.stderr,
           exitCode: banner.exitCode,
-          wallTimeSeconds: result.wallTimeSeconds + (performance.now() - startedAt) / 1_000,
+          wallTimeSeconds: result.wallTimeSeconds + (performance.now() - settleStartedAt) / 1_000,
         };
       }
       // Lost, malformed, or rebound observations are not exit proof.
       if (banner.kind !== "running" || banner.sessionId !== sessionId) return { ...result, stdout };
       stdout += stripExecBanner(page);
+      const pause = Math.min(INTERNAL_COMMAND_SETTLE_PAUSE_MS, deadline - performance.now());
+      if (performance.now() - readStartedAt < INTERNAL_COMMAND_SETTLE_FAST_READ_MS && pause > 0)
+        await delay(pause);
     }
   }
 
