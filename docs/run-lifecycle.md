@@ -4077,6 +4077,13 @@ directory. Resolving, losing, or renaming live file metadata does not rewrite
 that text. Active image bytes still require current authorized metadata and
 checksum-valid content; compacted attachment catalogs remain receipt-only.
 The receipt-format change incurs a one-time prefix change for existing histories.
+One exception: when this turn's file-authority lookup excludes an active
+reference (for example a file another participant shared in a shared session),
+its receipt says the file is not available to the current requester and gives
+no download instruction, so the model neither attempts a failing fetch nor
+reports the file as deleted. The authority boundary is unchanged, and the text
+stays stable for that requester. Compacted catalogs and callers without an
+authority resolver keep the reference-only receipt.
 
 Service turns without a human file subject read shared attachments under an explicit
 null subject, clearing inherited private-file authority for that lookup. The reader
