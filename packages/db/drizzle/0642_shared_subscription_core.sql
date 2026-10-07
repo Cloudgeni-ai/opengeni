@@ -862,16 +862,14 @@ BEGIN
   CREATE POLICY subscription_connections_membership_lifecycle ON subscription_connections FOR DELETE
     USING (current_user = pg_catalog.pg_get_userbyid((SELECT lifecycle.proowner
         FROM pg_catalog.pg_proc lifecycle
-        WHERE lifecycle.oid = pg_catalog.to_regprocedure(pg_catalog.format(
-          '%I.finalize_organization_retention_deletion(uuid,uuid,uuid,text)',
-          current_schema()))))
+        WHERE lifecycle.oid = pg_catalog.to_regprocedure(
+          'finalize_organization_retention_deletion(uuid,uuid,uuid,text)')))
       AND current_setting('opengeni.organization_tenancy_lifecycle', true) = 'organization_membership_lifecycle');
   CREATE POLICY subscription_connections_membership_lifecycle_read ON subscription_connections FOR SELECT
     USING (current_user = pg_catalog.pg_get_userbyid((SELECT lifecycle.proowner
         FROM pg_catalog.pg_proc lifecycle
-        WHERE lifecycle.oid = pg_catalog.to_regprocedure(pg_catalog.format(
-          '%I.finalize_organization_retention_deletion(uuid,uuid,uuid,text)',
-          current_schema()))))
+        WHERE lifecycle.oid = pg_catalog.to_regprocedure(
+          'finalize_organization_retention_deletion(uuid,uuid,uuid,text)')))
       AND current_setting('opengeni.organization_tenancy_lifecycle', true) = 'organization_membership_lifecycle');
   CREATE POLICY subscription_connection_workspaces_scope ON subscription_connection_workspaces FOR SELECT
     USING (account_id::text = nullif(current_setting('opengeni.account_id', true), '')

@@ -75,6 +75,7 @@ async function verifySubscriptionLifecycleRlsAsNonBypassOwner(connectionId: stri
         `grant execute on function opengeni_private.subscription_organization_admin(uuid) to ${probeRole}`,
       );
       await tx.unsafe(`set local role ${probeRole}`);
+      await tx.unsafe("set local search_path = pg_catalog, public, opengeni_private, pg_temp");
       const [attributes] = await tx<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
         select rolsuper, rolbypassrls from pg_roles where rolname = current_user`;
       expect(attributes).toEqual({ rolsuper: false, rolbypassrls: false });
