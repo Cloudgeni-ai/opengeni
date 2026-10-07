@@ -16,6 +16,7 @@ import {
 } from "@opengeni/db";
 import { type Settings } from "@opengeni/config";
 import { CodexReloginRequired, codexPlanKey } from "@opengeni/codex";
+import { loadCodexAccountsLackingModel } from "@opengeni/core";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   authoritativeCodexCapacityResetAt,
@@ -41,6 +42,10 @@ import type {
   RunAgentTurnResult,
 } from "../types";
 import { recordTurnStartupPhase } from "../../observability-metrics";
+import {
+  startSubscriptionCoreShadow,
+  subscriptionCoreShadowRequest,
+} from "./subscription-core-shadow";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { deliverFailedChildTurnToParent } from "../parent-wake";
 import { randomUUID } from "node:crypto";
@@ -69,6 +74,39 @@ import type {
  * most one per interval with the count it hid. The public log projection drops
  * the identifiers and counts, so the closed `reason` keeps the depth visible. */
 export const CODEX_POOL_LOW_WARNING_INTERVAL_MS = 10 * 60_000;
+
+/** Longest a turn waits to learn which accounts serve its model. */
+export const CODEX_MODEL_SUPPORT_LOOKUP_TIMEOUT_MS = 2_000;
+
+/**
+ * Accounts whose live model list lacks the turn's model. Never delays a turn
+ * by more than the timeout and never fails it: an unknown answer excludes
+ * nothing, and the plan-entitlement failover still covers a wrong pick.
+ */
+export async function codexAccountsLackingTurnModel(
+  db: ActivityServices["db"],
+  settings: Settings,
+  workspaceId: string,
+  upstreamModelId: string | null | undefined,
+  lookup: typeof loadCodexAccountsLackingModel = loadCodexAccountsLackingModel,
+  timeoutMs = CODEX_MODEL_SUPPORT_LOOKUP_TIMEOUT_MS,
+): Promise<Set<string>> {
+  if (!upstreamModelId) return new Set();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      lookup(db, settings, workspaceId, upstreamModelId),
+      new Promise<Set<string>>((resolve) => {
+        timer = setTimeout(() => resolve(new Set()), timeoutMs);
+      }),
+    ]);
+  } catch {
+    return new Set();
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 const codexPoolLowWarningThrottle = createLogThrottle({
   intervalMs: CODEX_POOL_LOW_WARNING_INTERVAL_MS,
   maxKeys: 1_024,
@@ -165,6 +203,14 @@ export async function selectCodexTurnCapacity(
     const credentialSelectionStartedAt = performance.now();
     let credentialSelectionOutcome: "completed" | "failed" = "completed";
     try {
+      // Accounts whose live model list lacks this model (a smaller plan in a
+      // mixed pool). Bounded and best effort: an unknown list excludes nothing.
+      const lackingModel = await codexAccountsLackingTurnModel(
+        db,
+        settings,
+        input.workspaceId,
+        deps.turnExecutionPolicy.upstreamModelId,
+      );
       const selectForTurn = (
         context: CodexCredentialLeaseSelectionContext,
         lockedSessionCodexState: CodexCredentialLeaseSessionState,
@@ -182,12 +228,17 @@ export async function selectCodexTurnCapacity(
           !allowed.some((account) => account.id === sessionPin)
         )
           throw new Error("This model is disabled for the pinned Codex subscription");
+        // An explicit session pin is honored as is; otherwise prefer accounts
+        // that serve the model, keeping the full list when none is known to.
+        const explicitPin = Boolean(sessionPin && lockedSessionCodexState.pinSource !== "policy");
+        const serving = allowed.filter((account) => !lackingModel.has(account.id));
+        const candidates = explicitPin || serving.length === 0 ? allowed : serving;
         return selectCodexCredentialLeaseForTurn({
           // The accepted product model also scopes proven plan entitlement:
           // an account whose current plan excludes it is not a candidate.
           context: {
             ...context,
-            accounts: allowed,
+            accounts: candidates,
             modelId: deps.turnExecutionPolicy.productModelId,
           },
           sessionId: input.sessionId,
@@ -530,6 +581,30 @@ export async function selectCodexTurnCapacity(
           payloadBytes: shadowResult.payloadBytes,
         });
       }
+
+      // Shared subscription core shadow: started in the background, bounded
+      // and fail-open; it never delays the turn or changes the lease, wait or
+      // failover decided above.
+      void startSubscriptionCoreShadow({
+        enabled: settings.subscriptionCoreShadowEnabled,
+        provider: "codex",
+        timeoutMs: settings.subscriptionCoreShadowTimeoutMs,
+        db,
+        observability,
+        signal: deps.cancellationSignal,
+        // The session state the legacy selection was made from, not the
+        // pin and last account it has written since.
+        request: () =>
+          subscriptionCoreShadowRequest(deps, "codex", turnId, null, {
+            pinnedConnectionId: lockedSessionCodexState.pinnedCredentialId,
+            pinSource: lockedSessionCodexState.pinSource,
+            lastConnectionId: lockedSessionCodexState.lastCredentialId,
+          }),
+        legacy: {
+          selectedConnectionId: providerTurn.effectiveCodexCredentialId,
+          reusedLease: leased.reused,
+        },
+      });
 
       const poolDepth = eligibleCount === 0 ? "zero" : eligibleCount === 1 ? "one" : "many";
       observability.incrementCounter({

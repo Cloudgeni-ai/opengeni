@@ -31,21 +31,30 @@ type Dependencies = {
   ) => ReturnType<ReturnType<typeof buildCodexTokenResolver>["getToken"]>;
 };
 
-/** Live provider support is separate from deployment membership and model permissions. */
-export async function loadWorkspaceCodexModelAvailability(
+// Resolved per call (as before #3781) so module-level spies on these imports take effect.
+const defaultDependencies = (): Dependencies => ({
+  listAccounts: listCodexAccountStatuses,
+  getRotation: getCodexRotationSettings,
+  loadCredential: loadCodexCredentialForRun,
+  fetchModels: fetchCodexModels,
+  getToken: (targetDb, targetSettings, targetWorkspaceId, credentialId) =>
+    buildCodexTokenResolver(targetDb, targetSettings, targetWorkspaceId, credentialId).getToken(),
+});
+
+type AccountCatalog = {
+  account: Awaited<ReturnType<typeof listCodexAccountStatuses>>[number];
+  ok: boolean;
+  slugs: string[];
+  checkedAt: string;
+};
+
+/** Each allocatable account's live model list (cached briefly per credential version). */
+async function loadAccountCatalogs(
   db: Database,
   settings: Settings,
   workspaceId: string,
-  deps: Dependencies = {
-    listAccounts: listCodexAccountStatuses,
-    getRotation: getCodexRotationSettings,
-    loadCredential: loadCodexCredentialForRun,
-    fetchModels: fetchCodexModels,
-    getToken: (targetDb, targetSettings, targetWorkspaceId, credentialId) =>
-      buildCodexTokenResolver(targetDb, targetSettings, targetWorkspaceId, credentialId).getToken(),
-  },
-): Promise<Record<string, ModelAvailabilityObservation>> {
-  if (!settings.codexSubscriptionEnabled) return {};
+  deps: Dependencies,
+): Promise<AccountCatalog[]> {
   const [accounts, rotation] = await Promise.all([
     deps.listAccounts(db, workspaceId),
     deps.getRotation(db, workspaceId),
@@ -106,6 +115,41 @@ export async function loadWorkspaceCodexModelAvailability(
       }
     }),
   );
+  return live;
+}
+
+/**
+ * Accounts whose live model list was read and does not include
+ * `upstreamModelId`. The turn allocator skips them for that model, so a pool
+ * that mixes plans (a free login beside paid ones) never leases a turn to an
+ * account that cannot serve it. Unreadable accounts are not listed: a failed
+ * read proves nothing, and a turn leased to one quarantines it and fails over.
+ */
+export async function loadCodexAccountsLackingModel(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  upstreamModelId: string,
+  deps: Dependencies = defaultDependencies(),
+): Promise<Set<string>> {
+  if (!settings.codexSubscriptionEnabled) return new Set();
+  const live = await loadAccountCatalogs(db, settings, workspaceId, deps);
+  return new Set(
+    live
+      .filter(({ ok, slugs }) => ok && !slugs.includes(upstreamModelId))
+      .map(({ account }) => account.id),
+  );
+}
+
+/** Live provider support is separate from deployment membership and model permissions. */
+export async function loadWorkspaceCodexModelAvailability(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  deps: Dependencies = defaultDependencies(),
+): Promise<Record<string, ModelAvailabilityObservation>> {
+  if (!settings.codexSubscriptionEnabled) return {};
+  const live = await loadAccountCatalogs(db, settings, workspaceId, deps);
   return Object.fromEntries(
     configuredModels(withCodexCatalogProvider(settings))
       .filter(
@@ -118,11 +162,15 @@ export async function loadWorkspaceCodexModelAvailability(
         const permitted = live.filter(({ account }) =>
           connectionModelAllowed(account.allowedModelIds, model.id),
         );
-        // The allocator may choose any permitted candidate, so all must support it.
-        const supported =
-          permitted.length > 0 &&
-          permitted.every(({ ok, slugs }) => ok && slugs.includes(model.upstreamModelId));
-        const uncertain = permitted.find(({ ok }) => !ok);
+        // One reachable permitted account serving the model is enough: the
+        // allocator skips accounts whose live list lacks it
+        // (loadCodexAccountsLackingModel), so a smaller plan in the pool never
+        // hides what the others serve. An account whose catalog read fails
+        // (revoked token, provider outage) proves nothing either way; a turn
+        // leased to it quarantines it and fails over.
+        const reachable = permitted.filter(({ ok }) => ok);
+        const supported = reachable.some(({ slugs }) => slugs.includes(model.upstreamModelId));
+        const uncertain = reachable.length === 0 ? permitted.find(({ ok }) => !ok) : undefined;
         return [
           model.definitionVersion,
           {

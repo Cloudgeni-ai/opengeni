@@ -11,6 +11,7 @@
       "@opengeni/react-native": ["../../packages/react-native/src/index.ts"],
       "@opengeni/react-native/ui": ["../../packages/react-native/src/ui/index.ts"],
       "@opengeni/react-native/expo": ["../../packages/react-native/src/expo.ts"],
+      "@opengeni/react-native/webrtc": ["../../packages/react-native/src/webrtc.ts"],
       "@opengeni/react-native/adapters": ["../../packages/react-native/src/adapters.ts"],
       "zod": ["../../node_modules/zod"],
       "zod/*": ["../../node_modules/zod/*"],

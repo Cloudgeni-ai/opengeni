@@ -611,8 +611,14 @@ function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutR
     layoutRef.current?.measure();
   }, [children]);
   return (
-    <div ref={wrapperRef} className="group/copy relative mt-3 max-w-full first:mt-0">
-      <div className="pointer-events-none absolute top-0 right-0 z-10">
+    // Touch shows the copy action permanently at full touch size, so it sits
+    // under the table there instead of covering the right-aligned header.
+    <div
+      ref={wrapperRef}
+      data-og-table=""
+      className="group/copy relative mt-3 max-w-full first:mt-0 pointer-coarse:pb-11"
+    >
+      <div className="pointer-events-none absolute top-0 right-0 z-10 pointer-coarse:top-auto pointer-coarse:bottom-0">
         <div className="pointer-events-auto">
           <CopyButton
             text={() => tableElementToTsv(tableRef.current)}

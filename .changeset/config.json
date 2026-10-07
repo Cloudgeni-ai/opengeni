@@ -27,9 +27,11 @@
       "@opengeni/observability",
       "@opengeni/ogtool",
       "@opengeni/react",
+      "@opengeni/react-native",
       "@opengeni/runtime",
       "@opengeni/sdk",
       "@opengeni/storage",
+      "@opengeni/subscriptions",
       "@opengeni/tool-gateway",
       "@opengeni/worker-bundle",
       "@opengeni/xai-subscription"

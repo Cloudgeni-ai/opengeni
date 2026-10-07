@@ -185,6 +185,7 @@ import type { MCPServer } from "@openai/agents";
 import {
   boundModelToolOutputItem,
   CODEX_APPS_MCP_URL,
+  CodexAppsCredentialUnavailable,
   type CodexTokenSnapshot,
 } from "@opengeni/codex";
 import { hostShellSession } from "./isolated-git-home-fixture";
@@ -10165,7 +10166,7 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("codex_apps: no explicit Apps auth => graceful best-effort drop", async () => {
+  test("codex_apps: no explicit Apps auth => graceful best-effort drop without a setup card (SUB-APPS-01)", async () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer tok-123" },
     });
@@ -10182,44 +10183,71 @@ describe("runtime event normalization", () => {
     try {
       expect(prepared.mcpServers).toHaveLength(0);
       expect(mcp.calls).toEqual([]);
-      expect(authNeeded).toContainEqual(
-        expect.objectContaining({
-          serverId: "codex_apps",
-          providerDomain: "chatgpt.com",
-          reason: "missing_connection",
-          toolName: null,
-        }),
-      );
+      // Plain setup (initialize/tools/list) never publishes an Apps card.
+      expect(authNeeded).toEqual([]);
     } finally {
       await prepared.close();
       mcp.close();
     }
   });
 
-  test("codex_apps: provider 401 publishes an actionable expired-auth signal", async () => {
-    const mcp = startTestMcpServer({
+  test("codex_apps: provider 401 on setup is silent; on tool calls it publishes one expired-auth card (SUB-APPS-01)", async () => {
+    const rejectedAtSetup = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer provider-rejected" },
     });
-    const authNeeded: ToolAuthNeededPayload[] = [];
-    const prepared = await prepareAgentTools(
+    const setupAuthNeeded: ToolAuthNeededPayload[] = [];
+    const preparedRejected = await prepareAgentTools(
       testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
       [{ kind: "mcp", id: "codex_apps" }],
       {
         codexAppsAuth: makeCodexAppsAuth(),
+        mcpFetchImpl: codexAppsTestFetch(rejectedAtSetup.url),
+        onAuthNeeded: (payload) => setupAuthNeeded.push(payload),
+      },
+    );
+    try {
+      expect(preparedRejected.mcpServers).toHaveLength(0);
+      expect(setupAuthNeeded).toEqual([]);
+    } finally {
+      await preparedRejected.close();
+      rejectedAtSetup.close();
+    }
+
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer tok-123" },
+    });
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    let accessToken = "tok-123";
+    const auth = makeCodexAppsAuth();
+    auth.withAuthorization = async (use) =>
+      await use({ accessToken, chatgptAccountId: "acct-9", isFedramp: false });
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: auth,
         mcpFetchImpl: codexAppsTestFetch(mcp.url),
         onAuthNeeded: (payload) => authNeeded.push(payload),
       },
     );
     try {
-      expect(prepared.mcpServers).toHaveLength(0);
-      expect(authNeeded).toContainEqual(
-        expect.objectContaining({
-          serverId: "codex_apps",
-          providerDomain: "chatgpt.com",
-          reason: "expired",
-          toolName: null,
-        }),
-      );
+      expect(prepared.mcpServers).toHaveLength(1);
+      await prepared.mcpServers[0]!.listTools();
+      accessToken = "provider-rejected";
+      for (const query of ["first", "second"]) {
+        const result = await prepared.mcpServers[0]!.callToolResult!(
+          "codex_apps__search_documents",
+          { query },
+        );
+        expect(result).toMatchObject({ isError: true });
+      }
+      expect(authNeeded).toHaveLength(1);
+      expect(authNeeded[0]).toMatchObject({
+        serverId: "codex_apps",
+        providerDomain: "chatgpt.com",
+        reason: "expired",
+      });
+      expect(authNeeded[0]!.toolName).toEqual(expect.any(String));
     } finally {
       await prepared.close();
       mcp.close();
@@ -10285,7 +10313,7 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("codex_apps: getToken rejection (needs_relogin) => graceful best-effort drop", async () => {
+  test("codex_apps: getToken rejection (needs_relogin) => graceful best-effort drop without a setup card (SUB-APPS-01)", async () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer tok-123" },
     });
@@ -10304,14 +10332,142 @@ describe("runtime event normalization", () => {
     try {
       expect(prepared.mcpServers).toHaveLength(0);
       expect(mcp.calls).toEqual([]);
-      expect(authNeeded).toContainEqual(
-        expect.objectContaining({
-          serverId: "codex_apps",
-          providerDomain: "chatgpt.com",
-          reason: "refresh_failed",
-          toolName: null,
-        }),
-      );
+      expect(authNeeded).toEqual([]);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps: an unavailable designated credential publishes one correctly classified card per turn, only for a tool call (SUB-APPS-01)", async () => {
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer tok-123" },
+    });
+    let failure: Error | null = null;
+    const auth = makeCodexAppsAuth();
+    const authorize = auth.withAuthorization;
+    auth.withAuthorization = async (use) => {
+      if (failure) throw failure;
+      return await authorize(use);
+    };
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: auth,
+        mcpFetchImpl: codexAppsTestFetch(mcp.url),
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(1);
+      await prepared.mcpServers[0]!.listTools();
+      expect(authNeeded).toEqual([]);
+
+      // Setup traffic after the designation becomes unusable stays silent
+      // (listing may degrade or fail; either way no card is published).
+      failure = new CodexAppsCredentialUnavailable();
+      await prepared.mcpServers[0]!.listTools().catch(() => []);
+      expect(authNeeded).toEqual([]);
+
+      for (const query of ["first", "second", "third"]) {
+        const result = await prepared.mcpServers[0]!.callToolResult!(
+          "codex_apps__search_documents",
+          { query },
+        );
+        expect(result).toMatchObject({ isError: true });
+      }
+      expect(mcp.calls).toEqual([]);
+      expect(authNeeded).toHaveLength(1);
+      expect(authNeeded[0]).toMatchObject({
+        serverId: "codex_apps",
+        providerDomain: "chatgpt.com",
+        provider: "codex_apps",
+        reason: "designated_credential_unavailable",
+      });
+      expect(authNeeded[0]!.toolName).toEqual(expect.any(String));
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps: a failed card publish does not use up the turn's one Apps card (SUB-APPS-01)", async () => {
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer tok-123" },
+    });
+    let failure: Error | null = null;
+    const auth = makeCodexAppsAuth();
+    const authorize = auth.withAuthorization;
+    auth.withAuthorization = async (use) => {
+      if (failure) throw failure;
+      return await authorize(use);
+    };
+    const delivered: ToolAuthNeededPayload[] = [];
+    let publishAttempts = 0;
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: auth,
+        mcpFetchImpl: codexAppsTestFetch(mcp.url),
+        onAuthNeeded: (payload) => {
+          publishAttempts += 1;
+          if (publishAttempts === 1) throw new Error("event bus unavailable");
+          delivered.push(payload);
+        },
+      },
+    );
+    try {
+      await prepared.mcpServers[0]!.listTools();
+      failure = new CodexAppsCredentialUnavailable();
+      for (const query of ["first", "second", "third"]) {
+        const result = await prepared.mcpServers[0]!.callToolResult!(
+          "codex_apps__search_documents",
+          { query },
+        );
+        expect(result).toMatchObject({ isError: true });
+      }
+      expect(publishAttempts).toBe(2);
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]).toMatchObject({ reason: "designated_credential_unavailable" });
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps: a genuine token refresh failure on a tool call stays refresh_failed (SUB-APPS-01)", async () => {
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer tok-123" },
+    });
+    let failure: Error | null = null;
+    const auth = makeCodexAppsAuth();
+    const authorize = auth.withAuthorization;
+    auth.withAuthorization = async (use) => {
+      if (failure) throw failure;
+      return await authorize(use);
+    };
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: auth,
+        mcpFetchImpl: codexAppsTestFetch(mcp.url),
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
+    );
+    try {
+      await prepared.mcpServers[0]!.listTools();
+      failure = new Error("Codex token refresh timed out");
+      const result = await prepared.mcpServers[0]!.callToolResult!("codex_apps__search_documents", {
+        query: "refresh",
+      });
+      expect(result).toMatchObject({ isError: true });
+      expect(authNeeded).toHaveLength(1);
+      expect(authNeeded[0]).toMatchObject({ serverId: "codex_apps", reason: "refresh_failed" });
     } finally {
       await prepared.close();
       mcp.close();

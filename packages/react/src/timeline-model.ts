@@ -73,11 +73,14 @@ export type {
 } from "./timeline/tool-presentation";
 
 export {
+  namedAgentTitle,
   sandboxRowTitle,
   startupDuration,
   startupPhaseTitle,
   STARTUP_WAIT_TITLES,
   workerRowTitle,
+  workerRowTitleParts,
+  type AgentTitleParts,
 } from "./timeline/platform-activity-presentation";
 export { formatBytes, stringifyPayload, tryParseJson } from "./lib/format";
 export { selectTurnSummaryFacets } from "./timeline/turn-summary-model";
@@ -99,6 +102,7 @@ export {
   noticeDisplayText,
   noticeIsResolvedApproval,
   noticeTone,
+  recordedWaitSummaryText,
 } from "./timeline/notice-presentation";
 export {
   QUESTION_NAV_HIDDEN_PX,

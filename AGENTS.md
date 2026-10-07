@@ -474,6 +474,15 @@ Promote `main` → `production` with a merge-commit PR (never squash / never
 GitHub rebase-and-merge). Hotfix PRs into `production` keep freeze-head
 admission; see `CONTRIBUTING.md` § Release / Publishing.
 
+Acknowledged canary receipt recovery uses
+`.github/workflows/reconcile-canary-publication.yml` and
+`scripts/reconcile-canary-publication.ts`. It is a separate protected GET-only
+controller, reads historical publisher source as data, and preserves the failed
+origin and absent Site artifact. Only complete positive acknowledged cohorts are
+eligible; unknown writes never replay. Distinct linked receipts and Site pins are
+nonpromotable and require explicit manual staging consumer authority. Do not relax
+the ordinary publisher/source equality, production or scheduled release guards.
+
 See the hotfix admission contract in
 `.github/workflows/source-admission.yml`, `scripts/check-source-admission.mjs`,
 and `scripts/check-source-admission.test.ts`. Do not reintroduce an

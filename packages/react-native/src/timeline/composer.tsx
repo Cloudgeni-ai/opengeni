@@ -15,6 +15,7 @@ import {
   type ViewStyle,
 } from "react-native";
 import Animated, { useAnimatedKeyboard, useAnimatedStyle } from "react-native-reanimated";
+import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
 import { withAlpha } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
@@ -164,6 +165,10 @@ export function SessionComposer(props: SessionComposerProps) {
   const c = theme.colors;
   const ios = Platform.OS === "ios";
   const [height, setHeight] = useState(22);
+  const empty = !props.value;
+  useEffect(() => {
+    if (empty) setHeight(22);
+  }, [empty]);
   // Track the keyboard directly: React Native's KeyboardAvoidingView mis-measures
   // inside modals and overlays; the animated keyboard height does not.
   const keyboard = useAnimatedKeyboard();
@@ -236,7 +241,15 @@ export function SessionComposer(props: SessionComposerProps) {
           : { paddingTop: 14, paddingBottom: 2, paddingHorizontal: 16, minHeight: 40 }),
         // The inline field sizes itself; the stacked one tracks its content.
         // (iOS never shrinks a self-sized multiline field, so an empty one is pinned.)
-        height: ios ? (inline ? (props.value ? undefined : 36) : height + 16) : undefined,
+        // A cleared field (after Send) returns to one line: iOS does not report
+        // the smaller content size, so the last height would otherwise stick.
+        height: ios
+          ? inline
+            ? props.value
+              ? undefined
+              : 36
+            : (props.value ? height : 22) + 16
+          : undefined,
         maxHeight: 166,
         textAlignVertical: inline ? "center" : "top",
       }}
@@ -261,7 +274,9 @@ export function SessionComposer(props: SessionComposerProps) {
       <ComposerSurface radius={compact ? 22 : 24}>
         {props.header}
         {props.below}
-        {voice?.status === "error" && voice.error ? (
+        {voice?.hasSavedRecording && voice.status === "error" ? (
+          <SavedRecordingStrip voice={voice} />
+        ) : voice?.status === "error" && voice.error ? (
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={`${voice.error} Dismiss`}
@@ -371,6 +386,32 @@ const LEVEL_BARS = 28;
 function formatDictationTime(seconds: number): string {
   const whole = Math.max(0, Math.floor(seconds));
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+/**
+ * A recording whose text could not be fetched yet. It stays on the device:
+ * Retry sends the same audio again; Discard is the only way to drop it.
+ */
+function SavedRecordingStrip({ voice }: { voice: NativeVoiceInput }) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  return (
+    <View style={{ gap: 6, paddingHorizontal: 16, paddingTop: 10 }}>
+      <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
+        <Icon name="audio-lines" size={14} color={c["status-waiting"]} />
+        <Text
+          accessibilityLiveRegion="polite"
+          style={{ ...fontStyle(theme), flex: 1, fontSize: 13, lineHeight: 18, color: c.fg }}
+        >
+          {voice.error ?? "Your recording is saved."}
+        </Text>
+      </View>
+      <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 6 }}>
+        <Button label="Discard" variant="ghost" onPress={voice.cancel} />
+        <Button label="Retry" variant="primary" onPress={voice.retry} />
+      </View>
+    </View>
+  );
 }
 
 /**
@@ -583,10 +624,13 @@ export function ComposerPill({
   detail,
   onPress,
   leading,
+  fast = false,
 }: {
   label: string;
   /** Secondary text after the label (the reasoning effort); truncates before the label. */
   detail?: string | null | undefined;
+  /** Fast latency is on: a filled bolt after the name, as on the web pill. */
+  fast?: boolean | undefined;
   onPress?: (() => void) | undefined;
   /** Shown before the label (the web picker's maker mark). */
   leading?: ReactNode;
@@ -595,7 +639,7 @@ export function ComposerPill({
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={detail ? `${label}, ${detail}` : label}
+      accessibilityLabel={[label, detail, fast ? "Fast" : null].filter(Boolean).join(", ")}
       onPress={onPress}
       disabled={!onPress}
       style={({ pressed }) => ({
@@ -635,6 +679,7 @@ export function ComposerPill({
           {detail}
         </Text>
       ) : null}
+      {fast ? <Icon name="zap" size={13} color={theme.colors.fg} fill={theme.colors.fg} /> : null}
       <Icon name="chevron-down" size={12} color={theme.colors["fg-muted"]} />
     </Pressable>
   );

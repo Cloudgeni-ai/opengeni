@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "80722745d74b358cc11e7abf6072663690494580d370a56c67e10dc1d63491bf"
+      "sha256": "0df365dba83f6c26edd2958d13dbeaca6c2361492a04af6871d4fae4fb7a745e"
     },
     {
       "path": ".github/workflows/deprecate-pre-1.0.yml",
@@ -63,6 +63,10 @@
     {
       "path": ".github/workflows/publish-stable.yml",
       "sha256": "1159f5b8fa72d596ae6e5ffb9f99b5d0c147a9771a614d9a7e0a7e2f93f45743"
+    },
+    {
+      "path": ".github/workflows/reconcile-canary-publication.yml",
+      "sha256": "915b27ac2a5841b9d3735366b2db1b3445b973543af6d0560f28add9e611a747"
     },
     {
       "path": ".github/workflows/reconcile-production-packages.yml",
@@ -1022,6 +1026,24 @@
       "job": "publish",
       "step": "Verify exact source",
       "sha256": "d7a6ea98d18789bfa7cefb07dc532bd7d386b9a11c4f6ccf9e38c9c2d814c78a"
+    },
+    {
+      "workflow": ".github/workflows/reconcile-canary-publication.yml",
+      "job": "reconcile",
+      "step": "Admit protected recovery controller",
+      "sha256": "cfb2a96ca1e8dc9b39b218cbc610b7d8e4cbdb3ac599f7ecf9b923482c51980f"
+    },
+    {
+      "workflow": ".github/workflows/reconcile-canary-publication.yml",
+      "job": "reconcile",
+      "step": "Install controller dependencies without lifecycle scripts",
+      "sha256": "0524638b6aec1ba097ce981b2431f1461e160b87c21eaa9123246ba3330ac89c"
+    },
+    {
+      "workflow": ".github/workflows/reconcile-canary-publication.yml",
+      "job": "reconcile",
+      "step": "Verify acknowledged archives and reconcile receipts",
+      "sha256": "fb8d98d0b7bac9728dfd404eca4fe21423be100a084d35740f528a8f8f86a399"
     },
     {
       "workflow": ".github/workflows/reconcile-production-packages.yml",

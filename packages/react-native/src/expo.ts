@@ -14,7 +14,7 @@ import {
   setAudioModeAsync,
   useAudioRecorder,
 } from "expo-audio";
-import { File } from "expo-file-system";
+import { Directory, File, Paths } from "expo-file-system";
 import * as ImagePicker from "expo-image-picker";
 import type { FetchLike, OpenGeniClient } from "@opengeni/sdk";
 import type {
@@ -23,7 +23,13 @@ import type {
   NativePickedFile,
   OpenGeniReactNativeAdapters,
 } from "./adapters";
-import type { NativeVoiceRecorder, NativeVoiceRecording } from "./voice-input";
+import {
+  NativeTranscriptionError,
+  type NativeVoiceRecorder,
+  type NativeVoiceRecording,
+} from "./voice-input";
+
+export { createExpoCallAdapter, parseNativeCallEvent } from "./realtime/expo-call";
 
 function lifecycleState(value: string | null | undefined): NativeLifecycleState {
   if (value === "active") return "active";
@@ -180,6 +186,21 @@ function discardRecordingFile(uri: string | null) {
   }
 }
 
+/** Move a finished recording out of the recorder's scratch path into its own file. */
+async function keepRecordingFile(uri: string): Promise<string> {
+  try {
+    const directory = new Directory(Paths.document, "opengeni-dictation");
+    if (!directory.exists) directory.create({ intermediates: true, idempotent: true });
+    const kept = new File(directory, `${Crypto.randomUUID()}.m4a`);
+    await new File(uri).copy(kept);
+    discardRecordingFile(uri);
+    return kept.uri;
+  } catch {
+    // Keeping the original path is still better than losing the recording.
+    return uri;
+  }
+}
+
 /** Dictation recorder backed by expo-audio. */
 export function useExpoVoiceRecorder(): NativeVoiceRecorder {
   const recorder = useAudioRecorder(DICTATION_RECORDING);
@@ -199,12 +220,18 @@ export function useExpoVoiceRecorder(): NativeVoiceRecorder {
         await recorder.stop();
         await setAudioModeAsync({ allowsRecording: false }).catch(() => undefined);
         const uri = recorder.uri;
-        return uri ? { uri, mimeType: "audio/mp4", durationSeconds } : null;
+        if (!uri) return null;
+        // Kept until its text is in the draft: a following segment or a retry
+        // must never find the recorder has reused or cleared this file.
+        return { uri: await keepRecordingFile(uri), mimeType: "audio/mp4", durationSeconds };
       },
       async cancel() {
         if (recorder.isRecording) await recorder.stop();
         await setAudioModeAsync({ allowsRecording: false }).catch(() => undefined);
         discardRecordingFile(recorder.uri);
+      },
+      discard(recording) {
+        discardRecordingFile(recording.uri);
       },
       durationSeconds() {
         return recorder.getStatus().durationMillis / 1000;
@@ -222,7 +249,8 @@ export function useExpoVoiceRecorder(): NativeVoiceRecorder {
 
 /**
  * Send a recording to the deployment's transcription API. The device file is
- * streamed as multipart form data, then removed.
+ * streamed as multipart form data and kept: dictation deletes it only once its
+ * text is in the draft. Failures carry the HTTP status (null when offline).
  */
 export async function transcribeExpoRecording(input: {
   client: Pick<OpenGeniClient, "fetchApi">;
@@ -253,10 +281,15 @@ export async function transcribeExpoRecording(input: {
           : typeof body.message === "string"
             ? body.message
             : `Transcription failed (${response.status}).`;
-      throw new Error(message);
+      throw new NativeTranscriptionError(message, response.status);
     }
     return typeof body.text === "string" ? body.text : "";
-  } finally {
-    discardRecordingFile(input.recording.uri);
+  } catch (cause) {
+    if (cause instanceof NativeTranscriptionError) throw cause;
+    // No response at all: offline, timed out or dropped. The recording is kept.
+    throw new NativeTranscriptionError(
+      cause instanceof Error ? cause.message : "Network request failed",
+      null,
+    );
   }
 }

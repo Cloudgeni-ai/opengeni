@@ -1434,6 +1434,27 @@ describe("buildTimeline", () => {
     expect(item.failure).toBeNull();
   });
 
+  test("session_create keeps the manager's title for the spawned agent", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "session_create",
+        arguments: JSON.stringify({
+          title: "  Release   audit ",
+          initialMessage: "Diff the public SDK surface",
+        }),
+      }),
+      event("agent.toolCall.created", {
+        id: "call-2",
+        name: "session_send_message",
+        arguments: { sessionId: "0b3ba745-1111-4222-8333-9c76ad9e0000", text: "Status?" },
+      }),
+    ]);
+    expect((items[0] as WorkerItem).title).toBe("Release audit");
+    expect((items[1] as WorkerItem).title).toBeUndefined();
+  });
+
   test("a worker spawn retains a bounded structured failure diagnostic", () => {
     reset();
     const message = `shared placement rejected ${"🧪".repeat(600)}`;

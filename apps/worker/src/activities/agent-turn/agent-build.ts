@@ -16,6 +16,7 @@ import { recoveryAwareSessionInstructions } from "./recovery-warning";
 import {
   formatSkillCatalog,
   skillCatalogEntryIds,
+  type AgentPromptToolAvailability,
   type AttemptConnectorActionBinding,
   type BuildAgentOptions,
   type ConnectorActionPolicyHooks,
@@ -138,6 +139,11 @@ export type BuildTurnAgentDeps = {
   preparationIndependentToolNames: readonly string[];
   /** The attempt's tool catalog includes the Jev-backed code_search tool. */
   codeSearchAvailable: boolean;
+  /**
+   * Frozen clause availability for the modular instructions; undefined for
+   * sessions without an agent configuration. Rendering input only.
+   */
+  promptToolAvailability?: AgentPromptToolAvailability | undefined;
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
@@ -198,6 +204,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     trigger,
     preparationIndependentToolNames,
     codeSearchAvailable,
+    promptToolAvailability,
     videoGenerationAcceptancesByCallId,
     activeSandboxBackend,
     groupBoxBackend,
@@ -440,6 +447,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           workspaceId: input.workspaceId,
           subjectId,
           sessionId: input.sessionId,
+          turnId: turn.id,
           authoritySnapshot,
         });
         const selected = providerTurn.effectiveXaiCredentialId
@@ -468,6 +476,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               workspaceId: input.workspaceId,
               subjectId,
               sessionId: input.sessionId,
+              turnId: turn.id,
               authoritySnapshot,
               credentialId: selected.credentialId,
               pinSource: "policy",
@@ -667,6 +676,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           : {}),
         ...(preparedTools.inputWaitYield ? { inputWaitYield: preparedTools.inputWaitYield } : {}),
         ...(session.agent ? { agentConfig: session.agent, toolRouterInHistory } : {}),
+        ...(session.agent && promptToolAvailability
+          ? { agentPromptToolAvailability: promptToolAvailability }
+          : {}),
         reasoningEffort: requestReasoningEffort,
         ...(reasoningSummary ? { reasoningSummary } : {}),
         latencyMode: turnExecutionPolicy.latencyMode,

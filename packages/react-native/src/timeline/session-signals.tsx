@@ -2,12 +2,12 @@ import type { ClientModel, LineageNode, SessionBackgroundCommand } from "@openge
 import type { UseGoalResult } from "@opengeni/react/session";
 import { sessionAgentsSignal, sessionGoalStateLabel } from "@opengeni/react/session-agents-model";
 import { useState, type ReactNode } from "react";
-import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, ScrollView, Text, View, type TextStyle } from "react-native";
 import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
 import { SessionRow } from "./session-list";
 import { BottomSheet } from "./sheet";
-import { fontStyle, useNativeTimelineTheme } from "./theme";
+import { fontStyle, useNativeTimelineTheme, type NativeTimelineTheme } from "./theme";
 
 /* ----------------------------------------------------------------------------
    The web session chrome's goal, agents and commands segments: one row of
@@ -42,8 +42,8 @@ export function SessionSignals(props: {
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
-        contentContainerStyle={{ gap: 6 }}
-        style={{ flexGrow: 0 }}
+        contentContainerStyle={{ gap: 6, alignItems: "center" }}
+        style={{ flexGrow: 0, flexShrink: 1 }}
       >
         {goal ? (
           <Chip
@@ -129,29 +129,19 @@ function Chip(props: {
       : props.tone === "waiting"
         ? c["status-waiting"]
         : c["fg-subtle"];
+  // Compact on the phone: the status reads from the dot (and the sheet); the
+  // word stays in the accessibility label. 30pt tall, 44pt to touch.
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={`${props.label}, ${props.detail}`}
       onPress={props.onPress}
-      style={({ pressed }) => ({
-        flexDirection: "row",
-        alignItems: "center",
-        gap: 6,
-        minHeight: 44,
-        paddingHorizontal: 12,
-        borderRadius: theme.radius.md,
-        backgroundColor: pressed ? c.hover : c["surface-2"],
-      })}
+      hitSlop={{ top: 7, bottom: 7, left: 3, right: 3 }}
+      style={({ pressed }) => signalChipStyle(theme, pressed)}
     >
-      <Icon name={props.icon} size={14} color={c.fg} />
-      <Text style={{ ...fontStyle(theme, 500), fontSize: theme.size.sm, color: c.fg }}>
-        {props.label}
-      </Text>
+      <Icon name={props.icon} size={13} color={c["fg-muted"]} />
+      <Text style={signalChipText(theme)}>{props.label}</Text>
       <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: toneColor }} />
-      <Text style={{ ...fontStyle(theme, 400), fontSize: theme.size.sm, color: c["fg-muted"] }}>
-        {props.detail}
-      </Text>
     </Pressable>
   );
 }
@@ -302,4 +292,21 @@ export function SessionCommandsList({
       })}
     </ScrollView>
   );
+}
+
+/** The compact signal chip shared by goal, agents, commands and the queue. */
+export function signalChipStyle(theme: NativeTimelineTheme, pressed: boolean) {
+  return {
+    flexDirection: "row" as const,
+    alignItems: "center" as const,
+    gap: 5,
+    height: 30,
+    paddingHorizontal: 10,
+    borderRadius: 15,
+    backgroundColor: pressed ? theme.colors.hover : theme.colors["surface-2"],
+  };
+}
+
+export function signalChipText(theme: NativeTimelineTheme): TextStyle {
+  return { ...fontStyle(theme, 500), fontSize: 13, color: theme.colors.fg };
 }

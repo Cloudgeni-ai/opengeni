@@ -32,6 +32,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Run lifecycle | `docs/run-lifecycle.md` | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, architecture summaries should link. |
 | Codex subscription rotation | `docs/codex-subscription-rotation.md` | `docs/run-lifecycle.md`, `docs/architecture.md`, and operator notes should link instead of restating allocator/failure semantics. |
 | SuperGrok/xAI subscription authority and rotation | `docs/supergrok-subscription.md` | `docs/run-lifecycle.md`, `docs/architecture.md`, provider/operator docs, SDK/React docs, and UI copy should link instead of restating authority or capacity semantics. |
+| Provider-neutral subscription account contract (target behaviour, requirement IDs, decision log) | `docs/subscription-accounts.md` | Provider subscription docs describe current behaviour and link here for the shared target; `docs/subscription-accounts-inventory.md` holds the entry-point inventory and Codex audit. |
 | Per-session MCP servers | `docs/session-mcp-servers.md` | `docs/architecture.md`, SDK/client examples should link instead of restating credential semantics. |
 | Connected machines | `docs/connected-machines.md` | `README.md`, `AGENTS.md`, client docs and skills should link. |
 | Deployment | `docs/deployment.md` | `README.md`, `AGENTS.md`, Helm/Terraform notes should link. |

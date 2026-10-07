@@ -12,8 +12,8 @@ import {
   nativeHumanInputRequestPreview,
   validateHumanInputAnswers,
   type NativeHumanInputDraft,
-} from "./view-model";
-import { DEFAULT_OPENGENI_NATIVE_LABELS } from "./presentation";
+} from "../src/view-model";
+import { DEFAULT_OPENGENI_NATIVE_LABELS } from "../src/presentation";
 
 describe("native session view-models", () => {
   test("presents folded assistant commentary as progress, never as reasoning", () => {

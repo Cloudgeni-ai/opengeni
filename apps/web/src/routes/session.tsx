@@ -27,6 +27,7 @@ import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-b
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import { useSessionStartupTimeline } from "@/lib/session-startup-timeline";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
+import { sessionDisplayTitle } from "@/lib/session-rename";
 import { useStreamHealthTelemetry } from "@/lib/stream-health";
 import { markIntegrationConnectRedirect } from "@/lib/integration-connect-redirect";
 import { noteTurnFailureAction } from "@/lib/turn-failure-actions";
@@ -1114,6 +1115,26 @@ export function SessionRoute({
     pollIntervalMs: 30_000,
   });
   const agentNodes = lineage.lineage?.children ?? [];
+  // The same lineage read names the agents the timeline spawns, messages, and
+  // hears from (parent and descendants), following renames.
+  const lineageTitles = useMemo(() => {
+    const titles = new Map<string, string>();
+    for (const ancestor of lineage.lineage?.ancestors ?? []) {
+      titles.set(ancestor.id, sessionDisplayTitle(ancestor));
+    }
+    const visit = (nodes: readonly LineageNode[]) => {
+      for (const node of nodes) {
+        titles.set(node.session.id, sessionDisplayTitle(node.session));
+        visit(node.children);
+      }
+    };
+    visit(lineage.lineage?.children ?? []);
+    return titles;
+  }, [lineage.lineage]);
+  const resolveSessionTitle = useCallback(
+    (agentSessionId: string) => lineageTitles.get(agentSessionId) ?? null,
+    [lineageTitles],
+  );
   const sandboxFileRequestSeq = useRef(0);
   const [sandboxFileRequest, setSandboxFileRequest] = useState<{
     path: string;
@@ -1229,6 +1250,7 @@ export function SessionRoute({
       onJumpToStart={loadOldest}
       onJumpToLatest={jumpToLatest}
       onClearView={clearView}
+      resolveSessionTitle={resolveSessionTitle}
       onOpenSession={(nextSessionId) =>
         void navigate({
           to: "/workspaces/$workspaceId/sessions/$sessionId",
@@ -1749,6 +1771,8 @@ function SessionChatPane(props: {
   /** Reset the local timeline view (the /clear-view command target). */
   onClearView: () => void;
   onOpenSession: (sessionId: string) => void;
+  /** Current titles for the agents this session spawns, messages, and hears from. */
+  resolveSessionTitle: (sessionId: string) => string | null;
   /** Deep-link a timeline memory step to its first-class workspace Memory record. */
   onMemoryClick: (memoryId: string) => void;
   onNewSession: () => void;
@@ -3126,6 +3150,7 @@ function SessionChatPane(props: {
                       draftAnnotations={composer.annotations}
                       onDraftAnnotationSelect={composer.requestAnnotationReview}
                       onOpenSession={props.onOpenSession}
+                      resolveSessionTitle={props.resolveSessionTitle}
                       onMemoryClick={props.onMemoryClick}
                       onReconnect={props.onReconnect}
                       renderAuthNeeded={renderAuthNeeded}

@@ -93,6 +93,10 @@ const ICONS: Record<string, string> = {
   bell: "BellIcon",
   "user-round": "UserRoundIcon",
   smartphone: "SmartphoneIcon",
+  phone: "PhoneIcon",
+  "phone-off": "PhoneOffIcon",
+  "mic-off": "MicOffIcon",
+  "volume-2": "Volume2Icon",
 };
 
 const out: Record<string, Array<[string, Record<string, string | number>]>> = {};

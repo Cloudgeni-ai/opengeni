@@ -525,9 +525,9 @@ describe("durable machine-input timeline", () => {
     await flush();
     expect(r.container.textContent).toContain("3 agent results received");
     expect(r.container.textContent).not.toContain("agents finished");
-    const links = [...r.container.querySelectorAll("button")].filter(
-      (button) => button.textContent === "View session",
-    );
+    const links = [
+      ...r.container.querySelectorAll<HTMLButtonElement>('button[aria-label="Open agent session"]'),
+    ];
     expect(links).toHaveLength(2);
     await act(async () => {
       links[0]?.click();
@@ -578,9 +578,125 @@ describe("durable machine-input timeline", () => {
     expect(details).not.toBeNull();
     expect(details?.open).toBe(false);
     // Detail rows stay in the DOM for expand-on-demand audit.
-    expect(r.container.textContent).toContain("verification-agent");
     expect(r.container.textContent).toContain("Cache verification completed.");
     expect(r.container.textContent).toContain("Agent result received");
+    await r.unmount();
+  });
+
+  test("names the sending agent, deep-links it, and keeps its words behind the pill", async () => {
+    resetTimelineEvents();
+    const agentId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const opened: string[] = [];
+    const r = await renderComponent(
+      <MessageTimeline
+        onOpenSession={(id) => opened.push(id)}
+        resolveSessionTitle={(id) => (id === agentId ? "Release audit" : null)}
+        events={[
+          timelineEvent("system.update.delivered", {
+            members: [
+              {
+                id: "update-1",
+                kind: "agent_message",
+                classification: "info",
+                sourceId: agentId,
+                summary: "Two breaking changes so far.",
+              },
+            ],
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    const pill = r.container.querySelector("details[data-og-machine-input-batch] summary");
+    expect(pill?.textContent).toBe("Update from Release audit");
+    // No loose summary under the collapsed pill; the text sits in the named row.
+    const batch = r.container.querySelector("details[data-og-machine-input-batch]")!;
+    expect(batch.nextElementSibling).toBeNull();
+    const row = batch.querySelector("[data-og-agent-row]")!;
+    expect(row.textContent).toContain("Update from Release audit");
+    expect(row.textContent).toContain("Two breaking changes so far.");
+    const open = row.querySelector<HTMLButtonElement>('button[aria-label="Open Release audit"]');
+    await actRun(() => open?.click());
+    expect(opened).toEqual([agentId]);
+    await r.unmount();
+  });
+
+  test("folds repeated progress notes from one agent into its latest note", async () => {
+    resetTimelineEvents();
+    const agentId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const r = await renderComponent(
+      <MessageTimeline
+        resolveSessionTitle={() => "Checkout flake"}
+        events={[
+          timelineEvent("system.update.delivered", {
+            members: ["Reproduced locally.", "Root cause found.", "Fix pushed."].map(
+              (note, index) => ({
+                id: `progress-${index}`,
+                kind: "child_progress",
+                classification: "info",
+                sourceId: agentId,
+                summary: `Worker ${agentId} progress: ${note}`,
+              }),
+            ),
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    const batch = r.container.querySelector("details[data-og-machine-input-batch]")!;
+    expect(batch.querySelector("summary")?.textContent).toBe("3 updates from Checkout flake");
+    const rows = batch.querySelectorAll("[data-og-agent-row]");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.textContent).toContain("Progress from Checkout flake");
+    expect(rows[0]!.textContent).toContain("+2 earlier");
+    expect(rows[0]!.querySelector("[data-og-agent-preview]")?.textContent).toBe("Fix pushed.");
+    expect(r.container.textContent).not.toContain(agentId);
+    await actRun(() => rows[0]!.querySelector<HTMLElement>("[role=button]")?.click());
+    expect(rows[0]!.textContent).toContain("Reproduced locally.");
+    expect(rows[0]!.textContent).toContain("Root cause found.");
+    await r.unmount();
+  });
+
+  test("spawn and message rows name the agent from the spawn title", async () => {
+    resetTimelineEvents();
+    const agentId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const opened: string[] = [];
+    const r = await renderComponent(
+      <MessageTimeline
+        onOpenSession={(id) => opened.push(id)}
+        events={[
+          timelineEvent("agent.toolCall.created", {
+            id: "call-spawn",
+            name: "opengeni__session_create",
+            arguments: { title: "API audit", initialMessage: "Diff the public SDK surface." },
+          }),
+          timelineEvent("agent.toolCall.output", {
+            id: "call-spawn",
+            output: { structuredContent: { sessionId: agentId, status: "queued" } },
+          }),
+          timelineEvent("agent.toolCall.created", {
+            id: "call-message",
+            name: "opengeni__session_send_message",
+            arguments: { sessionId: agentId, text: "Include webhooks too." },
+          }),
+          timelineEvent("agent.toolCall.output", {
+            id: "call-message",
+            output: { structuredContent: { sessionId: agentId } },
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Spawned API audit");
+    expect(text).toContain("Messaged API audit");
+    expect(text).toContain("Include webhooks too.");
+    const links = r.container.querySelectorAll<HTMLButtonElement>(
+      'button[aria-label="Open API audit"]',
+    );
+    expect(links).toHaveLength(2);
+    await actRun(() => links[1]?.click());
+    expect(opened).toEqual([agentId]);
     await r.unmount();
   });
 

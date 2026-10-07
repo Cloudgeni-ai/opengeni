@@ -30,6 +30,7 @@ import {
   type ApprovalStripProps,
   type HumanInputCardProps,
 } from "./decisions";
+import { NativeMessageAttachments } from "./message-attachments";
 import { QueueDock } from "./queue-dock";
 import { SessionCommandsList, SessionSignals } from "./session-signals";
 import type { ClientModel, OpenGeniClient, SessionBackgroundCommand } from "@opengeni/sdk";
@@ -146,6 +147,19 @@ export function NativeSessionScreen({
         contentInsetBottom={composerHeight + 20}
         overlayInsetBottom={composerHeight}
         renderMessageActions={feedback || hostMessageActions ? renderMessageActions : undefined}
+        renderUserAttachments={
+          timelineProps.renderUserAttachments ??
+          (client
+            ? (item) => (
+                <NativeMessageAttachments
+                  client={client}
+                  workspaceId={controller.workspaceId}
+                  sessionId={controller.sessionId}
+                  resources={item.resources}
+                />
+              )
+            : undefined)
+        }
         items={items}
         status={status}
         emptyState={
@@ -218,27 +232,29 @@ export function NativeSessionScreen({
         }
         above={
           <>
-            <SessionSignals
-              goal={controller.goal}
-              agents={controller.lineage.lineage?.children ?? []}
-              commandsCount={controller.session.session?.backgroundCommandActivity?.count ?? 0}
-              onOpenSession={timelineProps.onOpenSession}
-              models={models}
-              readOnly={status === "failed" || status === "cancelled"}
-              renderCommands={() =>
-                client ? (
-                  <NativeSessionCommands
-                    client={client}
-                    workspaceId={controller.workspaceId}
-                    sessionId={controller.sessionId}
-                  />
-                ) : null
-              }
-            />
             <QueueDock
               queue={queue}
               composer={composer}
               onComposerFocus={() => composerInput.current?.focus()}
+              leading={
+                <SessionSignals
+                  goal={controller.goal}
+                  agents={controller.lineage.lineage?.children ?? []}
+                  commandsCount={controller.session.session?.backgroundCommandActivity?.count ?? 0}
+                  onOpenSession={timelineProps.onOpenSession}
+                  models={models}
+                  readOnly={status === "failed" || status === "cancelled"}
+                  renderCommands={() =>
+                    client ? (
+                      <NativeSessionCommands
+                        client={client}
+                        workspaceId={controller.workspaceId}
+                        sessionId={controller.sessionId}
+                      />
+                    ) : null
+                  }
+                />
+              }
             />
             {approvals.length > 0 && status === "requires_action" ? (
               <ApprovalStrip
