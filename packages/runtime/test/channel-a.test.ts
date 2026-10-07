@@ -366,8 +366,7 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     }
     expect(existsSync(startedPath)).toBe(true);
     abort.abort(new Error("steered during internal filesystem command"));
-    const result = await operation;
-    expect(result.exitCode).not.toBe(0);
+    await expect(operation).rejects.toThrow("steered during internal filesystem command");
     await controller.waitForQuiescence();
     await Bun.sleep(2_200);
 

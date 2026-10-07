@@ -124,11 +124,7 @@ test("non-Modal composite import retains and settles the exact child before oute
   expect(f.starts).toHaveLength(1);
   expect(f.retained).toEqual([{ providerSessionId: 23, purpose: "synchronous_filesystem" }]);
   expect(f.settled).toEqual([{ providerSessionId: 23, exitCode: 0 }]);
-  expect(f.events).toEqual([
-    "child-promoted",
-    "child-terminal:0",
-    "importWorkspaceFile:resolved",
-  ]);
+  expect(f.events).toEqual(["child-promoted", "child-terminal:0", "importWorkspaceFile:resolved"]);
   expect(f.privateWrites).toHaveLength(1);
   expect(f.privateDeletes).toHaveLength(1);
   expect(f.route.hasRetainedProcess(23)).toBe(false);
@@ -146,11 +142,7 @@ test("non-Modal composite import settles an eventual nonzero child before reject
 
   expect(f.starts).toHaveLength(1);
   expect(f.settled).toEqual([{ providerSessionId: 23, exitCode: 7 }]);
-  expect(f.events).toEqual([
-    "child-promoted",
-    "child-terminal:7",
-    "importWorkspaceFile:rejected",
-  ]);
+  expect(f.events).toEqual(["child-promoted", "child-terminal:7", "importWorkspaceFile:rejected"]);
   expect(f.route.hasRetainedProcess(23)).toBe(false);
 });
 
