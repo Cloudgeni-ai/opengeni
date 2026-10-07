@@ -273,6 +273,31 @@ export function canServe(
   return servingFailure(world, session, connection, modelId, now) === null;
 }
 
+/** Earliest known time this connection can serve this model, if a temporary limit applies. */
+function nextAvailabilityAt(
+  world: World,
+  session: Session,
+  connection: Connection,
+  modelId: ModelId,
+  now: number,
+): number | null {
+  const model = byId(world.models, modelId);
+  if (
+    !model ||
+    model.provider !== connection.provider ||
+    !connection.entitledModels.includes(modelId) ||
+    (connection.allowedModelIds != null && !connection.allowedModelIds.includes(modelId)) ||
+    !modelAllowed(world, session, modelId) ||
+    authorizationFailure(world, session, connection)
+  ) {
+    return null;
+  }
+  const cooldownUntil = connection.modelCooldowns?.[modelId] ?? -Infinity;
+  const quotaUntil = connection.quota.kind === "exhausted" ? connection.quota.resetsAt : -Infinity;
+  const availableAt = Math.max(cooldownUntil, quotaUntil);
+  return availableAt > now ? availableAt : null;
+}
+
 // Selection
 
 /** Deterministic FNV-1a hash used to spread sessions across accounts (D-21). */
@@ -378,22 +403,9 @@ function earliestReset(
   let earliest: number | null = null;
   for (const connection of world.connections) {
     if (connection.ownership.kind === "personal" && !personalFallback) continue;
-    if (!isAuthorized(world, session, connection)) continue;
     for (const modelId of models) {
-      const model = byId(world.models, modelId);
-      if (
-        !model ||
-        model.provider !== connection.provider ||
-        !connection.entitledModels.includes(modelId) ||
-        (connection.allowedModelIds != null && !connection.allowedModelIds.includes(modelId))
-      ) {
-        continue;
-      }
-      const cooldownUntil = connection.modelCooldowns?.[modelId] ?? -Infinity;
-      const quotaUntil =
-        connection.quota.kind === "exhausted" ? connection.quota.resetsAt : -Infinity;
-      const availableAt = Math.max(cooldownUntil, quotaUntil);
-      if (availableAt > now) {
+      const availableAt = nextAvailabilityAt(world, session, connection, modelId, now);
+      if (availableAt !== null) {
         earliest = earliest === null ? availableAt : Math.min(earliest, availableAt);
       }
     }
@@ -438,10 +450,9 @@ export function decide(world: World, sessionId: string, now: number): Decision {
     return {
       kind: "wait",
       reason: "pinned_account_unavailable",
-      earliestResetAt:
-        pinned?.quota.kind === "exhausted" && isAuthorized(world, session, pinned)
-          ? pinned.quota.resetsAt
-          : null,
+      earliestResetAt: pinned
+        ? nextAvailabilityAt(world, session, pinned, session.preferredModelId, now)
+        : null,
     };
   }
 

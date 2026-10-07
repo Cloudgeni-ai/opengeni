@@ -687,6 +687,34 @@ describe("reference model scenarios", () => {
     });
   });
 
+  test("model:SUB-SEL-04, model:SUB-WAIT-02: a pinned wait reports when cooldown and quota both clear", () => {
+    const pinned = (quota: Connection["quota"]): World => ({
+      ...base(),
+      sessions: base().sessions.map((session) => ({ ...session, pinnedConnectionId: "claude-a" })),
+      connections: base().connections.map((connection) =>
+        connection.id === "claude-a"
+          ? {
+              ...connection,
+              quota,
+              modelCooldowns: { "claude/model-a": NOW + 30_000 },
+            }
+          : connection,
+      ),
+    });
+    expect(decide(pinned({ kind: "available" }), "session-1", NOW)).toEqual({
+      kind: "wait",
+      reason: "pinned_account_unavailable",
+      earliestResetAt: NOW + 30_000,
+    });
+    expect(
+      decide(pinned({ kind: "exhausted", resetsAt: NOW + 60_000 }), "session-1", NOW),
+    ).toEqual({
+      kind: "wait",
+      reason: "pinned_account_unavailable",
+      earliestResetAt: NOW + 60_000,
+    });
+  });
+
   test("model:SUB-SEL-03, model:SUB-SEL-05: Spread places each session deterministically and spreads sessions across accounts without a cross-session lock", () => {
     const spreadWorld = (sessionIds: string[]): World => ({
       ...base(),
