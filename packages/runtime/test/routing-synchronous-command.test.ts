@@ -30,6 +30,13 @@ function fixture(exitCode = 0) {
   const settled: number[] = [];
   const captured: Array<{ id: string; stdout: string; stderr: string }> = [];
   const enclosingSettled: string[] = [];
+  const enclosingPurposes: Array<string | undefined> = [];
+  const retainedPromotions: Array<{
+    op: string;
+    processId: string;
+    purpose: string | undefined;
+  }> = [];
+  const adoptedBackground: Array<{ processId: string; command: string | undefined }> = [];
   let failObservation = false;
   let activeSandboxId: string | null = null;
   let generation = 0;
@@ -113,8 +120,17 @@ function fixture(exitCode = 0) {
       return { handle: ++generation };
     },
     providerCommandHandle: (admission) => (admission as { handle: number }).handle,
-    afterMutation: async ({ op, retainedProcess }) => {
-      if (!retainedProcess) enclosingSettled.push(op);
+    afterMutation: async ({ op, retainedProcess, retainedProcessPurpose }) => {
+      if (!retainedProcess) {
+        enclosingSettled.push(op);
+        enclosingPurposes.push(retainedProcessPurpose);
+      } else {
+        retainedPromotions.push({
+          op,
+          processId: retainedProcess.id,
+          purpose: retainedProcessPurpose,
+        });
+      }
       if (retainedProcess?.providerCommand?.kind === "modal-router-v1") {
         commands.set(retainedProcess.id, structuredClone(retainedProcess.providerCommand));
       }
@@ -144,8 +160,8 @@ function fixture(exitCode = 0) {
       expect(proof.exitCode).toBe(exitCode);
       settled.push(process.providerSessionId);
     },
-    adoptProcessAsBackgroundCommand: async () => {
-      throw new Error("internal execution cannot adopt background lifetime");
+    adoptProcessAsBackgroundCommand: async ({ process, command }) => {
+      adoptedBackground.push({ processId: process.id, command });
     },
     observeProcessTerminal: async () => {
       throw new Error("internal execution cannot acknowledge model command completion");
@@ -159,6 +175,9 @@ function fixture(exitCode = 0) {
     commands,
     admissions,
     enclosingSettled,
+    enclosingPurposes,
+    retainedPromotions,
+    adoptedBackground,
     failObservation: () => {
       failObservation = true;
     },
@@ -180,6 +199,9 @@ test.each([0, 7])(
     });
     expect(f.starts).toHaveLength(1);
     expect(f.settled).toEqual([1]);
+    expect(f.retainedPromotions).toHaveLength(1);
+    expect(f.retainedPromotions[0]!.purpose).toBe("synchronous_filesystem");
+    expect(f.adoptedBackground).toEqual([]);
     expect(f.captured.map((page) => page.stdout).join("")).toBe(result.stdout);
     expect([...f.commands.values()][0]!.streams.stdout.byteOffset).toBe(
       Buffer.byteLength(result.stdout),
@@ -198,6 +220,41 @@ test("observation loss keeps the exact retained writer and committed initial cur
   expect(f.settled).toEqual([]);
   expect(f.route.hasRetainedProcess(1)).toBe(true);
   expect([...f.commands.values()][0]!.streams.stdout.byteOffset).toBeGreaterThan(0);
+  expect(f.retainedPromotions[0]!.purpose).toBe("synchronous_filesystem");
+  expect(f.adoptedBackground).toEqual([]);
+});
+
+test("ordinary yielded exec remains eligible for model-visible background adoption", async () => {
+  const promotions: Array<{
+    processId: string;
+    purpose: string | undefined;
+  }> = [];
+  const adoptions: Array<{ processId: string; command: string | undefined }> = [];
+  const backend = {
+    exec: async () => ({ stdout: "started", sessionId: 51, exitCode: null }),
+  };
+  const route = new RoutingSandboxSession({
+    readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+    resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+    beforeMutation: async () => "admission",
+    afterMutation: async ({ retainedProcess, retainedProcessPurpose }) => {
+      if (retainedProcess)
+        promotions.push({ processId: retainedProcess.id, purpose: retainedProcessPurpose });
+    },
+    captureProcessOutput: async () => {},
+    adoptProcessAsBackgroundCommand: async ({ process, command }) => {
+      adoptions.push({ processId: process.id, command });
+    },
+  });
+
+  const result = await route.exec({ cmd: "visible command" });
+  expect(result).toMatchObject({ sessionId: 51 });
+  expect(promotions).toHaveLength(1);
+  expect(promotions[0]!.purpose).toBeUndefined();
+  expect(route.canAdoptRetainedProcessAsBackgroundCommand(51)).toBe(true);
+
+  await route.adoptRetainedProcessAsBackgroundCommand(51, "visible command");
+  expect(adoptions).toEqual([{ processId: promotions[0]!.processId, command: "visible command" }]);
 });
 
 test("multi-file composite imports keep outer confinement with fresh exact retained subcommands", async () => {
@@ -224,6 +281,11 @@ test("multi-file composite imports keep outer confinement with fresh exact retai
   expect(f.starts).toHaveLength(2);
   expect(f.starts[0]!.id).not.toBe(f.starts[1]!.id);
   expect(f.settled).toEqual([2, 3]);
+  expect(f.retainedPromotions.map((promotion) => promotion.purpose)).toEqual([
+    "synchronous_filesystem",
+    "synchronous_filesystem",
+  ]);
+  expect(f.adoptedBackground).toEqual([]);
 });
 
 test("read-only SDK handles are observed on the resolved backend before route validation", async () => {
@@ -282,6 +344,8 @@ test("composite observation loss closes only its enclosing callback and leaves t
   expect(error).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
   expect(error.retainedProcess.providerSessionId).toBe(2);
   expect(f.enclosingSettled).toEqual(["importWorkspaceFiles"]);
+  expect(f.enclosingPurposes).toEqual(["synchronous_filesystem"]);
+  expect(f.retainedPromotions[0]!.purpose).toBe("synchronous_filesystem");
   expect(f.starts).toHaveLength(1);
   expect(f.settled).toEqual([]);
   expect(f.route.hasRetainedProcess(2)).toBe(true);
