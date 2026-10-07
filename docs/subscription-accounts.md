@@ -81,27 +81,27 @@ for it until the matching requirement below is implemented:
 
 ### Ownership and scope
 
-- **SUB-SCOPE-01** Connections are owned by the organization. A workspace
+- **SUB-OWN-01** Connections are owned by the organization. A workspace
   never owns a connection. Verification: pending (data-model).
-- **SUB-SCOPE-02** A connection's scope is one of: the whole organization,
+- **SUB-OWN-02** A connection's scope is one of: the whole organization,
   a set of chosen workspaces (with a separate switch for Personal workspaces),
   or a set of chosen people. Verification: pending (data-model).
-- **SUB-SCOPE-03** A personal connection is scoped to one person and is usable
+- **SUB-OWN-03** A personal connection is scoped to one person and is usable
   in every workspace that person can use, including their Personal workspace,
   without exposing private workspace inventory to administrators.
   Verification: pending (personal-connections).
-- **SUB-SCOPE-04** An organization administrator can delegate management of a
+- **SUB-OWN-04** An organization administrator can delegate management of a
   connection to a workspace administrator; ownership stays with the
   organization. Verification: pending (data-model).
-- **SUB-SCOPE-05** An organization administrator can disable personal
+- **SUB-OWN-05** An organization administrator can disable personal
   connections for the whole organization. Disabling stops new selection of
   personal connections; work already running on one moves at its next safe
   point under SUB-ACCESS-06. Verification: pending (personal-connections).
-- **SUB-SCOPE-06** Widening a personal connection to workspaces or the
+- **SUB-OWN-06** Widening a personal connection to workspaces or the
   organization turns it into a shared connection and shows a short notice
   that consumer plans may limit use to the account holder.
   Verification: pending (personal-connections).
-- **SUB-SCOPE-07** Who connected an account is audit metadata, never
+- **SUB-OWN-07** Who connected an account is audit metadata, never
   ownership or authority. Verification: pending (data-model).
 
 ### Settings and overrides
@@ -420,7 +420,7 @@ placement for a session (run on an account and model, or wait with a reason);
 `checkDecision` checks any decision, including one made by production code,
 against the contract's invariants, labelling each violation with the
 requirement it breaks (an ineligible account names the precise
-`SUB-ELIG-0x`, `SUB-SCOPE-05` or `SUB-ACCESS-06`). `checkDecision` is not
+`SUB-ELIG-0x`, `SUB-OWN-05` or `SUB-ACCESS-06`). `checkDecision` is not
 fully independent of `decide`: both use the same effective-settings,
 eligibility, cache-warmth and reasoning-level helpers, so a mistake in a
 shared helper would be invisible to the invariant check. Scenario tests pin

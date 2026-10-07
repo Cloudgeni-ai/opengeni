@@ -195,7 +195,7 @@ export function authorizationFailure(
       (session.visibility === "private" ||
         (workspace.kind === "personal" && workspace.ownerId === connection.ownership.ownerId));
     if (!settings.personalConnectionsAllowed) {
-      return failure("SUB-SCOPE-05", "personal connections are disabled here");
+      return failure("SUB-OWN-05", "personal connections are disabled here");
     }
     if (!owner?.active) return failure("SUB-ACCESS-06", "the personal account's owner left");
     if (!ownersOwnWork) {
