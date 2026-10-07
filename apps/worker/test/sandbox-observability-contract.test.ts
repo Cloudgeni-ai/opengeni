@@ -344,13 +344,17 @@ describe("sandbox observability contract", () => {
 
   test("alerts match emitted drain buckets and fail closed on every absent domain", async () => {
     const source = await Bun.file(rulePath).text();
+    const releaseScope =
+      "namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}";
     expect(source).toContain('age_bucket=~"5m_1h|1h_1d|gte_1d"');
     expect(source).toContain("OpenGeniSandboxOperationFailureRatio");
     expect(source).toContain("OpenGeniSandboxLogicalProvisionFailureRatio");
     expect(source).toContain("OpenGeniSandboxUnknownProvisionFailureRatio");
-    expect(source).toContain('opengeni_sandbox_operations_total{outcome=~"ok|failed"}[10m]');
     expect(source).toContain(
-      'opengeni_sandbox_provisions_total{outcome="failed",category="unknown"}[30m]',
+      `opengeni_sandbox_operations_total{${releaseScope},outcome=~"ok|failed"}[10m]`,
+    );
+    expect(source).toContain(
+      `opengeni_sandbox_provisions_total{${releaseScope},outcome="failed",category="unknown"}[30m]`,
     );
     expect(source).toContain("must cover at least three sandbox reaper periods");
     expect(source).toContain("$inventoryFreshnessSeconds");
@@ -363,7 +367,7 @@ describe("sandbox observability contract", () => {
       "expired_drains",
     ]) {
       expect(source).toContain(
-        `absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="${domain}"})`,
+        `absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{${releaseScope},domain="${domain}"})`,
       );
     }
     const openSandboxStale = source.slice(
@@ -371,10 +375,10 @@ describe("sandbox observability contract", () => {
       source.indexOf("- alert: OpenGeniOpenSandboxPodPending"),
     );
     expect(openSandboxStale).toContain(
-      'absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"})',
+      `absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{${releaseScope},domain="opensandbox_kubernetes"})`,
     );
     expect(source).toContain(
-      'opengeni_sandbox_inventory_refresh_timestamp_seconds{domain!~"opensandbox_kubernetes|modal_provider|interaction_idle"}',
+      `opengeni_sandbox_inventory_refresh_timestamp_seconds{${releaseScope},domain!~"opensandbox_kubernetes|modal_provider|interaction_idle"}`,
     );
   });
 
