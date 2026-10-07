@@ -317,14 +317,16 @@ function attachmentReceiptText(ref: FileResourceRef): string {
 }
 
 /** Receipt for an active reference that this turn's file-authority lookup did
- * not return, for example a file another participant shared in this session.
- * The authority boundary is unchanged: no bytes and no fetch instruction, which
- * would fail and lead the model to report the file as deleted. */
+ * not return: another participant's file, or one that is no longer available
+ * (not ready, purged, or access revoked). The lookup cannot tell these apart,
+ * so the text stays neutral. The authority boundary is unchanged: no bytes and
+ * no fetch instruction, which would fail and lead the model to report the file
+ * as deleted. */
 function unavailableAttachmentReceiptText(ref: FileResourceRef): string {
   return (
-    `[Attachment: fileId=${ref.fileId}. This file is not available to the current requester, ` +
-    `so its contents are not included and it cannot be downloaded in this turn. ` +
-    `It may have been shared by another participant; do not describe it as deleted.]`
+    `[Attachment: fileId=${ref.fileId}. This file is not available to the current requester: ` +
+    `it may belong to another participant, or it may no longer be available. ` +
+    `Its contents are not included and it cannot be downloaded in this turn; do not guess which.]`
   );
 }
 

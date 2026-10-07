@@ -973,7 +973,11 @@ describe("attachments outside the current requester's file access", () => {
     const [, sharedReceipt, ownReceipt] = texts(projected);
     expect(sharedReceipt).toContain(`fileId=${shared.id}`);
     expect(sharedReceipt).toContain("not available to the current requester");
-    expect(sharedReceipt).toContain("do not describe it as deleted");
+    // The lookup cannot tell another participant's file from one that is no
+    // longer available, so the receipt names both and asserts neither.
+    expect(sharedReceipt).toContain("may belong to another participant");
+    expect(sharedReceipt).toContain("may no longer be available");
+    expect(sharedReceipt).not.toContain("deleted");
     expect(sharedReceipt).not.toContain("files_get_download_url");
     expect(sharedReceipt).not.toContain("mountDirectory");
     // The authority boundary is unchanged: no bytes are read or sent.
@@ -985,6 +989,36 @@ describe("attachments outside the current requester's file access", () => {
     // Stable across same-turn reprojection without another lookup.
     expect(await projector(history)).toEqual(projected);
     expect(lookups).toEqual([[shared.id, own.id]]);
+  });
+
+  test("inline files of the current turn are never treated as excluded", async () => {
+    const projected = await createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      async () => bytes,
+      async () => [],
+    )(history, { inlineFiles: [shared, own] });
+    for (const receipt of texts(projected).slice(1)) {
+      expect(receipt).toContain("files__files_get_download_url");
+      expect(receipt).not.toContain("not available to the current requester");
+    }
+  });
+
+  test("a failed authority lookup excludes nothing and is retried", async () => {
+    let calls = 0;
+    const projector = createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      async () => bytes,
+      async () => {
+        calls++;
+        if (calls === 1) throw new Error("database unavailable");
+        return [own];
+      },
+    );
+    await expect(projector(history)).rejects.toThrow("database unavailable");
+    const [, sharedReceipt, ownReceipt] = texts(await projector(history));
+    expect(calls).toBe(2);
+    expect(sharedReceipt).toContain("not available to the current requester");
+    expect(ownReceipt).toContain("files__files_get_download_url");
   });
 
   test("the same history keeps the ordinary receipt and image for a requester with access", async () => {
