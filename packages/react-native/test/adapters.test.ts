@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createHydratedPersistenceAdapter, sha256HexToArrayBuffer } from "./adapters";
+import { createHydratedPersistenceAdapter, sha256HexToArrayBuffer } from "../src/adapters";
 
 describe("createHydratedPersistenceAdapter", () => {
   test("hydrates only its namespace and mirrors writes synchronously", async () => {

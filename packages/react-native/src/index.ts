@@ -70,3 +70,29 @@ export {
   type NativeTurnSummaryResult,
   type OpenGeniNativeSessionViewProps,
 } from "./session-view";
+export {
+  createMemoryRealtimeOwnerStorage,
+  createNativeRealtimeControllerFactory,
+  createNativeRemoteAudio,
+  type NativeRealtimeControllerFactoryOptions,
+  type NativeWebRtcAdapter,
+} from "./realtime/native-realtime";
+export {
+  useNativeSessionRealtime,
+  type UseNativeSessionRealtimeOptions,
+} from "./realtime/use-native-session-realtime";
+export {
+  nativeRealtimeModelSupported,
+  useNativeRealtimeCall,
+  type NativeCallAdapter,
+  type NativeCallAudioRoute,
+  type NativeCallEvent,
+  type NativeCallPhase,
+  type NativeCallRealtime,
+  type NativeRealtimeCall,
+} from "./realtime/native-call";
+export {
+  DEFAULT_OPENGENI_NATIVE_CALL_LABELS,
+  OpenGeniNativeCallView,
+  type OpenGeniNativeCallLabels,
+} from "./realtime/call-view";
