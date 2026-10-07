@@ -30470,6 +30470,7 @@
     },
     "@opengeni/react/timeline-model": {
       "ActivityGroup": "type",
+      "AgentTitleParts": "type",
       "answersFromDrafts": "value",
       "applyPatchOpsFromToolItem": "value",
       "applyPatchPresentation": "value",
@@ -30503,6 +30504,7 @@
       "isApplyPatch": "value",
       "isPreparingWork": "value",
       "mcpToolLeaf": "value",
+      "namedAgentTitle": "value",
       "noticeDisplayText": "value",
       "noticeIsResolvedApproval": "value",
       "noticeTone": "value",
@@ -30561,6 +30563,7 @@
       "WebSearchResult": "type",
       "withComputePreview": "value",
       "workerRowTitle": "value",
+      "workerRowTitleParts": "value",
       "writeStdinPresentation": "value"
     },
     "@opengeni/react/tokens.css": {
