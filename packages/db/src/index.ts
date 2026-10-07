@@ -28288,6 +28288,28 @@ function createScopedSubscriptionCapacityWaiters(options: {
   }
 
   /**
+   * Open one waiter transaction. A user pool acts as its initiating human, who
+   * owns any private session that runs on it. Workspace and organization pool
+   * policies do not read the subject, and their synthetic worker subject would
+   * make session-visibility RLS hide a member's private session (and its
+   * waiter rows) from that session's own turn, so they run without one.
+   */
+  async function withScopedCapacityWaiterRls<T>(
+    db: Database,
+    workspaceId: string,
+    subjectId: string,
+    snapshot: XaiProviderAccountAuthoritySnapshotV1,
+    fn: (db: SessionActivityDatabase) => Promise<T>,
+  ): Promise<T> {
+    if (!subjectId.trim()) {
+      throw new Error(options.label + " capacity waiter requires a non-empty subjectId");
+    }
+    return snapshot.scope === "user"
+      ? await withWorkspaceSubjectSessionActivityRls(db, workspaceId, subjectId, fn)
+      : await withWorkspaceSessionActivityRls(db, workspaceId, fn);
+  }
+
+  /**
    * Atomically close one exact xAI attempt and preserve its logical turn behind a
    * durable provider-capacity waiter. The immutable authority snapshot and, for
    * private pools, exact initiating human are revalidated under FORCE RLS before
@@ -28339,10 +28361,11 @@ function createScopedSubscriptionCapacityWaiters(options: {
     ) {
       throw new Error(options.label + " credential cooldown must end in the future");
     }
-    return await withWorkspaceSubjectSessionActivityRls(
+    return await withScopedCapacityWaiterRls(
       db,
       input.workspaceId,
       input.subjectId,
+      snapshot,
       async (scopedDb) =>
         await withSessionActivitySavepoint(scopedDb, async (tx) => {
           const ownerOrganizationMembershipId = await resolveXaiPoolMembershipInTransaction(tx, {
@@ -28929,10 +28952,11 @@ function createScopedSubscriptionCapacityWaiters(options: {
     const now = input.now ?? new Date();
     const authority = await resolveXaiWaiterSubject(db, input.workspaceId, input.sessionId);
     if (!authority) return { action: "stale", waiter: null, events: [] };
-    return await withWorkspaceSubjectSessionActivityRls(
+    return await withScopedCapacityWaiterRls(
       db,
       input.workspaceId,
       authority.subjectId,
+      authority.snapshot,
       async (scopedDb) =>
         await withSessionActivitySavepoint(scopedDb, async (tx) => {
           const ownerOrganizationMembershipId = await resolveXaiPoolMembershipInTransaction(tx, {
