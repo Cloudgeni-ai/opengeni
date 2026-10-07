@@ -48,7 +48,16 @@ async function until(predicate: () => boolean, description: string) {
   if (!predicate()) throw new Error(`TLS fixture did not observe ${description}`);
 }
 
-async function fixture(mode: "normal" | "split" | "bounded" | "cancel" | "failure" = "normal") {
+async function fixture(
+  mode:
+    | "normal"
+    | "split"
+    | "bounded"
+    | "cancel"
+    | "failure"
+    | "poll-before-eof"
+    | "eof-without-exit" = "normal",
+) {
   const directory = mkdtempSync(join(tmpdir(), "modal-raw-page-tls-"));
   const key = join(directory, "server.key"),
     cert = join(directory, "server.pem");
@@ -86,8 +95,11 @@ async function fixture(mode: "normal" | "split" | "bounded" | "cancel" | "failur
     peak = 0,
     cancellations = 0,
     starts = 0,
-    writes = 0;
-  let terminal = mode !== "split";
+    writes = 0,
+    polls = 0,
+    readsEnded = 0;
+  const pollAfterReads: boolean[] = [];
+  let terminal = mode !== "split" && mode !== "eof-without-exit" && mode !== "poll-before-eof";
   const entered = (call: any, method: string) => {
     expect(call.metadata.get("authorization")).toEqual(["Bearer raw-page-test-token"]);
     expect(call.request.taskId).toBe("task-original");
@@ -130,6 +142,18 @@ async function fixture(mode: "normal" | "split" | "bounded" | "cancel" | "failur
         const offset = Number(call.request.offset),
           stream = call.request.fileDescriptor;
         if (mode === "cancel") return;
+        if (mode === "poll-before-eof") {
+          // The command finishes only after the concurrent point-in-time poll
+          // was answered "running"; its streams then reach EOF.
+          void until(() => polls === 1, "the first concurrent poll").then(() => {
+            terminal = true;
+            call.write({ data: (stream === 0 ? stdout : stderr).subarray(offset) });
+            readsEnded++;
+            finish();
+            call.end();
+          });
+          return;
+        }
         if (mode === "failure") {
           if (stream === 0) {
             call.write({ data: Buffer.from([0xe2, 0x82]) });
@@ -159,12 +183,15 @@ async function fixture(mode: "normal" | "split" | "bounded" | "cancel" | "failur
                 : stderr;
           call.write({ data: bytes.subarray(offset) });
         }
+        readsEnded++;
         finish();
         call.end();
       },
       poll(call: any, callback: any) {
         const finish = entered(call, "poll");
         if (mode === "cancel" || mode === "failure") return;
+        pollAfterReads.push(readsEnded === 2);
+        polls++;
         finish();
         callback(null, terminal ? { code: 0 } : {});
       },
@@ -223,7 +250,7 @@ async function fixture(mode: "normal" | "split" | "bounded" | "cancel" | "failur
     setTerminal: () => {
       terminal = true;
     },
-    stats: () => ({ active, peak, cancellations, starts, writes }),
+    stats: () => ({ active, peak, cancellations, starts, writes, polls, pollAfterReads }),
     drained: () => until(() => active === 0, "server-side RPC completion/cancellation"),
   };
 }
@@ -276,6 +303,48 @@ test("native quiet partial page retains split UTF-8 and the same independent rea
   await f.drained();
   expect(f.stats().starts).toBe(0);
   expect(f.stats().writes).toBe(0);
+});
+
+test("a poll answered before both streams reach EOF is re-polled within the same page", async () => {
+  const f = await fixture("poll-before-eof");
+  const expected = cursor();
+  const raw = await f.control.readRaw(expected, 5_000);
+  expect(raw.streams.stdout.eof).toBe(true);
+  expect(raw.streams.stderr.eof).toBe(true);
+  expect(raw.exit).toEqual({ source: "router_poll", code: 0 });
+  // One concurrent poll lost the race; the authoritative exit came from a
+  // poll issued after both reads reached EOF.
+  expect(f.stats().pollAfterReads).toEqual([false, true]);
+  const reduced = reduceModalRawOutputPage(raw, expected);
+  expect(reduced.exitCode).toBe(0);
+  expect(reduced.command.streams.stdout).toMatchObject({ eof: true, exitCode: 0 });
+  expect(reduced.command.streams.stderr).toMatchObject({ eof: true, exitCode: 0 });
+  await f.drained();
+  expect(f.stats().starts).toBe(0);
+  expect(f.stats().writes).toBe(0);
+});
+
+test("EOF without a provider exit stays unknown and re-polls only within the read budget", async () => {
+  const f = await fixture("eof-without-exit");
+  const expected = cursor();
+  const started = performance.now();
+  const raw = await f.control.readRaw(expected, 150);
+  const elapsed = performance.now() - started;
+  expect(raw.streams.stdout.eof).toBe(true);
+  expect(raw.streams.stderr.eof).toBe(true);
+  // EOF alone is never exit proof.
+  expect(raw.exit).toEqual({ source: "router_poll", code: null });
+  expect(reduceModalRawOutputPage(raw, expected).exitCode).toBeNull();
+  expect(f.stats().polls).toBeGreaterThan(1);
+  expect(elapsed).toBeLessThan(2_000);
+  await f.drained();
+  // A later page polls again and observes the exit without rereading bytes.
+  f.setTerminal();
+  const reads = f.requests.filter((request) => request.method === "read").length;
+  const terminal = await f.control.readRaw(raw.command, 1_000);
+  expect(terminal.exit).toEqual({ source: "router_poll", code: 0 });
+  expect(f.requests.filter((request) => request.method === "read").length).toBe(reads);
+  await f.drained();
 });
 
 test("native wire page bound is not EOF or consumed backlog", async () => {

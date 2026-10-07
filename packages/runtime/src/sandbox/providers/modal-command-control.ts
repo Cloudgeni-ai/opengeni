@@ -832,7 +832,9 @@ export class ModalCommandControl {
           .value;
         const stderr = (results[1] as PromiseFulfilledResult<{ bytes: Buffer; eof: boolean }>)
           .value;
-        const exit = (results[2] as PromiseFulfilledResult<number | null>).value;
+        let exit = (results[2] as PromiseFulfilledResult<number | null>).value;
+        if (exit === null && stdout.eof && stderr.eof)
+          exit = await this.pollAfterEof(router, command, cancellation.signal, deadline);
         return collectModalRawOutputPage(
           command,
           { stdout, stderr },
@@ -842,6 +844,43 @@ export class ModalCommandControl {
     } finally {
       clearTimeout(lookupTimeout);
       signal?.removeEventListener("abort", abort);
+    }
+  }
+
+  /** TaskExecPoll is a point-in-time status, issued concurrently with stream
+   * reads that may wait for EOF. A poll answered before the command exited
+   * reports "running" even when both streams then finish, and callers that
+   * read once (internal Channel-A commands) would treat a finished command as
+   * still running. After both streams reach EOF, poll again within this read's
+   * existing budget. EOF is not exit proof: a re-poll fault or an exhausted
+   * budget keeps the observed bytes and reports the exit as still unknown, and
+   * only caller cancellation propagates. */
+  private async pollAfterEof(
+    router: ModalCommandRouterWire,
+    command: ModalRouterProviderCommand,
+    signal: AbortSignal,
+    deadline: number,
+  ): Promise<number | null> {
+    let pause = 10;
+    for (;;) {
+      signal.throwIfAborted();
+      let exit: number | null;
+      try {
+        exit = await router.poll(command, signal);
+      } catch {
+        signal.throwIfAborted();
+        return null;
+      }
+      if (exit !== null) return exit;
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) return null;
+      try {
+        await delay(Math.min(pause, remaining), undefined, { signal });
+      } catch {
+        signal.throwIfAborted();
+        return null;
+      }
+      pause = Math.min(pause * 2, 250);
     }
   }
 

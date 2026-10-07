@@ -499,3 +499,107 @@ describe("fsWriteFiles", () => {
     });
   });
 });
+
+describe("internal commands whose first observation is stale", () => {
+  // A Modal-kind backend whose first observation lost the exit/output race:
+  // the script already wrote every file and printed its OK marker, but the
+  // provider reported the command as still running.
+  function staleFirstObservation(root: string, follow: "exited" | "unavailable") {
+    const { session: shell } = shellSession(root);
+    const state = {
+      controlReads: [] as Array<{ sessionId: number; chars?: string }>,
+      retained: [] as number[],
+      settled: [] as Array<{ providerSessionId: number; exitCode: number | null }>,
+      adopted: [] as number[],
+    };
+    const backend = {
+      async execCommand(args: unknown) {
+        const result = await shell.exec!(args as ChannelAExecArgs);
+        return `Process running with session ID 41\n\nOutput:\n${result.stdout}`;
+      },
+      async writeStdin(args: unknown) {
+        const read = args as { sessionId: number; chars?: string };
+        state.controlReads.push({ sessionId: read.sessionId, chars: read.chars });
+        if (follow === "unavailable") throw new Error("observation unavailable");
+        return "Process exited with code 0\n\nOutput:\n";
+      },
+    };
+    const routing = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: backend as never,
+        sandboxId: "sb-test",
+        kind: "modal",
+        leaseEpoch: 1,
+        providerInstanceId: "instance",
+        activeEpoch: 0,
+      }),
+      beforeMutation: async () => ({}),
+      afterMutation: async ({ retainedProcess }) => {
+        if (retainedProcess) state.retained.push(retainedProcess.providerSessionId);
+      },
+      settleProcess: async ({ process, proof }) => {
+        state.settled.push({
+          providerSessionId: process.providerSessionId,
+          exitCode: proof.exitCode,
+        });
+      },
+      adoptProcessAsBackgroundCommand: async ({ process }) => {
+        state.adopted.push(process.providerSessionId);
+        return {} as never;
+      },
+    });
+    return { routing, state };
+  }
+
+  test("a finished write is reported written and its retained process is settled, not adopted", async () => {
+    const { root } = workspace();
+    const { routing, state } = staleFirstObservation(root, "exited");
+    const result = await service(routing as unknown as ChannelASession).fsWriteFiles({
+      directory: "skills/demo",
+      files: skillFiles,
+    });
+    expect(result.written).toHaveLength(skillFiles.length);
+    for (const file of skillFiles) {
+      expect(readFileSync(join(root, "skills/demo", file.path), "utf8")).toBe(file.content);
+    }
+    // Observed through the non-model-visible control read until exit proof,
+    // so the routing layer settles the exact process before returning.
+    expect(state.retained).toEqual([41]);
+    expect(state.controlReads).toEqual([{ sessionId: 41, chars: "" }]);
+    expect(state.settled).toEqual([{ providerSessionId: 41, exitCode: 0 }]);
+    expect(routing.hasRetainedProcess(41)).toBe(false);
+    expect(state.adopted).toEqual([]);
+  });
+
+  test("an unproven follow-up keeps the existing failure and never replays the command", async () => {
+    const { root } = workspace();
+    const { routing, state } = staleFirstObservation(root, "unavailable");
+    await expect(
+      service(routing as unknown as ChannelASession).fsWriteFiles({
+        directory: "skills/demo",
+        files: skillFiles,
+      }),
+    ).rejects.toThrow(ChannelAPartialMutationError);
+    expect(state.controlReads).toHaveLength(1);
+    expect(state.settled).toEqual([]);
+    expect(state.adopted).toEqual([]);
+  });
+
+  test("an interactive PTY keeps its yielded session without a follow-up read", async () => {
+    const reads: unknown[] = [];
+    const session: ChannelASession = {
+      exec: async () => ({ stdout: "$ ", stderr: "", exitCode: null, sessionId: 9 }),
+      supportsPty: () => true,
+      writeStdin: async () => "",
+      hasRetainedProcess: () => true,
+      writeStdinForProcessControl: async (args) => {
+        reads.push(args);
+        return "Process exited with code 0\n\nOutput:\n";
+      },
+    };
+    const opened = await service(session).ptyOpen({ cols: 80, rows: 24, cwd: "" }, "pty-1");
+    expect(opened.execSessionId).toBe(9);
+    expect(reads).toEqual([]);
+  });
+});

@@ -93,6 +93,7 @@ import {
   isExecSessionLostBanner,
   parseExecBannerExitCode,
   parseExecBannerSessionId,
+  parseExecResponseBanner,
 } from "./exec-banner";
 import {
   createTurnToolCancellationController,
@@ -372,6 +373,11 @@ export type RepositoryDiscoveryResult = {
 };
 
 const REPOSITORY_DISCOVERY_TRUNCATED_SENTINEL = "__OPENGENI_REPOSITORY_DISCOVERY_TRUNCATED__";
+/** A yielded internal command is observed for at least this long, or for the
+ * caller's longer requested wait, before its operation reports unavailable. */
+const INTERNAL_COMMAND_SETTLE_MIN_WAIT_MS = 30_000;
+/** One bounded control read while settling a yielded internal command. */
+const INTERNAL_COMMAND_SETTLE_SLICE_MS = 2_000;
 
 /** Raw ripgrep stdout kept on the box before encoding. */
 export const CODE_SEARCH_RG_MAX_BYTES = 64 * 1024 * 1024;
@@ -695,13 +701,13 @@ export class SandboxChannelAService {
     const withRunAs = this.runAs ? { ...args, runAs: this.runAs } : args;
     if (this.session.exec) {
       const r = await this.session.exec(withRunAs);
-      return {
+      return await this.settleRetainedInternalCommand(args, {
         stdout: r.stdout ?? r.output ?? "",
         stderr: r.stderr ?? "",
         exitCode: r.exitCode ?? null,
         ...(typeof r.sessionId === "number" ? { sessionId: r.sessionId } : {}),
         wallTimeSeconds: r.wallTimeSeconds ?? 0,
-      };
+      });
     }
     if (this.session.execCommand) {
       const raw = await this.session.execCommand(withRunAs);
@@ -714,15 +720,73 @@ export class SandboxChannelAService {
       // pty/write 409) even on backends (Modal) whose only exec surface is
       // execCommand. We DON'T close over the banner for stdout (that is stripped).
       const sessionId = parseExecBannerSessionId(raw);
-      return {
+      return await this.settleRetainedInternalCommand(args, {
         stdout: stripExecBanner(raw),
         stderr: "",
         exitCode: parseExecBannerExitCode(raw),
         ...(sessionId !== null ? { sessionId } : {}),
         wallTimeSeconds: 0,
-      };
+      });
     }
     throw new ChannelAUnsupportedError("the box does not support command execution");
+  }
+
+  /**
+   * An internal one-shot command can yield before its exit is observed (a slow
+   * start, or a provider exit status that trails the output). The routing layer
+   * then retains it as a workspace writer. Channel-A callers read once and
+   * would report a false failure, and the reconciler would later adopt the
+   * finished command into the agent's background commands. Keep observing the
+   * exact retained process through the non-model-visible control read until
+   * its exit, within the caller's wait, so the routing layer settles it
+   * durably before this operation returns. Interactive PTYs keep their
+   * yielded session; an unproven outcome keeps the original running result,
+   * which every internal caller already treats as unavailable.
+   */
+  private async settleRetainedInternalCommand(
+    args: ChannelAExecArgs,
+    result: Awaited<ReturnType<SandboxChannelAService["run"]>>,
+  ): Promise<Awaited<ReturnType<SandboxChannelAService["run"]>>> {
+    const sessionId = result.sessionId;
+    const session = this.session;
+    if (
+      sessionId === undefined ||
+      args.tty === true ||
+      !session.writeStdinForProcessControl ||
+      session.hasRetainedProcess?.(sessionId) !== true
+    )
+      return result;
+    const startedAt = performance.now();
+    const deadline =
+      startedAt + Math.max(args.yieldTimeMs ?? 0, INTERNAL_COMMAND_SETTLE_MIN_WAIT_MS);
+    let stdout = result.stdout;
+    for (;;) {
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) return { ...result, stdout };
+      let page: string;
+      try {
+        page = await session.writeStdinForProcessControl({
+          sessionId,
+          chars: "",
+          yieldTimeMs: Math.max(1, Math.min(remaining, INTERNAL_COMMAND_SETTLE_SLICE_MS)),
+          ...(args.maxOutputTokens !== undefined ? { maxOutputTokens: args.maxOutputTokens } : {}),
+        });
+      } catch {
+        return { ...result, stdout };
+      }
+      const banner = parseExecResponseBanner(page);
+      if (banner.kind === "exited") {
+        return {
+          stdout: stdout + stripExecBanner(page),
+          stderr: result.stderr,
+          exitCode: banner.exitCode,
+          wallTimeSeconds: result.wallTimeSeconds + (performance.now() - startedAt) / 1_000,
+        };
+      }
+      // Lost, malformed, or rebound observations are not exit proof.
+      if (banner.kind !== "running" || banner.sessionId !== sessionId) return { ...result, stdout };
+      stdout += stripExecBanner(page);
+    }
   }
 
   /** Run a command that is proven read-only. Routing sessions expose an
