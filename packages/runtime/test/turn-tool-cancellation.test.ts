@@ -1712,13 +1712,19 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       finishExec = resolve;
     });
     const cancelledOpIds: string[] = [];
+    let terminalObserved = false;
     const session = {
       supportsPty: () => false,
       cancelExecCommand: async (opId: string) => {
         cancelledOpIds.push(opId);
-        finishExec("cancelled");
+        terminalObserved = true;
+        finishExec(exited(130, "cancelled"));
         return true;
       },
+      observeExecCommand: async () =>
+        terminalObserved
+          ? { status: "completed" as const, result: exited(130, "cancelled") }
+          : { status: "running" as const },
     };
     const exec = functionTool("exec_command", async () => {
       markStarted();
@@ -1743,7 +1749,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     await started;
     abort.abort(new Error("steered"));
     await controller.waitForQuiescence();
-    await invocation;
+    await expect(invocation).rejects.toThrow("steered");
 
     expect(cancelledOpIds).toEqual(["call_2e_machine_2f_1:0"]);
   });
@@ -1950,6 +1956,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       finish = resolve;
     });
     const cancelledOpIds: string[] = [];
+    let terminalObserved = false;
     const session = {
       supportsPty: () => false,
       exec: async () => {
@@ -1958,16 +1965,21 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       },
       cancelExecCommand: async (opId: string) => {
         cancelledOpIds.push(opId);
+        terminalObserved = true;
         finish({ exitCode: 130, output: "cancelled" });
         return true;
       },
+      observeExecCommand: async () =>
+        terminalObserved
+          ? { status: "completed" as const, result: { exitCode: 130, output: "cancelled" } }
+          : { status: "running" as const },
     };
 
     const command = controller.runSandboxCommand(session, { cmd: "sleep 60" });
     await started;
     abort.abort(new Error("steered during setup"));
     await controller.waitForQuiescence();
-    await command;
+    await expect(command).rejects.toThrow("steered during setup");
 
     expect(cancelledOpIds).toHaveLength(1);
     expect(cancelledOpIds[0]).toMatch(/^turn_lifecycle_[a-zA-Z0-9_-]+:0$/);

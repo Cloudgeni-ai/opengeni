@@ -35,7 +35,19 @@ interface ToolCallCorrelation {
    * observers distinguish a completed transfer from its earlier cancellation
    * handoff; the turn fence has already relinquished cancellation authority. */
   onDurableOpOwnershipTransferred?: (opId: string) => void;
+  /** Pins cancellation/observation to the exact backend selected for this op. */
+  onRemoteOperationTransportSelected?: (transport: RemoteOperationControl) => void;
 }
+
+export type RemoteOperationObservation =
+  | { status: "running"; result?: unknown }
+  | { status: "completed"; result: unknown; failure?: unknown };
+
+/** Exact provider control surface for one already-dispatched operation. */
+export type RemoteOperationControl = {
+  cancelExecCommand?(opId: string): Promise<boolean>;
+  observeExecCommand?(opId: string): Promise<RemoteOperationObservation>;
+};
 
 const storage = new AsyncLocalStorage<ToolCallCorrelation>();
 
@@ -63,6 +75,7 @@ export function runWithToolCallCorrelation<T>(
   options: {
     onDurableOpOwnershipTransferStarted?: (opId: string) => void;
     onDurableOpOwnershipTransferred?: (opId: string) => void;
+    onRemoteOperationTransportSelected?: (transport: RemoteOperationControl) => void;
   } = {},
 ): T {
   return storage.run(
@@ -75,6 +88,9 @@ export function runWithToolCallCorrelation<T>(
         : {}),
       ...(options.onDurableOpOwnershipTransferred
         ? { onDurableOpOwnershipTransferred: options.onDurableOpOwnershipTransferred }
+        : {}),
+      ...(options.onRemoteOperationTransportSelected
+        ? { onRemoteOperationTransportSelected: options.onRemoteOperationTransportSelected }
         : {}),
     },
     fn,
@@ -114,4 +130,9 @@ export function notifyDurableOpOwnershipTransferStarted(opId: string): void {
  * durable session ownership. Failed adoption deliberately emits no signal. */
 export function notifyDurableOpOwnershipTransferred(opId: string): void {
   storage.getStore()?.onDurableOpOwnershipTransferred?.(opId);
+}
+
+/** Bind the current operation to its already-resolved physical backend. */
+export function notifyRemoteOperationTransportSelected(transport: RemoteOperationControl): void {
+  storage.getStore()?.onRemoteOperationTransportSelected?.(transport);
 }

@@ -88,6 +88,10 @@ import {
 } from "../synchronous-command";
 import { observeSynchronousCommand, synchronousCommandPage } from "../synchronous-command";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../exec-banner";
+import {
+  notifyRemoteOperationTransportSelected,
+  type RemoteOperationObservation,
+} from "../op-correlation";
 import { withSandboxProviderOperation } from "../provider-operation-gate";
 import { hasModalCommandStartOutcomeUnknownBoundary } from "../providers/modal-command-start-errors";
 
@@ -122,6 +126,7 @@ export interface RoutableBackendSession extends ProviderCommandSession {
   execCommand?(args: unknown): Promise<string>;
   writeStdin?(args: unknown): Promise<string>;
   cancelExecCommand?(opId: string): Promise<boolean>;
+  observeExecCommand?(opId: string): Promise<RemoteOperationObservation>;
   cancelPendingExecCommand?(): Promise<void>;
   readFile?(args: unknown): Promise<string | Uint8Array>;
   writeFile?(args: unknown): Promise<unknown>;
@@ -2352,6 +2357,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       "exec",
       true,
       async (s) => {
+        notifyRemoteOperationTransportSelected(s);
         if (s.exec) {
           return s.exec(args);
         }
@@ -2396,6 +2402,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           "exec",
           true,
           async (provider) => {
+            notifyRemoteOperationTransportSelected(provider);
             const result =
               backend.kind === "modal"
                 ? provider.execCommand
@@ -2439,6 +2446,12 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           : "shell_session";
       },
       cancelExecCommand: async (opId) => (await backend.session.cancelExecCommand?.(opId)) ?? false,
+      ...(backend.session.observeExecCommand
+        ? {
+            observeExecCommand: async (opId: string) =>
+              await backend.session.observeExecCommand!(opId),
+          }
+        : {}),
       cancelPendingExecCommand: async () => {
         await backend.session.cancelPendingExecCommand?.();
       },
@@ -2470,6 +2483,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         "execCommand",
         true,
         async (s) => {
+          notifyRemoteOperationTransportSelected(s);
           if (s.execCommand) {
             return s.execCommand(args);
           }
@@ -2982,6 +2996,12 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       backend.session.supportsPty?.() === false
       ? "remote_operation"
       : "shell_session";
+  }
+
+  /** A route proxy must wait for the exact command dispatch to bind its
+   * provider session before sending remote cancellation or observation calls. */
+  requiresPinnedRemoteOperationControl(): boolean {
+    return true;
   }
 
   /** createEditor is a synchronous factory in the SDK surface. The SDK's filesystem

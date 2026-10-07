@@ -1,4 +1,9 @@
-import { runWithToolCallCorrelation, sanitizeOpIdToken } from "./op-correlation";
+import {
+  runWithToolCallCorrelation,
+  sanitizeOpIdToken,
+  type RemoteOperationControl,
+  type RemoteOperationObservation,
+} from "./op-correlation";
 import {
   hasTypedExecHandleLoss,
   isExecSessionLostBanner,
@@ -116,6 +121,9 @@ type CommandCancellationSession = {
    * always-present method surface or a pre-resolution PTY default. */
   commandCancellationTransport?(): Promise<"remote_operation" | "shell_session">;
   cancelExecCommand?(opId: string): Promise<boolean>;
+  observeExecCommand?(opId: string): Promise<RemoteOperationObservation>;
+  /** A mutable routing proxy waits for dispatch-time exact-provider binding. */
+  requiresPinnedRemoteOperationControl?(): boolean;
   /** Abort a provider exec-start transport before it returns a session id. */
   cancelPendingExecCommand?(): Promise<void>;
   supportsPty?(): boolean;
@@ -203,8 +211,12 @@ export type TurnSandboxCommandSession = CommandCancellationSession & {
 
 type ActiveRemoteExec = {
   settled: boolean;
+  ownershipTransferred: boolean;
+  observation: RemoteOperationObservation | null;
   settledPromise: Promise<void>;
   settle(): void;
+  bindTransport(transport: RemoteOperationControl): void;
+  observe(): Promise<RemoteOperationObservation | null>;
   cancel(): Promise<void>;
 };
 
@@ -1022,10 +1034,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       const interactive = args.tty ?? !lossless;
       const remoteExec =
         session.cancelExecCommand && useRemoteOpCancellation
-          ? this.registerRemoteExec(
-              { cancelExecCommand: session.cancelExecCommand.bind(session) },
-              `${sanitizeOpIdToken(correlationId)}:0`,
-            )
+          ? this.registerRemoteExec(session, `${sanitizeOpIdToken(correlationId)}:0`)
           : null;
       const markerPath = shellMarkerPath(crypto.randomUUID());
       const command = useRemoteOpCancellation
@@ -1069,6 +1078,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
           {
             onDurableOpOwnershipTransferStarted: (opId) =>
               remoteExec?.releaseCancellationAuthority(opId),
+            onRemoteOperationTransportSelected: (transport) => remoteExec?.bindTransport(transport),
           },
         );
       } catch (error) {
@@ -1103,9 +1113,19 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
           pendingStart?.settle(retainedProcess.providerSessionId);
         }
         pendingStart?.settle();
-        throw error;
-      } finally {
-        remoteExec?.settle();
+        if (remoteExec && !remoteExec.settled) {
+          const observed = await remoteExec.observe();
+          if (observed?.status === "completed") {
+            if (this.cancelled) throw cancellationError(this.reason);
+            if (observed.failure) throw observed.failure;
+            initialNative = observed.result;
+          } else {
+            if (this.cancelled) throw cancellationError(this.reason);
+            throw error;
+          }
+        } else {
+          throw error;
+        }
       }
       const initial = nativeCommandBanner(initialNative);
       const initialResult = nativeCommandResult(initialNative);
@@ -1116,15 +1136,32 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
           )
         : null;
       if (useRemoteOpCancellation) {
-        if (initialPage)
-          return await observeSynchronousCommand(initialPage, async () => {
+        const hasTerminalReceipt = initialPage
+          ? initialPage.exitCode !== null
+          : initialResult.exitCode !== null;
+        if (hasTerminalReceipt) remoteExec?.settle();
+        if (hasTerminalReceipt && this.cancelled && !remoteExec?.ownershipTransferred) {
+          throw cancellationError(this.reason);
+        }
+        if (initialPage) {
+          const result = await observeSynchronousCommand(initialPage, async () => {
             throw new Error("Remote command did not report terminal completion");
           });
-        if (!structured) return initial;
+          if (hasTerminalReceipt && this.cancelled && !remoteExec?.ownershipTransferred) {
+            throw cancellationError(this.reason);
+          }
+          return result;
+        }
+        if (!structured) {
+          if (hasTerminalReceipt && this.cancelled && !remoteExec?.ownershipTransferred) {
+            throw cancellationError(this.reason);
+          }
+          return initial;
+        }
         if (initialResult.exitCode === null) {
           throw new Error("Sandbox command did not report a terminal exit code");
         }
-        return {
+        const result = {
           stdout: initialResult.stdout,
           stderr: initialResult.stderr,
           exitCode: initialResult.exitCode,
@@ -1133,6 +1170,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             (performance.now() - startedAt) / 1_000,
           ),
         } satisfies TurnSandboxCommandResult;
+        if (this.cancelled && !remoteExec?.ownershipTransferred) {
+          throw cancellationError(this.reason);
+        }
+        return result;
       }
 
       const sessionId = parseExecBannerSessionId(initial);
@@ -1395,7 +1436,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             const remoteExec =
               cancelExecCommand && useRemoteOpCancellation
                 ? this.registerRemoteExec(
-                    { cancelExecCommand: cancelExecCommand.bind(cancellationSession) },
+                    cancellationSession!,
                     `${sanitizeOpIdToken(correlationId)}:0`,
                   )
                 : null;
@@ -1435,6 +1476,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 {
                   onDurableOpOwnershipTransferStarted: (opId) =>
                     remoteExec?.releaseCancellationAuthority(opId),
+                  onRemoteOperationTransportSelected: (transport) =>
+                    remoteExec?.bindTransport(transport),
                 },
               );
             } catch (error) {
@@ -1475,15 +1518,38 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 pendingStart?.settle(retainedProcess.providerSessionId);
               }
               pendingStart?.settle();
-              if (error instanceof RoutingMutationOutcomeUnknownError)
+              if (remoteExec && !remoteExec.settled) {
+                const observed = await remoteExec.observe();
+                if (observed?.status === "completed") {
+                  if (this.cancelled) throw cancellationError(this.reason);
+                  if (observed.failure) throw observed.failure;
+                  output = observed.result;
+                } else if (this.cancelled) {
+                  throw cancellationError(this.reason);
+                } else if (error instanceof RoutingMutationOutcomeUnknownError) {
+                  return renderRoutingMutationOutcomeUnknownToolResult(error);
+                } else {
+                  throw error;
+                }
+              } else if (error instanceof RoutingMutationOutcomeUnknownError) {
                 return renderRoutingMutationOutcomeUnknownToolResult(error);
-              throw error;
-            } finally {
-              remoteExec?.settle();
+              } else {
+                throw error;
+              }
             }
             if (typeof output !== "string") {
+              if (remoteExec && !remoteExec.ownershipTransferred) {
+                const terminal = nativeCommandResult(output).exitCode !== null;
+                if (terminal) remoteExec.settle();
+                if (terminal && this.cancelled) throw cancellationError(this.reason);
+              }
               pendingStart?.settle();
               return output;
+            }
+            if (remoteExec && !remoteExec.ownershipTransferred) {
+              const terminal = nativeCommandResult(output).exitCode !== null;
+              if (terminal) remoteExec.settle();
+              if (terminal && this.cancelled) throw cancellationError(this.reason);
             }
             const sessionId = parseExecBannerSessionId(output);
             if (sessionId !== null) {
@@ -1513,6 +1579,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               // immediately before the running receipt is returned.
               this.shellSessions.set(sessionId, state);
               pendingStart?.settle(sessionId);
+              // A provider-specific numeric session is not an op-stream
+              // terminal result. Transfer its cancellation fence to the
+              // already-registered shell-session proof path instead.
+              remoteExec?.settle();
               return await this.awaitModelFacingShellResult({
                 state,
                 initialOutput: output,
@@ -2167,7 +2237,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   }
 
   private registerRemoteExec(
-    session: Required<Pick<CommandCancellationSession, "cancelExecCommand">>,
+    session: CommandCancellationSession,
     opId: string,
   ): ActiveRemoteExec & { releaseCancellationAuthority(transferredOpId: string): void } {
     let resolveSettled!: () => void;
@@ -2175,10 +2245,16 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       resolveSettled = resolve;
     });
     let cancellation: Promise<void> | null = null;
+    let cancellationRequest: Promise<void> | null = null;
+    let observation: Promise<RemoteOperationObservation | null> | null = null;
+    let transport: RemoteOperationControl | null =
+      session.requiresPinnedRemoteOperationControl?.() === true ? null : session;
     const entry: ActiveRemoteExec & {
       releaseCancellationAuthority(transferredOpId: string): void;
     } = {
       settled: false,
+      ownershipTransferred: false,
+      observation: null,
       settledPromise,
       settle: () => {
         if (entry.settled) return;
@@ -2186,19 +2262,54 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         resolveSettled();
         this.remoteExecs.delete(entry);
       },
+      bindTransport: (selected) => {
+        if (selected.cancelExecCommand || selected.observeExecCommand) transport = selected;
+      },
+      observe: async () => {
+        if (entry.observation?.status === "completed") return entry.observation;
+        const exactTransport = transport;
+        if (!exactTransport?.observeExecCommand) return null;
+        if (!observation) {
+          observation = exactTransport
+            .observeExecCommand(opId)
+            .then((observed) => {
+              entry.observation = observed;
+              if (observed.status === "completed") entry.settle();
+              return observed;
+            })
+            .catch(() => null)
+            .finally(() => {
+              observation = null;
+            });
+        }
+        return await observation;
+      },
       releaseCancellationAuthority: (transferredOpId: string) => {
         if (transferredOpId !== opId) return;
+        entry.ownershipTransferred = true;
         entry.settle();
       },
       cancel: () => {
         cancellation ??= (async () => {
           while (!entry.settled) {
-            const attempt = session.cancelExecCommand(opId).catch(() => false);
-            // A routing/provider cancellation request can itself hang while the
-            // ordinary PTY exec has already yielded. Do not let that advisory
-            // route hold the authoritative local/session fence; its late result
-            // is idempotent and already rejection-contained.
-            await Promise.race([attempt, entry.settledPromise]);
+            const exactTransport = transport;
+            if (exactTransport) {
+              if (!cancellationRequest && exactTransport.cancelExecCommand) {
+                cancellationRequest = exactTransport
+                  .cancelExecCommand(opId)
+                  .then((requested) => {
+                    // A successful OpCancel response is advisory only. It stops
+                    // repeat requests, but never settles the physical fence.
+                    if (!requested) cancellationRequest = null;
+                  })
+                  .catch(() => {
+                    cancellationRequest = null;
+                  });
+              }
+              // Reconcile only the original operation. readExisting is
+              // observation-only and never OpStarts or final-ACKs its output.
+              await entry.observe();
+            }
             await Promise.race([entry.settledPromise, delay(SHELL_POLL_MS)]);
           }
         })();

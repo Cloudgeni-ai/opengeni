@@ -62,8 +62,11 @@ import type { SelfhostedOpObservation, SelfhostedOpObserver } from "./op-observe
 import { selfhostedFaultClass } from "./fault-rendering";
 import {
   nextDurableOpId,
+  notifyRemoteOperationTransportSelected,
   notifyDurableOpOwnershipTransferStarted,
   notifyDurableOpOwnershipTransferred,
+  type RemoteOperationControl,
+  type RemoteOperationObservation,
 } from "../op-correlation";
 import {
   OpStreamExecClient,
@@ -471,6 +474,10 @@ export class SelfhostedSession {
    * durability hook; never retarget an already-admitted operation on reconnect. */
   private readonly opStreamClients = new Map<string, OpStreamExecClient>();
   private readonly inFlightOpStreamClients = new Map<string, OpStreamExecClient>();
+  private readonly inFlightOpStreamOutput = new Map<
+    string,
+    { stdout: string[]; stderr: string[]; completed?: RemoteOperationObservation }
+  >();
   private readonly ownedCommandReaders = new Map<string, () => Promise<void>>();
   private readonly commandRefreshes = new Map<string, Promise<void>>();
 
@@ -1018,7 +1025,31 @@ export class SelfhostedSession {
     const startedAt = Date.now();
     const opId = nextDurableOpId() ?? `anon_${crypto.randomUUID()}`;
     let adoptedCommandId: string | null = null;
+    let terminalProof = false;
+    const retainedOutput: {
+      stdout: string[];
+      stderr: string[];
+      completed?: RemoteOperationObservation;
+    } = {
+      stdout: [],
+      stderr: [],
+    };
     this.inFlightOpStreamClients.set(opId, client);
+    this.inFlightOpStreamOutput.set(opId, retainedOutput);
+    const remoteControl: RemoteOperationControl = {
+      cancelExecCommand: async (requestedOpId) => {
+        if (requestedOpId !== opId) return false;
+        await client.cancel(opId);
+        return true;
+      },
+      observeExecCommand: async (requestedOpId) => {
+        if (requestedOpId !== opId) {
+          throw new Error("Remote operation observer received a different operation id");
+        }
+        return await this.observeExecCommandWithClient(opId, client, retainedOutput);
+      },
+    };
+    notifyRemoteOperationTransportSelected(remoteControl);
     try {
       const wallMs =
         executionTimeoutMs > 0 ? executionTimeoutMs + SELFHOSTED_EXEC_REPLY_GRACE_MS : 0;
@@ -1088,6 +1119,7 @@ export class SelfhostedSession {
               outcome: await client.exec(opId, execReq, executionTimeoutMs, wallMs),
             };
       if (result.status === "running") {
+        terminalProof = result.terminal !== undefined;
         if (result.terminal && adoptedCommandId) {
           await Promise.resolve(
             this.settleBackgroundCommand?.({
@@ -1141,6 +1173,7 @@ export class SelfhostedSession {
           backgroundOpId: result.opId,
         };
       }
+      terminalProof = true;
       const outcome = result.outcome;
       if (adoptedCommandId) {
         await Promise.resolve(
@@ -1180,7 +1213,9 @@ export class SelfhostedSession {
         // start retries without heals were admission backpressure (draining).
         ...(retries > 0 ? { faultClass: outcome.heals > 0 ? "reconnecting" : "draining" } : {}),
       });
-      return execResultToChannelA(outcome.response, executionTimeoutMs);
+      const nativeResult = execResultToChannelA(outcome.response, executionTimeoutMs);
+      retainedOutput.completed = { status: "completed", result: nativeResult };
+      return nativeResult;
     } catch (error) {
       if (error instanceof OpStreamUnavailableError) throw error;
       const controlError =
@@ -1206,7 +1241,14 @@ export class SelfhostedSession {
       });
       throw controlError;
     } finally {
-      this.inFlightOpStreamClients.delete(opId);
+      // An observer failure does not prove that the exact provider operation
+      // stopped. Keep its launch client available for cancellation and
+      // readExisting recovery; only terminal proof or durable adoption releases
+      // this process-local custody entry.
+      if (terminalProof || adoptedCommandId) {
+        this.inFlightOpStreamClients.delete(opId);
+        this.inFlightOpStreamOutput.delete(opId);
+      }
     }
   }
 
@@ -1271,6 +1313,56 @@ export class SelfhostedSession {
     if (!client) return false;
     await client.cancel(opId);
     return true;
+  }
+
+  /** Reconcile the exact retained foreground exec without OpStart or final ACK.
+   * Running/unobservable results keep the pinned client for another attempt. */
+  async observeExecCommand(opId: string): Promise<RemoteOperationObservation> {
+    const client = this.inFlightOpStreamClients.get(opId);
+    if (!client) throw new Error("No retained observer is available for this operation");
+    const output = this.inFlightOpStreamOutput.get(opId);
+    if (!output) throw new Error("No retained output custody is available for this operation");
+    return await this.observeExecCommandWithClient(opId, client, output);
+  }
+
+  private async observeExecCommandWithClient(
+    opId: string,
+    client: OpStreamExecClient,
+    output: { stdout: string[]; stderr: string[]; completed?: RemoteOperationObservation },
+  ): Promise<RemoteOperationObservation> {
+    if (output.completed?.status === "completed") return output.completed;
+    const observed = await client.readExisting(opId, 250, async (frames) => {
+      for (const frame of frames) output[frame.stream].push(frame.chunk);
+    });
+    if (observed.status === "running") {
+      return {
+        status: "running",
+        result: {
+          stdout: output.stdout.join(""),
+          stderr: output.stderr.join(""),
+          exitCode: null,
+        },
+      };
+    }
+    const result = execResultToChannelA(observed.outcome.response, this.effectiveExecDeadlineMs);
+    const completed: RemoteOperationObservation = {
+      status: "completed",
+      result: {
+        ...result,
+        stdout: output.stdout.join(""),
+        stderr: output.stderr.join(""),
+        output: output.stdout.join(""),
+      },
+      ...(observed.outcome.failure
+        ? { failure: runnerFailureToControlError(observed.outcome.failure) }
+        : {}),
+    };
+    output.completed = completed;
+    if (this.inFlightOpStreamClients.get(opId) === client) {
+      this.inFlightOpStreamClients.delete(opId);
+      this.inFlightOpStreamOutput.delete(opId);
+    }
+    return completed;
   }
 
   /** SDK shell capability never calls this (gated on `supportsPty()` which is

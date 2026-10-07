@@ -65,6 +65,7 @@ import type {
 } from "@opengeni/contracts";
 import { CODE_SEARCH_CREDENTIAL_DIRS } from "@opengeni/contracts/code-search";
 import type { ProviderCommandSession } from "./provider-command-session";
+import type { RemoteOperationObservation } from "./op-correlation";
 import {
   connectedMachinePathWithinRoot,
   connectedMachineWorkspaceRootsEqual,
@@ -155,6 +156,8 @@ export type ChannelASession = ProviderCommandSession & {
     args: ChannelAExecArgs,
     runner?: SynchronousCommandRunner,
   ): Promise<SynchronousCommandResult>;
+  /** Observe an exact remote op without starting it or acknowledging its output. */
+  observeExecCommand?(opId: string): Promise<RemoteOperationObservation>;
   execCommand?(args: ChannelAExecArgs): Promise<string>;
   readFile?(args: {
     path: string;
