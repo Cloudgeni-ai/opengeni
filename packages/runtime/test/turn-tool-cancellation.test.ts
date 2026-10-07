@@ -1400,6 +1400,93 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(cancellationCommands[0]).toContain("command kill -KILL");
   });
 
+  test("a terminal no-session receipt after cancellation rejects only after pending-start cleanup", async () => {
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    const originalCommand = "printf 'synchronous write complete\\n'";
+    let releaseStart!: (output: string) => void;
+    let releaseCleanup!: (output: string) => void;
+    let markStarted!: () => void;
+    let markCleanupStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const cleanupStarted = new Promise<void>((resolve) => {
+      markCleanupStarted = resolve;
+    });
+    const pendingStart = new Promise<string>((resolve) => {
+      releaseStart = resolve;
+    });
+    const pendingCleanup = new Promise<string>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    const starts: string[] = [];
+    const cleanupCommands: string[] = [];
+    const session = {
+      supportsPty: () => true,
+      execCommand: async (args: { cmd: string }) => {
+        if (args.cmd.includes(originalCommand)) {
+          starts.push(args.cmd);
+          markStarted();
+          return await pendingStart;
+        }
+        cleanupCommands.push(args.cmd);
+        markCleanupStarted();
+        return await pendingCleanup;
+      },
+    };
+
+    const operation = controller.runSandboxCommandSynchronous(session, {
+      cmd: originalCommand,
+    });
+    await started;
+    abort.abort(new Error("steered during pending synchronous start"));
+    await cleanupStarted;
+    releaseStart(exited(0, "synchronous write complete"));
+    const outcome = await operation.then(
+      (value) => ({ kind: "fulfilled" as const, value }),
+      (error: unknown) => ({ kind: "rejected" as const, error }),
+    );
+    const quiescence = controller.waitForQuiescence();
+    expect(await pendingAfterMicrotasks(quiescence)).toBe(true);
+    releaseCleanup(exited(0));
+    await quiescence;
+
+    expect(outcome.kind).toBe("rejected");
+    if (outcome.kind === "rejected")
+      expect(outcome.error).toMatchObject({
+        name: "TurnSandboxCommandCancelledError",
+        message: "steered during pending synchronous start",
+      });
+    expect(starts).toHaveLength(1);
+    expect(cleanupCommands).toHaveLength(1);
+    expect(cleanupCommands[0]).toContain(".cancelled");
+    expect(cleanupCommands[0]).toContain("command kill -TERM");
+  });
+
+  test.each([0, 7])(
+    "uncancelled synchronous commands preserve terminal no-session exit %s",
+    async (exitCode) => {
+      const controller = createTurnToolCancellationController();
+      let starts = 0;
+      const result = await controller.runSandboxCommandSynchronous(
+        {
+          supportsPty: () => true,
+          execCommand: async () => {
+            starts++;
+            return exited(exitCode, "terminal output");
+          },
+        },
+        { cmd: "printf terminal" },
+      );
+
+      expect(result).toMatchObject({ stdout: "terminal output", exitCode });
+      expect(starts).toBe(1);
+      controller.cancel();
+      await controller.waitForQuiescence();
+    },
+  );
+
   test("native pending launch cancellation waits for its retained handoff without numeric helpers", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);

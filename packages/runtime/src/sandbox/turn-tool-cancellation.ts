@@ -1138,6 +1138,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       const sessionId = parseExecBannerSessionId(initial);
       if (sessionId === null) {
         pendingStart?.settle();
+        const hasTerminalInitialReceipt = initialPage
+          ? initialPage.exitCode !== null
+          : initialResult.exitCode !== null;
+        if (this.cancelled && hasTerminalInitialReceipt) throw cancellationError(this.reason);
         if (initialPage)
           return await observeSynchronousCommand(initialPage, async () => {
             throw new Error("Original command has no observation handle");
