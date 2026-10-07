@@ -362,19 +362,23 @@ describe("unit process planning", () => {
       "packages/db/test/migration-0138-sandbox-checkpoints.test.ts",
       "packages/db/test/migration-0352-session-variable-set-attachments.test.ts",
       "packages/db/test/migration-0305-personal-resource-grant-management.test.ts",
+      "packages/db/test/migration-0344-private-session-visibility-transition-gate.test.ts",
     ]) {
       expect(sourceMutatesSharedPostgresRole(readFileSync(join(root, path), "utf8"))).toBe(true);
     }
   });
 
-  test("runs owner-migrated role fixtures after parallel migration readers", () => {
+  test("serializes owner-migrated role fixtures and their migration readers", () => {
     const root = join(import.meta.dir, "../..");
     const owner = "packages/db/test/migration-0305-personal-resource-grant-management.test.ts";
     const reader =
-      "packages/db/test/migration-0381-organization-codex-subscription-inheritance.test.ts";
+      "packages/db/test/migration-0344-private-session-visibility-transition-gate.test.ts";
     const plan = planUnitTestProcesses(root, [], [owner, reader], 1);
-    expect(plan.parallel).toEqual([{ files: [reader], isolated: true }]);
-    expect(plan.clusterRoleSensitive).toEqual([{ files: [owner], isolated: true }]);
+    expect(plan.parallel).toEqual([]);
+    expect(plan.clusterRoleSensitive).toEqual([
+      { files: [owner], isolated: true },
+      { files: [reader], isolated: true },
+    ]);
   });
 
   test("keeps explicit concurrency, wall clocks, shared PostgreSQL, and cluster roles out of the parallel pool", () => {
