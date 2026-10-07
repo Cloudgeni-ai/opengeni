@@ -250,13 +250,38 @@ function pick(world: World, session: Session, candidates: Connection[]): Connect
   return ranked[0]!;
 }
 
-function nearestReasoningLevel(model: Model, requested: string, from: Model | undefined): string {
-  if (model.reasoningLevels.includes(requested)) return requested;
-  const order = from?.reasoningLevels ?? model.reasoningLevels;
-  const requestedRank = order.indexOf(requested);
-  // Map by relative position in the source model's ladder, rounding down.
-  const ratio = requestedRank <= 0 || order.length <= 1 ? 0 : requestedRank / (order.length - 1);
-  return model.reasoningLevels[Math.floor(ratio * (model.reasoningLevels.length - 1))] ?? "";
+/**
+ * SUB-FAIL-03 and D-16: the reasoning level to run `model` at when the session
+ * asked for `requested` on its preferred model `from`.
+ *
+ * 1. The same level name when the model supports it.
+ * 2. Otherwise the model's level whose relative position on its own ladder
+ *    (lowest 0, highest 1) is closest to the requested level's relative
+ *    position on the preferred model's ladder. A tie goes to the lower level.
+ * 3. A level the preferred model does not list has no position and maps to
+ *    the middle of the ladder (the lower middle when there are two).
+ */
+export function nearestReasoningLevel(
+  model: Model,
+  requested: string,
+  from: Model | undefined,
+): string {
+  const levels = model.reasoningLevels;
+  if (levels.includes(requested)) return requested;
+  if (levels.length <= 1) return levels[0] ?? "";
+  const source = from?.reasoningLevels ?? [];
+  const sourceIndex = source.indexOf(requested);
+  // The requested position as an exact fraction, so ties are exact.
+  const [numerator, denominator] =
+    sourceIndex < 0 || source.length <= 1 ? [1, 2] : [sourceIndex, source.length - 1];
+  // |index / (levels - 1) - numerator / denominator|, scaled by both denominators.
+  const distance = (index: number) =>
+    Math.abs(index * denominator - numerator * (levels.length - 1));
+  let best = 0;
+  for (let index = 1; index < levels.length; index += 1) {
+    if (distance(index) < distance(best)) best = index;
+  }
+  return levels[best]!;
 }
 
 /** Candidate models in failover order: the preferred model, then (if allowed) its fallbacks. */
@@ -452,6 +477,14 @@ export function checkDecision(
       byId(world.models, session.preferredModelId)?.provider;
     if (crossProvider && (!settings.crossProviderFailover || session.onlyThisModel)) {
       fail("SUB-FAIL-03", "moved across providers although that is not allowed");
+    }
+    const expectedLevel = nearestReasoningLevel(
+      byId(world.models, decision.modelId)!,
+      session.reasoningLevel,
+      byId(world.models, session.preferredModelId),
+    );
+    if (decision.reasoningLevel !== expectedLevel) {
+      fail("SUB-FAIL-03", "ran at a reasoning level other than the nearest supported level");
     }
     // Staying on the current account while its cache is warm is always allowed
     // (SUB-STICK-02); every other placement must respect the failover order.

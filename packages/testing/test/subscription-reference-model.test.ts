@@ -4,6 +4,7 @@ import {
   checkDecision,
   decide,
   effectiveSettings,
+  nearestReasoningLevel,
   type Connection,
   type Decision,
   type InvariantViolation,
@@ -309,6 +310,16 @@ describe("subscription reference model", () => {
       };
       expect(requirements(violationsFor(forceCrossProvider)).has("SUB-FAIL-03")).toBe(true);
     });
+
+    test("running at a reasoning level other than the nearest one is caught (model:SUB-FAIL-03)", () => {
+      const lowestLevel = (world: World, sessionId: string, now: number): Decision => {
+        const decision = decide(world, sessionId, now);
+        if (decision.kind !== "run") return decision;
+        const model = world.models.find((candidate) => candidate.id === decision.modelId)!;
+        return { ...decision, reasoningLevel: model.reasoningLevels[0]! };
+      };
+      expect(requirements(violationsFor(lowestLevel)).has("SUB-FAIL-03")).toBe(true);
+    });
   });
 });
 
@@ -508,5 +519,23 @@ describe("reference model scenarios", () => {
       },
     };
     expect(decide(spread, "session-1", NOW)).toMatchObject({ connectionId: "claude-b" });
+  });
+
+  test("model:SUB-FAIL-03: reasoning levels map by name, then by closest relative position with ties to the lower level", () => {
+    const model = (id: string) => MODELS.find((candidate) => candidate.id === id)!;
+    const claude = model("claude/model-a");
+    const codexA = model("codex/model-a");
+    const codexB = model("codex/model-b");
+    const supergrok = model("supergrok/model-a");
+    // Same name wins over position.
+    expect(nearestReasoningLevel(codexA, "high", claude)).toBe("high");
+    // Highest maps to highest.
+    expect(nearestReasoningLevel(codexA, "max", claude)).toBe("xhigh");
+    expect(nearestReasoningLevel(supergrok, "xhigh", claude)).toBe("high");
+    // "medium" sits halfway on a three-level ladder: equally close to both, so the lower.
+    expect(nearestReasoningLevel(supergrok, "medium", codexB)).toBe("low");
+    // A level the preferred model does not list maps to the (lower) middle, not the lowest.
+    expect(nearestReasoningLevel(codexA, "unlisted", codexA)).toBe("medium");
+    expect(nearestReasoningLevel(codexB, "unlisted", codexB)).toBe("medium");
   });
 });

@@ -197,8 +197,13 @@ for it until the matching requirement below is implemented:
   provider. Verification: pending (failover).
 - **SUB-FAIL-03** When the effective setting allows it, failover then moves to
   another provider using the organization's fallback order for the model,
-  mapping the reasoning level to the nearest level the target supports.
-  Verification: pending (failover).
+  mapping the reasoning level to the nearest level the target supports:
+  the same level name when the target has it; otherwise the target level
+  whose relative position on the target's ladder (lowest 0, highest 1) is
+  closest to the requested level's position on the preferred model's ladder,
+  with a tie going to the lower level. A level the preferred model does not
+  list maps to the middle of the target's ladder (the lower middle when there
+  are two) (D-16). Verification: pending (failover).
 - **SUB-FAIL-04** Failover never widens access: it uses only allowed models
   and in-scope connections. Verification: pending (failover).
 - **SUB-FAIL-05** A session explicitly limited to one account or model ("only
@@ -388,6 +393,7 @@ by the implementer and recorded here; consequential ones are escalated.
 | D-13 | 2026-10-07 | Implementer decision: "Primary only" becomes "Primary first". The primary account takes new work while it can; a backup account is used when the primary cannot serve, instead of the work waiting while an idle eligible account exists. This removes the behaviour behind the original report of an unused second account. |
 | D-14 | 2026-10-07 | Implementer decision: unknown quota is eligible but ranked after accounts with known capacity, so missing metadata neither blocks work nor wins over known capacity. |
 | D-15 | 2026-10-07 | Implementer decision, precedence between D-13 and D-14: in Primary first, the primary takes new work whenever it can serve it, and unknown quota counts as able to serve. The known-capacity ranking of D-14 orders only the other accounts (and, in Spread, applies before load balancing), so a primary with unknown quota is not passed over for a backup. |
+| D-16 | 2026-10-07 | Implementer decision: reasoning levels map by name first, then by closest relative position on the two ladders; a tie goes to the lower level (cheaper and less likely to exceed the target's plan), and an unlisted level maps to the lower middle. |
 
 ### Open decisions
 
