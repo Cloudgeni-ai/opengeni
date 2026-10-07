@@ -105,4 +105,5 @@ export const embeddingMigrationTail = [
   // only after the deliberately withheld 0598 Claude tables are restored.
   "0642_shared_subscription_core.sql",
   "0643_model_call_facts_subscription_connection_index.sql",
+  "0644_subscription_inference_source_settings.sql",
 ];

@@ -46,6 +46,18 @@ describe("release schema contract", () => {
     ).toMatchObject({ path: "0642_shared_subscription_core.sql", deploymentMode: "rolling" });
   });
 
+  test("registers the subscription inference-source settings migration as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0644_subscription_inference_source_settings.sql",
+      ),
+    ).toMatchObject({
+      path: "0644_subscription_inference_source_settings.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("checks complete ledger metadata against migration files", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     const sourceMigrationPaths = (
@@ -2423,6 +2435,7 @@ describe("release schema contract", () => {
       "0637_retained_process_background_owner_inventory.sql",
       "0638_allowance_unbilled_usage_metering.sql",
       "0639_native_app_push.sql",
+      "0644_subscription_inference_source_settings.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

@@ -125,8 +125,17 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
         claude: { mode: "spread" },
         xai: { mode: "spread" },
       };
-      const organizationProviders = {};
-      const workspaceProviders = { codex: { enabled: false } };
+      const organizationProviders = {
+        codex: {
+          inferenceSource: "automatic" as const,
+          useOrganizationAccounts: true,
+          enabled: true,
+        },
+        claude: { useOrganizationAccounts: false, enabled: true },
+      };
+      const workspaceProviders = {
+        codex: { useOrganizationAccounts: false, enabled: false },
+      };
       const organizationFallbackOrder = { "codex/model-a": ["claude/model-b"] };
       const workspaceFallbackOrder = { "codex/model-a": ["xai/model-c"] };
       const [jsonShapes] = await shared!.admin<
@@ -187,10 +196,16 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
       );
       expect(actual).toEqual(expected);
       expect(actual.values.providers.codex).toEqual({
-        useOrganizationAccounts: true,
+        inferenceSource: "workspace",
+        useOrganizationAccounts: false,
         enabled: false,
       });
+      expect(actual.values.providers.claude).toEqual({
+        useOrganizationAccounts: false,
+        enabled: true,
+      });
       expect(actual.sources.providers.codex).toBe("workspace");
+      expect(actual.sources.providers.claude).toBe("organization");
       expect(actual.sources.personalFallbackAllowed).toBe("organization");
     },
     180_000,

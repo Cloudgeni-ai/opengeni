@@ -20,6 +20,7 @@ const migration = "0598_claude_subscription_account_pools.sql";
 const subscriptionCoreMigrations = [
   "0642_shared_subscription_core.sql",
   "0643_model_call_facts_subscription_connection_index.sql",
+  "0644_subscription_inference_source_settings.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {
