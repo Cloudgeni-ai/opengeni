@@ -44,12 +44,89 @@ function bindAdapterSource(expression: string) {
     .replaceAll('environment="production"', 'environment="fixture"');
 }
 
-async function render(values: object = {}, capabilities = true, profiles: string[] = []) {
+async function render(
+  values: object = {},
+  capabilities = true,
+  profiles: string[] = [],
+  existingReplicas?: number,
+) {
   const [helm] = await tools;
   const dir = await mkdtemp(join(tmpdir(), "opengeni-queue-render-"));
+  const lookupRequests: string[] = [];
+  // Real Helm server-side dry-run reads this owned fixture, never a live cluster.
+  const lookupServer =
+    existingReplicas === undefined
+      ? undefined
+      : Bun.serve({
+          hostname: "127.0.0.1",
+          port: 0,
+          fetch(request) {
+            const path = new URL(request.url).pathname;
+            lookupRequests.push(`${request.method} ${path}`);
+            if (request.method !== "GET") return new Response(null, { status: 405 });
+            switch (path) {
+              case "/version":
+                return Response.json({ major: "1", minor: "34", gitVersion: "v1.34.0" });
+              case "/api":
+                return Response.json({ kind: "APIVersions", apiVersion: "v1", versions: ["v1"] });
+              case "/api/v1":
+                return Response.json({
+                  kind: "APIResourceList",
+                  groupVersion: "v1",
+                  resources: [],
+                });
+              case "/apis":
+                return Response.json({
+                  kind: "APIGroupList",
+                  apiVersion: "v1",
+                  groups: [
+                    {
+                      name: "apps",
+                      versions: [{ groupVersion: "apps/v1", version: "v1" }],
+                      preferredVersion: { groupVersion: "apps/v1", version: "v1" },
+                    },
+                  ],
+                });
+              case "/apis/apps/v1":
+                return Response.json({
+                  kind: "APIResourceList",
+                  groupVersion: "apps/v1",
+                  resources: [
+                    { name: "deployments", kind: "Deployment", namespaced: true, verbs: ["get"] },
+                  ],
+                });
+              case "/apis/apps/v1/namespaces/fixture/deployments/fixture-worker-turns":
+                return Response.json({
+                  apiVersion: "apps/v1",
+                  kind: "Deployment",
+                  metadata: { name: "fixture-worker-turns", namespace: "fixture" },
+                  spec: { replicas: existingReplicas },
+                });
+              default:
+                return Response.json(
+                  { kind: "Status", status: "Failure", reason: "NotFound", code: 404 },
+                  { status: 404 },
+                );
+            }
+          },
+        });
   try {
     const path = join(dir, "values.json");
     await Bun.write(path, JSON.stringify(values));
+    const kubeconfig = join(dir, "kubeconfig.json");
+    if (lookupServer) {
+      await Bun.write(
+        kubeconfig,
+        JSON.stringify({
+          apiVersion: "v1",
+          kind: "Config",
+          clusters: [{ name: "fixture", cluster: { server: lookupServer.url.toString() } }],
+          contexts: [{ name: "fixture", context: { cluster: "fixture", user: "fixture" } }],
+          users: [{ name: "fixture", user: {} }],
+          "current-context": "fixture",
+        }),
+      );
+    }
     const result = await run([
       helm,
       "template",
@@ -61,6 +138,7 @@ async function render(values: object = {}, capabilities = true, profiles: string
       "-f",
       path,
       ...(capabilities ? ["--api-versions", "monitoring.coreos.com/v1"] : []),
+      ...(lookupServer ? ["--is-upgrade", "--dry-run=server", "--kubeconfig", kubeconfig] : []),
     ]);
     const manifests =
       result.code === 0
@@ -70,8 +148,9 @@ async function render(values: object = {}, capabilities = true, profiles: string
             .map((doc) => Bun.YAML.parse(doc) as Manifest)
             .filter((doc) => doc?.kind)
         : [];
-    return { ...result, manifests };
+    return { ...result, manifests, lookupRequests };
   } finally {
+    lookupServer?.stop(true);
     await rm(dir, { recursive: true, force: true });
   }
 }
@@ -233,6 +312,117 @@ describe("queue demand schema v1 actual Helm rendering", () => {
       find(legacyAlerts.manifests, "PrometheusRule", "fixture").spec,
     );
   }, 180_000);
+
+  test("selected private bounds leave public and Azure defaults opt-out and unchanged", async () => {
+    const defaults = await render();
+    expect(defaults.code, defaults.stderr).toBe(0);
+    expect(
+      find(defaults.manifests, "Deployment", "fixture-opengeni-worker-turns").spec.replicas,
+    ).toBe(4);
+    expect(
+      defaults.manifests.some(
+        (m) => m.kind === "HorizontalPodAutoscaler" && m.metadata.name.endsWith("worker-turns"),
+      ),
+    ).toBe(false);
+    const azure = await render({}, true, ["values.azure-managed.example.yaml"]);
+    expect(azure.code, azure.stderr).toBe(0);
+    const hpa = find(
+      azure.manifests,
+      "HorizontalPodAutoscaler",
+      "fixture-opengeni-worker-turns",
+    ).spec;
+    expect([hpa.minReplicas, hpa.maxReplicas]).toEqual([2, 20]);
+    expect(hpa.metrics.some((metric: any) => metric.type === "Object")).toBe(false);
+    for (const result of [defaults, azure])
+      expect(
+        result.manifests.some(
+          (m) => m.kind === "PrometheusRule" && m.metadata.name.endsWith("worker-scaler"),
+        ),
+      ).toBe(false);
+  }, 180_000);
+
+  for (const { environment, maximum, liveReplicas } of [
+    { environment: "production", maximum: 28, liveReplicas: 14 },
+    { environment: "staging", maximum: 16, liveReplicas: 8 },
+  ]) {
+    const bounds = {
+      ...enabled,
+      worker: {
+        turns: {
+          replicaCount: 2,
+          autoscaling: {
+            enabled: true,
+            minReplicas: 2,
+            maxReplicas: maximum,
+            queueDemand: { enabled: true },
+            behavior: { scaleDown: { selectPolicy: "Max" } },
+          },
+        },
+      },
+    };
+    test(`${environment} 2/${maximum} source bounds preserve metrics, resources and Disabled downscale`, async () => {
+      const profile = ["values.azure-managed.example.yaml"];
+      const baseline = await render(enabled, true, profile);
+      const result = await render(bounds, true, profile);
+      expect(baseline.code, baseline.stderr).toBe(0);
+      expect(result.code, result.stderr).toBe(0);
+      const hpas = result.manifests.filter(
+        (m) => m.kind === "HorizontalPodAutoscaler" && m.metadata.name === "fixture-worker-turns",
+      );
+      expect(hpas).toHaveLength(1);
+      const hpa = hpas[0]!.spec;
+      const baselineHpa = find(
+        baseline.manifests,
+        "HorizontalPodAutoscaler",
+        "fixture-worker-turns",
+      ).spec;
+      expect([hpa.minReplicas, hpa.maxReplicas]).toEqual([2, maximum]);
+      expect(hpa.metrics).toHaveLength(6);
+      expect(hpa.metrics).toEqual(baselineHpa.metrics);
+      expect(hpa.behavior).toEqual(baselineHpa.behavior);
+      expect(hpa.behavior.scaleDown.selectPolicy).toBe("Disabled");
+      const deployment = find(result.manifests, "Deployment", "fixture-worker-turns");
+      const baselineDeployment = find(baseline.manifests, "Deployment", "fixture-worker-turns");
+      expect(deployment.spec.replicas).toBeUndefined();
+      expect(deployment.spec).toEqual(baselineDeployment.spec);
+      expect(deployment.spec.template.spec.containers[0].resources).toEqual({
+        requests: { cpu: "500m", memory: "1Gi" },
+        limits: { cpu: "2", memory: "4Gi" },
+      });
+      expect(
+        result.manifests.filter(
+          (m) => m.kind === "Deployment" && m.metadata.name !== "fixture-worker-turns",
+        ),
+      ).toEqual(
+        baseline.manifests.filter(
+          (m) => m.kind === "Deployment" && m.metadata.name !== "fixture-worker-turns",
+        ),
+      );
+      expect(result.manifests.filter((m) => m.kind === "ConfigMap")).toEqual(
+        baseline.manifests.filter((m) => m.kind === "ConfigMap"),
+      );
+    }, 180_000);
+
+    test(`${environment} lower source floor does not implicitly shrink an enabled-HPA upgrade`, async () => {
+      const result = await render(
+        bounds,
+        true,
+        ["values.azure-managed.example.yaml"],
+        liveReplicas,
+      );
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.lookupRequests).toContain(
+        "GET /apis/apps/v1/namespaces/fixture/deployments/fixture-worker-turns",
+      );
+      expect(result.lookupRequests.every((request) => request.startsWith("GET "))).toBe(true);
+      expect(find(result.manifests, "Deployment", "fixture-worker-turns").spec.replicas).toBe(
+        liveReplicas,
+      );
+      const hpa = find(result.manifests, "HorizontalPodAutoscaler", "fixture-worker-turns").spec;
+      expect([hpa.minReplicas, hpa.maxReplicas]).toEqual([2, maximum]);
+      expect(hpa.behavior.scaleDown.selectPolicy).toBe("Disabled");
+    }, 180_000);
+  }
 
   test("schema and prerequisite failures reject unsupported or unobservable opt-ins", async () => {
     for (const queueDemand of [
