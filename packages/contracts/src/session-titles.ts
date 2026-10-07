@@ -324,6 +324,17 @@ function automaticTitleGraphemes(value: string): string[] {
   return graphemes;
 }
 
+/**
+ * Model control tokens such as `<|fim_suffix|>`, `<|im_end|>` or `<｜end▁of▁sentence｜>`
+ * sometimes leak into generated text. They are never title content: each one
+ * becomes a line break, so a title keeps only its first real segment.
+ */
+const MODEL_CONTROL_TOKEN = /<[|｜][^<>|｜\s]{1,64}[|｜]>/gu;
+
+function withoutModelControlTokens(value: string): string {
+  return value.replace(MODEL_CONTROL_TOKEN, "\n");
+}
+
 /** Bound an already-normalized automatic-title candidate without splitting graphemes. */
 export function boundAutomaticSessionTitle(value: string): string {
   const words = value.split(/\s+/u);
@@ -345,7 +356,7 @@ export function boundAutomaticSessionTitle(value: string): string {
  * title (normally {@link AUTOMATIC_SESSION_TITLE_FALLBACK}) in that case.
  */
 export function normalizeAutomaticSessionTitle(value: string): string | null {
-  const firstLine = value
+  const firstLine = withoutModelControlTokens(value)
     .replace(/[\u0000-\u001f\u007f-\u009f]+/gu, "\n")
     .split(/\n+/u)
     .map((line) => line.trim())
@@ -450,7 +461,13 @@ export function deriveSessionDisplayTitle(
     return title || automaticSessionReferenceTitle(input.id);
   }
   if (title && !sessionTitleIsPending(input)) {
-    return title;
+    // Titles stored before control-token stripping keep only their first
+    // real segment ("Release plan<|fim_suffix|>" reads "Release plan").
+    const clean = withoutModelControlTokens(title)
+      .split("\n")
+      .map((part) => part.trim())
+      .find(Boolean);
+    return clean ?? title;
   }
 
   for (const key of options.metadataKeys ?? []) {

@@ -25,6 +25,23 @@ describe("automatic session titles", () => {
     ).toBe("investigate OAuth callback failures");
   });
 
+  test("drops leaked model control tokens from generated and stored titles", () => {
+    expect(normalizeAutomaticSessionTitle("iPhone Testing<|fim_suffix|>")).toBe("iPhone Testing");
+    expect(normalizeAutomaticSessionTitle("<|im_start|>Release Plan<|im_end|>")).toBe(
+      "Release Plan",
+    );
+    expect(normalizeAutomaticSessionTitle("Deploy Notes<｜end▁of▁sentence｜>")).toBe(
+      "Deploy Notes",
+    );
+    expect(normalizeAutomaticSessionTitle("<|endoftext|>")).toBeNull();
+    expect(
+      deriveSessionDisplayTitle({ title: "iPhone Testing<|fim_suffix|>", titleSource: "agent" }),
+    ).toBe("iPhone Testing");
+    expect(
+      deriveSessionDisplayTitle({ title: "Use a <|pipe|> literally", titleSource: "user" }),
+    ).toBe("Use a <|pipe|> literally");
+  });
+
   test("removes the closing quote or markdown mark of a wrapped title", () => {
     expect(normalizeAutomaticSessionTitle('"Kubernetes Pod Crash Debugging"')).toBe(
       "Kubernetes Pod Crash Debugging",

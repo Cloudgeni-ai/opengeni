@@ -8,7 +8,7 @@ import {
   queuedTurnPresentation,
   queueNeighborAnchors,
 } from "@opengeni/react/queue-presentation-model";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
@@ -37,10 +37,13 @@ export function QueueDock({
   queue,
   composer,
   onComposerFocus,
+  leading,
 }: {
   queue: TurnQueue;
   composer?: QueueDockComposer | undefined;
   onComposerFocus?: (() => void) | undefined;
+  /** Chips sharing the queue chip's row (goal, agents, commands). */
+  leading?: ReactNode;
 }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
@@ -50,10 +53,12 @@ export function QueueDock({
     () => queue.queue.filter((turn) => isAuthoritativeQueuedTurn(turn, queue.mutationFor)),
     [queue.mutationFor, queue.queue],
   );
-  if (turns.length === 0) return null;
+  if (turns.length === 0) {
+    return leading ? <View style={{ flexDirection: "row" }}>{leading}</View> : null;
+  }
   const first = turns[0]!;
-  // Web signal pill: control-size medium text in fg, 44pt tall on touch.
-  const small = { ...fontStyle(theme, 500), fontSize: theme.size.sm, color: c.fg };
+  // The compact signal chip text (goal, agents and the queue share one row).
+  const small = { ...fontStyle(theme, 500), fontSize: 13, color: c.fg };
   const canEdit = composer !== undefined && composer.draftPersistence !== "disabled";
   const checkout = async (turnId: string, replaceDraft: boolean) => {
     if (!composer) return;
@@ -73,47 +78,55 @@ export function QueueDock({
   };
   return (
     <View style={{ gap: 6 }}>
-      <View
-        style={{
-          alignSelf: "flex-start",
-          flexDirection: "row",
-          alignItems: "center",
-          borderRadius: theme.radius.md,
-          backgroundColor: c["surface-2"],
-        }}
-      >
-        <Pressable
-          accessibilityRole="button"
-          accessibilityState={{ expanded: open }}
-          accessibilityLabel={`${turns.length} queued prompt${turns.length === 1 ? "" : "s"}`}
-          onPress={() => setOpen((value) => !value)}
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+        {leading}
+        <View
           style={{
             flexDirection: "row",
             alignItems: "center",
-            gap: 6,
-            minHeight: 44,
-            paddingHorizontal: 12,
+            height: 30,
+            borderRadius: 15,
+            backgroundColor: c["surface-2"],
           }}
         >
-          <Icon name="list-ordered" size={14} color={c.fg} />
-          <Text style={small}>{`${turns.length} queued`}</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Steer first queued message"
-          disabled={queue.mutating || queue.mutationFor(first.id) !== null}
-          onPress={() => void queue.steerTurn(first.id)}
-          style={{
-            flexDirection: "row",
-            alignItems: "center",
-            gap: 4,
-            minHeight: 44,
-            paddingHorizontal: 12,
-          }}
-        >
-          <Icon name="corner-down-right" size={14} color={c.fg} />
-          <Text style={small}>Steer</Text>
-        </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityState={{ expanded: open }}
+            accessibilityLabel={`${turns.length} queued prompt${turns.length === 1 ? "" : "s"}`}
+            onPress={() => setOpen((value) => !value)}
+            hitSlop={{ top: 7, bottom: 7 }}
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 5,
+              height: 30,
+              paddingLeft: 10,
+              paddingRight: 6,
+            }}
+          >
+            <Icon name="list-ordered" size={13} color={c["fg-muted"]} />
+            <Text style={small}>{`${turns.length} queued`}</Text>
+          </Pressable>
+          <View style={{ width: 1, height: 14, backgroundColor: c.border }} />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Steer first queued message"
+            disabled={queue.mutating || queue.mutationFor(first.id) !== null}
+            onPress={() => void queue.steerTurn(first.id)}
+            hitSlop={{ top: 7, bottom: 7 }}
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 4,
+              height: 30,
+              paddingLeft: 6,
+              paddingRight: 10,
+            }}
+          >
+            <Icon name="corner-down-right" size={13} color={c["fg-muted"]} />
+            <Text style={small}>Steer</Text>
+          </Pressable>
+        </View>
       </View>
       {open ? (
         <View
@@ -189,7 +202,6 @@ export function QueueDock({
                   ) : null}
                   <RowAction
                     icon="corner-down-right"
-                    text="Steer"
                     label={`Steer queued prompt ${index + 1}`}
                     disabled={busy}
                     busy={pending === "steer"}
@@ -290,14 +302,14 @@ function RowAction(props: {
       accessibilityState={{ disabled: Boolean(props.disabled), busy: Boolean(props.busy) }}
       disabled={props.disabled}
       onPress={props.onPress}
-      hitSlop={4}
+      hitSlop={{ top: 6, bottom: 6, left: 2, right: 2 }}
       style={({ pressed }) => ({
         flexDirection: "row",
         alignItems: "center",
         justifyContent: "center",
         gap: 4,
-        minWidth: 34,
-        height: 44,
+        minWidth: 30,
+        height: 32,
         paddingHorizontal: props.text ? 6 : 0,
         borderRadius: theme.radius.sm,
         backgroundColor: pressed ? c.hover : "transparent",

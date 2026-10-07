@@ -1,4 +1,5 @@
 import { compactModelPill } from "@opengeni/react/model-policy";
+import { NativeMenu, type MenuAction } from "@/native-menu";
 import { sessionDisplayTitle } from "@opengeni/react/session-list-model";
 import { useOpenGeniNativeSession } from "@opengeni/react-native";
 import {
@@ -104,6 +105,23 @@ function LiveSession(props: {
             client={props.client}
             onChanged={() => void refreshSession()}
             onActionFeedback={() => void Haptics.selectionAsync()}
+            renderMenu={({ actions, trigger }) => (
+              <NativeMenu
+                actions={actions.map((action) => ({
+                  id: action.key,
+                  title: action.label,
+                  ...(action.systemImage
+                    ? { image: action.systemImage as MenuAction["image"] }
+                    : {}),
+                  ...(action.destructive ? { attributes: { destructive: true } } : {}),
+                }))}
+                onPressAction={({ nativeEvent }) =>
+                  actions.find((action) => action.key === nativeEvent.event)?.onPress()
+                }
+              >
+                {trigger}
+              </NativeMenu>
+            )}
           />
         </AppThemeProvider>
       ) : null,
@@ -146,6 +164,7 @@ function LiveSession(props: {
             <ComposerPill
               label={pill.name}
               detail={pill.effort}
+              fast={(policy?.latencyMode ?? session?.latencyMode) === "fast"}
               leading={<ModelMark model={model ?? ""} size={14} color={theme.colors.fg} />}
               onPress={
                 policy
