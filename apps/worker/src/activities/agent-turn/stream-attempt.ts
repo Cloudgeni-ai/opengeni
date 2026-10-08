@@ -45,6 +45,7 @@ import {
   compactionProviderRejection,
   withRunCredentialsSession,
   runOwnedSandboxSetup,
+  modelResponseHasVisibleText,
   type SandboxFileDownload,
   type OpenGeniRuntime,
   type HistoryProviderApi,
@@ -161,7 +162,11 @@ import {
   assertSuccessfulAgentStreamCompletion,
   requireAgentStreamFinalOutput,
 } from "./quiescence";
-import { inputWaitReply, latestDurableTurnMessageText } from "./input-wait-reply";
+import {
+  inputWaitReply,
+  inputWaitReplyRefusal,
+  latestDurableTurnMessageText,
+} from "./input-wait-reply";
 import { waitForTurnOperation } from "./sandbox-provision";
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
 import { finalReplyNudge, needsFinalReply } from "./final-reply";
@@ -629,6 +634,8 @@ export async function runTurnStreamAttempt(
   // Text of the newest assistant message any stream of this activity completed
   // durably: the reply a wait-ended human turn records on turn.completed.
   let latestAssistantMessageText: string | null = null;
+  // Waits refused because they would leave a person's message unanswered.
+  let inputWaitReplyRefusals = 0;
   let workerPreparationTotalRecorded = false;
   let toolsExecuted = false;
   let finalReplyNudged = false;
@@ -1056,6 +1063,29 @@ export async function runTurnStreamAttempt(
     }
     try {
       eventing.stream = await withProviderRequestContext(runStreamOnce);
+      const stream = eventing.stream;
+      eventing.inputWaitReplyGuard = async () => {
+        const refusal = await inputWaitReplyRefusal({
+          turn,
+          refusalsSoFar: inputWaitReplyRefusals,
+          hasVisibleReply: async () =>
+            Boolean(latestAssistantMessageText?.trim()) ||
+            modelResponseHasVisibleText(
+              (stream.state as { _lastTurnResponse?: unknown })._lastTurnResponse,
+            ) ||
+            Boolean(
+              (
+                await latestDurableTurnMessageText(db, {
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                })
+              )?.trim(),
+            ),
+        });
+        if (refusal) inputWaitReplyRefusals += 1;
+        return refusal;
+      };
     } catch (error) {
       modelCallAdmission.fail(error);
       modelCallAdmission.close();

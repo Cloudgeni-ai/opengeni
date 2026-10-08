@@ -1091,6 +1091,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     eventing.preparedTools = await waitForTurnOperation(
       runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {
         ...(credentialRestriction ? { credentialRestriction } : {}),
+        inputWaitReplyGuard: async () => (await eventing.inputWaitReplyGuard?.()) ?? null,
         mcpAccountLabels: accountRoutes.accountLabels,
         accountId: input.accountId,
         workspaceId: input.workspaceId,
