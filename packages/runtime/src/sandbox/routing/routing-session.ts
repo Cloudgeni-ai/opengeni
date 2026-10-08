@@ -38,6 +38,8 @@ import {
 import { isDeepStrictEqual } from "node:util";
 import {
   withProviderCommandHandle,
+  admittedProviderCommandHandle,
+  withoutProviderCommandHandle,
   withCommandSupervisionReady,
   withSupervisedLaunchReservation,
   ProviderCommandStartRejectedError,
@@ -46,6 +48,7 @@ import {
   ProviderCommandObservationUnavailableError,
   type ProviderCommandPersistence,
   type ProviderCommandSession,
+  type ProviderCommandOutput,
 } from "../provider-command-session";
 import type { SandboxProviderCommand } from "@opengeni/contracts";
 import { hasTypedExecHandleLoss, parseExecResponseBanner } from "../exec-banner";
@@ -77,8 +80,26 @@ import type {
   ChannelARoutedWorkspaceImportRequest,
   ChannelASession,
   WorkspaceFileImportReceipt,
+  SynchronousCommandRunner,
 } from "../channel-a";
+import {
+  executeSynchronousCommand,
+  SynchronousCommandOutcomeUnknownError,
+  type SynchronousCommandResult,
+  type SynchronousCommandPage,
+} from "../synchronous-command";
+import {
+  withNativeSynchronousCommandCollection,
+  withoutNativeSynchronousCommandCollection,
+  releaseNativeSynchronousCommandOutput,
+  isNativeSynchronousCommandHandle,
+} from "../native-synchronous-collection";
+import { observeSynchronousCommand, synchronousCommandPage } from "../synchronous-command";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../exec-banner";
+import {
+  notifyRemoteOperationTransportSelected,
+  type RemoteOperationObservation,
+} from "../op-correlation";
 import { withSandboxProviderOperation } from "../provider-operation-gate";
 import { hasModalCommandStartOutcomeUnknownBoundary } from "../providers/modal-command-start-errors";
 
@@ -105,6 +126,7 @@ export interface ActivePointer {
  * target may or may not implement it, and the proxy reflects that at call-time.
  */
 export interface RoutableBackendSession extends ProviderCommandSession {
+  getSynchronousCommandOutput?(result: unknown): SynchronousCommandPage | null;
   acknowledgeCommandOutput?(result: string): Promise<void>;
   refreshOwnedCommand?(commandId: string): Promise<boolean>;
   state?: unknown;
@@ -113,13 +135,14 @@ export interface RoutableBackendSession extends ProviderCommandSession {
   execCommand?(args: unknown): Promise<string>;
   writeStdin?(args: unknown): Promise<string>;
   cancelExecCommand?(opId: string): Promise<boolean>;
+  observeExecCommand?(opId: string): Promise<RemoteOperationObservation>;
   cancelPendingExecCommand?(): Promise<void>;
   readFile?(args: unknown): Promise<string | Uint8Array>;
   writeFile?(args: unknown): Promise<unknown>;
   writePlacementPrivate?(args: unknown): Promise<unknown>;
   deletePlacementPrivate?(path: string, runAs?: string): Promise<void>;
   createEditor?(runAs?: string): unknown;
-  listDir?(args: unknown): Promise<unknown>;
+  listDir?(args: unknown, runner?: SynchronousCommandRunner): Promise<unknown>;
   pathExists?(path: string, runAs?: string): Promise<boolean>;
   viewImage?(args: unknown): Promise<unknown>;
   materializeEntry?(args: unknown): Promise<void>;
@@ -269,6 +292,9 @@ export interface RoutingSandboxSessionDeps {
     /** Exact candidate for a yielded process or a client-chosen unknown Start.
      * Unknown Start settlement retains this writer; it does not prove exit. */
     retainedProcess?: RoutingRetainedProcess;
+    /** Inline Channel-A filesystem execution is retained for exact settlement,
+     * but is not a model-visible session background command. */
+    retainedProcessPurpose?: "synchronous_filesystem";
   }) => Promise<void | RoutingMutationSettlementResult>;
   /** Admit one model/user-visible stdin mutation under the already-durable
    * retained process authority. Control polling and helper execs never call it. */
@@ -665,19 +691,42 @@ type PendingParentPromotion = Parameters<
   NonNullable<RoutingSandboxSessionDeps["afterMutation"]>
 >[0];
 
+type RetainedProcessPurpose = "synchronous_filesystem";
+
 type PendingProcessMutationSettlement = Parameters<
   NonNullable<RoutingSandboxSessionDeps["afterProcessMutation"]>
 >[0];
 
+type ProcessReadSnapshot = (
+  result: string,
+  page: ProviderCommandOutput | null,
+  nativePage?: SynchronousCommandPage | null,
+) => void;
+
+type SharedProcessRead = {
+  result: Promise<string>;
+  /** Copied before capture removes the provider's receipt. This grants output
+   * to concurrent observers, not another ACK or provider invocation. */
+  snapshot?: {
+    result: string;
+    page: ProviderCommandOutput | null;
+    nativePage?: SynchronousCommandPage | null;
+  };
+};
+
 type RetainedProcessRecord = {
   process: RoutingRetainedProcess;
   backend: ResolvedActiveBackend;
+  /** Ephemeral routing intent; never persisted as part of the process identity. */
+  retainedProcessPurpose?: RetainedProcessPurpose;
   durable: boolean;
   pendingParentPromotion: PendingParentPromotion | null;
   pendingMutationSettlement: PendingProcessMutationSettlement | null;
   pendingTerminal: {
     proof: RoutingRetainedProcessTerminalProof;
     result: string;
+    page: ProviderCommandOutput | null;
+    nativePage: SynchronousCommandPage | null;
   } | null;
   settlement: Promise<void> | null;
   backgroundAdoption: Promise<void> | null;
@@ -746,6 +795,16 @@ function retainedProcessTerminalProof(
   providerSessionId: number,
   source?: object,
 ): RoutingRetainedProcessTerminalProof | null {
+  const nativePage = (source as RoutableBackendSession | undefined)?.getSynchronousCommandOutput?.(
+    result,
+  );
+  if (nativePage)
+    // A trusted adapter can separately authenticate physical exit after losing
+    // stream EOF. Settle physical custody after captured partial pages, while
+    // the synchronous collector still rejects collectionUnavailable output.
+    return nativePage.exitCode === null || nativePage.sessionId !== undefined
+      ? null
+      : { outcome: "exited", exitCode: nativePage.exitCode, reason: "provider_exit_banner" };
   if (isExecSessionLostBanner(result, providerSessionId, source)) {
     return {
       outcome: "lost",
@@ -911,7 +970,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * that exact resolved route so pointer movement can never redirect stdin,
    * polling, or process-group helpers to another box. */
   private readonly retainedProcesses = new Map<number, RetainedProcessRecord>();
-  private readonly processControlReads = new Map<number, Promise<string>>();
+  private readonly processControlReads = new Map<number, SharedProcessRead>();
   private readonly commandOwnerBackends = new Set<RoutableBackendSession>();
   /** Every backend whose settled op-stream results may still need a final ack.
    * Keep old epoch targets too: a mid-turn swap must not orphan the machine the
@@ -1211,8 +1270,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         { cause: error },
       );
     }
-    if (pending.result !== undefined)
-      await this.captureRetainedOutput(record, formatExecResult(pending.result));
+    if (pending.result !== undefined) await this.captureRetainedOutput(record, pending.result);
   }
 
   private confirmDurableRejectedPromotion(
@@ -1238,8 +1296,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     proof: RoutingRetainedProcessTerminalProof,
     result: string,
   ): Promise<void> {
-    record.pendingTerminal ??= { proof, result };
-    const pending = record.pendingTerminal;
+    const pending = this.rememberTerminalPage(record, proof, result);
     if (
       pending.proof.outcome !== proof.outcome ||
       pending.proof.exitCode !== proof.exitCode ||
@@ -1257,6 +1314,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         process: record.process,
         proof: pending.proof,
       });
+      await releaseNativeSynchronousCommandOutput(record.backend.session, pending.result);
       this.retainedProcesses.delete(record.process.providerSessionId);
       record.pendingTerminal = null;
     })();
@@ -1270,6 +1328,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         // local provider-session-lost banner), but state + exit code are the
         // immutable physical truth. Forget the local route without replaying.
         record.settlement = null;
+        await releaseNativeSynchronousCommandOutput(record.backend.session, pending.result);
         record.pendingTerminal = null;
         this.retainedProcesses.delete(record.process.providerSessionId);
         return;
@@ -1286,7 +1345,27 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     }
   }
 
-  private async flushPendingProcessMutation(record: RetainedProcessRecord): Promise<string | null> {
+  private rememberTerminalPage(
+    record: RetainedProcessRecord,
+    proof: RoutingRetainedProcessTerminalProof,
+    result: string,
+  ): NonNullable<RetainedProcessRecord["pendingTerminal"]> {
+    if (record.pendingTerminal) return record.pendingTerminal;
+    const page = record.backend.session.getProviderCommandOutput?.(result);
+    const nativePage = record.backend.session.getSynchronousCommandOutput?.(result);
+    record.pendingTerminal = {
+      proof,
+      result,
+      page: page ? structuredClone(page) : null,
+      nativePage: nativePage ? structuredClone(nativePage) : null,
+    };
+    return record.pendingTerminal;
+  }
+
+  private async flushPendingProcessMutation(
+    record: RetainedProcessRecord,
+    snapshot?: ProcessReadSnapshot,
+  ): Promise<string | null> {
     const pending = record.pendingMutationSettlement;
     if (!pending) return null;
     try {
@@ -1316,7 +1395,12 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         record.process.providerSessionId,
         record.backend.session,
       );
-      if (proof) record.pendingTerminal ??= { proof, result: pending.result };
+      snapshot?.(
+        pending.result,
+        record.backend.session.getProviderCommandOutput?.(pending.result) ?? null,
+        record.backend.session.getSynchronousCommandOutput?.(pending.result) ?? null,
+      );
+      if (proof) this.rememberTerminalPage(record, proof, pending.result);
       await this.captureRetainedOutput(record, pending.result);
       if (proof) {
         await this.settleRetainedProcess(record, proof, pending.result);
@@ -1327,24 +1411,28 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   private async dispatchProcessMutation(args: unknown): Promise<string> {
-    return await this.runRetainedProcessOperation(args, true, () =>
-      this.dispatchProcessMutationOnce(args),
+    return await this.runRetainedProcessOperation(args, true, (snapshot) =>
+      this.dispatchProcessMutationOnce(args, snapshot),
     );
   }
 
-  private async dispatchProcessMutationOnce(args: unknown): Promise<string> {
+  private async dispatchProcessMutationOnce(
+    args: unknown,
+    snapshot: ProcessReadSnapshot,
+  ): Promise<string> {
     assertNoCaughtMutationOutputRejection();
     const providerSessionId = providerSessionIdFromArgs(args);
     if (providerSessionId === null) throw new RoutingRetainedProcessNotFoundError(-1);
     const record = this.retainedProcess(providerSessionId);
     await this.captureRetainedOutput(record);
-    const priorTerminal = await this.flushPendingProcessMutation(record);
+    const priorTerminal = await this.flushPendingProcessMutation(record, snapshot);
     if (priorTerminal !== null) {
       await this.deps.observeProcessTerminal?.(record);
       return priorTerminal;
     }
     if (record.pendingTerminal) {
       const terminal = record.pendingTerminal;
+      snapshot(terminal.result, terminal.page, terminal.nativePage);
       await this.settleRetainedProcess(record, terminal.proof, terminal.result);
       await this.deps.observeProcessTerminal?.(record);
       return terminal.result;
@@ -1420,6 +1508,11 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       }
       throw error;
     }
+    snapshot(
+      result,
+      record.backend.session.getProviderCommandOutput?.(result) ?? null,
+      record.backend.session.getSynchronousCommandOutput?.(result) ?? null,
+    );
     if (this.deps.afterProcessMutation) {
       const pending: PendingProcessMutationSettlement = {
         op,
@@ -1454,7 +1547,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       }
     }
     const proof = retainedProcessTerminalProof(result, providerSessionId, record?.backend.session);
-    if (proof) record.pendingTerminal ??= { proof, result };
+    if (proof) this.rememberTerminalPage(record, proof, result);
     await this.captureRetainedOutput(record, result);
     if (proof) {
       await this.settleRetainedProcess(record, proof, result);
@@ -1463,44 +1556,68 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     return result;
   }
 
-  private async dispatchProcessControl(args: unknown, modelVisible = false): Promise<string> {
-    return await this.runRetainedProcessOperation(args, modelVisible, () =>
-      this.dispatchProcessControlOnce(args, modelVisible),
+  private async dispatchProcessControl(
+    args: unknown,
+    modelVisible = false,
+    onPage?: ProcessReadSnapshot,
+  ): Promise<string> {
+    return await this.runRetainedProcessOperation(
+      args,
+      modelVisible,
+      (snapshot) => this.dispatchProcessControlOnce(args, modelVisible, snapshot),
+      onPage,
     );
   }
 
   private async runRetainedProcessOperation(
     args: unknown,
     modelVisible: boolean,
-    operation: () => Promise<string>,
+    operation: (snapshot: ProcessReadSnapshot) => Promise<string>,
+    onPage?: ProcessReadSnapshot,
   ): Promise<string> {
     const providerSessionId = providerSessionIdFromArgs(args);
     if (providerSessionId === null) throw new RoutingRetainedProcessNotFoundError(-1);
     const existing = this.processControlReads.get(providerSessionId);
     const record = this.retainedProcesses.get(providerSessionId);
+    const shared: SharedProcessRead = { result: Promise.resolve("") };
+    const snapshot: ProcessReadSnapshot = (result, page, nativePage) => {
+      shared.snapshot = {
+        result,
+        page: page ? structuredClone(page) : null,
+        nativePage: nativePage ? structuredClone(nativePage) : null,
+      };
+      onPage?.(result, shared.snapshot.page, shared.snapshot.nativePage);
+    };
     const pending = (async () => {
       if (existing) {
-        const result = await existing.catch(() => null);
+        const result = await existing.result.catch(() => null);
         if (
           result !== null &&
           retainedProcessTerminalProof(result, providerSessionId, record?.backend.session)
         ) {
+          if (existing.snapshot?.result === result)
+            snapshot(result, existing.snapshot.page, existing.snapshot.nativePage);
           if (modelVisible && record) await this.deps.observeProcessTerminal?.(record);
           return result;
         }
       }
-      return await operation();
+      return await operation(snapshot);
     })();
-    this.processControlReads.set(providerSessionId, pending);
+    shared.result = pending;
+    this.processControlReads.set(providerSessionId, shared);
     try {
       return await pending;
     } finally {
-      if (this.processControlReads.get(providerSessionId) === pending)
+      if (this.processControlReads.get(providerSessionId) === shared)
         this.processControlReads.delete(providerSessionId);
     }
   }
 
-  private async dispatchProcessControlOnce(args: unknown, modelVisible: boolean): Promise<string> {
+  private async dispatchProcessControlOnce(
+    args: unknown,
+    modelVisible: boolean,
+    onPage: ProcessReadSnapshot,
+  ): Promise<string> {
     const providerSessionId = providerSessionIdFromArgs(args);
     if (providerSessionId === null) throw new RoutingRetainedProcessNotFoundError(-1);
     const record = this.retainedProcess(providerSessionId);
@@ -1523,13 +1640,14 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       args = { ...args, chars: "" };
     }
     await this.captureRetainedOutput(record);
-    const priorTerminal = await this.flushPendingProcessMutation(record);
+    const priorTerminal = await this.flushPendingProcessMutation(record, onPage);
     if (priorTerminal !== null) {
       if (modelVisible) await this.deps.observeProcessTerminal?.(record);
       return priorTerminal;
     }
     if (record.pendingTerminal) {
       const terminal = record.pendingTerminal;
+      onPage(terminal.result, terminal.page, terminal.nativePage);
       await this.settleRetainedProcess(record, terminal.proof, terminal.result);
       if (modelVisible) await this.deps.observeProcessTerminal?.(record);
       return terminal.result;
@@ -1540,8 +1658,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const result = await this.invokeProviderOperation("writeStdin", record.backend, () =>
       write.call(record.backend.session, args),
     );
+    onPage(
+      result,
+      record.backend.session.getProviderCommandOutput?.(result) ?? null,
+      record.backend.session.getSynchronousCommandOutput?.(result) ?? null,
+    );
     const proof = retainedProcessTerminalProof(result, providerSessionId, record?.backend.session);
-    if (proof) record.pendingTerminal ??= { proof, result };
+    if (proof) this.rememberTerminalPage(record, proof, result);
     await this.captureRetainedOutput(record, result);
     if (proof) {
       await this.settleRetainedProcess(record, proof, result);
@@ -1581,10 +1704,12 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       delete record.pendingProviderReceipt;
     }
     const providerPage = record.backend.session.getProviderCommandOutput?.(result);
+    const nativePage = record.backend.session.getSynchronousCommandOutput?.(result);
     const structured =
-      result && typeof result === "object"
+      nativePage ??
+      (result && typeof result === "object"
         ? (result as { stdout?: unknown; stderr?: unknown })
-        : null;
+        : null);
     if (providerPage) {
       if (typeof result === "string") record.pendingProviderReceipt = result;
       for (const page of providerPage.chunks) {
@@ -1600,11 +1725,14 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       structured &&
       (typeof structured.stdout === "string" || typeof structured.stderr === "string")
     ) {
+      if (nativePage && typeof result === "string") record.pendingProviderReceipt = result;
       for (const stream of ["stdout", "stderr"] as const) {
         const chunk = structured[stream];
         if (typeof chunk === "string" && chunk)
           (record.pendingOutput ??= []).push({
-            chunkId: crypto.randomUUID(),
+            chunkId: nativePage?.outputCursor
+              ? `${nativePage.outputCursor.identity}:${stream}:${nativePage.outputCursor.expected[stream]}:${nativePage.outputCursor.next[stream]}`
+              : crypto.randomUUID(),
             chunk,
             stream,
             streamFidelity: "separate",
@@ -1669,6 +1797,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     fn: (session: RoutableBackendSession, backend: ResolvedActiveBackend) => Promise<T>,
     supervisionEligible = false,
     onMutationAdmissionRefused?: (error: unknown) => void,
+    pinnedBackend?: ResolvedActiveBackend,
+    retainedProcessPurpose?: RetainedProcessPurpose,
   ): Promise<T> {
     const firstOperationObserver = this.deps.onFirstOperation;
     if (this.firstOperationClaimed || !firstOperationObserver) {
@@ -1679,6 +1809,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         undefined,
         supervisionEligible,
         onMutationAdmissionRefused,
+        pinnedBackend,
+        retainedProcessPurpose,
       );
     }
     this.firstOperationClaimed = true;
@@ -1693,6 +1825,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         timing,
         supervisionEligible,
         onMutationAdmissionRefused,
+        pinnedBackend,
+        retainedProcessPurpose,
       );
       outcome = "completed";
       return result;
@@ -1742,6 +1876,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     firstOperationTiming?: RoutingSandboxFirstOperationTiming,
     supervisionEligible = false,
     onMutationAdmissionRefused?: (error: unknown) => void,
+    pinnedBackend?: ResolvedActiveBackend,
+    retainedProcessPurpose?: RetainedProcessPurpose,
   ): Promise<T> {
     let attempt = 0;
     let lastError: unknown;
@@ -1751,7 +1887,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       let resolutionOutcome: RoutingSandboxPhaseOutcome = "failed";
       let backend: ResolvedActiveBackend;
       try {
-        backend = await this.resolve();
+        backend = pinnedBackend ?? (await this.resolve());
         resolutionOutcome = "completed";
       } finally {
         recordFirstOperationPhase(
@@ -1869,6 +2005,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
                           admission,
                           outcome: "resolved",
                           retainedProcess: process,
+                          ...(retainedProcessPurpose ? { retainedProcessPurpose } : {}),
                         });
                         // Even a durable-but-authority-rejected reservation must
                         // never dispatch user work. Its exact row remains recoverable.
@@ -1884,7 +2021,10 @@ export class RoutingSandboxSession implements RoutableBackendSession {
                           throw new Error(
                             "Supervised launch reservation did not retain the exact invocation",
                           );
-                        this.registerRetainedProcess(process, backend).durable = true;
+                        const record = this.registerRetainedProcess(process, backend);
+                        if (retainedProcessPurpose)
+                          record.retainedProcessPurpose = retainedProcessPurpose;
+                        record.durable = true;
                       },
                     },
                     () => fn(backend.session, backend),
@@ -1915,6 +2055,41 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           );
         }
       } catch (error) {
+        // Composite imports retain each physical shell under a fresh child
+        // admission. Their enclosing callback has stopped, but that child is
+        // still the writer. Close only the enclosing fence, never its process.
+        const child =
+          op !== "exec" && op !== "execCommand"
+            ? error instanceof RoutingMutationOutcomeUnknownError
+              ? error.retainedProcess
+              : error instanceof SynchronousCommandOutcomeUnknownError && error.sessionId !== null
+                ? this.retainedProcesses.get(error.sessionId)?.process
+                : undefined
+            : undefined;
+        if (mutatesWorkspace && child) {
+          const childRecord = this.retainedProcesses.get(child.providerSessionId);
+          const childPurpose = childRecord?.retainedProcessPurpose;
+          try {
+            await this.deps.afterMutation?.({
+              op,
+              backend,
+              admission,
+              outcome: "resolved",
+              ...(childPurpose ? { retainedProcessPurpose: childPurpose } : {}),
+            });
+          } catch (cause) {
+            throw new RoutingMutationOutcomeUnknownError(
+              op,
+              "Composite execution remains unknown; its original child command and enclosing settlement remain retained",
+              { cause, retainedProcess: child },
+            );
+          }
+          throw new RoutingMutationOutcomeUnknownError(
+            op,
+            "Composite execution completion is pending or unknown; its original child command remains retained and was not replayed",
+            { cause: error, retainedProcess: child },
+          );
+        }
         if (
           !reservedProcess &&
           error instanceof ProviderCommandStartOutcomeUnknownError &&
@@ -1929,12 +2104,14 @@ export class RoutingSandboxSession implements RoutableBackendSession {
             providerCommand: error.command,
           };
           const record = this.registerRetainedProcess(process, backend);
+          if (retainedProcessPurpose) record.retainedProcessPurpose = retainedProcessPurpose;
           const settlement: PendingParentPromotion = {
             op,
             backend,
             admission,
             outcome: "outcome_unknown",
             retainedProcess: process,
+            ...(retainedProcessPurpose ? { retainedProcessPurpose } : {}),
           };
           record.pendingParentPromotion = settlement;
           try {
@@ -1995,6 +2172,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
               backend,
               admission,
               outcome: partialMutation ? "resolved" : "rejected",
+              ...(retainedProcessPurpose ? { retainedProcessPurpose } : {}),
             });
             settlementOutcome = "completed";
           } catch (settlementError) {
@@ -2036,6 +2214,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         // Stale-epoch fence: the active pointer moved mid-op. Drop the cache so
         // the next resolve re-reads the NEW pointer and the op lands on the new
         // active sandbox (the fenced-retry role). Bounded by maxFenceRetries.
+        if (pinnedBackend) throw error;
         lastError = error;
         attempt += 1;
         continue;
@@ -2061,6 +2240,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           ? this.retainedProcess(reservedProcess.providerSessionId)
           : this.registerRetainedProcess(retainedProcess, backend)
         : null;
+      if (retainedRecord && retainedProcessPurpose)
+        retainedRecord.retainedProcessPurpose = retainedProcessPurpose;
 
       if (mutatesWorkspace && this.deps.afterMutation && !reservedProcess) {
         const settlement: PendingParentPromotion = {
@@ -2070,6 +2251,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           outcome: "resolved",
           result,
           ...(retainedProcess ? { retainedProcess } : {}),
+          ...(retainedProcessPurpose ? { retainedProcessPurpose } : {}),
         };
         const settlementStartedAt = performance.now();
         let settlementOutcome: RoutingSandboxPhaseOutcome = "failed";
@@ -2273,6 +2455,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       "exec",
       true,
       async (s) => {
+        notifyRemoteOperationTransportSelected(s);
         if (s.exec) {
           return s.exec(args);
         }
@@ -2286,12 +2469,142 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     );
   }
 
+  /** Internal filesystem execution. Keep the raw receipt through promotion
+   * and atomic output capture, then observe only its copied process route. */
+  async execSynchronous(
+    args: ChannelAExecArgs,
+    runner: SynchronousCommandRunner = executeSynchronousCommand,
+  ): Promise<SynchronousCommandResult> {
+    return await this.execSynchronousOnBackend(args, runner);
+  }
+
+  private async execSynchronousOnBackend(
+    args: ChannelAExecArgs,
+    runner: SynchronousCommandRunner,
+    pinnedBackend?: ResolvedActiveBackend,
+  ): Promise<SynchronousCommandResult> {
+    // Cancellation transport selection, pending-start control, and the launch
+    // must refer to one physical backend, even before a handle is returned.
+    const backend = pinnedBackend ?? (await this.resolve());
+    const pages = new Map<
+      unknown,
+      ReturnType<NonNullable<ProviderCommandSession["getProviderCommandOutput"]>>
+    >();
+    const nativePages = new Map<unknown, SynchronousCommandPage>();
+    const snapshot = (session: RoutableBackendSession, result: unknown) => {
+      const page = session.getProviderCommandOutput?.(result);
+      if (page) pages.set(result, page);
+      const nativePage = session.getSynchronousCommandOutput?.(result);
+      if (nativePage) nativePages.set(result, nativePage);
+    };
+    const session: ChannelASession = {
+      exec: async (input) => {
+        const raw = await this.dispatch(
+          "exec",
+          true,
+          async (provider) => {
+            notifyRemoteOperationTransportSelected(provider);
+            const result =
+              backend.kind === "modal"
+                ? provider.execCommand
+                  ? await provider.execCommand(input)
+                  : provider.exec
+                    ? await provider.exec(input)
+                    : (() => {
+                        throw new RoutingUnsupportedError("exec", this.cached?.kind ?? "unknown");
+                      })()
+                : provider.exec
+                  ? await provider.exec(input)
+                  : provider.execCommand
+                    ? await provider.execCommand(input)
+                    : (() => {
+                        throw new RoutingUnsupportedError("exec", this.cached?.kind ?? "unknown");
+                      })();
+            snapshot(provider, result);
+            return result;
+          },
+          eligibleForSupervision(input),
+          undefined,
+          backend,
+          "synchronous_filesystem",
+        );
+        const result =
+          typeof raw === "string"
+            ? structuredExecResultFromBanner(raw)
+            : (raw as ChannelAExecResult);
+        const page = pages.get(raw);
+        if (page) pages.set(result, page);
+        const nativePage = nativePages.get(raw);
+        if (nativePage) nativePages.set(result, nativePage);
+        if (!page && !nativePage && typeof raw === "string") {
+          // A banner can supply a locator/status, never complete separate
+          // streams. Do not make its projection look like native raw output.
+          delete result.stdout;
+          delete result.stderr;
+        }
+        return result;
+      },
+      writeStdin: async (input) =>
+        await this.dispatchProcessControl(input, false, (result, page, nativePage) => {
+          if (page) pages.set(result, page);
+          if (nativePage) nativePages.set(result, nativePage);
+        }),
+      getProviderCommandOutput: (result) => pages.get(result) ?? null,
+      getSynchronousCommandOutput: (result) => nativePages.get(result) ?? null,
+      supportsPty: () => Boolean(backend.session.supportsPty?.()),
+      commandCancellationTransport: async () => {
+        if (backend.session.commandCancellationTransport)
+          return await backend.session.commandCancellationTransport();
+        return backend.session.cancelExecCommand && backend.session.supportsPty?.() === false
+          ? "remote_operation"
+          : "shell_session";
+      },
+      cancelExecCommand: async (opId) => (await backend.session.cancelExecCommand?.(opId)) ?? false,
+      ...(backend.session.observeExecCommand
+        ? {
+            observeExecCommand: async (opId: string) =>
+              await backend.session.observeExecCommand!(opId),
+          }
+        : {}),
+      cancelPendingExecCommand: async () => {
+        await backend.session.cancelPendingExecCommand?.();
+      },
+      cancelSupervisedCommand: (handle, reason) => this.cancelSupervisedCommand(handle, reason),
+      hasRetainedProcess: (handle) => this.hasRetainedProcess(handle),
+      reconcileRetainedProcess: (handle) => this.reconcileRetainedProcess(handle),
+      retainedProcessHasTypedHandleLoss: (handle) => this.retainedProcessHasTypedHandleLoss(handle),
+      writeStdinForProcessControl: (input) =>
+        this.dispatchProcessControl(input, false, (result, page, nativePage) => {
+          if (page) pages.set(result, page);
+          if (nativePage) nativePages.set(result, nativePage);
+        }),
+      execCommandForProcessControl: (handle, input) =>
+        this.execCommandForProcessControl(handle, input),
+    };
+    try {
+      return await withNativeSynchronousCommandCollection(backend.session as ChannelASession, () =>
+        runner(session, args),
+      );
+    } catch (error) {
+      if (
+        error instanceof SynchronousCommandOutcomeUnknownError &&
+        isRoutingMutationOutputRejectedError(error.cause)
+      )
+        throw error.cause;
+      throw error;
+    } finally {
+      pages.clear();
+      nativePages.clear();
+    }
+  }
+
   async execCommand(args: unknown, options?: RoutingCommandDispatchOptions): Promise<string> {
     try {
       return await this.dispatch(
         "execCommand",
         true,
         async (s) => {
+          notifyRemoteOperationTransportSelected(s);
           if (s.execCommand) {
             return s.execCommand(args);
           }
@@ -2313,15 +2626,14 @@ export class RoutingSandboxSession implements RoutableBackendSession {
 
   /** Channel-A control-plane reads must not contend with durable workspace
    * capture admission, but provider sessions must receive only provider args. */
-  async execReadOnly(args: ChannelAExecArgs): Promise<ChannelAExecResult> {
+  async execReadOnly(
+    args: ChannelAExecArgs,
+    runner: SynchronousCommandRunner = executeSynchronousCommand,
+  ): Promise<ChannelAExecResult> {
     return await this.dispatch("execReadOnly", false, async (s) => {
-      if (s.exec) {
-        return (await s.exec(args)) as ChannelAExecResult;
-      }
-      if (s.execCommand) {
-        return structuredExecResultFromBanner(await s.execCommand(args));
-      }
-      throw new RoutingUnsupportedError("execReadOnly", this.cached?.kind ?? "unknown");
+      // Includes SDK-local Modal setup aliases, which have no retained route.
+      // The entire wait stays on this backend before pointer validation.
+      return await withoutProviderCommandHandle(() => runner(s as ChannelASession, args));
     });
   }
 
@@ -2387,6 +2699,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const record = this.retainedProcesses.get(providerSessionId);
     return (
       record !== undefined &&
+      !isNativeSynchronousCommandHandle(record.backend.session, providerSessionId) &&
       record.backend.kind !== "local" &&
       record.backend.kind !== "docker" &&
       record.backend.kind !== "opensandbox"
@@ -2471,6 +2784,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     return (
       record.backend.kind !== "selfhosted" &&
       record.backend.kind !== "opensandbox" &&
+      !isNativeSynchronousCommandHandle(record.backend.session, providerSessionId) &&
       typeof record.backend.session.writeStdin === "function"
     );
   }
@@ -2535,14 +2849,16 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const execCommand = record.backend.session.execCommand;
     if (execCommand) {
       return await this.invokeProviderOperation("execCommand", record.backend, () =>
-        execCommand.call(record.backend.session, args),
+        withoutNativeSynchronousCommandCollection(() =>
+          execCommand.call(record.backend.session, args),
+        ),
       );
     }
     const exec = record.backend.session.exec;
     if (exec) {
       return formatExecResult(
         await this.invokeProviderOperation("execCommand", record.backend, () =>
-          exec.call(record.backend.session, args),
+          withoutNativeSynchronousCommandCollection(() => exec.call(record.backend.session, args)),
         ),
       );
     }
@@ -2625,7 +2941,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   async writePlacementPrivate(args: unknown): Promise<unknown> {
     const input = placementPrivateWrite(args);
     return this.dispatch("writePlacementPrivate", false, async (session, backend) => {
-      return await writePlacementPrivateOnBackend(session, input, backend.kind);
+      return await withoutProviderCommandHandle(() =>
+        writePlacementPrivateOnBackend(session, input, backend.kind),
+      );
     });
   }
 
@@ -2634,7 +2952,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   async deletePlacementPrivate(path: string, runAs?: string): Promise<void> {
     const privatePath = placementPrivatePath(path);
     await this.dispatch("deletePlacementPrivate", false, async (session, backend) => {
-      await deletePlacementPrivateOnBackend(session, privatePath, runAs, backend.kind);
+      await withoutProviderCommandHandle(() =>
+        deletePlacementPrivateOnBackend(session, privatePath, runAs, backend.kind),
+      );
     });
   }
 
@@ -2646,7 +2966,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   ): Promise<WorkspaceFileImportReceipt> {
     return await this.dispatch("importWorkspaceFile", true, async (session, backend) => {
       const channel = new SandboxChannelAService({
-        session: withPlacementPrivateControl(session, backend.kind),
+        session: this.synchronousCompositeSession(session, backend),
         workspaceRoot: input.workspaceRoot,
         ...(backend.kind === "selfhosted"
           ? { providerPathMode: "workspace-relative" as const }
@@ -2667,7 +2987,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   ): Promise<readonly WorkspaceFileImportReceipt[]> {
     return await this.dispatch("importWorkspaceFiles", true, async (session, backend) => {
       const channel = new SandboxChannelAService({
-        session: withPlacementPrivateControl(session, backend.kind),
+        session: this.synchronousCompositeSession(session, backend),
         workspaceRoot: input.workspaceRoot,
         ...(backend.kind === "selfhosted"
           ? { providerPathMode: "workspace-relative" as const }
@@ -2679,6 +2999,30 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     });
   }
 
+  private synchronousCompositeSession(
+    session: RoutableBackendSession,
+    backend: ResolvedActiveBackend,
+  ): ChannelASession {
+    const privateSession = withPlacementPrivateControl(session, backend.kind);
+    const admittedCompositeMutation = admittedProviderCommandHandle() !== undefined;
+    return new Proxy(privateSession, {
+      get: (target, property) => {
+        if (property === "execReadOnly")
+          return (
+            args: ChannelAExecArgs,
+            runner: SynchronousCommandRunner = executeSynchronousCommand,
+          ) => withoutProviderCommandHandle(() => runner(target, args));
+        if (property === "execSynchronous" && admittedCompositeMutation)
+          return (
+            args: ChannelAExecArgs,
+            runner: SynchronousCommandRunner = executeSynchronousCommand,
+          ) => this.execSynchronousOnBackend(args, runner, backend);
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  }
+
   /** Inspect an exact-file envelope on one resolved backend without entering
    * mutation admission or staging private source authority. */
   async inspectWorkspaceFilesOnResolvedBackend(
@@ -2686,7 +3030,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   ): Promise<readonly WorkspaceFileImportReceipt[] | null> {
     return await this.dispatch("inspectWorkspaceFiles", false, async (session, backend) => {
       const channel = new SandboxChannelAService({
-        session: session as ChannelASession,
+        session: this.synchronousCompositeSession(session, backend),
         workspaceRoot: input.workspaceRoot,
         ...(backend.kind === "selfhosted"
           ? { providerPathMode: "workspace-relative" as const }
@@ -2698,12 +3042,12 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     });
   }
 
-  async listDir(args: unknown): Promise<unknown> {
+  async listDir(args: unknown, runner?: SynchronousCommandRunner): Promise<unknown> {
     return this.dispatch("listDir", false, async (s) => {
       if (!s.listDir) {
         throw new RoutingUnsupportedError("listDir", this.cached?.kind ?? "unknown");
       }
-      return s.listDir(args);
+      return await withoutProviderCommandHandle(() => s.listDir!(args, runner));
     });
   }
 
@@ -2777,6 +3121,12 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       backend.session.supportsPty?.() === false
       ? "remote_operation"
       : "shell_session";
+  }
+
+  /** A route proxy must wait for the exact command dispatch to bind its
+   * provider session before sending remote cancellation or observation calls. */
+  requiresPinnedRemoteOperationControl(): boolean {
+    return true;
   }
 
   /** createEditor is a synchronous factory in the SDK surface. The SDK's filesystem
@@ -3006,15 +3356,14 @@ function withPlacementPrivateControl(
     get(target, property) {
       if (property === "writePlacementPrivate") {
         return async (args: unknown) =>
-          await writePlacementPrivateOnBackend(target, placementPrivateWrite(args), backendKind);
+          await withoutProviderCommandHandle(() =>
+            writePlacementPrivateOnBackend(target, placementPrivateWrite(args), backendKind),
+          );
       }
       if (property === "deletePlacementPrivate") {
         return async (path: string, runAs?: string) =>
-          await deletePlacementPrivateOnBackend(
-            target,
-            placementPrivatePath(path),
-            runAs,
-            backendKind,
+          await withoutProviderCommandHandle(() =>
+            deletePlacementPrivateOnBackend(target, placementPrivatePath(path), runAs, backendKind),
           );
       }
       const value: unknown = Reflect.get(target, property, target);
@@ -3047,24 +3396,9 @@ async function deletePlacementPrivateOnBackend(
     cmd: `rm -f ${shellSingleQuote(privatePath)}`,
     ...(runAs ? { runAs } : {}),
   };
-  if (session.exec) {
-    const result = await session.exec(args);
-    if (
-      result &&
-      typeof result === "object" &&
-      typeof (result as { exitCode?: unknown }).exitCode === "number" &&
-      (result as { exitCode: number }).exitCode !== 0
-    ) {
-      throw new Error("placement-private cleanup failed");
-    }
-    return;
-  }
-  if (session.execCommand) {
-    const result = await session.execCommand(args);
-    const exitCode = parseExecBannerExitCode(result);
-    if (exitCode !== null && exitCode !== 0) {
-      throw new Error("placement-private cleanup failed");
-    }
+  if (session.exec || session.execCommand) {
+    const result = await executeSynchronousCommand(session as ChannelASession, args);
+    if (result.exitCode !== 0) throw new Error("placement-private cleanup failed");
     return;
   }
   throw new RoutingUnsupportedError("deletePlacementPrivate", backendKind);
@@ -3087,7 +3421,7 @@ async function streamPlacementPrivateFile(
     ...(input.createParents ? [`install -d -m 0700 -- ${shellSingleQuote(parent)}`] : []),
   ];
   if (bytes.byteLength === 0) {
-    const result = await exec({
+    const result = await executeSynchronousCommand(session as ChannelASession, {
       cmd: [
         ...prelude,
         `: > ${shellSingleQuote(input.path)}`,
@@ -3098,7 +3432,7 @@ async function streamPlacementPrivateFile(
       yieldTimeMs: 30_000,
       maxOutputTokens: 1_000,
     });
-    if (!formatExecResult(result).includes(marker)) {
+    if (result.exitCode !== 0 || !result.stdout.includes(marker)) {
       throw new Error("placement-private empty-file transfer failed");
     }
     return;
@@ -3125,17 +3459,27 @@ async function streamPlacementPrivateFile(
   if (sessionId === null) {
     throw new Error("placement-private transfer did not yield an input session");
   }
-  const settled = await session.writeStdin({
+  const first = await session.writeStdin({
     sessionId,
     chars: payload,
     yieldTimeMs: 30_000,
     maxOutputTokens: 1_000,
   });
-  if (!settled.includes(marker) || parseExecBannerSessionId(settled) !== null) {
-    throw new Error("placement-private transfer did not settle successfully");
-  }
-  const exitCode = parseExecBannerExitCode(settled);
-  if (exitCode !== null && exitCode !== 0) {
+  const settled = await observeSynchronousCommand(
+    synchronousCommandPage(session as ChannelASession, first, sessionId),
+    async () =>
+      synchronousCommandPage(
+        session as ChannelASession,
+        await session.writeStdin!({
+          sessionId,
+          chars: "",
+          yieldTimeMs: 1_000,
+          maxOutputTokens: 1_000,
+        }),
+        sessionId,
+      ),
+  );
+  if (settled.exitCode !== 0 || !settled.stdout.includes(marker)) {
     throw new Error("placement-private transfer exited unsuccessfully");
   }
 }

@@ -42,6 +42,7 @@ import {
   type RoutableSandbox,
   type RoutingSandboxSessionDeps,
 } from "../src/sandbox";
+import { synchronousNativeOutputFixture } from "./synchronous-output-fixture";
 
 const WS = "11111111-1111-1111-1111-111111111111";
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
@@ -756,7 +757,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       },
       async exec(args) {
         calls.push(`exec:${(args as { cmd: string }).cmd}`);
-        return { exitCode: 0 };
+        return { stdout: "", stderr: "", exitCode: 0 };
       },
     };
     const proxy = new RoutingSandboxSession({
@@ -790,14 +791,29 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
 
   test("streams placement-private bytes to the exact routed backend when it has no file API", async () => {
     const calls: Array<{ kind: string; value: unknown }> = [];
+    const output = synchronousNativeOutputFixture();
+    // Isolate routing and stdin staging behind the native collector's trusted
+    // page contract; an SDK-formatted Output body alone is not that contract.
     const backend: RoutableBackendSession = {
+      getSynchronousCommandOutput: output.getSynchronousCommandOutput,
       async exec(args) {
         calls.push({ kind: "exec", value: args });
-        return { sessionId: 41 };
+        return output.record(
+          { stdout: "", stderr: "", sessionId: 41, exitCode: null },
+          "",
+          "",
+          null,
+          41,
+        );
       },
       async writeStdin(args) {
         calls.push({ kind: "stdin", value: args });
-        return "Process exited with code 0\n\nOutput:\n__OPENGENI_PLACEMENT_PRIVATE_WRITE_OK__";
+        return output.record(
+          "Process exited with code 0\n\nOutput:\npresentation only",
+          "__OPENGENI_PLACEMENT_PRIVATE_WRITE_OK__",
+          "transfer diagnostic",
+          0,
+        );
       },
     };
     const proxy = new RoutingSandboxSession({
@@ -826,6 +842,25 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       sessionId: 41,
       chars: Buffer.from("signed-url-is-private").toString("base64"),
     });
+
+    // Removing the trusted contract must not turn a status/marker banner into
+    // complete separate output, nor replay the already-started private write.
+    backend.getSynchronousCommandOutput = undefined;
+    backend.writeStdin = async (args) => {
+      calls.push({ kind: "stdin", value: args });
+      return "Process exited with code 0\n\nOutput:\n__OPENGENI_PLACEMENT_PRIVATE_WRITE_OK__";
+    };
+    await expect(
+      proxy.writePlacementPrivate({
+        path: "/tmp/opengeni-private/workspace-imports/grant",
+        content: "signed-url-is-private",
+        createParents: true,
+      }),
+    ).rejects.toMatchObject({
+      code: "synchronous_command_outcome_unknown",
+      output: { stdout: "", stderr: "" },
+    });
+    expect(calls.map((call) => call.kind)).toEqual(["exec", "stdin", "exec", "stdin"]);
   });
 
   test("cleans private import authority on its admitted backend and rejects output after a swap", async () => {

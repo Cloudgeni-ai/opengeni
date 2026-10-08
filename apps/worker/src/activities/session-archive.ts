@@ -311,10 +311,22 @@ export function createSessionArchiveActivities(
       limit: 25,
     })) {
       if (now() >= deadline) break;
-      if (unfinished.state === "archiving") {
-        if (await abandonSessionArchive(db, unfinished)) result.abandoned += 1;
-      } else {
-        result.purgedRows += await purgeUntilDone(db, unfinished, deadline);
+      // One session's failure must not stop the pass: it is retried next pass,
+      // and new archives still proceed.
+      try {
+        if (unfinished.state === "archiving") {
+          if (await abandonSessionArchive(db, unfinished)) result.abandoned += 1;
+        } else {
+          result.purgedRows += await purgeUntilDone(db, unfinished, deadline);
+        }
+      } catch (error) {
+        result.failed += 1;
+        observability.warn("session archive recovery failed; it will be retried", {
+          workspaceId: unfinished.workspaceId,
+          sessionId: unfinished.sessionId,
+          errorClass: "SessionArchiveOperationError",
+          errorCode: sessionArchiveFailureCode(error),
+        });
       }
     }
 

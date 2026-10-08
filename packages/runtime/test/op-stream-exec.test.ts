@@ -1002,7 +1002,7 @@ describe("op-stream exec (fake runner)", () => {
     const cancelledAt = performance.now();
     abort.abort(new Error("steered"));
     await controller.waitForQuiescence();
-    await invocation;
+    await expect(invocation).rejects.toThrow("steered");
 
     expect(performance.now() - cancelledAt).toBeLessThan(2_000);
     expect(runner.runs.get("call_shell_cancel:0")?.exit.cancelled).toBe(true);

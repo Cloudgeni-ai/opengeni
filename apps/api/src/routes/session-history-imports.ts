@@ -147,9 +147,18 @@ export async function readSessionHistoryImportJson(request: Request): Promise<un
 
 export const SESSION_ARCHIVED_MESSAGE =
   "This session is archived and read-only. Start a new session to continue the work.";
+export const SESSION_IMPORTED_MESSAGE = "Imported session history is read-only";
 
-/** Also used by the composed API for imported- and archived-session Send/Steer refusals. */
-export function archivedSessionImportErrorResponse(c: Context, error: unknown): Response | null {
+export type ReadOnlySessionRefusal = {
+  code: "SESSION_ARCHIVED_READ_ONLY" | "SESSION_IMPORTED_READ_ONLY";
+  message: string;
+};
+
+/**
+ * Classifies a write refused because its session is read-only (archived or an
+ * imported history), for HTTP responses and agent tool results alike.
+ */
+export function readOnlySessionRefusal(error: unknown): ReadOnlySessionRefusal | null {
   // SQLSTATE OG002 is also used for unrelated admission refusals. Match the
   // archive guard's closed message on the exact driver error, including a
   // wrapped cause, rather than exposing SQL text or reclassifying every OG002.
@@ -159,19 +168,25 @@ export function archivedSessionImportErrorResponse(c: Context, error: unknown): 
     seen.add(candidate);
     const failure = candidate as { code?: unknown; message?: unknown; cause?: unknown };
     if (failure.code === "OG002" && failure.message === "SESSION_IMPORTED_READ_ONLY") {
-      return c.json(
-        { code: "SESSION_IMPORTED_READ_ONLY", message: "Imported session history is read-only" },
-        409,
-      );
+      return { code: "SESSION_IMPORTED_READ_ONLY", message: SESSION_IMPORTED_MESSAGE };
     }
     if (
       candidate instanceof SessionArchivedError ||
+      (failure.code === "SESSION_ARCHIVED_READ_ONLY" &&
+        (candidate as { name?: unknown }).name === "SessionArchivedError") ||
       (failure.code === "OG002" && failure.message === "SESSION_ARCHIVED_READ_ONLY")
     ) {
-      return c.json({ code: "SESSION_ARCHIVED_READ_ONLY", message: SESSION_ARCHIVED_MESSAGE }, 409);
+      return { code: "SESSION_ARCHIVED_READ_ONLY", message: SESSION_ARCHIVED_MESSAGE };
     }
     candidate = failure.cause;
   }
+  return null;
+}
+
+/** Also used by the composed API for imported- and archived-session Send/Steer refusals. */
+export function archivedSessionImportErrorResponse(c: Context, error: unknown): Response | null {
+  const readOnly = readOnlySessionRefusal(error);
+  if (readOnly) return c.json(readOnly, 409);
   const domainError =
     error instanceof ArchivedSessionImportError
       ? error
