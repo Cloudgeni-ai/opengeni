@@ -36,6 +36,8 @@ const TOOL_INVOKE_NAME = "tool_invoke";
  * HUMAN_INPUT_TOOL_NAME: run-events imports this module.
  */
 const ALWAYS_VISIBLE_BASE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  // EXPERIMENT: the Codex-style orchestration tool that nests the sandbox tools.
+  "exec",
   "exec_command",
   "write_stdin",
   "view_image",
