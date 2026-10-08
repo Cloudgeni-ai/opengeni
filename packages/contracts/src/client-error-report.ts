@@ -136,6 +136,7 @@ export const CLIENT_PAGES = [
   "environments",
   "rigs",
   "playground",
+  "read-only-chats",
   "home",
   "session-link",
   "identity-link",

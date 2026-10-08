@@ -336,7 +336,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/connect/attempts",
     "request": [
-      "ConnectInstallationTarget"
+      "ConnectInstallationTarget",
+      "PreparedMcpSetup"
     ],
     "response": [
       "ConnectAttempt"
