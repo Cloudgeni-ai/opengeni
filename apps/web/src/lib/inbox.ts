@@ -12,6 +12,8 @@ type InboxState = {
   loading: boolean;
 };
 
+type InboxClient = Pick<OpenGeniClient, "listInbox">;
+
 const EMPTY: InboxState = { data: null, error: null, loading: true };
 
 class InboxStore {
@@ -20,7 +22,7 @@ class InboxStore {
   private inFlight: Promise<void> | null = null;
   private generation = 0;
 
-  constructor(private readonly client: OpenGeniClient) {}
+  constructor(private readonly client: InboxClient) {}
 
   get snapshot(): InboxState {
     return this.state;
@@ -73,9 +75,9 @@ class InboxStore {
   }
 }
 
-const stores = new WeakMap<OpenGeniClient, InboxStore>();
+const stores = new WeakMap<InboxClient, InboxStore>();
 
-function storeFor(client: OpenGeniClient): InboxStore {
+function storeFor(client: InboxClient): InboxStore {
   let store = stores.get(client);
   if (!store) {
     store = new InboxStore(client);

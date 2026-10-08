@@ -20,7 +20,7 @@ import {
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
-const MIGRATION = "0654_inbox.sql";
+const MIGRATION = "0655_inbox.sql";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 setDefaultTimeout(60_000);
@@ -54,10 +54,10 @@ const db = () => client!.db;
 /** A person and a session they started. */
 async function personWithSession(label: string, subjectId = `user:${crypto.randomUUID()}`) {
   const access = await bootstrapWorkspace(db(), {
-    accountExternalSource: "migration-0654",
+    accountExternalSource: "migration-0655",
     accountExternalId: `account:${label}:${crypto.randomUUID()}`,
     accountName: `Inbox ${label}`,
-    workspaceExternalSource: "migration-0654",
+    workspaceExternalSource: "migration-0655",
     workspaceExternalId: `workspace:${label}:${crypto.randomUUID()}`,
     workspaceName: `Inbox ${label}`,
     subjectId,
@@ -86,7 +86,7 @@ async function inbox(person: { scope: { accountId: string }; subjectId: string }
   });
 }
 
-describe("0654 inbox", () => {
+describe("0655 inbox", () => {
   test("is a rolling, additive migration with private, owner-run storage", async () => {
     if (!client) return;
     const source = await Bun.file(new URL(`../drizzle/${MIGRATION}`, import.meta.url)).text();
@@ -151,11 +151,12 @@ describe("0654 inbox", () => {
     ]);
     const open = await inbox(person);
     expect(open.map((item) => [item.kind, item.title, item.body]).sort()).toEqual([
-      ["approval", "Approve Deploy?", ""],
-      ["approval", "Approve delete_file?", ""],
+      ["approval", "Deploy", ""],
+      ["approval", "delete_file", ""],
       ["question", "Which branch?", "1 more question"],
     ]);
     expect(open.every((item) => item.unread && item.sessionId === person.session.id)).toBe(true);
+    expect(open.every((item) => item.choices.length === 0)).toBe(true);
 
     await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
       { type: "user.humanInputResponse", payload: { requestId, response: { answers: [] } } },
@@ -168,6 +169,62 @@ describe("0654 inbox", () => {
       { type: "turn.cancelled", payload: {} },
     ]);
     expect(await inbox(person)).toHaveLength(0);
+  });
+
+  test("a single short choice question carries its options as one-tap answers", async () => {
+    if (!client) return;
+    const person = await personWithSession("choices");
+    const option = (id: string) => ({ id, label: `Option ${id}`, description: "ignored" });
+    await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+      {
+        type: "session.humanInput.requested",
+        payload: {
+          request: {
+            id: "short",
+            questions: [
+              {
+                kind: "single_select",
+                prompt: "Where first?",
+                options: [option("a"), option("b")],
+              },
+            ],
+          },
+        },
+      },
+      {
+        type: "session.humanInput.requested",
+        payload: {
+          request: {
+            id: "long",
+            questions: [
+              {
+                kind: "single_select",
+                prompt: "Pick one",
+                options: ["a", "b", "c", "d", "e"].map(option),
+              },
+            ],
+          },
+        },
+      },
+      {
+        type: "session.humanInput.requested",
+        payload: {
+          request: {
+            id: "multi",
+            questions: [
+              { kind: "multi_select", prompt: "Pick any", options: [option("a"), option("b")] },
+            ],
+          },
+        },
+      },
+    ]);
+    const bySource = new Map((await inbox(person)).map((item) => [item.sourceKey, item.choices]));
+    expect(bySource.get("short")).toEqual([
+      { id: "a", label: "Option a" },
+      { id: "b", label: "Option b" },
+    ]);
+    expect(bySource.get("long")).toEqual([]);
+    expect(bySource.get("multi")).toEqual([]);
   });
 
   test("an agent's pause waits on the person until the goal resumes", async () => {

@@ -2,7 +2,7 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
 import * as schema from "./schema";
 
-// The inbox (0654). Session events open and close items in the event writer's
+// The inbox (0655). Session events open and close items in the event writer's
 // transaction; these owner-run functions read them and record the person's own
 // attention. Every call is scoped to one account and one recipient subject.
 
@@ -14,6 +14,7 @@ export type InboxItemRow = {
   sourceKey: string;
   title: string;
   body: string;
+  choices: Array<{ id: string; label: string }>;
   urgency: "normal" | "time_sensitive";
   status: "open" | "resolved" | "withdrawn" | "dismissed";
   unread: boolean;
@@ -31,6 +32,7 @@ type InboxItemRecord = {
   source_key: string;
   title: string;
   body: string;
+  choices: unknown;
   urgency: InboxItemRow["urgency"];
   status: InboxItemRow["status"];
   unread: boolean;
@@ -46,6 +48,16 @@ function iso(value: Date | string): string {
 
 function isoOrNull(value: Date | string | null): string | null {
   return value === null ? null : iso(value);
+}
+
+function choicesOf(value: unknown): Array<{ id: string; label: string }> {
+  const parsed = typeof value === "string" ? (JSON.parse(value) as unknown) : value;
+  if (!Array.isArray(parsed)) return [];
+  return parsed.flatMap((choice: unknown) => {
+    if (typeof choice !== "object" || choice === null) return [];
+    const { id, label } = choice as { id?: unknown; label?: unknown };
+    return typeof id === "string" && typeof label === "string" ? [{ id, label }] : [];
+  });
 }
 
 /** The person's open items in one account, newest first. */
@@ -67,6 +79,7 @@ export async function listInboxItems(
     sourceKey: row.source_key,
     title: row.title,
     body: row.body,
+    choices: choicesOf(row.choices),
     urgency: row.urgency,
     status: row.status,
     unread: row.unread,

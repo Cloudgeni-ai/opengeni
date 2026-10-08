@@ -1,5 +1,5 @@
 // The person's inbox: what waits on them across their workspaces. Session
-// events open and close items (migration 0654); these routes read them and
+// events open and close items (migration 0655); these routes read them and
 // record the person's own attention. Answering a question or deciding an
 // approval happens through the session's ordinary events, which close the item.
 import {

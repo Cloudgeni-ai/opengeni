@@ -14397,6 +14397,8 @@ export const InboxItem = z.object({
   sourceKey: z.string(),
   title: z.string(),
   body: z.string(),
+  /** One-tap answers for a single short choice question; empty otherwise. */
+  choices: z.array(z.object({ id: z.string(), label: z.string() })).max(4),
   urgency: NotificationUrgency,
   status: InboxItemStatus,
   /** True while the person has not seen the item's current content. */

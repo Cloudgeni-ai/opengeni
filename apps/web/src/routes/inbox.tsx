@@ -15,6 +15,7 @@ import {
   CirclePauseIcon,
   InboxIcon,
   MessageCircleQuestionIcon,
+  MoreHorizontalIcon,
   ShieldCheckIcon,
   XIcon,
 } from "lucide-react";
@@ -31,15 +32,20 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Disclosure } from "@/components/ui/disclosure";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { EmptyState } from "@/components/ui/empty-state";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { Notice } from "@/components/ui/notice";
 import { RowButton } from "@/components/ui/page-actions";
 import { PageHeader } from "@/components/ui/page-header";
 import { RelativeTime } from "@/components/ui/relative-time";
-import { Section } from "@/components/ui/section";
+import { Section, SectionStack } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Toolbar } from "@/components/ui/toolbar";
@@ -47,8 +53,6 @@ import { useAppContext } from "@/context";
 import { apiErrorFacts, userErrorText } from "@/lib/api-error";
 import { useInbox } from "@/lib/inbox";
 import { cn } from "@/lib/utils";
-
-const COLUMNS: RowListColumn[] = [{ id: "when", label: "When", width: 88, hideLabel: true }];
 
 const KIND_WORD: Record<InboxItem["kind"], string> = {
   question: "Question",
@@ -85,6 +89,122 @@ function snoozeLabel(until: string): string {
     : `Snoozed until ${date.toLocaleDateString(undefined, { weekday: "short" })} ${time}`;
 }
 
+/*
+ * Inbox rows are messages, not resources: the question or the agent's note is
+ * the content, so the title wraps to two lines and the note to two more instead
+ * of truncating to one. Otherwise they match the flush resource list: the same
+ * tile, hairlines inset to the text, 10px hover wash and one row target.
+ */
+function InboxList({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <ul
+      aria-label={label}
+      className={cn(
+        "-mx-3 my-0 flex min-w-0 list-none flex-col p-0",
+        "[&>li+li]:before:pointer-events-none [&>li+li]:before:absolute [&>li+li]:before:inset-x-3 [&>li+li]:before:top-0 [&>li+li]:before:h-px [&>li+li]:before:bg-border [&>li+li]:before:content-['']",
+      )}
+    >
+      {children}
+    </ul>
+  );
+}
+
+function InboxRow(props: {
+  kind: InboxItem["kind"];
+  unread: boolean;
+  title: string;
+  body?: ReactNode;
+  meta: string[];
+  when: string;
+  actions?: ReactNode;
+  menu: ReactNode;
+  onOpen: () => void;
+}) {
+  return (
+    <li className="relative min-w-0">
+      <div
+        className={cn(
+          "group/row relative isolate flex min-w-0 gap-3 rounded-[10px] px-3 py-3.5 transition-colors duration-[120ms] hover:bg-hover",
+          "has-[[data-row-open]:focus-visible]:outline-2 has-[[data-row-open]:focus-visible]:-outline-offset-2 has-[[data-row-open]:focus-visible]:outline-brand/55",
+        )}
+      >
+        <button
+          type="button"
+          data-row-open
+          aria-label={`${props.title}. Open session`}
+          className="absolute inset-0 z-0 cursor-pointer rounded-[10px] outline-none"
+          onClick={props.onOpen}
+        />
+        <span className="pointer-events-none relative mt-0.5 inline-flex shrink-0 self-start">
+          <LogoTile icon={<KindIcon kind={props.kind} />} />
+          {props.unread ? (
+            <span
+              aria-label="Unread"
+              className="absolute -right-0.5 -top-0.5 size-2.5 rounded-full bg-session-update ring-2 ring-canvas"
+            />
+          ) : null}
+        </span>
+        <div className="pointer-events-none relative flex min-w-0 flex-1 flex-col">
+          <p className="line-clamp-2 min-w-0 text-sm font-medium leading-5 text-fg break-words">
+            {props.title}
+          </p>
+          {props.body ? (
+            <div className="line-clamp-2 min-w-0 text-sm leading-5 text-fg-muted break-words">
+              {props.body}
+            </div>
+          ) : null}
+          <p className="mt-0.5 flex min-w-0 items-baseline text-xs leading-[18px] text-fg-subtle">
+            <span className="min-w-0 truncate">{props.meta.join(" · ")}</span>
+            <span aria-hidden="true" className="shrink-0 px-1">
+              ·
+            </span>
+            <span className="pointer-events-auto relative z-10 shrink-0 tabular-nums">
+              <RelativeTime date={props.when} />
+            </span>
+          </p>
+          {props.actions ? (
+            <div className="pointer-events-auto relative z-10 mt-3 flex flex-wrap items-center gap-2">
+              {props.actions}
+            </div>
+          ) : null}
+        </div>
+        <div className="relative z-10 -mr-1.5 -mt-1 shrink-0 self-start">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                aria-label={`More actions for ${props.title}`}
+                className="grid size-8 place-items-center rounded-[10px] text-fg-subtle transition-colors duration-[120ms] hover:bg-surface-3 hover:text-fg data-[state=open]:bg-surface-3 data-[state=open]:text-fg pointer-coarse:size-11"
+              >
+                <MoreHorizontalIcon aria-hidden="true" className="size-4" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-48">
+              {props.menu}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
+    </li>
+  );
+}
+
+function InboxSkeleton() {
+  return (
+    <div className="flex flex-col gap-5" aria-busy="true" aria-label="Loading your inbox">
+      {[0, 1, 2].map((index) => (
+        <div key={index} className="flex gap-3">
+          <Skeleton className="size-8 shrink-0 rounded-[10px]" />
+          <div className="flex flex-1 flex-col gap-2 pt-1">
+            <Skeleton className="h-4 w-2/3" />
+            <Skeleton className="h-3 w-1/3" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
@@ -96,7 +216,9 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   const unreadThisVisit = useRef(new Set<string>());
   const now = Date.now();
 
-  const items = inbox.data?.items ?? [];
+  const listed = inbox.data?.items;
+  const items = useMemo(() => listed ?? [], [listed]);
+  const { patchItems } = inbox;
   const workspaceNames = useMemo(
     () => new Map(context.workspaces.map((workspace) => [workspace.id, workspace.name])),
     [context.workspaces],
@@ -118,12 +240,14 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
       for (const item of unseen) {
         void context.client.updateInboxItem(item.id, { seen: true }).catch(() => undefined);
       }
-      inbox.patchItems((current) =>
-        current.map((item) => (unseen.some((seen) => seen.id === item.id) ? { ...item, unread: false } : item)),
+      patchItems((current) =>
+        current.map((item) =>
+          unseen.some((seen) => seen.id === item.id) ? { ...item, unread: false } : item,
+        ),
       );
     }, 1500);
     return () => window.clearTimeout(timer);
-  }, [items, context.client, inbox]);
+  }, [items, context.client, patchItems]);
 
   const openSession = (item: InboxItem) =>
     void navigate({
@@ -162,7 +286,9 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     void run(item, "snooze", async () => {
       const snoozedUntil = until ? until.toISOString() : null;
       inbox.patchItems((current) =>
-        current.map((candidate) => (candidate.id === item.id ? { ...candidate, snoozedUntil } : candidate)),
+        current.map((candidate) =>
+          candidate.id === item.id ? { ...candidate, snoozedUntil } : candidate,
+        ),
       );
       await context.client.updateInboxItem(item.id, { snoozedUntil });
     });
@@ -173,13 +299,51 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
       await context.client.updateInboxItem(item.id, { dismissed: true });
     });
 
-  const meta = (item: InboxItem): ReactNode[] => {
-    const parts: ReactNode[] = [];
-    if (item.kind === "notification") {
-      if (item.body) parts.push(item.body);
-    } else {
-      parts.push(KIND_WORD[item.kind]);
+  // One tap on an offered option answers the question, exactly as the form would.
+  const choose = (item: InboxItem, choice: { id: string; label: string }) =>
+    void run(item, `choice:${choice.id}`, async () => {
+      const request = await context.client.getHumanInputRequest(
+        item.workspaceId,
+        item.sessionId,
+        item.sourceKey,
+      );
+      const question = request.questions[0];
+      if (request.status !== "pending" || !question) {
+        leave(item);
+        toast("That question was already answered", {
+          description: item.sessionTitle ?? undefined,
+        });
+        return;
+      }
+      await context.client.submitHumanInputResponse(
+        item.workspaceId,
+        item.sessionId,
+        item.sourceKey,
+        { outcome: "answered", answers: [{ questionId: question.id, values: [choice.id] }] },
+      );
+      leave(item);
+      toast.success(`Answered: ${choice.label}`, { description: item.sessionTitle ?? undefined });
+    });
+
+  // Under the title: what exactly is asked for, or the agent's note.
+  const description = (item: InboxItem): ReactNode => {
+    if (!item.body) return undefined;
+    if (item.kind === "approval") {
+      return (
+        <code className="my-0.5 inline-block max-w-full truncate rounded-[6px] bg-surface-2 px-1.5 py-0.5 align-top font-mono text-xs text-fg">
+          {item.body}
+        </code>
+      );
     }
+    if (item.kind === "notification") return item.body;
+    return undefined;
+  };
+
+  // Where it comes from. The kind word is left out where the row already says it.
+  const meta = (item: InboxItem): string[] => {
+    const parts: string[] = [];
+    if (item.kind === "goal_paused" || item.kind === "question") parts.push(KIND_WORD[item.kind]);
+    if (item.kind === "approval" && !item.body) parts.push(KIND_WORD.approval);
     parts.push(item.sessionTitle ?? "Untitled session");
     if (scope === "all" && workspacesWithItems.size > 1) {
       const name = workspaceNames.get(item.workspaceId);
@@ -194,19 +358,30 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     const pending = busy[item.id];
     if (item.kind === "approval") {
       return (
-        <div className="flex items-center gap-2">
+        <>
           <RowButton disabled={Boolean(pending)} onClick={() => decide(item, "reject")}>
             <XIcon />
-            Deny
+            {pending === "reject" ? "Denying…" : "Deny"}
           </RowButton>
           <RowButton disabled={Boolean(pending)} onClick={() => decide(item, "approve")}>
             <CheckIcon />
             {pending === "approve" ? "Approving…" : "Approve"}
           </RowButton>
-        </div>
+        </>
       );
     }
     if (item.kind === "question") {
+      if (item.choices.length > 0) {
+        return item.choices.map((choice) => (
+          <RowButton
+            key={choice.id}
+            disabled={Boolean(pending)}
+            onClick={() => choose(item, choice)}
+          >
+            {pending === `choice:${choice.id}` ? "Sending…" : choice.label}
+          </RowButton>
+        ));
+      }
       return (
         <RowButton disabled={Boolean(pending)} onClick={() => setAnswering(item)}>
           Answer
@@ -219,25 +394,16 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   const row = (item: InboxItem) => {
     const unread = item.unread || unreadThisVisit.current.has(item.id);
     return (
-      <ListRow
+      <InboxRow
         key={item.id}
-        leading={
-          <span className="relative inline-flex">
-            <LogoTile icon={<KindIcon kind={item.kind} />} />
-            {item.kind === "notification" && unread ? (
-              <span
-                aria-hidden="true"
-                className="absolute -right-0.5 -top-0.5 size-2.5 rounded-full bg-session-update ring-2 ring-canvas"
-              />
-            ) : null}
-          </span>
-        }
+        kind={item.kind}
+        unread={item.kind === "notification" && unread}
         title={item.title}
+        body={description(item)}
         meta={meta(item)}
-        cells={{ when: <RelativeTime date={item.updatedAt} /> }}
-        control={control(item)}
+        when={item.updatedAt}
+        actions={control(item)}
         onOpen={() => openSession(item)}
-        menuLabel={`More actions for ${item.title}`}
         menu={
           <>
             <DropdownMenuItem onSelect={() => openSession(item)}>Open session</DropdownMenuItem>
@@ -265,11 +431,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
 
   let body: ReactNode;
   if (inbox.loading && !inbox.data) {
-    body = (
-      <RowList label="Inbox" columns={COLUMNS} flush busy>
-        <ListRowSkeleton count={3} />
-      </RowList>
-    );
+    body = <InboxSkeleton />;
   } else if (inbox.error && !inbox.data) {
     body = (
       <Notice
@@ -295,36 +457,30 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     );
   } else {
     body = (
-      <div className="flex min-w-0 flex-col">
+      <SectionStack>
         {needsYou.length > 0 ? (
-          <Section title="Needs you" divided={false}>
-            <RowList label="Needs you" columns={COLUMNS} flush>
-              {needsYou.map(row)}
-            </RowList>
+          <Section title="Needs you">
+            <InboxList label="Needs you">{needsYou.map(row)}</InboxList>
           </Section>
         ) : null}
         {fromAgents.length > 0 ? (
-          <Section title="From your agents" divided={needsYou.length > 0}>
-            <RowList label="From your agents" columns={COLUMNS} flush>
-              {fromAgents.map(row)}
-            </RowList>
+          <Section title="From your agents">
+            <InboxList label="From your agents">{fromAgents.map(row)}</InboxList>
           </Section>
         ) : null}
         {awake.length === 0 ? (
-          <p className="py-6 text-sm text-fg-muted">
+          <p className="text-sm text-fg-muted">
             Nothing needs you right now. Snoozed items come back on their own.
           </p>
         ) : null}
         {snoozed.length > 0 ? (
-          <div className={cn(awake.length > 0 && "mt-6")}>
+          <div>
             <Disclosure title="Snoozed" summary={String(snoozed.length)}>
-              <RowList label="Snoozed" columns={COLUMNS} flush>
-                {snoozed.map(row)}
-              </RowList>
+              <InboxList label="Snoozed">{snoozed.map(row)}</InboxList>
             </Disclosure>
           </div>
         ) : null}
-      </div>
+      </SectionStack>
     );
   }
 

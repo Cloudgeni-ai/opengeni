@@ -878,6 +878,7 @@ export type {
   NativePushDevice,
   NativePushRule,
   InboxItem,
+  InboxItemChoice,
   InboxItemKind,
   InboxSettings,
   InboxTidyPolicy,

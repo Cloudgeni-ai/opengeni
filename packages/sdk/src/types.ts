@@ -5448,6 +5448,8 @@ export type InboxItem = {
   sourceKey: string;
   title: string;
   body: string;
+  /** One-tap answers for a single short choice question; empty otherwise. */
+  choices: InboxItemChoice[];
   urgency: "normal" | "time_sensitive";
   status: "open" | "resolved" | "withdrawn" | "dismissed";
   /** True while the person has not seen the item's current content. */
@@ -5457,6 +5459,9 @@ export type InboxItem = {
   updatedAt: string;
   resolvedAt: string | null;
 };
+
+/** An option of the question behind an inbox item, answerable in one tap. */
+export type InboxItemChoice = { id: string; label: string };
 
 export type ListInboxResponse = {
   items: InboxItem[];

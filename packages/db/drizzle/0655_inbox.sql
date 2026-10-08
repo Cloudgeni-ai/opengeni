@@ -20,6 +20,10 @@ CREATE TABLE opengeni_private.inbox_items (
   source_key text NOT NULL CHECK (char_length(source_key) BETWEEN 1 AND 200),
   title text NOT NULL CHECK (char_length(title) BETWEEN 1 AND 200),
   body text NOT NULL DEFAULT '' CHECK (char_length(body) <= 500),
+  -- One-tap answers: the options of a single short single-select question, so
+  -- the inbox and a phone notification can offer them as buttons.
+  choices jsonb NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(choices) = 'array' AND jsonb_array_length(choices) <= 4),
   urgency text NOT NULL DEFAULT 'normal' CHECK (urgency IN ('normal', 'time_sensitive')),
   status text NOT NULL DEFAULT 'open'
     CHECK (status IN ('open', 'resolved', 'withdrawn', 'dismissed')),
@@ -71,7 +75,8 @@ REVOKE ALL ON TABLE opengeni_private.inbox_settings FROM PUBLIC;
 -- again. Returns whether the item is newly open (so the caller can alert).
 CREATE FUNCTION opengeni_private.open_inbox_item_v1(
   p_account_id uuid, p_workspace_id uuid, p_session_id uuid, p_recipient text,
-  p_kind text, p_source_key text, p_title text, p_body text, p_urgency text
+  p_kind text, p_source_key text, p_title text, p_body text, p_urgency text,
+  p_choices jsonb DEFAULT '[]'::jsonb
 ) RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $open$
 DECLARE
@@ -81,16 +86,18 @@ BEGIN
   WHERE item.session_id = p_session_id AND item.kind = p_kind AND item.source_key = p_source_key;
   INSERT INTO opengeni_private.inbox_items AS item (
     account_id, workspace_id, session_id, recipient_subject_id, kind, source_key,
-    title, body, urgency
+    title, body, urgency, choices
   ) VALUES (
     p_account_id, p_workspace_id, p_session_id, p_recipient, p_kind, p_source_key,
     left(coalesce(nullif(btrim(p_title), ''), 'Needs you'), 200),
     left(coalesce(btrim(p_body), ''), 500),
-    coalesce(p_urgency, 'normal')
+    coalesce(p_urgency, 'normal'),
+    coalesce(p_choices, '[]'::jsonb)
   )
   ON CONFLICT (session_id, kind, source_key) DO UPDATE SET
     title = excluded.title,
     body = excluded.body,
+    choices = excluded.choices,
     urgency = excluded.urgency,
     status = CASE WHEN item.status IN ('resolved', 'withdrawn') THEN 'open' ELSE item.status END,
     resolved_at = CASE WHEN item.status IN ('resolved', 'withdrawn') THEN NULL ELSE item.resolved_at END,
@@ -126,6 +133,7 @@ DECLARE
   v_count integer;
   v_approval jsonb;
   v_new boolean;
+  v_choices jsonb;
 BEGIN
   BEGIN
     SELECT session.created_by_subject_id INTO v_recipient
@@ -138,13 +146,24 @@ BEGIN
     WHEN 'session.humanInput.requested' THEN
       v_question := NEW.payload #> '{request,questions,0}';
       v_count := coalesce(jsonb_array_length(NEW.payload #> '{request,questions}'), 1);
+      v_choices := '[]'::jsonb;
+      IF v_count = 1 AND v_question ->> 'kind' = 'single_select'
+        AND jsonb_typeof(v_question -> 'options') = 'array'
+        AND jsonb_array_length(v_question -> 'options') BETWEEN 2 AND 4 THEN
+        SELECT coalesce(jsonb_agg(jsonb_build_object(
+            'id', option.value ->> 'id', 'label', left(option.value ->> 'label', 40))
+            ORDER BY option.ordinality), '[]'::jsonb)
+          INTO v_choices
+        FROM jsonb_array_elements(v_question -> 'options') WITH ORDINALITY AS option(value, ordinality)
+        WHERE option.value ->> 'id' IS NOT NULL AND option.value ->> 'label' IS NOT NULL;
+      END IF;
       PERFORM opengeni_private.open_inbox_item_v1(
         NEW.account_id, NEW.workspace_id, NEW.session_id, v_recipient, 'question',
         NEW.payload #>> '{request,id}',
         coalesce(v_question ->> 'prompt', 'The agent has a question for you'),
         CASE WHEN v_count > 1 THEN (v_count - 1)::text || CASE WHEN v_count = 2
           THEN ' more question' ELSE ' more questions' END ELSE '' END,
-        'normal');
+        'normal', v_choices);
     WHEN 'session.requiresAction' THEN
       FOR v_approval IN SELECT value FROM jsonb_array_elements(
         CASE WHEN jsonb_typeof(NEW.payload -> 'approvals') = 'array'
@@ -154,8 +173,7 @@ BEGIN
           PERFORM opengeni_private.open_inbox_item_v1(
             NEW.account_id, NEW.workspace_id, NEW.session_id, v_recipient, 'approval',
             v_approval ->> 'id',
-            'Approve ' || coalesce(v_approval #>> '{display,toolName}', v_approval ->> 'name',
-              'a tool call') || '?',
+            coalesce(v_approval #>> '{display,toolName}', v_approval ->> 'name', 'A tool call'),
             coalesce(v_approval #>> '{display,title}', v_approval #>> '{display,serverName}', ''),
             'normal');
         END IF;
@@ -223,13 +241,13 @@ EXECUTE FUNCTION opengeni_private.project_inbox_for_session_event_v1();
 CREATE FUNCTION opengeni_private.list_inbox_items_v1(p_account_id uuid, p_subject_id text)
 RETURNS TABLE (
   id uuid, workspace_id uuid, session_id uuid, kind text,
-  source_key text, title text, body text, urgency text, status text, unread boolean,
+  source_key text, title text, body text, choices jsonb, urgency text, status text, unread boolean,
   snoozed_until timestamptz, created_at timestamptz, updated_at timestamptz,
   resolved_at timestamptz
 )
 LANGUAGE sql SECURITY DEFINER SET search_path FROM CURRENT AS $list$
   SELECT item.id, item.workspace_id, item.session_id, item.kind,
-    item.source_key, item.title, item.body, item.urgency, item.status,
+    item.source_key, item.title, item.body, item.choices, item.urgency, item.status,
     item.seen_version < item.content_version, item.snoozed_until, item.created_at,
     item.updated_at, item.resolved_at
   FROM opengeni_private.inbox_items item
@@ -317,7 +335,7 @@ DECLARE
   signature text;
 BEGIN
   FOREACH signature IN ARRAY ARRAY[
-    'open_inbox_item_v1(uuid,uuid,uuid,text,text,text,text,text,text)',
+    'open_inbox_item_v1(uuid,uuid,uuid,text,text,text,text,text,text,jsonb)',
     'close_inbox_items_v1(uuid,text[],text,text)',
     'project_inbox_for_session_event_v1()',
     'list_inbox_items_v1(uuid,text)',
@@ -339,7 +357,7 @@ DO $inbox_grants$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
     GRANT EXECUTE ON FUNCTION
-      opengeni_private.open_inbox_item_v1(uuid,uuid,uuid,text,text,text,text,text,text),
+      opengeni_private.open_inbox_item_v1(uuid,uuid,uuid,text,text,text,text,text,text,jsonb),
       opengeni_private.close_inbox_items_v1(uuid,text[],text,text),
       opengeni_private.project_inbox_for_session_event_v1(),
       opengeni_private.list_inbox_items_v1(uuid,text),
@@ -371,7 +389,7 @@ BEGIN
       AND acl.grantee <> procedure.proowner
   LOOP
     EXECUTE format(
-      'GRANT EXECUTE ON FUNCTION opengeni_private.open_inbox_item_v1(uuid,uuid,uuid,text,text,text,text,text,text), opengeni_private.close_inbox_items_v1(uuid,text[],text,text), opengeni_private.project_inbox_for_session_event_v1() TO %I',
+      'GRANT EXECUTE ON FUNCTION opengeni_private.open_inbox_item_v1(uuid,uuid,uuid,text,text,text,text,text,text,jsonb), opengeni_private.close_inbox_items_v1(uuid,text[],text,text), opengeni_private.project_inbox_for_session_event_v1() TO %I',
       target_role.rolname
     );
   END LOOP;
