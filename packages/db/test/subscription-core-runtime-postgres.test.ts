@@ -2649,11 +2649,16 @@ describe("provider-neutral subscription runtime persistence", () => {
       );
       expect(refreshed).toEqual({ status: "completed", value: true });
       const [stored] = await shared!.admin<
-        { credential_encrypted: string; refresh_generation: string }[]
+        { credential_encrypted: string; refresh_generation: string; version: number }[]
       >`
-        select credential_encrypted, refresh_generation::text from subscription_connections
+        select credential_encrypted, refresh_generation::text, version from subscription_connections
         where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid`;
-      expect(stored).toEqual({ credential_encrypted: rotated, refresh_generation: "2" });
+      // A refresh is not a metadata edit: the optimistic-concurrency version stays.
+      expect(stored).toEqual({
+        credential_encrypted: rotated,
+        refresh_generation: "2",
+        version: 1,
+      });
     },
     180_000,
   );
@@ -2770,12 +2775,12 @@ describe("provider-neutral subscription runtime persistence", () => {
         await adminWriteError(sql`update subscription_connections
           set credential_encrypted = 'v1:c2tpcA==:c2VjcmV0', refresh_generation = 4
           where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid`),
-      ).toContain("refresh generation advances by exactly one per write");
+      ).toContain("refresh generation advances by at most one per write");
       expect(
         await adminWriteError(sql`update subscription_connections
           set refresh_generation = 9007199254740992
           where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid`),
-      ).toContain("refresh generation advances by exactly one per write");
+      ).toContain("refresh generation advances by at most one per write");
       // The safe-integer CHECK still backs the trigger for any other writer.
       const [bound] = await shared!.admin<{ present: boolean }[]>`
         select exists (

@@ -414,9 +414,13 @@ calls inside one transaction around the provider request.
    the write, and it does not bump the metadata `version`.
 
 `refresh_generation` is enforced for every writer by a trigger: it never
-moves backwards, and any change to the stored credential advances it. An
-administrator replacing a credential during an in-flight refresh therefore
-makes that refresh's compare-and-swap fail instead of being overwritten.
+moves backwards, it advances by at most one per write (so its safe-integer
+CHECK ceiling is unreachable), and any change to the stored credential
+advances it. An administrator replacing a credential during an in-flight
+refresh therefore makes that refresh's compare-and-swap fail instead of being
+overwritten. No writer may advance the generation without changing the
+credential: that would only make an in-flight refresh discard its rotated
+token.
 
 Decision (strictest design that does not strand a shared credential):
 persistence deliberately does not repeat lease-expiry, visibility, settings or

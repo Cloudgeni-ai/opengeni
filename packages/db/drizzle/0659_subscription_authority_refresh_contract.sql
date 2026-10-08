@@ -759,7 +759,7 @@ BEGIN
       END IF;
       -- One step per write at most, so the safe-integer ceiling is unreachable.
       IF NEW.refresh_generation > OLD.refresh_generation + 1 THEN
-        RAISE EXCEPTION 'refresh generation advances by exactly one per write'
+        RAISE EXCEPTION 'refresh generation advances by at most one per write'
           USING ERRCODE = '23514';
       END IF;
       IF (NEW.credential_encrypted IS DISTINCT FROM OLD.credential_encrypted
