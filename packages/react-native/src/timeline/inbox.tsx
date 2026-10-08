@@ -129,17 +129,22 @@ const MONO = Platform.OS === "ios" ? "Menlo" : "monospace";
 function Spans({ spans }: { spans: NotificationSpan[] }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
+  // Spans are the positional pieces of one parsed message and never reorder,
+  // so their index is their identity.
   return spans.map((span, index) =>
     span.kind === "bold" ? (
+      // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
       <Text key={index} style={{ ...fontStyle(theme, 500), color: c.fg }}>
         {span.text}
       </Text>
     ) : span.kind === "code" ? (
+      // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
       <Text key={index} style={{ fontFamily: MONO, fontSize: 13, color: c.fg }}>
         {span.text}
       </Text>
     ) : span.kind === "link" ? (
       <Text
+        // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
         key={index}
         accessibilityRole="link"
         onPress={() => void Linking.openURL(span.href)}
@@ -148,6 +153,7 @@ function Spans({ spans }: { spans: NotificationSpan[] }) {
         {span.text}
       </Text>
     ) : (
+      // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
       <Text key={index}>{span.text}</Text>
     ),
   );
@@ -179,12 +185,15 @@ function NotificationContent({ item }: { item: InboxItem }) {
         <View style={{ gap: 6, marginTop: 2 }}>
           {blocks.map((block, index) =>
             block.kind === "paragraph" ? (
+              // oxlint-disable-next-line react/no-array-index-key -- positional block of one message
               <Text key={index} style={text}>
                 <Spans spans={block.spans} />
               </Text>
             ) : (
+              // oxlint-disable-next-line react/no-array-index-key -- positional block of one message
               <View key={index} style={{ gap: 2 }}>
                 {block.items.map((spans, bullet) => (
+                  // oxlint-disable-next-line react/no-array-index-key -- positional bullet of one list
                   <View key={bullet} style={{ flexDirection: "row", gap: 8 }}>
                     <View
                       style={{

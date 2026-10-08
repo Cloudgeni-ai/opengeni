@@ -88,9 +88,12 @@ function KindIcon({ item }: { item: InboxItem }) {
 }
 
 function Spans({ spans }: { spans: NotificationSpan[] }) {
+  // Spans are the positional pieces of one parsed message and never reorder,
+  // so their index is their identity.
   return spans.map((span, index) => {
     if (span.kind === "bold") {
       return (
+        // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
         <strong key={index} className="font-medium text-fg">
           {span.text}
         </strong>
@@ -99,6 +102,7 @@ function Spans({ spans }: { spans: NotificationSpan[] }) {
     if (span.kind === "code") {
       return (
         <code
+          // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
           key={index}
           className="rounded-[4px] bg-surface-2 px-1 py-px font-mono text-[0.8125rem] text-fg"
         >
@@ -109,6 +113,7 @@ function Spans({ spans }: { spans: NotificationSpan[] }) {
     if (span.kind === "link") {
       return (
         <a
+          // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
           key={index}
           href={span.href}
           target="_blank"
@@ -119,6 +124,7 @@ function Spans({ spans }: { spans: NotificationSpan[] }) {
         </a>
       );
     }
+    // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
     return <span key={index}>{span.text}</span>;
   });
 }
@@ -136,12 +142,15 @@ function NotificationContent({ item }: { item: InboxItem }) {
         <div className="flex min-w-0 flex-col gap-1.5 text-sm leading-5 text-fg-muted break-words">
           {blocks.map((block, index) =>
             block.kind === "paragraph" ? (
+              // oxlint-disable-next-line react/no-array-index-key -- positional block of one message
               <p key={index} className="m-0 whitespace-pre-line">
                 <Spans spans={block.spans} />
               </p>
             ) : (
+              // oxlint-disable-next-line react/no-array-index-key -- positional block of one message
               <ul key={index} className="m-0 flex list-none flex-col gap-0.5 p-0">
                 {block.items.map((spans, bullet) => (
+                  // oxlint-disable-next-line react/no-array-index-key -- positional bullet of one list
                   <li key={bullet} className="relative pl-3.5">
                     <span
                       aria-hidden="true"
