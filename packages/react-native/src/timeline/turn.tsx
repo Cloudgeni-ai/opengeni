@@ -26,6 +26,7 @@ import { ThinkingOrb } from "./thinking-orb";
 import { Icon } from "./icon";
 import { PulseDot, ShimmerText, ROW_MIN_HEIGHT, useReleaseFollow } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
+import { useNativeTimelineMessages } from "./messages";
 
 /* ----------------------------------------------------------------------------
    Native TurnSummary / ActivityRail / RollingActivity — the web components of
@@ -126,6 +127,7 @@ export function TurnSummary({
   children,
 }: TurnSummaryProps) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const foldMemory = useContext(FoldMemoryContext);
   const registerSticky = useContext(StickyWorkHeaderContext);
   const releaseFollow = useReleaseFollow();
@@ -199,12 +201,12 @@ export function TurnSummary({
       statusNode = (
         <Text
           style={text}
-        >{`${status.label ?? "Worked for"} ${formatElapsed(status.durationMs)}`}</Text>
+        >{`${status.label ?? m.workedFor} ${formatElapsed(status.durationMs)}`}</Text>
       );
     }
   } else if (status) {
     hasStatusText = true;
-    const label = status.label ?? (status.kind === "working" ? "Working" : "Waiting");
+    const label = status.label ?? (status.kind === "working" ? m.working : m.waiting);
     statusNode = (
       <>
         <ShimmerText style={text} active={status.kind === "working"}>
@@ -463,6 +465,7 @@ export function PreparingState({
   render?: ((props: PreparingProps) => ReactNode) | undefined;
 }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const phrases = phase === "waiting" ? GENIE_WAITING_PHRASES : GENIE_PREPARING_PHRASES;
   const [index, setIndex] = useState(() => Math.floor(Math.random() * phrases.length));
   const [slow, setSlow] = useState(false);
@@ -476,8 +479,8 @@ export function PreparingState({
   }, [startedAt, phrases]);
   const phrase = slow
     ? phase === "waiting"
-      ? "Still waiting for a response…"
-      : "A little longer than usual…"
+      ? m.stillWaiting
+      : m.longerThanUsual
     : (phrases[index % phrases.length] ?? "");
   if (render) return <>{render({ startedAt, phase, phrase, slow })}</>;
   return (
@@ -518,6 +521,7 @@ export function RollingActivity({
   showCount?: boolean;
 }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
   const selected = rollingActivityItem(items, previousItem, mounted);
@@ -530,8 +534,8 @@ export function RollingActivity({
         item.kind === "tool-call"
           ? toolDisplayName(item.name, item.display)
           : item.kind === "reasoning"
-            ? "Thinking"
-            : "Working"
+            ? m.thinking
+            : m.working
       }
     >
       <View style={{ flex: 1, minWidth: 0, height: 24, overflow: "hidden" }}>

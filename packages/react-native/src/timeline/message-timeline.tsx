@@ -56,6 +56,7 @@ import {
   type NativeTurnStatus,
   type PreparingProps,
 } from "./turn";
+import { useNativeTimelineMessages } from "./messages";
 
 /* ----------------------------------------------------------------------------
    Native MessageTimeline: the web MessageTimeline (components/message-timeline)
@@ -108,6 +109,7 @@ export interface NativeMessageTimelineProps extends NativeActivityOptions {
 
 export function MessageTimeline(props: NativeMessageTimelineProps) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const items = useMemo(
     () => props.items ?? buildTimeline(props.events ?? []),
     [props.items, props.events],
@@ -364,7 +366,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                 >
                   <NavButton
                     icon="arrow-up"
-                    label="Back to your message"
+                    label={m.backToYourMessage}
                     onPress={() => {
                       const frame = promptFrames.get(questionNav);
                       if (!frame) return;
@@ -390,7 +392,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                 >
                   <NavButton
                     icon="arrow-down"
-                    label="Jump to latest"
+                    label={m.jumpToLatest}
                     onPress={() => {
                       following.current = true;
                       scrollRef.current?.scrollToEnd({ animated: true });
@@ -814,6 +816,7 @@ function MessageFooter({
   onCopy?: ((text: string) => void) | undefined;
 }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const [copied, setCopied] = useState(false);
   return (
     <View
@@ -828,7 +831,7 @@ function MessageFooter({
       {onCopy ? (
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Copy message"
+          accessibilityLabel={m.copyMessage}
           onPress={() => {
             onCopy(text);
             setCopied(true);
@@ -866,6 +869,7 @@ function MessageFooter({
  */
 function CollapsibleUserText({ children }: { children: ReactNode }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const [height, setHeight] = useState(0);
   const [expanded, setExpanded] = useState(false);
   // A little slack so a message just over the clamp isn't hidden behind a control.
@@ -910,7 +914,7 @@ function CollapsibleUserText({ children }: { children: ReactNode }) {
               color: theme.colors["fg-muted"],
             }}
           >
-            {expanded ? "Show less" : "Show more"}
+            {expanded ? m.showLess : m.showMore}
           </Text>
         </Pressable>
       ) : null}
@@ -921,13 +925,11 @@ function CollapsibleUserText({ children }: { children: ReactNode }) {
 /** Top of the loaded window: a spinner while older history loads, else a manual control. */
 function OlderHistoryRow({ loading, onPress }: { loading: boolean; onPress: () => void }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   return (
     <View style={{ alignItems: "center", paddingVertical: 8 }}>
       {loading ? (
-        <ActivityIndicator
-          color={theme.colors["fg-muted"]}
-          accessibilityLabel="Loading earlier messages"
-        />
+        <ActivityIndicator color={theme.colors["fg-muted"]} accessibilityLabel={m.loadingEarlier} />
       ) : (
         <Pressable accessibilityRole="button" hitSlop={8} onPress={onPress}>
           <Text
@@ -947,6 +949,7 @@ function OlderHistoryRow({ loading, onPress }: { loading: boolean; onPress: () =
 
 function UserMessageRow({ item, context }: { item: UserMessageItem; context: GroupContext }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const failed = item.delivery?.state === "failed";
   return (
     <Animated.View entering={FadeIn.duration(180)} style={{ alignItems: "flex-end" }}>
@@ -1006,7 +1009,7 @@ function UserMessageRow({ item, context }: { item: UserMessageItem; context: Gro
                 color: theme.colors["status-failed"],
               }}
             >
-              {item.delivery?.error || "Message not sent"}
+              {item.delivery?.error || m.messageNotSent}
             </Text>
             {item.delivery?.onRetry ? (
               <Pressable onPress={item.delivery.onRetry} accessibilityRole="button">
@@ -1069,15 +1072,16 @@ function HumanInputRow({
   onCopy?: ((text: string) => void) | undefined;
 }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const multiple = Math.max(item.questions.length, item.answers.length) > 1;
   const settled =
     item.response.outcome === "answered"
-      ? "You answered"
+      ? m.humanInputOutcome.answered
       : item.response.outcome === "skipped"
-        ? "Skipped"
+        ? m.humanInputOutcome.skipped
         : item.response.outcome === "expired"
-          ? "Expired"
-          : "Cancelled";
+          ? m.humanInputOutcome.expired
+          : m.humanInputOutcome.cancelled;
   const answerText = item.answers
     .map((answer) => `${multiple ? `${answer.label}: ` : ""}${answer.values.join(", ")}`)
     .join("\n");
