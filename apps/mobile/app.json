@@ -50,7 +50,8 @@
           "call": {
             "title": "Call Opengeni",
             "description": "Start a voice call with your agent.",
-            "phrases": ["Call {app}", "Start a call with {app}", "Talk to {app}", "Ring {app}"]
+            "phrases": ["Call {app}", "Start a call with {app}", "Talk to {app}", "Ring {app}"],
+            "control": true
           }
         }
       ]
