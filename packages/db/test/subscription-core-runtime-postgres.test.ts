@@ -523,6 +523,22 @@ describe("provider-neutral subscription runtime persistence", () => {
           },
         ),
       );
+      await shared!.admin`
+        delete from subscription_connection_assignment_policies
+        where account_id = ${state.accountId}::uuid and connection_id = ${state.connectionId}::uuid`;
+      const unassigned = await withSessionRlsActorContext(actor, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: state.accountId, workspaceId: state.workspaceId },
+          (db) =>
+            listSubscriptionConnectionsForPlacement(db, {
+              accountId: state.accountId,
+              workspaceId: state.workspaceId,
+              provider: "codex",
+            }),
+        ),
+      );
+      expect(unassigned[0]?.assignmentPolicies).toEqual([]);
     },
     180_000,
   );

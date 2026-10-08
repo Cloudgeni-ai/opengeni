@@ -96,8 +96,8 @@ export async function listSubscriptionConnectionAssignmentPolicies(
 
 /**
  * Read the provider/workspace-visible connection world for the pure placement
- * policy. Account, provider, and workspace are mandatory so callers cannot
- * accidentally turn this into a viewer-derived or cross-account pool read.
+ * policy. Account and workspace are mandatory; provider may narrow the result.
+ * Callers cannot accidentally turn this into a viewer-derived or cross-account pool read.
  * Credential ciphertext is deliberately never selected here.
  */
 export async function listSubscriptionConnectionsForPlacement(
@@ -232,9 +232,7 @@ export async function listSubscriptionConnectionsForPlacement(
       entitledModelIds: row.entitled_model_ids,
       excludedModelIds: row.excluded_models,
       allowedModelIds: row.allowed_model_ids,
-      ...(assignmentPolicy && assignmentPolicy.length > 0
-        ? { assignmentPolicies: assignmentPolicy }
-        : {}),
+      ...(ownership.kind === "shared" ? { assignmentPolicies: assignmentPolicy ?? [] } : {}),
       refreshGeneration: Number(row.refresh_generation),
       quota: decodeSubscriptionQuota(row),
     };
