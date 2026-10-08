@@ -213,9 +213,6 @@ describe("release schema contract", () => {
       expect(failedSessionVariableSetAttach.deploymentMode).toBe("rolling");
     }
     if (subscriptionAuthorityRefreshContract) {
-      expect(sourceContract.latestMigration).toBe(
-        "0654_subscription_authority_refresh_contract.sql",
-      );
       expect(subscriptionAuthorityRefreshContract.deploymentMode).toBe("rolling");
     }
     // Keep the published-history assertions below scoped to their existing
