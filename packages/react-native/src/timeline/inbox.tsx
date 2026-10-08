@@ -58,6 +58,21 @@ export function nativeInboxAttentionCount(data: ListInboxResponse | null): numbe
   ).length;
 }
 
+/**
+ * An item as this app reads it. Servers from before rich notifications leave
+ * out the subtitle, facts, link and moment; read those as empty.
+ */
+function normalizeInboxItem(item: InboxItem): InboxItem {
+  return {
+    ...item,
+    subtitle: item.subtitle ?? "",
+    facts: Array.isArray(item.facts) ? item.facts : [],
+    link: item.link ?? null,
+    eventSequence: item.eventSequence ?? null,
+    choices: Array.isArray(item.choices) ? item.choices : [],
+  };
+}
+
 /** The person's inbox, refreshed on an interval, on foreground and after every action. */
 export function useNativeInbox(client: NativeInboxClient, options: { pollMs?: number } = {}) {
   const [state, setState] = useState<InboxState>({ data: null, error: null, loading: true });
@@ -66,7 +81,8 @@ export function useNativeInbox(client: NativeInboxClient, options: { pollMs?: nu
   const refresh = useCallback(async () => {
     const request = ++generation.current;
     try {
-      const data = await client.listInbox();
+      const listed = await client.listInbox();
+      const data = { ...listed, items: listed.items.map(normalizeInboxItem) };
       if (request === generation.current) setState({ data, error: null, loading: false });
     } catch (error) {
       if (request === generation.current)
