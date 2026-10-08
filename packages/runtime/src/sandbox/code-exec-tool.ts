@@ -14,6 +14,7 @@
  */
 import type { FunctionTool } from "@openai/agents-core";
 import { newQuickJSWASMModule, type QuickJSContext, type QuickJSHandle } from "quickjs-emscripten";
+import { parseExecResponseBanner } from "./exec-banner";
 
 type Invoke = FunctionTool["invoke"];
 type NestedTool = { name: string; description: string; parameters: unknown; invoke: Invoke };
@@ -52,6 +53,7 @@ function describe(nested: NestedTool[]): string {
     "- All nested tools are available on the global `tools` object, for example `await tools.exec_command({cmd: \"ls\"})`.",
     "- Nested tool methods take either an object (the tool's JSON arguments) or a string.",
     "- Nested tools return the tool's output (usually a string).",
+    "- Nested `exec_command` and `write_stdin` wait until the command exits, however long it runs, and return its complete output and exit code; you never need to poll. Pass `background: true` to get the running session handle back after `yield_time_ms` instead (for servers or watchers you will interact with).",
     "- Runs raw JavaScript -- no Node, no file system, no network access, no console. Use nested tools for side effects.",
     "- Run independent calls concurrently with `await Promise.allSettled([...])`; chain dependent steps in one script instead of separate exec calls when the next step does not need your judgment.",
     "- Only output you pass to `text(...)` is returned to you; return just what you need to see.",
@@ -65,6 +67,46 @@ function describe(nested: NestedTool[]): string {
     "",
     ...nested.map(declaration),
   ].join("\n");
+}
+
+const WAIT_SLICE_MS = 30_000;
+const WAIT_CEILING_MS = 60 * 60 * 1000;
+
+/** Nested shell calls run to completion: a script is the place to wait, so a
+ * yielded command is drained here instead of costing the model a poll request. */
+async function invokeToCompletion(
+  tool: NestedTool,
+  tools: Map<string, NestedTool>,
+  runContext: unknown,
+  arg: unknown,
+  details: unknown,
+): Promise<unknown> {
+  const background =
+    typeof arg === "object" && arg !== null && (arg as Record<string, unknown>).background === true;
+  const cleaned =
+    typeof arg === "object" && arg !== null
+      ? Object.fromEntries(Object.entries(arg as Record<string, unknown>).filter(([k]) => k !== "background"))
+      : arg;
+  let result = await tool.invoke(runContext as never, toInputString(tool, cleaned), details as never);
+  const poller = tools.get("write_stdin");
+  if (background || !poller || (tool.name !== "exec_command" && tool.name !== "write_stdin")) return result;
+  const bodies: string[] = [];
+  const deadline = Date.now() + WAIT_CEILING_MS;
+  for (;;) {
+    if (typeof result !== "string") return result;
+    const banner = parseExecResponseBanner(result);
+    const split = result.split(/\r?\nOutput:\r?\n/u);
+    if (banner.kind !== "running" || Date.now() > deadline) {
+      if (bodies.length === 0) return result;
+      return `${split[0]}\nOutput:\n${[...bodies, split.slice(1).join("\nOutput:\n")].join("")}`;
+    }
+    bodies.push(split.slice(1).join("\nOutput:\n"));
+    result = await poller.invoke(
+      runContext as never,
+      JSON.stringify({ session_id: banner.sessionId, chars: "", yield_time_ms: WAIT_SLICE_MS }),
+      details as never,
+    );
+  }
 }
 
 function toInputString(tool: NestedTool, arg: unknown): string {
@@ -196,11 +238,7 @@ export class CodeExecRegistry {
           const deferred = vm.newPromise();
           const work = (async () => {
             try {
-              const result = await tool.invoke(
-                runContext as never,
-                toInputString(tool, arg),
-                details as never,
-              );
+              const result = await invokeToCompletion(tool, this.tools, runContext, arg, details);
               if (!deferred.alive) return;
               const handle =
                 typeof result === "string"
