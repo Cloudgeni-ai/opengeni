@@ -984,7 +984,7 @@ describe("SessionChrome", () => {
       id: `lost-${index}`,
       kind: "background_command_result" as const,
       classification: "failure" as const,
-      summary: `\`job-${index}\` stopped because its sandbox was shut down or lost; its exit status is unknown. Restart it if you still need it.`,
+      summary: `\`job-${index}\` is no longer running because its sandbox was shut down or lost; whether it finished is unknown. Check its effects before running it again.`,
     });
     const inputs = [pendingInput(), ...Array.from({ length: 35 }, (_, index) => lost(index))];
     mounted = await renderComponent(
@@ -999,7 +999,7 @@ describe("SessionChrome", () => {
     const panel = mounted.container.querySelector('[data-og-session-chrome-panel="incoming"]')!;
     expect(panel.querySelectorAll("li")).toHaveLength(2);
     expect(panel.textContent).toContain(
-      "35 background commands stopped because their sandbox was shut down or lost.",
+      "35 background commands are no longer running because their sandbox was shut down or lost.",
     );
     expect(panel.textContent).not.toContain("job-3");
     const dismissAll = panel.querySelector<HTMLButtonElement>(
@@ -1009,6 +1009,31 @@ describe("SessionChrome", () => {
       dismissAll?.click();
     });
     expect(dismissed).toHaveLength(35);
+  });
+
+  test("ordinary command results keep their own rows", async () => {
+    const result = (index: number, summary: string) => ({
+      ...pendingInput(),
+      id: `result-${index}`,
+      kind: "background_command_result" as const,
+      classification: "failure" as const,
+      summary,
+    });
+    mounted = await renderComponent(
+      <SessionChrome
+        defaultActive="incoming"
+        queue={queue({
+          queue: [],
+          pendingInputs: [
+            result(1, "bun test: exited with code 1."),
+            result(2, "bun build: completed successfully."),
+          ],
+        })}
+      />,
+    );
+    const panel = mounted.container.querySelector('[data-og-session-chrome-panel="incoming"]')!;
+    expect(panel.querySelectorAll("li")).toHaveLength(2);
+    expect(panel.textContent).toContain("bun test: exited with code 1.");
   });
 
   test("inbox dismiss action appears when onDismissIncoming is provided", async () => {

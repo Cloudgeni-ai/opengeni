@@ -1320,12 +1320,14 @@ function IncomingPanel({
   onDismiss?: ((inputId: string) => void) | undefined;
   onOpenSession?: ((sessionId: string) => void) | undefined;
 }) {
-  // Many background commands usually finish or stop together (for example all
-  // of a sandbox's commands when the box is replaced). One row reads better
-  // than dozens of identical ones; each result still reaches the agent.
-  const commandResults = inputs.filter((input) => input.kind === "background_command_result");
-  const grouped = commandResults.length >= 2 ? commandResults : [];
-  const rows = grouped.length ? inputs.filter((input) => !grouped.includes(input)) : inputs;
+  // When a sandbox is shut down or lost, every command on it reports at once.
+  // One row reads better than dozens of identical ones; each result still
+  // reaches the agent. Ordinary results keep their own rows.
+  const lostWithSandbox = inputs.filter(isLostWithSandboxResult);
+  const grouped = new Set(
+    lostWithSandbox.length >= 2 ? lostWithSandbox.map((input) => input.id) : [],
+  );
+  const firstGrouped = lostWithSandbox.length >= 2 ? lostWithSandbox[0]!.id : null;
   return (
     <div>
       <p className="mb-2 text-og-xs text-og-fg-subtle">Waiting to be included in an agent turn.</p>
@@ -1334,60 +1336,64 @@ function IncomingPanel({
         aria-label="Incoming updates"
         data-og-session-chrome-panel="incoming"
       >
-        {grouped.length ? <CommandResultsRow inputs={grouped} onDismiss={onDismiss} /> : null}
-        {rows.map((input) => (
-          <li
-            key={input.id}
-            className="group flex items-start gap-1.5 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--_og-session-chrome-row-hover)]"
-          >
-            <span
-              className={cn(
-                "mt-px shrink-0 rounded px-1 py-px text-[10px] font-medium leading-4",
-                input.classification === "action_required" || input.classification === "failure"
-                  ? "bg-og-status-waiting/12 text-og-status-waiting"
-                  : "bg-og-surface-3/80 text-og-fg-muted",
-              )}
+        {inputs.map((input) =>
+          grouped.has(input.id) ? (
+            input.id === firstGrouped ? (
+              <CommandResultsRow key={input.id} inputs={lostWithSandbox} onDismiss={onDismiss} />
+            ) : null
+          ) : (
+            <li
+              key={input.id}
+              className="group flex items-start gap-1.5 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--_og-session-chrome-row-hover)]"
             >
-              {pendingKindLabel(input.kind)}
-            </span>
-            <div className="min-w-0 flex-1">
-              <p className="break-words text-og-xs leading-4 text-og-fg">{input.summary}</p>
-              <ChildSessionLink
-                kind={input.kind}
-                sourceId={input.sourceId}
-                onOpenSession={onOpenSession}
-              />
-            </div>
-            {onDismiss ? (
-              <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">
-                <IconAction
-                  label={`Dismiss incoming ${pendingKindLabel(input.kind)}`}
-                  tip="Dismiss"
-                  onClick={() => onDismiss(input.id)}
-                  danger
-                >
-                  <Trash2Icon className="size-3" />
-                </IconAction>
+              <span
+                className={cn(
+                  "mt-px shrink-0 rounded px-1 py-px text-[10px] font-medium leading-4",
+                  input.classification === "action_required" || input.classification === "failure"
+                    ? "bg-og-status-waiting/12 text-og-status-waiting"
+                    : "bg-og-surface-3/80 text-og-fg-muted",
+                )}
+              >
+                {pendingKindLabel(input.kind)}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="break-words text-og-xs leading-4 text-og-fg">{input.summary}</p>
+                <ChildSessionLink
+                  kind={input.kind}
+                  sourceId={input.sourceId}
+                  onOpenSession={onOpenSession}
+                />
               </div>
-            ) : null}
-          </li>
-        ))}
+              {onDismiss ? (
+                <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">
+                  <IconAction
+                    label={`Dismiss incoming ${pendingKindLabel(input.kind)}`}
+                    tip="Dismiss"
+                    onClick={() => onDismiss(input.id)}
+                    danger
+                  >
+                    <Trash2Icon className="size-3" />
+                  </IconAction>
+                </div>
+              ) : null}
+            </li>
+          ),
+        )}
       </ul>
     </div>
   );
 }
 
+/** Matches the worker's notice for a command whose sandbox is gone. */
+function isLostWithSandboxResult(input: SessionPendingInputPreview): boolean {
+  return (
+    input.kind === "background_command_result" &&
+    input.summary.includes("is no longer running because its sandbox was shut down or lost")
+  );
+}
+
 function commandResultsSummary(inputs: SessionPendingInputPreview[]): string {
-  const stoppedWithSandbox = inputs.filter((input) =>
-    input.summary.includes("stopped because its sandbox was shut down or lost"),
-  ).length;
-  if (stoppedWithSandbox === inputs.length) {
-    return `${inputs.length} background commands stopped because their sandbox was shut down or lost. Their exit status is unknown.`;
-  }
-  const failed = inputs.filter((input) => input.classification === "failure").length;
-  return failed
-    ? `${inputs.length} background command results (${failed} did not succeed).`
-    : `${inputs.length} background command results.`;
+  return `${inputs.length} background commands are no longer running because their sandbox was shut down or lost. Whether they finished is unknown.`;
 }
 
 function CommandResultsRow({
@@ -1397,20 +1403,12 @@ function CommandResultsRow({
   inputs: SessionPendingInputPreview[];
   onDismiss?: ((inputId: string) => void) | undefined;
 }) {
-  const failure = inputs.some((input) => input.classification === "failure");
   return (
     <li
       className="group flex items-start gap-1.5 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--_og-session-chrome-row-hover)]"
       data-og-session-chrome-command-results={inputs.length}
     >
-      <span
-        className={cn(
-          "mt-px shrink-0 rounded px-1 py-px text-[10px] font-medium leading-4",
-          failure
-            ? "bg-og-status-waiting/12 text-og-status-waiting"
-            : "bg-og-surface-3/80 text-og-fg-muted",
-        )}
-      >
+      <span className="mt-px shrink-0 rounded bg-og-status-waiting/12 px-1 py-px text-[10px] font-medium leading-4 text-og-status-waiting">
         Command results
       </span>
       <div className="min-w-0 flex-1">

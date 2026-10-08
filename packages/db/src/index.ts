@@ -87677,7 +87677,7 @@ function backgroundCommandTerminalMutation(input: {
           : command.state === "lost" && reason === DEADLINE_COMMAND_CONTAINMENT_REASON
             ? `\`${commandLabel}\` was stopped because the sandbox reached its maximum lifetime; the workspace was saved. Restart it if you still need it.`
             : command.state === "lost" && SANDBOX_GONE_COMMAND_REASONS.has(reason)
-              ? `\`${commandLabel}\` stopped because its sandbox was shut down or lost; its exit status is unknown. Restart it if you still need it.`
+              ? `\`${commandLabel}\` is no longer running because its sandbox was shut down or lost; whether it finished is unknown. Check its effects before running it again.`
               : command.state === "lost"
                 ? `${commandLabel}: result unavailable. Its exit status could not be confirmed.`
                 : command.exitCode === 0

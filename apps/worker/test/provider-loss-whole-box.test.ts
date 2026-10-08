@@ -1,4 +1,4 @@
-// OPE-743 regression: after Modal ended a box at its 24h deadline, staging
+// Regression: after Modal ended a box at its 24h deadline, staging
 // session 5040c525 settled its 35 retained commands one probe at a time, at
 // most 20 per 30 s sweep: 11 extra minutes of a session waiting on a box that
 // was already gone, and 35 separate "result unavailable" notices. The first
@@ -198,7 +198,7 @@ function services(): () => Promise<ActivityServices> {
   });
 }
 
-describe("provider loss settles the whole box at once (OPE-743)", () => {
+describe("provider loss settles the whole box at once", () => {
   test("the first exact NotFound retires every command, request and holder of the box", async () => {
     const fixture = await boxWithCommands(5);
     let probes = 0;
@@ -237,7 +237,9 @@ describe("provider loss settles the whole box at once (OPE-743)", () => {
       order by summary`;
     expect(updates).toHaveLength(5);
     for (const update of updates) {
-      expect(update.summary).toContain("stopped because its sandbox was shut down or lost");
+      expect(update.summary).toContain(
+        "is no longer running because its sandbox was shut down or lost",
+      );
     }
   }, 60_000);
 });

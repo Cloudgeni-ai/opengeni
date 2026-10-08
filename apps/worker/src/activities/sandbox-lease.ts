@@ -1660,7 +1660,7 @@ async function reconcileTerminalRetainedProcesses(
     const expected = retainedProcessSettlementIdentity(process);
     let proof = retainedProcessReconciliationProof(process);
     // The exact current box itself answered NotFound to this probe: that is
-    // loss proof for the whole box, not just this command (OPE-743).
+    // loss proof for the whole box, not just this command.
     let wholeBoxGone = false;
     const processScope = {
       accountId: process.accountId,
@@ -2014,6 +2014,37 @@ async function reconcileTerminalRetainedProcesses(
       // and wake waiters. Settling one command per probe took a 20-per-sweep
       // queue 11 minutes for 35 commands in staging session 5040c525 and kept
       // the session waiting on a box that was already gone.
+      // Commands of this box that a closed turn never adopted get their
+      // session background record first, exactly as their own claim would
+      // have, so the agent hears about them when the box settles below.
+      const boxKey = `${process.leaseId}:${process.leaseEpoch}:${process.providerInstanceId}`;
+      for (const other of claims) {
+        const sibling = other.process;
+        if (
+          other === claim ||
+          `${sibling.leaseId}:${sibling.leaseEpoch}:${sibling.providerInstanceId}` !== boxKey ||
+          sibling.ownerActorKind !== "turn" ||
+          sibling.providerBackend !== "modal" ||
+          other.ownerState.startsWith("background_") ||
+          retainedProcessReconciliationProof(sibling)
+        )
+          continue;
+        try {
+          await recoverManagedSessionBackgroundCommand(db, {
+            accountId: sibling.accountId,
+            workspaceId: sibling.workspaceId,
+            sessionId: sibling.sessionId,
+            processId: sibling.id,
+            expected: retainedProcessSettlementIdentity(sibling),
+            reconciliationClaimId: other.claimId,
+          });
+        } catch (error) {
+          observability.warn("sandbox reaper: retained-command background recovery failed", {
+            processId: sibling.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
       try {
         const marked = await markWarmLeaseInstanceLost(db, {
           accountId: process.accountId,
