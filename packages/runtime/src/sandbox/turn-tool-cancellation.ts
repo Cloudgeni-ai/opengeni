@@ -36,6 +36,7 @@ import {
   type SynchronousCommandResult,
 } from "./synchronous-command";
 import type { ChannelASession, ChannelAExecArgs } from "./channel-a";
+import { withNativeSynchronousCommandCollection } from "./native-synchronous-collection";
 
 const TURN_PROVIDER_YIELD_SLICE_MS = 250;
 const TURN_DEFAULT_MODEL_WAIT_MS = 10_000;
@@ -944,11 +945,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       ...(args.yieldTimeMs !== undefined ? { yieldTimeMs: args.yieldTimeMs } : {}),
       ...(args.maxOutputTokens !== undefined ? { maxOutputTokens: args.maxOutputTokens } : {}),
     };
-    return (await this.runSandboxCommandInternal(
-      session,
-      definedArgs,
-      true,
-      true,
+    return (await withNativeSynchronousCommandCollection(session, () =>
+      this.runSandboxCommandInternal(session, definedArgs, true, true),
     )) as SynchronousCommandResult;
   }
 

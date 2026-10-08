@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { Tool } from "@openai/agents";
-import { shell } from "@openai/agents/sandbox";
-import { existsSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { Manifest, shell } from "@openai/agents/sandbox";
+import { UnixLocalSandboxClient } from "@openai/agents/sandbox/local";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,6 +25,8 @@ import { createSandboxClientForBackend } from "../src/index";
 import { testSettings } from "@opengeni/testing";
 import { markPendingCommandSupervised } from "../src/sandbox/provider-command-session";
 import { ModalCommandStartNotDispatchedError } from "../src/sandbox/providers/modal-command-router-wire";
+import { SandboxChannelAService } from "../src/sandbox/channel-a";
+import { synchronousNativeOutputFixture } from "./synchronous-output-fixture";
 
 const runContext = {} as never;
 
@@ -1406,6 +1409,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
   test("a terminal no-session receipt after cancellation rejects only after pending-start cleanup", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
+    const output = synchronousNativeOutputFixture();
     const originalCommand = "printf 'synchronous write complete\\n'";
     let releaseStart!: (output: string) => void;
     let releaseCleanup!: (output: string) => void;
@@ -1426,12 +1430,13 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const starts: string[] = [];
     const cleanupCommands: string[] = [];
     const session = {
+      getSynchronousCommandOutput: output.getSynchronousCommandOutput,
       supportsPty: () => true,
       execCommand: async (args: { cmd: string }) => {
         if (args.cmd.includes(originalCommand)) {
           starts.push(args.cmd);
           markStarted();
-          return await pendingStart;
+          return output.record(await pendingStart, "synchronous write complete", "", 0);
         }
         cleanupCommands.push(args.cmd);
         markCleanupStarted();
@@ -1471,19 +1476,30 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     "uncancelled synchronous commands preserve terminal no-session exit %s",
     async (exitCode) => {
       const controller = createTurnToolCancellationController();
+      const output = synchronousNativeOutputFixture();
       let starts = 0;
       const result = await controller.runSandboxCommandSynchronous(
         {
+          getSynchronousCommandOutput: output.getSynchronousCommandOutput,
           supportsPty: () => true,
           execCommand: async () => {
             starts++;
-            return exited(exitCode, "terminal output");
+            return output.record(
+              exited(exitCode, "combined presentation"),
+              "terminal output",
+              "terminal diagnostic",
+              exitCode,
+            );
           },
         },
         { cmd: "printf terminal" },
       );
 
-      expect(result).toMatchObject({ stdout: "terminal output", exitCode });
+      expect(result).toMatchObject({
+        stdout: "terminal output",
+        stderr: "terminal diagnostic",
+        exitCode,
+      });
       expect(starts).toBe(1);
       controller.cancel();
       await controller.waitForQuiescence();
@@ -1494,15 +1510,23 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     "synchronous remote-operation commands observe their exact numeric handle through exit %s",
     async (exitCode) => {
       const controller = createTurnToolCancellationController();
+      const output = synchronousNativeOutputFixture();
       let starts = 0;
       const reads: number[] = [];
       let readCount = 0;
       const session = {
+        getSynchronousCommandOutput: output.getSynchronousCommandOutput,
         commandCancellationTransport: async () => "remote_operation" as const,
         cancelExecCommand: async () => true,
         exec: async () => {
           starts++;
-          return running(219, "started\n");
+          return output.record(
+            running(219, "presentation prefix"),
+            "started\n",
+            "start warning\n",
+            null,
+            219,
+          );
         },
         writeStdin: async () => {
           throw new Error("must use the exact process-control read");
@@ -1510,8 +1534,19 @@ describe("turn sandbox-tool physical cancellation fence", () => {
         writeStdinForProcessControl: async ({ sessionId }: { sessionId: number }) => {
           reads.push(sessionId);
           return readCount++ === 0
-            ? running(sessionId, "middle\n")
-            : exited(exitCode, "finished\n");
+            ? output.record(
+                running(sessionId, "presentation middle"),
+                "middle\n",
+                "middle warning\n",
+                null,
+                sessionId,
+              )
+            : output.record(
+                exited(exitCode, "presentation tail"),
+                "finished\n",
+                "final warning\n",
+                exitCode,
+              );
         },
       };
 
@@ -1520,6 +1555,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
 
       expect(result).toMatchObject({
         stdout: "started\nmiddle\nfinished\n",
+        stderr: "start warning\nmiddle warning\nfinal warning\n",
         exitCode,
       });
       expect(starts).toBe(1);
@@ -1530,6 +1566,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
   test("remote numeric-handle cancellation waits for its exact terminal read", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
+    const output = synchronousNativeOutputFixture();
     let markReadStarted!: () => void;
     let releaseRead!: (result: string) => void;
     let markCancelRequested!: () => void;
@@ -1546,6 +1583,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     let cancellations = 0;
     const readHandles: number[] = [];
     const session = {
+      getSynchronousCommandOutput: output.getSynchronousCommandOutput,
       commandCancellationTransport: async () => "remote_operation" as const,
       cancelExecCommand: async () => {
         cancellations++;
@@ -1554,7 +1592,13 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       },
       exec: async () => {
         starts++;
-        return running(220, "initial\n");
+        return output.record(
+          running(220, "presentation prefix"),
+          "initial\n",
+          "warning",
+          null,
+          220,
+        );
       },
       writeStdinForProcessControl: async ({ sessionId }: { sessionId: number }) => {
         readHandles.push(sessionId);
@@ -1570,7 +1614,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     await cancelRequested;
     expect(await pendingAfterMicrotasks(drain)).toBe(true);
 
-    releaseRead(exited(0, "terminal\n"));
+    releaseRead(output.record(exited(0, "presentation tail"), "terminal\n", "final warning", 0));
     await expect(operation).rejects.toMatchObject({
       name: "TurnSandboxCommandCancelledError",
       message: "cancel while observing original command",
@@ -2132,6 +2176,171 @@ describe("turn sandbox-tool cancellation against a real local process", () => {
     if (originalPython === undefined) delete process.env.OPENAI_AGENTS_PYTHON;
     else process.env.OPENAI_AGENTS_PYTHON = originalPython;
   });
+
+  test("direct synchronous local controller joins fresh and unchanged multi-batch filesystem writes", async () => {
+    const session = await new UnixLocalSandboxClient().create(new Manifest());
+    sessions.push(session);
+    const controller = createTurnToolCancellationController();
+    const commands: string[] = [];
+    const exec = session.execCommand.bind(session);
+    session.execCommand = async (args) => {
+      commands.push(args.cmd);
+      expect(args.tty).toBe(false);
+      return await exec(args);
+    };
+    const events: unknown[] = [];
+    const service = new SandboxChannelAService({
+      session,
+      commandRunner: (owningSession, args) =>
+        controller.runSandboxCommandSynchronous(owningSession, args),
+      emit: async (batch) => {
+        events.push(...batch);
+      },
+    });
+    const directory = "skills/direct-controller";
+    const files = [
+      { path: "SKILL.md", content: "# Direct synchronous checkout\n" },
+      { path: "empty.txt", content: "" },
+      ...Array.from({ length: 6 }, (_, index) => ({
+        path: `references/chunk-${index}.txt`,
+        content: `${index}:` + "x".repeat(12_000),
+      })),
+    ];
+    try {
+      const fresh = await service.fsWriteFiles({ directory, files });
+      expect(fresh).toMatchObject({
+        written: files.map((file) => file.path),
+        unchanged: [],
+        createdDirectory: true,
+        revision: 1,
+      });
+      expect(
+        commands.filter((command) => command.includes("__OPENGENI_FS_BATCH_OK__")).length,
+      ).toBeGreaterThan(1);
+      const paths = files.map((file) =>
+        join(session.state.workspaceRootPath, directory, file.path),
+      );
+      const times = paths.map((path) => statSync(path).mtimeMs);
+      const repeated = await service.fsWriteFiles({ directory, files });
+      expect(repeated).toMatchObject({
+        written: [],
+        unchanged: files.map((file) => file.path),
+        createdDirectory: false,
+        revision: 1,
+      });
+      expect(paths.map((path) => statSync(path).mtimeMs)).toEqual(times);
+      for (let index = 0; index < paths.length; index++) {
+        expect(readFileSync(paths[index]!, "utf8")).toBe(files[index]!.content);
+      }
+      expect(events).toHaveLength(1);
+    } finally {
+      controller.cancel();
+      await controller.waitForQuiescence();
+    }
+  }, 30_000);
+
+  test.each([1, 1_000])(
+    "direct synchronous local controller preserves oversized separate streams at token limit 1 and yield %s",
+    async (yieldTimeMs) => {
+      const session = await new UnixLocalSandboxClient().create(new Manifest());
+      sessions.push(session);
+      const controller = createTurnToolCancellationController();
+      const stdout = `sync_output_begin🚀${"0".repeat(2_000_000)}`;
+      const stderr = `stderr€${"0".repeat(2_000_000)}`;
+      const command =
+        "printf 'sync_output_begin🚀'; sleep 0.05; printf '%02000000d' 0; printf 'stderr€' >&2; printf '%02000000d' 0 >&2; exit 7";
+      const exec = session.execCommand.bind(session);
+      const write = session.writeStdin.bind(session);
+      let starts = 0;
+      let reads = 0;
+      let originalHandle: number | undefined;
+      session.execCommand = async (args) => {
+        if (args.cmd.includes("sync_output_begin")) {
+          starts++;
+          expect(args.tty).toBe(false);
+          expect(args.maxOutputTokens).toBe(1);
+        }
+        const raw = await exec(args);
+        const banner = parseExecResponseBanner(raw);
+        if (banner.kind === "running") originalHandle = banner.sessionId;
+        return raw;
+      };
+      session.writeStdin = async (args) => {
+        reads++;
+        expect(args.sessionId).toBe(originalHandle);
+        expect(args.chars).toBe("");
+        return await write(args);
+      };
+      try {
+        const result = await controller.runSandboxCommandSynchronous(session, {
+          cmd: command,
+          yieldTimeMs,
+          maxOutputTokens: 1,
+          login: false,
+        });
+        expect(result.stdout.length).toBe(stdout.length);
+        expect(result.stdout === stdout).toBe(true);
+        expect(result.stderr.length).toBe(stderr.length);
+        expect(result.stderr === stderr).toBe(true);
+        expect(result.exitCode).toBe(7);
+        expect(starts).toBe(1);
+        if (yieldTimeMs === 1) expect(reads).toBeGreaterThan(0);
+      } finally {
+        controller.cancel();
+        await controller.waitForQuiescence();
+      }
+    },
+    30_000,
+  );
+
+  test("direct synchronous local controller cancellation drains before a delayed write can occur", async () => {
+    const session = await new UnixLocalSandboxClient().create(new Manifest());
+    sessions.push(session);
+    const zombiePath = join(session.state.workspaceRootPath, `sync-zombie-${crypto.randomUUID()}`);
+    const controller = createTurnToolCancellationController();
+    const exec = session.execCommand.bind(session);
+    const write = session.writeStdin.bind(session);
+    let originalHandle: number | undefined;
+    let starts = 0;
+    let observeEntered!: () => void;
+    const observing = new Promise<void>((resolve) => {
+      observeEntered = resolve;
+    });
+    session.execCommand = async (args) => {
+      const raw = await exec(args);
+      if (args.cmd.includes("sync_cancel_ready")) {
+        starts++;
+        const banner = parseExecResponseBanner(raw);
+        expect(banner.kind).toBe("running");
+        if (banner.kind === "running") originalHandle = banner.sessionId;
+      }
+      return raw;
+    };
+    session.writeStdin = async (args) => {
+      if (args.sessionId === originalHandle) observeEntered();
+      return await write(args);
+    };
+    const operation = controller.runSandboxCommandSynchronous(session, {
+      cmd: `printf sync_cancel_ready; printf diagnostic >&2; trap '' INT TERM; sleep 2; printf zombie > '${zombiePath}'`,
+      yieldTimeMs: 1,
+      maxOutputTokens: 1,
+      login: false,
+    });
+    void operation.catch(() => undefined);
+    try {
+      await observing;
+      controller.cancel(new Error("cancelled direct synchronous command"));
+      await expect(operation).rejects.toMatchObject({ name: "TurnSandboxCommandCancelledError" });
+      await controller.waitForQuiescence();
+      expect(starts).toBe(1);
+      expect(existsSync(zombiePath)).toBe(false);
+      await Bun.sleep(2_100);
+      expect(existsSync(zombiePath)).toBe(false);
+    } finally {
+      controller.cancel();
+      await controller.waitForQuiescence();
+    }
+  }, 30_000);
 
   test.skipIf(process.platform !== "linux" || Bun.which("git") === null)(
     "explicit non-TTY execution exposes pipe descriptors and bypasses the Git pager",
