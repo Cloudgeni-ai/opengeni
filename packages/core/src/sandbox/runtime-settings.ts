@@ -6,8 +6,15 @@ import {
   type SandboxBackend,
   type SandboxOs,
 } from "@opengeni/contracts";
-import { getRigVersion, getWorkspace, type Database } from "@opengeni/db";
+import {
+  getRigVersion,
+  getScheduledScopedRigVersionMetadata,
+  getWorkspace,
+  nestedPostgresSqlState,
+  type Database,
+} from "@opengeni/db";
 import { resolveModalCheckpointProviderBinding } from "@opengeni/runtime/sandbox";
+import { HTTPException } from "hono/http-exception";
 import {
   rigProviderImageContentHash,
   rigProviderImageMatchesDefinition,
@@ -240,17 +247,69 @@ export type SessionSandboxRuntime = {
   rigVersion: RigVersion | null;
 };
 
+/** The subject a direct attach resolves under when no authenticated subject
+ *  drives it. It holds no organization membership, so it can resolve
+ *  organization and workspace Sandbox Environments but never a personal one. */
+const SESSION_ATTACH_SUBJECT = "session-attach";
+
+/**
+ * The exact frozen Sandbox Environment version a session is bound to, resolved
+ * for a direct attach (terminal, Files, desktop viewer, Browser, Computer).
+ *
+ * A version homed in the session's own workspace resolves physically, exactly
+ * as before. An organization Sandbox Environment, or a personal one used
+ * outside its home workspace, keeps its versions in that home workspace, so
+ * those resolve through the same scoped authority the session's turns, the
+ * attach Variable Set defaults and scheduled tasks use: same organization,
+ * active, and visible to the attaching subject in the session's workspace.
+ */
+async function resolveSessionRigVersion(
+  db: Database,
+  session: Pick<Session, "accountId" | "workspaceId"> & { rigId: string; rigVersionId: string },
+  subjectId: string | null,
+): Promise<RigVersion | null> {
+  const local = await getRigVersion(db, session.workspaceId, session.rigId, session.rigVersionId);
+  if (local) return local;
+  let scoped: Awaited<ReturnType<typeof getScheduledScopedRigVersionMetadata>>;
+  try {
+    scoped = await getScheduledScopedRigVersionMetadata(
+      db,
+      {
+        accountId: session.accountId,
+        workspaceId: session.workspaceId,
+        subjectId: subjectId ?? SESSION_ATTACH_SUBJECT,
+      },
+      session.rigId,
+      session.rigVersionId,
+    );
+  } catch (error) {
+    // The scoped seam refuses (42501) a subject without current access to the
+    // session's workspace; that is the same "not available" answer.
+    if (nestedPostgresSqlState(error) === "42501") return null;
+    throw error;
+  }
+  return scoped?.version.rigId === session.rigId ? scoped.version : null;
+}
+
 export async function resolveSessionSandboxRuntime(
   db: Database,
   settings: Settings,
-  session: Pick<Session, "workspaceId" | "sandboxBackend" | "rigId" | "rigVersionId">,
+  session: Pick<Session, "accountId" | "workspaceId" | "sandboxBackend" | "rigId" | "rigVersionId">,
+  /** The authenticated subject driving the attach; null for a service attach. */
+  access: { subjectId: string | null },
 ): Promise<SessionSandboxRuntime> {
   const rigVersion =
     session.rigId && session.rigVersionId
-      ? await getRigVersion(db, session.workspaceId, session.rigId, session.rigVersionId)
+      ? await resolveSessionRigVersion(
+          db,
+          { ...session, rigId: session.rigId, rigVersionId: session.rigVersionId },
+          access.subjectId,
+        )
       : null;
   if (session.rigVersionId && !rigVersion) {
-    throw new Error(`Frozen sandbox environment version ${session.rigVersionId} is unavailable`);
+    throw new HTTPException(403, {
+      message: "This session's Sandbox Environment version is not available.",
+    });
   }
   // Setup and checks layer on the deployment image, or on the workspace's
   // allowlisted selection of one.

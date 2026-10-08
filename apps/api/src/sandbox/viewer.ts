@@ -236,7 +236,9 @@ export async function attachViewer(
     : null;
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
   const sandboxGroupId = session.sandboxGroupId;
-  const sandboxRuntime = await resolveSessionSandboxRuntime(db, settings, session);
+  const sandboxRuntime = await resolveSessionSandboxRuntime(db, settings, session, {
+    subjectId: attachSubjectId,
+  });
 
   const release = async (): Promise<void> => {
     await releaseLeaseHolder(db, {

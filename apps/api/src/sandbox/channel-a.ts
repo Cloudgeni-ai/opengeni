@@ -780,7 +780,9 @@ async function withChannelAOperation<T>(
   // surface. Without this, Terminal/Files/Browser/Computer/viewers could rearm
 
   // deployment image for the same durable sandbox group.
-  const sandboxRuntime = await resolveSessionSandboxRuntime(db, settings, session);
+  const sandboxRuntime = await resolveSessionSandboxRuntime(db, settings, session, {
+    subjectId: ctx.subjectId,
+  });
 
   const release = async (): Promise<void> => {
     await releaseLeaseHolder(db, {

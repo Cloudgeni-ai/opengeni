@@ -4102,7 +4102,9 @@ async function ensureInteractionHolder(
   if (!placement.lease?.instanceId) {
     throw new BrowserSessionStateError("BrowserSession lease placement is unavailable");
   }
-  const sandboxRuntime = await resolveSessionSandboxRuntime(deps.db, deps.settings, sourceSession);
+  const sandboxRuntime = await resolveSessionSandboxRuntime(deps.db, deps.settings, sourceSession, {
+    subjectId: grant.subjectId,
+  });
   const acquired = await acquireLease(deps.db, {
     accountId: grant.accountId,
     workspaceId: sourceSession.workspaceId,
