@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
-import postgres from "postgres";
 import {
   acquireSubscriptionOperationLease,
   assertSubscriptionOperationLeaseCurrent,
@@ -31,8 +30,6 @@ let client: DbClient | null = null;
 
 beforeAll(async () => {
   if (process.env.OPENGENI_REQUIRE_REAL_DB !== "1") return;
-  if (process.env.OPENGENI_TEST_PG_NATIVE !== "1")
-    throw new Error("Set OPENGENI_TEST_PG_NATIVE=1 for subscription runtime tests");
   shared = await acquireSharedTestDatabase("subscription-core-runtime-v4");
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = createDb(shared.appUrl, { max: 4 });

@@ -258,6 +258,14 @@ CREATE POLICY subscription_connection_assignment_policy_manage
 
 ALTER TABLE subscription_operation_leases ENABLE ROW LEVEL SECURITY;
 ALTER TABLE subscription_operation_leases FORCE ROW LEVEL SECURITY;
+CREATE POLICY session_visibility_isolation ON subscription_operation_leases AS RESTRICTIVE
+  FOR ALL
+  USING (
+    session_id IS NULL OR session_reference_visible(account_id, workspace_id, session_id)
+  )
+  WITH CHECK (
+    session_id IS NULL OR session_reference_visible(account_id, workspace_id, session_id)
+  );
 CREATE POLICY subscription_operation_leases_scope
   ON subscription_operation_leases FOR ALL
   USING (
