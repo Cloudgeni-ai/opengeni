@@ -229,7 +229,7 @@ describe("0655 inbox", () => {
     expect(bySource.get("multi")).toEqual([]);
   });
 
-  test("paused goals stay out of the inbox until the person turns them on (0662)", async () => {
+  test("paused goals stay out of the inbox until the person turns them on (0663)", async () => {
     if (!client) return;
     const person = await personWithSession("goal-off");
     const owner = { accountId: person.scope.accountId, subjectId: person.subjectId };

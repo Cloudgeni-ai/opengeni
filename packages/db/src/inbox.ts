@@ -200,7 +200,7 @@ export async function setInboxTidyPolicy(
 
 export type InboxSettingsValue = { tidyPolicy: InboxTidyPolicyValue; pausedGoals: boolean };
 
-/** The person's inbox settings in one account (0662). */
+/** The person's inbox settings in one account (0663). */
 export async function getInboxSettings(
   db: Database,
   input: { accountId: string; subjectId: string },
