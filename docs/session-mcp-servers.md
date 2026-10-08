@@ -396,8 +396,13 @@ connection pointer.
 
 Each durable session tool ref may set `eager: true`. Eagerness is not inferred
 from mandatory/strict selection: on a fresh progressive-disclosure turn, only
-those exact servers join the first-provider-request barrier. Every other MCP,
-including strict first-party Opengeni, begins connection/listing concurrently.
+those exact servers join the first-provider-request barrier. The single
+exception is first-party Opengeni when its signed selection and permission
+ceiling can admit a harness control tool (goal lifecycle, `command_read`,
+`command_wait`, `wait_for_input`): it joins the barrier so those exact tools are
+always visible from the first request with a stable tool block, while its other
+tools stay searchable. Every other MCP, including first-party Opengeni without a
+harness tool, begins connection/listing concurrently.
 Ordinary text may settle without waiting; `tool_search`, deferred invocation,
 Codemode activation, and catalog-dependent work join the same attempt promise.
 Generic deferred invocation then renames a valid `tool_invoke` to the exact
