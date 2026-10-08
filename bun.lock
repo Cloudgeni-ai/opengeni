@@ -356,7 +356,7 @@
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "@opengeni/interaction": "workspace:*",
-        "@trycua/cua-driver": "0.30.4",
+        "@trycua/cua-driver": "0.34.0",
         "agent-browser": "0.33.2",
         "zod": "4.4.3",
       },
@@ -2255,19 +2255,19 @@
 
     "@tootallnate/once": ["@tootallnate/once@2.0.1", "", {}, "sha512-HqmEUIGRJ5fSXchkVgR5F7qn48bDBzv0kWj/Kfu5e6uci4UlEeng4331LnBkWffb++Ei3FOVLxo8JJWMFBDMeQ=="],
 
-    "@trycua/cua-driver": ["@trycua/cua-driver@0.30.4", "", { "dependencies": { "@ubjs/core": "0.31.0-3", "@ubjs/node": "0.31.0-3" }, "optionalDependencies": { "@trycua/cua-driver-darwin-arm64": "0.30.4", "@trycua/cua-driver-darwin-x64": "0.30.4", "@trycua/cua-driver-linux-arm64-gnu": "0.30.4", "@trycua/cua-driver-linux-x64-gnu": "0.30.4", "@trycua/cua-driver-win32-arm64-msvc": "0.30.4", "@trycua/cua-driver-win32-x64-msvc": "0.30.4" } }, "sha512-0v1IhX151BvULRiHzuKoV4D39O6A1CY1UteSZRR3NHPimaj7zd5p8rqgl9N27eldY+cPGloVykAlzPds8KMNSA=="],
+    "@trycua/cua-driver": ["@trycua/cua-driver@0.34.0", "", { "dependencies": { "@ubjs/core": "0.31.0-3", "@ubjs/node": "0.31.0-3" }, "optionalDependencies": { "@trycua/cua-driver-darwin-arm64": "0.34.0", "@trycua/cua-driver-darwin-x64": "0.34.0", "@trycua/cua-driver-linux-arm64-gnu": "0.34.0", "@trycua/cua-driver-linux-x64-gnu": "0.34.0", "@trycua/cua-driver-win32-arm64-msvc": "0.34.0", "@trycua/cua-driver-win32-x64-msvc": "0.34.0" } }, "sha512-MJs5+z6dM9UnqXZuKCE9uNZPA12QZOI+7wiKjk2ZmTtGox7Scvx1w+7fv6B1CTQV+3/ZR8fVmfEILbq/90WbVg=="],
 
-    "@trycua/cua-driver-darwin-arm64": ["@trycua/cua-driver-darwin-arm64@0.30.4", "", { "os": "darwin", "cpu": "arm64" }, "sha512-ceIRKOYtsL5mRTivFjctvDEjCuZSddzv6wsaN8fO3/U6bLLOEEXVEBxwmbF5hJLu0Eb33lybVeqZpc0hr9tdtg=="],
+    "@trycua/cua-driver-darwin-arm64": ["@trycua/cua-driver-darwin-arm64@0.34.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-UhzOe86Q1cJpl8lagOCgMnnekzbZz7hnvmBU4hDc7apUqnv6BBAJJz2e1DE4CUkNCCF2tkZSHA6xUncTYdnylA=="],
 
-    "@trycua/cua-driver-darwin-x64": ["@trycua/cua-driver-darwin-x64@0.30.4", "", { "os": "darwin", "cpu": "x64" }, "sha512-sy7Fj4y+fuWQcjYILWtLNTdPOQE1HZUwHg8Q2E97RaGRMKw1EA413g/HPru4FtVjaMgOJZFSGUdkQPNMIFdn0Q=="],
+    "@trycua/cua-driver-darwin-x64": ["@trycua/cua-driver-darwin-x64@0.34.0", "", { "os": "darwin", "cpu": "x64" }, "sha512-v4Pj3BuQ48d713uIhNjSP5F9hD2zoKtMfJWfii2lx35fJNwJImhDZccxbDjDnAVjIrGICqviGVCrLTq1OiDSaA=="],
 
-    "@trycua/cua-driver-linux-arm64-gnu": ["@trycua/cua-driver-linux-arm64-gnu@0.30.4", "", { "os": "linux", "cpu": "arm64" }, "sha512-SycwQiI909YzOys7HpsW4AUBX/pSWftZ97lPqrI7ttYElWySLRu+f5rsUJ01Vit2i73oTw9jt/uUNXBtXCobmA=="],
+    "@trycua/cua-driver-linux-arm64-gnu": ["@trycua/cua-driver-linux-arm64-gnu@0.34.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-RUygHOF8D20sLgJ1NrVmsb13I3W+XDcOvEnFt5/YTHsXoyWaj2KPneY3mUTONH0/ya25KbVOmI6vObdVZetMyA=="],
 
-    "@trycua/cua-driver-linux-x64-gnu": ["@trycua/cua-driver-linux-x64-gnu@0.30.4", "", { "os": "linux", "cpu": "x64" }, "sha512-DLkgZkI1rNHXtSGZUUHZ9uhq0J1CsGQZew+QNu4ZuXC1RLu4hwa83jfKPCHg5Rs95ki6a5yX6XIP8fSjYzErkw=="],
+    "@trycua/cua-driver-linux-x64-gnu": ["@trycua/cua-driver-linux-x64-gnu@0.34.0", "", { "os": "linux", "cpu": "x64" }, "sha512-MUe05gFjB9AK1BgMnQQBgRQFBeu6jzBAO7kpc5QbybtcwzbGiXlDDvrtirrWJ+AYJFqvaewE3DPdwT+aC7UL7A=="],
 
-    "@trycua/cua-driver-win32-arm64-msvc": ["@trycua/cua-driver-win32-arm64-msvc@0.30.4", "", { "os": "win32", "cpu": "arm64" }, "sha512-L1AFSgZF61IuB9EM4/RE9N1BjlSqSK542LzHQW/lYPKtHdzgADOVbFO9nzMs6ZM9jU18UYoXagsiJcwFWkIiHQ=="],
+    "@trycua/cua-driver-win32-arm64-msvc": ["@trycua/cua-driver-win32-arm64-msvc@0.34.0", "", { "os": "win32", "cpu": "arm64" }, "sha512-xlrck9tP1fD9AQpbWyuF6axnQHRYv8hM+iV7j5vI8yP3HCQl3bsGmvXa9r230d6A7zGqr5dHvbVPFw8y5gVvnQ=="],
 
-    "@trycua/cua-driver-win32-x64-msvc": ["@trycua/cua-driver-win32-x64-msvc@0.30.4", "", { "os": "win32", "cpu": "x64" }, "sha512-ZrCOUCHwKNwPT8cx96pfOLQ12Dz2WJqfbx9RZ41WkhKTXYf0HrRKrMQ2u2xvic78WC4AB4qaWwI+TvDNgb/C9Q=="],
+    "@trycua/cua-driver-win32-x64-msvc": ["@trycua/cua-driver-win32-x64-msvc@0.34.0", "", { "os": "win32", "cpu": "x64" }, "sha512-BzdQ9rSOvekEdHLwEpYOaNAYRVXwav9cNnaR4traNmKPLkr+IvhQZv5K6CDGMM20O2S9q7lHG6k8n6jHA4zqHg=="],
 
     "@tufjs/canonical-json": ["@tufjs/canonical-json@2.0.0", "", {}, "sha512-yVtV8zsdo8qFHe+/3kw81dSLyF7D576A5cCFCi4X7B39tWT7SekaEFUnvnWJHz+9qO7qJTah1JbrDjWKqFtdWA=="],
 

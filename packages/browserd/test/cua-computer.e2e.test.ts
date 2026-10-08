@@ -20,7 +20,13 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
     let fixturePid: number | undefined;
     let supervisor: ComputerSupervisor | undefined;
     const reference = { computerSessionId: randomUUID(), controllerGeneration: randomUUID() };
-    type State = { pid: number; windowId: number; value: string; clicks: number };
+    type State = {
+      pid: number;
+      windowId: number;
+      value: string;
+      clicks: number;
+      frontmostPid: number;
+    };
     const actual = async (): Promise<State> =>
       await Bun.file(join(root, "fixture-state.json")).json();
     try {
@@ -48,6 +54,7 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
         await Bun.sleep(100);
       fixturePid = (await actual()).pid;
       await Bun.sleep(1000);
+      expect((await actual()).frontmostPid).not.toBe(fixturePid);
       supervisor = await ComputerSupervisor.open({
         rootDirectory: join(root, "controller"),
         displaceExistingSessions: true,
@@ -114,12 +121,9 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
           action: "set_value",
           value: "Viewer open",
         });
-        // SDK 0.30.4 capture-only reads invalidate element handles. Keep this
-        // limitation explicit until upstream provides non-invalidating previews.
-        expect(await supervisor.action(liveReplace)).toMatchObject({
-          state: "failed",
-          error: { code: "observation_stale" },
-        });
+        // Preview-only captures must preserve the agent's element handles.
+        expect(await supervisor.action(liveReplace)).toMatchObject({ state: "completed" });
+        expect((await actual()).value).toBe("Viewer open");
         observed = await supervisor.observe(reference, target.id);
         const frame = await supervisor.capture(reference, target.id, {
           maxWidth: 480,
@@ -181,6 +185,7 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
           0,
         );
         expect(((await actual()) as State & { dragEvents: number }).dragEvents).toBe(0);
+        expect((await actual()).frontmostPid).not.toBe(fixturePid);
       } finally {
         await stream.close();
       }

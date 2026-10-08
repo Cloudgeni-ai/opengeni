@@ -248,6 +248,7 @@ export class CuaComputerBackend implements ComputerBackend {
       ...this.args(target),
       include_screenshot: false,
       include_accessibility_tree: true,
+      ...(this.identity.platform === "macos" ? { tree_format: "elements" } : {}),
       max_elements: 2000,
       max_depth: 25,
     });
