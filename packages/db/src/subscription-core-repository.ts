@@ -1,5 +1,14 @@
 import { sql } from "drizzle-orm";
-import type { ProviderId, SubscriptionSettingValues } from "@opengeni/subscriptions";
+import type {
+  ConnectionHealth,
+  ConnectionKind,
+  ConnectionOwnership,
+  InferencePool,
+  ProviderId,
+  SubscriptionConnection,
+  SubscriptionQuota,
+  SubscriptionSettingValues,
+} from "@opengeni/subscriptions";
 import { rawRows, type Database } from "./database";
 
 export type EffectiveSubscriptionSettingsRow = {
@@ -83,6 +92,243 @@ export async function listSubscriptionConnectionAssignmentPolicies(
     excludedModels: row.excluded_models,
     managedByWorkspaceId: row.managed_by_workspace_id,
   }));
+}
+
+/**
+ * Read the provider/workspace-visible connection world for the pure placement
+ * policy. Account, provider, and workspace are mandatory so callers cannot
+ * accidentally turn this into a viewer-derived or cross-account pool read.
+ * Credential ciphertext is deliberately never selected here.
+ */
+export async function listSubscriptionConnectionsForPlacement(
+  db: Database,
+  input: { accountId: string; workspaceId: string; provider?: ProviderId },
+): Promise<SubscriptionConnection[]> {
+  const rows = await rawRows<{
+    id: string;
+    provider: ProviderId;
+    kind: ConnectionKind;
+    ownership: "shared" | "personal";
+    owner_membership_id: string | null;
+    health: string;
+    allocator_enabled: boolean;
+    entitled_model_ids: string[] | null;
+    excluded_models: string[];
+    allowed_model_ids: string[] | null;
+    refresh_generation: number | string;
+    scope_kind: "organization" | "workspaces" | "people";
+    allow_personal_workspaces: boolean;
+    managed_by_workspace_id: string | null;
+    quota: unknown;
+    quota_revision: number | string | null;
+    quota_observed_refresh_generation: number | string | null;
+    quota_updated_at: Date | string | null;
+  }>(
+    db,
+    sql`select connection.id::text as id, connection.provider, connection.kind,
+      connection.ownership, connection.owner_organization_membership_id::text as owner_membership_id,
+      connection.status as health, connection.allocator_enabled,
+      null::text[] as entitled_model_ids, connection.excluded_models,
+      connection.allowed_model_ids, connection.refresh_generation,
+      connection.scope_kind, connection.allow_personal_workspaces,
+      connection.managed_by_workspace_id::text as managed_by_workspace_id,
+      quota.quota, quota.revision as quota_revision,
+      quota.observed_refresh_generation as quota_observed_refresh_generation,
+      quota.updated_at as quota_updated_at
+    from subscription_connections connection
+    left join subscription_connection_quota quota
+      on quota.account_id = connection.account_id and quota.connection_id = connection.id
+    where connection.account_id = ${input.accountId}::uuid
+      and (${input.provider ?? null}::text is null or connection.provider = ${input.provider ?? null})
+    order by connection.provider, connection.id`,
+  );
+  if (rows.length === 0) return [];
+
+  const workspaceAssignments = await rawRows<{
+    connection_id: string;
+    workspace_id: string;
+  }>(
+    db,
+    sql`select connection_id::text as connection_id, workspace_id::text as workspace_id
+      from subscription_connection_workspaces
+      where account_id = ${input.accountId}::uuid`,
+  );
+  const peopleAssignments = await rawRows<{
+    connection_id: string;
+    membership_id: string;
+  }>(
+    db,
+    sql`select connection_id::text as connection_id,
+      organization_membership_id::text as membership_id
+      from subscription_connection_people
+      where account_id = ${input.accountId}::uuid`,
+  );
+  const assignmentPolicies = await listSubscriptionConnectionAssignmentPolicies(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    ...(input.provider ? { provider: input.provider } : {}),
+  });
+
+  const workspacesByConnection = groupStrings(
+    workspaceAssignments,
+    "connection_id",
+    "workspace_id",
+  );
+  const peopleByConnection = groupStrings(peopleAssignments, "connection_id", "membership_id");
+  const policiesByConnection = new Map<
+    string,
+    Array<NonNullable<SubscriptionConnection["assignmentPolicies"]>[number]>
+  >();
+  for (const policy of assignmentPolicies) {
+    const current = policiesByConnection.get(policy.connectionId) ?? [];
+    current.push({
+      workspaceId: policy.workspaceId,
+      inferencePool: policy.inferencePool as InferencePool,
+      allocatorEnabled: policy.allocatorEnabled,
+      allowedModelIds: policy.allowedModelIds,
+      excludedModelIds: policy.excludedModels,
+      managedByWorkspaceId: policy.managedByWorkspaceId,
+    });
+    policiesByConnection.set(policy.connectionId, current);
+  }
+
+  return rows.map((row) => {
+    const health: ConnectionHealth =
+      row.health === "active"
+        ? "healthy"
+        : row.health === "needs_relogin" || row.health === "needs_reconnect"
+          ? "needs_reconnect"
+          : "error";
+    let ownership: ConnectionOwnership;
+    if (row.ownership === "personal") {
+      if (!row.owner_membership_id) {
+        throw new Error("Personal subscription connection is missing its owner membership");
+      }
+      ownership = { kind: "personal", ownerMembershipId: row.owner_membership_id };
+    } else {
+      ownership = {
+        kind: "shared",
+        managedByWorkspaceId: row.managed_by_workspace_id,
+        scope:
+          row.scope_kind === "organization"
+            ? { kind: "organization" }
+            : row.scope_kind === "people"
+              ? { kind: "people", membershipIds: peopleByConnection.get(row.id) ?? [] }
+              : {
+                  kind: "workspaces",
+                  workspaceIds: workspacesByConnection.get(row.id) ?? [],
+                  allowPersonalWorkspaces: row.allow_personal_workspaces,
+                },
+      };
+    }
+    const assignmentPolicy = policiesByConnection.get(row.id);
+    return {
+      id: row.id,
+      provider: row.provider,
+      kind: row.kind,
+      ownership,
+      health,
+      allocatorEnabled: row.allocator_enabled,
+      entitledModelIds: row.entitled_model_ids,
+      excludedModelIds: row.excluded_models,
+      allowedModelIds: row.allowed_model_ids,
+      ...(assignmentPolicy && assignmentPolicy.length > 0
+        ? { assignmentPolicies: assignmentPolicy }
+        : {}),
+      refreshGeneration: Number(row.refresh_generation),
+      quota: decodeSubscriptionQuota(row),
+    };
+  });
+}
+
+function groupStrings<
+  T extends Record<Key, string>,
+  Key extends string,
+  ValueKey extends Exclude<keyof T, Key>,
+>(rows: T[], key: Key, valueKey: ValueKey): Map<string, string[]> {
+  const grouped = new Map<string, string[]>();
+  for (const row of rows) {
+    const values = grouped.get(row[key]) ?? [];
+    values.push(row[valueKey]);
+    grouped.set(row[key], values);
+  }
+  return grouped;
+}
+
+function decodeSubscriptionQuota(row: {
+  quota: unknown;
+  quota_revision: number | string | null;
+  quota_observed_refresh_generation: number | string | null;
+  quota_updated_at: Date | string | null;
+}): SubscriptionQuota | null {
+  if (row.quota_observed_refresh_generation === null) return null;
+  if (row.quota === null || typeof row.quota !== "object" || Array.isArray(row.quota)) return null;
+  const raw = row.quota as Record<string, unknown>;
+  const windows = raw.windows;
+  const cooldowns = raw.modelCooldowns;
+  if (!Array.isArray(windows) || cooldowns === null || typeof cooldowns !== "object") return null;
+  const parsedWindows = [];
+  for (const window of windows) {
+    if (window === null || typeof window !== "object" || Array.isArray(window)) return null;
+    const item = window as Record<string, unknown>;
+    if (
+      typeof item.id !== "string" ||
+      !(
+        item.usedPercent === null ||
+        (typeof item.usedPercent === "number" && Number.isFinite(item.usedPercent))
+      ) ||
+      !(
+        item.resetsAt === null ||
+        (typeof item.resetsAt === "number" && Number.isFinite(item.resetsAt))
+      ) ||
+      (item.status !== "ok" &&
+        item.status !== "warning" &&
+        item.status !== "exhausted" &&
+        item.status !== "unknown")
+    )
+      return null;
+    parsedWindows.push({
+      id: item.id,
+      usedPercent: item.usedPercent,
+      resetsAt: item.resetsAt,
+      status: item.status as "ok" | "warning" | "exhausted" | "unknown",
+    });
+  }
+  const modelCooldowns: Record<string, number> = {};
+  for (const [modelId, until] of Object.entries(cooldowns)) {
+    if (typeof until !== "number" || !Number.isFinite(until)) return null;
+    modelCooldowns[modelId] = until;
+  }
+  const exhaustedUntil = raw.exhaustedUntil === undefined ? null : raw.exhaustedUntil;
+  const exhaustedKind = raw.exhaustedKind === undefined ? null : raw.exhaustedKind;
+  const source = raw.source === undefined ? null : raw.source;
+  if (
+    !(
+      exhaustedUntil === null ||
+      (typeof exhaustedUntil === "number" && Number.isFinite(exhaustedUntil))
+    ) ||
+    !(exhaustedKind === null || exhaustedKind === "quota" || exhaustedKind === "rate_limit") ||
+    !(
+      source === null ||
+      source === "usage_endpoint" ||
+      source === "response_headers" ||
+      source === "refusal"
+    )
+  )
+    return null;
+  return {
+    windows: parsedWindows,
+    modelCooldowns,
+    exhaustedUntil,
+    exhaustedKind,
+    revision: Number(row.quota_revision ?? 1),
+    observedAt: row.quota_updated_at === null ? null : new Date(row.quota_updated_at).getTime(),
+    observedRefreshGeneration:
+      row.quota_observed_refresh_generation === null
+        ? null
+        : Number(row.quota_observed_refresh_generation),
+    source,
+  };
 }
 
 /** Canonical IDs win; otherwise resolve one visible provider-scoped alias. */
@@ -232,6 +478,151 @@ export async function createSubscriptionConnection(
   );
   if (!row) throw new Error("Subscription connection insert returned no row");
   return row.id;
+}
+
+export type SubscriptionTurnLeaseIdentity = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  provider: ProviderId;
+  connectionId: string;
+  holderId: string;
+  generation: number;
+};
+
+export type SubscriptionTurnLease = SubscriptionTurnLeaseIdentity & {
+  leasedUntil: Date;
+};
+
+/**
+ * The organization/provider cutover is disabled unless an explicit row opts
+ * in. Callers must check this before reading core state; an absent row must
+ * never be interpreted as a partially activated provider.
+ */
+export async function isSubscriptionProviderCutoverEnabled(
+  db: Database,
+  input: { accountId: string; provider: ProviderId },
+): Promise<boolean> {
+  const [row] = await rawRows<{ enabled: boolean }>(
+    db,
+    sql`select enabled from subscription_provider_cutovers
+      where account_id = ${input.accountId}::uuid and provider = ${input.provider}`,
+  );
+  return row?.enabled ?? false;
+}
+
+/**
+ * Acquire the chat-turn lease after core placement and immediately rechecking
+ * current eligibility. Replays by the same holder/connection/generation are
+ * idempotent. A stale holder can be replaced only after expiry and only by a
+ * strictly newer generation for the same turn and session.
+ */
+export async function acquireSubscriptionTurnLease(
+  db: Database,
+  input: SubscriptionTurnLeaseIdentity & { ttlMs: number },
+): Promise<SubscriptionTurnLease | null> {
+  assertPositiveLeaseTtl(input.ttlMs);
+  assertPositiveGeneration(input.generation);
+  if (!input.holderId.trim() || input.holderId.length > 256)
+    throw new Error("Subscription lease holder id must contain 1-256 characters");
+  const [row] = await rawRows<{ leased_until: Date | string }>(
+    db,
+    sql`insert into subscription_leases (
+      account_id, workspace_id, session_id, turn_id, connection_id, provider,
+      holder_id, generation, leased_until
+    ) values (
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid,
+      ${input.turnId}::uuid, ${input.connectionId}::uuid, ${input.provider},
+      ${input.holderId}, ${input.generation},
+      clock_timestamp() + (${input.ttlMs} * interval '1 millisecond')
+    )
+    on conflict (workspace_id, turn_id) do update
+      set connection_id = excluded.connection_id,
+          provider = excluded.provider,
+          holder_id = excluded.holder_id,
+          generation = excluded.generation,
+          leased_until = clock_timestamp() + (${input.ttlMs} * interval '1 millisecond')
+      where subscription_leases.account_id = excluded.account_id
+        and subscription_leases.session_id = excluded.session_id
+        and ((subscription_leases.generation = excluded.generation
+              and subscription_leases.connection_id = excluded.connection_id
+              and subscription_leases.provider = excluded.provider
+              and subscription_leases.holder_id = excluded.holder_id
+              and subscription_leases.leased_until > clock_timestamp())
+          or (subscription_leases.generation < excluded.generation
+              and subscription_leases.leased_until <= clock_timestamp()))
+    returning leased_until`,
+  );
+  return row ? { ...turnLeaseIdentity(input), leasedUntil: new Date(row.leased_until) } : null;
+}
+
+/** Renew only the exact, still-live chat-turn lease generation. */
+export async function renewSubscriptionTurnLease(
+  db: Database,
+  input: SubscriptionTurnLeaseIdentity & { ttlMs: number },
+): Promise<Date | null> {
+  assertPositiveLeaseTtl(input.ttlMs);
+  const [row] = await rawRows<{ leased_until: Date | string }>(
+    db,
+    sql`update subscription_leases
+      set leased_until = clock_timestamp() + (${input.ttlMs} * interval '1 millisecond')
+      where ${turnLeaseWhere(input)} and leased_until > clock_timestamp()
+      returning leased_until`,
+  );
+  return row ? new Date(row.leased_until) : null;
+}
+
+/** Pre-dispatch fence; placement and current eligibility are separate checks. */
+export async function assertSubscriptionTurnLeaseCurrent(
+  db: Database,
+  input: SubscriptionTurnLeaseIdentity,
+): Promise<boolean> {
+  const [row] = await rawRows<{ current: boolean }>(
+    db,
+    sql`select exists (
+      select 1 from subscription_leases
+      where ${turnLeaseWhere(input)} and leased_until > clock_timestamp()
+    ) as current`,
+  );
+  return row?.current ?? false;
+}
+
+/** Release is fenced by turn, connection, holder and generation. */
+export async function releaseSubscriptionTurnLease(
+  db: Database,
+  input: SubscriptionTurnLeaseIdentity,
+): Promise<boolean> {
+  const rows = await rawRows<{ turn_id: string }>(
+    db,
+    sql`delete from subscription_leases
+      where ${turnLeaseWhere(input)} returning turn_id::text as turn_id`,
+  );
+  return rows.length === 1;
+}
+
+function turnLeaseIdentity(input: SubscriptionTurnLeaseIdentity): SubscriptionTurnLeaseIdentity {
+  return {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    provider: input.provider,
+    connectionId: input.connectionId,
+    holderId: input.holderId,
+    generation: input.generation,
+  };
+}
+
+function turnLeaseWhere(input: SubscriptionTurnLeaseIdentity) {
+  return sql`account_id = ${input.accountId}::uuid
+    and workspace_id = ${input.workspaceId}::uuid
+    and session_id = ${input.sessionId}::uuid
+    and turn_id = ${input.turnId}::uuid
+    and provider = ${input.provider}
+    and connection_id = ${input.connectionId}::uuid
+    and holder_id = ${input.holderId}
+    and generation = ${input.generation}`;
 }
 
 export type SubscriptionOperationKind = "image" | "realtime" | "transcription";

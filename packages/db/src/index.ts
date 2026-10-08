@@ -72,9 +72,13 @@ export {
 export { SubscriptionAccountChangedError } from "./subscription-account-conflict";
 export {
   acquireSubscriptionOperationLease,
+  acquireSubscriptionTurnLease,
+  assertSubscriptionTurnLeaseCurrent,
   assertSubscriptionOperationLeaseCurrent,
   claimSubscriptionCapacityWakeDeliveries,
   createSubscriptionConnection,
+  isSubscriptionProviderCutoverEnabled,
+  listSubscriptionConnectionsForPlacement,
   listSubscriptionConnectionAssignmentPolicies,
   listDueSubscriptionCapacityWaiters,
   markSubscriptionCapacityWakeDelivered,
@@ -83,7 +87,9 @@ export {
   readSubscriptionSessionBinding,
   resolveSubscriptionConnectionId,
   releaseSubscriptionOperationLease,
+  releaseSubscriptionTurnLease,
   renewSubscriptionOperationLease,
+  renewSubscriptionTurnLease,
   upsertSubscriptionCapacityWaiter,
   wakeSubscriptionCapacityWaiter,
   writeSubscriptionSessionBinding,
@@ -94,6 +100,8 @@ export {
   type SubscriptionOperationKind,
   type SubscriptionOperationLease,
   type SubscriptionOperationLeaseIdentity,
+  type SubscriptionTurnLease,
+  type SubscriptionTurnLeaseIdentity,
   type SubscriptionSessionBinding,
   type EffectiveSubscriptionSettingsRow,
 } from "./subscription-core-repository";

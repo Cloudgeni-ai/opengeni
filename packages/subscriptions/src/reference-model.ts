@@ -63,7 +63,9 @@ export type Connection = {
     workspaceId: string;
     inferencePool: "workspace" | "organization";
     allowedModelIds: readonly ModelId[] | null;
+    excludedModelIds?: readonly ModelId[];
     allocatorEnabled: boolean;
+    managedByWorkspaceId?: string | null;
   }[];
   /** Per-model cooldowns (Claude reports model-specific limits). */
   modelCooldowns?: Readonly<Record<ModelId, number>>;
@@ -311,11 +313,14 @@ export function servingFailure(
       !matching.some(
         (policy) =>
           policy.allocatorEnabled &&
-          (policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId)),
+          (policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId)) &&
+          !policy.excludedModelIds?.includes(modelId),
       )
     ) {
       const hasModelAssignment = matching.some(
-        (policy) => policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId),
+        (policy) =>
+          (policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId)) &&
+          !policy.excludedModelIds?.includes(modelId),
       );
       return {
         requirement: hasModelAssignment ? "SUB-ELIG-04" : "SUB-ELIG-03",
@@ -487,7 +492,8 @@ function earliestReset(
           !assignments.some(
             (policy) =>
               policy.allocatorEnabled &&
-              (policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId)),
+              (policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId)) &&
+              !policy.excludedModelIds?.includes(modelId),
           )
         ) {
           continue;
@@ -533,7 +539,9 @@ export function pinnedNeverServes(
     );
     if (
       !assignments.some(
-        (policy) => policy.allowedModelIds === null || policy.allowedModelIds.includes(model.id),
+        (policy) =>
+          (policy.allowedModelIds === null || policy.allowedModelIds.includes(model.id)) &&
+          !policy.excludedModelIds?.includes(model.id),
       )
     ) {
       return true;

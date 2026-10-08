@@ -70,6 +70,18 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers the subscription people-assignment read policy fix as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0646_subscription_core_people_assignment_read.sql",
+      ),
+    ).toMatchObject({
+      path: "0646_subscription_core_people_assignment_read.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("checks complete ledger metadata against migration files", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     const sourceMigrationPaths = (
@@ -2449,6 +2461,7 @@ describe("release schema contract", () => {
       "0639_native_app_push.sql",
       "0644_subscription_inference_source_settings.sql",
       "0645_subscription_core_runtime.sql",
+      "0646_subscription_core_people_assignment_read.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

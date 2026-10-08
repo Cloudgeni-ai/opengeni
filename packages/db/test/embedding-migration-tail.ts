@@ -107,4 +107,5 @@ export const embeddingMigrationTail = [
   "0643_model_call_facts_subscription_connection_index.sql",
   "0644_subscription_inference_source_settings.sql",
   "0645_subscription_core_runtime.sql",
+  "0646_subscription_core_people_assignment_read.sql",
 ];
