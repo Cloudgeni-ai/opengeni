@@ -125,8 +125,17 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
         claude: { mode: "spread" },
         xai: { mode: "spread" },
       };
-      const organizationProviders = {};
-      const workspaceProviders = { codex: { enabled: false } };
+      const organizationProviders = {
+        codex: {
+          inferenceSource: "automatic" as const,
+          useOrganizationAccounts: true,
+          enabled: true,
+        },
+        claude: { useOrganizationAccounts: false, enabled: true },
+      };
+      const workspaceProviders = {
+        codex: { useOrganizationAccounts: false, enabled: false },
+      };
       const organizationFallbackOrder = { "codex/model-a": ["claude/model-b"] };
       const workspaceFallbackOrder = { "codex/model-a": ["xai/model-c"] };
       const [jsonShapes] = await shared!.admin<
@@ -187,11 +196,87 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
       );
       expect(actual).toEqual(expected);
       expect(actual.values.providers.codex).toEqual({
-        useOrganizationAccounts: true,
+        inferenceSource: "workspace",
+        useOrganizationAccounts: false,
         enabled: false,
       });
+      expect(actual.values.providers.claude).toEqual({
+        useOrganizationAccounts: false,
+        enabled: true,
+      });
       expect(actual.sources.providers.codex).toBe("workspace");
+      expect(actual.sources.providers.claude).toBe("organization");
       expect(actual.sources.personalFallbackAllowed).toBe("organization");
+    },
+    180_000,
+  );
+
+  test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
+    "subscription settings resolver cannot be shadowed by a temporary table",
+    async () => {
+      const fixture = await organizationFixture();
+      await shared!.admin`
+        insert into subscription_settings (
+          account_id, workspace_id, rotation, providers, cross_provider_failover,
+          fallback_order, personal_connections_allowed, personal_fallback_allowed
+        ) values (
+          ${fixture.accountId}, null,
+          ${shared!.admin.json({ codex: { mode: "spread" }, claude: { mode: "spread" }, xai: { mode: "spread" } })}::jsonb,
+          '{}'::jsonb, false, '{}'::jsonb, false, false
+        )`;
+
+      const personalConnectionsAllowed = await withSessionRlsActorContext(
+        { subjectId: fixture.subjectId },
+        () =>
+          withRlsContext(
+            client!.db,
+            { accountId: fixture.accountId, workspaceId: fixture.workspaceId },
+            async (db) => {
+              await rawRows(
+                db,
+                sql`
+                create temporary table subscription_settings (
+                  account_id uuid,
+                  workspace_id uuid,
+                  rotation jsonb,
+                  providers jsonb,
+                  codex_primary_connection_id uuid,
+                  claude_primary_connection_id uuid,
+                  xai_primary_connection_id uuid,
+                  cross_provider_failover boolean,
+                  fallback_order jsonb,
+                  personal_connections_allowed boolean,
+                  personal_fallback_allowed boolean,
+                  locked_settings text[]
+                ) on commit drop
+              `,
+              );
+              await rawRows(
+                db,
+                sql`
+                insert into subscription_settings (
+                  account_id, workspace_id, rotation, providers, fallback_order,
+                  personal_connections_allowed, personal_fallback_allowed, locked_settings
+                ) values (
+                  ${fixture.accountId}::uuid, null, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+                  true, false, '{}'::text[]
+                )
+              `,
+              );
+              const [row] = await rawRows<{ allowed: boolean }>(
+                db,
+                sql`
+                select (subscription_effective_settings(
+                  ${fixture.accountId}::uuid, ${fixture.workspaceId}::uuid
+                ) #>> '{values,personalConnectionsAllowed}')::boolean as allowed
+              `,
+              );
+              return row?.allowed;
+            },
+          ),
+      );
+
+      expect(personalConnectionsAllowed).toBe(false);
     },
     180_000,
   );
