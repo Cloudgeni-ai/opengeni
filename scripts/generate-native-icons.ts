@@ -99,6 +99,9 @@ const ICONS: Record<string, string> = {
   "volume-2": "Volume2Icon",
   "maximize-2": "Maximize2Icon",
   "rotate-ccw": "RotateCcwIcon",
+  "shield-check": "ShieldCheckIcon",
+  inbox: "InboxIcon",
+  "circle-pause": "CirclePauseIcon",
 };
 
 const out: Record<string, Array<[string, Record<string, string | number>]>> = {};
