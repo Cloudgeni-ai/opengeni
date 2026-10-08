@@ -2,7 +2,11 @@
 // approvals, goals paused on them) and what they chose to tell them. The same
 // rules as the web Inbox page: rows are messages, approvals decide in place, a
 // single short choice answers in one tap, everything else opens its session.
-import { parseNotificationText, type NotificationSpan } from "@opengeni/react/timeline-model";
+import {
+  notificationPlainText,
+  parseNotificationText,
+  type NotificationSpan,
+} from "@opengeni/react/timeline-model";
 import type { InboxItem, ListInboxResponse, OpenGeniClient } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
@@ -40,12 +44,17 @@ function snoozedNow(item: InboxItem, now: number): boolean {
   return item.snoozedUntil !== null && Date.parse(item.snoozedUntil) > now;
 }
 
+/** Questions, approvals and paused goals wait on the person; notes and replies don't. */
+export function isNeedsYouKind(kind: InboxItem["kind"]): boolean {
+  return kind === "question" || kind === "approval" || kind === "goal_paused";
+}
+
 /** What waits on the person right now: needs-you items plus unread notes, unsnoozed. */
 export function nativeInboxAttentionCount(data: ListInboxResponse | null): number {
   if (!data) return 0;
   const now = Date.now();
   return data.items.filter(
-    (item) => !snoozedNow(item, now) && (item.kind !== "notification" || item.unread),
+    (item) => !snoozedNow(item, now) && (isNeedsYouKind(item.kind) || item.unread),
   ).length;
 }
 
@@ -90,12 +99,13 @@ const KIND_ICON: Record<InboxItem["kind"], NativeIconName> = {
   approval: "shield-check",
   goal_paused: "circle-pause",
   notification: "bell",
+  reply: "message-square-text",
 };
 
 function kindIcon(item: InboxItem): NativeIconName {
   return item.kind === "notification" && item.urgency === "time_sensitive"
     ? "bell-ring"
-    : KIND_ICON[item.kind];
+    : (KIND_ICON[item.kind] ?? "bell");
 }
 
 const MONO = Platform.OS === "ios" ? "Menlo" : "monospace";
@@ -449,8 +459,10 @@ export function NativeInboxList({
   const now = Date.now();
   const items = useMemo(() => inbox.data?.items ?? [], [inbox.data]);
   const awake = items.filter((item) => !snoozedNow(item, now));
-  const needsYou = awake.filter((item) => item.kind !== "notification");
+  // Most important first: what waits on the person, then agents' notes, then replies.
+  const needsYou = awake.filter((item) => isNeedsYouKind(item.kind));
   const fromAgents = awake.filter((item) => item.kind === "notification");
+  const replies = awake.filter((item) => item.kind === "reply");
   const snoozed = items.filter((item) => snoozedNow(item, now));
   const spansWorkspaces = new Set(items.map((item) => item.workspaceId)).size > 1;
 
@@ -581,7 +593,7 @@ export function NativeInboxList({
             { label: "Snooze until tomorrow", run: () => snooze(item, tomorrowMorning()) },
           ]),
       {
-        label: item.kind === "notification" ? "Dismiss" : "Remove from inbox",
+        label: isNeedsYouKind(item.kind) ? "Remove from inbox" : "Dismiss",
         run: () => dismiss(item),
         destructive: true,
       },
@@ -597,6 +609,7 @@ export function NativeInboxList({
     }
     if (item.kind === "question") parts.push("Question");
     if (item.kind === "goal_paused") parts.push("Goal paused");
+    if (item.kind === "reply") parts.push("Reply");
     if (item.kind === "approval" && !item.body) parts.push("Approval");
     parts.push(item.sessionTitle ?? "Untitled session");
     const workspace = spansWorkspaces ? workspaceNames?.get(item.workspaceId) : undefined;
@@ -654,8 +667,7 @@ export function NativeInboxList({
   };
 
   const row = (item: InboxItem, index: number) => {
-    const unread =
-      item.kind === "notification" && (item.unread || shownUnread.current.has(item.id));
+    const unread = !isNeedsYouKind(item.kind) && (item.unread || shownUnread.current.has(item.id));
     const rowActions = actions(item);
     return (
       <View key={item.id}>
@@ -671,7 +683,7 @@ export function NativeInboxList({
             onPress: () => swipeSnooze(item),
           }}
           dismiss={{
-            label: item.kind === "notification" ? "Dismiss" : "Remove",
+            label: isNeedsYouKind(item.kind) ? "Remove" : "Dismiss",
             icon: "x",
             color: c["danger-fill"],
             onPress: () => dismiss(item),
@@ -775,6 +787,18 @@ export function NativeInboxList({
                 </View>
               ) : item.kind === "notification" ? (
                 <NotificationContent item={item} />
+              ) : item.kind === "reply" && item.body ? (
+                <Text
+                  numberOfLines={2}
+                  style={{
+                    ...fontStyle(theme),
+                    fontSize: 14,
+                    lineHeight: 20,
+                    color: c["fg-muted"],
+                  }}
+                >
+                  {notificationPlainText(item.body)}
+                </Text>
               ) : null}
               <View style={{ flexDirection: "row", marginTop: 2 }}>
                 <Text
@@ -904,6 +928,7 @@ export function NativeInboxList({
     <View>
       {section("Needs you", needsYou, true)}
       {section("From your agents", fromAgents, needsYou.length === 0)}
+      {section("Replies", replies, needsYou.length === 0 && fromAgents.length === 0)}
       {awake.length === 0 ? (
         <Text
           style={{

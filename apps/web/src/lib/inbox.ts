@@ -68,7 +68,7 @@ class InboxStore {
     this.set({
       data: {
         items,
-        needsYouCount: awake.filter((item) => item.kind !== "notification").length,
+        needsYouCount: awake.filter((item) => isNeedsYouKind(item.kind)).length,
         unreadCount: awake.filter((item) => item.unread).length,
       },
     });
@@ -122,13 +122,18 @@ export function useInbox(options: { pollMs?: number; enabled?: boolean } = {}) {
   return { ...state, refresh, patchItems };
 }
 
-/** What waits on the person: needs-you items plus unread notifications, unsnoozed. */
+/** Questions, approvals and paused goals wait on the person; notes and replies don't. */
+export function isNeedsYouKind(kind: InboxItem["kind"]): boolean {
+  return kind === "question" || kind === "approval" || kind === "goal_paused";
+}
+
+/** What waits on the person: needs-you items plus unread notes and replies, unsnoozed. */
 export function inboxAttentionCount(data: ListInboxResponse | null): number {
   if (!data) return 0;
   const now = Date.now();
   return data.items.filter(
     (item) =>
       (item.snoozedUntil === null || Date.parse(item.snoozedUntil) <= now) &&
-      (item.kind !== "notification" || item.unread),
+      (isNeedsYouKind(item.kind) || item.unread),
   ).length;
 }

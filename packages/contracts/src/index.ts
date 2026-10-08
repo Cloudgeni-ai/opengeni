@@ -14478,8 +14478,13 @@ export const InboxItemKind = z.enum([
   "goal_paused",
   /** An agent chose to notify the person. */
   "notification",
+  /** A session's latest finished reply, for people who keep replies in their inbox. */
+  "reply",
 ]);
 export type InboxItemKind = z.infer<typeof InboxItemKind>;
+
+/** Kinds that wait on the person: they lead the inbox and count toward "needs you". */
+export const INBOX_NEEDS_YOU_KINDS = ["question", "approval", "goal_paused"] as const;
 
 export const InboxItemStatus = z.enum(["open", "resolved", "withdrawn", "dismissed"]);
 export type InboxItemStatus = z.infer<typeof InboxItemStatus>;
@@ -14566,6 +14571,11 @@ export const InboxSettings = z.object({
    * Always present in responses; a request that leaves it out keeps it as is.
    */
   pausedGoals: z.boolean().optional(),
+  /**
+   * Keep each session's latest reply in the inbox until the person clears it.
+   * Off by default. Always present in responses; leave it out to keep it.
+   */
+  replies: z.boolean().optional(),
 });
 export type InboxSettings = z.infer<typeof InboxSettings>;
 

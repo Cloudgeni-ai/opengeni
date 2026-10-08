@@ -236,6 +236,7 @@ describe("0655 inbox", () => {
     expect(await getInboxSettings(db(), owner)).toEqual({
       tidyPolicy: "own_sessions",
       pausedGoals: false,
+      replies: false,
     });
     await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
       {
@@ -249,7 +250,47 @@ describe("0655 inbox", () => {
     expect(await setInboxSettings(db(), { ...owner, pausedGoals: true })).toEqual({
       tidyPolicy: "any_agent",
       pausedGoals: true,
+      replies: false,
     });
+  });
+
+  test("replies keep one item per session until cleared, only when turned on (0665)", async () => {
+    if (!client) return;
+    const person = await personWithSession("replies");
+    const owner = { accountId: person.scope.accountId, subjectId: person.subjectId };
+    const reply = (text: string) =>
+      appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+        { type: "agent.message.completed", payload: { text } },
+        { type: "turn.completed", payload: {} },
+      ]);
+    await reply("Off by default");
+    expect(await inbox(person)).toHaveLength(0);
+    await setInboxSettings(db(), { ...owner, replies: true });
+    const [message] = await reply("## Deployed **2.4**\nAll services are green.");
+    let items = await inbox(person);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "reply",
+      title: "Deployed 2.4",
+      body: "All services are green.",
+      unread: true,
+      eventSequence: message!.sequence,
+    });
+    // Seen, it stays; a new reply updates the same item and is unread again.
+    await updateInboxItemAttention(db(), { itemId: items[0]!.id, ...owner, seen: true });
+    expect((await inbox(person))[0]).toMatchObject({ unread: false });
+    await reply("Second reply");
+    items = await inbox(person);
+    expect(items.map((item) => [item.kind, item.title, item.unread])).toEqual([
+      ["reply", "Second reply", true],
+    ]);
+    // Cleared, a later reply brings it back; turning replies off takes it away.
+    await updateInboxItemAttention(db(), { itemId: items[0]!.id, ...owner, dismissed: true });
+    expect(await inbox(person)).toHaveLength(0);
+    await reply("Third reply");
+    expect((await inbox(person)).map((item) => item.title)).toEqual(["Third reply"]);
+    await setInboxSettings(db(), { ...owner, replies: false });
+    expect(await inbox(person)).toHaveLength(0);
   });
 
   test("an agent's pause waits on the person until the goal resumes", async () => {

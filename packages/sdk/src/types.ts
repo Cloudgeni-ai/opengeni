@@ -5445,7 +5445,7 @@ export type McpConnectionDecision =
 // --- Inbox ---------------------------------------------------------------------------------------
 
 /** Why an inbox item waits on the person. */
-export type InboxItemKind = "question" | "approval" | "goal_paused" | "notification";
+export type InboxItemKind = "question" | "approval" | "goal_paused" | "notification" | "reply";
 
 /**
  * One thing that waits on the person: a question, an approval, a goal the agent
@@ -5521,6 +5521,11 @@ export type InboxSettings = {
    * default. Always present in responses; leave it out of an update to keep it.
    */
   pausedGoals?: boolean;
+  /**
+   * Keep each session's latest reply in the inbox until the person clears it.
+   * Off by default. Always present in responses; leave it out to keep it.
+   */
+  replies?: boolean;
 };
 
 // --- Native app sign-in (authorization code + PKCE over the app's scheme) ----------------------

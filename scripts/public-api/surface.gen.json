@@ -15186,7 +15186,7 @@
         "input"
       ],
       "shape": {
-        "$": "enum=[\"\\\"approval\\\"\",\"\\\"goal_paused\\\"\",\"\\\"notification\\\"\",\"\\\"question\\\"\"]"
+        "$": "enum=[\"\\\"approval\\\"\",\"\\\"goal_paused\\\"\",\"\\\"notification\\\"\",\"\\\"question\\\"\",\"\\\"reply\\\"\"]"
       }
     },
     "InboxItemStatus": {
@@ -15205,6 +15205,7 @@
       "shape": {
         "$": "object",
         "$.pausedGoals": "boolean?",
+        "$.replies": "boolean?",
         "$.tidyPolicy": "ref(InboxTidyPolicy)!"
       }
     },

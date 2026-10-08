@@ -56,6 +56,7 @@ export type { ApprovalStripMessages, ApprovalStripProps, HumanInputCardProps } f
 export { Button, IconButton } from "./controls";
 export {
   NativeInboxList,
+  isNeedsYouKind,
   nativeInboxAttentionCount,
   useNativeInbox,
   type NativeInboxClient,

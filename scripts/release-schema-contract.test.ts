@@ -2505,6 +2505,7 @@ describe("release schema contract", () => {
       "0662_session_first_party_default_intent.sql",
       "0663_inbox_paused_goal_setting.sql",
       "0664_inbox_rich_notifications.sql",
+      "0665_inbox_replies.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
