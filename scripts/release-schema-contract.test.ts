@@ -2487,6 +2487,7 @@ describe("release schema contract", () => {
       "0656_inbox_owner_recipient.sql",
       "0657_session_archive_purge_retained_evidence.sql",
       "0658_tenancy_quiescence_ignores_stranded_tool_receipts.sql",
+      "0659_sandbox_capture_concurrent_commands.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

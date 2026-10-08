@@ -39,6 +39,26 @@ describe("sandbox checkpoint and deadline metrics", () => {
     expect(metrics).not.toContain("NaN");
     await observability.flush();
   });
+  test("skipped warm checkpoints use bounded backend and reason labels", async () => {
+    const observability = workerObservability();
+    const hooks = runtimeMetricsHooksForObservability(observability);
+    hooks.onWorkspaceCaptureSkipped?.({ backend: "modal", reason: "holder_in_progress" });
+    hooks.onWorkspaceCaptureSkipped?.({ backend: "modal", reason: "holder_in_progress" });
+    hooks.onWorkspaceCaptureSkipped?.({
+      backend: "private-provider",
+      reason: "secret-reason" as never,
+    });
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_workspace_capture_skipped_total\{[^}]*backend="modal"[^}]*reason="holder_in_progress"[^}]*\} 2/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_workspace_capture_skipped_total\{[^}]*backend="unknown"[^}]*reason="unknown"[^}]*\} 1/,
+    );
+    expect(metrics).not.toContain("private-provider");
+    expect(metrics).not.toContain("secret-reason");
+    await observability.flush();
+  });
   test("physical and logical capture timings coexist in one worker registry", async () => {
     // The runtime hook (physical warm capture) and the turn-end logical capture
     // share the worker's Observability. Each histogram keeps its own label set,
