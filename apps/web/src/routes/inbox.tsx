@@ -53,7 +53,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Toolbar } from "@/components/ui/toolbar";
 import { useAppContext } from "@/context";
 import { apiErrorFacts, userErrorText } from "@/lib/api-error";
-import { useInbox } from "@/lib/inbox";
+import { canUsePersonalInbox, useInbox } from "@/lib/inbox";
 import { cn } from "@/lib/utils";
 
 const KIND_WORD: Record<InboxItem["kind"], string> = {
@@ -210,7 +210,11 @@ function InboxSkeleton() {
 export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
-  const inbox = useInbox({ pollMs: 10_000 });
+  const inboxEnabled = canUsePersonalInbox(
+    context.clientConfig.auth.mode,
+    context.authSession !== null,
+  );
+  const inbox = useInbox({ pollMs: 10_000, enabled: inboxEnabled });
   const [scope, setScope] = useState<"all" | "workspace">("all");
   const [busy, setBusy] = useState<Record<string, string>>({});
   const [answering, setAnswering] = useState<InboxItem | null>(null);
@@ -432,7 +436,9 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   };
 
   let body: ReactNode;
-  if (inbox.loading && !inbox.data) {
+  if (!inboxEnabled) {
+    body = <Notice tone="info" title="Inbox requires a signed-in person." />;
+  } else if (inbox.loading && !inbox.data) {
     body = <InboxSkeleton />;
   } else if (inbox.error && !inbox.data) {
     body = (

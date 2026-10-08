@@ -86,6 +86,9 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
       add column content_archived_at timestamptz,
       add column content_archive jsonb,
       add column content_archive_purged_at timestamptz`;
+    // The current turn adapter also selects the nullable M3 authority snapshot
+    // while this fixture is intentionally stopped before that migration.
+    await owner`alter table session_turns add column subscription_authority jsonb`;
     const session = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -209,6 +212,7 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
       drop column content_archived_at,
       drop column content_archive,
       drop column content_archive_purged_at`;
+    await owner`alter table session_turns drop column subscription_authority`;
     // The real runner commits one file at a time: the rolling default may
     // succeed, but activation must refuse a still-connected runtime login.
     await expect(

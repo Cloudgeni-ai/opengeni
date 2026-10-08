@@ -16,6 +16,11 @@ type InboxClient = Pick<OpenGeniClient, "listInbox">;
 
 const EMPTY: InboxState = { data: null, error: null, loading: true };
 
+/** Inbox access is person-bound; API-key and unauthenticated browser clients must not poll it. */
+export function canUsePersonalInbox(authMode: string, hasManagedSession: boolean): boolean {
+  return authMode === "managedSession" && hasManagedSession;
+}
+
 class InboxStore {
   private state: InboxState = EMPTY;
   private listeners = new Set<() => void>();
