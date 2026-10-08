@@ -132,6 +132,7 @@ export const drainSandboxLease = defaultControlActivities.drainSandboxLease;
 export const maintainSandboxLeaseSweep = defaultControlActivities.maintainSandboxLeaseSweep;
 export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;
 export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUploads;
+export const maintainSessionStorage = defaultControlActivities.maintainSessionStorage;
 export const recoverVideoGenerationWorkflows =
   defaultControlActivities.recoverVideoGenerationWorkflows;
 export const maintainRetainedScreenshots = defaultControlActivities.maintainRetainedScreenshots;

@@ -13,6 +13,7 @@ import {
 } from "@opengeni/contracts";
 import { type Database, withRlsContext } from "./database";
 import * as schema from "./schema";
+import { hydrateStoredAttemptToolCatalog } from "./session-content-blobs";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
 import { fromPostgresLosslessJson } from "./lossless-json";
 import { legacyToolActionReview } from "./legacy-tool-action-reviews";
@@ -135,7 +136,10 @@ async function catalogReviewContext(
   try {
     const { request, turn } = record;
     const [stored] = await scoped
-      .select({ catalog: schema.sessionAttemptToolCatalogs.catalog })
+      .select({
+        catalog: schema.sessionAttemptToolCatalogs.catalog,
+        contentRefs: schema.sessionAttemptToolCatalogs.contentRefs,
+      })
       .from(schema.sessionAttemptToolCatalogs)
       .where(
         and(
@@ -152,7 +156,9 @@ async function catalogReviewContext(
       )
       .limit(1);
     if (!stored) return null;
-    const entries = parseVerifiedAttemptToolCatalog(stored.catalog).entries.filter(
+    const entries = parseVerifiedAttemptToolCatalog(
+      await hydrateStoredAttemptToolCatalog(scoped, stored),
+    ).entries.filter(
       (item) =>
         item.identity.serverId === request.serverId && item.identity.toolName === request.toolName,
     );

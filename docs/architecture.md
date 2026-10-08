@@ -2102,6 +2102,8 @@ Goals: [semantics](goals.md).
 
 Filtered session page ownership and its maintenance boundary: [session pagination](session-pagination.md).
 
+Session content blobs, legacy compaction and the idle-session archive: [session storage lifecycle](session-storage-lifecycle.md).
+
 Workspace timers: [implementation and rollout](workspace-pause-timers.md).
 
 ### In-conversation connection setup

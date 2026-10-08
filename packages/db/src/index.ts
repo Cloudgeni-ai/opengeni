@@ -89050,6 +89050,8 @@ export * from "./editable-artifacts";
 export * from "./editable-artifact-materialization";
 export * from "./attempt-tool-catalogs";
 export * from "./model-context-snapshots";
+export * from "./session-content-blobs";
+export * from "./session-content-compaction";
 export * from "./codemode-operations";
 export * from "./codemode-approvals";
 export * from "./tool-action-reviews";

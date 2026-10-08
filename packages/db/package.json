@@ -109,6 +109,7 @@
     "migrate": "bun src/migrate.ts",
     "provision-roles": "bun src/provision-roles.ts",
     "backfill-lifecycle-facts": "bun src/lifecycle-fact-backfill.ts",
+    "compact-session-content": "bun src/session-content-compaction.ts",
     "assert-runtime-posture": "bun src/runtime-posture-cli.ts",
     "typecheck": "tsc --noEmit",
     "build": "bun ../../scripts/build-typescript-package.ts",
