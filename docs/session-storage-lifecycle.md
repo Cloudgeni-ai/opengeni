@@ -181,7 +181,37 @@ finish resumes purging on the next pass. Deleting an archived session queues
 its objects for deletion in the deleting transaction, and the maintenance
 worker removes them, so a deleted session never leaves its bundle behind.
 
-## Planned next stages
+## Folded text deltas
 
-- Fold streamed delta events into compact records once their turn settles, for
-  sessions that stay live.
+A model answer or reasoning stream is stored as one `session_events` row per
+provider fragment, often thousands per turn, next to the completed message.
+Ten minutes after a turn settles, the same maintenance pass folds each run of
+adjacent `agent.message.delta` or `agent.reasoning.delta` rows (one turn, one
+producer, one message and phase, at most 48 KiB of text) into the run's first
+row and removes the others. Always on: it is lossless.
+
+The folded row keeps its id, sequence and timestamps, and its payload is the
+shape live streams already deliver:
+
+```json
+{
+  "text": "the whole run's text",
+  "coalescedUntil": 1234,
+  "messageId": "optional, as on the fragments",
+  "phase": "optional, as on the fragments",
+  "folded": {
+    "v": 1,
+    "parts": [[0, 0, 0, 17, 5, "id-of-fragment-1"], [1, 1520, 1610, 18, 3, "id-of-fragment-2"]]
+  }
+}
+```
+
+Each part is `[sequenceOffset, occurredOffsetMicroseconds,
+createdOffsetMicroseconds, producerSeq, textLengthInUtf16Units, id]`, relative
+to the folded row. `unfoldSessionEventDeltas` in `@opengeni/db` rebuilds the
+original events. Readers already treat a delta with `coalescedUntil` as
+covering the sequences up to it; event streams and compact pages report that
+coverage, and raw pages skip the removed sequences. Only plain fragments fold:
+anything with another payload field, a client event id or a duplicate marker,
+and command or terminal output, stays as it was. Progress is recorded per turn
+in `opengeni_private.session_turn_delta_folds`, so each turn is folded once.
