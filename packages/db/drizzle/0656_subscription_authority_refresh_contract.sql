@@ -824,7 +824,8 @@ BEGIN
       SELECT connection.* INTO target
       FROM subscription_connections connection
       WHERE connection.account_id = p_account_id AND connection.id = p_connection_id
-        AND connection.provider = 'codex' AND connection.status = 'active'
+        AND connection.provider = 'codex' AND connection.kind = 'subscription'
+        AND connection.status = 'active'
       FOR UPDATE;
       IF NOT FOUND THEN
         DELETE FROM opengeni_private.subscription_runtime_capabilities capability
@@ -894,7 +895,7 @@ BEGIN
           version = version + 1,
           updated_at = pg_catalog.clock_timestamp()
       WHERE account_id = p_account_id AND id = p_connection_id
-        AND provider = 'codex' AND status = 'active'
+        AND provider = 'codex' AND kind = 'subscription' AND status = 'active'
         AND refresh_generation = p_expected_refresh_generation
         AND EXISTS (
           SELECT 1 FROM subscription_leases lease

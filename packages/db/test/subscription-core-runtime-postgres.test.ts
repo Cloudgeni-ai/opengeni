@@ -75,7 +75,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-async function fixture() {
+async function fixture(connectionKind: "subscription" | "api_key" = "subscription") {
   const userId = `subscription-runtime-${crypto.randomUUID()}`;
   const access = await ensureManagedAccessForUser(client!.db, {
     userId,
@@ -87,8 +87,10 @@ async function fixture() {
   const subjectId = `user:${userId}`;
   const [connection] = await shared!.admin<{ id: string }[]>`
     insert into subscription_connections (
-      account_id, provider, credential_encrypted, ownership, scope_kind
-    ) values (${accountId}::uuid, 'codex', 'v1:test', 'shared', 'organization')
+      account_id, provider, kind, credential_encrypted, ownership, scope_kind
+    ) values (
+      ${accountId}::uuid, 'codex', ${connectionKind}, 'v1:test', 'shared', 'organization'
+    )
     returning id::text as id`;
   const session = await withSessionRlsActorContext({ subjectId }, () =>
     createSession(client!.db, {
@@ -1732,6 +1734,71 @@ describe("provider-neutral subscription runtime persistence", () => {
         status: "completed",
         value: { persisted: true, unauthorizedScopeWrite: [] },
       });
+    },
+    180_000,
+  );
+
+  test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
+    "Codex refresh persistence refuses API-key connection credentials",
+    async () => {
+      const state = await fixture("api_key");
+      const actor = {
+        subjectId: "service:subscription-refresh-test",
+        initiatingHumanSubjectId: state.subjectId,
+      };
+      const [membership] = await shared!.admin<{ id: string }[]>`
+        select id::text as id from organization_memberships
+        where account_id = ${state.accountId}::uuid and subject_id = ${state.subjectId}
+          and status = 'active' and revoked_at is null limit 1`;
+      const request = {
+        accountId: state.accountId,
+        workspaceId: state.workspaceId,
+        sessionId: state.sessionId,
+        turnId: state.turnId,
+        sessionOwnerSubjectId: state.subjectId,
+        sessionOwnerMembershipId: membership!.id,
+        initiatingHumanSubjectId: state.subjectId,
+        provider: "codex" as const,
+        connectionId: state.connectionId,
+        holderId: `refresh-api-key-${crypto.randomUUID()}`,
+        generation: 1,
+      };
+      const lease = await withSessionRlsActorContext(actor, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: state.accountId, workspaceId: state.workspaceId },
+          (db) => acquireSubscriptionTurnLease(db, { ...request, ttlMs: 60_000 }),
+        ),
+      );
+      expect(lease).toMatchObject({ generation: 1, turnId: state.turnId });
+
+      const result = await withSessionRlsActorContext(actor, () =>
+        withSubscriptionCoreCodexRefreshLock(client!.db, request, async (db) => {
+          const persisted = await persistSubscriptionCodexRefresh(db, {
+            ...request,
+            expectedRefreshGeneration: 1,
+            credentialEncrypted: "v1:dG9rZW4=:c2VjcmV0",
+            expiresAt: new Date(Date.now() + 60 * 60_000),
+            lastRefreshAt: new Date(),
+          });
+          const [capability] = await rawRows<{ allowed: boolean }>(
+            db,
+            sql`select opengeni_private.subscription_codex_refresh_write_allowed(
+              ${state.accountId}::uuid, ${state.workspaceId}::uuid,
+              ${state.connectionId}::uuid
+            ) as allowed`,
+          );
+          return { persisted, refreshCapability: capability?.allowed === true };
+        }),
+      );
+      expect(result).toMatchObject({
+        status: "completed",
+        value: { persisted: false, refreshCapability: false },
+      });
+      const [connection] = await shared!.admin<{ kind: string; credential_encrypted: string }[]>`
+        select kind, credential_encrypted from subscription_connections
+        where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid`;
+      expect(connection).toEqual({ kind: "api_key", credential_encrypted: "v1:test" });
     },
     180_000,
   );
