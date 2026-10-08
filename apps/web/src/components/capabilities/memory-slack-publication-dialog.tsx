@@ -7,9 +7,9 @@ import type {
 } from "@opengeni/sdk";
 import { OpenGeniMemorySlackClient } from "@opengeni/sdk/memory-slack";
 import { Loader2Icon, RefreshCwIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { userErrorText } from "@/lib/api-error";
+import { apiErrorFacts, userErrorText } from "@/lib/api-error";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -147,43 +147,70 @@ function MemorySlackPublicationSettings({
   const [saving, setSaving] = useState(false);
   const [actingId, setActingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The saved installation is no longer connected, so its channel was dropped.
+  const [installationReplaced, setInstallationReplaced] = useState(false);
 
-  const applyConfiguration = useCallback(
-    (next: MemorySlackPublicationConfiguration | null) => {
-      setConfiguration(next);
-      setConnectionId(next?.connectionId ?? installations[0]?.connection.id ?? null);
-      setChannelId(next?.slackChannelId ?? null);
-      setChannelName(next?.slackChannelName ?? null);
-      setPolicy({
-        major: policyForImportance(next, "major"),
-        normal: policyForImportance(next, "normal"),
-        minor: policyForImportance(next, "minor"),
-      });
-    },
-    [installations],
-  );
+  // Read through a ref: a new connections array must never reload the saved
+  // settings over unsaved edits.
+  const installationsRef = useRef(installations);
+  useEffect(() => {
+    installationsRef.current = installations;
+  }, [installations]);
 
-  const refresh = useCallback(
-    async ({ reapply }: { reapply: boolean }) => {
-      setError(null);
-      try {
-        const [config, history] = await Promise.all([
-          client.getMemorySlackPublicationConfiguration(workspaceId),
-          client.listMemorySlackPublications(workspaceId),
-        ]);
-        if (reapply) applyConfiguration(config.current);
-        else setConfiguration(config.current);
-        setPublications(history.publications);
-      } catch (loadError) {
-        setError(`Couldn't load Slack publication settings. ${userErrorText(loadError)}`);
-      } finally {
-        setLoading(false);
-      }
-    },
-    [applyConfiguration, client, workspaceId],
-  );
+  /** The only writer of `configuration`: its revision and on/off state back the next save. */
+  const applyConfiguration = useCallback((next: MemorySlackPublicationConfiguration | null) => {
+    const available = installationsRef.current;
+    const storedConnectionId = next?.connectionId ?? null;
+    const storedAvailable =
+      storedConnectionId !== null &&
+      available.some((option) => option.connection.id === storedConnectionId);
+    const replaced = storedConnectionId !== null && !storedAvailable;
+    setConfiguration(next);
+    setInstallationReplaced(replaced);
+    setConnectionId(storedAvailable ? storedConnectionId : (available[0]?.connection.id ?? null));
+    setChannelId(replaced ? null : (next?.slackChannelId ?? null));
+    setChannelName(replaced ? null : (next?.slackChannelName ?? null));
+    setPolicy({
+      major: policyForImportance(next, "major"),
+      normal: policyForImportance(next, "normal"),
+      minor: policyForImportance(next, "minor"),
+    });
+  }, []);
 
-  useEffect(() => void refresh({ reapply: true }), [refresh]);
+  const loadSettings = useCallback(async () => {
+    setError(null);
+    try {
+      const [config, history] = await Promise.all([
+        client.getMemorySlackPublicationConfiguration(workspaceId),
+        client.listMemorySlackPublications(workspaceId),
+      ]);
+      applyConfiguration(config.current);
+      setPublications(history.publications);
+    } catch (loadError) {
+      setError(`Couldn't load Slack publication settings. ${userErrorText(loadError)}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [applyConfiguration, client, workspaceId]);
+
+  /** Re-reads only the history, so unsaved edits and the saved revision stay as they are. */
+  const loadHistory = useCallback(async () => {
+    try {
+      const history = await client.listMemorySlackPublications(workspaceId);
+      setPublications(history.publications);
+    } catch (loadError) {
+      toast.error("Couldn't refresh recent posts", { description: userErrorText(loadError) });
+    }
+  }, [client, workspaceId]);
+
+  useEffect(() => void loadSettings(), [loadSettings]);
+
+  // Installations that arrive after the settings loaded still get a default.
+  useEffect(() => {
+    if (!loading && connectionId === null && installations.length > 0) {
+      setConnectionId(installations[0]!.connection.id);
+    }
+  }, [connectionId, installations, loading]);
 
   useEffect(() => {
     if (!canManage || !connectionId) {
@@ -251,9 +278,17 @@ function MemorySlackPublicationSettings({
       );
       onClose();
     } catch (saveError) {
-      toast.error("Could not save Slack publication settings", {
-        description: userErrorText(saveError),
-      });
+      if (apiErrorFacts(saveError).status === 409) {
+        // Someone else saved first: show their settings rather than failing every retry.
+        toast.error("These settings changed while you were editing", {
+          description: "The latest settings are shown. Make your change again and save.",
+        });
+        await loadSettings();
+      } else {
+        toast.error("Could not save Slack publication settings", {
+          description: userErrorText(saveError),
+        });
+      }
     } finally {
       setSaving(false);
     }
@@ -274,8 +309,7 @@ function MemorySlackPublicationSettings({
         description: userErrorText(actionError),
       });
     } finally {
-      // Only the history: a re-read must not discard unsaved edits above it.
-      await refresh({ reapply: false });
+      await loadHistory();
       setActingId(null);
     }
   }
@@ -319,6 +353,10 @@ function MemorySlackPublicationSettings({
         {installations.length === 0 ? (
           <Notice tone="waiting" className="mb-4">
             Install or reconnect the Opengeni Slack bot first.
+          </Notice>
+        ) : installationReplaced ? (
+          <Notice tone="waiting" className="mb-4">
+            The saved Slack installation is no longer connected. Choose a channel again.
           </Notice>
         ) : null}
 

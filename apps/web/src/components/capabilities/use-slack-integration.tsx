@@ -285,7 +285,10 @@ export function useSlackIntegration({
   const preview = localConnectedSlackPreview(window.location.search, workspaceId);
   const readOnly = preview !== null;
   const loaded = connectionsLoaded || readOnly;
-  const botConnections = openGeniSlackBotConnections(connections ?? []);
+  const botConnections = useMemo(
+    () => openGeniSlackBotConnections(connections ?? []),
+    [connections],
+  );
   const botConnection = preview?.bot ?? preferredOpenGeniSlackBotConnection(botConnections);
   const botMetadata = botConnection ? openGeniSlackBotUiMetadata(botConnection) : null;
   const binding = botConnection

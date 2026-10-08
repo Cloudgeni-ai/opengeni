@@ -16,6 +16,18 @@ const connectionId = "22222222-2222-4222-8222-222222222222";
 type Request = { method: string; path: string; body: unknown };
 const requests: Request[] = [];
 let currentConfiguration: MemorySlackPublicationConfiguration | null = null;
+let publications: unknown[] = [];
+let putError: Error | null = null;
+/** Runs when a publication action succeeds, e.g. to simulate another admin saving meanwhile. */
+let onAction: (() => void) | null = null;
+
+function resetServer(configuration: MemorySlackPublicationConfiguration | null) {
+  requests.length = 0;
+  currentConfiguration = configuration;
+  publications = [];
+  putError = null;
+  onAction = null;
+}
 
 const client = {
   requestJson: async (method: string, path: string, body?: unknown) => {
@@ -33,10 +45,15 @@ const client = {
       return { current: currentConfiguration, history: [] };
     }
     if (path.endsWith("/memory-slack-publications/configuration") && method === "PUT") {
+      if (putError) throw putError;
       return { ...currentConfiguration, ...(body as object), revision: 9 };
     }
+    if (path.endsWith("/action") && method === "POST") {
+      onAction?.();
+      return publications[0];
+    }
     if (path.endsWith("/memory-slack-publications")) {
-      return { publications: [], nextCursor: null };
+      return { publications, nextCursor: null };
     }
     throw new Error(`Unexpected request: ${method} ${path}`);
   },
@@ -97,30 +114,34 @@ async function settle() {
   });
 }
 
-async function render(props: { enableOnSave?: boolean }) {
+async function render(props: { enableOnSave?: boolean; connections?: ConnectionMetadata[] }) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   const saved: MemorySlackPublicationConfiguration[] = [];
   const openChanges: boolean[] = [];
-  await act(async () => {
-    root.render(
-      <MemorySlackPublicationDialog
-        workspaceId={workspaceId}
-        connections={[botConnection]}
-        canManage
-        open
-        enableOnSave={props.enableOnSave}
-        onOpenChange={(open) => openChanges.push(open)}
-        onSaved={(configuration) => saved.push(configuration)}
-      />,
-    );
-  });
-  await settle();
-  await settle();
+  const draw = async (connections: ConnectionMetadata[]) => {
+    await act(async () => {
+      root.render(
+        <MemorySlackPublicationDialog
+          workspaceId={workspaceId}
+          connections={connections}
+          canManage
+          open
+          enableOnSave={props.enableOnSave}
+          onOpenChange={(open) => openChanges.push(open)}
+          onSaved={(configuration) => saved.push(configuration)}
+        />,
+      );
+    });
+    await settle();
+    await settle();
+  };
+  await draw(props.connections ?? [botConnection]);
   return {
     saved,
     openChanges,
+    rerender: draw,
     unmount: async () => {
       await act(async () => root.unmount());
       container.remove();
@@ -152,10 +173,29 @@ function selectedPolicy(label: string): string | undefined {
   return policyGroup(label).querySelector('[data-state="on"]')?.textContent?.trim();
 }
 
+async function choosePolicy(label: string, option: string) {
+  const target = [...policyGroup(label).querySelectorAll("button")].find(
+    (candidate) => candidate.textContent?.trim() === option,
+  );
+  if (!target) throw new Error(`policy option ${label} ${option} not found`);
+  await act(async () => {
+    target.click();
+  });
+}
+
+function puts(): Request[] {
+  return requests.filter((request) => request.method === "PUT");
+}
+
+function configurationReads(): number {
+  return requests.filter(
+    (request) => request.method === "GET" && request.path.endsWith("/configuration"),
+  ).length;
+}
+
 describe("Slack decision publication dialog", () => {
   test("keeps the copy short and shows one stacked channel picker", async () => {
-    requests.length = 0;
-    currentConfiguration = null;
+    resetServer(null);
     const rendered = await render({ enableOnSave: true });
     try {
       const text = dialog().textContent ?? "";
@@ -178,8 +218,7 @@ describe("Slack decision publication dialog", () => {
   });
 
   test("reads saved policies exactly and keeps publishing off when saved from Configure", async () => {
-    requests.length = 0;
-    currentConfiguration = { ...savedConfiguration };
+    resetServer({ ...savedConfiguration });
     const rendered = await render({});
     try {
       expect(selectedPolicy("Major")).toBe("Automatic");
@@ -218,8 +257,7 @@ describe("Slack decision publication dialog", () => {
   });
 
   test("an enable attempt turns publishing on when saved", async () => {
-    requests.length = 0;
-    currentConfiguration = { ...savedConfiguration };
+    resetServer({ ...savedConfiguration });
     const rendered = await render({ enableOnSave: true });
     try {
       await act(async () => {
@@ -228,6 +266,127 @@ describe("Slack decision publication dialog", () => {
       await settle();
       const put = requests.find((request) => request.method === "PUT");
       expect(put?.body).toMatchObject({ enabled: true });
+    } finally {
+      await rendered.unmount();
+    }
+  });
+  test("a saved installation that is no longer connected falls back and asks for a channel again", async () => {
+    resetServer({
+      ...savedConfiguration,
+      enabled: true,
+      connectionId: "99999999-9999-4999-8999-999999999999",
+    });
+    const rendered = await render({});
+    try {
+      const text = dialog().textContent ?? "";
+      expect(text).toContain("no longer connected");
+      expect(text).not.toContain("#engineering-decisions");
+      // Channels load for the connected installation instead of the dead one.
+      const channelReads = requests.filter((request) => request.path.includes("/channels"));
+      expect(channelReads.at(-1)?.path).toContain(`connectionId=${connectionId}`);
+      // Publishing is on, so it can't be saved without a channel.
+      expect(button("Save").disabled).toBe(true);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("approving a post keeps unsaved edits and the revision they were made against", async () => {
+    resetServer({ ...savedConfiguration });
+    publications = [
+      {
+        id: "55555555-5555-4555-8555-555555555555",
+        workspaceId,
+        configurationRevision: 3,
+        connectionId,
+        slackTeamId: "T1",
+        slackChannelId: "C2",
+        sourceType: "workspace_memory",
+        sourceId: "s",
+        sourceVersion: null,
+        importance: "normal",
+        deliveryMode: "review",
+        state: "review_pending",
+        summary: "Staging deploys wait for the canary receipt.",
+        sourceLabel: "Knowledge",
+        authoritativePath: null,
+        initiatorKind: "agent",
+        initiatorSubjectId: "a",
+        initiatingHumanSubjectId: null,
+        attemptCount: 0,
+        retryAt: null,
+        lastErrorCode: null,
+        slackMessageTimestamp: null,
+        createdAt: "2026-10-08T08:00:00.000Z",
+        updatedAt: "2026-10-08T08:00:00.000Z",
+        receipts: [],
+      },
+    ];
+    // Another admin turns publishing on and saves while this dialog is open.
+    onAction = () => {
+      currentConfiguration = { ...savedConfiguration, revision: 7, enabled: true };
+    };
+    const rendered = await render({});
+    try {
+      await choosePolicy("Minor", "Review first");
+      await act(async () => {
+        button("Approve").click();
+      });
+      await settle();
+      expect(selectedPolicy("Minor")).toBe("Review first");
+      expect(configurationReads()).toBe(1);
+
+      await act(async () => {
+        button("Save").click();
+      });
+      await settle();
+      expect(puts()[0]?.body).toMatchObject({
+        expectedRevision: 3,
+        enabled: false,
+        reviewImportances: ["normal", "minor"],
+      });
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a new connections array does not reload the settings over unsaved edits", async () => {
+    resetServer({ ...savedConfiguration });
+    const rendered = await render({});
+    try {
+      await choosePolicy("Major", "Off");
+      await rendered.rerender([{ ...botConnection }]);
+      await rendered.rerender([{ ...botConnection }]);
+      expect(selectedPolicy("Major")).toBe("Off");
+      expect(configurationReads()).toBe(1);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a revision conflict shows the latest settings so the next save can succeed", async () => {
+    resetServer({ ...savedConfiguration });
+    putError = Object.assign(new Error("OpenGeni API 409: configuration revision conflict"), {
+      status: 409,
+    });
+    const rendered = await render({});
+    try {
+      await choosePolicy("Major", "Off");
+      currentConfiguration = { ...savedConfiguration, revision: 8 };
+      await act(async () => {
+        button("Save").click();
+      });
+      await settle();
+      expect(rendered.openChanges).toEqual([]);
+      expect(configurationReads()).toBe(2);
+      expect(selectedPolicy("Major")).toBe("Automatic");
+
+      putError = null;
+      await act(async () => {
+        button("Save").click();
+      });
+      await settle();
+      expect(puts().at(-1)?.body).toMatchObject({ expectedRevision: 8 });
     } finally {
       await rendered.unmount();
     }
