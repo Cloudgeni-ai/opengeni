@@ -82,6 +82,38 @@ test("live retry status names the model, provider condition and attempt", () => 
   );
 });
 
+test("a turn parked behind a sandbox rotation says why it is waiting", () => {
+  const facts = parseProviderRecovery({
+    reason: "sandbox_deadline_rotation",
+    sandboxGroupId: "group",
+    leaseEpoch: 5,
+    rotationReason: "provider_deadline",
+    transitionReason: "rotation_in_progress",
+  });
+  expect(facts).toMatchObject({ sandboxWait: true, modelRoute: false });
+  expect(providerRecoveryRetryingText(facts!)).toBe(
+    "The sandbox reached its maximum lifetime, so Opengeni is saving the workspace and moving it to a fresh sandbox…",
+  );
+  expect(
+    providerRecoveryRetryingText(
+      parseProviderRecovery({ reason: "sandbox_lifecycle_transition" })!,
+    ),
+  ).toBe("Opengeni is saving the sandbox before it can be used again…");
+});
+
+test("the sandbox wait notice promises no retry budget", async () => {
+  const facts = parseProviderRecovery({ reason: "sandbox_deadline_rotation" });
+  const view = await renderComponent(<ProviderRecoveryNotice recovery={facts} />);
+  try {
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("moving it to a fresh sandbox");
+    expect(text).toContain("runs as soon as the sandbox is ready");
+    expect(text).not.toContain("retrying");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("other recovery reasons are never presented as provider outages", () => {
   for (const payload of [
     { reason: "human_retry", failureEventId: "x" },

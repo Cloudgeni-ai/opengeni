@@ -14,6 +14,9 @@ export type ProviderRecoveryNoticeProps = {
 export const PROVIDER_RECOVERY_NOTICE_DETAIL =
   "Your message is saved. Opengeni keeps retrying automatically for a few minutes.";
 
+export const SANDBOX_WAIT_NOTICE_DETAIL =
+  "Your message is saved and runs as soon as the sandbox is ready. This usually takes a few minutes.";
+
 /**
  * One calm, live status line while the same turn waits for an automatic retry
  * after a transient provider failure. It replaces itself on every attempt
@@ -25,7 +28,12 @@ export function ProviderRecoveryNotice({
   className,
 }: ProviderRecoveryNoticeProps) {
   if (!recovery) return null;
-  const secondary = detail === undefined ? PROVIDER_RECOVERY_NOTICE_DETAIL : detail;
+  const secondary =
+    detail === undefined
+      ? recovery.sandboxWait
+        ? SANDBOX_WAIT_NOTICE_DETAIL
+        : PROVIDER_RECOVERY_NOTICE_DETAIL
+      : detail;
   return (
     <div
       className={cn("flex items-start gap-2 text-og-sm text-og-fg-muted", className)}

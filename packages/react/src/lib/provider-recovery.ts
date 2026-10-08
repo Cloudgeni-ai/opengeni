@@ -26,6 +26,9 @@ export type ProviderRecoveryFacts = {
   maxAttempts: number | null;
   /** True when the model route itself is affected, so another model may help. */
   modelRoute: boolean;
+  /** True while the turn waits for its sandbox to be saved and replaced. It
+   * has no retry budget: it resumes as soon as the successor box is ready. */
+  sandboxWait?: boolean;
 };
 
 const MODEL_CODES: ReadonlySet<string> = new Set([
@@ -35,8 +38,17 @@ const MODEL_CODES: ReadonlySet<string> = new Set([
   "post_compaction_continuation_empty",
 ]);
 
+/** A recovering turn parked behind a sandbox rotation (worker
+ * `failure-settlement.ts`). Before OPE-743 this showed only "Recovering" with
+ * no reason, for up to an hour in staging session 5040c525. */
+const SANDBOX_WAIT_CODES: ReadonlySet<string> = new Set([
+  "sandbox_deadline_rotation",
+  "sandbox_lifecycle_transition",
+]);
+
 const RECOVERY_CODES: ReadonlySet<string> = new Set([
   ...MODEL_CODES,
+  ...SANDBOX_WAIT_CODES,
   "upstream_connectivity_unavailable",
   "mcp_transport_timeout",
   "mcp_transport_unavailable",
@@ -100,6 +112,7 @@ export function parseProviderRecovery(payload: unknown): ProviderRecoveryFacts |
     attempt,
     maxAttempts: count(record.maxProviderRecoveryCount) ?? DEFAULT_MAX_ATTEMPTS,
     modelRoute: MODEL_CODES.has(code),
+    ...(SANDBOX_WAIT_CODES.has(code) ? { sandboxWait: true } : {}),
   };
 }
 
@@ -130,6 +143,10 @@ export function providerRecoverySubject(facts: ProviderRecoveryFacts): string {
       return "The sandbox isn't ready yet";
     case "turn_execution_policy_definition_mismatch":
       return "Opengeni is applying a configuration update";
+    case "sandbox_deadline_rotation":
+      return "The sandbox reached its maximum lifetime, so Opengeni is saving the workspace and moving it to a fresh sandbox";
+    case "sandbox_lifecycle_transition":
+      return "Opengeni is saving the sandbox before it can be used again";
     default:
       return "A service this turn depends on is temporarily unavailable";
   }
@@ -137,6 +154,7 @@ export function providerRecoverySubject(facts: ProviderRecoveryFacts): string {
 
 /** Live status while the same turn waits for its next automatic retry. */
 export function providerRecoveryRetryingText(facts: ProviderRecoveryFacts): string {
+  if (facts.sandboxWait) return `${providerRecoverySubject(facts)}…`;
   const progress =
     facts.attempt !== null && facts.maxAttempts !== null
       ? ` (attempt ${Math.min(facts.attempt, facts.maxAttempts)} of ${facts.maxAttempts})`

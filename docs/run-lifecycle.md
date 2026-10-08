@@ -1119,6 +1119,13 @@ the live `ProviderRecoveryNotice` above the composer ("… — retrying (attempt
 of 5)…", shown only while the active turn is `recovering`, never as timeline
 rows) and for failure text, including legacy events without labels. Two indexed latest-event reads select this
 projection; detail polling never aggregates the session's lifetime event log.
+The same notice explains a turn parked behind a sandbox rotation (reason
+`sandbox_deadline_rotation` or `sandbox_lifecycle_transition` on
+`turn.recovery.requested`): "The sandbox reached its maximum lifetime, so
+Opengeni is saving the workspace and moving it to a fresh sandbox…" with "Your
+message is saved and runs as soon as the sandbox is ready." It has no attempt
+counter because the wait has no retry budget; the turn resumes on the lifecycle
+wake (OPE-743; before, the session showed only "Recovering" for up to an hour).
 
 **Durable recovery observability.** The control worker reads one content-free,
 cross-workspace aggregate per minute,
