@@ -1408,7 +1408,12 @@ describe("first-party MCP tool visibility policy", () => {
       expect(request?.inputSchema).toMatchObject({
         required: expect.arrayContaining(["capabilityId", "rationale"]),
       });
-      expect(custom?.description).toContain("cannot add, enable, or contact");
+      expect(custom?.description).toContain(
+        "Posting this card does not contact or connect the server",
+      );
+      expect(custom?.description).toContain(
+        "delegated connections:read, connections:write and capabilities:manage",
+      );
       expect(custom?.inputSchema).toMatchObject({
         required: expect.arrayContaining(["name", "endpointUrl", "rationale"]),
       });

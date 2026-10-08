@@ -78,6 +78,10 @@ export const embeddingMigrationTail = [
   ...allowanceMigrationTail,
   // Extends the attachment helper from withheld 0499; replay after it.
   "0560_archived_session_imports.sql",
+  // Archive routines compile against the withheld import columns and guards.
+  "0649_session_content_archive.sql",
+  "0650_session_archive_activity.sql",
+  "0651_session_event_delta_folding.sql",
   // Patches the scheduled producer fence after its withheld prerequisites.
   "0561_scheduled_session_agent_identity.sql",
   // Patches the reaper installed by withheld 0345/0388/0391/0397.
