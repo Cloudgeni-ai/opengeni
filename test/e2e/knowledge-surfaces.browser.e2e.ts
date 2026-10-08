@@ -186,6 +186,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
   test("ships responsive, accessible variable sets, files, and unified Knowledge", async () => {
     const bootstrap = await configuredContext(
       browser,
+      apiBaseUrl,
       {
         viewport: { width: 1280, height: 900 },
         extraHTTPHeaders: ownerHeaders,
@@ -243,6 +244,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     for (const matrixCase of matrix) {
       const context = await configuredContext(
         browser,
+        apiBaseUrl,
         {
           viewport: matrixCase.viewport,
           isMobile: matrixCase.isMobile,
@@ -305,6 +307,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
   test("keeps a long schedules list inside the workspace scroll owner", async () => {
     const desktop = await configuredContext(
       browser,
+      apiBaseUrl,
       {
         viewport: { width: 1280, height: 900 },
         extraHTTPHeaders: ownerHeaders,
@@ -326,6 +329,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
 
     const constrained = await configuredContext(
       browser,
+      apiBaseUrl,
       {
         viewport: { width: 375, height: 720 },
         extraHTTPHeaders: ownerHeaders,
@@ -344,6 +348,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
   test("scheduled learning changes remain drafts until Save and Cancel discards them", async () => {
     const context = await configuredContext(
       browser,
+      apiBaseUrl,
       { viewport: { width: 1280, height: 900 }, extraHTTPHeaders: ownerHeaders },
       false,
     );
@@ -455,6 +460,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
   test("keeps the Agent Knowledge overview truthful across responsive breakpoints", async () => {
     const bootstrap = await configuredContext(
       browser,
+      apiBaseUrl,
       {
         viewport: { width: 1280, height: 900 },
         extraHTTPHeaders: ownerHeaders,
@@ -480,6 +486,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     for (const matrixCase of matrix) {
       const context = await configuredContext(
         browser,
+        apiBaseUrl,
         {
           viewport: matrixCase.viewport,
           isMobile: matrixCase.label === "desktop" ? undefined : true,
@@ -532,6 +539,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
   test("browses nested collections as pages, opens entries and searches across collections", async () => {
     const context = await configuredContext(
       browser,
+      apiBaseUrl,
       { viewport: { width: 1280, height: 900 }, extraHTTPHeaders: ownerHeaders },
       browserTestSettings.sandboxSelfhostedEnabled,
     );
@@ -721,6 +729,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     const expectedMissingKnowledge = new Set<string>();
     const context = await configuredContext(
       browser,
+      apiBaseUrl,
       { viewport: { width: 1280, height: 900 }, extraHTTPHeaders: ownerHeaders },
       false,
       expectedMissingKnowledge,
@@ -1249,11 +1258,21 @@ const diagnostics = new WeakMap<BrowserContext, string[]>();
 
 async function configuredContext(
   browser: Browser,
+  apiBaseUrl: string,
   options: BrowserContextOptions,
   sandboxSelfhostedEnabled: boolean,
   expectedMissingKnowledge: ReadonlySet<string> = new Set(),
 ): Promise<BrowserContext> {
   const context = await browser.newContext(options);
+  // This local-mode fixture exercises real Knowledge APIs and PostgreSQL.
+  // Personal Inbox requires a managed browser identity and is outside its scope.
+  await context.route(`${apiBaseUrl}/v1/inbox`, async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    return route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ items: [], needsYouCount: 0, unreadCount: 0 }),
+    });
+  });
   context.setDefaultTimeout(15_000);
   const problems: string[] = [];
   const expectedMachines404Urls = new Set<string>();

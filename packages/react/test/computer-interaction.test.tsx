@@ -414,6 +414,60 @@ describe("ComputerSession React resources", () => {
     },
   );
 
+  test("a disappeared window does not redirect observation or input to another target", async () => {
+    const chosen = target("window-1");
+    const unrelated = target("window-2");
+    let targets = [chosen, unrelated];
+    const observed: string[] = [];
+    const requests: ComputerActionRequest[] = [];
+    const client = fakeClient({
+      getComputerSession: async () => computerSession(),
+      listComputerTargets: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets,
+      }),
+      observeComputerTarget: async (_workspaceId, _computerSessionId, targetId) => {
+        observed.push(targetId);
+        return observation(targets.find((candidate) => candidate.id === targetId)!);
+      },
+      actInComputer: async (_workspaceId, _computerSessionId, request) => {
+        requests.push(request);
+        return receipt(observation(unrelated), request.operationId);
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComputerSession({
+          client,
+          workspaceId: WORKSPACE_ID,
+          computerSessionId: COMPUTER_SESSION_ID,
+          pollIntervalMs: 60_000,
+        }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      expect(hook.result.current.selectedTarget?.id).toBe(chosen.id);
+      targets = [unrelated];
+      for (let i = 0; i < 2; i++) {
+        await actRun(() => hook.result.current.refresh());
+        expect(hook.result.current.selectedTarget).toBeNull();
+        expect(hook.result.current.observation).toBeNull();
+      }
+      await expect(
+        hook.result.current.act({ type: "keyboard", action: "type", value: "fixture" }),
+      ).rejects.toThrow();
+      expect(requests).toEqual([]);
+      expect(observed).toEqual([chosen.id]);
+      await actRun(() => hook.result.current.selectTarget(unrelated.id));
+      expect(hook.result.current.selectedTarget?.id).toBe(unrelated.id);
+      expect(observed).toEqual([chosen.id, unrelated.id]);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
   test("keeps target selection local and fences semantic and pixel actions exactly", async () => {
     const windowTarget = target();
     const screenTarget = target("screen-1", "screen");
@@ -584,6 +638,9 @@ describe("ComputerSession React resources", () => {
         });
         targets = [windowTarget, screenTarget];
         await actRun(() => hook.result.current.refresh());
+        expect(hook.result.current.selectedTarget).toBeNull();
+        expect(hook.result.current.observation).toBeNull();
+        await actRun(() => hook.result.current.selectTarget(screenTarget.id));
         expect(hook.result.current.selectedTarget?.id).toBe(screenTarget.id);
         expect(requests).toHaveLength(1);
       } finally {

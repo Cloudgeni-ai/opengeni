@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { CUA_DESKTOP_TOOLS } from "@opengeni/contracts";
+import { ComputerInteractionController } from "@opengeni/interaction";
 import type { ToolResult } from "@trycua/cua-driver";
 import { CuaComputerBackend } from "../src/cua/backend";
+import { ComputerDriver } from "../src/computer-driver";
 import { callDesktop, type CuaDesktopRuntime } from "../src/cua/wire";
 import type {
   ComputerBackendActionCommand,
@@ -19,6 +22,7 @@ function result(data: Record<string, unknown>, isError = false): ToolResult {
 }
 
 class Fixture implements CuaDesktopRuntime {
+  listToolsJson?: () => Promise<string>;
   readonly calls: Array<{ name: string; args: Record<string, unknown> }> = [];
   snapshot = 0;
   captures = 0;
@@ -155,6 +159,93 @@ function command(observation: ComputerBackendObservation): ComputerBackendAction
 }
 
 describe("CUA desktop boundary", () => {
+  test("revives idle owned sessions and retires expired viewer controls before input", async () => {
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    const expired = new Set<string>();
+    let refusedSession: string | null = null;
+    fixture.listToolsJson = async () => JSON.stringify({ tools: CUA_DESKTOP_TOOLS });
+    fixture.callTool = async (name, json) => {
+      const args = JSON.parse(json);
+      if (name === "start_session") {
+        fixture.calls.push({ name, args });
+        if (args.session === refusedSession)
+          return result({ status: "refused", refusal: { code: "session_unavailable" } }, true);
+        return result({ active: true, revived: expired.delete(args.session) });
+      }
+      if (expired.has(args.session)) throw new Error("expired session reached dispatch");
+      if (name === "get_cursor_position") {
+        fixture.calls.push({ name, args });
+        return {
+          ...result({ x: 1, y: 2 }),
+          rawJson: JSON.stringify({ content: [], structuredContent: { x: 1, y: 2 } }),
+        };
+      }
+      return original(name, json);
+    };
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      const observation = await backend.observe(target.id);
+      const frame = await backend.capture(target.id);
+      const viewerSession = fixture.calls.find((call) => call.name === "start_session")!.args
+        .session as string;
+      expired.add(viewerSession);
+      await expect(backend.dispatch(command(observation))).rejects.toMatchObject({
+        code: "observation_stale",
+        dispatched: false,
+      });
+      await expect(
+        backend.dispatch({
+          ...command(observation),
+          expectedFrameId: frame.frameId,
+          action: { type: "pointer", action: "click", frameId: frame.frameId, x: 10, y: 10 },
+        }),
+      ).rejects.toMatchObject({ code: "frame_stale", dispatched: false });
+      expect(fixture.calls.filter((call) => call.name === "click")).toHaveLength(0);
+      const refreshed = await backend.observe(target.id);
+      expect(refreshed.target.targetGeneration).toBe(target.targetGeneration);
+      await backend.dispatch(command(refreshed));
+      expect(fixture.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      const native = {
+        operationId: crypto.randomUUID(),
+        tool: "get_cursor_position",
+        arguments: {},
+      };
+      expect((await backend.callNative(native)).outcome).toBe("completed");
+      const nativeSession = fixture.calls.find((call) => call.name === "get_cursor_position")!.args
+        .session as string;
+      expired.add(nativeSession);
+      expect(
+        (await backend.callNative({ ...native, operationId: crypto.randomUUID() })).outcome,
+      ).toBe("completed");
+      expect(fixture.calls.filter((call) => call.name === "get_cursor_position")).toHaveLength(2);
+      refusedSession = nativeSession;
+      const computerSessionId = crypto.randomUUID();
+      const controllerGeneration = "controller-fixture";
+      const controller = new ComputerInteractionController({
+        computerSessionId,
+        controllerGeneration,
+        driver: new ComputerDriver({ computerSessionId, controllerGeneration, client: backend }),
+      });
+      const rejected = await controller.runNative({
+        ...native,
+        operationId: crypto.randomUUID(),
+        protocolVersion: 1,
+        computerSessionId,
+        controllerGeneration,
+        targetId: null,
+        actor: { kind: "agent", subjectId: "agent:fixture" },
+      });
+      expect(rejected.state).toBe("failed");
+      expect(rejected.error?.code).toBe("driver_failed");
+      expect(fixture.calls.filter((call) => call.name === "get_cursor_position")).toHaveLength(2);
+    } finally {
+      refusedSession = null;
+      await backend.close();
+    }
+  });
+
   test("rejects one-pair continuation before any CUA discovery or input delivery", async () => {
     const fixture = new Fixture();
     const backend = await CuaComputerBackend.open(fixture, "macos");
@@ -183,7 +274,9 @@ describe("CUA desktop boundary", () => {
         code: "unsupported",
         dispatched: false,
       });
-      expect(fixture.calls).toHaveLength(before);
+      expect(fixture.calls.slice(before).filter((call) => call.name !== "start_session")).toEqual(
+        [],
+      );
     } finally {
       await backend.close();
     }

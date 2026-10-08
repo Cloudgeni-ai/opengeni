@@ -118,6 +118,7 @@ export const CLIENT_WEB_VITAL_MAX_VALUE: Readonly<Record<ClientWebVitalMetric, n
  */
 export const CLIENT_PAGES = [
   "sessions",
+  "inbox",
   "priority",
   "plugins",
   "capabilities",
@@ -149,7 +150,6 @@ export const CLIENT_PAGES = [
   "setup-account",
   "account-auth",
   "personal-security",
-  "read-only-chats",
   "other",
 ] as const;
 export type ClientPage = (typeof CLIENT_PAGES)[number];
