@@ -94,7 +94,13 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
       ADD COLUMN imported_archive_imported_at timestamptz,
       ADD COLUMN imported_archive_request_hash text,
       ADD COLUMN imported_archive_subject_id text,
-      ADD COLUMN imported_archive_next_offset integer`;
+      ADD COLUMN imported_archive_next_offset integer,
+      ADD COLUMN keep_live boolean NOT NULL DEFAULT false,
+      ADD COLUMN content_archive_state text,
+      ADD COLUMN content_archive_started_at timestamptz,
+      ADD COLUMN content_archived_at timestamptz,
+      ADD COLUMN content_archive jsonb,
+      ADD COLUMN content_archive_purged_at timestamptz`;
     // Current event writers read this additive field while seeding legacy rows.
     // Remove it before replay so the actual attention backfill still runs.
     await owner`ALTER TABLE session_event_cursors
@@ -267,7 +273,13 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
       DROP COLUMN imported_archive_imported_at,
       DROP COLUMN imported_archive_request_hash,
       DROP COLUMN imported_archive_subject_id,
-      DROP COLUMN imported_archive_next_offset`;
+      DROP COLUMN imported_archive_next_offset,
+      DROP COLUMN keep_live,
+      DROP COLUMN content_archive_state,
+      DROP COLUMN content_archive_started_at,
+      DROP COLUMN content_archived_at,
+      DROP COLUMN content_archive,
+      DROP COLUMN content_archive_purged_at`;
     await owner`ALTER TABLE session_event_cursors DROP COLUMN last_meaningful_sequence`;
     // Assert the attribution repair's literal policy invariance before the
     // separately governed 0591 planner optimization. This fixture already
