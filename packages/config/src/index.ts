@@ -722,6 +722,10 @@ const SettingsSchema = z.object({
     .positive()
     .max(25 * 1024 * 1024)
     .default(8 * 1024 * 1024),
+  /** Move idle sessions' bulky content to object storage (docs/session-storage-lifecycle.md). */
+  sessionArchiveEnabled: EnvBoolean.default(false),
+  /** Days without a new turn before a session becomes eligible for the archive. */
+  sessionArchiveIdleDays: z.coerce.number().int().min(1).max(3650).default(30),
   voiceInputResumableRetentionSeconds: z.coerce
     .number()
     .int()
@@ -4506,6 +4510,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     voiceInputResumableMaxChunkSizeBytes: optional(
       "OPENGENI_VOICE_INPUT_RESUMABLE_MAX_CHUNK_SIZE_BYTES",
     ),
+    sessionArchiveEnabled: optional("OPENGENI_SESSION_ARCHIVE_ENABLED"),
+    sessionArchiveIdleDays: optional("OPENGENI_SESSION_ARCHIVE_IDLE_DAYS"),
     voiceInputResumableRetentionSeconds: optional(
       "OPENGENI_VOICE_INPUT_RESUMABLE_RETENTION_SECONDS",
     ),

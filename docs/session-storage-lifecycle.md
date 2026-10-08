@@ -67,9 +67,108 @@ backlog is drained, for example with `pg_repack`, which rewrites online and
 needs free disk roughly equal to the compacted table size. `VACUUM FULL` also
 works but holds an exclusive lock for the duration.
 
+## Idle-session archive
+
+Off by default. Enable it per deployment:
+
+| Setting | Helm value | Default |
+| --- | --- | --- |
+| `OPENGENI_SESSION_ARCHIVE_ENABLED` | `sessionArchive.enabled` | `false` |
+| `OPENGENI_SESSION_ARCHIVE_IDLE_DAYS` | `sessionArchive.idleDays` | `30` |
+
+The archive requires the deployment's object storage. The same maintenance
+Schedule runs it after content compaction.
+
+### What qualifies
+
+Each session is judged on its own, not by its tree. A session qualifies when
+all of these hold for the idle period:
+
+- no turn was created or updated, the session row did not change, and the
+  session is `idle`, `failed` or `cancelled` with no active turn;
+- it is not marked keep-live, is not an imported archive, and has no session
+  wait;
+- it has no pending human input request, active goal, pending machine input or
+  inbound outbox delivery, running background command, scheduled task that
+  reuses it, or site-authentication maintenance binding;
+- no direct child is still active or recently active.
+
+### What happens
+
+1. Under the session's write lock the worker re-checks eligibility and sets
+   `content_archive_state = 'archiving'`, recording the planned object keys.
+   From that moment the database refuses new turns, attempts, history, goals,
+   workflow wakes and machine inputs for the session (`SESSION_ARCHIVED_READ_ONLY`),
+   and the API refuses sends and steers with 409. A message cannot race the
+   archive.
+2. The worker streams two zstd-compressed JSON-lines objects to a temporary
+   file and uploads them through the bounded object-storage path, which reads
+   every byte back before success:
+   - `bundle.jsonl.zst`: a header with the exact `sessions` row, then every row
+     of the session's turns, attempts, goals, goal revisions, all events,
+     history items, machine inputs, realtime entries, code-mode calls, tool
+     catalogs, model-request snapshots, content blobs, pending tool calls and
+     preference snapshots, each as `{"table": ..., "row": <exact row JSON>}`,
+     then a footer with row counts. Full fidelity, for analysis and audit.
+   - `transcript.jsonl.zst`: a header, then the readable timeline as public
+     `SessionEvent` objects (`{"event": ...}`), then a footer. This is the
+     stable, documented readable section and does not require Opengeni's
+     internal tables to interpret.
+3. The manifest (object keys, sizes, SHA-256 digests, row counts) is recorded
+   and the state becomes `archived`.
+4. Only then are the bulky tables purged in bounded batches: realtime entries,
+   machine inputs, model history, code-mode calls, tool catalogs, model-request
+   snapshots, content blobs, pending tool calls, and the event types only an
+   executing session or a debugger needs (streamed fragments, model-request
+   telemetry, update bookkeeping, startup phases, credential selection and
+   late-rejected events).
+
+What stays in PostgreSQL: the session row, turns, attempts, goals and every
+readable timeline event, so the web app, `session_events` and the SDK read an
+archived session exactly as before, and every durable reference (task notes,
+artifact versions, Knowledge lifecycle, usage, billing and audit facts) is
+unchanged. Small per-turn audit snapshots also stay.
+
+Archiving is one-way: there is no restore to an executable state. Start a new
+session to continue the work. A late machine input for an archived session (a
+child result, schedule or media completion) is settled like input to a
+cancelled session.
+
+### Keep-live
+
+`PUT /v1/workspaces/:workspaceId/sessions/:sessionId/retention` with
+`{ "keepLive": true }`, `keepLive: true` on session create, or the SDK's
+`updateSessionRetention`, exempts a session permanently. It is workspace-wide
+and independent of a member's personal rail archive. It cannot change once a
+session is archived.
+
+### In the web app
+
+The web app calls an archived session "read-only" and its storage "long-term
+storage", so it is never confused with the personal Archive action, which only
+hides a chat from one member's list.
+
+- A read-only chat opens normally with a notice above its timeline that says
+  when it was stored and offers a new chat; the composer is not shown.
+- The chat's Agent tab has a "Keep this chat active" switch (keep-live) under
+  Storage, shown only when the deployment archives idle sessions
+  (`ClientConfig.sessionArchive`, present when archiving is enabled and object
+  storage is configured).
+- The session list's view menu links to a "Read-only chats" page that lists
+  every read-only root chat in the workspace, including chats a member
+  archived personally, with title search, a project filter and sorting. It is
+  backed by the session list's `contentArchivedOnly` filter.
+
+### Recovery and deletion
+
+An archive left in `archiving` by a crashed worker for more than two hours is
+abandoned: the session returns to live, and its planned objects are queued for
+deletion in the same transaction. An `archived` session whose purge did not
+finish resumes purging on the next pass. Deleting an archived session queues
+its objects for deletion in the deleting transaction, and the maintenance
+worker removes them, so a deleted session never leaves its bundle behind.
+
 ## Planned next stages
 
-- Fold streamed delta events into compact records once their turn settles.
-- Archive idle sessions: a full-fidelity compressed bundle in the deployment's
-  object storage, read-only access from the archive, a per-session keep-live
-  setting, and deployment configuration to enable automatic archiving.
+- Fold streamed delta events into compact records once their turn settles, for
+  sessions that stay live.

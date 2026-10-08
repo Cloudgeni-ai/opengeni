@@ -4648,6 +4648,15 @@ export const sessions = pgTable(
     importedArchiveRequestHash: text("imported_archive_request_hash"),
     importedArchiveSubjectId: text("imported_archive_subject_id"),
     importedArchiveNextOffset: integer("imported_archive_next_offset"),
+    /** Never move this session's content to the idle-session archive. */
+    keepLive: boolean("keep_live").notNull().default(false),
+    /** Idle-session archive lifecycle: null (live), archiving, or archived (read-only). */
+    contentArchiveState: text("content_archive_state").$type<"archiving" | "archived">(),
+    contentArchiveStartedAt: timestamp("content_archive_started_at", { withTimezone: true }),
+    contentArchivedAt: timestamp("content_archived_at", { withTimezone: true }),
+    /** Archive plan while archiving; verified manifest once archived. */
+    contentArchive: jsonb("content_archive").$type<Record<string, unknown>>(),
+    contentArchivePurgedAt: timestamp("content_archive_purged_at", { withTimezone: true }),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     skills: jsonb("skills").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
@@ -4929,6 +4938,26 @@ export const sessions = pgTable(
         and ${table.importedArchiveRequestHash} ~ '^[0-9a-f]{64}$' and ${table.importedArchiveSubjectId} is not null
         and ${table.importedArchiveNextOffset} is not null and ${table.importedArchiveNextOffset} >= 0)`,
     ),
+    contentArchiveState: check(
+      "sessions_content_archive_state_check",
+      sql`
+      (${table.contentArchiveState} is null and ${table.contentArchiveStartedAt} is null
+        and ${table.contentArchivedAt} is null and ${table.contentArchive} is null
+        and ${table.contentArchivePurgedAt} is null)
+      or (${table.contentArchiveState} = 'archiving' and ${table.contentArchiveStartedAt} is not null
+        and ${table.contentArchivedAt} is null and jsonb_typeof(${table.contentArchive}) = 'object'
+        and ${table.contentArchivePurgedAt} is null)
+      or (${table.contentArchiveState} = 'archived' and ${table.contentArchiveStartedAt} is not null
+        and ${table.contentArchivedAt} is not null and jsonb_typeof(${table.contentArchive}) = 'object'
+        and ${table.contentArchive} ? 'sha256')`,
+    ),
+    contentArchiveSize: check(
+      "sessions_content_archive_size_check",
+      sql`${table.contentArchive} is null or octet_length(${table.contentArchive}::text) <= 65536`,
+    ),
+    contentArchiveStateIndex: index("sessions_content_archive_state_idx")
+      .on(table.contentArchiveState, table.contentArchiveStartedAt)
+      .where(sql`${table.contentArchiveState} is not null`),
     importedArchiveInert: check(
       "sessions_imported_archive_inert_check",
       sql`

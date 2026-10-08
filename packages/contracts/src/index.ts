@@ -6927,6 +6927,33 @@ export const UpdateSessionArchiveRequest = z
   .strict();
 export type UpdateSessionArchiveRequest = z.infer<typeof UpdateSessionArchiveRequest>;
 
+/**
+ * Idle-session archive state (docs/session-storage-lifecycle.md). `archive` is
+ * null while the session is live. An archived session keeps its readable
+ * timeline but is read-only.
+ */
+export const SessionRetention = z
+  .object({
+    /** Never archive this session, however long it stays idle. */
+    keepLive: z.boolean(),
+    archive: z
+      .object({
+        state: z.enum(["archiving", "archived"]),
+        archivedAt: z.string().nullable(),
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+export type SessionRetention = z.infer<typeof SessionRetention>;
+
+export const UpdateSessionRetentionRequest = z
+  .object({
+    keepLive: z.boolean(),
+  })
+  .strict();
+export type UpdateSessionRetentionRequest = z.infer<typeof UpdateSessionRetentionRequest>;
+
 // Operator context controls (slash-command palette: /clear, /compact). These
 // are session/operator actions, NOT a structured way to talk to the agent —
 // the human↔agent channel stays plain chat. Both require `sessions:control`.
@@ -7385,6 +7412,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.feedback.write",
   "session.attention.write",
   "session.archive.write",
+  "session.retention.write",
   "session.delete",
   "session.codex_account.write",
   "session.realtime.start",
@@ -13578,6 +13606,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     archivedAt: z.string().nullable().default(null),
     /** Workspace-persisted read-only import, independent of a member's rail archive. */
     importedArchive: z.lazy(() => SessionImportedArchive).optional(),
+    /**
+     * Idle-session archive state and the keep-live exemption. Workspace-wide and
+     * independent of a member's personal rail archive (`archived`). Absent on
+     * older servers; treat absence as a live session without an exemption.
+     */
+    retention: z.lazy(() => SessionRetention).optional(),
     /** Optimistic archive-state revision; zero represents an absent personal relation. */
     archiveVersion: z.number().int().nonnegative().default(0),
     /**
@@ -13671,6 +13705,8 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
     filtersApplied: z.literal(true).optional(),
     /** Explicit receipt: older servers may acknowledge other filters only. */
     needsYouOnly: z.literal(true).optional(),
+    /** Explicit receipt for the read-only (archived idle session) filter. */
+    contentArchivedOnly: z.literal(true).optional(),
     totals: SessionListTotals.optional(),
     /** Effective server ordering; name uses ASCII-space trim, ASCII case fold,
      * UTF-8 byte order, then id ASC. Date keys and their id ties use DESC. */
@@ -13712,6 +13748,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     archived: true,
     archivedAt: true,
     importedArchive: true,
+    retention: true,
     archiveVersion: true,
     treeStats: true,
     requiresActionSince: true,
@@ -16265,6 +16302,8 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
        * inherit omission and may only narrow (workspace > user > off). */
       memoryScope: SessionMemoryScope.default("workspace"),
       initialMessage: z.string().min(1).optional(),
+      /** Exempt the new session from the idle-session archive (for persistent agents). */
+      keepLive: z.boolean().optional(),
       // Creates the durable session shell without fabricating a user message or
       // starting an underlying agent turn. Realtime can then become the first
       // interaction and use the ordinary Send/Steer path when it delegates.
@@ -18499,6 +18538,10 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       defaultForNewSessions: false,
       capabilities: [],
     }),
+    /** Idle-session archive, present only when this deployment archives idle sessions. */
+    sessionArchive: z
+      .object({ enabled: z.literal(true), idleDays: z.number().int().positive() })
+      .optional(),
     // Whether this deployment offers the Jev-backed code_search agent tool and
     // whether workspaces without their own setting get it.
     codeSearch: z

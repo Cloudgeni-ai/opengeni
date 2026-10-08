@@ -1301,6 +1301,8 @@ export type {
   UpdateSessionMcpApprovalPolicyResponse,
   UpdateSessionAttentionRequest,
   UpdateSessionArchiveRequest,
+  UpdateSessionRetentionRequest,
+  SessionRetention,
   UpdateSessionPinRequest,
   UpdateSessionRequest,
   UpdateSessionVariableSetsRequest,

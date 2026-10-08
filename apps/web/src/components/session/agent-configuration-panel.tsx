@@ -35,6 +35,7 @@ import { Disclosure } from "@/components/ui/disclosure";
 import { Field, TextArea } from "@/components/ui/field";
 import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
+import { KeepActiveSetting, sessionReadOnlyArchive } from "@/components/session/session-retention";
 import { useAppContext } from "@/context";
 import {
   AGENT_CAPABILITY_GROUPS,
@@ -358,6 +359,14 @@ export function AgentConfigurationPanel(props: {
                   learningModes={learning.modes}
                 />
               </PanelSection>
+              {context.clientConfig.sessionArchive && !sessionReadOnlyArchive(session) ? (
+                <PanelSection id={`${sectionId}-storage`} title="Storage">
+                  <KeepActiveSetting
+                    session={session}
+                    idleDays={context.clientConfig.sessionArchive.idleDays}
+                  />
+                </PanelSection>
+              ) : null}
               <ConnectedApps session={session} />
               <TechnicalDetails session={session} />
             </>

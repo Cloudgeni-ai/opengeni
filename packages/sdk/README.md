@@ -182,7 +182,12 @@ default (`sessionList: "mine"`) the proxy adds a creator filter for the
 resolved user server-side, so each user sees only the chats they started;
 `sessionList: "visible"` lists every chat Opengeni lets the user read in the
 workspace, and `false` disables listing. Archive and restore go through
-`updateSessionArchive` unless `archive: false`. A "New chat" in `OpenGeniChat`
+`updateSessionArchive` unless `archive: false`. That personal archive only hides
+a chat from one member's list. The deployment's idle-session archive is separate:
+it makes long-idle sessions read-only and is reported on `session.retention`.
+Pass `keepLive: true` to `createSession`, or call
+`updateSessionRetention(workspaceId, sessionId, { keepLive: true })`, to keep a
+persistent agent's session out of it. A "New chat" in `OpenGeniChat`
 sends `{ initialMessage, idempotencyKey }` plus any attached file `resources`
 and, unless `modelSelection: false`, the user's explicit model choices, so it
 needs the `createSession` hook. The hook sees them as input; the proxy adds the

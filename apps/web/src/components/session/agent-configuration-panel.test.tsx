@@ -184,3 +184,74 @@ test("Chat settings from the composer opens the editor on Capabilities", async (
     container.remove();
   }
 });
+
+test("Storage keeps a chat active only where the deployment archives idle chats", async () => {
+  const clientConfig = context.clientConfig;
+  const updateSessionRetention = mock(
+    async (_workspace: string, _session: string, request: { keepLive: boolean }) =>
+      ({
+        id: sessionId,
+        workspaceId,
+        retention: { keepLive: request.keepLive, archive: null },
+      }) as unknown as Session,
+  );
+  const setSession = mock((_update: unknown) => undefined);
+  Object.assign(context.client, { updateSessionRetention });
+  Object.assign(context, { setSession });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const storageSection = () =>
+    container.querySelector<HTMLElement>('[data-agent-section="Storage"]');
+  try {
+    // Off on this deployment: no Storage section at all.
+    await act(async () =>
+      root.render(<AgentConfigurationPanel session={session()} onReloadSession={async () => {}} />),
+    );
+    await settle();
+    expect(storageSection()).toBeNull();
+
+    context.clientConfig = { ...clientConfig, sessionArchive: { enabled: true, idleDays: 30 } };
+    await act(async () =>
+      root.render(
+        <AgentConfigurationPanel
+          session={session({ retention: { keepLive: false, archive: null } })}
+          onReloadSession={async () => {}}
+        />,
+      ),
+    );
+    await settle();
+    const storage = storageSection()!;
+    expect(storage.textContent).toContain("Keep this chat active");
+    expect(storage.textContent).toContain("no activity for 30 days become read-only");
+    const toggle = storage.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    await act(async () => toggle.click());
+    await settle();
+    expect(updateSessionRetention).toHaveBeenCalledWith(workspaceId, sessionId, {
+      keepLive: true,
+    });
+    expect(setSession).toHaveBeenCalled();
+
+    // A read-only chat has nothing left to keep active.
+    await act(async () =>
+      root.render(
+        <AgentConfigurationPanel
+          session={session({
+            retention: {
+              keepLive: false,
+              archive: { state: "archived", archivedAt: "2026-01-01T00:00:00.000Z" },
+            },
+          })}
+          onReloadSession={async () => {}}
+        />,
+      ),
+    );
+    await settle();
+    expect(storageSection()).toBeNull();
+  } finally {
+    context.clientConfig = clientConfig;
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
