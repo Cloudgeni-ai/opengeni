@@ -217,99 +217,134 @@ function NotificationContent({ item }: { item: InboxItem }) {
   );
 }
 
-/** How far a row travels before letting go acts. */
-const SWIPE_COMMIT = 96;
-/** The width of a swipe action's icon and label. */
-const SWIPE_LABEL = 88;
+/** Each revealed swipe action's width. */
+const SWIPE_ACTION = 76;
+/** A partial swipe past this opens the actions. */
+const SWIPE_OPEN = 56;
+/** A full swipe past this dismisses outright. */
+const SWIPE_FULL = 220;
+
+type SwipeAction = { label: string; icon: NativeIconName; color: string; onPress: () => void };
 
 /**
- * A row that swipes like Mail: toward the left to dismiss, toward the right to
- * snooze. Past the commit point the action's color fills and the host's haptic
- * fires; letting go there acts, anywhere else springs back.
+ * A row that swipes like Mail: drag left to reveal Snooze and Dismiss, or keep
+ * going to dismiss in one motion (a light haptic marks the point). Drags to the
+ * right stay with the system back gesture.
  */
 function SwipeRow(props: {
   children: ReactNode;
-  leading: { label: string; icon: NativeIconName; color: string; onCommit: () => void };
-  trailing: { label: string; icon: NativeIconName; color: string; onCommit: () => void };
+  snooze: SwipeAction;
+  dismiss: SwipeAction;
   onThreshold?: (() => void) | undefined;
 }) {
   const theme = useNativeTimelineTheme();
-  const c = theme.colors;
   const x = useRef(new Animated.Value(0)).current;
   const width = useRef(0);
-  const armed = useRef<"leading" | "trailing" | null>(null);
-  const [side, setSide] = useState<"leading" | "trailing" | null>(null);
+  const base = useRef(0);
+  const full = useRef(false);
+  const [open, setOpen] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const latest = useRef(props);
   latest.current = props;
+  const settle = useCallback(
+    (to: number) => {
+      base.current = to;
+      setOpen(to !== 0);
+      Animated.spring(x, { toValue: to, useNativeDriver: true, bounciness: 0, speed: 18 }).start(
+        () => {
+          if (to === 0) setDragging(false);
+        },
+      );
+    },
+    [x],
+  );
   const responder = useMemo(
     () =>
       PanResponder.create({
-        // Claim clearly horizontal drags only, so the list still scrolls.
+        // Clearly horizontal drags only: to the left from rest, either way once open.
         onMoveShouldSetPanResponderCapture: (_event, gesture) =>
-          Math.abs(gesture.dx) > 12 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.6,
+          Math.abs(gesture.dx) > 10 &&
+          Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.6 &&
+          (gesture.dx < 0 || base.current !== 0),
         onPanResponderTerminationRequest: () => false,
-        onPanResponderGrant: () => x.stopAnimation(),
+        onPanResponderGrant: () => {
+          x.stopAnimation();
+          setDragging(true);
+        },
         onPanResponderMove: (_event, gesture) => {
-          x.setValue(gesture.dx);
-          setSide(gesture.dx > 0 ? "leading" : gesture.dx < 0 ? "trailing" : null);
-          const next =
-            gesture.dx > SWIPE_COMMIT ? "leading" : gesture.dx < -SWIPE_COMMIT ? "trailing" : null;
-          if (next !== armed.current) {
-            armed.current = next;
-            if (next) latest.current.onThreshold?.();
+          const next = Math.min(0, base.current + gesture.dx);
+          x.setValue(next);
+          const past = next < -SWIPE_FULL;
+          if (past !== full.current) {
+            full.current = past;
+            if (past) latest.current.onThreshold?.();
           }
         },
-        onPanResponderRelease: () => {
-          const commit = armed.current;
-          armed.current = null;
-          if (!commit) {
-            Animated.spring(x, { toValue: 0, useNativeDriver: true, bounciness: 0 }).start(() =>
-              setSide(null),
-            );
-            return;
-          }
-          const action = commit === "leading" ? latest.current.leading : latest.current.trailing;
-          if (commit === "trailing") {
-            // Dismissing slides the row away before it leaves the list.
+        onPanResponderRelease: (_event, gesture) => {
+          const end = Math.min(0, base.current + gesture.dx);
+          if (full.current) {
+            full.current = false;
             Animated.timing(x, {
               toValue: -(width.current || 400),
               duration: 160,
               useNativeDriver: true,
             }).start(() => {
-              action.onCommit();
+              latest.current.dismiss.onPress();
               // Back in place in case the row stays (the dismissal failed).
               setTimeout(() => {
                 x.setValue(0);
-                setSide(null);
+                base.current = 0;
+                setOpen(false);
+                setDragging(false);
               }, 800);
             });
             return;
           }
-          Animated.spring(x, { toValue: 0, useNativeDriver: true, bounciness: 0 }).start(() =>
-            setSide(null),
-          );
-          action.onCommit();
+          settle(end < -SWIPE_OPEN && gesture.vx <= 0.3 ? -SWIPE_ACTION * 2 : 0);
         },
         onPanResponderTerminate: () => {
-          armed.current = null;
-          Animated.spring(x, { toValue: 0, useNativeDriver: true, bounciness: 0 }).start(() =>
-            setSide(null),
-          );
+          full.current = false;
+          settle(0);
         },
       }),
-    [x],
+    [settle, x],
   );
-  const action = side === "leading" ? props.leading : side === "trailing" ? props.trailing : null;
-  // The label rides in the middle of the uncovered strip, so it is always
-  // readable and slides out from under the row as the strip widens.
-  const labelShift = x.interpolate({
-    inputRange: [-1, 0, 1],
-    outputRange:
-      side === "leading"
-        ? [-SWIPE_LABEL / 2 - 0.5, -SWIPE_LABEL / 2, -SWIPE_LABEL / 2 + 0.5]
-        : [SWIPE_LABEL / 2 - 0.5, SWIPE_LABEL / 2, SWIPE_LABEL / 2 + 0.5],
-    extrapolate: "extend",
+  // Snooze rides along with the row's edge on a long swipe, then fades as
+  // Dismiss takes the whole strip.
+  const snoozeShift = x.interpolate({
+    inputRange: [-SWIPE_ACTION * 2 - 1, -SWIPE_ACTION * 2, 0],
+    outputRange: [-1, 0, 0],
+    extrapolateLeft: "extend",
+    extrapolateRight: "clamp",
   });
+  const snoozeOpacity = x.interpolate({
+    inputRange: [-SWIPE_FULL, -SWIPE_ACTION * 2 - 24, 0],
+    outputRange: [0, 1, 1],
+    extrapolate: "clamp",
+  });
+  const button = (action: SwipeAction, after: () => void) => (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={action.label}
+      onPress={() => {
+        after();
+        action.onPress();
+      }}
+      style={{
+        width: SWIPE_ACTION,
+        height: "100%",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 4,
+        backgroundColor: action.color,
+      }}
+    >
+      <Icon name={action.icon} size={18} color="#ffffff" />
+      <Text style={{ ...fontStyle(theme, 600), fontSize: 13, color: "#ffffff" }}>
+        {action.label}
+      </Text>
+    </Pressable>
+  );
   return (
     <View
       onLayout={(event: LayoutChangeEvent) => {
@@ -317,7 +352,7 @@ function SwipeRow(props: {
       }}
       style={{ overflow: "hidden", borderRadius: theme.radius.md }}
     >
-      {action ? (
+      {dragging || open ? (
         <View
           style={{
             position: "absolute",
@@ -325,34 +360,32 @@ function SwipeRow(props: {
             bottom: 0,
             left: 0,
             right: 0,
-            backgroundColor: action.color,
+            flexDirection: "row",
+            justifyContent: "flex-end",
+            backgroundColor: props.dismiss.color,
           }}
         >
           <Animated.View
-            style={{
-              position: "absolute",
-              top: 0,
-              bottom: 0,
-              width: SWIPE_LABEL,
-              ...(side === "leading" ? { left: 0 } : { right: 0 }),
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 4,
-              transform: [{ translateX: labelShift }],
-            }}
+            style={{ opacity: snoozeOpacity, transform: [{ translateX: snoozeShift }] }}
           >
-            <Icon name={action.icon} size={18} color="#ffffff" />
-            <Text style={{ ...fontStyle(theme, 600), fontSize: 13, color: "#ffffff" }}>
-              {action.label}
-            </Text>
+            {button(props.snooze, () => settle(0))}
           </Animated.View>
+          {button(props.dismiss, () => undefined)}
         </View>
       ) : null}
       <Animated.View
         {...responder.panHandlers}
-        style={{ transform: [{ translateX: x }], backgroundColor: c.bg }}
+        style={{ transform: [{ translateX: x }], backgroundColor: theme.colors.bg }}
       >
         {props.children}
+        {open ? (
+          // While open, a tap on the row closes the actions instead of opening it.
+          <Pressable
+            accessibilityLabel="Close actions"
+            onPress={() => settle(0)}
+            style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0 }}
+          />
+        ) : null}
       </Animated.View>
     </View>
   );
@@ -631,17 +664,17 @@ export function NativeInboxList({
         ) : null}
         <SwipeRow
           onThreshold={onSwipeThreshold}
-          leading={{
+          snooze={{
             label: snoozedNow(item, now) ? "Unsnooze" : "Snooze",
             icon: "alarm-clock",
             color: c["status-waiting"],
-            onCommit: () => swipeSnooze(item),
+            onPress: () => swipeSnooze(item),
           }}
-          trailing={{
+          dismiss={{
             label: item.kind === "notification" ? "Dismiss" : "Remove",
             icon: "x",
             color: c["danger-fill"],
-            onCommit: () => dismiss(item),
+            onPress: () => dismiss(item),
           }}
         >
           <Pressable
