@@ -54,6 +54,8 @@ const EXACT: Record<string, AgentToolMetricFamily> = {
   web_fetch: "web",
   set_session_title: "session",
   notify_user: "session",
+  notification_withdraw: "session",
+  inbox_tidy: "session",
   set_other_session_title: "session",
   sessions_list: "session",
   sandboxes_list: "machine",

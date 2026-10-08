@@ -42,6 +42,7 @@ export default function RootLayout() {
               <Stack screenOptions={{ headerShown: true }}>
                 <Stack.Screen name="index" options={{ title: "Opengeni" }} />
                 <Stack.Screen name="sessions" options={{ title: "Sessions" }} />
+                <Stack.Screen name="inbox" options={{ title: "Inbox" }} />
                 <Stack.Screen name="session/[id]" options={{ title: "" }} />
                 <Stack.Screen name="settings" options={{ title: "Settings" }} />
                 <Stack.Screen

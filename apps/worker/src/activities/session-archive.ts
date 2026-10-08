@@ -27,11 +27,40 @@ import {
   type SessionArchiveManifest,
   type SessionArchiveScope,
 } from "@opengeni/db";
-import { uploadWorkspaceArchiveSpool, type ObjectStorage } from "@opengeni/storage";
+import {
+  uploadWorkspaceArchiveSpool,
+  WorkspaceArchiveStorageError,
+  type ObjectStorage,
+} from "@opengeni/storage";
 import type { ControlActivityServices } from "./types";
 
+/**
+ * Content-free public classification of a failed session archive. Telemetry
+ * only exports reviewed error classes and codes, so a raw error name or
+ * storage code would be reduced to a generic "OperationError".
+ */
+export function sessionArchiveFailureCode(error: unknown): string {
+  if (error instanceof WorkspaceArchiveStorageError) {
+    switch (error.code) {
+      case "archive_object_missing":
+        return "session_archive_object_missing";
+      case "archive_hash_mismatch":
+        return "session_archive_hash_mismatch";
+      default:
+        return "session_archive_storage_failed";
+    }
+  }
+  return "session_archive_failed";
+}
+
 export const SESSION_ARCHIVE_CANDIDATES_PER_PASS = 25;
-export const SESSION_ARCHIVE_TIME_BUDGET_MS = 40 * 60 * 1_000;
+/**
+ * Soft budget for one archive pass. It shares a workflow (and the Schedule's
+ * skip-overlap cadence) with content compaction and delta folding, so a long
+ * archive pass would starve them while a backlog drains. Matching the storage
+ * pass budget gives both an equal share; unfinished work resumes next pass.
+ */
+export const SESSION_ARCHIVE_TIME_BUDGET_MS = 10 * 60 * 1_000;
 export const SESSION_ARCHIVE_STALE_SECONDS = 2 * 60 * 60;
 export const SESSION_ARCHIVE_EXPORT_PAGE_ROWS = 200;
 export const SESSION_ARCHIVE_PURGE_BATCH_ROWS = 2_000;
@@ -324,9 +353,9 @@ export function createSessionArchiveActivities(
           observability.warn("session archive failed; the session stays live", {
             workspaceId: scope.workspaceId,
             sessionId: scope.sessionId,
-            errorName: error instanceof Error ? error.name : "unknown",
             // Content-free classification only: database errors can echo row values.
-            errorCode: String((error as { code?: unknown } | null)?.code ?? "unknown").slice(0, 64),
+            errorClass: "SessionArchiveOperationError",
+            errorCode: sessionArchiveFailureCode(error),
           });
         }
       }

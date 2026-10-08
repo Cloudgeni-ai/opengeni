@@ -324,7 +324,12 @@ const webVital = { signal: "web_vital", metric: "lcp", page: "sessions", value: 
 
 describe("client signal report contract", () => {
   test("accepts closed request-failure, stream and web-vital reports", () => {
-    for (const report of [requestFailure, streamEvent, webVital]) {
+    for (const report of [
+      requestFailure,
+      streamEvent,
+      webVital,
+      { ...webVital, page: "read-only-chats" },
+    ]) {
       expect(parseClientBeaconReport(JSON.stringify(report))).toEqual(report as never);
       // A signal report is never mistaken for an error report.
       expect(parseClientErrorReport(JSON.stringify(report))).toBeNull();
@@ -357,6 +362,27 @@ describe("client signal report contract", () => {
 });
 
 describe("POST /v1/client-errors signal reports", () => {
+  test("records read-only chats web vitals using the closed page label", async () => {
+    const observability = createObservability(observabilitySettings, { component: "api" });
+    const app = new Hono();
+    registerClientErrorRoutes(app, { observability, settings: originSettings });
+    const response = await post(app, JSON.stringify({ ...webVital, page: "read-only-chats" }), {
+      origin: "https://app.opengeni.test",
+    });
+    expect(response.status).toBe(204);
+    const metrics = await observability.prometheusMetrics();
+    expect(
+      metricValue(
+        metrics,
+        "opengeni_client_web_vital_count",
+        'metric="lcp",page="read-only-chats"',
+      ),
+    ).toBe(1);
+    expect(
+      metricValue(metrics, "opengeni_client_web_vital_sum", 'metric="lcp",page="read-only-chats"'),
+    ).toBe(2.4);
+  });
+
   test("increments the closed signal series and the web-vital histogram", async () => {
     const observability = createObservability(observabilitySettings, { component: "api" });
     const app = new Hono();

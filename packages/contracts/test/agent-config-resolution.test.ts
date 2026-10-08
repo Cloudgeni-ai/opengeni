@@ -289,7 +289,15 @@ describe("write-through", () => {
     expect(
       agentConfigFirstPartyMcpTools(none, DEFAULT_FIRST_PARTY_MCP_TOOLS).sort() as string[],
     ).toEqual(
-      ["command_read", "command_wait", "notify_user", "set_session_title", "wait_for_input"].sort(),
+      [
+        "command_read",
+        "command_wait",
+        "inbox_tidy",
+        "notification_withdraw",
+        "notify_user",
+        "set_session_title",
+        "wait_for_input",
+      ].sort(),
     );
   });
 

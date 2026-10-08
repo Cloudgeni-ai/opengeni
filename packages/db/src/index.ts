@@ -955,6 +955,7 @@ export {
 } from "./integration-oauth-pending-states";
 export * from "./workspace-integrations";
 export * from "./native-push";
+export * from "./inbox";
 export {
   decryptEnvironmentValue as decryptVariableSetValue,
   encryptEnvironmentValue as encryptVariableSetValue,
@@ -34991,13 +34992,14 @@ async function createSessionInTransaction(
   let privateCreateOwnerSubjectId: string | null = null;
   if (createRequestedVisibility === "user_private") {
     if (input.parentSessionId) {
-      if (
-        frozenCreator.initiator.kind !== "subject" ||
-        !input.createdByActor ||
-        input.createdByActor.sessionId !== input.parentSessionId
-      ) {
+      if (!input.createdByActor || input.createdByActor.sessionId !== input.parentSessionId) {
         throw new Error("Private child session creation requires its exact parent attempt");
       }
+      // Internal-update turns retain service audit attribution. The capability
+      // below derives the distinct causal human from the locked parent turn
+      // and verifies that human owns the private parent, alongside the live
+      // attempt/generation and interruption fences. Do not confuse attribution
+      // with authority or rewrite the child's service creator as a human.
       const capability = await openPrivateChildSessionCreateCapability(tx, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
