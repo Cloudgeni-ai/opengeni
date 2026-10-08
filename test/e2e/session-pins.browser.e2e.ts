@@ -646,15 +646,28 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       }
 
       const paginationRequests: URL[] = [];
+      const recentSessionRequests: URL[] = [];
       page.on("request", (request) => {
         const url = new URL(request.url());
         if (
           request.method() === "GET" &&
           url.pathname === `/v1/workspaces/${workspaceId}/sessions` &&
           url.searchParams.get("view") === "page" &&
+          url.searchParams.get("parentSessionId") === "null" &&
+          !url.searchParams.has("channelId") &&
+          !url.searchParams.has("pinsOnly") &&
+          !url.searchParams.has("includePinned")
+        ) {
+          recentSessionRequests.push(url);
+        }
+        if (
+          request.method() === "GET" &&
+          url.pathname === `/v1/workspaces/${workspaceId}/sessions` &&
+          url.searchParams.get("view") === "page" &&
           // The separate Recent sessions panel needs full model/resource data.
           // Identify sidebar reads by their query shape, independently of projection.
-          (url.searchParams.get("parentSessionId") === "null" ||
+          ((url.searchParams.get("parentSessionId") === "null" &&
+            url.searchParams.get("includePinned") === "false") ||
             url.searchParams.has("channelId") ||
             url.searchParams.get("pinsOnly") === "true")
         ) {
@@ -678,6 +691,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const emptyProjectPage = (await emptyProjectResponse.json()) as BrowserSessionPage;
       expect(
         paginationRequests.every((request) => request.searchParams.get("projection") === "summary"),
+      ).toBe(true);
+      expect(recentSessionRequests.length).toBeGreaterThan(0);
+      expect(
+        recentSessionRequests.every((request) => !request.searchParams.has("projection")),
       ).toBe(true);
       expect(
         paginationRequests.some((request) => request.searchParams.get("pinsOnly") === "true"),

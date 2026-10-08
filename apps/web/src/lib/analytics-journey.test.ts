@@ -29,6 +29,7 @@ describe("content-free customer journey", () => {
   });
   test("labels every workspace page, including agents, variable sets, and environments", () => {
     for (const page of [
+      "read-only-chats",
       "agents",
       "variable-sets",
       "environments",
