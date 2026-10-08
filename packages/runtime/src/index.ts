@@ -8,6 +8,12 @@ import {
 } from "./prepared-compaction-request";
 export { preparedCompactionRequest, queuePreparedCompaction } from "./prepared-compaction-request";
 import { AnthropicMessagesModel } from "./anthropic-messages";
+import { anthropicCompactionRequest } from "./anthropic-compaction";
+export {
+  createAnthropicCompactionSizer,
+  fitCompactionPrefix,
+  compactionPrefixCuts,
+} from "./anthropic-compaction";
 export { AnthropicProviderRejection } from "./anthropic-messages";
 import { instrumentedModelFetch } from "./model-provider-client";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
@@ -19,6 +25,7 @@ import {
 } from "@opengeni/contracts";
 export { RunMcpCredentials, RunMcpCredentialError } from "./mcp-run-credentials";
 export { AnthropicRequestError } from "./anthropic-request-error";
+export * from "./anthropic-request-size";
 import { executeCommandReadWithRefresh } from "./command-read-refresh";
 import {
   captureMcpOperationDispatch,
@@ -776,6 +783,7 @@ export {
   DEFAULT_COMPACTION_THRESHOLD_RATIO,
   MIN_COMPACTION_THRESHOLD_RATIO,
   MAX_COMPACTION_THRESHOLD_RATIO,
+  omitOpaqueArtifactsFromPortableCompactionHistory,
   SUMMARY_BUFFER_TOKENS,
   compactionSummaryOutputTokens,
   SUMMARY_PREFIX,
@@ -1385,7 +1393,16 @@ export async function summarizeForCompaction(
             provider,
             model,
             instrumentedModelFetch(provider.id, globalThis.fetch),
-          ).getResponse(request)
+          ).getResponse(
+            anthropicCompactionRequest(input, {
+              maxOutputTokens: maxTokens,
+              ...(options.systemInstructions
+                ? { systemInstructions: options.systemInstructions }
+                : {}),
+              ...(options.promptCacheKey ? { promptCacheKey: options.promptCacheKey } : {}),
+              ...(options.signal ? { signal: options.signal } : {}),
+            }),
+          )
         : await new CompactionResponsesModel(client, model, provider).fetchResponse(request);
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);

@@ -15239,14 +15239,23 @@
         "$.choices[].id": "string!",
         "$.choices[].label": "string!",
         "$.createdAt": "string!",
+        "$.eventSequence": "integer? null",
+        "$.facts": "array?",
+        "$.facts[]": "object",
+        "$.facts[].label": "string!",
+        "$.facts[].value": "string!",
         "$.id": "string!",
         "$.kind": "ref(InboxItemKind)!",
+        "$.link": "object? null",
+        "$.link.label": "string!",
+        "$.link.url": "string!",
         "$.resolvedAt": "string! null",
         "$.sessionId": "string!",
         "$.sessionTitle": "string! null",
         "$.snoozedUntil": "string! null",
         "$.sourceKey": "string!",
         "$.status": "ref(InboxItemStatus)!",
+        "$.subtitle": "string?",
         "$.title": "string!",
         "$.unread": "boolean!",
         "$.updatedAt": "string!",
@@ -15259,7 +15268,7 @@
         "input"
       ],
       "shape": {
-        "$": "enum=[\"\\\"approval\\\"\",\"\\\"goal_paused\\\"\",\"\\\"notification\\\"\",\"\\\"question\\\"\"]"
+        "$": "enum=[\"\\\"approval\\\"\",\"\\\"goal_paused\\\"\",\"\\\"notification\\\"\",\"\\\"question\\\"\",\"\\\"reply\\\"\"]"
       }
     },
     "InboxItemStatus": {
@@ -15277,6 +15286,8 @@
       ],
       "shape": {
         "$": "object",
+        "$.pausedGoals": "boolean?",
+        "$.replies": "boolean?",
         "$.tidyPolicy": "ref(InboxTidyPolicy)!"
       }
     },
@@ -17802,6 +17813,19 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"supported\\\"\",\"\\\"unknown\\\"\",\"\\\"unsupported\\\"\"]"
+      }
+    },
+    "ModelCompactionPolicy": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.defaultTokens": "integer!",
+        "$.effectiveTokens": "integer!",
+        "$.maximumTokens": "integer!",
+        "$.minimumTokens": "integer!",
+        "$.overrideTokens": "integer! null"
       }
     },
     "ModelContextContributionSource": {
@@ -22323,6 +22347,7 @@
         "$": "object",
         "$.excludedMcpServerIds": "array?",
         "$.excludedMcpServerIds[]": "string",
+        "$.firstPartyMode": "enum?=[\"\\\"explicit\\\"\",\"\\\"workspace_default\\\"\"]",
         "$.inheritedFromSessionId": "string! null",
         "$.mode": "enum!=[\"\\\"explicit\\\"\",\"\\\"inherited\\\"\",\"\\\"workspace_default\\\"\"]"
       }
@@ -24501,6 +24526,7 @@
         "$.maxNestedAgentDepth": "integer? null",
         "$.memoryEnabled": "boolean?",
         "$.memoryPromptMode": "ref(WorkspaceMemoryPromptMode)?",
+        "$.modelCompactionThresholds": "unknown?",
         "$.sessionAgentDefaults": "ref(WorkspaceAgentDefaults)? null",
         "$.sessionDefaults": "ref(WorkspaceSessionDefaults)?",
         "$.sessionToolDefaults": "ref(WorkspaceSessionToolDefaultsPatch)?",
@@ -25986,6 +26012,7 @@
         "$.availability": "ref(ModelAvailabilityV1)!",
         "$.billing": "ref(ModelBillingAttributionV1)?",
         "$.capabilities": "ref(ModelCapabilitiesV1)?",
+        "$.compactionPolicy": "ref(ModelCompactionPolicy)?",
         "$.contextWindowTokens": "integer?",
         "$.cost": "ref(ModelCostClassV1)?",
         "$.credentialReadiness": "ref(ModelCredentialReadinessV1)!",
@@ -27113,7 +27140,9 @@
       "ImportLegacyWorkspaceInstructionPolicyDraftRequest": "type",
       "InboxItem": "type",
       "InboxItemChoice": "type",
+      "InboxItemFact": "type",
       "InboxItemKind": "type",
+      "InboxItemLink": "type",
       "InboxSettings": "type",
       "InboxTidyPolicy": "type",
       "InitiatingHuman": "type",
@@ -30832,6 +30861,11 @@
       "noticeDisplayText": "value",
       "noticeIsResolvedApproval": "value",
       "noticeTone": "value",
+      "NotificationBlock": "type",
+      "notificationPlainText": "value",
+      "NotificationSpan": "type",
+      "parseNotificationInline": "value",
+      "parseNotificationText": "value",
       "parseToolArgs": "value",
       "pathBasename": "value",
       "pathDirname": "value",
@@ -30863,6 +30897,8 @@
       "stripExecBanner": "value",
       "tailPeek": "value",
       "timelineGroupContainsPresentedImage": "value",
+      "timelineGroupIndexAtSequence": "value",
+      "timelineGroupSequences": "value",
       "ToolBody": "type",
       "ToolChip": "type",
       "toolDisplayName": "value",

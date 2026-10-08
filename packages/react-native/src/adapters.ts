@@ -42,6 +42,8 @@ export interface NativePickedFile {
 export interface NativeFileAdapter {
   pickDocuments(): Promise<NativePickedFile[]>;
   pickImages(): Promise<NativePickedFile[]>;
+  /** Take one photo with the camera (asks for camera access first). Optional. */
+  takePhoto?(): Promise<NativePickedFile[]>;
   readBytes(file: NativePickedFile): Promise<Uint8Array>;
 }
 

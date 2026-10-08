@@ -145,6 +145,7 @@ export {
   providerSupportsImmutableImageBuild,
   renewSandboxProviderExpiration,
   providerWorkspaceCapturePolicy,
+  providerWorkspaceCaptureIsPointInTime,
   type ProviderRegistration,
   type ProviderConstructionContext,
   type ProviderExactResumeMode,

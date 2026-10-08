@@ -879,6 +879,8 @@ export type {
   NativePushRule,
   InboxItem,
   InboxItemChoice,
+  InboxItemFact,
+  InboxItemLink,
   InboxItemKind,
   InboxSettings,
   InboxTidyPolicy,

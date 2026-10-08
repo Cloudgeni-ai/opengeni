@@ -1,6 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { applyClaudeCodeIdentity } from "./claude-code-identity";
 import { AnthropicRequestError } from "./anthropic-request-error";
+import { isCompactionSummary } from "./context-compaction";
+import {
+  ANTHROPIC_IMAGE_MAX_ENCODED_BYTES,
+  ANTHROPIC_REQUEST_MAX_BYTES,
+  AnthropicRequestSizeError,
+  anthropicRequestSize,
+} from "./anthropic-request-size";
 import {
   protocol,
   Usage,
@@ -508,6 +515,24 @@ export function buildAnthropicRequest(
   return body;
 }
 
+function thinkingDropCounts(transformations: unknown): Record<string, number> | undefined {
+  if (!Array.isArray(transformations)) return undefined;
+  const counts: Record<string, number> = {};
+  for (const entry of transformations) {
+    if (
+      entry?.type !== "thinking_dropped" ||
+      ![
+        "prefix_binding_mismatch",
+        "model_binding_mismatch",
+        "organization_binding_mismatch",
+      ].includes(entry.reason)
+    )
+      continue;
+    counts[entry.reason] = (counts[entry.reason] ?? 0) + 1;
+  }
+  return Object.keys(counts).length ? counts : undefined;
+}
+
 function normalizeUsage(raw: Json): Usage {
   const count = (value: unknown) =>
     typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
@@ -599,13 +624,18 @@ export function anthropicResponse(
   }
   if (message.stop_reason === "tool_use" && callIds.size === 0)
     throw new AnthropicProtocolError("Claude tool_use stop has no tool calls");
+  const droppedThinking = thinkingDropCounts(message.input_transformations);
   return {
     output,
     usage: normalizeUsage(message.usage ?? {}),
     responseId: message.id,
     ...(requestId ? { requestId } : {}),
     providerData: {
-      anthropic: { stopReason: message.stop_reason, usage: message.usage },
+      anthropic: {
+        stopReason: message.stop_reason,
+        usage: message.usage,
+        ...(droppedThinking ? { thinkingBlocksDropped: droppedThinking } : {}),
+      },
       ...(message.stop_reason === "max_tokens"
         ? { status: "incomplete", incomplete_details: { reason: "max_output_tokens" } }
         : {}),
@@ -620,7 +650,7 @@ export class AnthropicMessagesModel implements Model {
   private previousRequestId: string | undefined;
   // The same bound applies from the first image onward. A growing conversation
   // must not resize its old prefix when it crosses the many-image threshold.
-  private readonly sizeImage = createModelImageSizer(2000);
+  private readonly sizeImage = createModelImageSizer(2000, ANTHROPIC_IMAGE_MAX_ENCODED_BYTES);
   constructor(
     readonly provider: ResolvedModelProvider,
     readonly model: string,
@@ -628,12 +658,19 @@ export class AnthropicMessagesModel implements Model {
   ) {}
 
   /** Project inline images only; never fetch arbitrary URLs or edit stored history. */
-  private async sizeImageBlocks(blocks: Json[], signal?: AbortSignal): Promise<Json[]> {
+  private async sizeImageBlocks(
+    blocks: Json[],
+    projection: { resized: boolean },
+    signal?: AbortSignal,
+  ): Promise<Json[]> {
     const result: Json[] = [];
     for (const block of blocks) {
       signal?.throwIfAborted();
       if (block.type === "tool_result" && Array.isArray(block.content)) {
-        result.push({ ...block, content: await this.sizeImageBlocks(block.content, signal) });
+        result.push({
+          ...block,
+          content: await this.sizeImageBlocks(block.content, projection, signal),
+        });
       } else if (block.type === "image" && block.source?.type === "base64") {
         const image = await this.sizeImage(block.source.data, block.source.media_type);
         if (image.data === block.source.data && image.mediaType === block.source.media_type) {
@@ -641,6 +678,7 @@ export class AnthropicMessagesModel implements Model {
           continue;
         }
         const { cache_control: cache, ...unmarked } = block;
+        projection.resized = true;
         result.push({
           ...unmarked,
           source: { type: "base64", media_type: image.mediaType, data: image.data },
@@ -657,11 +695,12 @@ export class AnthropicMessagesModel implements Model {
     return result;
   }
 
-  private async send(request: ModelRequest, stream: boolean): Promise<Response> {
+  private async prepare(request: ModelRequest, stream: boolean) {
     request.signal?.throwIfAborted();
     const body = buildAnthropicRequest(request, this.model, this.provider, stream);
+    const projection = { resized: false };
     for (const message of body.messages) {
-      message.content = await this.sizeImageBlocks(message.content, request.signal);
+      message.content = await this.sizeImageBlocks(message.content, projection, request.signal);
     }
     request.signal?.throwIfAborted();
     const base = this.provider.baseUrl ?? "https://api.anthropic.com/v1";
@@ -672,6 +711,28 @@ export class AnthropicMessagesModel implements Model {
     headers.set("content-type", "application/json");
     headers.set("accept", stream ? "text/event-stream" : "application/json");
     headers.set("anthropic-version", "2023-06-01");
+    // A portable checkpoint (including its tool-less summary request) rewrites
+    // the prefix. Image-policy upgrades can do so too. Keep signed blocks
+    // verbatim and use the provider's explicit invalid-block reset, never strip
+    // signatures ourselves. Retained checkpoints/images make this choice
+    // reproducible after worker/model-instance restarts.
+    const resetsPrefix =
+      projection.resized ||
+      request.modelSettings.providerData?.opengeni_portable_compaction === true ||
+      (Array.isArray(request.input) && request.input.some(isCompactionSummary));
+    if (claudeNativeModelProfile(this.model)?.prefixBoundThinking && resetsPrefix) {
+      body.thinking = {
+        type: "adaptive",
+        display: "summarized",
+        ...body.thinking,
+        block_binding: { prefix_mismatch_behavior: "drop_block" },
+      };
+      delete body.temperature;
+      delete body.top_p;
+      const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
+      betas.add("thinking-binding-controls-2026-08-01");
+      headers.set("anthropic-beta", [...betas].join(","));
+    }
     if ((claudeNativeModelProfile(this.model)?.contextWindowTokens ?? 0) > 200_000) {
       const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
       betas.add("context-1m-2025-08-07");
@@ -713,11 +774,25 @@ export class AnthropicMessagesModel implements Model {
         previousRequestId: this.previousRequestId,
       });
     }
+    const serialized = JSON.stringify(body);
+    return { url, headers, serialized, size: anthropicRequestSize(body, serialized) };
+  }
+
+  /** Uses the same final serialization as dispatch, but performs no network I/O. */
+  async measureRequest(request: ModelRequest, stream = false) {
+    return (await this.prepare(request, stream)).size;
+  }
+
+  private async send(request: ModelRequest, stream: boolean): Promise<Response> {
+    const { url, headers, serialized, size } = await this.prepare(request, stream);
+    if (size.requestBytes > ANTHROPIC_REQUEST_MAX_BYTES)
+      throw new AnthropicRequestSizeError(size, "preflight");
+    request.signal?.throwIfAborted();
     const response = await withClaudeModelRequest(this.model, () =>
       this.fetch(url, {
         method: "POST",
         headers,
-        body: JSON.stringify(body),
+        body: serialized,
         ...(request.signal ? { signal: request.signal } : {}),
       }),
     );
@@ -726,6 +801,10 @@ export class AnthropicMessagesModel implements Model {
       request.signal.throwIfAborted();
     }
     if (!response.ok) {
+      if (response.status === 413) {
+        void response.body?.cancel().catch(() => undefined);
+        throw new AnthropicRequestSizeError(size, "http_413", response.headers);
+      }
       const detail = await readErrorDetail(
         response.body,
         Math.min(this.provider.anthropic?.streamIdleTimeoutMs ?? 600000, 5000),

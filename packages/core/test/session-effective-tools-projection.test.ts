@@ -94,6 +94,36 @@ describe("server effectiveTools environment projection", () => {
     }
   });
 
+  test("native computer projection follows current defaults only for opted-in sessions", () => {
+    const row = session("all", {
+      firstPartyMcpTools: [],
+      toolPolicy: {
+        mode: "workspace_default",
+        inheritedFromSessionId: null,
+        firstPartyMode: "workspace_default",
+      },
+    });
+    const env = context({
+      workspaceSettings: {
+        sessionToolDefaults: { firstPartyMcpTools: ["computer_open", "computer_act"] },
+      },
+    });
+    const nativeCount = (current: typeof row, currentEnv = env) =>
+      projected(current, currentEnv).effectiveTools!.tools.filter((tool) =>
+        tool.name.startsWith("interaction__cua_"),
+      ).length;
+    expect(nativeCount(row)).toBe(CUA_DESKTOP_TOOLS.length);
+    expect(
+      nativeCount({ ...row, toolPolicy: { ...row.toolPolicy, firstPartyMode: "explicit" } }),
+    ).toBe(0);
+    expect(
+      nativeCount(
+        { ...row, firstPartyMcpTools: ["computer_open", "computer_act"] },
+        context({ workspaceSettings: { sessionToolDefaults: { firstPartyMcpTools: [] } } }),
+      ),
+    ).toBe(0);
+  });
+
   test("native computer projection cannot restore missing selection or authority", () => {
     const row = session("all", { firstPartyMcpTools: ["computer_open", "computer_act"] });
     const noSecret = context({

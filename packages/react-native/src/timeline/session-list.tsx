@@ -278,12 +278,20 @@ export function SessionHeaderTitle({
   status,
   statusLabel,
   align = Platform.OS === "ios" ? "center" : "left",
+  sideInset = 116,
 }: {
   title: string;
   status: SessionStatus | null;
   /** Override the label ("Paused" for a paused workstream). */
   statusLabel?: string | undefined;
   align?: "center" | "left";
+  /**
+   * Room kept clear on each side of a centered title: the wider of the bar's
+   * leading and trailing buttons plus their margin (a back button and a
+   * two-button pill take about 116pt), so a long title truncates instead of
+   * running under them.
+   */
+  sideInset?: number | undefined;
 }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
@@ -304,10 +312,13 @@ export function SessionHeaderTitle({
       accessibilityLabel={label ? `${title}, ${label}` : title}
       // iOS sizes a custom title view once, often before the session (and its
       // title) has loaded; a fixed width keeps a late title from collapsing to
-      // "H…". The bar's back and actions buttons take about 150pt.
+      // "H…". Centered, it stays clear of the wider side's buttons on both sides.
       style={
         align === "center"
-          ? { alignItems: "center", width: Math.max(120, Math.min(260, viewport.width - 150)) }
+          ? {
+              alignItems: "center",
+              width: Math.max(120, Math.min(260, viewport.width - 2 * sideInset)),
+            }
           : { alignItems: "flex-start", maxWidth: 240 }
       }
     >
