@@ -10,6 +10,7 @@ export default defineConfig({
     "src/mcp-endpoint.ts",
     "src/index.ts",
     "src/connect.ts",
+    "src/prepared-mcp-setup.ts",
     "src/browser-storage.ts",
     "src/plugin-discovery.ts",
     "src/external-identities.ts",

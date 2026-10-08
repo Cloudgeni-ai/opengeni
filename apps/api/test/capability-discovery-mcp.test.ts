@@ -108,7 +108,7 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
           rationale: "Use the server to find the requested records.",
         },
       });
-      expect(result.isError).not.toBe(true);
+      expect(result.isError, JSON.stringify(result)).not.toBe(true);
       expect(mcpJson(result)).toMatchObject({ status: "setup_requested" });
       const notices = (
         await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)
@@ -128,10 +128,184 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
           },
         },
       });
+      const prepared = {
+        name: "Prepared Records",
+        endpointUrl: "https://records.example.test/mcp",
+        headers: [
+          { name: "X-Region", value: "north" },
+          { name: "Authorization", secret: "key", prefix: "Bearer " },
+        ],
+        secretFields: [{ id: "key", label: "API key" }],
+      };
+      for (const ownership of ["personal", "workspace"]) {
+        const preparedResult = await mcp.callTool({
+          name: "custom_mcp_setup_request",
+          arguments: {
+            name: prepared.name,
+            endpointUrl: prepared.endpointUrl,
+            rationale: "Find records.",
+            ownership,
+            mcpSetup: prepared,
+          },
+        });
+        expect(preparedResult.isError).not.toBe(true);
+        const posted = (
+          await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)
+        )
+          .filter((event) => event.type === "tool.auth_needed")
+          .at(-1);
+        expect(posted?.payload).toMatchObject({ setupRequest: { ownership, mcpSetup: prepared } });
+      }
+      for (const change of [
+        { ownership: undefined },
+        { endpointUrl: "https://different.example.test/mcp" },
+        {
+          mcpSetup: {
+            ...prepared,
+            headers: [{ name: "Authorization", value: "bad-literal" }],
+            secretFields: [],
+          },
+        },
+      ]) {
+        const invalidResult = await mcp.callTool({
+          name: "custom_mcp_setup_request",
+          arguments: {
+            name: prepared.name,
+            endpointUrl: prepared.endpointUrl,
+            rationale: "Find records.",
+            ownership: "personal",
+            mcpSetup: prepared,
+            ...change,
+          },
+        });
+        expect(invalidResult.isError).toBe(true);
+      }
+      expect(
+        (await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)).filter(
+          (event) => event.type === "tool.auth_needed",
+        ),
+      ).toHaveLength(3);
     } finally {
       await Promise.all([mcp.close(), server.close()]);
     }
   }, 60_000);
+
+  test.each([
+    ["personal", true],
+    ["workspace", true],
+    ["personal", false],
+    ["workspace", false],
+  ] as const)(
+    "prepared MCP reuses the existing %s scope without another key (tools available: %s)",
+    async (ownership, available) => {
+      if (!shared) throw new Error("Real PostgreSQL fixture required");
+      const endpointUrl = `https://reuse-${crypto.randomUUID()}.example.test/mcp`;
+      const ownId = `reuse-${crypto.randomUUID()}`;
+      const createdIds: string[] = [];
+      for (const candidate of ["other", "own"] as const) {
+        const serverId = candidate === "own" ? ownId : `other-${crypto.randomUUID()}`;
+        createdIds.push(`mcp:${serverId}`);
+        const personal = (ownership === "personal") === (candidate === "own");
+        await upsertCapabilityCatalogItem(client.db, {
+          accountId: workspace.accountId,
+          workspaceId: workspace.workspaceId,
+          id: `mcp:${serverId}`,
+          kind: "mcp",
+          source: "manual",
+          name: candidate === "other" ? "A different scope" : "Z requested scope",
+          endpointUrl,
+          authModel: "native_connection",
+          metadata: { mcpServerId: serverId },
+        });
+        await enableCapabilityInstallation(client.db, {
+          accountId: workspace.accountId,
+          workspaceId: workspace.workspaceId,
+          capabilityId: `mcp:${serverId}`,
+          kind: "mcp",
+          metadata: { mcpConnectivity: { status: "ok" } },
+          config: {
+            connectionRef: {
+              providerDomain: new URL(endpointUrl).hostname,
+              kind: "api_key",
+              subjectScope: personal ? "subject" : "workspace",
+              accountSelection: "all_eligible",
+              resource: endpointUrl,
+            },
+          },
+        });
+      }
+      const attempt = await seedAttempt(false, ["custom_mcp_setup_request"]);
+      await persistAttemptToolCatalog(
+        client.db,
+        createAttemptToolEnvironment({
+          scope: { ...attempt, accountId: workspace.accountId, workspaceId: workspace.workspaceId },
+          generation: 1,
+          definitions: available
+            ? [
+                {
+                  identity: { serverId: ownId, toolName: "read_records" },
+                  modelName: `${ownId}__read_records`,
+                  description: "Read records",
+                  inputSchema: { type: "object" },
+                  source: "mcp",
+                  approval: "none",
+                  execute: async () => ({ content: [] }),
+                },
+              ]
+            : [],
+        }).catalog,
+      );
+      const server = buildOpenGeniMcpServer(
+        { settings: testSettings(), db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
+        {
+          accountId: workspace.accountId,
+          workspaceId: workspace.workspaceId,
+          subjectId: "worker:first-party-mcp",
+          permissions: ["workspace:read"],
+          principalKind: "agent_attempt",
+          metadata: { ...attempt, firstPartyMcpTools: ["custom_mcp_setup_request"] },
+        },
+      );
+      const [ct, st] = InMemoryTransport.createLinkedPair();
+      const mcp = new Client({ name: "prepared-reuse", version: "1" });
+      await server.connect(st);
+      await mcp.connect(ct);
+      try {
+        const result = await mcp.callTool({
+          name: "custom_mcp_setup_request",
+          arguments: {
+            name: "Records",
+            endpointUrl,
+            ownership,
+            rationale: "Read records",
+            mcpSetup: {
+              name: "Records",
+              endpointUrl,
+              headers: [{ name: "Authorization", secret: "key", prefix: "Bearer " }],
+              secretFields: [{ id: "key", label: "API key" }],
+            },
+          },
+        });
+        expect(result.isError).not.toBe(true);
+        expect(mcpJson(result)).toMatchObject({
+          status: "already_in_catalog",
+          capabilityId: `mcp:${ownId}`,
+          setup: { status: available ? "ready" : "unavailable" },
+        });
+        expect(
+          (await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)).filter(
+            (event) => event.type === "tool.auth_needed",
+          ),
+        ).toHaveLength(0);
+      } finally {
+        await Promise.all([mcp.close(), server.close()]);
+        for (const id of createdIds) {
+          await shared.admin`DELETE FROM capability_installations WHERE workspace_id=${workspace.workspaceId} AND capability_id=${id}`;
+          await shared.admin`DELETE FROM capability_catalog_items WHERE workspace_id=${workspace.workspaceId} AND id=${id}`;
+        }
+      }
+    },
+  );
 
   test("Fiken setup distinguishes connection health, human tool selection, and exact attempt availability", async () => {
     if (!shared) throw new Error("Real PostgreSQL fixture required");

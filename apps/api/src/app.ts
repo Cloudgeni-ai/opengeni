@@ -1,4 +1,5 @@
 import { registerClaudeSubscriptionAccountRoutes } from "./routes/claude-subscription-accounts";
+import { isPreparedMcpConnectPath } from "./prepared-mcp-permissions";
 import { registerWorkspaceModelProviderRoutes } from "./routes/workspace-model-providers";
 import { registerClaudeSubscriptionOAuthRoutes } from "./routes/claude-subscription-oauth";
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
@@ -2299,6 +2300,8 @@ export function assertConfiguredCodemodeSessionProxyPath(
       } else {
         allowed = families.subagents;
       }
+    } else if (surface === "connect") {
+      allowed = allows("custom_mcp_setup_request") && isPreparedMcpConnectPath(pathname, verb);
     } else if (surface === "files") {
       allowed = families.allowsMcpServer("files");
     } else if (surface === "skills") {

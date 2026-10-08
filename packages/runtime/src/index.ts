@@ -5510,6 +5510,9 @@ async function prepareAttemptToolEnvironment(
     : definitions;
   const environment = createAttemptToolEnvironment({
     scope,
+    firstPartyMcpPermissions: options.firstPartyPermissions ?? [
+      ...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+    ],
     generation: options.attemptToolCatalogGeneration ?? 1,
     definitions: guardedDefinitions,
     confirmModelApproval: ({ modelName, subjectId: callerSubjectId }) =>

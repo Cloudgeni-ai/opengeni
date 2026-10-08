@@ -5895,6 +5895,21 @@ export class OpenGeniClient {
   }
 
   /** Begin durable setup. Completion requirements are provider-specific. */
+  beginConnect(
+    workspaceId: string,
+    request: {
+      providerId: string;
+      ownership: "personal" | "workspace";
+      returnUrl: string;
+      idempotencyKey: string;
+      reconnectAccountId?: string;
+      installationTarget?: import("@opengeni/contracts/connect").ConnectInstallationTarget;
+    },
+  ): Promise<import("@opengeni/contracts/connect").ConnectAttempt>;
+  beginConnect(
+    workspaceId: string,
+    request: import("@opengeni/contracts/connect").BeginConnectRequest,
+  ): Promise<import("@opengeni/contracts/connect").ConnectAttempt>;
   async beginConnect(
     workspaceId: string,
     request: {
@@ -5904,6 +5919,7 @@ export class OpenGeniClient {
       idempotencyKey: string;
       reconnectAccountId?: string;
       installationTarget?: import("@opengeni/contracts/connect").ConnectInstallationTarget;
+      mcpSetup?: import("@opengeni/contracts/connect").PreparedMcpSetup;
     },
   ): Promise<import("@opengeni/contracts/connect").ConnectAttempt> {
     return this.requestJson("POST", `/v1/workspaces/${workspaceId}/connect/attempts`, request);

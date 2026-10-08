@@ -18,6 +18,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./prepared-mcp-setup": {
+      "types": "./src/prepared-mcp-setup.ts",
+      "default": "./src/prepared-mcp-setup.ts"
+    },
     "./connection-account-label": {
       "types": "./src/connection-account-label.ts",
       "default": "./src/connection-account-label.ts"

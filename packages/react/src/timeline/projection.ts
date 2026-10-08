@@ -1,4 +1,5 @@
 import {
+  parseCustomMcpSetupRequest,
   parseMediaGenerationResult,
   parseToolDisplayMetadata,
   EMPTY_FINAL_REPLY_NOTICE,
@@ -3277,26 +3278,7 @@ function capabilityAuthorizationRequest(
 }
 
 function customMcpSetupRequest(value: unknown): NonNullable<AuthNeededItem["setupRequest"]> | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const input = value as Record<string, unknown>;
-  if (
-    input.kind !== "mcp" ||
-    typeof input.name !== "string" ||
-    typeof input.rationale !== "string" ||
-    typeof input.endpointUrl !== "string"
-  )
-    return null;
-  try {
-    if (new URL(input.endpointUrl).protocol !== "https:") return null;
-  } catch {
-    return null;
-  }
-  return {
-    kind: "mcp",
-    name: input.name,
-    endpointUrl: input.endpointUrl,
-    rationale: input.rationale,
-  };
+  return parseCustomMcpSetupRequest(value);
 }
 
 function stringList(value: unknown): string[] {

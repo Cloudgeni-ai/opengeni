@@ -75,6 +75,8 @@ export type AttemptToolAuthorization = (input: {
 export type CreateAttemptToolEnvironmentInput = {
   scope: AttemptToolScope;
   generation: number;
+  /** Trusted host's accepted native permission set, never caller input. */
+  firstPartyMcpPermissions?: AttemptToolCatalogValue["firstPartyMcpPermissions"];
   definitions: readonly AttemptToolDefinition[];
   createdAt?: Date;
   authorize?: AttemptToolAuthorization;
@@ -660,6 +662,9 @@ export function createAttemptToolEnvironment(
     ...input.scope,
     generation: input.generation,
     createdAt,
+    ...(input.firstPartyMcpPermissions !== undefined
+      ? { firstPartyMcpPermissions: [...input.firstPartyMcpPermissions] }
+      : {}),
     entries: [...prepared.entries],
   };
   const catalog = AttemptToolCatalog.parse({

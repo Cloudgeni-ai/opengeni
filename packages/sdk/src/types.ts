@@ -2438,6 +2438,8 @@ export type ToolAuthNeededPayload = {
   setupRequest?:
     | {
         kind: "mcp";
+        ownership?: "personal" | "workspace" | undefined;
+        mcpSetup?: import("@opengeni/contracts/prepared-mcp-setup").PreparedMcpSetup | undefined;
         name: string;
         endpointUrl: string;
         rationale: string;

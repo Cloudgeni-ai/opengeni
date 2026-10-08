@@ -1370,6 +1370,15 @@ Capabilities define integration/tool shapes. Connections bind credentials and
 ownership. Session policy selects authorized tools.
 MCP/Codemode execute tools; neither grants authority.
 
+Agent-prepared API-key MCP setup uses the native Connect attempt lifecycle, not
+a parallel credential store. `apps/api/src/prepared-mcp-actor.ts` fences the
+exact causal owner and frozen/live permissions; the core
+`prepared-mcp-connection.ts` helper probes before the atomic connection,
+installation, and completion receipt. Missing keys use the protected inline
+Connect form; existing credentials use the same lifecycle through the narrow
+Codemode Connect route. Neither admits new tools to a frozen attempt.
+See [prepared MCP setup](remote-mcp-credentials.md#agent-prepared-api-key-connections).
+
 Omitted personal selections restore existing exact-owner grants; explicit empty
 selections suppress restoration. Children inherit captured authority. Canonical:
 `packages/core/src/domain/personal-connection-delegations.ts` and

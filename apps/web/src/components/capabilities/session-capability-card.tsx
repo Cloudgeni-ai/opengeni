@@ -54,6 +54,8 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
         key={`${props.workspaceId}:${props.item.id}`}
         item={props.item}
         workspaceId={props.workspaceId}
+        sessionId={props.sessionId}
+        onConfigured={props.onConfigured}
         onRegistered={onRegistered}
       />
     );

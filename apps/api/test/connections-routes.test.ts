@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mcpAccountRouteId } from "@opengeni/core";
+import { mcpAccountRouteId, type McpCapabilityProbeInput } from "@opengeni/core";
+import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
@@ -23,6 +24,8 @@ import {
 import {
   createApiKey,
   createConnection,
+  createSession,
+  persistAttemptToolCatalog,
   createOrganizationApiKey,
   ensureExternalIdentity,
   grantWorkspaceAccess,
@@ -32,6 +35,8 @@ import {
   getConnectionMetadata,
   getSessionTurnPersonalConnectionDelegations,
   listConnectionsMetadata,
+  listCapabilityInstallations,
+  enableCapabilityInstallation,
   loadIntegrationOAuthClient,
   loadIntegrationOAuthPendingState,
   storeIntegrationOAuthPendingState,
@@ -521,6 +526,563 @@ describe("official Gmail MCP OAuth compatibility", () => {
 });
 
 describe("connections routes", () => {
+  test.each(["personal", "workspace"] as const)(
+    "prepared MCP agent %s setup uses the causal owner and exact frozen authority",
+    async (ownership) => {
+      if (!available) throw new Error("Prepared MCP setup requires the PostgreSQL test fixture");
+      const workspace = await freshWorkspace();
+      const permissions: Permission[] = [
+        "workspace:read",
+        "connections:read",
+        "connections:write",
+        "capabilities:manage",
+      ];
+      await shared!
+        .admin`update workspace_memberships set permissions = ${shared!.admin.json(permissions)}
+        where workspace_id = ${workspace.workspaceId} and subject_id = 'subject-a'`;
+      const session = await createSession(client.db, {
+        ...workspace,
+        initialMessage: "Connect the requested records server",
+        resources: [],
+        tools: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        firstPartyMcpPermissions: permissions,
+        firstPartyMcpTools: ["custom_mcp_setup_request"],
+      });
+      const [turn] = await shared!.admin<{ id: string }[]>`insert into session_turns (
+        account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id, status, position,
+        prompt, model, reasoning_effort, sandbox_backend, execution_generation,
+        initiator_kind, initiator_subject_id, initiator_context, initiating_human_subject_id
+      ) values (${workspace.accountId}, ${workspace.workspaceId}, ${session.id}, gen_random_uuid(),
+        ${`prepared-${randomUUID()}`}, 'running', 0, 'Connect records', 'scripted-model', 'medium', 'none', 1,
+        'subject', 'subject-a', '{}'::jsonb, 'subject-a') returning id`;
+      const attemptId = randomUUID();
+      await shared!.admin.begin(async (tx) => {
+        await tx.unsafe("set local opengeni.session_inference_claim = '1'");
+        await tx`update sessions set active_turn_id = ${turn!.id}, status = 'running' where id = ${session.id}`;
+        await tx`update session_turns set active_attempt_id = ${attemptId} where id = ${turn!.id}`;
+        await tx`insert into session_turn_attempts (
+          id, account_id, workspace_id, session_id, turn_id, execution_generation, state,
+          temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id, verified_control_revision, mcp_approval_policies
+        ) values (${attemptId}, ${workspace.accountId}, ${workspace.workspaceId}, ${session.id}, ${turn!.id}, 1,
+          'running', 'prepared-fixture', ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0, '{}'::jsonb)`;
+      });
+      const authority = {
+        ...workspace,
+        sessionId: session.id,
+        turnId: turn!.id,
+        attemptId,
+        executionGeneration: 1,
+      };
+      const catalog = createAttemptToolEnvironment({
+        scope: authority,
+        generation: 1,
+        firstPartyMcpPermissions: permissions,
+        definitions: [
+          {
+            identity: { serverId: "opengeni", toolName: "custom_mcp_setup_request" },
+            modelName: "opengeni__custom_mcp_setup_request",
+            inputSchema: { type: "object" },
+            source: "mcp",
+            approval: "none",
+            execute: async () => ({ content: [] }),
+          },
+        ],
+      }).catalog;
+      await persistAttemptToolCatalog(client.db, catalog);
+      const token = await signDelegatedAccessToken(DELEGATION_SECRET, {
+        ...authority,
+        subjectId: "worker:first-party-mcp",
+        principalKind: "agent_attempt",
+        permissions: ["codemode:call"],
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+      let probes = 0;
+      let stopDuringProbe = false;
+      const api = appWithDeps(
+        {},
+        {
+          mcpCapabilityProbe: async () => {
+            probes += 1;
+            if (stopDuringProbe)
+              await shared!.admin`update workspace_inference_controls
+          set workspace_state = 'paused', revision = revision + 1, workspace_pause_revision = revision + 1
+          where workspace_id = ${workspace.workspaceId}`;
+            return { toolCount: 2 };
+          },
+        },
+      );
+      const directBase = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+      const proxyBase = `/v1/workspaces/${workspace.workspaceId}/codemode/sdk/v1/workspaces/site-host`;
+      const base = `${proxyBase}/connect/attempts`;
+      const configuration = {
+        name: "Example MCP",
+        endpointUrl: "https://prepared-agent.example.test/mcp",
+        headers: [{ name: "Authorization", secret: "key", prefix: "Bearer " }],
+        secretFields: [{ id: "key", label: "API key" }],
+      };
+      const body = {
+        providerId: "mcp-headers",
+        ownership,
+        idempotencyKey: randomUUID(),
+        returnUrl: "https://console.example.test/connections",
+        mcpSetup: configuration,
+      };
+      const begin = (input: unknown) =>
+        api.request(base, { method: "POST", headers, body: JSON.stringify(input) });
+      const response = await begin(body);
+      expect(response.status, await response.clone().text()).toBe(200);
+      const attempt = await response.json();
+      expect(await (await begin(body)).json()).toEqual(attempt);
+      const advance = {
+        expectedRevision: attempt.revision,
+        idempotencyKey: randomUUID(),
+        action: { type: "credentials", values: { key: "synthetic-agent-key" } },
+      };
+      const submit = () =>
+        api.request(`${base}/${attempt.id}/advance`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(advance),
+        });
+      const connected = await submit();
+      expect(connected.status, await connected.clone().text()).toBe(200);
+      const receipt = await connected.json();
+      expect(receipt).toMatchObject({ state: "complete", integrationInstalled: true, ownership });
+      expect(await (await submit()).json()).toEqual(receipt);
+      expect(probes).toBe(1);
+      const stored = await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a");
+      expect(stored).toHaveLength(1);
+      expect(stored[0]!.subjectId).toBe(ownership === "personal" ? "subject-a" : null);
+      expect(JSON.stringify(receipt)).not.toContain("synthetic-agent-key");
+      expect(
+        (
+          await begin({
+            ...body,
+            idempotencyKey: randomUUID(),
+            providerId: "mcp-oauth",
+            mcpSetup: undefined,
+          })
+        ).status,
+      ).toBe(403);
+      expect((await api.request(`${base}/${attempt.id}`, { headers })).status).toBe(200);
+      expect(
+        (await api.request(`${proxyBase}/connections`, { method: "POST", headers, body: "{}" }))
+          .status,
+      ).toBe(403);
+      const ownerHeaders = { authorization: await bearer(workspace, "subject-a", permissions) };
+      expect(
+        (await api.request(`${directBase}/${attempt.id}`, { headers: ownerHeaders })).status,
+      ).toBe(200);
+      expect(
+        (
+          await api.request(`${directBase}/${attempt.id}`, {
+            headers: { authorization: await bearer(workspace, "subject-b", permissions) },
+          })
+        ).status,
+      ).toBe(404);
+      await shared!
+        .admin`update sessions set first_party_mcp_tools = '[]'::jsonb where id = ${session.id}`;
+      expect((await begin({ ...body, idempotencyKey: randomUUID() })).status).toBe(403);
+      await shared!
+        .admin`update sessions set first_party_mcp_tools = '["custom_mcp_setup_request"]'::jsonb where id = ${session.id}`;
+      stopDuringProbe = true;
+      const other = await (
+        await begin({
+          ...body,
+          idempotencyKey: randomUUID(),
+          mcpSetup: {
+            ...configuration,
+            endpointUrl: "https://second.example.test/mcp",
+          },
+        })
+      ).json();
+      const interrupted = await api.request(`${base}/${other.id}/advance`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          ...advance,
+          expectedRevision: other.revision,
+          idempotencyKey: randomUUID(),
+        }),
+      });
+      expect(interrupted.status, await interrupted.clone().text()).toBe(403);
+      expect(
+        await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a"),
+      ).toHaveLength(1);
+    },
+    30_000,
+  );
+
+  test("prepared MCP verification failure settles without secrets or partial writes and accepts a corrected submission", async () => {
+    if (!available) throw new Error("Prepared MCP setup requires the PostgreSQL test fixture");
+    const workspace = await freshWorkspace();
+    const permissions: Permission[] = [
+      "connections:read",
+      "connections:write",
+      "capabilities:manage",
+    ];
+    await shared!
+      .admin`update workspace_memberships set permissions = ${shared!.admin.json(permissions)}
+      where workspace_id = ${workspace.workspaceId} and subject_id = 'subject-a'`;
+    const headers = {
+      authorization: await bearer(workspace, "subject-a", permissions),
+      "content-type": "application/json",
+    };
+    let probes = 0;
+    const api = appWithDeps(
+      {},
+      {
+        mcpCapabilityProbe: async ({ headers: supplied }: McpCapabilityProbeInput) => {
+          probes += 1;
+          if (supplied?.["X-API-Key"] !== "synthetic-correct-key")
+            throw new Error("Provider reflected synthetic-rejected-key in its error");
+          return { toolCount: 0 };
+        },
+      },
+    );
+    const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+    const response = await api.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: "mcp-headers",
+        ownership: "personal",
+        idempotencyKey: randomUUID(),
+        returnUrl: "https://console.example.test/connections",
+        mcpSetup: {
+          name: "Example service",
+          endpointUrl: "https://prepared.example.test/mcp",
+          headers: [{ name: "X-API-Key", secret: "key" }],
+          secretFields: [{ id: "key", label: "API key" }],
+        },
+      }),
+    });
+    expect(response.status).toBe(200);
+    const attempt = await response.json();
+    const failedOperation = {
+      expectedRevision: attempt.revision,
+      idempotencyKey: randomUUID(),
+      action: { type: "credentials", values: { key: "synthetic-rejected-key" } },
+    };
+    const advance = (operation: unknown) =>
+      api.request(`${base}/${attempt.id}/advance`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(operation),
+      });
+    const failed = await advance(failedOperation);
+    expect(failed.status).toBe(200);
+    const rejected = await failed.json();
+    expect(rejected).toMatchObject({
+      revision: attempt.revision + 1,
+      state: "credential_input",
+      credentialsCommitted: false,
+      integrationInstalled: false,
+      error: { code: "mcp_verification_failed", retryable: false },
+    });
+    expect(JSON.stringify(rejected)).not.toContain("synthetic-rejected-key");
+    expect(await (await advance(failedOperation)).json()).toEqual(rejected);
+    expect(probes).toBe(1);
+    expect(
+      await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a"),
+    ).toHaveLength(0);
+    expect(await listCapabilityInstallations(client.db, workspace.workspaceId)).toHaveLength(0);
+    const corrected = await advance({
+      expectedRevision: rejected.revision,
+      idempotencyKey: randomUUID(),
+      action: { type: "credentials", values: { key: "synthetic-correct-key" } },
+    });
+    expect(corrected.status, await corrected.clone().text()).toBe(200);
+    const result = await corrected.json();
+    expect(result).toMatchObject({
+      state: "complete",
+      credentialsCommitted: true,
+      integrationInstalled: true,
+    });
+    expect(result).not.toHaveProperty("error");
+    expect(probes).toBe(2);
+    expect(
+      await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a"),
+    ).toHaveLength(1);
+  });
+
+  test("prepared MCP setup requires installation authority and rechecks revocation after verification", async () => {
+    if (!available) throw new Error("Prepared MCP setup requires the PostgreSQL test fixture");
+    const workspace = await freshWorkspace();
+    const permissions: Permission[] = [
+      "connections:read",
+      "connections:write",
+      "capabilities:manage",
+    ];
+    const headers = {
+      authorization: await bearer(workspace, "subject-a", permissions),
+      "content-type": "application/json",
+    };
+    let probes = 0;
+    const api = appWithDeps(
+      {},
+      {
+        mcpCapabilityProbe: async () => {
+          probes += 1;
+          await shared!
+            .admin`update workspace_memberships set permissions = ${shared!.admin.json(["connections:read", "connections:write"])}
+          where workspace_id = ${workspace.workspaceId} and subject_id = 'subject-a'`;
+          return { toolCount: 1 };
+        },
+      },
+    );
+    const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+    const body = {
+      providerId: "mcp-headers",
+      ownership: "workspace",
+      idempotencyKey: randomUUID(),
+      returnUrl: "https://console.example.test/connections",
+      mcpSetup: {
+        name: "Example",
+        endpointUrl: "https://prepared.example.test/mcp",
+        headers: [{ name: "Authorization", secret: "key", prefix: "Bearer " }],
+        secretFields: [{ id: "key", label: "API key" }],
+      },
+    };
+    const begin = () => api.request(base, { method: "POST", headers, body: JSON.stringify(body) });
+    expect((await begin()).status).toBe(403);
+    expect(probes).toBe(0);
+    await shared!
+      .admin`update workspace_memberships set permissions = ${shared!.admin.json(permissions)}
+      where workspace_id = ${workspace.workspaceId} and subject_id = 'subject-a'`;
+    const admitted = await begin();
+    expect(admitted.status).toBe(200);
+    const attempt = await admitted.json();
+    const response = await api.request(`${base}/${attempt.id}/advance`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        expectedRevision: attempt.revision,
+        idempotencyKey: randomUUID(),
+        action: { type: "credentials", values: { key: "synthetic-key" } },
+      }),
+    });
+    expect(response.status).toBe(403);
+    expect(probes).toBe(1);
+    expect(
+      await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a"),
+    ).toHaveLength(0);
+    expect(await listCapabilityInstallations(client.db, workspace.workspaceId)).toHaveLength(0);
+  });
+
+  test.each(["personal", "workspace"] as const)(
+    "prepared MCP %s credential input retains configuration and accepts only requested secrets",
+    async (ownership) => {
+      if (!available) throw new Error("Prepared MCP setup requires the PostgreSQL test fixture");
+      const workspace = await freshWorkspace();
+      await shared!.admin`update workspace_memberships
+        set permissions = ${shared!.admin.json(["connections:read", "connections:write", "capabilities:manage"])}
+        where workspace_id = ${workspace.workspaceId} and subject_id = 'subject-a'`;
+      const headers = {
+        authorization: await bearer(workspace, "subject-a", [
+          "connections:read",
+          "connections:write",
+          "capabilities:manage",
+        ]),
+        "content-type": "application/json",
+      };
+      const probes: McpCapabilityProbeInput[] = [];
+      const api = appWithDeps(
+        {},
+        {
+          mcpCapabilityProbe: async (input: McpCapabilityProbeInput) => {
+            probes.push(input);
+            return { toolCount: 3 };
+          },
+        },
+      );
+      const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+      const mcpSetup = {
+        name: "Prepared example",
+        endpointUrl: "https://prepared.example.test/tools",
+        headers: [
+          { name: "Authorization", secret: "key", prefix: "Bearer " },
+          { name: "X-Tenant", value: "example" },
+        ],
+        secretFields: [{ id: "key", label: "API key" }],
+      };
+      const beginBody = {
+        providerId: "mcp-headers",
+        ownership,
+        returnUrl: "https://console.example.test/connections",
+        idempotencyKey: randomUUID(),
+        mcpSetup,
+      };
+      const begin = () =>
+        api.request(base, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(beginBody),
+        });
+      const response = await begin();
+      expect(response.status).toBe(200);
+      const attempt = await response.json();
+      expect(attempt.mcpSetup).toEqual(mcpSetup);
+      expect(attempt.ownership).toBe(ownership);
+      expect(attempt.nextAction).toEqual({
+        type: "credentials",
+        fields: [{ name: "key", label: "API key", required: true, secret: true }],
+      });
+      expect(await (await begin()).json()).toEqual(attempt);
+      expect(await (await api.request(`${base}/${attempt.id}`, { headers })).json()).toEqual(
+        attempt,
+      );
+      const operationId = randomUUID();
+      const advance = (values: Record<string, string>) =>
+        api.request(`${base}/${attempt.id}/advance`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            expectedRevision: attempt.revision,
+            idempotencyKey: operationId,
+            action: { type: "credentials", values },
+          }),
+        });
+      for (const values of [
+        {},
+        { key: "" },
+        { key: "synthetic-credential", endpointUrl: "https://other.example.test" },
+        { key: "synthetic-credential", headers: "{}" },
+        { key: "synthetic-credential\r\nInjected: value" },
+      ]) {
+        const rejected = await advance(values);
+        expect(rejected.status).toBe(422);
+        expect(await rejected.text()).not.toContain("synthetic-credential");
+      }
+      expect(
+        await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a"),
+      ).toHaveLength(0);
+      const secret = "synthetic-prepared-secret";
+      const accepted = await advance({ key: secret });
+      expect(accepted.status, await accepted.clone().text()).toBe(200);
+      const result = await accepted.json();
+      expect(result.credentialsCommitted).toBe(true);
+      expect(result.integrationInstalled).toBe(true);
+      expect(result.completionRequirement).toBe("integration");
+      expect(result.state).toBe("complete");
+      expect(result.account.ownership).toBe(ownership);
+      expect(JSON.stringify(result)).not.toContain(secret);
+      expect(await (await advance({ key: secret })).json()).toEqual(result);
+      expect((await advance({ key: "different-synthetic-secret" })).status).toBe(409);
+      expect(probes).toHaveLength(1);
+      expect(probes[0]?.url).toBe(mcpSetup.endpointUrl);
+      expect(probes[0]?.headers).toEqual({
+        Authorization: `Bearer ${secret}`,
+        "X-Tenant": "example",
+      });
+      const installations = await listCapabilityInstallations(client.db, workspace.workspaceId);
+      expect(installations).toHaveLength(1);
+      expect(installations[0]?.config.connectionRef).toMatchObject({
+        providerDomain: "prepared.example.test",
+        subjectScope: ownership === "personal" ? "subject" : "workspace",
+        resource: mcpSetup.endpointUrl,
+        kind: "api_key",
+      });
+      expect(installations[0]?.metadata.mcpConnectivity).toMatchObject({
+        status: "ok",
+        toolCount: 3,
+      });
+      expect(installations[0]?.config).not.toHaveProperty("headersEncrypted");
+      expect(JSON.stringify(installations)).not.toContain(secret);
+      const connections = await listConnectionsMetadata(
+        client.db,
+        workspace.workspaceId,
+        "subject-a",
+      );
+      expect(connections).toHaveLength(1);
+      expect(connections[0]?.subjectId).toBe(ownership === "personal" ? "subject-a" : null);
+      expect(connections[0]?.metadata.mcpUrl).toBe(mcpSetup.endpointUrl);
+      expect(JSON.stringify(connections)).not.toContain(secret);
+      const stored = await loadConnectionCredentialForBroker(client.db, settings, {
+        workspaceId: workspace.workspaceId,
+        connectionId: result.account.id,
+        providerDomain: "prepared.example.test",
+        kind: "api_key",
+        ...(ownership === "personal" ? { subjectId: "subject-a", allowSubjectOwned: true } : {}),
+      });
+      expect(stored?.credential).toEqual({
+        headers: { Authorization: `Bearer ${secret}`, "X-Tenant": "example" },
+      });
+
+      // An explicit account pin made after setup is not permission to turn it
+      // back into an all-account selector or to claim a new account is usable.
+      const { accountSelection: _selection, ...unpinnedRef } = installations[0]!.config
+        .connectionRef as Record<string, unknown>;
+      const pinned = await enableCapabilityInstallation(client.db, {
+        ...workspace,
+        capabilityId: result.mcpCapabilityId,
+        kind: "mcp",
+        config: { connectionRef: { ...unpinnedRef, connectionId: result.account.id } },
+        metadata: {},
+      });
+      const separate = await (
+        await api.request(base, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ ...beginBody, idempotencyKey: randomUUID() }),
+        })
+      ).json();
+      const refusedPinChange = await api.request(`${base}/${separate.id}/advance`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          expectedRevision: separate.revision,
+          idempotencyKey: randomUUID(),
+          action: { type: "credentials", values: { key: "synthetic-second-key" } },
+        }),
+      });
+      expect(refusedPinChange.status).toBe(409);
+      expect(
+        await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a"),
+      ).toHaveLength(1);
+      expect(
+        (await listCapabilityInstallations(client.db, workspace.workspaceId))[0]?.config,
+      ).toEqual(pinned.config);
+      const reconnect = await (
+        await api.request(base, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            ...beginBody,
+            idempotencyKey: randomUUID(),
+            reconnectAccountId: result.account.id,
+          }),
+        })
+      ).json();
+      const replaced = await api.request(`${base}/${reconnect.id}/advance`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          expectedRevision: reconnect.revision,
+          idempotencyKey: randomUUID(),
+          action: { type: "credentials", values: { key: "synthetic-replacement-key" } },
+        }),
+      });
+      expect(replaced.status).toBe(200);
+      expect(await replaced.json()).toMatchObject({
+        state: "complete",
+        account: { id: result.account.id },
+      });
+      expect(
+        await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a"),
+      ).toHaveLength(1);
+      expect(
+        (await listCapabilityInstallations(client.db, workspace.workspaceId))[0]?.config,
+      ).toEqual(pinned.config);
+    },
+  );
+
   test("superseded host registration routes are absent", async () => {
     if (!available) throw new Error("Real database required");
     const workspace = await freshWorkspace();

@@ -34,6 +34,7 @@ import {
   type TurnAttemptFenceRejectReason,
 } from "./session-attempt-fence";
 export type { TurnAttemptFenceRejectReason } from "./session-attempt-fence";
+export { lockTurnAttemptWriteFenceTx } from "./session-attempt-fence";
 import {
   CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY,
   ToolReviewContext,

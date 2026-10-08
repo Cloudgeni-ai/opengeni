@@ -21,6 +21,8 @@
 .og-connect fieldset { border: 0; padding: 0; margin: 0; }
 .og-connect legend { font-weight: 600; padding-block-end: .5rem; }
 .og-connect label { display: grid; gap: .375rem; }
+.og-session-capability-setup .og-connect label:not(:has(input[type="checkbox"], input[type="radio"])) { display:grid; gap:.375rem; }
+.og-session-capability-setup .og-connect label > input:not([type="checkbox"]):not([type="radio"]) { width:100%; margin-top:0; }
 .og-connect label:has(input[type="checkbox"], input[type="radio"]) { display: flex; align-items: center; gap: .75rem; min-height: 2.75rem; }
 .og-connect :where(button, select, input:not([type="checkbox"]):not([type="radio"])) {
   font: inherit;

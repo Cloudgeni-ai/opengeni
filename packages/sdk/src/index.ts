@@ -1,4 +1,4 @@
-// Types only: a value re-export would pull the contracts runtime into the root entry.
+export { parseCustomMcpSetupRequest } from "./prepared-mcp-setup";
 export type {
   AvailableOpenGeniSlackBots,
   OpenGeniSlackBotOrganizationAccess,
