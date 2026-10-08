@@ -2144,6 +2144,7 @@ describe("provider-neutral subscription runtime persistence", () => {
           table_owner: string;
           security_definer: boolean;
           search_path: string;
+          lock_timeout: string | null;
           app_execute: boolean;
           public_execute: boolean;
         }[]
@@ -2152,7 +2153,10 @@ describe("provider-neutral subscription runtime persistence", () => {
           pg_get_userbyid(proc.proowner) as owner,
           pg_get_userbyid(connection_table.relowner) as table_owner,
           proc.prosecdef as security_definer,
-          array_to_string(proc.proconfig, ',') as search_path,
+          (select setting from unnest(proc.proconfig) setting
+            where setting like 'search_path=%') as search_path,
+          (select setting from unnest(proc.proconfig) setting
+            where setting like 'lock_timeout=%') as lock_timeout,
           has_function_privilege('opengeni_app', proc.oid, 'EXECUTE') as app_execute,
           coalesce((
             select bool_or(acl_entry.grantee = 0 and acl_entry.privilege_type = 'EXECUTE')
@@ -2181,6 +2185,9 @@ describe("provider-neutral subscription runtime persistence", () => {
         );
         expect(routine.app_execute).toBe(true);
         expect(routine.public_execute).toBe(false);
+        expect(routine.lock_timeout).toBe(
+          routine.name === "persist_subscription_codex_refresh" ? "lock_timeout=0" : null,
+        );
       }
       const [persisted] = await shared!.admin<
         { credential_encrypted: string; refresh_generation: string; scope_kind: string }[]
@@ -2581,6 +2588,323 @@ describe("provider-neutral subscription runtime persistence", () => {
         Promise.resolve("must not run"),
       );
       expect(reacquired.status).not.toBe("completed");
+    },
+    180_000,
+  );
+
+  test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
+    "credential writers always advance refresh_generation, so an in-flight refresh cannot overwrite them",
+    async () => {
+      const state = await fixture();
+      const [membership] = await shared!.admin<{ id: string }[]>`
+        select id::text as id from organization_memberships
+        where account_id = ${state.accountId}::uuid and subject_id = ${state.subjectId}
+          and status = 'active' and revoked_at is null limit 1`;
+      const request = {
+        accountId: state.accountId,
+        workspaceId: state.workspaceId,
+        sessionId: state.sessionId,
+        turnId: state.turnId,
+        sessionOwnerSubjectId: state.subjectId,
+        sessionOwnerMembershipId: membership!.id,
+        initiatingHumanSubjectId: state.subjectId,
+        provider: "codex" as const,
+        connectionId: state.connectionId,
+        holderId: `refresh-writer-${crypto.randomUUID()}`,
+        generation: 1,
+      };
+      const actor = {
+        subjectId: "service:subscription-core",
+        initiatingHumanSubjectId: state.subjectId,
+      };
+      expect(
+        await withSessionRlsActorContext(actor, () =>
+          withRlsContext(
+            client!.db,
+            { accountId: state.accountId, workspaceId: state.workspaceId },
+            (db) => acquireSubscriptionTurnLease(db, { ...request, ttlMs: 60_000 }),
+          ),
+        ),
+      ).toMatchObject({ generation: 1 });
+      const adminSubject = `user:subscription-refresh-writer-admin-${crypto.randomUUID()}`;
+      const [adminPersonal] = await shared!.admin<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${state.accountId}::uuid, 'Subscription refresh writer admin Personal')
+        returning id::text as id`;
+      await shared!.admin`
+        insert into organization_memberships (
+          account_id, subject_id, role, status, personal_workspace_id
+        ) values (
+          ${state.accountId}::uuid, ${adminSubject}, 'admin', 'active', ${adminPersonal!.id}::uuid
+        )`;
+      const asAdmin = <T>(work: (db: Parameters<typeof rawRows>[0]) => Promise<T>) =>
+        withSessionRlsActorContext({ subjectId: adminSubject }, () =>
+          withRlsContext(
+            client!.db,
+            { accountId: state.accountId, workspaceId: state.workspaceId },
+            work,
+          ),
+        );
+      const replaced = "v1:YWRtaW4tcmVwbGFjZWQ=:c2VjcmV0";
+
+      // An administrator replaces the credential while a refresh is in flight.
+      const refresh = await withSubscriptionCoreCodexRefreshLock(
+        client!.db,
+        request,
+        async (db, credential) => {
+          const [adminWrite] = await asAdmin((adminDb) =>
+            rawRows<{ refresh_generation: string }>(
+              adminDb,
+              sql`update subscription_connections set credential_encrypted = ${replaced}
+                where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid
+                returning refresh_generation::text`,
+            ),
+          );
+          const persisted = await persistSubscriptionCodexRefresh(db, {
+            ...request,
+            expectedRefreshGeneration: credential.refreshGeneration,
+            credentialEncrypted: "v1:c3RhbGUtcm90YXRpb24=:c2VjcmV0",
+            expiresAt: null,
+            lastRefreshAt: new Date(),
+          });
+          return { adminGeneration: adminWrite?.refresh_generation, persisted };
+        },
+      );
+      expect(refresh).toEqual({
+        status: "completed",
+        value: { adminGeneration: "2", persisted: false },
+      });
+
+      let rewindError: unknown;
+      try {
+        await asAdmin((adminDb) =>
+          rawRows(
+            adminDb,
+            sql`update subscription_connections set refresh_generation = 1
+              where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid`,
+          ),
+        );
+      } catch (error) {
+        rewindError = error;
+      }
+      expect(String((rewindError as { cause?: unknown } | undefined)?.cause)).toContain(
+        "refresh generation cannot move backwards",
+      );
+      const [stored] = await shared!.admin<
+        { credential_encrypted: string; refresh_generation: string; version: number }[]
+      >`
+        select credential_encrypted, refresh_generation::text, version
+        from subscription_connections
+        where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid`;
+      expect(stored).toEqual({
+        credential_encrypted: replaced,
+        refresh_generation: "2",
+        version: 1,
+      });
+    },
+    180_000,
+  );
+
+  test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
+    "personal Codex refresh needs frozen owner authority and current settings, and leaves other capabilities untouched",
+    async () => {
+      const state = await fixture();
+      const [membership] = await shared!.admin<{ id: string; personal_workspace_id: string }[]>`
+        select id::text as id, personal_workspace_id::text as personal_workspace_id
+        from organization_memberships
+        where account_id = ${state.accountId}::uuid and subject_id = ${state.subjectId}
+          and status = 'active' and revoked_at is null limit 1`;
+      const personalWorkspaceId = membership!.personal_workspace_id;
+      const personalSession = await withSessionRlsActorContext({ subjectId: state.subjectId }, () =>
+        createSession(client!.db, {
+          accountId: state.accountId,
+          workspaceId: personalWorkspaceId,
+          initialMessage: "personal refresh fixture",
+          resources: [],
+          metadata: {},
+          model: "fixture-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          createdBy: { kind: "subject", subjectId: state.subjectId },
+          createdByContext: {},
+        }),
+      );
+      const personalTurn = await withSessionRlsActorContext({ subjectId: state.subjectId }, () =>
+        enqueueSessionTurn(client!.db, {
+          accountId: state.accountId,
+          workspaceId: personalWorkspaceId,
+          sessionId: personalSession.id,
+          triggerEventId: crypto.randomUUID(),
+          temporalWorkflowId: `personal-refresh-${personalSession.id}`,
+          source: "user",
+          prompt: "personal refresh fixture",
+          resources: [],
+          tools: [],
+          model: "fixture-model",
+          reasoningEffort: "medium",
+          sandboxBackend: "none",
+          metadata: {},
+          initiator: { kind: "subject", subjectId: state.subjectId },
+        }),
+      );
+      const connectionId = crypto.randomUUID();
+      const authorityId = crypto.randomUUID();
+      await shared!.admin`
+        insert into organization_user_resource_authorities (
+          id, account_id, organization_membership_id, resource_kind, resource_id, generation, status
+        ) values (
+          ${authorityId}::uuid, ${state.accountId}::uuid, ${membership!.id}::uuid,
+          'subscription_connection', ${connectionId}::uuid, 1, 'active'
+        )`;
+      await shared!.admin`
+        insert into subscription_connections (
+          id, account_id, provider, credential_encrypted, ownership, scope_kind,
+          owner_organization_membership_id, owner_subject_id, authority_id,
+          authority_resource_kind, authority_generation
+        ) values (
+          ${connectionId}::uuid, ${state.accountId}::uuid, 'codex', 'v1:personal-refresh',
+          'personal', 'people', ${membership!.id}::uuid, ${state.subjectId}, ${authorityId}::uuid,
+          'subscription_connection', 1
+        )`;
+      await shared!.admin`
+        insert into subscription_settings (
+          account_id, rotation, providers, cross_provider_failover, fallback_order,
+          personal_connections_allowed, personal_fallback_allowed
+        ) values (
+          ${state.accountId}::uuid, '{}'::jsonb, '{}'::jsonb, false, '{}'::jsonb, true, true
+        ) on conflict (account_id, workspace_id) do update
+          set personal_connections_allowed = true`;
+      // The accepted turn froze the owner's personal Codex authority (v1 stays
+      // authoritative until the drained cutover replaces the helper's source).
+      // The snapshot is immutable after acceptance, so this fixture writes it
+      // as the table owner with the immutability trigger briefly disabled.
+      await shared!.admin.begin(async (tx) => {
+        await tx.unsafe(
+          "alter table session_turns disable trigger session_turns_codex_authority_snapshot_immutable_trg",
+        );
+        await tx`
+          update session_turns
+          set codex_provider_account_authority_snapshot =
+            '{"version":1,"scope":"user","authorityGeneration":1}'::jsonb
+          where account_id = ${state.accountId}::uuid and id = ${personalTurn.id}::uuid`;
+        await tx.unsafe(
+          "alter table session_turns enable trigger session_turns_codex_authority_snapshot_immutable_trg",
+        );
+      });
+      const request = {
+        accountId: state.accountId,
+        workspaceId: personalWorkspaceId,
+        sessionId: personalSession.id,
+        turnId: personalTurn.id,
+        sessionOwnerSubjectId: state.subjectId,
+        sessionOwnerMembershipId: membership!.id,
+        initiatingHumanSubjectId: state.subjectId,
+        provider: "codex" as const,
+        connectionId,
+        holderId: `personal-refresh-${crypto.randomUUID()}`,
+        generation: 1,
+      };
+      const actor = {
+        subjectId: "service:subscription-core",
+        initiatingHumanSubjectId: state.subjectId,
+      };
+      expect(
+        await withSessionRlsActorContext(actor, () =>
+          withRlsContext(
+            client!.db,
+            { accountId: state.accountId, workspaceId: personalWorkspaceId },
+            (db) => acquireSubscriptionTurnLease(db, { ...request, ttlMs: 60_000 }),
+          ),
+        ),
+      ).toMatchObject({ generation: 1 });
+      const refreshOnce = (credentialEncrypted: string) =>
+        withSubscriptionCoreCodexRefreshLock(client!.db, request, async (db, credential) =>
+          persistSubscriptionCodexRefresh(db, {
+            ...request,
+            expectedRefreshGeneration: credential.refreshGeneration,
+            credentialEncrypted,
+            expiresAt: null,
+            lastRefreshAt: new Date(),
+          }),
+        );
+
+      expect(await refreshOnce("v1:cGVyc29uYWwtb25l:c2VjcmV0")).toEqual({
+        status: "completed",
+        value: true,
+      });
+
+      // Disabling personal connections stops further personal refreshes, even
+      // for a turn that still holds a live lease.
+      await shared!.admin`
+        update subscription_settings set personal_connections_allowed = false
+        where account_id = ${state.accountId}::uuid and workspace_id is null`;
+      expect(await refreshOnce("v1:cGVyc29uYWwtdHdv:c2VjcmV0")).toEqual({ status: "refused" });
+      await shared!.admin`
+        update subscription_settings set personal_connections_allowed = true
+        where account_id = ${state.accountId}::uuid and workspace_id is null`;
+
+      // A capability another turn holds for the same connection in this
+      // transaction is neither rebound nor deleted; refresh fails closed.
+      const probeSuffix = crypto.randomUUID().replaceAll("-", "_");
+      const seedProbe = `opengeni_private.test_seed_personal_${probeSuffix}`;
+      const readProbe = `opengeni_private.test_read_personal_${probeSuffix}`;
+      await shared!.admin.unsafe(`
+        create function ${seedProbe}(
+          p_account uuid, p_workspace uuid, p_session uuid, p_turn uuid,
+          p_connection uuid, p_owner text
+        ) returns void language sql security definer
+        set search_path = pg_catalog, opengeni_private, pg_temp as $probe$
+          insert into opengeni_private.subscription_runtime_capabilities (
+            backend_pid, transaction_id, capability_kind, account_id, workspace_id,
+            session_id, turn_id, connection_id, provider,
+            session_owner_subject_id, turn_human_subject_id
+          ) values (
+            pg_backend_pid(), pg_current_xact_id(), 'personal_access', p_account, p_workspace,
+            p_session, p_turn, p_connection, 'codex', p_owner, p_owner
+          );
+        $probe$;
+        create function ${readProbe}(p_account uuid, p_connection uuid)
+        returns uuid language sql security definer
+        set search_path = pg_catalog, opengeni_private, pg_temp as $probe$
+          select capability.turn_id from opengeni_private.subscription_runtime_capabilities capability
+          where capability.backend_pid = pg_backend_pid()
+            and capability.transaction_id = pg_current_xact_id_if_assigned()
+            and capability.capability_kind = 'personal_access'
+            and capability.account_id = p_account and capability.connection_id = p_connection;
+        $probe$;
+        grant execute on function ${seedProbe}(uuid, uuid, uuid, uuid, uuid, text) to opengeni_app;
+        grant execute on function ${readProbe}(uuid, uuid) to opengeni_app;
+      `);
+      const otherTurnId = crypto.randomUUID();
+      try {
+        const observed = await client!.db.transaction(async (transaction) => {
+          await transaction.execute(sql`select ${sql.raw(seedProbe)}(
+            ${state.accountId}::uuid, ${personalWorkspaceId}::uuid, ${personalSession.id}::uuid,
+            ${otherTurnId}::uuid, ${connectionId}::uuid, ${state.subjectId}
+          )`);
+          const refreshed = await withSubscriptionCoreCodexRefreshLock(
+            transaction as never,
+            request,
+            async () => "must not run",
+          );
+          const [held] = await rawRows<{ turn_id: string | null }>(
+            transaction as never,
+            sql`select ${sql.raw(readProbe)}(${state.accountId}::uuid, ${connectionId}::uuid)::text as turn_id`,
+          );
+          return { refreshed, heldTurnId: held?.turn_id ?? null };
+        });
+        expect(observed).toEqual({ refreshed: { status: "refused" }, heldTurnId: otherTurnId });
+      } finally {
+        await shared!.admin.unsafe(`
+          drop function if exists ${seedProbe}(uuid, uuid, uuid, uuid, uuid, text);
+          drop function if exists ${readProbe}(uuid, uuid);
+        `);
+      }
+      const [stored] = await shared!.admin<{ credential_encrypted: string }[]>`
+        select credential_encrypted from subscription_connections
+        where account_id = ${state.accountId}::uuid and id = ${connectionId}::uuid`;
+      expect(stored?.credential_encrypted).toBe("v1:cGVyc29uYWwtb25l:c2VjcmV0");
     },
     180_000,
   );

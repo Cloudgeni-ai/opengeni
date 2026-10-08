@@ -2,6 +2,10 @@
 -- Add only the chat-turn v2 slot and an inactive, lease-fenced credential-write
 -- seam. The M3 cutover gate remains absent; v1 accepted authority stays live.
 
+-- Never queue behind a long-running transaction while holding session_turns'
+-- ACCESS EXCLUSIVE lock during a rolling deploy.
+SET LOCAL lock_timeout = '5s';
+
 ALTER TABLE session_turns
   ADD COLUMN subscription_authority jsonb;
 
@@ -50,8 +54,9 @@ ALTER TABLE session_turns
   ADD CONSTRAINT session_turns_subscription_authority_v2_chk
   CHECK (subscription_authority IS NULL OR subscription_personal_authority_v2_valid(subscription_authority))
   NOT VALID;
-ALTER TABLE session_turns
-  VALIDATE CONSTRAINT session_turns_subscription_authority_v2_chk;
+-- The new column is entirely NULL, and a NOT VALID check still applies to every
+-- new or updated row, so skip the full-table scan under ACCESS EXCLUSIVE. The
+-- drained cutover may validate it after its backfill.
 
 COMMENT ON COLUMN session_turns.subscription_authority IS
   'Nullable M3 v2 accepted-authority slot. The v1 Codex snapshot remains authoritative until drained cutover.';
@@ -139,7 +144,9 @@ BEGIN
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
     AS $body$
-    DECLARE allowed boolean;
+    DECLARE
+      allowed boolean;
+      minted_lifecycle boolean := false;
     BEGIN
       IF p_account_id IS DISTINCT FROM nullif(current_setting('opengeni.account_id', true), '')::uuid
         OR p_workspace_id IS DISTINCT FROM nullif(current_setting('opengeni.workspace_id', true), '')::uuid
@@ -150,7 +157,8 @@ BEGIN
       INSERT INTO opengeni_private.subscription_runtime_capabilities (
         backend_pid, transaction_id, capability_kind, account_id
       ) VALUES (pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(), 'lifecycle', p_account_id)
-      ON CONFLICT (backend_pid, transaction_id, capability_kind, account_id, connection_id) DO NOTHING;
+      ON CONFLICT (backend_pid, transaction_id, capability_kind, account_id, connection_id) DO NOTHING
+      RETURNING true INTO minted_lifecycle;
       SELECT EXISTS (
         SELECT 1 FROM sessions session
         JOIN session_turns turn ON turn.account_id = session.account_id
@@ -162,10 +170,13 @@ BEGIN
           AND turn.id = p_turn_id AND turn.initiating_human_subject_id IS NULL
           AND session_reference_visible(p_account_id, p_workspace_id, p_session_id)
       ) INTO allowed;
-      DELETE FROM opengeni_private.subscription_runtime_capabilities capability
-      WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
-        AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
-        AND capability.capability_kind = 'lifecycle' AND capability.account_id = p_account_id;
+      -- Remove only a lifecycle capability this call created.
+      IF coalesce(minted_lifecycle, false) THEN
+        DELETE FROM opengeni_private.subscription_runtime_capabilities capability
+        WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+          AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+          AND capability.capability_kind = 'lifecycle' AND capability.account_id = p_account_id;
+      END IF;
       IF NOT allowed THEN RETURN false; END IF;
 
       INSERT INTO opengeni_private.subscription_runtime_capabilities (
@@ -728,6 +739,47 @@ CREATE POLICY subscription_connections_codex_refresh_read
     account_id, nullif(current_setting('opengeni.workspace_id', true), '')::uuid, id
   ));
 
+-- refresh_generation is the compare-and-swap fence for rotating credentials.
+-- Enforce it for every writer, including administrators editing the row:
+-- it never moves backwards, and any credential change advances it, so an
+-- in-flight refresh can never overwrite a newer credential.
+DO $refresh_generation_monotonic$
+DECLARE data_schema text := current_schema();
+BEGIN
+  EXECUTE format($ddl$
+    CREATE FUNCTION %1$I.enforce_subscription_refresh_generation()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog
+    AS $body$
+    BEGIN
+      IF NEW.refresh_generation < OLD.refresh_generation THEN
+        RAISE EXCEPTION 'subscription connection refresh generation cannot move backwards'
+          USING ERRCODE = '23514';
+      END IF;
+      IF (NEW.credential_encrypted IS DISTINCT FROM OLD.credential_encrypted
+          OR NEW.credential_format IS DISTINCT FROM OLD.credential_format)
+        AND NEW.refresh_generation = OLD.refresh_generation
+      THEN
+        NEW.refresh_generation := OLD.refresh_generation + 1;
+      END IF;
+      RETURN NEW;
+    END;
+    $body$;
+  $ddl$, data_schema);
+  EXECUTE format(
+    'REVOKE ALL ON FUNCTION %I.enforce_subscription_refresh_generation() FROM PUBLIC',
+    data_schema
+  );
+  EXECUTE format($ddl$
+    CREATE TRIGGER subscription_connections_refresh_generation_trg
+    BEFORE UPDATE ON %1$I.subscription_connections
+    FOR EACH ROW
+    EXECUTE FUNCTION %1$I.enforce_subscription_refresh_generation()
+  $ddl$, data_schema);
+END
+$refresh_generation_monotonic$;
+
 -- Codex refresh is two calls in one transaction around the provider request.
 --
 -- begin_subscription_codex_refresh authorizes before the network call: exact
@@ -842,9 +894,11 @@ BEGIN
 
       -- A service or ownerless turn can refresh only shared credentials. For
       -- human turns, the existing v1 helper grants visibility only for the
-      -- exact accepted personal connection and authority snapshot. Remember
-      -- whether the caller already held that capability so cleanup removes
-      -- only what this call created.
+      -- exact accepted personal connection and authority snapshot (the drained
+      -- cutover replaces that helper's authority source with v2). The helper
+      -- rebinds or deletes an existing capability for the connection, so never
+      -- call it when the caller already holds one: an exact match for this
+      -- turn is already proof, anything else fails closed untouched.
       IF NOT ownerless_session AND turn_human IS NOT NULL THEN
         SELECT EXISTS (
           SELECT 1 FROM opengeni_private.subscription_runtime_capabilities capability
@@ -854,10 +908,27 @@ BEGIN
             AND capability.account_id = p_account_id
             AND capability.connection_id = p_connection_id
         ) INTO had_personal_access;
-        personal_authorized := opengeni_private.authorize_subscription_personal_access(
-          p_account_id, p_workspace_id, p_session_id, p_turn_id, p_connection_id,
-          'codex', session_owner, turn_human
-        );
+        IF had_personal_access THEN
+          SELECT EXISTS (
+            SELECT 1 FROM opengeni_private.subscription_runtime_capabilities capability
+            WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+              AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+              AND capability.capability_kind = 'personal_access'
+              AND capability.account_id = p_account_id
+              AND capability.connection_id = p_connection_id
+              AND capability.workspace_id = p_workspace_id
+              AND capability.session_id = p_session_id
+              AND capability.turn_id = p_turn_id
+              AND capability.provider = 'codex'
+              AND capability.session_owner_subject_id = session_owner
+              AND capability.turn_human_subject_id = turn_human
+          ) INTO personal_authorized;
+        ELSE
+          personal_authorized := opengeni_private.authorize_subscription_personal_access(
+            p_account_id, p_workspace_id, p_session_id, p_turn_id, p_connection_id,
+            'codex', session_owner, turn_human
+          );
+        END IF;
       END IF;
 
       SELECT connection.* INTO target
@@ -874,6 +945,11 @@ BEGIN
           )
         ))
         AND NOT (target.ownership = 'personal' AND NOT personal_authorized)
+        -- Personal credentials also require personal connections to be allowed
+        -- now, as the lease guard does.
+        AND NOT (target.ownership = 'personal' AND NOT coalesce((subscription_effective_settings(
+          p_account_id, p_workspace_id
+        ) #>> '{values,personalConnectionsAllowed}')::boolean, false))
         AND opengeni_private.subscription_connection_visible(
           p_account_id, p_workspace_id, target.id, target.ownership, target.scope_kind,
           target.owner_organization_membership_id, target.owner_subject_id, target.provider
@@ -926,6 +1002,9 @@ BEGIN
     ) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
+    -- The provider has already rotated the token: wait for a briefly held
+    -- connection row rather than abort the transaction and discard it.
+    SET lock_timeout = 0
     AS $body$
     DECLARE
       capability_owner text;
@@ -974,14 +1053,14 @@ BEGIN
       -- The compare-and-swap is the only freshness fence after the provider
       -- call. Status is not rechecked: a connection disabled meanwhile keeps a
       -- usable token if it is enabled again, and a deleted row simply matches
-      -- nothing.
+      -- nothing. A refresh is not a metadata edit, so `version` (metadata
+      -- optimistic concurrency) is left alone.
       UPDATE subscription_connections
       SET credential_encrypted = p_credential_encrypted,
           credential_format = split_part(p_credential_encrypted, ':', 1),
           expires_at = p_expires_at,
           last_refresh_at = p_last_refresh_at,
           refresh_generation = subscription_connections.refresh_generation + 1,
-          version = version + 1,
           updated_at = pg_catalog.clock_timestamp()
       WHERE account_id = p_account_id AND id = p_connection_id
         AND provider = 'codex' AND kind = 'subscription'

@@ -116,5 +116,5 @@ export const embeddingMigrationTail = [
   "0652_session_archive_guard_search_path.sql",
   "0653_session_archive_tenancy_fence.sql",
   "0657_session_archive_purge_retained_evidence.sql",
-  "0658_subscription_authority_refresh_contract.sql",
+  "0659_subscription_authority_refresh_contract.sql",
 ];

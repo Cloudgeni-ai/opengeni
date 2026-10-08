@@ -396,16 +396,26 @@ calls inside one transaction around the provider request.
    id>`, then checks the exact accepted session and turn, session access
    (owned, service or ownerless), the live lease holder and generation,
    shared-only scope for ownerless turns, the frozen personal authority for
-   personal connections, and current visibility. It requires an active
+   personal connections (through the same helper the lease guard uses, whose
+   authority source the drained cutover switches to v2), whether personal
+   connections are allowed now, and current visibility. It requires an active
    `subscription`-kind Codex connection, returns the credential to rotate, and
    mints a one-shot `codex_refresh_authorized` capability that no RLS policy
    reads. A second `begin` for the same connection in one transaction is
-   refused.
+   refused, and a personal capability the caller already holds for another
+   turn is left untouched and refuses the refresh.
 2. `persist_subscription_codex_refresh` runs as soon as the provider returns.
    It consumes that capability and writes under the still-held advisory lock and
    the `refresh_generation` compare-and-swap only. A short-lived
    `codex_refresh_write` capability exposes the exact row to that one UPDATE
    (SELECT and UPDATE policies) and is removed before the function returns.
+   It runs with no lock timeout so a briefly held row delays rather than aborts
+   the write, and it does not bump the metadata `version`.
+
+`refresh_generation` is enforced for every writer by a trigger: it never
+moves backwards, and any change to the stored credential advances it. An
+administrator replacing a credential during an in-flight refresh therefore
+makes that refresh's compare-and-swap fail instead of being overwritten.
 
 Decision (strictest design that does not strand a shared credential):
 persistence deliberately does not repeat lease-expiry, visibility, settings or
@@ -422,8 +432,14 @@ Lock order: the advisory key first, then the connection row (taken
 Neither function locks the lease row, and no row lock is held across the
 provider call, so lease renewal, release, takeover and connection
 administration never wait on a refresh. Any future writer that replaces a
-Codex credential, such as reconnect, must take the same advisory key and
-advance `refresh_generation`.
+Codex credential, such as reconnect, should also take the same advisory key so
+it does not race the provider call itself.
+
+Residual risk, accepted for now: a rotated token is still lost if the
+surrounding transaction fails after `persist` (commit failure, a dropped
+connection, or an idle-in-transaction timeout during a slow provider call).
+Moving refresh to a session-level advisory lock with its own short persist
+transaction would remove it; that belongs with the refresh consumer.
 
 #### Runtime and consumer entry points
 
