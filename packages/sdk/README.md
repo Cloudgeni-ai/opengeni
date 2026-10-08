@@ -1161,10 +1161,11 @@ single-use capability after the catalog digest changes; instead it throws
 the trusted host can show approval again for the same operation id.
 
 Concurrent callers share one in-flight catalog request (`$catalog` and every
-call path). Each caller's `signal` cancels only its own wait, never the shared
-request; a failed load is not cached. Calls rejected as stale on the same digest
-share one refresh started after the rejection, and an explicit
-`$catalog({ refresh: true })` always starts a new request.
+call path). Each caller's `signal` cancels only its own wait; the shared request
+is cancelled only when every waiter has aborted, and a failed load is not
+cached. Calls rejected as stale on the same digest share one refresh started
+after the first such rejection while it remains the current catalog, and an
+explicit `$catalog({ refresh: true })` always starts a new request.
 
 A call's `catalogDigest` is checked against the exact catalog entry it invokes:
 the API may accept an unchanged entry from a catalog digest whose unrelated

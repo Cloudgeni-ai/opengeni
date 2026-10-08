@@ -2,12 +2,13 @@
  * Single-flight loader for one digest-pinned tool catalog.
  *
  * - Concurrent cold callers share one request instead of each fetching.
- * - The shared request is never bound to one caller's AbortSignal: a waiter
- *   that aborts rejects alone, and its siblings still receive the catalog.
+ * - A waiter's AbortSignal cancels only its own wait. The shared request is
+ *   cancelled only when every waiter has aborted; the next caller then starts
+ *   a new request, so one hung request never captures later callers.
  * - A failed load is never cached; the next caller starts a new request.
  * - An explicit refresh, or a stale rejection, always obtains a catalog from a
  *   request started after that refresh/rejection. Callers rejected on the same
- *   stale digest share that one post-rejection request.
+ *   stale digest share one post-rejection request while it is still current.
  * - A load started before an invalidation never overwrites the newer state.
  */
 export type SharedCatalogLoader<T extends { digest: string }> = {
@@ -18,39 +19,93 @@ export type SharedCatalogLoader<T extends { digest: string }> = {
   invalidate(digest: string): void;
 };
 
-type InFlightLoad<T> = { epoch: number; promise: Promise<T> };
+type SharedLoad<T> = {
+  epoch: number;
+  promise: Promise<T>;
+  controller: AbortController;
+  waiters: number;
+  settled: boolean;
+};
 
 export function createSharedCatalogLoader<T extends { digest: string }>(
-  /** `refresh` is true when this load follows an invalidation or explicit refresh. */
-  fetchCatalog: (refresh: boolean) => Promise<T>,
+  /**
+   * `refresh` is true when this load follows an invalidation or explicit
+   * refresh. `signal` aborts only when every waiter has abandoned the load.
+   */
+  fetchCatalog: (refresh: boolean, signal: AbortSignal) => Promise<T>,
 ): SharedCatalogLoader<T> {
   let snapshot: T | null = null;
   let epoch = 0;
   let refreshPending = false;
-  let inFlight: InFlightLoad<T> | null = null;
-  let staleReload: { staleDigest: string; promise: Promise<T>; settled: T | null } | null = null;
+  let inFlight: SharedLoad<T> | null = null;
+  let staleReload: {
+    staleDigest: string;
+    load: SharedLoad<T>;
+    settled: T | null;
+  } | null = null;
 
-  const start = (): Promise<T> => {
-    if (inFlight && inFlight.epoch === epoch) return inFlight.promise;
-    const entry: { epoch: number; promise: Promise<T> | null } = { epoch, promise: null };
+  const start = (): SharedLoad<T> => {
+    if (inFlight && inFlight.epoch === epoch) return inFlight;
     const refresh = refreshPending;
-    inFlight = entry as InFlightLoad<T>;
-    const promise = (async () => {
+    const load = {
+      epoch,
+      controller: new AbortController(),
+      waiters: 0,
+      settled: false,
+    } as SharedLoad<T>;
+    inFlight = load;
+    load.promise = (async () => {
       try {
-        const next = await fetchCatalog(refresh);
-        if (entry.epoch === epoch) {
+        const next = await fetchCatalog(refresh, load.controller.signal);
+        if (load.epoch === epoch) {
           snapshot = next;
           refreshPending = false;
         }
         return next;
       } finally {
-        if (inFlight === entry) inFlight = null;
+        load.settled = true;
+        if (inFlight === load) inFlight = null;
       }
     })();
     // Every waiter observes rejection itself; never leave an unobserved one.
-    promise.catch(() => undefined);
-    entry.promise = promise;
-    return promise;
+    load.promise.catch(() => undefined);
+    return load;
+  };
+
+  const abandon = (load: SharedLoad<T>, reason: unknown): void => {
+    if (inFlight === load) inFlight = null;
+    if (staleReload?.load === load) staleReload = null;
+    load.controller.abort(reason);
+  };
+
+  const wait = (load: SharedLoad<T>, signal: AbortSignal | undefined): Promise<T> => {
+    if (signal?.aborted) return Promise.reject(abortReason(signal));
+    load.waiters += 1;
+    return new Promise<T>((resolve, reject) => {
+      let released = false;
+      const release = (): boolean => {
+        if (released) return false;
+        released = true;
+        load.waiters -= 1;
+        signal?.removeEventListener("abort", onAbort);
+        return true;
+      };
+      const onAbort = () => {
+        if (!release()) return;
+        const reason = abortReason(signal!);
+        reject(reason);
+        if (load.waiters === 0 && !load.settled) abandon(load, reason);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      load.promise.then(
+        (value) => {
+          if (release()) resolve(value);
+        },
+        (error: unknown) => {
+          if (release()) reject(error);
+        },
+      );
+    });
   };
 
   const advance = (): void => {
@@ -64,27 +119,29 @@ export function createSharedCatalogLoader<T extends { digest: string }>(
       options.signal?.throwIfAborted();
       if (options.refresh) advance();
       if (snapshot) return snapshot;
-      return await raceAbort(start(), options.signal);
+      return await wait(start(), options.signal);
     },
     async reloadAfterStale(staleDigest, signal) {
       signal?.throwIfAborted();
-      // Share a post-rejection reload while it runs, or while its result is
-      // still the current catalog; never reuse a superseded result.
+      // Share a post-rejection reload while it is still the current load, or
+      // while its result is still the current catalog; never reuse a
+      // superseded load or result.
+      const shared = staleReload;
       if (
-        staleReload?.staleDigest === staleDigest &&
-        (staleReload.settled === null || staleReload.settled === snapshot)
+        shared?.staleDigest === staleDigest &&
+        (shared.settled === null ? shared.load.epoch === epoch : shared.settled === snapshot)
       ) {
-        return await raceAbort(staleReload.promise, signal);
+        return await wait(shared.load, signal);
       }
       advance();
-      const promise = start();
-      const reload: { staleDigest: string; promise: Promise<T>; settled: T | null } = {
+      const load = start();
+      const reload: { staleDigest: string; load: SharedLoad<T>; settled: T | null } = {
         staleDigest,
-        promise,
+        load,
         settled: null,
       };
       staleReload = reload;
-      promise.then(
+      load.promise.then(
         (next) => {
           // The same digest again proves nothing newer; a later rejection must
           // start its own request rather than reuse this one.
@@ -96,31 +153,12 @@ export function createSharedCatalogLoader<T extends { digest: string }>(
           if (staleReload === reload) staleReload = null;
         },
       );
-      return await raceAbort(promise, signal);
+      return await wait(load, signal);
     },
     invalidate(digest) {
       if (snapshot?.digest === digest) advance();
     },
   };
-}
-
-function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-  if (!signal) return promise;
-  if (signal.aborted) return Promise.reject(abortReason(signal));
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(abortReason(signal));
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(
-      (value) => {
-        signal.removeEventListener("abort", onAbort);
-        resolve(value);
-      },
-      (error: unknown) => {
-        signal.removeEventListener("abort", onAbort);
-        reject(error);
-      },
-    );
-  });
 }
 
 function abortReason(signal: AbortSignal): unknown {

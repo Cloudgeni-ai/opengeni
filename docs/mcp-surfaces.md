@@ -119,12 +119,14 @@ Each complete catalog preparation (`tools/catalog`, `tools/declarations`, or a
 complete call fallback) leaves a bounded, per-process, content-free attestation:
 the complete digest plus only the canonical digest of each entry, keyed by the
 exact caller scope (account, workspace, subject, principal kind, permissions,
-and service/external actor), with a fixed ten-minute lifetime. A later call
-without an approval token whose `catalogDigest` is attested prepares only its
-target identity's connector, through the same live account binding,
-credential, connector-policy, approval, Site-version, and argument validation
-path, and executes only when that live entry is identical to the attested one;
-the response echoes the caller's digest. An unknown or expired digest, another
+and service/external actor), with a fixed ten-minute lifetime and a global
+entry budget. A later call without an approval token whose `catalogDigest` is
+attested constructs and connects only its target identity's connector, through
+the same live account binding, credential, connector-policy, approval,
+Site-version, and argument validation path; first-party tool handlers still see
+the caller's complete authorized server settings. It executes only when that
+live entry is identical to the attested one, and the response echoes the
+caller's digest. An unknown or expired digest, another
 API replica, an approval token, or a missing, changed, or no-longer-authorized
 target falls back to complete preparation and the unchanged `catalog_stale`
 contract. Attestations never hold credentials or prepared gateways and grant no

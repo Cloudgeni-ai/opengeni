@@ -43,22 +43,28 @@ export type CreateSiteToolBridgeOptions = {
  * Recreate on actor/version change. Never take these pinned fields from HTML. */
 export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteToolBridge {
   const allowed = input.requestedTools ? new Set(input.requestedTools.map(identityKey)) : null;
-  // One shared, abort-isolated load serves every concurrent Site request; a
-  // stale rejection reloads once for all requests rejected on that digest.
-  const projectedCatalog = createSharedCatalogLoader<OpenGeniSiteToolCatalog>(async (refresh) => {
-    const current = await input.workspaceTools.$catalog(refresh ? { refresh } : {});
-    if (current.workspaceId !== input.workspaceId)
-      throw new Error("Site catalog workspace mismatch");
-    return {
-      version: current.version,
-      generation: current.generation,
-      digest: current.digest,
-      createdAt: current.createdAt,
-      entries: current.entries.filter(
-        (entry) => !allowed || allowed.has(identityKey(entry.identity)),
-      ),
-    };
-  });
+  // One shared load serves every concurrent Site request (cancelled only when
+  // all of them abort); a stale rejection reloads once for all requests
+  // rejected on that digest.
+  const projectedCatalog = createSharedCatalogLoader<OpenGeniSiteToolCatalog>(
+    async (refresh, signal) => {
+      const current = await input.workspaceTools.$catalog({
+        signal,
+        ...(refresh ? { refresh } : {}),
+      });
+      if (current.workspaceId !== input.workspaceId)
+        throw new Error("Site catalog workspace mismatch");
+      return {
+        version: current.version,
+        generation: current.generation,
+        digest: current.digest,
+        createdAt: current.createdAt,
+        entries: current.entries.filter(
+          (entry) => !allowed || allowed.has(identityKey(entry.identity)),
+        ),
+      };
+    },
+  );
   const loadCatalog = async ({
     signal,
     staleDigest,

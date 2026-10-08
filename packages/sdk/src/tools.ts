@@ -127,15 +127,14 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
     const normalizedWorkspaceId = requiredId(workspaceId, "workspaceId");
     const catalogPath = `/v1/workspaces/${encodeURIComponent(normalizedWorkspaceId)}/tools/catalog`;
     const catalogLoader = createSharedCatalogLoader<ToolGatewayCatalog>(
-      async () =>
+      async (_refresh, signal) =>
         await this.transport.requestJson<ToolGatewayCatalog>(
           "GET",
           catalogPath,
           undefined,
           {},
-          // A shared load serves every waiter; one waiter's abort must not
-          // cancel it for its siblings. Each waiter races its own signal.
-          {},
+          // Shared by every waiter: aborted only once all of them abort.
+          { signal },
         ),
     );
     const approvalBindings = new Map<

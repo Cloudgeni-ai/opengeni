@@ -1798,14 +1798,15 @@ export function createAppComposition(deps: AppDependencies): {
       {
         attestations: toolGatewayCatalogAttestations,
         ...(routeDeps.observability ? { observability: routeDeps.observability } : {}),
+        onPreparation: (preparation) =>
+          recordWorkspaceToolGatewayPreparation(routeDeps.observability, {
+            operation: "call",
+            scope: preparation.scope,
+            attestation: preparation.attestation,
+            durationSeconds: preparation.prepareMs / 1_000,
+          }),
       },
     );
-    recordWorkspaceToolGatewayPreparation(routeDeps.observability, {
-      operation: "call",
-      scope: timing.scope,
-      attestation: timing.attestation,
-      durationSeconds: timing.prepareMs / 1_000,
-    });
     c.header("server-timing", workspaceToolGatewayServerTiming(timing));
     return c.json(response);
   });

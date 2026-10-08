@@ -19,11 +19,14 @@ function deferred<T>() {
 
 /** A fetcher whose every request is held until the test settles it. */
 function controlledFetcher() {
-  const requests: Array<{ refresh: boolean } & ReturnType<typeof deferred<Catalog>>> = [];
+  const requests: Array<
+    { refresh: boolean; signal: AbortSignal } & ReturnType<typeof deferred<Catalog>>
+  > = [];
   return {
     requests,
-    fetch: (refresh: boolean) => {
-      const request = { refresh, ...deferred<Catalog>() };
+    fetch: (refresh: boolean, signal: AbortSignal) => {
+      const request = { refresh, signal, ...deferred<Catalog>() };
+      signal.addEventListener("abort", () => request.reject(signal.reason), { once: true });
       requests.push(request);
       return request.promise;
     },
@@ -55,9 +58,78 @@ describe("shared catalog loader", () => {
     fetcher.requests[0]!.resolve({ digest: "d1" });
     expect((await sibling).digest).toBe("d1");
     expect(fetcher.requests).toHaveLength(1);
+    expect(fetcher.requests[0]!.signal.aborted).toBe(false);
     const already = new AbortController();
     already.abort(new Error("caller gone"));
     await expect(loader.load({ signal: already.signal })).rejects.toThrow("caller gone");
+  });
+
+  test("a request abandoned by every waiter is cancelled and never captures later callers", async () => {
+    const fetcher = controlledFetcher();
+    const loader = createSharedCatalogLoader(fetcher.fetch);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const controller = new AbortController();
+      const waiting = loader.load({ signal: controller.signal });
+      controller.abort();
+      await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+      expect(fetcher.requests[attempt]!.signal.aborted).toBe(true);
+    }
+    expect(fetcher.requests).toHaveLength(3);
+    // A waiter without a signal keeps the shared request alive for itself.
+    const controller = new AbortController();
+    const abandoned = loader.load({ signal: controller.signal });
+    const kept = loader.load();
+    controller.abort();
+    await expect(abandoned).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetcher.requests[3]!.signal.aborted).toBe(false);
+    fetcher.requests[3]!.resolve({ digest: "d1" });
+    expect((await kept).digest).toBe("d1");
+  });
+
+  test("an abandoned stale reload is cancelled and a later rejection reloads again", async () => {
+    const fetcher = controlledFetcher();
+    const loader = createSharedCatalogLoader(fetcher.fetch);
+    const initial = loader.load();
+    fetcher.requests[0]!.resolve({ digest: "d1" });
+    await initial;
+    const cancelled = new AbortController();
+    const abandonedReload = loader.reloadAfterStale("d1", cancelled.signal);
+    const sibling = loader.reloadAfterStale("d1", new AbortController().signal);
+    cancelled.abort();
+    await expect(abandonedReload).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetcher.requests[1]!.signal.aborted).toBe(false);
+    fetcher.requests[1]!.resolve({ digest: "d2" });
+    expect((await sibling).digest).toBe("d2");
+
+    const alone = new AbortController();
+    const lonely = loader.reloadAfterStale("d2", alone.signal);
+    alone.abort();
+    await expect(lonely).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetcher.requests[2]!.signal.aborted).toBe(true);
+    const retry = loader.reloadAfterStale("d2");
+    expect(fetcher.requests).toHaveLength(4);
+    expect(fetcher.requests[3]!.refresh).toBe(true);
+    fetcher.requests[3]!.resolve({ digest: "d3" });
+    expect((await retry).digest).toBe("d3");
+  });
+
+  test("a running stale reload superseded by a newer catalog is never joined", async () => {
+    const fetcher = controlledFetcher();
+    const loader = createSharedCatalogLoader(fetcher.fetch);
+    const initial = loader.load();
+    fetcher.requests[0]!.resolve({ digest: "d1" });
+    await initial;
+    const first = loader.reloadAfterStale("d1");
+    const explicit = loader.load({ refresh: true });
+    fetcher.requests[2]!.resolve({ digest: "d3" });
+    expect((await explicit).digest).toBe("d3");
+    const late = loader.reloadAfterStale("d1");
+    expect(fetcher.requests).toHaveLength(4);
+    fetcher.requests[1]!.resolve({ digest: "d2" });
+    expect((await first).digest).toBe("d2");
+    fetcher.requests[3]!.resolve({ digest: "d4" });
+    expect((await late).digest).toBe("d4");
+    expect((await loader.load()).digest).toBe("d4");
   });
 
   test("a failed load is shared by its waiters but never cached", async () => {
@@ -252,6 +324,39 @@ describe("workspace tools catalog single flight", () => {
 });
 
 describe("host Site bridge catalog single flight", () => {
+  test("a Site catalog request abandoned by every frame request cancels the host load", async () => {
+    const signals: AbortSignal[] = [];
+    const bridge = createSiteToolBridge({
+      workspaceId,
+      workspaceTools: {
+        $catalog: async (options = {}) => {
+          signals.push(options.signal!);
+          return await new Promise<ToolGatewayCatalog>((_resolve, reject) =>
+            options.signal!.addEventListener("abort", () => reject(options.signal!.reason)),
+          );
+        },
+      },
+      callTool: async () => {
+        throw new Error("unexpected tool call");
+      },
+    });
+    const first = new AbortController();
+    const second = new AbortController();
+    const waits = Promise.allSettled(
+      [first, second].map((controller) => bridge.catalog({ signal: controller.signal })),
+    );
+    first.abort();
+    expect(signals).toHaveLength(1);
+    expect(signals[0]!.aborted).toBe(false);
+    second.abort();
+    expect(signals[0]!.aborted).toBe(true);
+    expect(
+      (await waits).map((settled) =>
+        settled.status === "rejected" ? (settled.reason as Error).name : "fulfilled",
+      ),
+    ).toEqual(["AbortError", "AbortError"]);
+  });
+
   test("concurrent Site panels project one catalog; one stale storm reloads once with refresh", async () => {
     const catalogCalls: Array<{ refresh?: boolean }> = [];
     let current: ToolGatewayCatalog = catalog;

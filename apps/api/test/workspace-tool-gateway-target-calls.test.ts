@@ -9,6 +9,7 @@ import type {
 import type { AccessGrantAuthorization, ApiRouteDeps } from "@opengeni/core";
 import { startTestMcpServer, testSettings, type TestMcpServer } from "@opengeni/testing";
 import { createWorkspaceToolGateway } from "@opengeni/tool-gateway";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 // Only the fixture DB's inventory/catalog and credential IO are replaced. All
 // other handles delegate to captured real functions because Bun module mocks
@@ -88,6 +89,25 @@ mock.module("@opengeni/db", () => ({
     };
   },
 }));
+// First-party handlers built for fixture DBs report the server set they see.
+const mcpServerModule = await import("../src/mcp/server");
+const realBuildOpenGeniMcpServer = mcpServerModule.buildOpenGeniMcpServer;
+mock.module("../src/mcp/server", () => ({
+  ...mcpServerModule,
+  buildOpenGeniMcpServer: (...args: Parameters<typeof realBuildOpenGeniMcpServer>) => {
+    if (!fixtures.has(args[0].db)) return realBuildOpenGeniMcpServer(...args);
+    const probe = new McpServer({ name: "first-party-probe", version: "1.0.0" });
+    probe.registerTool("sessions_list", { description: "Report visible servers." }, async () => ({
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(args[0].settings.mcpServers.map((server) => server.id)),
+        },
+      ],
+    }));
+    return probe;
+  },
+}));
 const {
   callWorkspaceToolGatewayForCaller,
   prepareAttestedWorkspaceToolGateway,
@@ -133,13 +153,17 @@ function authorizationFor(subject: string): AccessGrantAuthorization {
 const prepareForGrant = async (
   deps: ApiRouteDeps,
   authorization: AccessGrantAuthorization,
-  options: { allowedIdentities?: readonly { serverId: string; toolName: string }[] } = {},
+  options: {
+    allowedIdentities?: readonly { serverId: string; toolName: string }[];
+    firstPartySettings?: "prepared" | "caller";
+  } = {},
 ) => {
   preparations.push(options.allowedIdentities ? "target" : "complete");
   return await prepareWorkspaceToolGatewayForGrant(
     deps,
     authorization.grant,
     options.allowedIdentities,
+    options.firstPartySettings ? { firstPartySettings: options.firstPartySettings } : {},
   );
 };
 const preparations: Array<"target" | "complete"> = [];
@@ -186,7 +210,9 @@ function delayedProvider(
   return Object.assign(provider, { extraTools }) as DelayedProvider;
 }
 
-function createFixture(input: { delayMs?: number; unrelatedConnectors?: number } = {}) {
+function createFixture(
+  input: { delayMs?: number; unrelatedConnectors?: number; firstParty?: boolean } = {},
+) {
   const delayMs = input.delayMs ?? 0;
   const grafana = delayedProvider(delayMs, {
     requireBearer: true,
@@ -223,6 +249,9 @@ function createFixture(input: { delayMs?: number; unrelatedConnectors?: number }
         url: provider.url,
         cacheToolsList: false,
       })),
+      ...(input.firstParty
+        ? [{ id: "opengeni", url: "http://127.0.0.1:9/mcp", cacheToolsList: false }]
+        : []),
     ],
   });
   const deps = { db: database, settings } as ApiRouteDeps;
@@ -607,6 +636,80 @@ describe("target-only workspace tool calls", () => {
     }
   });
 
+  test("first-party tools on a target call see the same caller settings as a complete call", async () => {
+    const f = createFixture({ firstParty: true });
+    const attestations = createWorkspaceToolGatewayCatalogAttestations();
+    try {
+      const catalog = await attestedCatalog(f, attestations);
+      const identity = { serverId: "opengeni", toolName: "sessions_list" };
+      expect(catalog.entries.map((entry) => entry.identity)).toContainEqual(identity);
+      const visible = async (store: typeof attestations | undefined) => {
+        const { response, timing } = await call(f, store, {
+          catalogDigest: catalog.digest,
+          identity,
+          arguments: {},
+        });
+        const text = (response.result.content[0] as { text: string }).text;
+        return { scope: timing.scope, servers: JSON.parse(text) as string[] };
+      };
+      const complete = await visible(undefined);
+      const target = await visible(attestations);
+      expect(complete.scope).toBe("complete");
+      expect(target.scope).toBe("target");
+      expect(target.servers).toEqual(complete.servers);
+      expect(target.servers).toEqual(
+        expect.arrayContaining(["opengeni", "unrelated_0", f.identity(f.shared).serverId]),
+      );
+      // MCP OAuth keeps its existing identity-narrowed first-party settings.
+      const oauth = await prepareWorkspaceToolGatewayForGrant(f.deps, grantFor(subjectId), [
+        identity,
+      ]);
+      try {
+        const result = await oauth.toolGateway.call({
+          operationId: crypto.randomUUID(),
+          catalogDigest: oauth.toolGatewayCatalog.digest,
+          identity,
+          arguments: {},
+          caller: { kind: "http", subjectId },
+        });
+        expect(JSON.parse((result.content[0] as { text: string }).text)).toEqual(["opengeni"]);
+      } finally {
+        await oauth.close();
+      }
+    } finally {
+      f.close();
+    }
+  });
+
+  test("failed calls still report their preparation split", async () => {
+    const f = createFixture();
+    const attestations = createWorkspaceToolGatewayCatalogAttestations();
+    try {
+      const catalog = await attestedCatalog(f, attestations);
+      f.personal.status = "revoked";
+      const reported: unknown[] = [];
+      await expectHttpStatus(
+        callWorkspaceToolGatewayForCaller(
+          f.deps,
+          authorizationFor(subjectId),
+          { catalogDigest: catalog.digest, identity: f.identity(f.personal), arguments: {} },
+          {
+            attestations,
+            prepare: prepareForGrant,
+            onPreparation: (preparation) => reported.push(preparation),
+          },
+        ),
+        409,
+        "catalog_stale",
+      );
+      expect(reported).toEqual([
+        expect.objectContaining({ scope: "complete", attestation: "mismatch" }),
+      ]);
+    } finally {
+      f.close();
+    }
+  });
+
   test("concurrent target calls prepare independently and never share a prepared gateway", async () => {
     const f = createFixture({ delayMs: 5 });
     const attestations = createWorkspaceToolGatewayCatalogAttestations();
@@ -726,6 +829,34 @@ describe("catalog attestation store", () => {
     expect(store.entryDigest("a", "d3", { serverId: "s", toolName: "t" })).not.toBe(
       store.entryDigest("a", "d1", { serverId: "s", toolName: "t" }),
     );
+  });
+
+  test("sweeps expired catalogs and bounds retained entries globally", () => {
+    let now = 0;
+    const store = createWorkspaceToolGatewayCatalogAttestations({
+      ttlMs: 1_000,
+      maxEntries: 3,
+      now: () => now,
+    });
+    const id = { serverId: "s", toolName: "t" };
+    store.record("a", { digest: "d1", entries: [entry("t"), entry("u")] as never });
+    expect(store.retainedEntries).toBe(2);
+    now = 1_000;
+    store.record("b", { digest: "d2", entries: [entry("t")] as never });
+    expect(store.retainedEntries).toBe(1);
+    now = 1_001;
+    store.record("c", { digest: "d3", entries: [entry("t"), entry("u")] as never });
+    expect(store.retainedEntries).toBe(3);
+    store.record("d", { digest: "d4", entries: [entry("t")] as never });
+    expect(store.retainedEntries).toBe(3);
+    expect(store.entryDigest("b", "d2", id)).toBeUndefined();
+    expect(store.entryDigest("d", "d4", id)).toBeDefined();
+    store.record("e", {
+      digest: "huge",
+      entries: ["t", "u", "v", "w"].map((name) => entry(name)) as never,
+    });
+    expect(store.entryDigest("e", "huge", id)).toBeUndefined();
+    expect(store.retainedEntries).toBeLessThanOrEqual(3);
   });
 
   test("expires on a fixed lifetime and bounds retained scopes and catalogs", () => {
