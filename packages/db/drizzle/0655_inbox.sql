@@ -394,3 +394,46 @@ BEGIN
     );
   END LOOP;
 END $inbox_rolling_grants$;
+
+-- Hosts follow the inbox through webhooks: an agent's notification and its
+-- withdrawal become subscribable workspace and organization events. The
+-- fanout triggers keep their functions; only their event filters widen.
+ALTER TABLE workspace_webhooks DROP CONSTRAINT workspace_webhooks_event_types_chk;
+ALTER TABLE workspace_webhooks ADD CONSTRAINT workspace_webhooks_event_types_chk CHECK (
+  cardinality(event_types) BETWEEN 1 AND 16 AND event_types <@ ARRAY[
+    'turn.completed','turn.failed','turn.cancelled','session.status.changed',
+    'session.requiresAction','session.humanInput.requested',
+    'session.notification.posted','session.notification.withdrawn',
+    'usage.threshold_reached','usage.exhausted','usage.period_reset'
+  ]::text[]
+) NOT VALID;
+ALTER TABLE workspace_webhooks VALIDATE CONSTRAINT workspace_webhooks_event_types_chk;
+ALTER TABLE organization_webhooks DROP CONSTRAINT organization_webhooks_event_types_chk;
+ALTER TABLE organization_webhooks ADD CONSTRAINT organization_webhooks_event_types_chk CHECK (
+  cardinality(event_types) BETWEEN 1 AND 16 AND event_types <@ ARRAY[
+    'turn.completed', 'turn.failed', 'turn.cancelled', 'session.status.changed',
+    'session.requiresAction', 'session.humanInput.requested',
+    'session.notification.posted', 'session.notification.withdrawn'
+  ]::text[]
+) NOT VALID;
+ALTER TABLE organization_webhooks VALIDATE CONSTRAINT organization_webhooks_event_types_chk;
+
+DROP TRIGGER session_events_workspace_webhook_enqueue_v1 ON session_events;
+CREATE TRIGGER session_events_workspace_webhook_enqueue_v1
+AFTER INSERT ON session_events FOR EACH ROW
+WHEN (NEW.duplicate_of_event_id IS NULL AND NEW.type IN (
+  'turn.completed', 'turn.failed', 'turn.cancelled', 'session.status.changed',
+  'session.requiresAction', 'session.humanInput.requested',
+  'session.notification.posted', 'session.notification.withdrawn'
+))
+EXECUTE FUNCTION opengeni_private.enqueue_workspace_webhook_deliveries_v1();
+
+DROP TRIGGER session_events_organization_webhook_enqueue_v1 ON session_events;
+CREATE TRIGGER session_events_organization_webhook_enqueue_v1
+AFTER INSERT ON session_events FOR EACH ROW
+WHEN (NEW.duplicate_of_event_id IS NULL AND NEW.type IN (
+  'turn.completed', 'turn.failed', 'turn.cancelled', 'session.status.changed',
+  'session.requiresAction', 'session.humanInput.requested',
+  'session.notification.posted', 'session.notification.withdrawn'
+))
+EXECUTE FUNCTION opengeni_private.enqueue_organization_webhook_deliveries_v1();
