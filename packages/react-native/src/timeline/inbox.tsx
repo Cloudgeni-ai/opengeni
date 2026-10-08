@@ -458,6 +458,29 @@ export function NativeInboxList({
       </View>
     );
 
+  // A failed first load says so, rather than claiming nothing waits.
+  if (!inbox.data && inbox.error && !inbox.loading) {
+    return (
+      <View style={{ alignItems: "center", paddingTop: 72, paddingHorizontal: 32, gap: 12 }}>
+        <Text style={{ ...fontStyle(theme, 600), fontSize: 16, color: c.fg, textAlign: "center" }}>
+          Couldn't load your inbox
+        </Text>
+        <Text
+          style={{
+            ...fontStyle(theme),
+            fontSize: 14,
+            lineHeight: 20,
+            color: c["fg-muted"],
+            textAlign: "center",
+          }}
+        >
+          Check your connection, or this server may not have the inbox yet.
+        </Text>
+        <Button label="Try again" onPress={() => void inbox.refresh()} />
+      </View>
+    );
+  }
+
   if (awake.length === 0 && snoozed.length === 0) {
     return (
       <View style={{ alignItems: "center", paddingTop: 72, paddingHorizontal: 32, gap: 10 }}>
