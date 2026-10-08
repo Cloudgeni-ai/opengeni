@@ -51,6 +51,9 @@ entry.connect("changed", lambda _: save())
 for child in [entry, button, label]:
     box.pack_start(child, False, False, 0)
 window.connect("destroy", Gtk.main_quit)
+# A decorated window at the screen origin must not have its border counted
+# twice when translating accessibility bounds to screenshot coordinates.
+window.move(0, 0)
 window.show_all()
 GLib.timeout_add(100, save)
 Gtk.main()

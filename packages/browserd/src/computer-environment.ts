@@ -152,7 +152,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
         XDG_DATA_HOME: dataDirectory,
         TMPDIR: temporaryDirectory,
         NO_AT_BRIDGE: "0",
-        GTK_A11Y: "1",
+        GTK_A11Y: "atspi",
         GTK_MODULES: "gail:atk-bridge",
         QT_ACCESSIBILITY: "1",
         GDK_BACKEND: "x11",
