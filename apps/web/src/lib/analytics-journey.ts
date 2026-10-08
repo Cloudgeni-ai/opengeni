@@ -8,7 +8,6 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // step with the workspace routes in App.tsx (a drift test enforces it).
 const PAGES = new Set([
   "sessions",
-  "read-only-chats",
   "priority",
   "plugins",
   "capabilities",
@@ -27,6 +26,7 @@ const PAGES = new Set([
   "environments",
   "rigs",
   "playground",
+  "read-only-chats",
 ]);
 // Top-level routes outside a workspace, by exact path shape. A concrete id in
 // the path is never reported for these; everything unlisted is "other".
