@@ -198,4 +198,24 @@ describe("idle-session archive worker", () => {
       where session_id = ${scope.sessionId} and type = 'agent.message.delta'`;
     expect((deltas as { count: number }).count).toBe(0);
   }, 120_000);
+
+  test("one pass keeps taking batches until no idle session is left", async () => {
+    const scopes = [await idleSession(), await idleSession(), await idleSession()];
+    const activities = createSessionArchiveActivities(
+      async () =>
+        ({
+          db: client.db,
+          objectStorage: { deleteObject: async () => undefined } as never,
+          observability: { info: () => undefined, warn: () => undefined } as never,
+          settings: testSettings({ sessionArchiveEnabled: true, sessionArchiveIdleDays: 30 }),
+        }) as unknown as ActivityServices,
+      { upload: async () => undefined, candidatesPerPass: 1 },
+    );
+    const result = await activities.archiveIdleSessions();
+    expect(result.failed).toBe(0);
+    for (const scope of scopes) {
+      const session = await getSession(client.db, scope.workspaceId, scope.sessionId);
+      expect(session?.retention?.archive?.state).toBe("archived");
+    }
+  }, 120_000);
 });

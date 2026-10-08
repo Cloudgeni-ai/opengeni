@@ -319,11 +319,34 @@ describe("idle-session archive lifecycle", () => {
       from session_turns t where t.workspace_id = ${waiting.scope.workspaceId}
         and t.session_id = ${waiting.scope.sessionId} limit 1`.catch(() => undefined);
     const eligible = await idleSession();
+    // Bulk maintenance can touch updated_at on every row; that is not activity.
+    const touched = await idleSession();
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      await sql`update sessions set updated_at = now() where id = ${touched.scope.sessionId}`;
+    });
+    // Bookkeeping events appended to an idle session are not activity either;
+    // a new or advanced turn is.
+    const noted = await idleSession();
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      await sql`update session_events set created_at = now()
+        where session_id = ${noted.scope.sessionId}
+          and sequence = (select last_sequence from sessions where id = ${noted.scope.sessionId})`;
+    });
+    const spoke = await idleSession();
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      await sql`update session_turns set updated_at = now() where session_id = ${spoke.scope.sessionId}`;
+    });
 
     const ids = (
       await listSessionArchiveCandidates(client.db, { idleSeconds: IDLE_SECONDS, limit: 100 })
     ).map((candidate) => candidate.sessionId);
     expect(ids).toContain(eligible.scope.sessionId);
+    expect(ids).toContain(touched.scope.sessionId);
+    expect(ids).toContain(noted.scope.sessionId);
+    expect(ids).not.toContain(spoke.scope.sessionId);
     expect(ids).not.toContain(kept.scope.sessionId);
     expect(ids).not.toContain(recent.scope.sessionId);
     const [pending] =
