@@ -2558,6 +2558,7 @@ describe("release schema contract", () => {
       "0673_delete_stranded_completed_turn_tool_receipts.sql",
       "0674_inbox_reply_hands_back.sql",
       "0675_inbox_subagent_turn_push.sql",
+      "0676_sandbox_deadline_forced_capture.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

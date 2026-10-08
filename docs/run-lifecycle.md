@@ -3178,6 +3178,37 @@ gate. A prior explicit stop remains immutable; deadline intent starts its own
 grace. The two-minute grace applies only to provider-deadline rotation; any
 lease may still meet the idle rule above.
 
+**The pre-deadline save is mandatory.** The orderly backstop above
+can wait forever: a command whose stop request or reconciliation never ran, an
+owner whose quiescence receipt is still pending, a sibling attempt that holds no
+holder, or a request whose owner vanished each refused enrollment (and an open
+request refused the zero-holder drain's capture) until the provider killed the
+box uncaptured. Inside `sandboxDeadlineMandatoryCaptureLeadMs` before the
+stamped provider deadline of a lease with any requested rotation (an earlier
+operator rotation keeps the due deadline rotation from being stamped separately) (the
+legacy command stop grace, the full drain capture budget and two reaper periods,
+never more than the rotation lead; about 13 minutes with a 10-minute
+drain capture budget), the save no longer waits for any of that. Enrollment then needs
+only that every holder is a process holder of an active, unsupervised process
+on the exact box route (a live turn, viewer, direct request or interaction still
+owns the box, supervised commands keep their separate proof gate, and an
+operator reaper hold still pauses it), and records
+mode `forced_deadline` (`opengeni_sandbox_command_containment_total` outcome
+`forced_deadline_enrolled`; the reason stays `provider_deadline_containment`).
+A zero-holder drain claim in the same window does the same for its open
+requests. Every request still open on the exact box is recorded in
+`sandbox_leases.deadline_forced_admission_ids` (migration 0676), which drain
+publication excludes like enrolled command parents; the cold commit rejects
+exactly those requests only after the box was terminated, and a trigger clears
+the set on a new epoch or instance and on cold. Drain publication also ignores
+open requests left on an older epoch or instance of the lease, which cannot race
+this box's capture. A command that exited but was never reconciled settles as
+contained rather than with its exit code. A file being written
+at that instant may be saved half-written, and unlike a warm checkpoint this
+also applies to tar-style captures, which then read files one by one while such
+a request may still run; the box would otherwise die with everything since the
+last checkpoint.
+
 Historical containment cannot reconstruct an execution ID the old adapter never
 retained. A command whose owner cannot recover its terminal receipt remains a visible capture blocker;
 operators must reconcile the exact command/provider identity rather than replay

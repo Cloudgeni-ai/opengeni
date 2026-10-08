@@ -9912,6 +9912,9 @@ export const sandboxLeases = pgTable(
     // The exact warm capture claim that ran around active background commands
     // (migration 0659). Equal to archive_capture_id only for that claim.
     archiveCaptureConcurrentCaptureId: uuid("archive_capture_concurrent_capture_id"),
+    // Exact admissions a mandatory pre-deadline save may capture around and
+    // settle after termination (migration 0676).
+    deadlineForcedAdmissionIds: uuid("deadline_forced_admission_ids").array(),
     // Bounded operator preservation gate. Unlike rotation/capture, this blocks
     // only reaper teardown: a user may still re-arm a resumable draining lease.
     // The exact id makes renewal/release ownership explicit and race-safe.

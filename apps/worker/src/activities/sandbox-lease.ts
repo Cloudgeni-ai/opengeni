@@ -93,7 +93,10 @@ import {
   type ConnectedMachineBackgroundCommandClaim,
   type ConnectedMachineBackgroundCommandProof,
 } from "@opengeni/db/session-background-commands";
-import { sandboxWarmRateMicrosPerSecond } from "@opengeni/config";
+import {
+  sandboxDeadlineMandatoryCaptureLeadMs,
+  sandboxWarmRateMicrosPerSecond,
+} from "@opengeni/config";
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import { captureConnectedCommandOutput } from "../sandbox-routing";
 import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
@@ -584,6 +587,7 @@ export function createSandboxLeaseActivities(
       const timing = sandboxDrainTiming(settings);
       const commandContainment = {
         idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
+        deadlineMandatoryCaptureLeadMs: sandboxDeadlineMandatoryCaptureLeadMs(settings),
         onCommandContainment: (outcome: Parameters<typeof recordSandboxCommandContainment>[1]) =>
           recordSandboxCommandContainment(observability, outcome),
         onCommandContainmentError: (error: unknown) => {
@@ -3347,6 +3351,7 @@ async function terminateDrainableBox(
         captureTimeoutMs,
         minIntervalMs: 0,
         pointInTimeCapture: providerWorkspaceCaptureIsPointInTime(backend, lease.resumeState),
+        deadlineMandatoryCaptureLeadMs: sandboxDeadlineMandatoryCaptureLeadMs(settings),
         providerReplaySafe: capturePolicy?.takeover === "same_request",
         takeoverSafe: capturePolicy !== null && capturePolicy.takeover !== "exclusive",
       });

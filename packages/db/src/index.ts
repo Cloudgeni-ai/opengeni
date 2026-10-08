@@ -48269,6 +48269,7 @@ type LeaseRow = {
   archive_capture_remaining_ms?: number | string | null;
   archive_capture_published_at: Date | string | null;
   archive_capture_concurrent_capture_id?: string | null;
+  deadline_forced_admission_ids?: string[] | null;
   reaper_hold_id: string | null;
   reaper_hold_until: Date | string | null;
   reaper_hold_reason: string | null;
@@ -56916,6 +56917,7 @@ async function settledCommandOwnerMatchesTx(
 export type CommandContainmentInspection =
   | "idle_enrolled"
   | "deadline_enrolled"
+  | "forced_deadline_enrolled"
   | "quiescence_enrolled"
   | "resumed_enrolled"
   | "not_eligible"
@@ -56924,7 +56926,7 @@ export type CommandContainmentInspection =
 export type CommandContainmentEnrollment = ReapDrainable & {
   /** `idle`/`deadline`/`quiescence` newly enrolled this call; `resumed` continues an
    * existing enrollment whose drain has not committed yet. */
-  mode: "idle" | "deadline" | "quiescence" | "resumed";
+  mode: "idle" | "deadline" | "forced_deadline" | "quiescence" | "resumed";
 };
 
 /** Whole-group "unused" from durable facts only. Every session of the group,
@@ -57152,6 +57154,10 @@ export async function enrollRetainedCommandContainment(
     sandboxGroupId: string;
     /** Omit to evaluate only the provider-deadline rule. */
     idleCommandContainmentMs?: number | undefined;
+    /** Inside this window before the provider deadline the deadline save is
+     * mandatory (see `sandboxDeadlineMandatoryCaptureLeadMs`). Omit to keep
+     * only the orderly deadline rule. */
+    deadlineMandatoryCaptureLeadMs?: number | undefined;
     /** Internal recovery authority: caller verified exact Temporal settlement. */
     settledOwner?: SettledCommandOwner;
   },
@@ -57254,22 +57260,35 @@ export async function enrollRetainedCommandContainment(
       order by process.id for update of process
     `,
     );
-    const admissions = await rawRows<{ id: string; orphaned: boolean }>(
+    const admissions = await rawRows<{ id: string; orphaned: boolean; exact: boolean }>(
       tx,
       sql`
       select admission.id,
         (admission.lease_epoch = ${initial.leaseEpoch}
           and admission.provider_instance_id = ${initial.instanceId}
-          and ${crashedWorkerOrphanAdmissionSql(sql`admission`)}) as orphaned
+          and ${crashedWorkerOrphanAdmissionSql(sql`admission`)}) as orphaned,
+        (admission.lease_epoch = ${initial.leaseEpoch}
+          and admission.provider_instance_id = ${initial.instanceId}) as exact
       from sandbox_workspace_mutation_admissions admission
       where admission.lease_id = ${initial.id} and admission.settled_at is null
       order by admission.id for update of admission
     `,
     );
-    const rows = await tx.execute<LeaseRow>(sql`
-      select * from sandbox_leases where id = ${initial.id} for update
+    const rows = await tx.execute<LeaseRow & { deadline_mandatory: boolean }>(sql`
+      select *,
+        (rotation_requested_at is not null
+          and ${input.deadlineMandatoryCaptureLeadMs ?? null}::bigint is not null
+          and provider_deadline_at is not null
+          and provider_deadline_at <= now() +
+            (${input.deadlineMandatoryCaptureLeadMs ?? null}::bigint * interval '1 millisecond'))
+          as deadline_mandatory
+      from sandbox_leases where id = ${initial.id} for update
     `);
     const lease = rows[0];
+    // Close to the provider deadline the save is mandatory: an orderly
+    // shutdown can no longer finish in time, and waiting means the provider
+    // kills the box uncaptured.
+    const mandatory = lease?.deadline_mandatory === true;
     if (
       !lease ||
       Number(lease.lease_epoch) !== initial.leaseEpoch ||
@@ -57294,7 +57313,21 @@ export async function enrollRetainedCommandContainment(
     const pointInTime = leaseCaptureIsPointInTime(initial.backend, initial.resumeState);
     const writerMode = pointInTime ? ("containment" as const) : ("physical" as const);
     const parents = new Set(processes.map((p) => p.parent_admission_id));
-    if (admissions.some((a) => !parents.has(a.id) && !(pointInTime && a.orphaned))) return null;
+    // A tolerated orphan is captured around only by a point-in-time drain.
+    const tolerated = (a: { id: string; orphaned: boolean }) =>
+      parents.has(a.id) || (pointInTime && a.orphaned);
+    // A mandatory deadline save captures around every other request still
+    // open on this exact box (a stdin write in flight, a request whose owner
+    // vanished, an orphan under a tar-style capture) and settles it with the
+    // box after termination. Requests on an older epoch or instance do not
+    // touch this box's capture.
+    const forced = mandatory
+      ? admissions.filter((a) => a.exact && !tolerated(a)).map((a) => a.id)
+      : [];
+    if (
+      admissions.some((a) => !tolerated(a) && !(mandatory && (forced.includes(a.id) || !a.exact)))
+    )
+      return null;
     const holders = await rawRows<{ kind: string; holder_id: string }>(
       tx,
       sql`
@@ -57315,8 +57348,14 @@ export async function enrollRetainedCommandContainment(
     };
     if (enrolled) return { ...target, mode: "resumed" };
     if (lease.archive_capture_id !== null) return null;
-    let mode: "idle" | "deadline" | "quiescence" | null = null;
-    if (
+    let mode: "idle" | "deadline" | "forced_deadline" | "quiescence" | null = null;
+    if (mandatory) {
+      // No stop grace, owner quiescence or sibling activity can be waited for
+      // any longer. Holders were checked above: a live turn, viewer or direct
+      // request on the box still blocks, and supervised commands keep their
+      // separate proof gate.
+      mode = "forced_deadline";
+    } else if (
       input.settledOwner !== undefined &&
       processes.every(
         (p) =>
@@ -57352,10 +57391,11 @@ export async function enrollRetainedCommandContainment(
     if (!mode) return null;
     await tx.execute(sql`
       update sandbox_leases set unobservable_command_drain_ids = ${`{${ids.join(",")}}`}::uuid[],
+        deadline_forced_admission_ids = ${forced.length ? `{${forced.join(",")}}` : null}::uuid[],
         command_containment_reason = ${
           mode === "quiescence"
             ? QUIESCENCE_COMMAND_CONTAINMENT_REASON
-            : mode === "deadline"
+            : mode === "deadline" || mode === "forced_deadline"
               ? DEADLINE_COMMAND_CONTAINMENT_REASON
               : IDLE_COMMAND_CONTAINMENT_REASON
         },
@@ -57387,6 +57427,8 @@ export async function reapStaleLeaseHoldersGlobal(
     /** Whole-group idle window for legacy retained-command containment.
      * Omitted: only the provider-deadline rule may enroll commands. */
     idleCommandContainmentMs?: number | undefined;
+    /** Mandatory pre-deadline save window (sandboxDeadlineMandatoryCaptureLeadMs). */
+    deadlineMandatoryCaptureLeadMs?: number | undefined;
     onCommandContainment?: (outcome: CommandContainmentInspection) => void;
     onCommandContainmentError?: (error: unknown) => void;
   },
@@ -57462,6 +57504,9 @@ export async function reapStaleLeaseHoldersGlobal(
       ...(input.idleCommandContainmentMs === undefined
         ? {}
         : { idleCommandContainmentMs: input.idleCommandContainmentMs }),
+      ...(input.deadlineMandatoryCaptureLeadMs === undefined
+        ? {}
+        : { deadlineMandatoryCaptureLeadMs: input.deadlineMandatoryCaptureLeadMs }),
     }).catch((error: unknown) => {
       reportContainmentError(error);
       input.onCommandContainment?.("inspection_failed");
@@ -57923,6 +57968,7 @@ export async function confirmDrainCold(
         const blockerScope =
           (input.providerMissingBeforeCapture ||
             observed.unobservable_command_drain_ids?.length ||
+            observed.deadline_forced_admission_ids?.length ||
             orphanedRequests[0]?.present === true) &&
           observed.instance_id
             ? {
@@ -61495,6 +61541,7 @@ export async function readWorkspaceArchiveCapturePreflight(
                   and process.lease_epoch = lease.lease_epoch
                   and process.provider_instance_id = lease.instance_id)
               and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
+              and not (admission.id = any(coalesce(lease.deadline_forced_admission_ids, '{}'::uuid[])))
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         limit 1
@@ -61837,6 +61884,11 @@ export async function claimWorkspaceArchiveCapture(
      * request. Tar-style captures read files one by one from a
      * running box and keep both as blockers. */
     pointInTimeCapture?: boolean;
+    /** Draining only: inside this window before a requested provider-deadline
+     * rotation's deadline the save is mandatory. Requests still open on the
+     * exact box are recorded in deadline_forced_admission_ids, captured
+     * around, and settled with the box after termination. */
+    deadlineMandatoryCaptureLeadMs?: number;
   },
 ): Promise<ClaimWorkspaceArchiveCaptureResult> {
   if (
@@ -62049,9 +62101,9 @@ export async function claimWorkspaceArchiveCapture(
       if ((holderCounts[0]?.total ?? 0) !== expectedHolderCount) {
         return { status: "holder_in_progress" as const };
       }
-      const unsettled = await scopedDb.execute<{ present: boolean }>(sql`
-        select exists (
-          select 1
+      const forcedAdmissionIds = row.deadline_forced_admission_ids ?? [];
+      const unsettled = await scopedDb.execute<{ id: string }>(sql`
+          select admission.id
           from sandbox_workspace_mutation_admissions admission
           left join session_turn_attempts attempt
             on attempt.account_id = admission.account_id
@@ -62084,11 +62136,43 @@ export async function claimWorkspaceArchiveCapture(
                 ? sql`and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}`
                 : sql``
             }
+            ${
+              input.warmAttempt === undefined
+                ? sql`and not (admission.id = any(${`{${forcedAdmissionIds.join(",")}}`}::uuid[]))`
+                : sql``
+            }
             and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
-        ) as present
+          order by admission.id
       `);
-      if (unsettled[0]?.present) {
-        return { status: "mutation_in_progress" as const };
+      if (unsettled.length > 0) {
+        // Any requested rotation counts: an earlier operator rotation keeps the
+        // due provider-deadline rotation from being stamped separately.
+        const lead = input.deadlineMandatoryCaptureLeadMs;
+        const [deadline] =
+          input.liveness === "draining" && lead !== undefined && Number.isSafeInteger(lead)
+            ? await scopedDb.execute<{ mandatory: boolean }>(sql`
+                select (
+                  ${row.rotation_requested_at !== null}
+                  and ${row.provider_deadline_at ?? null}::timestamptz is not null
+                  and ${row.provider_deadline_at ?? null}::timestamptz
+                    <= now() + (${lead}::bigint * interval '1 millisecond')
+                ) as mandatory
+              `)
+            : [];
+        if (deadline?.mandatory !== true) {
+          return { status: "mutation_in_progress" as const };
+        }
+        // Mandatory pre-deadline save: no holder is left on the box (checked
+        // above), so these requests cannot finish into a capture in time.
+        // Record exactly them; publication excludes them, and the cold commit
+        // settles them only after the box is terminated.
+        await scopedDb.execute(sql`
+          update sandbox_leases set deadline_forced_admission_ids = ${`{${[
+            ...forcedAdmissionIds,
+            ...unsettled.map((admission: { id: string }) => admission.id),
+          ].join(",")}}`}::uuid[], updated_at = now()
+          where id = ${row.id}
+        `);
       }
       const [concurrentCommands] = aroundCommands
         ? await scopedDb.execute<{ present: boolean }>(sql`
@@ -62368,6 +62452,7 @@ export async function replaceWorkspaceArchiveCaptureAfterProof(
                   and process.lease_epoch = lease.lease_epoch
                   and process.provider_instance_id = lease.instance_id)
               and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
+              and not (admission.id = any(coalesce(lease.deadline_forced_admission_ids, '{}'::uuid[])))
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         returning lease.*
@@ -63333,12 +63418,18 @@ export async function persistDrainSnapshot(
              and attempt.execution_generation = admission.execution_generation
              and admission.actor_kind = 'turn'
             where admission.lease_id = lease.id
+              -- Only requests on this exact box can race its capture; an open
+              -- request left on an older epoch or instance must not refuse
+              -- every later publication.
+              and admission.lease_epoch = lease.lease_epoch
+              and admission.provider_instance_id = lease.instance_id
               and admission.workspace_generation <= ${input.expectedWorkspaceGeneration}
               and admission.settled_at is null
               and not exists(select 1 from sandbox_retained_processes process
                 where process.id = any(lease.unobservable_command_drain_ids)
                   and process.parent_admission_id = admission.id and process.lease_id = lease.id)
               and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
+              and not (admission.id = any(coalesce(lease.deadline_forced_admission_ids, '{}'::uuid[])))
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           ) as unsettled_mutation
         from sandbox_leases as lease
@@ -63841,6 +63932,7 @@ async function foldWorkspaceArchiveOntoLease(
               : sql``
           }
           and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
+          and not (admission.id = any(coalesce(lease.deadline_forced_admission_ids, '{}'::uuid[])))
           and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
       )
     returning lease.id
