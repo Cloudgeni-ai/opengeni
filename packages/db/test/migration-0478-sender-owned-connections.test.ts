@@ -19,6 +19,8 @@ const admissionRefusalsMigration = "0539_scheduled_admission_refusals.sql";
 // 0608 rewrites the MCP receipt fence installed by withheld 0494 and preserves
 // its 0501 sharing behavior. Replay it only after both prerequisites exist.
 const receiverExecutionContextMigration = "0608_receiver_execution_context.sql";
+// Reads the schedule owner column introduced by this cutover.
+const inboxScheduleOwnerMigration = "0661_inbox_subagent_goals_and_schedules.sql";
 let database: OwnerMigratedTestDatabase | null = null;
 
 beforeAll(async () => {
@@ -41,14 +43,14 @@ test("maintenance cutover backfills proven owners under FORCE RLS without rewrit
     );
     await owner`insert into schema_migrations (name) values (${migration}), (${accountBindingsMigration}), (${sharingMigration}), (${admissionDiagnosticsMigration}), (${admissionRefusalsMigration}), (${receiverExecutionContextMigration})`;
     // The allowance guard patch must wait for the withheld refusal lifecycle.
-    for (const name of allowanceMigrationTail)
+    for (const name of [...allowanceMigrationTail, inboxScheduleOwnerMigration])
       await owner`insert into schema_migrations(name) values(${name})`;
     await migrate(db.ownerUrl);
     const [historicalBindings] =
       await owner`select to_regprocedure('opengeni_private.fence_mcp_account_bindings()') as receipt_fence`;
     expect(historicalBindings!.receipt_fence).toBeNull();
     await owner`delete from schema_migrations where name in (${migration}, ${accountBindingsMigration}, ${sharingMigration}, ${admissionDiagnosticsMigration}, ${admissionRefusalsMigration}, ${receiverExecutionContextMigration})`;
-    for (const name of allowanceMigrationTail)
+    for (const name of [...allowanceMigrationTail, inboxScheduleOwnerMigration])
       await owner`delete from schema_migrations where name=${name}`;
     const [posture] =
       await owner`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`;

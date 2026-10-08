@@ -117,4 +117,6 @@ export const embeddingMigrationTail = [
   "0653_session_archive_tenancy_fence.sql",
   "0657_session_archive_purge_retained_evidence.sql",
   "0660_session_archive_preference_snapshot_export.sql",
+  // Reads the schedule owner column introduced by withheld 0478.
+  "0661_inbox_subagent_goals_and_schedules.sql",
 ];
