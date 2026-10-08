@@ -52,6 +52,7 @@ describe("pre-knowledge Memory storage compatibility", () => {
         "0651_session_event_delta_folding.sql",
         "0652_session_archive_guard_search_path.sql",
         "0653_session_archive_tenancy_fence.sql",
+        "0657_session_archive_purge_retained_evidence.sql",
       ])
         await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       await migrate(owned.ownerUrl);
