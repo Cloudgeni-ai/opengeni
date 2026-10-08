@@ -94,10 +94,11 @@ export class CuaComputerBackend implements ComputerBackend {
     return this.run(async () => {
       this.nativeTools ??= new CuaNativeTools(this.runtime, this.nativeSession);
       await this.nativeTools.validate(request);
-      if (!this.nativeSessionStarted) {
-        await callDesktop(this.runtime, "start_session", { session: this.nativeSession });
-        this.nativeSessionStarted = true;
-      }
+      // CUA reclaims idle sessions independently of ComputerSession. Reassert
+      // the same owned label before dispatch; active snapshots stay intact and
+      // revived sessions reject their expired tokens through CUA's own checks.
+      await callDesktop(this.runtime, "start_session", { session: this.nativeSession });
+      this.nativeSessionStarted = true;
       this.nativeObservations = true;
       this.observations.clear();
       return await this.nativeTools.call(request);
@@ -234,9 +235,20 @@ export class CuaComputerBackend implements ComputerBackend {
         new ComputerBackendError("unavailable", "CUA backend queue is full", true, false),
       );
     this.pending++;
-    const result = this.tail.then(operation).finally(() => {
-      this.pending--;
-    });
+    const result = this.tail
+      .then(async () => {
+        const { data } = await callDesktop(this.runtime, "start_session", {
+          session: this.session,
+        });
+        if (data.revived === true) {
+          this.observations.clear();
+          this.frames.clear();
+        }
+        return await operation();
+      })
+      .finally(() => {
+        this.pending--;
+      });
     this.tail = result.catch(() => undefined);
     return result;
   }

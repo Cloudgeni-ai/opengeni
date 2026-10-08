@@ -163,16 +163,27 @@ export class ComputerDriver implements ComputerInteractionDriver {
 
   async dispatchNative(command: ComputerNativeCommand): Promise<ComputerNativeResult> {
     this.assertOpen();
-    const client = await this.activeClient();
-    if (!client.callNative)
-      throw new InteractionDefiniteDriverError("unsupported", "Native CUA tools are unavailable");
-    return ComputerNativeResult.parse({
-      target: null,
-      computerSessionId: this.computerSessionId,
-      controllerGeneration: this.controllerGeneration,
-      tool: command.tool,
-      ...(await client.callNative(command)),
-    });
+    try {
+      const client = await this.activeClient();
+      if (!client.callNative)
+        throw new InteractionDefiniteDriverError("unsupported", "Native CUA tools are unavailable");
+      return ComputerNativeResult.parse({
+        target: null,
+        computerSessionId: this.computerSessionId,
+        controllerGeneration: this.controllerGeneration,
+        tool: command.tool,
+        ...(await client.callNative(command)),
+      });
+    } catch (error) {
+      if (error instanceof ComputerBackendError) {
+        const code = interactionErrorCode(error.code);
+        if (!error.dispatched) {
+          throw new InteractionDefiniteDriverError(code, error.message, error.retryable);
+        }
+        throw new InteractionOutcomeUnknownDriverError(code, error.message, false);
+      }
+      throw error;
+    }
   }
 
   async validate(command: ComputerActionCommand): Promise<void> {
