@@ -67,12 +67,6 @@ type SessionPlacementRow = {
   allowed_models: string[] | null;
 };
 
-type PersonPlacementRow = {
-  membership_id: string;
-  active: boolean;
-  personal_fallback_opt_in: boolean;
-};
-
 /**
  * Load a single Codex placement world and run the caller's placement/lease
  * operation in the same tenant- and session-scoped transaction. Database
@@ -153,45 +147,49 @@ export async function withSubscriptionCorePlacementWorld<T>(
 
     let people: PlacementInput["people"] = [];
     if (session.owner_membership_id) {
-      const [person] = await rawRows<PersonPlacementRow>(
+      const [preference] = await rawRows<{ personal_fallback_opt_in: boolean }>(
         tx,
-        sql`select membership.id::text as membership_id,
-                  (membership.status = 'active' and membership.revoked_at is null) as active,
-                  coalesce(preference.personal_fallback_opt_in, false) as personal_fallback_opt_in
-                from organization_memberships membership
-                left join subscription_person_preferences preference
-                  on preference.account_id = membership.account_id
-                  and preference.organization_membership_id = membership.id
-                where membership.account_id = ${request.accountId}::uuid
-                  and membership.id = ${session.owner_membership_id}::uuid
-                limit 1`,
+        sql`select personal_fallback_opt_in
+              from subscription_person_preferences
+              where account_id = ${request.accountId}::uuid
+                and organization_membership_id = ${session.owner_membership_id}::uuid
+              limit 1`,
       );
-      if (person) {
-        people = [
-          {
-            membershipId: person.membership_id,
-            active: person.active,
-            personalFallbackOptIn: person.personal_fallback_opt_in,
-          },
-        ];
-      }
+      // The exact accepted-turn gate above established that a non-null owner
+      // membership is active. Runtime roles intentionally cannot read the
+      // organization_memberships table directly; preferences remain
+      // independently scoped by FORCE RLS and default to false when absent.
+      people = [
+        {
+          membershipId: session.owner_membership_id,
+          active: true,
+          personalFallbackOptIn: preference?.personal_fallback_opt_in ?? false,
+        },
+      ];
     }
 
     const workspaceKind = session.workspace_kind === "personal" ? "personal" : "shared";
-    const models = request.models.filter(
-      (model) =>
-        evaluateWorkspaceModelPolicy(workspacePolicy, {
-          providerId: model.provider,
-          modelId: model.id,
-        }).allowed,
-    );
+    const workspaceAllowedModelIds =
+      workspacePolicy.allowedProviders === null && workspacePolicy.allowedModels === null
+        ? null
+        : request.models
+            .filter(
+              (model) =>
+                evaluateWorkspaceModelPolicy(workspacePolicy, {
+                  // Workspace model policy uses the resolved provider identity;
+                  // the subscription core's provider key is intentionally neutral.
+                  providerId: model.provider === "codex" ? "codex-subscription" : model.provider,
+                  modelId: model.id,
+                }).allowed,
+            )
+            .map((model) => model.id);
     const input: PlacementInput = {
       now: request.now.getTime(),
       workspace: {
         id: request.workspaceId,
         kind: workspaceKind,
         ownerMembershipId: workspaceKind === "personal" ? session.owner_membership_id : null,
-        allowedModelIds: workspacePolicy.allowedModels,
+        allowedModelIds: workspaceAllowedModelIds,
       },
       session: {
         id: request.sessionId,
@@ -224,7 +222,9 @@ export async function withSubscriptionCorePlacementWorld<T>(
       },
       settings: effectiveSettings.values,
       people,
-      models,
+      // Keep the complete catalog so a disallowed preferred model does not
+      // erase provider metadata needed to evaluate same-provider fallback.
+      models: request.models,
       connections: connectionRows,
       cacheFacts: { codex: { kind: "measured_idle_cutoff", cutoffMs: null } },
     };
@@ -362,6 +362,17 @@ export async function withSubscriptionCoreCodexRefreshLock<T>(
         hashtextextended(${`subscription-refresh:${request.connectionId}`}, 0)
       )`,
     );
+    const leaseStillCurrent = await assertSubscriptionTurnLeaseCurrent(tx, {
+      accountId: request.accountId,
+      workspaceId: request.workspaceId,
+      sessionId: request.sessionId,
+      turnId: request.turnId,
+      provider: "codex",
+      connectionId: request.connectionId,
+      holderId: request.holderId,
+      generation: request.generation,
+    });
+    if (!leaseStillCurrent) return { status: "lease_lost" } as const;
     return { status: "locked", value: await operation(tx) } as const;
   });
   if (access.status === "not_visible") return access;

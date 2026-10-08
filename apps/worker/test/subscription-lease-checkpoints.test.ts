@@ -264,6 +264,55 @@ test("core Codex lease is checked at the provider-dispatch boundary", async () =
   }
 });
 
+test("rejects a delayed positive core lease check after the local deadline", async () => {
+  let now = 0;
+  const clock = spyOn(performance, "now").mockImplementation(() => now);
+  let resolveCheck!: (current: boolean) => void;
+  const pendingCheck = new Promise<boolean>((resolve) => {
+    resolveCheck = resolve;
+  });
+  const core = spyOn(db, "assertSubscriptionTurnLeaseCurrent").mockReturnValue(pendingCheck);
+  const rls = spyOn(db, "withRlsContext").mockImplementation(
+    async (_db, _context, callback) => await callback({} as TurnCredentialLeaseDeps["db"]),
+  );
+  const deps = {
+    db: {} as TurnCredentialLeaseDeps["db"],
+    observability: {
+      incrementCounter() {},
+      warn() {},
+    } as unknown as TurnCredentialLeaseDeps["observability"],
+    accountId: "account-fixture",
+    workspaceId: "workspace-fixture",
+    codexWorkspaceKey: "fixture",
+    getTurnId: () => "turn-fixture",
+    getSessionId: () => "session-fixture",
+  };
+  const leases = createTurnCredentialLeases(deps);
+  Object.assign(leases.codex, {
+    held: true,
+    holderId: "holder-fixture",
+    generation: 10,
+    confirmedUntilMs: 100,
+  });
+  leases.codex.useSubscriptionCoreLease("connection-fixture");
+  try {
+    const dispatchCheck = leases.codex.assertCurrentForDispatch();
+    await Promise.resolve();
+    expect(core).toHaveBeenCalledTimes(1);
+    now = 101;
+    resolveCheck(true);
+    await expect(dispatchCheck).rejects.toThrow(
+      "Codex credential lease is not usable for provider dispatch",
+    );
+    expect(leases.codex.lost).toBe(true);
+  } finally {
+    leases.codex.stopHeartbeat();
+    core.mockRestore();
+    rls.mockRestore();
+    clock.mockRestore();
+  }
+});
+
 test("legacy Codex dispatch keeps its existing local lease fence", async () => {
   const core = spyOn(db, "assertSubscriptionTurnLeaseCurrent").mockResolvedValue(true);
   const deps = {

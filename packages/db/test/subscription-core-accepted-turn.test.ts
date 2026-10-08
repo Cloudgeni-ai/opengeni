@@ -164,6 +164,9 @@ describe("subscription-core accepted-turn guard", () => {
         },
       ],
       [{ current: true }],
+      [],
+      [],
+      [{ current: true }],
     ]);
     const sessionActor = spyOn(database, "withSessionRlsActorContext").mockImplementation(
       async (_value, run) => await run(),
@@ -189,7 +192,56 @@ describe("subscription-core accepted-turn guard", () => {
     ).resolves.toEqual({ status: "completed", value: "refreshed" });
     expect(operationCalls).toBe(1);
     expect(statements.some((statement) => statement.includes("pg_advisory_xact_lock"))).toBe(true);
+    expect(
+      statements.filter((statement) => statement.includes("subscription_leases")),
+    ).toHaveLength(2);
     expect(parameters.flat()).toContain(`subscription-refresh:${connectionId}`);
+  });
+
+  test("rechecks the lease after waiting for the refresh lock", async () => {
+    const connectionId = "66666666-6666-4666-8666-666666666666";
+    const { db, statements } = transaction([
+      [{ authorized: true }],
+      [
+        {
+          owner_subject_id: identity.sessionOwnerSubjectId,
+          owner_membership_id: identity.sessionOwnerMembershipId,
+          initiating_human_subject_id: identity.initiatingHumanSubjectId,
+          visibility: "shared",
+        },
+      ],
+      [{ current: true }],
+      [],
+      [],
+      [{ current: false }],
+    ]);
+    const sessionActor = spyOn(database, "withSessionRlsActorContext").mockImplementation(
+      async (_value, run) => await run(),
+    );
+    const rls = spyOn(database, "withRlsContext").mockImplementation(
+      async (_db, _value, run) => await run(db),
+    );
+    restores.push(
+      () => sessionActor.mockRestore(),
+      () => rls.mockRestore(),
+    );
+    let operationCalls = 0;
+
+    await expect(
+      withSubscriptionCoreCodexRefreshLock(
+        db,
+        { ...identity, connectionId, holderId: "expired-during-lock", generation: 9 },
+        async () => {
+          operationCalls += 1;
+          return "must not refresh";
+        },
+      ),
+    ).resolves.toEqual({ status: "lease_lost" });
+    expect(operationCalls).toBe(0);
+    expect(statements.some((statement) => statement.includes("pg_advisory_xact_lock"))).toBe(true);
+    expect(
+      statements.filter((statement) => statement.includes("subscription_leases")),
+    ).toHaveLength(2);
   });
 
   test("does not enter the refresh callback when the lease generation is no longer current", async () => {

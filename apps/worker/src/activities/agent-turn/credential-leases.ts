@@ -143,6 +143,8 @@ export class CodexTurnLease extends SubscriptionTurnLease {
       this.assertUsable();
       return;
     }
+    const holderId = this.holderId;
+    const generation = this.generation;
     const current = await withRlsContext(
       this.codexDeps.db,
       { accountId: this.codexDeps.accountId, workspaceId: this.codexDeps.workspaceId },
@@ -154,10 +156,22 @@ export class CodexTurnLease extends SubscriptionTurnLease {
           turnId,
           provider: "codex",
           connectionId,
-          holderId: this.holderId!,
-          generation: this.generation!,
+          holderId,
+          generation,
         }),
     );
+    // The DB round trip can outlive the local lease deadline or a heartbeat
+    // can mark this holder lost while it is in flight. A stale positive reply
+    // is not dispatch authority.
+    this.assertUsable();
+    if (
+      this.subscriptionCoreConnectionId !== connectionId ||
+      this.holderId !== holderId ||
+      this.generation !== generation
+    ) {
+      this.markLost("not_found");
+      this.assertUsable();
+    }
     if (!current) {
       this.markLost("not_found");
       this.assertUsable();
