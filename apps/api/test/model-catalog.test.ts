@@ -216,7 +216,7 @@ describe("workspace model catalog availability", () => {
     });
   });
 
-  test("projects OpenGeni topology safely and gates the workspace Gateway rail", () => {
+  test("projects Opengeni topology safely and gates the workspace Gateway rail", () => {
     const settings = testSettings({
       codexSubscriptionEnabled: false,
       modelProvidersJson: "[]",

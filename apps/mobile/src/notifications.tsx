@@ -22,7 +22,7 @@ export const NOTIFICATION_RULES: Array<{ rule: NativePushRule; title: string; su
 
 const DEFAULT_RULES: NativePushRule[] = ["needs_input", "failed", "agent"];
 
-/** The data every OpenGeni push carries, so a tap can open the right place. */
+/** The data every Opengeni push carries, so a tap can open the right place. */
 export interface PushData {
   sessionId?: string;
   workspaceId?: string;

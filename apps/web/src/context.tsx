@@ -1655,7 +1655,7 @@ export function RootRouteComponent() {
         if (status.status === "bound") {
           // Explicit refreshes re-sync from GitHub (POST /github/repositories/sync)
           // so installations changed after connect show up; passive loads read
-          // OpenGeni's cached rows.
+          // Opengeni's cached rows.
           const { repositories } = options?.sync
             ? await client.syncGitHubRepositories(workspaceId)
             : await client.listGitHubRepositories(workspaceId);

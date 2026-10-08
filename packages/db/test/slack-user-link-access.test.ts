@@ -90,7 +90,7 @@ async function slackConnection(target: { accountId: string; workspaceId: string 
       slackTeamName: `Slack ${label}`,
       botId: `B_${label}`,
       botUserId: `UB_${label}`,
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: new Date().toISOString(),
     },
   });

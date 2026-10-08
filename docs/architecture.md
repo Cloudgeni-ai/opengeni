@@ -1,4 +1,4 @@
-# OpenGeni architecture reference
+# Opengeni architecture reference
 
 > Setup: [`../AGENTS.md`](../AGENTS.md). Documentation index: [`README.md`](README.md).
 
@@ -16,7 +16,7 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 
 ---
 
-## 2. OpenGeni
+## 2. Opengeni
 
 External users require live membership/`asUser()`; an organization key holding
 `members:manage` creates a missing shared-workspace membership on the user's first
@@ -270,7 +270,7 @@ owner-only row on Knowledge > Agent learning, in the same Off / Review first /
 Automatic words as the workspace modes, while each store stays separate.
 
 Accepted conversation and tool content stays intact at its canonical boundary;
-OpenGeni does not rewrite arbitrary credential-like text. Configured secrets
+Opengeni does not rewrite arbitrary credential-like text. Configured secrets
 are encrypted at rest and exposed only through explicit permissioned
 operations with metadata-only audit.
 
@@ -329,7 +329,7 @@ and provenance never imply human authority. Turns freeze initiating principals
 and execution/recovery authority snapshots.
 
 An effective first-party permission ceiling of `[]` remains zero delegated
-OpenGeni authority. Runtime skips only remote OpenGeni-delegated MCP preparation,
+Opengeni authority. Runtime skips only remote OpenGeni-delegated MCP preparation,
 never pads a grant or signs an empty token; external-host, host-local,
 connection-backed and already-authorized native paths keep their own authority.
 See [automation defaults](automations.md#empty-first-party-authority).
@@ -360,7 +360,7 @@ ownership or bypass recovery settlement.
 Personal connections and resources require the exact human authority that made
 them executable. Workspace-owned credentials remain workspace-scoped and are
 revalidated at use. An embedding host may narrow access through an explicit
-port; it cannot grant access that OpenGeni denied.
+port; it cannot grant access that Opengeni denied.
 
 The managed personal-workspace owner receives a closed permission projection
 that includes live viewing and handoff (`stream:view`, `stream:control`,
@@ -470,7 +470,7 @@ Mac updates preserve signed bundles and
 [ACLs](../agent/TRANSACTIONAL-WRITES.md).
 
 Machines own files, Git auth, environment and [credential renewal](connected-machines.md).
-OpenGeni neither clones repos nor installs durable credentials;
+Opengeni neither clones repos nor installs durable credentials;
 child Codemode authority is transient/attempt-bound.
 [Recovery](run-lifecycle.md) restores capabilities without tool replay.
 
@@ -695,7 +695,7 @@ Canonical: [`usage-allowances.md`](usage-allowances.md).
 
 ## 4. System architecture
 
-OpenGeni separates durable control, live transport, and user-code execution.
+Opengeni separates durable control, live transport, and user-code execution.
 
 ```mermaid
 flowchart LR
@@ -775,7 +775,7 @@ Large or high-frequency bytes take separate paths:
 - terminal and desktop streams use the sandbox/provider transport or the
   dedicated relay edge for Connected Machines;
 - realtime voice uses Codex or Azure Live WebRTC, or the AI Gateway WebSocket while durable
-  ownership, ledger, delegation, context, and recovery remain in OpenGeni;
+  ownership, ledger, delegation, context, and recovery remain in Opengeni;
   the voice lease freezes connector accounts at authenticated admission and
   supplies that exact authority to delegations and transcript handoff;
 - model token and tool events use the session event stream, not Temporal; and
@@ -1342,7 +1342,7 @@ tool execution, progressive disclosure and sandbox interfaces.
 Embedding processes—not the Agents SDK—own global rejection/termination policy.
 SDK background lifecycle work must settle owned promises, never detach rejecting
 tasks or install `unhandledRejection` handlers exiting shared workers. Worker global
-rejection listeners provide last-resort observation; OpenGeni drains/checkpoints
+rejection listeners provide last-resort observation; Opengeni drains/checkpoints
 before deliberate restarts.
 
 Workers supply frozen authority and durable sinks. Runtime must not invent
@@ -2070,9 +2070,10 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | Slack user-token MCP tools and shared provider quota | `packages/runtime/src/slack-rest-mcp.ts`, `packages/contracts/src/slack-rest-mcp.ts`, `packages/db/src/slack-api-rate-limits.ts` | [`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md), [`slack-bot.md`](slack-bot.md) |
+| Slack app identity and icons | `packages/contracts/src/slack-bot-scopes.ts`, `scripts/generate-slack-bot-icons.ts`, `deploy/slack/` | [`slack-bot.md`](slack-bot.md) |
 | Organization Slack bot sharing and prepared delivery | `packages/db/src/organization-slack-bots.ts`, `apps/api/src/routes/slack-bot-access.ts`, `apps/api/src/integrations/slack-bot.ts` | [`slack-bot.md`](slack-bot.md) |
 | Slack task files | `apps/api/src/integrations/slack-task-file-upload.ts`, `apps/api/src/integrations/slack-file-upload-flow.ts`, `packages/db/src/slack-file-uploads.ts` | [`slack-bot.md`](slack-bot.md#explicit-file-delivery-in-the-task-thread) |
-| OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
+| Opengeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4, [`../packages/sdk/README.md`](../packages/sdk/README.md), and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) for public routes |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts`, `scripts/public-api/` | Package READMEs, §3.10, §7.6, and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) |
 | Startup loading, per-turn activity rows, timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `projection.ts`, `apps/web/src/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |

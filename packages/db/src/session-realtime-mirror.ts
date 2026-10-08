@@ -158,7 +158,7 @@ export function renderRealtimeHumanInputContext(input: {
     `  <status>${input.routing}</status>`,
     `  <delivery>${input.delivery}</delivery>`,
     `  <text>${escapeXmlText(input.text)}</text>`,
-    "  <instruction>Already routed by OpenGeni; do not delegate this message again.</instruction>",
+    "  <instruction>Already routed by Opengeni; do not delegate this message again.</instruction>",
     "</session_user_message>",
   ].join("\n");
 }

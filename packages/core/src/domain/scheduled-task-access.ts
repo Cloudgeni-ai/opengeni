@@ -3,7 +3,7 @@
  * in-app signal for runs that failed closed on connector access.
  *
  * A task freezes its connectors, its connector accounts and (when an agent
- * created it, migration 0428) its OpenGeni tool policy. Workspace changes made
+ * created it, migration 0428) its Opengeni tool policy. Workspace changes made
  * later never reach its runs on their own. This module computes one plan: what
  * the task's owner would get by saving it again now. The drift projection is
  * that plan's difference, and the refresh applies exactly that plan through the
@@ -239,7 +239,7 @@ export type FirstPartyToolPermissionRequirements = (
 ) => readonly Permission[];
 
 /**
- * OpenGeni tools of an agent-created task (migration 0428). A human- or
+ * Opengeni tools of an agent-created task (migration 0428). A human- or
  * API-created task has no frozen creator policy and already follows the
  * deployment default at each run, so there is nothing to refresh. For a frozen
  * policy the refresh adds the current default tools. Permissions stay
@@ -663,7 +663,7 @@ export async function withScheduledTaskPolicyDrift(input: {
 
 /**
  * The owner's explicit access refresh: re-freeze the task's connectors,
- * connector accounts and (for an agent-created task) OpenGeni tool policy with
+ * connector accounts and (for an agent-created task) Opengeni tool policy with
  * the calling person's current authority. It is an ordinary owner edit whose
  * content the server computes, so the owner check, Variable Set permission,
  * model policy, target validation, personal-resource re-authorization and

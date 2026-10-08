@@ -1,6 +1,6 @@
 [package]
 name = "opengeni-agent"
-description = "The OpenGeni self-hosted agent binary: enrollment, dial, RPC dispatch, and the resiliency supervisor."
+description = "The Opengeni self-hosted agent binary: enrollment, dial, RPC dispatch, and the resiliency supervisor."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -253,7 +253,7 @@ export async function brokerSessionCodexRealtime(
   }
 }
 
-/** Bind the pure broker to OpenGeni's encrypted DB credential lifecycle. */
+/** Bind the pure broker to Opengeni's encrypted DB credential lifecycle. */
 export function buildSessionCodexRealtimeBroker(
   db: Database,
   settings: Settings,

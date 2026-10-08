@@ -100,7 +100,7 @@ export function codexPlanEntitlementFailurePayload(input: {
 
 /**
  * Terminal copy for an empty Codex rejection. With `planChecked`, the account's
- * plan was re-read and did not explain it, so OpenGeni kept the account.
+ * plan was re-read and did not explain it, so Opengeni kept the account.
  */
 export function codexRequestRejectedFailurePayload(input: {
   accountLabel: string | null;

@@ -1,8 +1,8 @@
-# OpenGeni observability stack
+# Opengeni observability stack
 
 `deploy/observability` is the optional Kubernetes observability distribution for
-OpenGeni. It is a thin Helm wrapper around the upstream
-`kube-prometheus-stack` chart and packages the canonical OpenGeni dashboards
+Opengeni. It is a thin Helm wrapper around the upstream
+`kube-prometheus-stack` chart and packages the canonical Opengeni dashboards
 from [`dashboards/`](dashboards/) without copying their JSON.
 
 The wrapper is intentionally separate from `deploy/helm/opengeni`:
@@ -10,7 +10,7 @@ The wrapper is intentionally separate from `deploy/helm/opengeni`:
 - this chart lifecycle-manages Prometheus, Prometheus Operator, Alertmanager,
   Grafana, kube-state-metrics, node-exporter, and the canonical dashboard
   ConfigMaps;
-- the OpenGeni application chart owns `/metrics`, `ServiceMonitor`,
+- the Opengeni application chart owns `/metrics`, `ServiceMonitor`,
   `PrometheusRule`, and optional OTLP collector integration;
 - environment overlays own ingress/TLS, Grafana administrator credentials,
   Alertmanager receivers, remote write, scheduling, and environment-only rules
@@ -51,7 +51,7 @@ compact self-hosted cluster:
 | Grafana | 2 GiB | persistent database and plugins |
 
 The compact profile filters metrics at ingestion, retaining every signal used
-by the pinned Kubernetes mixin and OpenGeni dashboards/rules while excluding
+by the pinned Kubernetes mixin and Opengeni dashboards/rules while excluding
 unused modern Go runtime fanout and redundant zero-valued pod reasons. Validate
 the live target mix with `bun run bench:observability-series -- --prometheus-url
 <url> --check`; the guard requires at least a 4x instantaneous series reduction
@@ -93,14 +93,14 @@ bun run deployment:observability -- --profile single-node --opensandbox
 
 That flag adds `values.opensandbox.yaml`, enabling bounded `Pool`
 custom-resource metrics and the pinned controller `ServiceMonitor`. Per-workload
-BatchSandbox and Pod state is aggregated at source by the OpenGeni control
+BatchSandbox and Pod state is aggregated at source by the Opengeni control
 worker into fixed-label gauges. The base profile leaves those integrations
 disabled so a cluster without the optional CRDs remains unaffected.
 
 The plan deliberately installs only the wrapper. It never upgrades or rolls
-back OpenGeni application workloads and never executes application hooks. After
+back Opengeni application workloads and never executes application hooks. After
 the wrapper is ready, include `opengeni.values.example.yaml` in the next
-ordinary OpenGeni application release using that release's exact chart version
+ordinary Opengeni application release using that release's exact chart version
 and complete authoritative values. The ordering matters: the application chart
 omits `ServiceMonitor` and `PrometheusRule` when the Prometheus Operator CRDs do
 not exist.
@@ -126,7 +126,7 @@ For an OpenSandbox cluster, add
 `--values deploy/observability/values.opensandbox.yaml` after installing the
 OpenSandbox chart and `deploy/stacks/opensandbox-controller-metrics-service.yaml`.
 
-For a new or existing OpenGeni installation, include
+For a new or existing Opengeni installation, include
 `deploy/observability/opengeni.values.example.yaml` in the ordinary application
 chart install or release upgrade. Do not run a local application-chart upgrade
 solely to toggle observability: a different checkout can roll workloads and run
@@ -149,7 +149,7 @@ It verifies:
 - the expected wrapper chart release is deployed;
 - every dashboard ConfigMap exactly matches its canonical JSON and content hash;
 - the source-revision annotations match the source checkout;
-- OpenGeni `ServiceMonitor` and `PrometheusRule` resources exist with the shared
+- Opengeni `ServiceMonitor` and `PrometheusRule` resources exist with the shared
   discovery label;
 - the bundled Grafana, kube-state-metrics, and node-exporter ServiceMonitors
   carry the same discovery label and have healthy live targets;
@@ -179,7 +179,7 @@ bun run deployment:observability-verify -- \
   --grafana-namespace monitoring \
   --grafana-pod-selector app.kubernetes.io/name=grafana \
   --grafana-sidecar-container grafana-sc-dashboard \
-  --grafana-dashboard-directory /tmp/dashboards/OpenGeni
+  --grafana-dashboard-directory /tmp/dashboards/Opengeni
 ```
 
 The supplied HTTP endpoints must already be reachable through the operator's

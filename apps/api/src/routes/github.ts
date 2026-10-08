@@ -300,7 +300,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   // Start with user authorization, not GitHub's install/configure selector.
   // This lets an owner link an already-installed App without relying on
-  // GitHub's Configure page to preserve or return OpenGeni state.
+  // GitHub's Configure page to preserve or return Opengeni state.
   app.get("/v1/workspaces/:workspaceId/github/connect", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const state = c.req.query("state");
@@ -513,7 +513,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId: grant.workspaceId,
     });
     setGitHubStateCookie(c, deps, state);
-    const appName = payload.appName?.trim() || "OpenGeni";
+    const appName = payload.appName?.trim() || "Opengeni";
     const manifest = buildGitHubAppManifest({
       appName,
       baseUrl,
@@ -1214,7 +1214,7 @@ function githubBrowserFailureDetail(error: unknown): string | null {
 /**
  * The failure page links back to the workspace integrations page when the
  * request names a workspace (its path, or a correctly signed state even if it
- * aged out); otherwise to the OpenGeni home. This is only a link target, so an
+ * aged out); otherwise to the Opengeni home. This is only a link target, so an
  * expired state is acceptable evidence of where the user came from.
  */
 function githubFailureReturnUrl(deps: ApiRouteDeps, c: Context): string {

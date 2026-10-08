@@ -2283,7 +2283,7 @@ mod tests {
         for args in [
             vec!["init", "-q"],
             vec!["config", "user.email", "agent@opengeni.test"],
-            vec!["config", "user.name", "OpenGeni Agent"],
+            vec!["config", "user.name", "Opengeni Agent"],
         ] {
             // git is gated as known-present by the callers' `which_git()` check, so
             // a spawn `NotFound` here is the transient NixOS fork/exec ENOENT — retry

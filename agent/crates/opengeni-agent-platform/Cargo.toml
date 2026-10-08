@@ -1,6 +1,6 @@
 [package]
 name = "opengeni-agent-platform"
-description = "Per-OS platform abstraction (exec/fs/git/terminal/desktop/metrics + service manager) for the OpenGeni agent."
+description = "Per-OS platform abstraction (exec/fs/git/terminal/desktop/metrics + service manager) for the Opengeni agent."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

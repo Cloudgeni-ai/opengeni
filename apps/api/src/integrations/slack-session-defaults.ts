@@ -75,7 +75,7 @@ export function selectRecentRepositoryResources(
   const resources: RepositoryResourceRef[] = [];
   for (const used of recent) {
     if (resources.length >= limit) break;
-    // A repository OpenGeni attached automatically is not a choice the person
+    // A repository Opengeni attached automatically is not a choice the person
     // made; counting it would keep re-attaching it to every later Slack task.
     if (used.optional === true) continue;
     const repositoryId = positiveRepositoryId(
@@ -164,13 +164,13 @@ function siteOf(hostname: string): string | null {
 }
 
 /**
- * OpenGeni workspace or session links in `text` that point at a sibling
+ * Opengeni workspace or session links in `text` that point at a sibling
  * deployment of this one (for example staging versus production).
  *
  * A sibling is a different host under the same parent domain as this
- * deployment's web origin, carrying OpenGeni's own route shape. Anything else
+ * deployment's web origin, carrying Opengeni's own route shape. Anything else
  * is left alone: an unrelated product's URL must never be described as
- * another OpenGeni.
+ * another Opengeni.
  */
 export function otherDeploymentLinks(
   text: string,
@@ -204,7 +204,7 @@ export function otherDeploymentLinks(
 }
 
 /**
- * Model context for links to another OpenGeni deployment. A session id from
+ * Model context for links to another Opengeni deployment. A session id from
  * one deployment does not exist in another, so without this the agent reports
  * "Session not found or access denied" and asks for access that no grant in
  * this deployment can give.

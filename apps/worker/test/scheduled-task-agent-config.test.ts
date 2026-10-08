@@ -375,7 +375,7 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
         scheduledTaskRunId: run.id,
         scheduledTaskRunMode: task.runMode,
       },
-      createdBy: { kind: "service", subjectId: "scheduler", label: "OpenGeni scheduler" },
+      createdBy: { kind: "service", subjectId: "scheduler", label: "Opengeni scheduler" },
       createdByContext: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
       createIdempotencyKey: binding.createIdempotencyKey,
       maxNestedAgentDepthOverride: null,

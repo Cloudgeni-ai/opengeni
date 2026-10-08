@@ -120,7 +120,7 @@ async function botConnection(
       slackTeamName: "Slack interaction database test",
       botId: principal.botId,
       botUserId: principal.botUserId,
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: new Date().toISOString(),
     },
   });

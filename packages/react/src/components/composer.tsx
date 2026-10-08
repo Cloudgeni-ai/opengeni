@@ -124,7 +124,7 @@ export type ComposerSubmitBlocker =
 /**
  * How the composer offers run control.
  * - `pause`: the workstream Pause control and paused-state strip (default; the
- *   OpenGeni console).
+ *   Opengeni console).
  * - `stop`: a Stop control only while a response runs. Stopping pauses this
  *   conversation; the next message continues it, so people never see a paused
  *   state they have to resume. Pauses applied elsewhere still show.

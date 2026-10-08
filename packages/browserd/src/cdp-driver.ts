@@ -341,7 +341,7 @@ function hasBrowserEmulation(
 
 /**
  * Target-scoped browser authority. agent-browser owns the pinned Chrome/profile
- * lifecycle; OpenGeni talks to that private browser through one local CDP
+ * lifecycle; Opengeni talks to that private browser through one local CDP
  * connection and keeps an independent causal queue for every target.
  */
 export class AgentBrowserDriver implements BrowserInteractionDriver {

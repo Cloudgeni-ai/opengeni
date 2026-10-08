@@ -185,7 +185,7 @@ export function capabilityErrorToast(
       description: `Opengeni couldn't connect to ${probe[1]}. Check the endpoint address, then try again.`,
     };
   }
-  // Never the raw "OpenGeni API 422: ... Reference: <uuid>." string (DESIGN.md
+  // Never the raw "Opengeni API 422: ... Reference: <uuid>." string (DESIGN.md
   // section 6): API errors become advice, an app error keeps its own sentence.
   return { title: fallbackTitle, description: userErrorText(error) };
 }

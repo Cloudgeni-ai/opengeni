@@ -1,7 +1,7 @@
 #!/bin/sh
 # shellcheck shell=sh
 #
-# OpenGeni self-hosted agent installer — Linux + macOS, STRICT POSIX sh.
+# Opengeni self-hosted agent installer — Linux + macOS, STRICT POSIX sh.
 # =============================================================================
 #
 #   curl -fsSL https://get.opengeni.ai/install.sh | sh
@@ -61,7 +61,7 @@
 #   OPENGENI_INSTALL_REPLACE_APP=1  macOS local-build fallback only. Force-replace
 #                              an existing non-ad-hoc app with a locally assembled
 #                              bundle. A verified prebuilt release app from the
-#                              stable OpenGeni signing identity updates normally;
+#                              stable Opengeni signing identity updates normally;
 #                              retaining it would also retain stale helpers.
 #
 # macOS install shape. On macOS the verified binary is installed INSIDE an app
@@ -122,6 +122,7 @@ OPENGENI_API_URL="${OPENGENI_API_URL:-$OPENGENI_API_DEFAULT_URL}"
 # It matches the id the release workflow signs the notarized bundle with and the
 # id the agent's enroll-time preflight prompts under.
 OPENGENI_APP_BUNDLE_ID="ai.opengeni.agent"
+# Keep the signed bundle archive/install path compatible; plist display names use Opengeni.
 OPENGENI_APP_NAME="OpenGeni Agent"
 # The optional prebuilt bundle asset the release serves once Apple secrets are set
 # (a Developer-ID-signed + notarized .app zipped with its .app dir as the archive
@@ -617,8 +618,8 @@ write_info_plist() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>$OPENGENI_APP_NAME</string>
-    <key>CFBundleDisplayName</key><string>$OPENGENI_APP_NAME</string>
+    <key>CFBundleName</key><string>Opengeni Agent</string>
+    <key>CFBundleDisplayName</key><string>Opengeni Agent</string>
     <key>CFBundleIdentifier</key><string>$OPENGENI_APP_BUNDLE_ID</string>
     <key>CFBundleExecutable</key><string>opengeni-agent</string>
     <key>CFBundleIconFile</key><string>$OPENGENI_APP_ICON_ASSET</string>

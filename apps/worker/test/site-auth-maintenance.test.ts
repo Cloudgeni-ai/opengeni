@@ -71,7 +71,7 @@ describe("site auth maintenance", () => {
             createdBy: {
               kind: "service",
               subjectId: "site-auth-maintenance",
-              label: "OpenGeni authentication maintenance",
+              label: "Opengeni authentication maintenance",
             },
             createdByContext: {
               opengeniSiteAuthConnectionId: claim.siteAuthConnectionId,
@@ -105,7 +105,7 @@ describe("site auth maintenance", () => {
       requestedSessionId: claim.sessionId,
       createIdempotencyKey: `site-auth-maintenance:${claim.operationId}`,
       firstPartyMcpTools: expect.arrayContaining(["browser_open", "browser_auth"]),
-      // OpenGeni's own periodic check, not a person's request.
+      // Opengeni's own periodic check, not a person's request.
       surface: "system",
     });
     expect(String(createInput?.["initialMessage"])).toContain("Purpose: repair");

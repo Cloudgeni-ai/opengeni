@@ -1,6 +1,6 @@
 {
   "uid": "opengeni-streaming-health",
-  "title": "OpenGeni \u00b7 Streaming Health",
+  "title": "Opengeni \u00b7 Streaming Health",
   "description": "TTFT, inter-delta gaps, durable append, NATS publication, and SSE connection lifecycle \u2014 so 'streaming is sluggish' names its layer.",
   "schemaVersion": 39,
   "version": 4,
@@ -43,7 +43,7 @@
     {
       "type": "timeseries",
       "title": "User-perceived time-to-first-token p99 / p95 / p50 by provider (absolute)",
-      "description": "Seconds from a stream start or tool/message boundary to the first streamed content delta. Absolute investigation view: it mixes OpenGeni between-call work with provider time and reasoning models are legitimately slow here, so no alert reads it. Use the split panels below to attribute a slow first token to OpenGeni (pre-dispatch) or the provider.",
+      "description": "Seconds from a stream start or tool/message boundary to the first streamed content delta. Absolute investigation view: it mixes Opengeni between-call work with provider time and reasoning models are legitimately slow here, so no alert reads it. Use the split panels below to attribute a slow first token to Opengeni (pre-dispatch) or the provider.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -129,7 +129,7 @@
     {
       "type": "timeseries",
       "title": "Provider TTFT p90 / p50 by provider (dispatch -> first delta)",
-      "description": "Seconds from the literal provider dispatch to the first streamed reasoning-or-answer delta (content=any): network, provider queueing, prefill and reasoning before the first token. OpenGeni pre-dispatch work is excluded.",
+      "description": "Seconds from the literal provider dispatch to the first streamed reasoning-or-answer delta (content=any): network, provider queueing, prefill and reasoning before the first token. Opengeni pre-dispatch work is excluded.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -289,7 +289,7 @@
     },
     {
       "type": "timeseries",
-      "title": "OpenGeni pre-dispatch p95 / p50 (model entry -> provider dispatch)",
+      "title": "Opengeni pre-dispatch p95 / p50 (model entry -> provider dispatch)",
       "description": "OpenGeni-owned seconds per model request before bytes reach the provider: admission, durable history and audit checkpoints, credit revalidation, request build. The red line is the default 2-second warning threshold.",
       "datasource": {
         "type": "prometheus",

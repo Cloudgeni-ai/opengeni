@@ -37,7 +37,7 @@ function automaticDefaultNote(source: DefaultModelSelectionSource | undefined): 
 /**
  * Picker rows for the default-model row. The shared picker only lists models
  * whose credentials are ready, but the current default may be one that can't
- * run yet (e.g. OpenGeni credits without a balance). Keep that real catalog
+ * run yet (e.g. Opengeni credits without a balance). Keep that real catalog
  * entry visible as an unselectable row so the trigger shows its label and
  * payment source instead of a raw id.
  */

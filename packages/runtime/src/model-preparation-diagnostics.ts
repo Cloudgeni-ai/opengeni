@@ -106,7 +106,7 @@ class ModelPreparationTraceProcessor implements TracingProcessor {
   async forceFlush(): Promise<void> {}
 }
 
-// OpenGeni exports observability through its own OTLP pipeline. Replace the
+// Opengeni exports observability through its own OTLP pipeline. Replace the
 // Agents SDK default batch exporter instead of adding to it: the default has no
 // OpenAI tracing key on Azure/Codex deployments and its async timer can leak a
 // rejected export promise into the SDK's process-global unhandled-rejection

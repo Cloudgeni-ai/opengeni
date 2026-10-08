@@ -1,6 +1,6 @@
 /**
  * `@opengeni/agent-proto` — generated TypeScript wire-protocol types for the
- * OpenGeni self-hosted agent.
+ * Opengeni self-hosted agent.
  *
  * This is the **control-plane side** of the single-source-of-truth wire protocol
  * defined once in `agent/proto/opengeni_agent.proto`. The types here are

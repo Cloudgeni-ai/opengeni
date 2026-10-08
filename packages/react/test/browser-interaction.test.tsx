@@ -293,7 +293,7 @@ function target(
     targetGeneration: `${id}-generation`,
     documentGeneration,
     kind: "page",
-    title: "OpenGeni",
+    title: "Opengeni",
     url: "https://opengeni.ai/",
     selected: true,
     attached: true,

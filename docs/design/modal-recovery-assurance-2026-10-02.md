@@ -2,7 +2,7 @@
 
 ## Finding
 
-Short transport interruptions have safe recovery paths, but current OpenGeni
+Short transport interruptions have safe recovery paths, but current Opengeni
 cannot promise that every Modal DNS failure automatically resumes work after
 connectivity returns. A nonfailed parked turn is not proof of eventual recovery.
 Error text also cannot establish whether a provider accepted a mutation.
@@ -45,7 +45,7 @@ turn-recovery/claim protocol. See [run lifecycle](../run-lifecycle.md).
 [Modal's command documentation](https://modal.com/docs/guide/sandbox-spawn)
 separates execution from process/output observation. Its public documentation
 does not establish native router Start deduplication or a durable continuation
-contract for OpenGeni's SDK setup helpers. We therefore verify the installed
+contract for Opengeni's SDK setup helpers. We therefore verify the installed
 protocol and count physical Starts/writes in actual gRPC fault tests.
 
 ## Newly reproduced defects and focused correction

@@ -37,7 +37,7 @@ function createdCheckoutMetadata(): Record<string, string> {
 }
 
 describe("Stripe checkout credit decision", () => {
-  test("grants credits for a paid OpenGeni checkout created by the checkout route", () => {
+  test("grants credits for a paid Opengeni checkout created by the checkout route", () => {
     const metadata = createdCheckoutMetadata();
     const event = checkoutSessionEvent(
       "checkout.session.completed",
@@ -101,7 +101,7 @@ describe("Stripe checkout credit decision", () => {
     expect(decide(failed)).toEqual({ action: "ignore", reason: "payment_not_paid" });
   });
 
-  test("keeps malformed OpenGeni checkout metadata a visible failure", () => {
+  test("keeps malformed Opengeni checkout metadata a visible failure", () => {
     const metadata = openGeniCheckoutMetadata({ accountId });
     delete metadata.opengeni_credit_micros;
 

@@ -59,7 +59,7 @@ export const LEGACY_SUBSCRIPTION_PROVIDERS: readonly LegacySubscriptionProvider[
   "claude",
 ];
 export const LEGACY_WORLD_MAX_CONNECTIONS = 64;
-/** OpenGeni's default Anthropic prompt-cache lifetime (`5m`). */
+/** Opengeni's default Anthropic prompt-cache lifetime (`5m`). */
 export const LEGACY_CLAUDE_CACHE_TTL_MS = 5 * 60_000;
 const NEAR_EXHAUSTION_PERCENT = 90;
 

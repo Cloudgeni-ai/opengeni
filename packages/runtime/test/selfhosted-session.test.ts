@@ -818,7 +818,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     // environment variables" unless the session manifest's environment EQUALS the
     // turn's. The session must carry the run's declared environment for parity.
     const env = {
-      GIT_AUTHOR_NAME: "OpenGeni Bot",
+      GIT_AUTHOR_NAME: "Opengeni Bot",
       HOME: "/workspace",
       DEPLOY_TARGET: "vm2",
     };

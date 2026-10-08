@@ -1,6 +1,6 @@
 # Run lifecycle: turns, goals, and memory
 
-This is the orientation for how an OpenGeni agent run actually executes over
+This is the orientation for how an Opengeni agent run actually executes over
 time. It ties together three subsystems a contributor touching the session
 workflow, the worker activity, or the runtime must keep straight. Code wins
 over this doc; the canonical sources are `apps/worker/src/workflows/session.ts`,
@@ -330,7 +330,7 @@ there is no status API or newly invented logical mode. Canonical:
 `apps/web/src/routes/session.tsx`.
 
 Finite provider calls are hidden behind connection generations, not new
-realtime modes. On OpenGeni's configured conservative proactive-rotation interval, or after a dead or
+realtime modes. On Opengeni's configured conservative proactive-rotation interval, or after a dead or
 disconnected peer, the controller reuses a healthy microphone stream and
 negotiates one replacement beside the active connection. PostgreSQL permits
 exactly one `active` connection and one `negotiating`/`ready` replacement for a
@@ -339,7 +339,7 @@ that transaction advances the connection epoch, retires the old row, and keeps
 the same realtime id, owner, lifecycle, and durable V3 ledger. During rolling
 deployment, clients that omit the new browser-activation marker retain the old
 immediate-activation behavior; hardened clients always require the two-phase
-proof. Startup replay and OpenGeni client-delivery ACKs remain bound to the promoted connection,
+proof. Startup replay and Opengeni client-delivery ACKs remain bound to the promoted connection,
 and browser generation fences make late answers, duplicate callbacks, and old
 peer events inert. Failed preparation leaves the old healthy peer active;
 recovery uses bounded backoff and terminal conflicts permanently stop its retry
@@ -444,7 +444,7 @@ session-wide route: commentary progress and speakable terminal output use
 that same session-wide route without a channel, in a typed envelope saying it
 was already accepted by execution; voice therefore understands the change but
 does not delegate it again. The browser durably ACKs receipt of each row from
-OpenGeni. Pinned V3 exposes no provider receipt for either append event, so
+Opengeni. Pinned V3 exposes no provider receipt for either append event, so
 provider sends remain at-least-once: a live
 bridge suppresses repeat sends only within that generation after a full local
 send, while a browser crash or connection rotation replays the same durable row
@@ -793,9 +793,9 @@ turns.
 **Runs have no default length limits, by design.** What the SDK calls "turns" are model
 calls; `OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN` exists but defaults to
 effectively unbounded. There is no continuation cap and the agent activity's
-Temporal timeout is measured in days, not hours. OpenGeni is built for agents
+Temporal timeout is measured in days, not hours. Opengeni is built for agents
 that legitimately run for a very long time. Budget/admission policy and
-explicit goal completion or pause bound execution; OpenGeni does not infer
+explicit goal completion or pause bound execution; Opengeni does not infer
 "no progress" from tool/event shape. Do not reintroduce default count- or
 duration-based caps on legitimate run length; fix the pathology instead.
 
@@ -808,7 +808,7 @@ RPC. Both native Starts and the pinned Modal SDK enforce this boundary; SDK
 manifest/setup, file/path helpers, and archive hydration/capture must not bypass
 it. SDK provider/archive wrappers preserve the typed error cause. This also covers resolver
 failure for no-port `task-*.w.modal.host` URLs without trusting DNS-shaped
-server replies. After exact never-started reservation settlement, OpenGeni
+server replies. After exact never-started reservation settlement, Opengeni
 resumes the same accepted turn through bounded connectivity backoff, including
 pre-model setup before `turn.started` eventing exists. The same durable five-replacement
 budget applies. A sixth genuine pre-dispatch setup failure parks the same accepted
@@ -861,7 +861,7 @@ recovery-safe. That narrow exception does not apply to external MCP servers,
 tool invocation, explicit non-404 client responses, or typed
 protocol/programming failures. The retry classifier records typed out-of-band
 category metadata without rewriting the exact source diagnostic retained by
-OpenGeni. A failed MCP request records its HTTP method, parsed JSON-RPC method
+Opengeni. A failed MCP request records its HTTP method, parsed JSON-RPC method
 when available, and a bounded exact source/cause chain in the durable recovery
 detail before SDK layers can flatten the transport error. Only genuinely public
 SDK/console diagnostics receive a fixed structural projection; raw transport
@@ -1381,7 +1381,7 @@ and are never requeued. Remote v2 also retains these system messages within its
 existing shared 64,000-token budget. Automatic compaction uses provider-reported
 usage only: the durable prior-call input count at a turn boundary, or the immediately preceding
 same-activity provider total plus bounded newly appended input. With no bound
-provider count, OpenGeni sends the request and recovers from a genuine provider
+provider count, Opengeni sends the request and recovers from a genuine provider
 context overflow instead of compacting from a whole-request approximation.
 Each authoritative terminal response replaces the durable count with its usable
 input count or null; an omitted count never leaves an older response active.
@@ -2425,14 +2425,14 @@ be unavailable while conversation and external effects remain.
 
 #### Empty-workspace continuity when no checkpoint survives
 
-When the loss leaves no checkpoint OpenGeni can restore automatically (no
+When the loss leaves no checkpoint Opengeni can restore automatically (no
 archive, an unverified archive, a legacy or unregistered descriptor, an invalid
 artifact, or a definitive integrity failure of the selected checkpoint), the
 decision is lane `fresh_workspace`: continue on a new EMPTY workspace. Because
 that is irreversible for the running sandbox, it also waits until the lost
 object is past its hard provider lifetime: its stamped provider deadline plus a
 one-hour create grace, or, for rows without one, the loss observation plus 24
-hours. OpenGeni validates the Modal timeout to at most 24 hours (Modal's own
+hours. Opengeni validates the Modal timeout to at most 24 hours (Modal's own
 cap) and never renews it, so no Modal sandbox can outlive that bound in any
 workspace. A misconfigured credential or namespace that turned a live box into
 a false `NOT_FOUND` therefore cannot cause an empty reset; this deadline proof
@@ -2445,7 +2445,7 @@ same commit.
 
 This is truthful rather than a silent reset. Every member is told, on every
 later agent build, that the previous sandbox was lost at that time, that no
-checkpoint exists that OpenGeni can restore automatically, that files, clones,
+checkpoint exists that Opengeni can restore automatically, that files, clones,
 installs and processes from before it are not available in this workspace, and
 never to replay operations with unknown outcomes. The next spawner (worker or
 API) hydrates nothing, not even a per-session legacy archive, and resumes no
@@ -3412,7 +3412,7 @@ after the key is fixed, when a new message re-runs the work. Billing, access,
 daily-limit and quota failures keep Retry, because each condition can clear.
 When the failed turn's model is the deployment's free model (catalog
 `cost: "free"`), the daily-limit copy names the free model instead and lists
-only the remedies the viewer can use: buying OpenGeni credits, connecting a
+only the remedies the viewer can use: buying Opengeni credits, connecting a
 model, or picking another model, with matching links. The connect remedy names
 ChatGPT or SuperGrok only when the deployment enables that subscription, and
 otherwise reads "connect a model provider". Every other model keeps the generic
@@ -4097,7 +4097,7 @@ last captured model request, not an archive of the entire session.
 
 ### Operational notice and attachment replay stability
 
-Runtime internal context is labeled as an OpenGeni turn-scoped operational notice.
+Runtime internal context is labeled as an Opengeni turn-scoped operational notice.
 History reconciliation persists these notices at their original positions,
 including when replayed for remote compaction. Their status is historical on
 later turns; current authorization and tool availability remain independently

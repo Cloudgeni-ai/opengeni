@@ -527,7 +527,7 @@ export async function turnInput(
   const internalContext = joinInternalContext(
     options.recovering
       ? [
-          "[OpenGeni inference recovery]",
+          "[Opengeni inference recovery]",
           "Continue the same inference from durable conversation and sandbox state. A previous execution stopped before it could finish. Do not repeat completed side effects; inspect actual state when uncertain.",
         ].join("\n")
       : undefined,

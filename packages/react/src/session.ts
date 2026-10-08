@@ -1,7 +1,7 @@
 // @opengeni/react/session — session state and pure timeline projection.
 //
 // This entry deliberately excludes styled components, workbench surfaces, CSS,
-// and their optional peers. Hosts keep OpenGeni's session semantics while
+// and their optional peers. Hosts keep Opengeni's session semantics while
 // rendering their own product UI.
 
 export type {

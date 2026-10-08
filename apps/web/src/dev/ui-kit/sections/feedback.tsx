@@ -254,7 +254,7 @@ function RetryButton({ label = "Try again" }: { label?: string }) {
 function CopyRewrite() {
   const rows = [
     {
-      before: "OpenGeni API 404: Connected MCP connector not found Reference: 4b1d7e2a-93c5-…",
+      before: "Opengeni API 404: Connected MCP connector not found Reference: 4b1d7e2a-93c5-…",
       after: "Couldn't load this connection's tools. Try again.",
     },
     {

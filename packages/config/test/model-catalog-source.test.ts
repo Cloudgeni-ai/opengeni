@@ -103,7 +103,7 @@ describe("deployment model catalog source", () => {
       baseUrl: OPENROUTER_BASE_URL,
       billing: { upstreamPayer: "deployment", metering: "external" },
     });
-    expect(provider?.defaultHeaders).toMatchObject({ "x-title": "OpenGeni" });
+    expect(provider?.defaultHeaders).toMatchObject({ "x-title": "Opengeni" });
     expect(model).toMatchObject({
       cost: "free",
       contextWindowTokens: 262_144,
@@ -364,7 +364,7 @@ describe("deployment model catalog source", () => {
             },
           ],
         }),
-      ).toThrow("reserved for a reviewed OpenGeni provider");
+      ).toThrow("reserved for a reviewed Opengeni provider");
     }
     expect(() =>
       parseModelCatalogDocument({

@@ -1,6 +1,6 @@
 ---
 name: opengeni-schedules
-description: Create a schedule, recurring task, reminder, or monitor in OpenGeni. Read this before turning a user's request into scheduled work, including Create with OpenGeni from Schedules. Discover the required resources and integrations, then create the task with the user's cadence and time zone.
+description: Create a schedule, recurring task, reminder, or monitor in Opengeni. Read this before turning a user's request into scheduled work, including Create with Opengeni from Schedules. Discover the required resources and integrations, then create the task with the user's cadence and time zone.
 ---
 
 # Create a schedule

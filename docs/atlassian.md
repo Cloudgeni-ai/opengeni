@@ -2,7 +2,7 @@
 
 Jira and Confluence use Atlassian's hosted MCP server. The curated connector and
 Atlassian plugins retain their existing URLs and ordinary MCP OAuth flow. Users
-approve Atlassian access in the browser; OpenGeni stores the resulting connection
+approve Atlassian access in the browser; Opengeni stores the resulting connection
 through its encrypted connection broker and applies normal tool permissions.
 Hosted tools follow the connected user's Atlassian access and provider controls.
 They do not use the former native project's or space's source selection.

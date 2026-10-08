@@ -89,7 +89,7 @@ export type CodexRealtimeWebrtcSession = {
  * Complete the browser half of native connected-Codex GPT-Live V3 negotiation.
  * Provider credentials never enter this boundary: `negotiate` sends SDP,
  * public session configuration, and the active browser-owner proof only to the
- * OpenGeni API.
+ * Opengeni API.
  */
 export async function startCodexRealtimeWebrtc(
   options: StartCodexRealtimeWebrtcOptions,

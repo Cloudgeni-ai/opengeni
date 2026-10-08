@@ -1,4 +1,4 @@
-//! Node-API adapter for the OpenGeni artifact kernel binding protocol.
+//! Node-API adapter for the Opengeni artifact kernel binding protocol.
 //!
 //! This crate intentionally exposes only owned byte buffers. The shared
 //! protocol crate remains the single authority for decoding, validation,

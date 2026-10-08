@@ -237,7 +237,7 @@ export function capabilitySummary(
   return `${on} of ${offered.length} capabilities`;
 }
 
-/** The workspace's saved defaults, or null when it follows OpenGeni's defaults. */
+/** The workspace's saved defaults, or null when it follows Opengeni's defaults. */
 export function workspaceAgentDefaultsDraft(input: {
   capabilities: AgentCapabilities | undefined;
   legacyHumanInputOff: boolean;

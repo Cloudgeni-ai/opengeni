@@ -112,7 +112,7 @@ describe("DiffView", () => {
 
   test("a failed load says what to do, with the reference behind Technical details", () => {
     const cause = Object.assign(
-      new Error("OpenGeni API 500: internal error Reference: req_diff_1."),
+      new Error("Opengeni API 500: internal error Reference: req_diff_1."),
       { status: 500 },
     );
     const html = renderToStaticMarkup(
@@ -122,14 +122,14 @@ describe("DiffView", () => {
     expect(html).toContain("Opengeni couldn&#x27;t finish the request. Try again in a moment.");
     expect(html).toContain("Technical details");
     expect(html).toContain("req_diff_1");
-    expect(html).not.toContain("OpenGeni API 500");
+    expect(html).not.toContain("Opengeni API 500");
   });
 });
 
 describe("failedLoadParts", () => {
   test("replaces a raw API error string passed as the detail", () => {
     const parts = failedLoadParts({
-      detail: "OpenGeni API 404: knowledge entry not found Reference: req_404.",
+      detail: "Opengeni API 404: knowledge entry not found Reference: req_404.",
     });
     expect(parts.detail).toBe("It may have been removed. Reload the page and try again.");
     expect(parts.details).toContainEqual({ label: "Status", value: "HTTP 404" });

@@ -257,7 +257,7 @@ describe("createSandboxClient — per-backend matrix construction", () => {
     // sandbox-file-persistence: idleTimeoutMs is ALWAYS pinned; with no explicit
     // OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS it DEFAULTS to the hard lifetime so
     // Modal's short server-default idle-reap can never kill an idle box before the
-    // OpenGeni reaper snapshots /workspace.
+    // Opengeni reaper snapshots /workspace.
     expect(client.options?.idleTimeoutMs).toBe(3_600_000);
   });
 

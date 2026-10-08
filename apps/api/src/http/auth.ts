@@ -21,7 +21,7 @@ export function requireAccessKey(settings: Settings): MiddlewareHandler {
     // §7.2 P1: requireAccessKey is the coarse NETWORK perimeter, not the
     // per-tenant identity gate (that is resolveAccessContext). When
     // `authRequired:false` it is a NO-OP — the embedded (Path 2) case where the
-    // host's own auth is the sole human gate and OpenGeni is mounted behind it.
+    // host's own auth is the sole human gate and Opengeni is mounted behind it.
     // Standalone/separate deployments set `authRequired:true` to keep this ON as
     // the shared-deployment-key perimeter.
     if (!settings.authRequired || isAuthExempt(c, settings)) {

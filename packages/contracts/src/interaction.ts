@@ -378,7 +378,7 @@ export type AttachedBrowserDevice = z.infer<typeof AttachedBrowserDevice>;
 
 /** One enrolled machine agent currently reporting its browser-bridge inventory.
  * A bridge with zero devices is operational but has no Chrome profile connected
- * through the OpenGeni extension yet. */
+ * through the Opengeni extension yet. */
 export const AttachedBrowserBridge = z
   .object({
     enrollmentId: z.string().uuid(),
@@ -549,7 +549,7 @@ export const BrowserIdentity = z
   .strict();
 export type BrowserIdentity = z.infer<typeof BrowserIdentity>;
 
-/** A non-secret reference to credential authority held by OpenGeni Connections.
+/** A non-secret reference to credential authority held by Opengeni Connections.
  * The subject and provider bindings are copied when the browser-auth resource is
  * configured so a later agent cannot swap the UUID to another credential. */
 export const InteractionCredentialAuthorityRef = z

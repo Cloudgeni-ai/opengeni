@@ -1,7 +1,7 @@
-// OpenGeni self-hosted agent — wire protocol (single source of truth).
+// Opengeni self-hosted agent — wire protocol (single source of truth).
 //
 // This file is the ONE definition of the control-plane RPC surface and the
-// stream-channel framing exchanged between the OpenGeni control plane (TypeScript)
+// stream-channel framing exchanged between the Opengeni control plane (TypeScript)
 // and the `opengeni-agent` Rust binary running on a user's machine. It is
 // code-generated to BOTH Rust (via prost) and TypeScript (via ts-proto) so the
 // two stacks can never drift. See `agent/scripts/codegen.sh` for the single
@@ -107,7 +107,7 @@ enum StreamKind {
   // A desktop framebuffer (noVNC-equivalent) for view + computer-use.
   STREAM_KIND_DESKTOP = 2;
   // Browser-native encoded frames from one BrowserSession target. The payload is
-  // the canonical OpenGeni browser-frame message, not a desktop capture.
+  // the canonical Opengeni browser-frame message, not a desktop capture.
   STREAM_KIND_BROWSER = 3;
   // Native app/window/screen frames from one ComputerSession target. Browser and
   // Computer frames share the relay transport, but never the resource label.
@@ -564,7 +564,7 @@ message PtyOpenRequest {
   // Stable caller-owned identity for an idempotent terminal. Repeating pty_open
   // with the same non-empty scope_id returns the existing live PTY/channel rather
   // than spawning another shell. Empty preserves the explicit "open a new PTY"
-  // behavior. The control plane uses the durable OpenGeni session id here so
+  // behavior. The control plane uses the durable Opengeni session id here so
   // capability/token refreshes reattach the same terminal while separate sessions
   // on one machine remain isolated.
   string scope_id = 7;

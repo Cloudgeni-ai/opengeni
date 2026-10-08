@@ -1,11 +1,11 @@
 ---
 name: opengeni-sites
-description: Build, edit, and publish OpenGeni Sites. Use when the user asks for a site, dashboard, explorable report, landing page, demo, tracker, portal, directory, calculator, form, or custom agent interface, or when a saved interactive page clearly serves a deliverable they asked for. When working on an existing application, follow its established architecture and workflow; consider Sites only when relevant to the requested outcome, not as an automatic conversion. Respect explicit format and platform choices.
+description: Build, edit, and publish Opengeni Sites. Use when the user asks for a site, dashboard, explorable report, landing page, demo, tracker, portal, directory, calculator, form, or custom agent interface, or when a saved interactive page clearly serves a deliverable they asked for. When working on an existing application, follow its established architecture and workflow; consider Sites only when relevant to the requested outcome, not as an automatic conversion. Respect explicit format and platform choices.
 ---
 
-# OpenGeni Sites
+# Opengeni Sites
 
-An OpenGeni Site is an ordinary Bun web application with retained editable
+An Opengeni Site is an ordinary Bun web application with retained editable
 source (when supplied) and one published runtime file. React is the default,
 not a requirement: a plain HTML-only Site is valid. Build and test in the
 sandbox, then upload the self-contained HTML and optional source.
@@ -16,7 +16,7 @@ provider-specific API wrapper, or OpenGeni-only build CLI.
 ## Sites have no server; AI comes from the host
 
 A Site never needs its own server, API key, or hosting provider to reach
-OpenGeni. Model access, agent conversations, and workspace tools all come from
+Opengeni. Model access, agent conversations, and workspace tools all come from
 the host bridge: `createOpenGeniSiteClient` from `@opengeni/sdk/site` plus the
 `@opengeni/react/session-ui` conversation surface. The parent page owns the
 credentials and workspace identity; Site code receives neither, so "keep
@@ -24,10 +24,10 @@ credentials server-side" is already satisfied by that bridge.
 
 When the user asks for AI, chat, an assistant, "Ask the data", or a "backend"
 inside a Site, that bridge is the design. Do not propose Vercel, another
-server, a tunnel, or a Connected Machine for OpenGeni access, do not spawn a
+server, a tunnel, or a Connected Machine for Opengeni access, do not spawn a
 child to build a separate backend, and do not post a Connect card for a
 hosting provider the user did not name. A separate server is only relevant for
-a genuinely non-OpenGeni need: a third-party API that requires a secret the
+a genuinely non-Opengeni need: a third-party API that requires a secret the
 viewer's browser must not hold, a persistent database, or scheduled jobs. If
 the request seems to need one of those, or you cannot tell where the user
 wants the AI to run, say which designs are possible and ask before building.
@@ -39,7 +39,7 @@ wants the AI to run, say which designs are possible and ask before building.
   packaged as self-contained HTML, preserve its design and behavior, and retain
   editable source when available. A local preview alone is still appropriate
   when that is all the user requests. Explain workspace access for the published
-  link; do not imply it is public to anyone. OpenGeni AI and tool access are
+  link; do not imply it is public to anyone. Opengeni AI and tool access are
   never such a backend (see above). If the app genuinely requires server-side
   compute that Sites cannot host, explain that constraint and ask how the user
   wants to proceed instead of dropping functionality or choosing a host.
@@ -54,7 +54,7 @@ wants the AI to run, say which designs are possible and ask before building.
   optimistic-concurrency fence for the next publish.
 - Treat retained source as the editable truth and the compiled HTML as the
   runtime projection. Never edit only the generated HTML when source exists.
-- Keep secrets, OpenGeni access keys, OAuth tokens, workspace ids, API base
+- Keep secrets, Opengeni access keys, OAuth tokens, workspace ids, API base
   URLs, and signed URLs out of the source and generated HTML.
 
 ## Use normal Bun + React
@@ -69,7 +69,7 @@ bun test
 bun build --compile --target=browser ./index.html --outdir=dist
 ```
 
-Install OpenGeni packages from the npm registry using the exact versions in
+Install Opengeni packages from the npm registry using the exact versions in
 this Skill's `package-versions.json`. With `skill_read`, request
 `{"skill":"opengeni-sites","paths":["package-versions.json"]}` and use the
 returned package/version pairs in `bun add --exact package@version ...`.
@@ -83,10 +83,10 @@ The pins include `@opengeni/ogtool`. Run `bun run ogtool ...` from this
 project for discovery and calls; a sandbox-global CLI can predate the deployment.
 
 Local development only: if `/opt/opengeni/site-packages/sdk.tgz` exists, these
-are unreleased checkout packages. Skip the registry command above for OpenGeni.
+are unreleased checkout packages. Skip the registry command above for Opengeni.
 After ordinary dependencies, install these packages with
 `bun add --no-save /opt/opengeni/site-packages/sdk.tgz /opt/opengeni/site-packages/react.tgz /opt/opengeni/site-packages/codemode.tgz`.
-Remove stale OpenGeni overrides; repeat this step after `bun install`. Do not
+Remove stale Opengeni overrides; repeat this step after `bun install`. Do not
 save sandbox archive paths in published source. In this local-development
 exception, use the image's `ogtool` directly: it is built from the same checkout.
 
@@ -143,7 +143,7 @@ Site complete from compilation alone.
 ## Plain HTML without a browser build
 
 For a small HTML-only Site, use ordinary HTML, CSS, and JavaScript. If it calls
-OpenGeni tools or SDK methods, place this exact optional tag before your own
+Opengeni tools or SDK methods, place this exact optional tag before your own
 scripts (without async, defer, or type="module"):
 
 ```html
@@ -172,10 +172,10 @@ paths in one document.
 Publish the original HTML containing the tag, not the served client script or
 transformed viewer document. For this path, upload `index.html` wherever the
 publishing instructions below use `dist/index.html`. Inline ordinary styles,
-scripts, and assets as usual; the OpenGeni client tag is resolved by the host.
+scripts, and assets as usual; the Opengeni client tag is resolved by the host.
 An HTML-only Site can be a small widget; it does not require a full-page layout.
 
-## Prefer OpenGeni's UI and typed client
+## Prefer Opengeni's UI and typed client
 
 - Prefer `@opengeni/react` components and compiled CSS for OpenGeni-native
   session, timeline, composer, queue, approval, and human-input experiences.
@@ -196,7 +196,7 @@ const client = createOpenGeniSiteClient();
 const issues = await client.tools.linear.issues_list({ state: "Todo" });
 ```
 
-For embedded conversations, `site.client` is the ordinary OpenGeni SDK client;
+For embedded conversations, `site.client` is the ordinary Opengeni SDK client;
 `site.workspaceId` is a host-resolved routing alias. Use the normal React
 complete conversation surface—do not implement session REST or SSE yourself:
 
@@ -247,7 +247,7 @@ Use the lower-level hooks/components only for intentionally custom behavior.
 The host owns the chat's available space; `SessionConversation` fills it.
 The SDK defaults to dark colors. On a light panel, set `data-og-theme="light"`
 on its wrapper; changing the Site's body background does not select the SDK
-theme, and the outer OpenGeni app's theme does not cross the iframe. Keep
+theme, and the outer Opengeni app's theme does not cross the iframe. Keep
 foreground and background on the same SDK tokens rather than overriding
 message/button colors individually. Check a real assistant reply, expanded
 steps, composer and menus for readable contrast in the chosen theme.
@@ -274,7 +274,7 @@ The optional `@pierre/diffs` peer brings a large syntax-language bundle. For
 a small self-contained Site that does not need highlighted diffs, exclude
 `@pierre/diffs` and `@pierre/diffs/react` with Bun's `--external` build flags;
 the React renderer already provides a plain-diff fallback. Do not externalize
-the OpenGeni SDK, React, or other required runtime imports.
+the Opengeni SDK, React, or other required runtime imports.
 
 The generated tool declarations make exact tool paths typed during authoring.
 The runtime proxy resolves those paths to opaque `{serverId, toolName}`
@@ -291,7 +291,7 @@ There are two client surfaces:
 - `site.tools.*` calls workspace tools. Published direct calls must appear in
   `requestedTools` and are checked against the viewer's live tool access.
   Preview calls use your attempt's available tool catalog.
-- `site.client.*` calls the ordinary OpenGeni REST SDK, including the React
+- `site.client.*` calls the ordinary Opengeni REST SDK, including the React
   conversation components. These calls are not entries in `requestedTools`.
   Published calls use the viewer's authorization; sandbox previews use your
   agent proxy's narrower permissions. The preview currently supports workspace

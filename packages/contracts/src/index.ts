@@ -318,7 +318,7 @@ export const LEGACY_SANDBOX_PROVIDER_INSTANCE_ID_FIELDS = [
 
 /**
  * Durable proof that a provider may replace an execution wrapper without
- * replacing the workspace OpenGeni owns. This is intentionally narrower than
+ * replacing the workspace Opengeni owns. This is intentionally narrower than
  * generic provider resume: only a provider adapter that can prove the same
  * continuity key may consume it, and only a cold->warming owner or teardown
  * claimant may authorize that replacement.
@@ -669,7 +669,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
   // (Linux X11/Xvfb, macOS CGEvent/ScreenCaptureKit) consent-gated at enroll;
   // the online/offline/consent/display negotiation lives in select.ts (M3), this
   // row is the static feasibility ceiling. Always-on (process-lifetime, never
-  // idle-reaped) and NOT persistable — OpenGeni cannot snapshot the user's disk,
+  // idle-reaped) and NOT persistable — Opengeni cannot snapshot the user's disk,
   // so resume = "is the agent's subject live?", never a cold re-create. Ports
   // surface on-demand through the stateless relay edge, which lands behind the
   // `resolveExposedPort` swap-seam later; until then it reuses the existing
@@ -700,7 +700,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
       resumeIsLockFree: true, // resume = address the live NATS subject; no provider lock
     },
     // persistable:false forces snapshot.kind:"none" (the descriptor invariant
-    // `persistable ⇒ snapshot.kind!=="none"`): OpenGeni cannot snapshot the
+    // `persistable ⇒ snapshot.kind!=="none"`): Opengeni cannot snapshot the
     // user's disk — the machine itself is the persistence.
     snapshot: { kind: "none", hasTarFallback: false },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true },
@@ -711,7 +711,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
   },
   // Optional Kubernetes-native provisioned sandbox through OpenSandbox.
   // Desktop-class when the box image includes ttyd/browserd/Xvfb: PTY over ttyd,
-  // noVNC and browserd over signed URI-mode ingress. OpenGeni owns persistence
+  // noVNC and browserd over signed URI-mode ingress. Opengeni owns persistence
   // through its portable tar checkpoint path in object storage; native
   // OpenSandbox pause/resume and snapshots are deliberately not used.
   opensandbox: {
@@ -816,7 +816,7 @@ export const SessionSpawnDenial = z.object({
 export type SessionSpawnDenial = z.infer<typeof SessionSpawnDenial>;
 
 /**
- * Capability-first permissions signed into a session's first-party OpenGeni
+ * Capability-first permissions signed into a session's first-party Opengeni
  * MCP token when a top-level creator does not explicitly narrow them.
  *
  * Keep this contract shared by admission and runtime signing: a worker-signed
@@ -1154,8 +1154,8 @@ const FIRST_PARTY_TOOL_FAMILY_NAME_SET: ReadonlySet<string> = new Set<string>([
 ]);
 
 /**
- * Analytics tool family for a tool OpenGeni itself defines. Only names from
- * OpenGeni's fixed first-party lists qualify; anything else returns null, so a
+ * Analytics tool family for a tool Opengeni itself defines. Only names from
+ * Opengeni's fixed first-party lists qualify; anything else returns null, so a
  * model-invented or third-party name never becomes an exported value.
  */
 export function firstPartyToolFamily(toolName: string | null | undefined): ToolFamily | null {
@@ -3301,7 +3301,7 @@ export async function verifyEnrollToken(
 //
 // REUSES the existing HMAC envelope (sign/verifyDelegatedAccessToken's
 // base64Url + hmacSha256Base64Url) — NOT a second crypto — but with a distinct
-// `ogs_` prefix and a HARD-NARROW claim set. The token is a CLAIM the OpenGeni
+// `ogs_` prefix and a HARD-NARROW claim set. The token is a CLAIM the Opengeni
 // control plane mints; it is NOT the provider's tunnel secret. The browser
 // receives { providerUrl, streamToken }; the provider tunnel URL is the
 // transport, the streamToken is what the in-box edge validates (websockify
@@ -3829,12 +3829,12 @@ export const InsightsModelUsageRow = z.object({
   totalTokens: z.number().nonnegative(),
   tokenKnownCalls: z.number().int().nonnegative(),
   cacheKnownCalls: z.number().int().nonnegative(),
-  /** Priced OpenGeni credit $ for this model×provider (from model_call_facts). */
+  /** Priced Opengeni credit $ for this model×provider (from model_call_facts). */
   creditUsd: z.number().nonnegative(),
-  /** Hypothetical provider-rate USD; never an OpenGeni charge. */
+  /** Hypothetical provider-rate USD; never an Opengeni charge. */
   estimatedProviderUsd: z.number().nonnegative(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
-  /** OpenGeni credit price at the captured rate, whether or not credits paid for the call. */
+  /** Opengeni credit price at the captured rate, whether or not credits paid for the call. */
   equivalentCreditUsd: z.number().nonnegative(),
   equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
 });
@@ -3847,7 +3847,7 @@ export const InsightsSeriesPoint = z.object({
   /** UTC hour/day-bucketed hypothetical provider-rate USD for calls with captured pricing. */
   estimatedProviderUsd: z.number().nonnegative(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
-  /** UTC hour/day-bucketed equivalent OpenGeni credit price for calls with captured pricing. */
+  /** UTC hour/day-bucketed equivalent Opengeni credit price for calls with captured pricing. */
   equivalentCreditUsd: z.number().nonnegative(),
   equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
   warmSeconds: z.number().nonnegative(),
@@ -3984,11 +3984,11 @@ export const InsightsModelCallRow = z.object({
   cacheWriteTokens: z.number().nonnegative().nullable(),
   reasoningTokens: z.number().nonnegative().nullable(),
   totalTokens: z.number().nonnegative().nullable(),
-  /** OpenGeni credit price for this call. External calls are always zero. */
+  /** Opengeni credit price for this call. External calls are always zero. */
   creditUsd: z.number().nonnegative(),
   /** Hypothetical provider-rate USD; null when historical pricing is unavailable. */
   estimatedProviderUsd: z.number().nonnegative().nullable(),
-  /** Equivalent OpenGeni credit price; null when historical pricing is unavailable. */
+  /** Equivalent Opengeni credit price; null when historical pricing is unavailable. */
   equivalentCreditUsd: z.number().nonnegative().nullable(),
   pricingSource: InsightsPricingSource.nullable(),
 });
@@ -4051,7 +4051,7 @@ export const WorkspaceInsightsSnapshot = z.object({
   floor: z.array(InsightsFloorSession),
   selfhostedEnabled: z.boolean(),
   machinesOnline: z.number().int().nonnegative(),
-  /** Workspace-wide OpenGeni credit $ from usage_events.model.cost (unfiltered). */
+  /** Workspace-wide Opengeni credit $ from usage_events.model.cost (unfiltered). */
   workspaceCreditUsd: z.number().nonnegative(),
   priorWorkspaceCreditUsd: z.number().nonnegative(),
   /** Model-filterable credit $ from facts (equals workspace when unfiltered, ignoring late-reject drift). */
@@ -4062,7 +4062,7 @@ export const WorkspaceInsightsSnapshot = z.object({
   priorEstimatedProviderUsd: z.number().nonnegative(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
   priorEstimatedProviderCostKnownCalls: z.number().int().nonnegative(),
-  /** Equivalent OpenGeni credit price across calls whose historical price was captured. */
+  /** Equivalent Opengeni credit price across calls whose historical price was captured. */
   equivalentCreditUsd: z.number().nonnegative(),
   priorEquivalentCreditUsd: z.number().nonnegative(),
   equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
@@ -4153,21 +4153,21 @@ export type LimitDecision = z.infer<typeof LimitDecision>;
 
 // ============ P3 — Entitlements port (§7.5) ============
 //
-// The host-providable admission seam over OpenGeni's TWO existing admission
+// The host-providable admission seam over Opengeni's TWO existing admission
 // sites: the API edge (`checkLimit`/`requireLimit`, billing/limits.ts) AND the
 // worker edge (`ensureRunAllowed`, agent-turn.ts — both turn-entry and the
 // mid-stream budget valve). A host that owns its OWN ledger/meter binds this to
-// keep OpenGeni from re-deriving admission from its local ledger.
+// keep Opengeni from re-deriving admission from its local ledger.
 //
 // CRITICAL CONTRACT: `admitRun` returns a transport-neutral allow/deny decision
 // (+ optional structured reason + the echoed quantity it admitted) and NEVER
 // exposes `getBillingBalance` or any ledger internals — the host's balance math
 // stays on the host side of the boundary. This is what lets the same port serve
-// both PUSH (host funds OpenGeni's ledger; admission is a LOCAL read of that
+// both PUSH (host funds Opengeni's ledger; admission is a LOCAL read of that
 // funded ledger) and PULL (a network callback to the host's own meter).
 //
 // `action` is a free `string` (NOT the internal `LimitAction` enum) so a host
-// meter can key on actions OpenGeni does not model. `quantity` is the units the
+// meter can key on actions Opengeni does not model. `quantity` is the units the
 // caller is about to consume (tokens, bytes, 1 run, …); the decision MAY echo
 // the admitted quantity so a PULL host can grant a partial allowance.
 export const EntitlementDecision = z.discriminatedUnion("allowed", [
@@ -4226,7 +4226,7 @@ export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryR
 
 // ============ connection-credential provider — Connection-credential provider (§7.6) ============
 //
-// The host-providable credential seam over OpenGeni's run-scoped credential
+// The host-providable credential seam over Opengeni's run-scoped credential
 // sites in the worker and API:
 //   - GIT credentials: run-scoped provider tokens minted in
 //     `sandboxEnvironmentForRun` (standalone self-mints GitHub App tokens from
@@ -4240,7 +4240,7 @@ export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryR
 //
 // In embedded/separate topologies the HOST owns these external connections
 // (its GitHub App, its secret vault + encryption key). When a host binds this
-// port, OpenGeni asks the host to mint/decrypt per-run instead of self-minting
+// port, Opengeni asks the host to mint/decrypt per-run instead of self-minting
 // from `settings`. Unset (standalone default) → byte-for-byte today's
 // self-mint.
 //
@@ -4268,7 +4268,7 @@ export type GitCredentialsRequest = {
   provider?: GitCredentialProvider;
   // Present when the host supplied an explicit binding or when more than one
   // independently mintable credential exists for this provider. A host must
-  // mint only this binding; OpenGeni never treats provider identity as enough
+  // mint only this binding; Opengeni never treats provider identity as enough
   // to select among multiple accounts/installations.
   credentialBindingId?: GitCredentialBindingId;
   // Canonical lower-case host shared by this binding's repository refs when
@@ -4315,14 +4315,14 @@ export type GitCredentials = {
   // before lazy sandbox provision. The value never enters the manifest.
   token?: string;
   // A host-owned exact smart-Git transport for providers whose available token
-  // cannot be constrained to the selected repositories. OpenGeni rewrites only
+  // cannot be constrained to the selected repositories. Opengeni rewrites only
   // the echoed repository remotes and never exposes this bearer to provider
   // CLIs. Omitted means the token is a direct provider credential.
   transport?: GitCredentialTransport;
   // workspace-scope cross-check echo: the workspace the provider scoped this token to. The activity
   // asserts `workspaceId === request.workspaceId` before injecting.
   workspaceId: string;
-  // Strict request echoes for binding-aware requests. OpenGeni validates these
+  // Strict request echoes for binding-aware requests. Opengeni validates these
   // before accepting a token, preventing a host routing bug from returning a
   // sibling connection's credential. They remain optional for legacy single-
   // binding/provider hosts.
@@ -4330,7 +4330,7 @@ export type GitCredentials = {
   provider?: GitCredentialProvider;
   providerHost?: string;
   // Optional provider expiry for host-managed proactive renewal. ISO-8601;
-  // null/omitted means the host does not expose a deadline and OpenGeni uses
+  // null/omitted means the host does not expose a deadline and Opengeni uses
   // its conservative bounded refresh cadence instead.
   expiresAt?: string | null;
   // Optional git identity override. When omitted the activity falls back to
@@ -4510,7 +4510,7 @@ export const McpServerConnectionRef = z
     connectionId: z.string().min(1).optional(),
     /** Explicit native catalog selector. Never overrides an exact connection pin. */
     accountSelection: z.literal("all_eligible").optional(),
-    /** Host-owned credential authority; omission keeps OpenGeni's native connection authority. */
+    /** Host-owned credential authority; omission keeps Opengeni's native connection authority. */
     authoritySource: z.literal("host").optional(),
     /** Durable fixed reference, or an explicit configuration-only selector.
      * accepted_turn resolves only from immutable accepted-work authority. */
@@ -4913,7 +4913,7 @@ export type ConnectionCredentialsPort = {
   sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
   /**
    * Resolve host-owned, session-aware sandbox credentials independently of an
-   * OpenGeni variable set. OpenGeni transports and renews the material; the host
+   * Opengeni variable set. Opengeni transports and renews the material; the host
    * remains the sole owner of connection selection and credential policy.
    */
   runCredentials?(input: RunCredentialsRequest): Promise<RunCredentialsResolution>;
@@ -4925,7 +4925,7 @@ export type ConnectionCredentialsPort = {
 // gate (storage) axis; this closes the credential leg by making the live
 // GitHub-API calls host-PROVIDABLE so a BYO-GitHub-App host drives its OWN App
 // credentials (its own JWT-signing key, its own OAuth client) instead of
-// OpenGeni self-minting from `settings`:
+// Opengeni self-minting from `settings`:
 //   - authorizeUser: OAuth code exchange + user-visible installation and
 //     repository permission discovery. Retained for provider ABI compatibility;
 //     visibility is not proof of installation authority and core does not use
@@ -4940,7 +4940,7 @@ export type ConnectionCredentialsPort = {
 //     `listGitHubAppRepositories(settings, …)`).
 //
 // Unset (standalone default) → today's `settings`-based self-mint runs
-// byte-for-byte (the live GitHub-API verify/list against OpenGeni's own App).
+// byte-for-byte (the live GitHub-API verify/list against Opengeni's own App).
 
 export type GitHubInstallationSummary = {
   installationId: number;
@@ -5150,7 +5150,7 @@ export const RepositoryResourceRef = z.object({
   /**
    * Best-effort materialization. When true, a failed clone of this repository
    * logs a warning and the session continues without it instead of failing
-   * sandbox setup. OpenGeni sets it on repositories it attaches on the
+   * sandbox setup. Opengeni sets it on repositories it attaches on the
    * person's behalf (a Slack task's recently used repositories); a repository
    * a caller names explicitly stays strict unless the caller opts in. Only
    * `true` is stored.
@@ -5311,7 +5311,7 @@ export const MODEL_ATTACHMENT_REFS_FIELD = "opengeni_attachment_refs" as const;
 export const MODEL_ATTACHMENT_CATALOG_MARKER = "opengeni_attachment_catalog" as const;
 /**
  * Structured timeline annotations retained beside the deterministic user-text
- * projection in canonical history. Provider adapters remove this OpenGeni
+ * projection in canonical history. Provider adapters remove this Opengeni
  * extension field; the numbered projection in `content` remains model-visible.
  */
 export const MODEL_TIMELINE_ANNOTATIONS_FIELD = "opengeni_timeline_annotations" as const;
@@ -6857,7 +6857,7 @@ export type UpdateSessionVariableSetsRequest = z.infer<typeof UpdateSessionVaria
 
 /**
  * Replace the complete durable session tool policy, or explicitly opt back in
- * to current workspace defaults. MCP servers and individual OpenGeni tools
+ * to current workspace defaults. MCP servers and individual Opengeni tools
  * advance atomically under one policy version.
  */
 export const UpdateSessionToolPolicyRequest = z.union([
@@ -7036,10 +7036,10 @@ export type TurnInitiator = z.infer<typeof TurnInitiator>;
 
 // ============ embedding host session authorization ============
 //
-// Workspace permissions answer whether a principal may use an OpenGeni
+// Workspace permissions answer whether a principal may use an Opengeni
 // capability. An embedding host can additionally own per-session visibility
 // (ownership, sharing, nested workspaces, revocation). This port is the one
-// host-neutral boundary for that second decision. Inputs contain OpenGeni ids
+// host-neutral boundary for that second decision. Inputs contain Opengeni ids
 // and immutable, non-secret authority only; host records and policy details
 // never cross the boundary.
 
@@ -7475,7 +7475,7 @@ export type SessionAuthorizationDecision = z.infer<typeof SessionAuthorizationDe
 /**
  * A database-applicable listing scope. `rootSessionIds` includes every
  * descendant of those lineage anchors; `sessionIds` authorizes only the exact
- * sessions. Supplying neither is an explicit empty scope. OpenGeni intersects
+ * sessions. Supplying neither is an explicit empty scope. Opengeni intersects
  * every id with the requested workspace and never trusts a host scope as
  * session existence evidence.
  */
@@ -7524,7 +7524,7 @@ export function storedSessionMemoryScope(value: unknown): SessionMemoryScope {
 }
 
 /**
- * The calling agent attempt's own access scope, resolved by OpenGeni from the
+ * The calling agent attempt's own access scope, resolved by Opengeni from the
  * caller session row (never from the request) and applied as one SQL
  * predicate wherever a session list runs for that attempt.
  */
@@ -7540,7 +7540,7 @@ export type SessionAgentAccessViewer = z.infer<typeof SessionAgentAccessViewer>;
 export const SessionAuthorizationListScope = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("all"),
-    /** Set by OpenGeni for an agent attempt; a host-returned value is replaced. */
+    /** Set by Opengeni for an agent attempt; a host-returned value is replaced. */
     agentAccessViewer: SessionAgentAccessViewer.optional(),
   }),
   z.object({
@@ -7562,7 +7562,7 @@ export type ResolveSessionAuthorizationListScopeInput = {
 export type SessionAuthorizationPort = {
   authorizeSession(input: AuthorizeSessionInput): Promise<SessionAuthorizationDecision>;
   /**
-   * Return the complete current scope used inside OpenGeni's cursor query.
+   * Return the complete current scope used inside Opengeni's cursor query.
    * This is deliberately not a post-filter callback: search, pinning, ordering,
    * totals, and cursor advancement must all operate on authorized rows.
    */
@@ -7785,7 +7785,7 @@ export function renderTimelineAnnotationsForModel(
   ]);
   return [
     ...(text.length > 0 ? [text, ""] : []),
-    "[OpenGeni timeline annotations]",
+    "[Opengeni timeline annotations]",
     ...sections.flatMap((line, index) =>
       index > 0 && line.startsWith("Annotation ") ? ["", line] : [line],
     ),
@@ -8997,7 +8997,7 @@ export function renderSessionSystemUpdateBatch(
     throw new TypeError("A durable machine-input batch requires at least one update");
   }
   return [
-    "[OpenGeni internal updates]",
+    "[Opengeni internal updates]",
     "These platform updates were delivered together for this inference.",
     ...renderSessionSystemUpdateDeliveredAt(options),
     JSON.stringify({
@@ -9018,7 +9018,7 @@ export function renderSessionSystemUpdateBatch(
   ].join("\n");
 }
 
-export const SCHEDULED_OCCURRENCE_TASK_LABEL = "[OpenGeni scheduled task occurrence]" as const;
+export const SCHEDULED_OCCURRENCE_TASK_LABEL = "[Opengeni scheduled task occurrence]" as const;
 
 /**
  * A pure scheduled-occurrence batch is a new task boundary for the model, not
@@ -10013,7 +10013,7 @@ export const ScheduledTaskSlackChannelId = z
   .regex(/^[CG][A-Z0-9]{2,63}$/, "must be a Slack channel ID such as C0123456789");
 
 /**
- * The only first-party tools that post as the OpenGeni bot. A generated
+ * The only first-party tools that post as the Opengeni bot. A generated
  * session receives them only when a person chose its task's Slack channel,
  * and they refuse every other destination.
  */
@@ -10054,11 +10054,11 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     metadata: bounded
       ? ScheduledTaskMetadataInput.default({})
       : z.record(z.string(), z.unknown()).default({}),
-    // Explicit workspace-shared OpenGeni Slack bot binding for scheduled runs.
+    // Explicit workspace-shared Opengeni Slack bot binding for scheduled runs.
     // The worker copies this non-secret pointer into session metadata; the
     // first-party Slack tools never fall back to a personal hosted-MCP grant.
     slackBotConnectionId: z.string().uuid().optional(),
-    // The one Slack channel this task's runs may post to as the OpenGeni bot.
+    // The one Slack channel this task's runs may post to as the Opengeni bot.
     // Only a person chooses it (never an agent attempt); it requires
     // slackBotConnectionId and is read from the task at every post.
     slackBotChannelId: ScheduledTaskSlackChannelId.optional(),
@@ -10213,10 +10213,10 @@ export const SCHEDULED_TASK_ACCESS_CONNECTORS_MAX = 64;
  * What a scheduled task's frozen tools and connector accounts lack compared
  * with what its owner would get by saving it again now. A task freezes its
  * connectors, its connector accounts and (when an agent created it, migration
- * 0428) its OpenGeni tool policy, so later workspace changes never reach its
+ * 0428) its Opengeni tool policy, so later workspace changes never reach its
  * runs on their own. This read-only projection names what
  * `POST .../scheduled-tasks/:taskId/refresh-access` would add or remove; the
- * refresh adds only the OpenGeni permissions those named tools need and drops
+ * refresh adds only the Opengeni permissions those named tools need and drops
  * frozen permissions the refreshing person no longer holds.
  *
  * Present only for a viewer who can act on it: the task owner, or anyone who
@@ -10233,7 +10233,7 @@ export const ScheduledTaskPolicyDrift = /* @__PURE__ */ z
     unavailableConnectors: z
       .array(ScheduledTaskAccessConnector)
       .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
-    /** Default OpenGeni tools missing from an agent-created task's frozen tools. */
+    /** Default Opengeni tools missing from an agent-created task's frozen tools. */
     missingOpenGeniTools: z.array(FirstPartyMcpToolName).max(FIRST_PARTY_MCP_TOOL_NAMES.length),
     /** Connectors whose chosen account can no longer be used by this schedule. */
     unavailableAccounts: z
@@ -10351,7 +10351,12 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
             slackTeamName: z.string().min(1).max(256),
             botUserId: z.string().min(1).max(64),
             botId: z.string().min(1).max(64),
-            botDisplayName: z.enum(["OpenGeni", "OpenGeni Staging"]),
+            botDisplayName: z.enum([
+              "Opengeni",
+              "Opengeni Staging",
+              "OpenGeni",
+              "OpenGeni Staging",
+            ]),
             verifiedAt: z.string().datetime({ offset: true }),
           })
           .passthrough(),
@@ -10692,7 +10697,7 @@ export type ListScheduledTaskAccessAttentionResponse = z.infer<
 >;
 
 /**
- * Re-freeze a task's connectors, connector accounts and OpenGeni tool policy
+ * Re-freeze a task's connectors, connector accounts and Opengeni tool policy
  * with the calling person's current authority. `executionDigest` is the task
  * head the person reviewed; a changed task is refused with 409.
  */
@@ -10700,7 +10705,7 @@ export const RefreshScheduledTaskAccessRequest = /* @__PURE__ */ z
   .object({
     executionDigest: z.string().regex(/^[0-9a-f]{64}$/u),
     /**
-     * Workspace default connectors and OpenGeni tools the person chose to keep
+     * Workspace default connectors and Opengeni tools the person chose to keep
      * off this schedule (the drift they dismissed). It only narrows what the
      * refresh adds; it never removes anything the schedule already has.
      */
@@ -11419,7 +11424,7 @@ function projectStoredTemplateSkillMetadata(value: unknown): unknown {
 
 /** Execution view only; never replace the stored manifest or its digest with it. */
 
-// ============ OpenGeni Review Bot — provider-neutral pull-request review automation ============
+// ============ Opengeni Review Bot — provider-neutral pull-request review automation ============
 
 export const OPENGENI_PR_REVIEW_SESSION_ROLE = "pull_request_review" as const;
 
@@ -11582,7 +11587,7 @@ export const PrReviewManagedGitHubSetup = /* @__PURE__ */ (() =>
   z.object({
     configured: z.boolean(),
     status: z.enum(["unavailable", "not_connected", "connected"]),
-    appName: z.literal("OpenGeni Lens"),
+    appName: z.enum(["Opengeni Lens", "OpenGeni Lens"]),
     connectUrl: z.string().url().nullable(),
     installations: z.array(PrReviewManagedGitHubInstallation),
     missing: z.array(z.string()),
@@ -11748,9 +11753,16 @@ export type ConnectionStatus = z.infer<typeof ConnectionStatus>;
 export const OPENGENI_PERSONAL_SLACK_MCP_URL = "https://mcp.slack.com/mcp" as const;
 
 export const OPENGENI_SLACK_BOT_CREDENTIAL_ROLE = "opengeni_slack_bot" as const;
+// Historical credential discriminator, not a presentation label. Keep its wire value stable.
 export const OPENGENI_SLACK_BOT_CREDENTIAL_LABEL = "OpenGeni Slack bot" as const;
 export const OPENGENI_SLACK_BOT_SESSION_METADATA_KEY = "opengeniSlackBotConnectionId" as const;
-export const OpenGeniSlackBotDisplayName = z.enum(["OpenGeni", "OpenGeni Staging"]);
+// Accept historical install receipts alongside the current display names.
+export const OpenGeniSlackBotDisplayName = z.enum([
+  "Opengeni",
+  "Opengeni Staging",
+  "OpenGeni",
+  "OpenGeni Staging",
+]);
 export type OpenGeniSlackBotDisplayName = z.infer<typeof OpenGeniSlackBotDisplayName>;
 export const OpenGeniSlackBotConnectionMetadata = z
   .object({
@@ -12054,7 +12066,7 @@ export type OAuthStartResponse = z.infer<typeof OAuthStartResponse>;
 
 export const IntegrationClientMetadata = z.object({
   client_id: z.string().url(),
-  client_name: z.literal("OpenGeni"),
+  client_name: z.enum(["Opengeni", "OpenGeni"]),
   redirect_uris: z.array(z.string().url()),
   token_endpoint_auth_method: z.literal("none"),
   grant_types: z.array(z.enum(["authorization_code", "refresh_token"])),
@@ -13475,7 +13487,7 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     // Non-default first-party MCP token permissions (manager-style sessions);
     // null means the fixed worker default set.
     firstPartyMcpPermissions: z.array(Permission).nullable(),
-    // Exact model-visible OpenGeni selection. The default omits connector-wide
+    // Exact model-visible Opengeni selection. The default omits connector-wide
     // tools; [] intentionally selects none.
     firstPartyMcpTools: z.array(FirstPartyMcpToolName),
     // Frozen agent configuration (migration 0559). null = a legacy session
@@ -14274,9 +14286,9 @@ export const ToolAuthNeededPayload = z
     providerDomain: z.string().min(1),
     provider: z.string().min(1).max(128).optional(),
     // Embedded hosts may use an opaque connection identity; never assume an
-    // OpenGeni UUID on the public event wire.
+    // Opengeni UUID on the public event wire.
     connectionId: z.string().min(1).nullable().optional(),
-    /** The failed binding is owned by the embedding host, not OpenGeni's connection broker. */
+    /** The failed binding is owned by the embedding host, not Opengeni's connection broker. */
     authoritySource: z.literal("host").optional(),
     /**
      * Legacy-compatible reason. Host-owned event writers pin this to
@@ -15567,7 +15579,7 @@ const HostExportAttribution = {
 
 /**
  * Host streams are deliberately forward-tolerant across rolling upgrades.
- * OpenGeni's application contract enumerates the event types known to this
+ * Opengeni's application contract enumerates the event types known to this
  * build, while the durable export may be read by an older host consumer after
  * a newer writer has committed a bounded type. The database remains the
  * authority for the byte bounds on these persisted strings.
@@ -16228,8 +16240,8 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       bundledSkillIds: BundledSkillSelection.optional(),
       /**
        * Optional UUID preallocated by an embedding host. This lets the host durably
-       * link its own projection before OpenGeni admits the initial turn. Replays
-       * must pair it with the same idempotency key; OpenGeni never derives host
+       * link its own projection before Opengeni admits the initial turn. Replays
+       * must pair it with the same idempotency key; Opengeni never derives host
        * identity or authorization from the UUID.
        */
       requestedSessionId: z.string().uuid().optional(),
@@ -16297,7 +16309,7 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         .optional(),
       // The same child omission rule applies to selected MCP tool refs. Top-level
       // omission still applies workspace-default capability MCP tools; explicit []
-      // suppresses those defaults (the first-party OpenGeni server remains added).
+      // suppresses those defaults (the first-party Opengeni server remains added).
       // Servers attached in this request's `mcpServers` are selected either way.
       tools: z.array(ToolRef).default([]),
       excludedMcpServerIds: SessionExcludedMcpServerIds.optional(),
@@ -16358,7 +16370,7 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // A goal-bearing session whose explicit/effective set omits goals:manage is
       // rejected; creation never silently expands a child beyond that set.
       firstPartyMcpPermissions: z.array(Permission).optional(),
-      // Exact model-visible selection from the broad first-party OpenGeni MCP
+      // Exact model-visible selection from the broad first-party Opengeni MCP
       // catalog. Omission selects the safe non-connector default; [] intentionally
       // exposes none.
       // This does not grant authority: every registered tool is permission-gated.
@@ -16501,7 +16513,7 @@ export const HumanInputQuestion = /* @__PURE__ */ defineSkillContractSchema(() =
       skillReview: SkillReviewReference.nullable().optional(),
       options: z.array(HumanInputOption).max(20).default([]),
       required: z.boolean().default(true),
-      // Retained on the wire for older hosts. OpenGeni's stock runtime and
+      // Retained on the wire for older hosts. Opengeni's stock runtime and
       // surfaces always expose Other for choice questions, including requests
       // that were persisted before that became the default behavior.
       allowOther: z.boolean().default(false),
@@ -18342,7 +18354,7 @@ export type WorkspaceModelCatalogModel = z.infer<typeof WorkspaceModelCatalogMod
 /**
  * Why a new chat or scheduled task without an explicit model gets its default:
  * a saved workspace default, the first usable connected subscription model, the
- * configured OpenGeni credits model while the organization holds a credit
+ * configured Opengeni credits model while the organization holds a credit
  * balance, or the deployment default.
  */
 export const DefaultModelSelectionSource = /* @__PURE__ */ defineModelContractSchema(() =>
@@ -18367,7 +18379,7 @@ export const WorkspaceModelCatalogResponse =
       defaultSelection: DefaultModelSelection.optional(),
       /**
        * The default this workspace would use once its organization holds an
-       * OpenGeni credit balance. Null when this deployment does not bill
+       * Opengeni credit balance. Null when this deployment does not bill
        * credits.
        */
       creditsSelection: DefaultModelSelection.nullable().optional(),
@@ -18388,7 +18400,7 @@ export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
 
-/** Public OpenGeni documentation linked from the web console's Help menu by default. */
+/** Public Opengeni documentation linked from the web console's Help menu by default. */
 export const DEFAULT_OPENGENI_DOCUMENTATION_URL = "https://docs.opengeni.ai" as const;
 
 /** An absolute http(s) URL the console may render as a plain link. */

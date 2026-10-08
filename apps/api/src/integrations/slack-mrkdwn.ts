@@ -1,8 +1,8 @@
 /**
- * Markdown to Slack mrkdwn for model-authored text OpenGeni posts to Slack.
+ * Markdown to Slack mrkdwn for model-authored text Opengeni posts to Slack.
  *
  * Agents write ordinary Markdown because the same reply renders as Markdown in
- * the OpenGeni console. Slack message text does not render Markdown headings,
+ * the Opengeni console. Slack message text does not render Markdown headings,
  * `**bold**`, or `[label](url)` links, so a reply that reads well in the
  * console arrives in Slack full of literal syntax. This rewrites only that
  * syntax, only for the bytes handed to Slack: stored session events, model
@@ -24,7 +24,7 @@
  * A private provider citation handle: U+E200 `cite`, one or more U+E202
  * separated references, then U+E201. Codex web search can emit these without
  * the annotation table that would make them resolvable, so they carry nothing a
- * Slack reader can use. The OpenGeni timeline hides the same handles
+ * Slack reader can use. The Opengeni timeline hides the same handles
  * (`stripOpaqueCitationTokens` in `packages/react/src/timeline/projection.ts`).
  */
 const PROVIDER_CITATION_TOKEN =
@@ -52,7 +52,7 @@ const CODE_SPAN_OR_SLACK_TOKEN =
 
 /**
  * A Markdown link or image whose target is a web or mail address. Other
- * targets, such as OpenGeni's own `artifact:` and `sandbox:` links, mean
+ * targets, such as Opengeni's own `artifact:` and `sandbox:` links, mean
  * nothing in Slack and are left as written rather than turned into dead links.
  * One level of balanced parentheses is allowed in the URL (as in Wikipedia
  * links), and an optional link title is dropped.

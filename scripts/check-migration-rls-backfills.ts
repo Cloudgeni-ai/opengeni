@@ -5,7 +5,7 @@
  *
  *   bun scripts/check-migration-rls-backfills.ts
  *
- * `FORCE ROW LEVEL SECURITY` binds the table owner. OpenGeni migrates as a
+ * `FORCE ROW LEVEL SECURITY` binds the table owner. Opengeni migrates as a
  * NON-superuser owner without `BYPASSRLS`, and no tenant GUC is set during a
  * migration, so a bare `UPDATE`/`DELETE`/`INSERT ... SELECT`/`DO $$` backfill
  * over such a table matches ZERO rows and still reports success. The bug is
@@ -45,7 +45,7 @@ function main(): void {
       `${writes} backfill statement(s) and ${guards} preflight guard(s) touch a FORCE ROW LEVEL SECURITY table with no owner-visible window.`,
     );
     console.error(
-      "Under OpenGeni's production migration principal (a NON-superuser owner without BYPASSRLS)",
+      "Under Opengeni's production migration principal (a NON-superuser owner without BYPASSRLS)",
     );
     console.error(
       "a backfill matches ZERO rows and reports success, and an `IF EXISTS ... RAISE EXCEPTION`",

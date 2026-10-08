@@ -47,7 +47,7 @@ export function dockerContinuityResumeStateForImage<T>(
 function dockerContinuityKey(state: unknown): string | null {
   if (!state || typeof state !== "object" || Array.isArray(state)) return null;
   const value = state as DockerResumeState;
-  // OpenGeni explicitly disables the SDK's local snapshot facility. Requiring
+  // Opengeni explicitly disables the SDK's local snapshot facility. Requiring
   // that invariant prevents the SDK from restoring an older local snapshot
   // over a newer host workspace before restarting the container.
   return typeof value.workspaceRootPath === "string" &&
@@ -128,7 +128,7 @@ class OpenGeniDockerSandboxClient extends DockerSandboxClient {
     );
   }
 
-  /** Ordinary resume is reserved by OpenGeni for the elected cold continuity
+  /** Ordinary resume is reserved by Opengeni for the elected cold continuity
    * owner. Exact live attachment uses resumeExact() below and never reimages. */
   override async resume(
     state: Parameters<DockerSandboxClient["resume"]>[0],
@@ -216,7 +216,7 @@ export const dockerProvider: ProviderRegistration = {
     return new OpenGeniDockerSandboxClient({
       image: settings.dockerImage,
       exposedPorts,
-      // The OpenGeni archive ledger is the recovery authority. SDK-local
+      // The Opengeni archive ledger is the recovery authority. SDK-local
       // snapshots are process-host artifacts and, more importantly, ordinary
       // Docker resume may overwrite a newer live host workspace from them.
       snapshot: new NoopSnapshotSpec(),

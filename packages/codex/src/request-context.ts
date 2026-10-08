@@ -93,7 +93,7 @@ export type CodexRequestContext = {
    * 99.0% ceiling — Codex CLI parity (the CLI always sends it; its own last-3d
    * token-weighted rate here is 94%). `prompt_cache_key` in the body only
    * influences routing and does NOT pin it. Use the SAME value as
-   * prompt_cache_key (the OpenGeni sessionId) so routing and cache key agree.
+   * prompt_cache_key (the Opengeni sessionId) so routing and cache key agree.
    */
   sessionId?: string;
   /** Worker-supplied: proactive refresh + single-flight + db persist. */

@@ -56,7 +56,7 @@ and lists what uses it, with links.
 3. **Attachment and use are separate.** Creating or changing a runnable attachment requires both `variable-sets:attach` and `variable-sets:use`; neither permission implies the other. `variable-sets:attach` alone permits detaching, while `variable-sets:use` alone permits neither attaching nor detaching. Neither implies metadata, write, or plaintext-read authority.
 4. **Capability-only storage boundary.** The runtime role has no direct DML on variable-set or ciphertext tables. Security-definer routines enforce organization/workspace/user visibility and mutation rules under forced RLS.
 5. **Encryption at rest.** Values are AES-256-GCM encrypted with an operator key (`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`) held outside Postgres. A database dump alone does not reveal values.
-6. **No content rewriting.** If an authorized agent echoes a configured value into model history, events, tool results, errors, memory, or UI-visible OpenGeni data, that content remains exact. Public or third-party telemetry uses a sink-local, closed schema and never writes back over canonical OpenGeni data.
+6. **No content rewriting.** If an authorized agent echoes a configured value into model history, events, tool results, errors, memory, or UI-visible Opengeni data, that content remains exact. Public or third-party telemetry uses a sink-local, closed schema and never writes back over canonical Opengeni data.
 
 ## Rollout
 
@@ -205,7 +205,7 @@ Later wins. A session bound to a [sandbox environment](rigs.md) with `defaultVar
 
 ### Env injection is a managed-sandbox concept
 
-This whole layering — the deployment allowlist, git identity, workspace variable set, and the run-scoped GitHub-auth block that always applies last — describes a **managed sandbox**: a box OpenGeni provisions and injects variables into. A session that runs on a [Connected Machine](../SECURITY.md#connected-machines) is a different backend and is **not** injected this way:
+This whole layering — the deployment allowlist, git identity, workspace variable set, and the run-scoped GitHub-auth block that always applies last — describes a **managed sandbox**: a box Opengeni provisions and injects variables into. A session that runs on a [Connected Machine](../SECURITY.md#connected-machines) is a different backend and is **not** injected this way:
 
 - **The GitHub-token injection is skipped.** A machine-targeted turn does not mint or distribute a run-scoped GitHub App token; the machine uses its **own** git credentials. The "last, untouched" GitHub block above simply does not exist for a machine turn.
 - **No env reaches the machine over the wire.** The run's declared variable set is still assembled server-side (and threaded into the session manifest so the SDK's per-turn manifest-env delta stays empty — the internal parity guard), but the command RPC to the machine carries an empty variable set. Workspace variable-set values are therefore not delivered to a machine's commands.
@@ -224,7 +224,7 @@ Practically: attaching a variable set shapes what a managed sandbox sees; it doe
 
 ## Exact content and exposure model
 
-OpenGeni does not replace an echoed value in model context, history, events,
+Opengeni does not replace an echoed value in model context, history, events,
 memory, tool calls/results, failures, diagnostics, transcription, or UI. These
 surfaces preserve accepted content exactly. This is deliberately separate from
 the configured-secret read boundary:

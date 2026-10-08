@@ -1,6 +1,6 @@
 # `@opengeni/codemode`
 
-OpenGeni's canonical attempt-frozen programmatic tool surface. It compiles one
+Opengeni's canonical attempt-frozen programmatic tool surface. It compiles one
 catalog from the exact tools admitted to an execution attempt and dispatches
 both model MCP calls and sandbox Codemode calls through the same opaque tool
 identities and executors.
@@ -15,7 +15,7 @@ the already-admitted definitions and one authorization hook.
 `modelName` and `codemodePath` are projections only. Execution authority is
 always the exact `{ serverId, toolName }` identity in the frozen catalog.
 
-Inside an OpenGeni sandbox the worker supplies `OPENGENI_CODEMODE_URL` and a
+Inside an Opengeni sandbox the worker supplies `OPENGENI_CODEMODE_URL` and a
 renewed bearer file. The package exposes one lazy namespace over that exact
 attempt catalog:
 
@@ -148,7 +148,7 @@ source session workspace, retaining size/SHA-256 verification and the durable
 operation id. Downloads stay controller-private until this explicit save.
 Attached browsers and Lightpanda do not support managed download export.
 
-Editable artifacts use the same path. The object remains in OpenGeni; files are
+Editable artifacts use the same path. The object remains in Opengeni; files are
 only explicit import/export boundaries:
 
 ```ts

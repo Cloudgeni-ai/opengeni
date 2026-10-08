@@ -1,6 +1,6 @@
 # Model and provider architecture
 
-OpenGeni separates the model a user selects from the provider deployment that
+Opengeni separates the model a user selects from the provider deployment that
 serves it. This document is the canonical integration contract for model
 definitions, provider credentials, billing attribution, workspace availability,
 and per-turn execution identity.
@@ -18,7 +18,7 @@ The point-in-time decision record and evidence are in
 Turn inference uses two OpenAI-shaped HTTP APIs: **Responses**
 (`POST …/responses`) and **Chat Completions** (`POST …/chat/completions`).
 Configure `.env` (from `.env.example`) and restart the API and both workers.
-OpenGeni does not scrape `GET /models`. Membership is the reviewed catalog
+Opengeni does not scrape `GET /models`. Membership is the reviewed catalog
 (`OPENGENI_MODEL_CATALOG_SOURCE=code` by default, or the operator singleton in
 `database` mode). See [Deployment catalog source and cost policy](#deployment-catalog-source-and-cost-policy).
 
@@ -86,7 +86,7 @@ separately for deployment operators.
 The web flow sends `verifyModelAccess: true` on connection creation. Before
 saving, the API checks the exact provider/model with a short Responses message
 (32 output tokens maximum, `store: false`, no tools). Provider usage applies;
-this uses no OpenGeni credits. Failed checks do not save a connection and show
+this uses no Opengeni credits. Failed checks do not save a connection and show
 safe actionable errors without reflecting upstream response text. Other API
 callers can omit the check for offline provisioning. A successful setup check
 does not establish ongoing provider health. The connected model is selected in
@@ -95,7 +95,7 @@ the current user’s next-chat draft from onboarding and Workspace settings.
 These connections are workspace-owned, including in the onboarding Personal
 workspace. The existing Connections API encrypts the key at rest and returns
 metadata only. Usage is externally billed to that provider account and consumes
-no OpenGeni credits. Organization provider inheritance does not apply to these
+no Opengeni credits. Organization provider inheritance does not apply to these
 workspace connections. Replace a key, endpoint, or model by disconnecting and
 reconnecting; the new connection has a distinct model ID.
 
@@ -119,7 +119,7 @@ provider form in `apps/web/src/components/direct-model-provider-connection.tsx`.
 
 | Route                        | Enable                                        | Wire             | Catalog                                                           |
 | ---------------------------- | --------------------------------------------- | ---------------- | ----------------------------------------------------------------- |
-| OpenGeni-managed AI Gateway  | `OPENGENI_VERCEL_AI_GATEWAY_API_KEY`          | Responses        | Curated DeepSeek / Kimi, OpenGeni credits                         |
+| OpenGeni-managed AI Gateway  | `OPENGENI_VERCEL_AI_GATEWAY_API_KEY`          | Responses        | Curated DeepSeek / Kimi, Opengeni credits                         |
 | Workspace AI Gateway         | member connects a Gateway key in Settings     | Responses        | Same curated models plus optional workspace slugs, workspace-paid |
 | Deployment OpenRouter        | `OPENGENI_OPENROUTER_API_KEY`                 | Chat Completions | Curated `openrouter/…` (v1 ships one `:free` starter)             |
 | Workspace OpenRouter         | member connects an OpenRouter key in Settings | Chat Completions | `workspace-openrouter/…`, workspace-paid                          |
@@ -209,7 +209,7 @@ workspace-facing cost are deliberately independent:
   and workspace Gateway models remain `subscription` and `workspace`.
 - `OPENGENI_MODEL_PRICING_JSON` is separate again. A managed deployment that
   marks a model `credits` must provide a price when no reviewed built-in price
-  exists, even if OpenGeni settles that provider through an external account.
+  exists, even if Opengeni settles that provider through an external account.
 
 ### Code-mode managed model lists
 
@@ -465,19 +465,19 @@ A registry model may add:
 Legacy `reasoningEffort` and `hostedWebSearch` booleans remain accepted. When a
 full capability record is also present, the legacy booleans must agree with it.
 
-Generic registry JSON cannot set `credentialSource` or `billing`. OpenGeni
+Generic registry JSON cannot set `credentialSource` or `billing`. Opengeni
 derives both from the provider kind:
 
 | Provider kind                        | Credential source             | Upstream payer         | Metering         |
 | ------------------------------------ | ----------------------------- | ---------------------- | ---------------- |
-| Built-in or registry API key         | deployment                    | deployment             | OpenGeni credits |
+| Built-in or registry API key         | deployment                    | deployment             | Opengeni credits |
 | Anonymous registry route             | deployment, no authentication | deployment             | external         |
-| Azure without an API key             | deployment Azure AD bearer    | deployment             | OpenGeni credits |
+| Azure without an API key             | deployment Azure AD bearer    | deployment             | Opengeni credits |
 | Connected Codex subscription         | connected subscription        | connected subscription | external         |
 | Connected SuperGrok/xAI subscription | connected subscription        | connected subscription | external         |
 | Workspace Vercel AI Gateway          | workspace connection          | workspace              | external         |
 | Workspace OpenRouter                 | workspace connection          | workspace              | external         |
-| Deployment Opper                     | deployment                    | deployment             | OpenGeni credits |
+| Deployment Opper                     | deployment                    | deployment             | Opengeni credits |
 | Workspace Opper                      | workspace connection          | workspace              | external         |
 | Workspace OpenAI / Azure OpenAI       | workspace connection          | workspace              | external         |
 | Organization Vercel AI Gateway      | organization connection       | organization           | external         |
@@ -502,7 +502,7 @@ The table describes credential and upstream-settlement identity, not the
 workspace-facing price. Deployment models—including anonymous and managed
 OpenRouter routes—default to `credits` unless
 `OPENGENI_MODEL_COST_POLICY_JSON` marks the exact product ID `free`. The picker
-groups all deployment-provided models under OpenGeni, regardless of upstream
+groups all deployment-provided models under Opengeni, regardless of upstream
 provider or settlement. Only explicitly free models receive a Free badge; paid
 rows omit repetitive credit labels. Subscription descriptions appear once per
 provider group; the Free badge stays explicit, and `list_models` retains the cost.
@@ -571,8 +571,8 @@ promise:
 ]
 ```
 
-Requests go from OpenGeni to OpenCode's `opencode.ai` service; this is not local
-inference. Anonymous deployment routes are shown under OpenGeni. To make this
+Requests go from Opengeni to OpenCode's `opencode.ai` service; this is not local
+inference. Anonymous deployment routes are shown under Opengeni. To make this
 temporary preview free to the workspace, set
 `OPENGENI_MODEL_COST_POLICY_JSON='{"opencode/muse-spark-1.3-contributor-free":"free"}'`;
 external settlement alone does not bypass credits. A free route still emits
@@ -581,12 +581,12 @@ subject to the upstream provider's changing
 model catalogue, rate limits, retention policy, contributor duration, and terms.
 Verify `GET /zen/v1/models` before enabling the route and remove or update the
 registry entry when keyless access or the model slug changes. The example keeps
-OpenGeni's runnable input capability at its conservative text-only default until
+Opengeni's runnable input capability at its conservative text-only default until
 the image path is independently verified end to end.
 
 OpenCode Zen uses the same provider-neutral progressive disclosure as other
 ordinary Responses API providers. The first request receives the stable
-`tool_search` and `tool_invoke` functions plus OpenGeni's always-visible base
+`tool_search` and `tool_invoke` functions plus Opengeni's always-visible base
 tools and any explicitly eager MCP tools. Deferred MCP and other non-base tool
 schemas stay out of the initial prompt; matching definitions are disclosed on
 demand, and a valid invocation is rebound to the real authorized tool before
@@ -595,7 +595,7 @@ function calling from Zen—no OpenCode-specific lazy-tool protocol.
 
 OpenCode 1.18.21 also documented a client-side workaround for model responses
 whose finish reason is `unknown`: continue the model loop instead of accepting
-the response as final. OpenGeni handles the same signal at the generic Chat
+the response as final. Opengeni handles the same signal at the generic Chat
 Completions adapter boundary. It withholds `response_done`, executes no tool call
 from the ambiguous response, and routes the same accepted turn through the
 existing fenced recovery path from durable history. This is intentionally
@@ -610,14 +610,14 @@ ownership must stay explicit:
   `Authorization` header.
 - For deployment-managed paid Zen models, declare a separate `kind: "api-key"`
   provider (it may reuse the same base URL) with `apiKeyEnv` and reviewed model
-  pricing/capabilities. The deployment owns the upstream account and OpenGeni
+  pricing/capabilities. The deployment owns the upstream account and Opengeni
   meters those turns through the ordinary OpenGeni-credit path.
 - A workspace member connecting their own OpenCode key/account is not generic
   registry JSON. That requires a reviewed encrypted workspace-connection broker,
   readiness/re-auth UI, and `upstreamPayer: workspace` external billing—the same
   authority boundary used by workspace AI Gateway.
 
-Provider JSON is deliberately a static reviewed catalogue. OpenGeni does not
+Provider JSON is deliberately a static reviewed catalogue. Opengeni does not
 silently mirror `GET /models` into the picker because a mutable upstream list
 does not supply stable product IDs, capability evidence, context limits,
 pricing, billing ownership, or definition versions. An operator may use the
@@ -632,7 +632,7 @@ Opper is a first-class reviewed provider, not a registry example; see
 ## Curated AI Gateway models
 
 `OPENGENI_VERCEL_AI_GATEWAY_API_KEY` enables two reviewed OpenGeni-credit
-models. They are siblings of the built-in GPT-5.6 family in the OpenGeni picker
+models. They are siblings of the built-in GPT-5.6 family in the Opengeni picker
 rail; the client never receives the Gateway hostname, upstream model slug, or
 endpoint provider.
 
@@ -650,7 +650,7 @@ above are only a conservative fallback if that response metadata is absent.
 Adding or changing a model requires reviewing the provider order, Responses
 tool/vision transport, cache reporting, pricing, definition, and tests together.
 Kimi's Gateway Responses adapter rejects grouped parallel call/result history.
-At the post-serialization fence, OpenGeni pairs only complete call/result batches
+At the post-serialization fence, Opengeni pairs only complete call/result batches
 by `call_id`. This preserves all fields and parallel execution; it does not
 change the model or provider route. Grouped, name-annotated, and Chat Completions
 continuations were probed on 2026-08-03; only the paired Responses shape kept
@@ -674,12 +674,12 @@ request body.
 
 Both models request Gateway automatic caching. Kimi remains catalogued as
 image-capable, so the worker also attaches `view_image` and `computer_*`
-screenshot tools. DeepSeek stays text-only. OpenGeni verifies finalized
+screenshot tools. DeepSeek stays text-only. Opengeni verifies finalized
 attachment bytes and checksums, then sends images inline as data URLs through
 the standard Responses input surface; it never gives an endpoint provider an
 object-store URL.
 
-DeepSeek V4 Flash 0731 and Kimi K3 use OpenGeni's provider-neutral lazy-tool
+DeepSeek V4 Flash 0731 and Kimi K3 use Opengeni's provider-neutral lazy-tool
 dispatcher on the Responses wire. Their initial tool block contains the stable
 ordinary `tool_search` and `tool_invoke` schemas, the always-visible base
 runtime tools (`exec_command`, `write_stdin`, `apply_patch`, `view_image`,
@@ -698,7 +698,7 @@ rollback, and compaction input.
 A workspace admin can instead connect **Vercel AI Gateway** in workspace Settings.
 The key is stored in the encrypted workspace connection table, resolved only in
 the worker, and uses the same curated models and exact routes. These turns have
-`upstreamPayer: workspace` and `metering: external`, so OpenGeni never debits
+`upstreamPayer: workspace` and `metering: external`, so Opengeni never debits
 credits. Gateway credential create/rotation replay receipts use a
 deployment-keyed HMAC and their reserved operation fields are stripped from all
 public connection metadata projections. The picker hides this rail until the
@@ -739,7 +739,7 @@ openrouter/nvidia/nemotron-3-super-120b-a12b:free
 On August 27, 2026, OpenRouter advertised that slug with a 262,144-token context
 window, a 235,929-token completion ceiling, text input/output, function tools,
 tool choice, structured outputs, and reasoning controls. A live forced-function
-probe completed with `finish_reason=tool_calls`. OpenGeni therefore marks
+probe completed with `finish_reason=tool_calls`. Opengeni therefore marks
 function calling and structured output runnable. On September 8, 2026, OpenRouter
 `GET /api/v1/models` explicitly advertised reasoning efforts `low` and `medium`,
 with `medium` as default. Both are runnable; the Chat Completions adapter sends
@@ -749,7 +749,7 @@ OpenRouter membership is curated and production never mirrors `GET /models`.
 The v1 database schema accepts reviewed `:free` slugs only; a key does not make
 every upstream model visible, and workspace policy may hide the starter. The
 provider settles through the deployment's OpenRouter account and appears in the
-OpenGeni picker group, while `OPENGENI_MODEL_COST_POLICY_JSON` independently
+Opengeni picker group, while `OPENGENI_MODEL_COST_POLICY_JSON` independently
 decides whether the workspace sees `free` or `credits`. The shipped default is
 `free`. If an operator changes it to `credits`, managed billing also requires a
 separate `OPENGENI_MODEL_PRICING_JSON` entry.
@@ -768,14 +768,14 @@ and its products use `workspace-openrouter/<upstream>`. Curated OpenRouter
 membership is available through this workspace rail even when the deployment
 has no `OPENGENI_OPENROUTER_API_KEY`; selectability still requires the workspace
 connection and policy. These turns have `upstreamPayer: workspace` and
-`metering: external`, so OpenGeni neither debits credits nor treats them as the
+`metering: external`, so Opengeni neither debits credits nor treats them as the
 deployment's free/credits rail. Billing settles directly through the
 workspace's OpenRouter account.
 
 Admins may add exact OpenRouter slugs in the same card. The API does not call
 OpenRouter `GET /models` or infer capabilities dynamically. Custom IDs receive
 the reviewed conservative text/function-calling Chat envelope, and the admin is
-asserting that the upstream slug supports that behavior. OpenGeni does not claim
+asserting that the upstream slug supports that behavior. Opengeni does not claim
 a reasoning vocabulary or context-window size for these unreviewed slugs.
 Duplicate and curated collisions are scoped to the OpenRouter workspace
 provider, not to Vercel AI Gateway or deployment-managed `openrouter/*`.
@@ -792,13 +792,13 @@ provider id, credential, and payer.
 
 | Rail         | Enable                                                | Provider id          | Product ids                        | Payer / metering                |
 | ------------ | ----------------------------------------------------- | -------------------- | ---------------------------------- | ------------------------------- |
-| Deployment   | `OPENGENI_OPPER_API_KEY`                              | `opper`              | `opper/<upstream>`                 | deployment / OpenGeni credits   |
+| Deployment   | `OPENGENI_OPPER_API_KEY`                              | `opper`              | `opper/<upstream>`                 | deployment / Opengeni credits   |
 | Workspace    | workspace admin connects an Opper key in Settings     | `workspace-opper`    | `workspace-opper/<upstream>`       | workspace / external            |
 | Organization | organization owner/admin connects Opper in Org settings | `organization-opper` | `organization-opper/<upstream>`  | organization / external         |
 
 All three use the generic OpenAI-compatible Chat dispatcher with no OpenAI SDK
 retries (an Opper request can incur upstream work before a retryable failure
-reaches OpenGeni, and Opper has no idempotency key tied to the durable call).
+reaches Opengeni, and Opper has no idempotency key tied to the durable call).
 A request whose `model` is not in the provider's resolved catalog fails before
 network I/O. Membership is curated and production never mirrors
 `GET /v3/models`.
@@ -894,7 +894,7 @@ validation all reject them with an explanation instead of storing a key that
 can never run a turn. Curated
 Opper membership is available through this rail even without
 `OPENGENI_OPPER_API_KEY`; turns are `upstreamPayer: workspace`,
-`metering: external`, and spend no OpenGeni credits.
+`metering: external`, and spend no Opengeni credits.
 
 Admins may add exact Opper ids in the same card (`/v1/workspaces/:id/opper-custom-models`,
 SDK `listWorkspaceOpperCustomModels` / `createWorkspaceOpperCustomModel` /
@@ -1129,7 +1129,7 @@ at the protocol boundary so older clients and older payloads remain parseable.
 
 ## Capabilities: support is not runnability
 
-Every capability records both upstream evidence and current OpenGeni adapter
+Every capability records both upstream evidence and current Opengeni adapter
 runnability:
 
 ```ts
@@ -1151,14 +1151,14 @@ The catalog describes:
 GPT-6 Astra, Sol, and Luna (including their Codex subscription variants)
 advertise runnable **Fast** mode. Fast requests set the provider service tier,
 use a 2× billing multiplier, and fail the turn if the provider response omits
-or downgrades that tier; OpenGeni never silently falls back to Standard. The
+or downgrades that tier; Opengeni never silently falls back to Standard. The
 GPT-6 family uses the 1.05M context window. A configured GPT-5.6 id still pins
 Codex's 272,000 / 258,400 / 244,800 raw / effective / auto-compact catalog.
 
 Upstream documentation alone never makes a capability runnable. For example,
 provider support for X search or Responses WebSocket remains `runnable: false`
-until OpenGeni has the request, recovery, and billing contracts to use it
-safely. Capability metadata also never authorizes an OpenGeni tool; tool
+until Opengeni has the request, recovery, and billing contracts to use it
+safely. Capability metadata also never authorizes an Opengeni tool; tool
 discovery and authorization remain independent.
 
 Hosted image generation is runnable only for reviewed direct OpenAI Responses
@@ -1169,10 +1169,10 @@ provider-neutral client tool through separate paid-operation adapters. See
 ### Native web search is a runtime capability
 
 Provider-native `web_search` is not an MCP catalog entry and is not governed by
-the session's MCP allow-list. OpenGeni attaches native search whenever the
+the session's MCP allow-list. Opengeni attaches native search whenever the
 resolved provider declares hosted web search runnable, regardless of whether
 the session uses workspace defaults or an explicit/inherited MCP policy.
-Changing a session's connected or OpenGeni tools therefore cannot silently
+Changing a session's connected or Opengeni tools therefore cannot silently
 disable web search.
 
 Models without hosted search (Claude, Gemini, DeepSeek, GLM and other
@@ -1226,7 +1226,7 @@ typed model-visible error (`tool_unavailable` on generic `tool_invoke`, the
 SDK not-found message on native) instead of killing the turn. The compacted
 textual summary is never trusted as an exact schema store. Historical
 generic-dispatch calls are restored independently of the current transport, so
-switching providers cannot expose OpenGeni's internal execution rewrite.
+switching providers cannot expose Opengeni's internal execution rewrite.
 
 Prompt-cache stability is a primary invariant. Generic control schemas,
 descriptions, and ordering are constant, so adding, removing, or changing a
@@ -1239,7 +1239,7 @@ handling, so schema JSON is never silently middle-truncated.
 The native tool uses the Agents SDK's bounded `medium` search-context setting
 and preserves provider URL-citation annotations in structured conversation
 history. It does not need a sandbox. If the resolved provider does not support
-hosted search, or the provider search call fails, OpenGeni does not switch
+hosted search, or the provider search call fails, Opengeni does not switch
 providers, invoke an MCP connector, or run `curl` in a sandbox as a silent
 fallback.
 
@@ -1577,21 +1577,21 @@ verbosity. `reasoning.summary` stays `detailed`.
 Pricing is keyed by product model ID. A tiered schedule selects the greatest
 `minimumInputTokens` threshold not exceeding the current input count. Billing
 classification comes from the accepted policy: `external` usage must not spend
-OpenGeni model credits; `opengeni_credits` usage follows configured pricing and
+Opengeni model credits; `opengeni_credits` usage follows configured pricing and
 margin rules. Each price entry can distinguish uncached input, cache reads,
 cache writes, and output through `inputMicrosPerMillionTokens`,
 `cachedInputMicrosPerMillionTokens`, `cacheWriteMicrosPerMillionTokens`, and
 `outputMicrosPerMillionTokens`. Cache writes fall back to the ordinary input
 rate only when an older override omits the dedicated field.
 
-The built-in schedules use a 5% OpenGeni markup (`marginBps: 500`). Insights
+The built-in schedules use a 5% Opengeni markup (`marginBps: 500`). Insights
 keeps three amounts separate for every authoritative model call:
 
 - estimated provider USD is the upstream list price or Gateway-reported cost,
-  before OpenGeni markup;
-- equivalent OpenGeni credit price is the same captured rate with markup,
+  before Opengeni markup;
+- equivalent Opengeni credit price is the same captured rate with markup,
   including a comparison for externally billed Codex-subscription calls;
-- OpenGeni credit price is the actual credits-path price and remains zero for
+- Opengeni credit price is the actual credits-path price and remains zero for
   externally billed calls.
 
 GPT-5.6 Sol uses OpenAI's current promotional list price ($4 input, $0.40
@@ -1682,7 +1682,7 @@ usage facts.
 
 ### Price audit (llm-prices canary)
 
-OpenGeni debit authority is the unchanged hand-maintained `defaultModelPricing`
+Opengeni debit authority is the unchanged hand-maintained `defaultModelPricing`
 map in `packages/config/src/index.ts` (plus registry /
 `OPENGENI_MODEL_PRICING_JSON` overrides). New comparison-only rates live in
 `reviewedModelListPricing` and reach callers only through provider-gated list
@@ -1720,7 +1720,7 @@ upstream model: grok-4.5
 base URL:       https://api.x.ai/v1
 wire API:       responses
 credential:     deployment API key
-billing:        deployment / OpenGeni credits
+billing:        deployment / Opengeni credits
 context:        500,000 tokens
 ```
 
@@ -1728,7 +1728,7 @@ The evidence-backed definition exposes reasoning (`low`, `medium`, `high`,
 default `high`, required), function calling, structured output, text/image
 input, text output, hosted web search, and SSE as runnable. X search, code
 execution, Responses WebSocket, and priority service remain non-runnable until
-their OpenGeni contracts exist. Realtime audio is unsupported for this model.
+their Opengeni contracts exist. Realtime audio is unsupported for this model.
 
 Standard pricing below 200,000 input tokens is $2/M input, $0.30/M cached input,
 and $6/M output. At 200,000 or more input tokens it is $4/M input, $0.60/M
@@ -1779,7 +1779,7 @@ already-authorized credential and must keep secrets out of logs and fixtures.
 
 Workspace and organization Models support **Anthropic API** keys and **Claude subscription**
 sign-in as separate connections. **Sign in to Claude** opens Claude's approval page;
-paste its authorization code back into OpenGeni. This grants model and profile
+paste its authorization code back into Opengeni. This grants model and profile
 access, enables direct usage checks and reset times, and stores an encrypted refresh
 token for automatic renewal. Account files and terminal commands are not needed.
 **Sign in again** reconnects through the same flow while retaining native access policy.
@@ -1793,7 +1793,7 @@ scopes never borrow or overwrite each other’s credentials. Both use existing e
 connection storage and model access policy. Add exact upstream
 model IDs to each connection; connecting alone does not validate model entitlement
 or make a paid model call. Subscription usage consumes the connected plan's limits;
-API-key usage is billed by Anthropic. Neither uses OpenGeni credits.
+API-key usage is billed by Anthropic. Neither uses Opengeni credits.
 
 The `anthropic-messages` protocol is implemented by
 `packages/runtime/src/anthropic-messages.ts`, through the existing Agents SDK
@@ -1803,7 +1803,7 @@ parallel calls, images, streaming text, signed thinking and redacted thinking ar
 preserved. Initial system/developer history items join the top-level system field
 in order; later system items keep their conversation position. Tool names unsupported on the wire receive stable reversible names.
 Native OpenAI hosted tools and opaque compaction tokens are not compatible;
-ordinary function tools and OpenGeni's text compaction remain available.
+ordinary function tools and Opengeni's text compaction remain available.
 
 Native Claude HTTP and SSE errors retain status and bounded retry/request
 metadata. Documented tier-spend proof and configured-spend HTTP 400 prefixes
@@ -1858,7 +1858,7 @@ usage preserves reported 5-minute and 1-hour creation counts separately; downstr
 durable telemetry and UI currently show aggregate writes. Registry pricing has one
 cache-write rate, which must match its configured TTL (do not use a 5-minute write
 price with `cacheTtl: "1h"`). Managed connections use 5-minute caching and external
-billing; OpenGeni does not debit these tokens as credits.
+billing; Opengeni does not debit these tokens as credits.
 Managed Claude connections use per-model native profiles from
 `claudeNativeModelProfile` in `packages/config/src/index.ts`. Opus and Sonnet 5.5
 expose low, medium, high, xhigh and max, with medium as the new-selection default.
@@ -1914,7 +1914,7 @@ requested text with this profile and no `cch`. Omission therefore did not preven
 that request; this does not establish a universal requirement or the cause of
 the earlier HTTP 429. The profile is not a byte-exact reproduction. Separately,
 98 completed captured response streams passed offline adapter replay. A user-requested
-full local OpenGeni session subsequently completed an SSB population chart with
+full local Opengeni session subsequently completed an SSB population chart with
 streaming tool loops, signed thinking, cache reads/writes, and retained PNG/SVG/CSV
 artifacts using this profile without `cch`.
 

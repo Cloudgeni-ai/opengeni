@@ -1,6 +1,6 @@
 ---
 name: social-media-marketing
-description: Use when running marketing, social media, content performance, audience signal, campaign reporting, or daily media analysis tasks through OpenGeni social account connectors and MCP tools.
+description: Use when running marketing, social media, content performance, audience signal, campaign reporting, or daily media analysis tasks through Opengeni social account connectors and MCP tools.
 ---
 
 # Social Media Marketing

@@ -50,9 +50,9 @@ export function requireLegacyOAuthActor(access: AccessGrantAuthorization): void 
  */
 
 /**
- * Subject namespaces OpenGeni itself mints for machines. This is deliberately
+ * Subject namespaces Opengeni itself mints for machines. This is deliberately
  * NOT an allow-list of human subjects: `docs/embedding.md` states that
- * `subjectId` "remains opaque to OpenGeni" and that the kind must not be
+ * `subjectId` "remains opaque to Opengeni" and that the kind must not be
  * inferred from a subject-id prefix "because the host owns that namespace", so
  * a trusted embedding host legitimately signs `human_session` over an opaque
  * subject that is not `user:`-prefixed. Restricting personal ownership to

@@ -208,7 +208,7 @@ export function OpenGeniReactNativeProvider({
 export function useOpenGeniReactNativeEnvironment(): NativeEnvironmentContextValue {
   const value = useContext(NativeEnvironmentContext);
   if (!value) {
-    throw new Error("OpenGeni native hooks require OpenGeniReactNativeProvider");
+    throw new Error("Opengeni native hooks require OpenGeniReactNativeProvider");
   }
   return value;
 }

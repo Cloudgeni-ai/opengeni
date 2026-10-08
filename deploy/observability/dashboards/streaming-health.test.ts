@@ -25,7 +25,7 @@ describe("streaming health dashboard", () => {
     expect(serialized).not.toContain("sessionId");
   });
 
-  test("keeps absolute TTFT as an unalerted view and splits OpenGeni from provider latency", async () => {
+  test("keeps absolute TTFT as an unalerted view and splits Opengeni from provider latency", async () => {
     const dashboard = JSON.parse(
       await readFile(new URL("./streaming-health.json", import.meta.url), "utf8"),
     ) as {
@@ -58,7 +58,7 @@ describe("streaming health dashboard", () => {
       "opengeni:model_provider_ttft_seconds:p90_24h_baseline",
     );
 
-    const ours = byTitle("OpenGeni pre-dispatch p95 / p50 (model entry -> provider dispatch)");
+    const ours = byTitle("Opengeni pre-dispatch p95 / p50 (model entry -> provider dispatch)");
     expect(ours?.targets?.[0]?.expr).toContain(
       "opengeni_model_request_pre_dispatch_seconds_bucket",
     );

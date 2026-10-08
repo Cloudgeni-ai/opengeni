@@ -9,7 +9,7 @@ const ACCOUNT = "acct-1";
 const WORKSPACE = "ws-1";
 const db = {} as Database;
 
-// Live config that reproduces the bug: stripe + managed, 0 OpenGeni credits.
+// Live config that reproduces the bug: stripe + managed, 0 Opengeni credits.
 function billedSettings() {
   return testSettings({ billingMode: "stripe", usageLimitsMode: "managed" });
 }
@@ -46,7 +46,7 @@ describe("worker ensureRunAllowed — codex bypass", () => {
     }
   });
 
-  test("(c) a normal turn with 0 credits still throws insufficient OpenGeni credits", async () => {
+  test("(c) a normal turn with 0 credits still throws insufficient Opengeni credits", async () => {
     const restore = mockZeroBalance();
     try {
       await expect(
@@ -277,7 +277,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         sourceKey: "response-1",
       });
       // Exactly one event: a zero-cost audit marker. NO model.tokens row (it would
-      // feed the OpenGeni token cap a codex turn is exempt from).
+      // feed the Opengeni token cap a codex turn is exempt from).
       expect(recorded).toEqual([{ eventType: "model.cost", quantity: 0, unit: "usd_micros" }]);
       expect(debitSpy).not.toHaveBeenCalled();
     } finally {

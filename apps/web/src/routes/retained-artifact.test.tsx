@@ -115,7 +115,7 @@ test("malformed retained-file ids show unavailable copy and the Artifacts back l
     expect(rendered.container.textContent).toContain("Artifacts");
     expect(rendered.container.textContent).toContain("Support reference");
     expect(rendered.container.textContent).toContain("corr-malformed");
-    expect(rendered.container.textContent).not.toContain("OpenGeni API");
+    expect(rendered.container.textContent).not.toContain("Opengeni API");
     expect(rendered.container.textContent).not.toContain("Retry");
     const link = rendered.container.querySelector("a");
     expect(link?.textContent?.trim()).toBe("Artifacts");
@@ -193,7 +193,7 @@ test("valid missing retained-file UUIDs match 403 copy and omit retry", async ()
   const missing = await renderRoute();
   try {
     expect(missing.container.textContent).toContain("Artifact unavailable");
-    expect(missing.container.textContent).not.toContain("OpenGeni API");
+    expect(missing.container.textContent).not.toContain("Opengeni API");
     expect(missing.container.textContent).not.toContain("Retry");
   } finally {
     await missing.unmount();
@@ -206,7 +206,7 @@ test("valid missing retained-file UUIDs match 403 copy and omit retry", async ()
   try {
     expect(forbidden.container.textContent).toContain("Artifact unavailable");
     expect(forbidden.container.textContent).toContain("This file isn't available.");
-    expect(forbidden.container.textContent).not.toContain("OpenGeni API");
+    expect(forbidden.container.textContent).not.toContain("Opengeni API");
     expect(forbidden.container.textContent).not.toContain("Retry");
   } finally {
     await forbidden.unmount();
@@ -225,7 +225,7 @@ test("transient retained-file failures keep retry without raw API prefix", async
     expect(rendered.container.textContent).toContain("Artifacts");
     expect(rendered.container.textContent).toContain("Retry");
     expect(rendered.container.textContent).toContain("corr-503");
-    expect(rendered.container.textContent).not.toContain("OpenGeni API");
+    expect(rendered.container.textContent).not.toContain("Opengeni API");
   } finally {
     await rendered.unmount();
   }

@@ -53,7 +53,7 @@ const PUBLISHERS: Array<[RegExp, string]> = [
 
 /**
  * Who makes it, for the "by X" line. Only claimed when the catalog says the
- * provider publishes it (official) or OpenGeni built it; otherwise null.
+ * provider publishes it (official) or Opengeni built it; otherwise null.
  */
 export function capabilityPublisher(item: CapabilityCatalogItem): string | null {
   if (item.source === "built_in" || item.surfaceType?.startsWith("first_party_")) return "Opengeni";
@@ -64,7 +64,7 @@ export function capabilityPublisher(item: CapabilityCatalogItem): string | null 
 }
 
 /**
- * Registry entries OpenGeni has not curated. Shown with a visible "Community"
+ * Registry entries Opengeni has not curated. Shown with a visible "Community"
  * label because it changes whether you should trust it.
  */
 export function isCommunityCapability(item: CapabilityCatalogItem): boolean {

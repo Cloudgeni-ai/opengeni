@@ -787,9 +787,9 @@ export type WorkspaceControlEventPage = {
 };
 
 export type OpenGeniClientOptions = {
-  /** Base URL of the OpenGeni API, e.g. `https://api.example.com`. */
+  /** Base URL of the Opengeni API, e.g. `https://api.example.com`. */
   baseUrl: string;
-  /** OpenGeni API key, sent as `Authorization: Bearer <apiKey>`. */
+  /** Opengeni API key, sent as `Authorization: Bearer <apiKey>`. */
   apiKey?: string;
   /**
    * Receives a notice (once per route per client) when the API advertises a
@@ -979,7 +979,7 @@ function normalizeScheduledTaskMachineTarget<
 }
 
 /**
- * Typed client for the OpenGeni public API. Framework-agnostic: only needs
+ * Typed client for the Opengeni public API. Framework-agnostic: only needs
  * WHATWG `fetch` + streams, so it runs in Node 18+, Bun, Deno, browsers, and
  * edge runtimes.
  */
@@ -2429,7 +2429,7 @@ export class OpenGeniClient {
 
   /**
    * Channels a person may choose as a scheduled task's fixed Slack destination:
-   * active, non-shared channels the selected OpenGeni bot already belongs to.
+   * active, non-shared channels the selected Opengeni bot already belongs to.
    */
   async listScheduledTaskSlackChannels(
     workspaceId: string,
@@ -5764,7 +5764,7 @@ export class OpenGeniClient {
   }
 
   /** Uses this client's fixed actor and standard contract/error/abort handling.
-   * Disconnect revokes OpenGeni connection access, not upstream provider consent. */
+   * Disconnect revokes Opengeni connection access, not upstream provider consent. */
 
   connectTransport(): import("@opengeni/connect").ConnectTransport {
     const root = (workspaceId: string) =>
@@ -6546,7 +6546,7 @@ export class OpenGeniClient {
   }
 
   /**
-   * Re-freeze a task's connectors, connector accounts and OpenGeni tool policy
+   * Re-freeze a task's connectors, connector accounts and Opengeni tool policy
    * with the signed-in caller's current authority. Pass the `executionDigest`
    * of the task whose `policyDrift` was reviewed; a changed task returns 409.
    */
@@ -8409,7 +8409,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** List the secret-free Slack team -> OpenGeni tenant routing authority. */
+  /** List the secret-free Slack team -> Opengeni tenant routing authority. */
   async listSlackInstallationBindings(workspaceId: string): Promise<SlackInstallationBinding[]> {
     const response = await this.requestJson<ListSlackInstallationBindingsResponse>(
       "GET",
@@ -8487,7 +8487,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Start the public Slack installation flow for the workspace-shared OpenGeni bot. */
+  /** Start the public Slack installation flow for the workspace-shared Opengeni bot. */
   async startOpenGeniSlackBotInstall(
     workspaceId: string,
     request: OpenGeniSlackBotInstallRequest = {},

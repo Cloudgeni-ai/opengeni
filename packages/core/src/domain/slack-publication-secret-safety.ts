@@ -19,7 +19,7 @@ const CREDENTIAL_URL_PATTERN = /\b([a-z][a-z0-9+.-]*:\/\/[^:\s/@]+:)[^@\s/]+@/gi
  * Deterministic, sink-local protection for text that is about to be persisted
  * as a Slack publication projection or rendered to Slack. It intentionally
  * does not scan or mutate canonical Memory, durable-learning receipts, model
- * context, history, events, or any other internal OpenGeni content path.
+ * context, history, events, or any other internal Opengeni content path.
  */
 export function sanitizeSlackPublicationText(value: string): string {
   let sanitized = value;

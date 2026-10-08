@@ -1,4 +1,4 @@
-// Usage allowances in the OpenGeni console. Budgets here are paid from the
+// Usage allowances in the Opengeni console. Budgets here are paid from the
 // organization's credit balance, which the console already shows in dollars
 // (balance, top-ups, usage dashboard), so budgets and limits use the same unit:
 // an owner compares "$500 a month" with "$1,240 available" without converting.

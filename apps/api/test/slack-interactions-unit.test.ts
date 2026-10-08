@@ -80,7 +80,7 @@ describe("Slack allowance admission remedies", () => {
       ),
     ).toContain("no automatic reset");
     expect(slackAdmissionFailureText(new HTTPException(402))).toBe(
-      "OpenGeni could not start this task because the selected model has no available billing source. Open OpenGeni, select a connected subscription model, and try again.",
+      "Opengeni could not start this task because the selected model has no available billing source. Open Opengeni, select a connected subscription model, and try again.",
     );
     expect(slackAdmissionFailureText(new HTTPException(429))).toContain(
       "review the workspace limits",
@@ -276,7 +276,7 @@ describe("Slack shared-image authorization", () => {
 });
 
 describe("Slack event classification and safe projection", () => {
-  test("normalizes exactly one opaque OpenGeni block action", () => {
+  test("normalizes exactly one opaque Opengeni block action", () => {
     const normalized = normalizedBlockActionInteraction({
       type: "block_actions",
       team: { id: "T_ACTION" },

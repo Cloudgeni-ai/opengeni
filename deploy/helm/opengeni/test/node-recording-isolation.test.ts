@@ -91,7 +91,7 @@ function series(name: string, labels: Record<string, string>): string {
 
 function nodeGroup(manifest: Manifest): Group {
   const group = manifest.spec.groups.find((entry) => entry.name === "opengeni.rules");
-  if (!group) throw new Error("Missing canonical OpenGeni rule group");
+  if (!group) throw new Error("Missing canonical Opengeni rule group");
   return {
     ...group,
     rules: group.rules.filter(

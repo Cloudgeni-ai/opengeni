@@ -1,6 +1,6 @@
 [package]
 name = "opengeni-agent-linux-ffi"
-description = "Linux-only leaf FFI for the OpenGeni agent's async-signal-safe pre-exec hardening."
+description = "Linux-only leaf FFI for the Opengeni agent's async-signal-safe pre-exec hardening."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

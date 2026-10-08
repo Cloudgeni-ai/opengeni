@@ -16,7 +16,7 @@ export * from "./workspace-integration-wire";
 /**
  * Workspace integration primitives for embedding hosts: signed outbound
  * webhooks and one signed HTTP credential provider per workspace. Both
- * directions share one signature scheme so a host verifies every OpenGeni
+ * directions share one signature scheme so a host verifies every Opengeni
  * request with the same helper.
  */
 
@@ -361,7 +361,7 @@ export type CredentialProviderInitiatorContext = {
   context: TurnInitiatorContext;
 };
 
-/** The body OpenGeni POSTs to a workspace credential provider. */
+/** The body Opengeni POSTs to a workspace credential provider. */
 export type CredentialProviderRequest = {
   type: "credentials.request";
   lane: "organization" | "workspace";
@@ -370,7 +370,7 @@ export type CredentialProviderRequest = {
   /**
    * `test` comes from an administrator's "Test connection": it is not a run,
    * so `sessionId`, `rootSessionId`, `turnId` and `attemptId` are the nil
-   * UUID. Answer it as you would a run in this workspace (OpenGeni shows only
+   * UUID. Answer it as you would a run in this workspace (Opengeni shows only
    * the names of what you return, never the values), or `not_applicable`.
    */
   purpose: "provision" | "renewal" | "test";
@@ -404,7 +404,7 @@ const ProviderAuthNeeded = z.object({
 
 /**
  * HTTPS Git credentials the host wants available to `git` in the sandbox.
- * OpenGeni stores them in a renewable file and points a credential helper at
+ * Opengeni stores them in a renewable file and points a credential helper at
  * it, so a refreshed token applies to the next git command.
  */
 const ProviderGitCredential = z.object({
@@ -507,7 +507,7 @@ export const CredentialProviderMcpMaterial = z
   });
 export type CredentialProviderMcpMaterial = z.infer<typeof CredentialProviderMcpMaterial>;
 
-/** What a credential provider returns. Scope echoes are added by OpenGeni. */
+/** What a credential provider returns. Scope echoes are added by Opengeni. */
 export const CredentialProviderResponse = z.discriminatedUnion("status", [
   z.object({
     status: z.literal("ok"),
@@ -568,7 +568,7 @@ export const IntegrationEndpointTestResult = z
     durationMs: z.number().int().nonnegative(),
     /** What went wrong, in one sentence, or null. */
     error: z.string().nullable(),
-    /** The exact JSON body OpenGeni signed and sent. */
+    /** The exact JSON body Opengeni signed and sent. */
     request: z.string(),
     /** The start of the endpoint's answer. Omitted for a successful provider answer. */
     responseBody: z.string().nullable(),

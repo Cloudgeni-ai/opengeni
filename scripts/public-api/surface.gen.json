@@ -17994,7 +17994,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"OpenGeni Staging\\\"\",\"\\\"OpenGeni\\\"\"]"
+        "$": "enum=[\"\\\"OpenGeni Staging\\\"\",\"\\\"OpenGeni\\\"\",\"\\\"Opengeni Staging\\\"\",\"\\\"Opengeni\\\"\"]"
       }
     },
     "OpenGeniSlackBotInstallRequest": {
@@ -19166,7 +19166,7 @@
       ],
       "shape": {
         "$": "object",
-        "$.appName": "const!=[\"\\\"OpenGeni Lens\\\"\"]",
+        "$.appName": "enum!=[\"\\\"OpenGeni Lens\\\"\",\"\\\"Opengeni Lens\\\"\"]",
         "$.configured": "boolean!",
         "$.connectUrl": "string! null",
         "$.installations": "array!",
@@ -27980,6 +27980,7 @@
       "humanInputPending": "value",
       "IMPORTED_HISTORY_MAX_CHARS": "value",
       "lastUIMessageText": "value",
+      "Opengeni": "value",
       "OpenGeni": "value",
       "OpenGeniChatError": "value",
       "OpenGeniOptions": "type",
@@ -39429,6 +39430,35 @@
       ],
       "turnId": [
         "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]}}"
+      ]
+    },
+    "@opengeni/sdk/chat:Opengeni": {
+      "chat": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChatOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Chat\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "chatBySessionId": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"workspaceId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"sessionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"user\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Chat\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "client": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniClient\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "organizationId": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSStringKeyword\"}}"
+      ],
+      "resolveOrganizationId": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSStringKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "sessions": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"list\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"params\":[{\"name\":\"options\",\"optional\":false,\"type\":\"Identifier\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChatSessionListOptions\",\"optional\":false,\"type\":\"Identifier\"}}}],\"returnType\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Session\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSFunctionType\"}}],\"type\":\"TSTypeLiteral\"}}"
+      ],
+      "source": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSStringKeyword\"}}"
+      ],
+      "workspaceId": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"tenant\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSStringKeyword\"},{\"type\":\"TSUndefinedKeyword\"}]}},{\"computed\":false,\"key\":{\"name\":\"workspaceId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSStringKeyword\"},{\"type\":\"TSUndefinedKeyword\"}]}}],\"type\":\"TSTypeLiteral\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChatTarget\",\"optional\":false,\"type\":\"Identifier\"}},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceTarget\",\"optional\":false,\"type\":\"Identifier\"}}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSStringKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "workspaceIdFor": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceIdTarget\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceIdOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSStringKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ]
     },
     "@opengeni/sdk/chat:OpenGeni": {

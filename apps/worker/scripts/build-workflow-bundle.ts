@@ -12,7 +12,7 @@ const outputPath = resolve(packageRoot, "dist/workflow-bundle.js");
 
 const bundle = await bundleWorkflowCode({ workflowsPath });
 if (!bundle.code.trim()) {
-  throw new Error("Temporal produced an empty OpenGeni workflow bundle");
+  throw new Error("Temporal produced an empty Opengeni workflow bundle");
 }
 
 // Parse before writing so a release can never carry an artifact that V8 cannot load.

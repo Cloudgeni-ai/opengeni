@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 /* ----------------------------------------------------------------------------
    ErrorMessage (design brief 6 and 7, "Also build").
 
-   What happened, then what to do. Never the raw "OpenGeni API 404 ...
+   What happened, then what to do. Never the raw "Opengeni API 404 ...
    Reference: <uuid>" string: the request reference and other system facts
    live behind one collapsed "Technical details", with Copy.
 

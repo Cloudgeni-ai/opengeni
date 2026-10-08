@@ -11,7 +11,7 @@ function Conversation({ id }: { id: string }) {
   return (
     <SessionConversation
       sessionId={id}
-      composerProps={{ placeholder: "Send a message through OpenGeni…" }}
+      composerProps={{ placeholder: "Send a message through Opengeni…" }}
     />
   );
 }

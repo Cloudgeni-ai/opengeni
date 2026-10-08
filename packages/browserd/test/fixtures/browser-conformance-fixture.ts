@@ -101,7 +101,7 @@ function mainPage(crossOrigin: string): string {
     <html lang="en">
       <head>
         <meta charset="utf-8">
-        <title>OpenGeni browser conformance</title>
+        <title>Opengeni browser conformance</title>
         <style>
           body { font-family: sans-serif; }
           #covered-wrap { position: relative; width: 180px; height: 40px; }

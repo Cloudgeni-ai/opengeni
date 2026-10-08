@@ -429,7 +429,7 @@ describe("ChatComposer attachments", () => {
         error: {
           status: 402,
           code: "payment_required",
-          message: "insufficient OpenGeni credits",
+          message: "insufficient Opengeni credits",
           retryable: false,
         },
       }),

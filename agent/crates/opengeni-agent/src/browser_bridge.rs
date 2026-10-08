@@ -168,7 +168,7 @@ pub fn install_native_host_manifests(
     })?;
     let body = serde_json::to_vec_pretty(&NativeHostManifest {
         name: NATIVE_HOST_NAME,
-        description: "OpenGeni attached-browser bridge",
+        description: "Opengeni attached-browser bridge",
         path: binary,
         kind: "stdio",
         allowed_origins: extension_origins(),
@@ -1453,7 +1453,7 @@ mod tests {
             "id": id,
             "windowId": 1,
             "index": 0,
-            "title": "OpenGeni",
+            "title": "Opengeni",
             "url": "https://opengeni.ai/",
             "active": true,
             "pinned": false,

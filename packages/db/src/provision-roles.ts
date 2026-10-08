@@ -28,16 +28,16 @@ export type ProvisionResult = {
 
 export type ProvisionRolesOptions = {
   /**
-   * The schema OpenGeni's tables live in. The app-role GRANTs target this
+   * The schema Opengeni's tables live in. The app-role GRANTs target this
    * schema + `opengeni_private`. Defaults to `public` (standalone).
    */
   targetSchema?: string;
   /**
    * RLS posture (Step I). `"force"` (default) provisions the non-owner
    * `opengeni_app` login role and GRANTs it table DML in the target schema —
-   * the role OpenGeni connects as under FORCE-RLS. `"scoped"` SKIPS the app-role
-   * provisioning entirely: the embedded host runs OpenGeni's queries over a role
-   * IT owns/manages (typically the schema owner), so OpenGeni neither creates
+   * the role Opengeni connects as under FORCE-RLS. `"scoped"` SKIPS the app-role
+   * provisioning entirely: the embedded host runs Opengeni's queries over a role
+   * IT owns/manages (typically the schema owner), so Opengeni neither creates
    * nor grants the `opengeni_app` role. Temporal-role provisioning is unaffected
    * by strategy.
    */
@@ -66,7 +66,7 @@ export type ProvisionRolesOptions = {
 };
 
 /**
- * SDK entry point (Step I): provision the OpenGeni database roles + grants over
+ * SDK entry point (Step I): provision the Opengeni database roles + grants over
  * a host-supplied admin connection. This is the named, parameterized form of the
  * historical env-driven `provision-roles` script (which still works as a CLI via
  * the `import.meta.main` block at the bottom — it just reads env into these
@@ -131,8 +131,8 @@ export async function provisionRoles(
 
   const sql = postgres(adminConnection, { max: 1 });
   try {
-    // FORCE strategy provisions the non-owner app role OpenGeni connects as.
-    // SCOPED strategy: the host owns the connection role; OpenGeni provisions no
+    // FORCE strategy provisions the non-owner app role Opengeni connects as.
+    // SCOPED strategy: the host owns the connection role; Opengeni provisions no
     // app role (skipped here), only the optional Temporal role.
     let provisionedAppRole: string | null = null;
     if (rlsStrategy === "force") {
@@ -384,7 +384,7 @@ async function executeRoleConvergence(sql: postgres.Sql, statement: string): Pro
 
 /**
  * Fail rather than silently revoking role relationships or transferring owned
- * objects. Those operations have effects outside OpenGeni's runtime grant
+ * objects. Those operations have effects outside Opengeni's runtime grant
  * contract and require an explicit, audited operator decision.
  */
 async function assertAppRoleSafeToNormalize(sql: postgres.Sql, role: string): Promise<void> {
@@ -508,7 +508,7 @@ async function grantTemporalRoleInDatabase(
 }
 
 /**
- * Grant the app role table DML in the OpenGeni data schema + EXECUTE on the
+ * Grant the app role table DML in the Opengeni data schema + EXECUTE on the
  * `opengeni_private` helper functions. Schema-parameterized (Step I): standalone
  * passes `public`; embedded passes the dedicated schema. The grants are guarded
  * on schema existence so provisioning before migrate is a safe no-op.

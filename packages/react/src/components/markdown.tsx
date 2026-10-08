@@ -105,7 +105,7 @@ export type MarkdownProps = {
    */
   onSandboxFile?: ((path: string, line?: number) => void | Promise<void>) | undefined;
   /**
-   * Resolve OpenGeni object links (`artifact:`, `sandbox:`, editable
+   * Resolve Opengeni object links (`artifact:`, `sandbox:`, editable
    * artifacts, Sites) to a host URL or action. Asked before any
    * {@link OpenGeniLinkProvider} above this body; `artifactHref` and
    * `onSandboxFile` still win for their own kinds.
@@ -429,7 +429,7 @@ function isSandboxHref(href: string | undefined): boolean {
 }
 
 /**
- * Parse an OpenGeni `sandbox:` application href (plus the historical bare
+ * Parse an Opengeni `sandbox:` application href (plus the historical bare
  * `/workspace/...` form). The decoded path is intentionally opaque here:
  * target selection, path policy, and filesystem authority belong to the
  * session-aware host and its FileSystem boundary.

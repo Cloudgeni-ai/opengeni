@@ -331,7 +331,7 @@ test("PG: an explicit Codex draft creates with zero credits without refreshing i
   try {
     const draft = {
       expectedRevision: 0,
-      text: "Use the chosen subscription without OpenGeni credits",
+      text: "Use the chosen subscription without Opengeni credits",
       resources: [],
       tools: [],
       toolsProvided: true,

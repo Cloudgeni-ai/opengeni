@@ -1,11 +1,11 @@
 ---
 name: opengeni-spreadsheets
-description: Create, inspect, calculate, edit, import, and export durable OpenGeni spreadsheet artifacts and explicit XLSX/CSV file boundaries. Use for workbooks, formulas, analyses, tables, calculations, and spreadsheet visual QA. Do not use for controlling a live Excel application.
+description: Create, inspect, calculate, edit, import, and export durable Opengeni spreadsheet artifacts and explicit XLSX/CSV file boundaries. Use for workbooks, formulas, analyses, tables, calculations, and spreadsheet visual QA. Do not use for controlling a live Excel application.
 ---
 
-# OpenGeni spreadsheets
+# Opengeni spreadsheets
 
-The durable OpenGeni artifact is the default working workbook. It is the same
+The durable Opengeni artifact is the default working workbook. It is the same
 live object the user sees in the Artifacts dock and grid. Never maintain a
 mutable XLSX shadow or publish a sandbox workbook over user edits.
 

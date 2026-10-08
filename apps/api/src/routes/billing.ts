@@ -556,10 +556,10 @@ export type StripeCheckoutCreditDecision =
   | { action: "ignore"; reason: "foreign_checkout" | "not_payment_mode" | "payment_not_paid" };
 
 /**
- * Decides whether a Checkout Session webhook grants OpenGeni credits.
+ * Decides whether a Checkout Session webhook grants Opengeni credits.
  *
- * Sessions created outside OpenGeni on the same Stripe account carry no
- * `opengeni_` metadata and are acknowledged without effect. An OpenGeni
+ * Sessions created outside Opengeni on the same Stripe account carry no
+ * `opengeni_` metadata and are acknowledged without effect. An Opengeni
  * session with malformed credit metadata still throws so the failure stays
  * visible. Credits are granted once Stripe reports the payment `paid` or a
  * completed checkout fully covered by a coupon:
@@ -617,7 +617,7 @@ async function handleCheckoutSessionPayment(
 }
 
 /**
- * Grants a paid (or fully coupon-covered) OpenGeni checkout's credits once.
+ * Grants a paid (or fully coupon-covered) Opengeni checkout's credits once.
  * The webhook calls this with its event; the checkout status read calls it
  * with the session it retrieved from Stripe when the webhook is late.
  */
@@ -629,7 +629,7 @@ async function grantCheckoutSessionCredits(
   const decision = stripeCheckoutCreditDecision(session);
   if (decision.action === "ignore") {
     if (decision.reason === "foreign_checkout") {
-      console.info("[api] stripe webhook ignored a checkout session not created by OpenGeni", {
+      console.info("[api] stripe webhook ignored a checkout session not created by Opengeni", {
         stripeEventType: source.stripeEventType ?? null,
         livemode: source.livemode,
       });
@@ -643,7 +643,7 @@ async function grantCheckoutSessionCredits(
     throw new Error("Scoped promotional credits require a fully discounted checkout");
   }
   if (!(await getManagedAccount(deps.db, credit.accountId))) {
-    // Another OpenGeni deployment sharing the Stripe account (or an account
+    // Another Opengeni deployment sharing the Stripe account (or an account
     // removed before a delayed payment settled). Retrying cannot succeed, so
     // acknowledge instead of failing the delivery for days.
     console.info(

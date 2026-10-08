@@ -8,14 +8,14 @@ schema and exact application image before assuming this contract is active.
 
 There is one recurring architectural mistake, not one low-level bug:
 
-> Provider runtime identity was allowed to stand in for durable OpenGeni
+> Provider runtime identity was allowed to stand in for durable Opengeni
 > ownership.
 
 It produced several independent defects:
 
-1. OpenGeni configured Modal boxes to die after two hours and had no transition
+1. Opengeni configured Modal boxes to die after two hours and had no transition
    before that finite deadline.
-2. OpenGeni treated Modal's opaque native snapshot receipt as if Modal promised
+2. Opengeni treated Modal's opaque native snapshot receipt as if Modal promised
    GNU-tar/inode equivalence.
 3. Provider snapshots had no durable creation/deletion ledger, so publication
    races and worker crashes could leak Images.
@@ -28,7 +28,7 @@ It produced several independent defects:
    start, so provider or shell diagnostics appended after stdout could corrupt
    control probes and byte-count records.
 8. A durable `warm` lease was treated as provider-liveness proof. Modal could
-   terminate the exact box while OpenGeni was idle, leaving a false-live pointer
+   terminate the exact box while Opengeni was idle, leaving a false-live pointer
    that was discovered only inside a later user operation.
 9. The private provisioning heartbeat was bound to the lifetime of an
    unresolved provider promise rather than the authoritative turn attempt. A
@@ -48,7 +48,7 @@ It produced several independent defects:
     That could both leak the old provider box and discard the only durable
     recovery path.
 13. A native Modal checkpoint pauses the source box while the provider creates
-    its Image. OpenGeni fenced publication with a generation compare-and-swap
+    its Image. Opengeni fenced publication with a generation compare-and-swap
     but did not fence new provider operations during that pause. A newly
     admitted command could therefore reach Modal and fail with `state paused`;
     rejecting the now-stale checkpoint afterward protected recovery truth but
@@ -57,7 +57,7 @@ It produced several independent defects:
 These defects interact, but no single flag fixes all of them. The remediation
 draws four explicit boundaries:
 
-- the session and mutation ledger are durable OpenGeni truth;
+- the session and mutation ledger are durable Opengeni truth;
 - a sandbox is a finite, replaceable execution instance;
 - a native snapshot is an opaque provider artifact with provider-scoped
   ownership;
@@ -91,8 +91,8 @@ Production uses Modal `snapshot_filesystem`:
 
 - Modal stores the workspace filesystem as an Image.
 - the Agents extension returns a small opaque receipt containing the Image ID;
-- OpenGeni stores that small receipt and its descriptor in PostgreSQL;
-- OpenGeni's new artifact row records ownership/lifecycle for that same Image.
+- Opengeni stores that small receipt and its descriptor in PostgreSQL;
+- Opengeni's new artifact row records ownership/lifecycle for that same Image.
 
 No production workspace tar is stored in this path. The old tar commands merely
 streamed the tree into a hash and discarded the stream. That extra verifier was
@@ -105,7 +105,7 @@ work, not part of the Modal repair.
 
 ### Why verify a Modal snapshot at all?
 
-OpenGeni verifies only its own persisted protocol:
+Opengeni verifies only its own persisted protocol:
 
 - receipt bytes still match their recorded hash and length;
 - receipt and descriptor name the same provider, persistence kind, and Image ID;
@@ -114,7 +114,7 @@ OpenGeni verifies only its own persisted protocol:
 - publication won the exact lease, epoch, source instance, and mutation-revision
   fence.
 
-OpenGeni does not serialize the restored tree through tar, compare inodes, or
+Opengeni does not serialize the restored tree through tar, compare inodes, or
 write/verify a marker. Modal owns Image storage and restore semantics. A marker
 would add another mutable protocol without proving anything the receipt and
 publication fence do not already prove.
@@ -122,7 +122,7 @@ publication fence do not already prove.
 ### What are retained processes?
 
 A yielded Shell/Terminal execution continues after the initiating tool call
-returns. OpenGeni stores a retained-process row plus a non-expiring lease holder
+returns. Opengeni stores a retained-process row plus a non-expiring lease holder
 so it can later poll/write/interrupt that exact provider process and truthfully
 settle its mutation admission.
 
@@ -229,7 +229,7 @@ round trip.
 ### Durable artifact ledger
 
 `sandbox_checkpoint_artifacts` records every Modal Image whose creation result
-returns to the OpenGeni process:
+returns to the Opengeni process:
 
 - source account/workspace/group/lease plus typed provenance;
 - exact capture epoch, instance, and mutation revision for new native captures;
@@ -268,7 +268,7 @@ The reaper:
 - records exponential-backoff failure without dropping ownership;
 - keeps deleted tombstones for 30 days, then prunes at most 500 per pass.
 
-OpenGeni pins Modal JS 0.9.0 and passes `ttlMs: null` for both native snapshot
+Opengeni pins Modal JS 0.9.0 and passes `ttlMs: null` for both native snapshot
 kinds. Modal's 30-day default is not a safe session-recovery lifetime: a
 checkpoint remains provider-retained until this ledger proves its exact Image
 id unreferenced and completes bounded garbage collection.
@@ -276,7 +276,7 @@ id unreferenced and completes bounded garbage collection.
 This keeps one current and one previous checkpoint per lease. Old Images are not
 left around merely because another writer won a race.
 
-OpenGeni's pinned Modal 0.9.0 patch accepts the durable capture-operation UUID as
+Opengeni's pinned Modal 0.9.0 patch accepts the durable capture-operation UUID as
 the provider `snapshotId` for both native snapshot kinds. Temporal retries keep
 that UUID while receiving a new database callback/capture UUID. Repeating the
 same request from an independently resumed handle therefore returns the same
@@ -290,7 +290,7 @@ the same immutable artifact through the unique provider-object ledger, and
 publishes under the current exact claim. An in-process timeout keeps the late
 promise attached to registration/publication; a process death needs no in-memory
 callback. Unknown database commit outcomes are reconciled by the artifact's
-immutable unique identity. OpenGeni still never directly deletes after an
+immutable unique identity. Opengeni still never directly deletes after an
 ambiguous registration failure because the first transaction may already have
 published the Image.
 
@@ -314,7 +314,7 @@ workspace generation may advance independently.
 ### Provider-pause admission gate
 
 A provider-native checkpoint is an exclusive operation on the source box, not a
-read-only observation. Before asking Modal to capture an Image, OpenGeni now
+read-only observation. Before asking Modal to capture an Image, Opengeni now
 claims the exact lease, epoch, instance, and workspace generation durably. A
 claim is admitted only for the exact live turn as the sole holder (or for a
 zero-holder drain) with no unsettled mutation admission. A viewer holder may own
@@ -483,7 +483,7 @@ reclassify unrelated leases.
 Modal-like `execCommand` transports can combine command stdout with provider or
 shell diagnostics. Each confined filesystem/Git transport attempt now emits a
 fresh nonce-bound start frame and a final status frame from an operation
-subshell. OpenGeni accepts only that attempt's exact pair, parses its status
+subshell. Opengeni accepts only that attempt's exact pair, parses its status
 strictly in the shell exit-code range, and returns only the enclosed bytes.
 Provider prelude, trailer, delayed earlier-attempt output, and payload lookalikes
 cannot authenticate the frame; a missing, truncated, or malformed frame fails

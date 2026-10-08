@@ -355,8 +355,8 @@ describe("provider quota exhaustion fails the turn promptly", () => {
     expect(agentRunFailurePayload(new Error("ENOSPC: Disk quota exceeded"))).toEqual({
       error: "ENOSPC: Disk quota exceeded",
     });
-    expect(agentRunFailurePayload(new Error("insufficient OpenGeni credits"))).toEqual({
-      error: "insufficient OpenGeni credits",
+    expect(agentRunFailurePayload(new Error("insufficient Opengeni credits"))).toEqual({
+      error: "insufficient Opengeni credits",
     });
   });
 });

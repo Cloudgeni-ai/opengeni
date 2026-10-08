@@ -668,7 +668,7 @@ function fakeSlack(
         {
           ok: true,
           team_id: options.teamId ?? "T_OPEN_GENI",
-          team: "OpenGeni Test Workspace",
+          team: "Opengeni Test Workspace",
           user_id: options.botUserId ?? "U_OPEN_GENI",
           bot_id: options.botId ?? "B_OPEN_GENI",
         },
@@ -683,8 +683,8 @@ function fakeSlack(
           is_bot: true,
           deleted: false,
           profile: {
-            display_name: options.displayName ?? "OpenGeni",
-            real_name: options.realName ?? "OpenGeni",
+            display_name: options.displayName ?? "Opengeni",
+            real_name: options.realName ?? "Opengeni",
             api_app_id: options.installedAppId ?? "A_OPEN_GENI",
           },
         },
@@ -1184,7 +1184,7 @@ describe("Slack files.list pagination adapter", () => {
   });
 });
 
-describe("OpenGeni Slack bot credential verification", () => {
+describe("Opengeni Slack bot credential verification", () => {
   test("exchanges the authorization code server-side with the configured callback", async () => {
     let requestUrl = "";
     let requestInit: RequestInit | undefined;
@@ -1273,7 +1273,7 @@ describe("OpenGeni Slack bot credential verification", () => {
     const exact = fakeSlack({ scopes: OPENGENI_SLACK_BOT_REQUIRED_SCOPES });
     const verified = await verifyOpenGeniSlackBotCredential(
       fixtureBotToken(),
-      { appId: "A_OPEN_GENI", displayName: "OpenGeni" },
+      { appId: "A_OPEN_GENI", displayName: "Opengeni" },
       exact.fetch,
       new Date("2026-01-02T03:04:05.000Z"),
     );
@@ -1282,7 +1282,7 @@ describe("OpenGeni Slack bot credential verification", () => {
       metadata: {
         credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
         slackTeamId: "T_OPEN_GENI",
-        botDisplayName: "OpenGeni",
+        botDisplayName: "Opengeni",
         verifiedAt: "2026-01-02T03:04:05.000Z",
       },
     });
@@ -1291,16 +1291,16 @@ describe("OpenGeni Slack bot credential verification", () => {
 
     const staging = await verifyOpenGeniSlackBotCredential(
       fixtureBotToken(),
-      { appId: "A_OPEN_GENI", displayName: "OpenGeni Staging" },
-      fakeSlack({ displayName: "", realName: "OpenGeni" }).fetch,
+      { appId: "A_OPEN_GENI", displayName: "Opengeni Staging" },
+      fakeSlack({ displayName: "", realName: "Opengeni" }).fetch,
       new Date("2026-01-02T03:04:05.000Z"),
     );
-    expect(staging.metadata.botDisplayName).toBe("OpenGeni Staging");
+    expect(staging.metadata.botDisplayName).toBe("Opengeni Staging");
 
     await expect(
       verifyOpenGeniSlackBotCredential(
         fixtureBotToken(),
-        { appId: "A_OPEN_GENI", displayName: "OpenGeni" },
+        { appId: "A_OPEN_GENI", displayName: "Opengeni" },
         fakeSlack({
           scopes: OPENGENI_SLACK_BOT_REQUIRED_SCOPES.filter((scope) => scope !== "groups:history"),
         }).fetch,
@@ -1318,7 +1318,7 @@ describe("OpenGeni Slack bot credential verification", () => {
       await expect(
         verifyOpenGeniSlackBotCredential(
           fixtureBotToken(),
-          { appId: "A_OPEN_GENI", displayName: "OpenGeni" },
+          { appId: "A_OPEN_GENI", displayName: "Opengeni" },
           fakeSlack({ scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, unsafe] }).fetch,
         ),
       ).rejects.toThrow("do not satisfy");
@@ -1326,7 +1326,7 @@ describe("OpenGeni Slack bot credential verification", () => {
     await expect(
       verifyOpenGeniSlackBotCredential(
         fixtureBotToken(),
-        { appId: "A_OPEN_GENI", displayName: "OpenGeni" },
+        { appId: "A_OPEN_GENI", displayName: "Opengeni" },
         fakeSlack({
           scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, "chat:write.public"],
         }).fetch,
@@ -1335,7 +1335,7 @@ describe("OpenGeni Slack bot credential verification", () => {
     await expect(
       verifyOpenGeniSlackBotCredential(
         fixtureBotToken(),
-        { appId: "A_DIFFERENT_APP", displayName: "OpenGeni" },
+        { appId: "A_DIFFERENT_APP", displayName: "Opengeni" },
         fakeSlack().fetch,
       ),
     ).rejects.toThrow("does not belong to the authorized Slack app");
@@ -1547,7 +1547,7 @@ async function withFailingConnectionInsert<T>(
   }
 }
 
-describe("OpenGeni Slack bot connection", () => {
+describe("Opengeni Slack bot connection", () => {
   test("requires connections:write before starting Slack OAuth", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -1732,7 +1732,7 @@ describe("OpenGeni Slack bot connection", () => {
       metadata: {
         credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
         slackTeamId: "T_OPEN_GENI",
-        botDisplayName: "OpenGeni",
+        botDisplayName: "Opengeni",
       },
     });
     expect(connection?.verifiedInstallAt).not.toBeNull();
@@ -1778,10 +1778,10 @@ describe("OpenGeni Slack bot connection", () => {
         workspaceId: workspace.workspaceId,
         connectionId: body.connection.id,
         slackTeamId: "T_OPEN_GENI",
-        slackTeamName: "OpenGeni Test Workspace",
+        slackTeamName: "Opengeni Test Workspace",
         botId: "B_OPEN_GENI",
         botUserId: "U_OPEN_GENI",
-        botDisplayName: "OpenGeni",
+        botDisplayName: "Opengeni",
         state: "active",
         version: 1,
       }),
@@ -2023,10 +2023,10 @@ describe("OpenGeni Slack bot connection", () => {
         credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
         credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
         slackTeamId: "T_OPEN_GENI",
-        slackTeamName: "OpenGeni Test Workspace",
+        slackTeamName: "Opengeni Test Workspace",
         botUserId: "U_OPEN_GENI",
         botId: "B_OPEN_GENI",
-        botDisplayName: "OpenGeni",
+        botDisplayName: "Opengeni",
         verifiedAt: new Date().toISOString(),
       },
     });
@@ -5180,7 +5180,7 @@ describe("scheduled task posting to a fixed Slack channel", () => {
       },
       createdBy: { kind: "service", subjectId: "scheduler" },
       createdByContext: {
-        label: "OpenGeni scheduler",
+        label: "Opengeni scheduler",
         scheduledTaskId: task.id,
         scheduledTaskRunId: runId,
       },

@@ -24,7 +24,7 @@ export type ModelCallUsageInput = {
 
 /**
  * A single provider usage frame above one billion tokens is outside every
- * supported OpenGeni model contract. Keeping the ceiling explicit also prevents
+ * supported Opengeni model contract. Keeping the ceiling explicit also prevents
  * malformed-but-finite provider values from corrupting durable accounting or a
  * process-lifetime Prometheus counter.
  */

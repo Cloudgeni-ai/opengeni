@@ -13,8 +13,8 @@ tokens. It never writes text, so the agent still writes the answer.
 
 ## Measured effect
 
-- **Investigation questions, in OpenGeni.** 26 real code questions from
-  staging, answered twice per arm by the OpenGeni agent (gpt-6-astra) on a
+- **Investigation questions, in Opengeni.** 26 real code questions from
+  staging, answered twice per arm by the Opengeni agent (gpt-6-astra) on a
   Connected Machine, with the tool on and off in parallel, graded blind by two
   graders. With the current wording: cost -6.6% (95% CI 2-12%), wall time -9.1%
   (5-13%), 1.4 fewer model requests per question, answer quality at parity.
@@ -133,7 +133,7 @@ The rule is path exclusion at the source, never content redaction:
 - ripgrep searches an explicitly named path even when a glob excludes it, so an
   explicit `paths` entry into one of them is ignored like a missing path. The
   engine checks the normalized path case-insensitively (`./.opengeni`,
-  `.OpenGeni`, `a/../x` and backslashes included), and `codeSearchRipgrep`
+  `.Opengeni`, `a/../x` and backslashes included), and `codeSearchRipgrep`
   refuses such a path again.
 - ripgrep follows a symlink named as a search root, so `codeSearchPathKinds`
   resolves each path physically and reports one that lands in a credential
@@ -220,7 +220,7 @@ The tool reports problems to the agent instead of degrading silently:
 ## Cost
 
 Jev runs on the deployment's TypeSafe key, so the tool works whatever the
-workspace uses for its chat model: OpenGeni credits, its own subscription or
+workspace uses for its chat model: Opengeni credits, its own subscription or
 its own API keys. It costs about $0.006 per call. Every completed call records
 two usage events against its workspace, session, turn and attempt:
 `code_search.jev_input_tokens` (tokens) and `code_search.jev_cost`

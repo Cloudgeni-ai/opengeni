@@ -705,7 +705,7 @@ describe("schedule errors", () => {
     expect(
       scheduleErrorText(
         new Error(
-          "OpenGeni API 422: self-hosted scheduled tasks require a Connected Machine; select a machine before saving Reference: 58f70db6-fcc9-4e4a-8b58-064908f49d53.",
+          "Opengeni API 422: self-hosted scheduled tasks require a Connected Machine; select a machine before saving Reference: 58f70db6-fcc9-4e4a-8b58-064908f49d53.",
         ),
       ),
     ).toBe(

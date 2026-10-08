@@ -1,5 +1,5 @@
 # docker/desktop.Dockerfile
-# OpenGeni canonical DESKTOP sandbox image (Channel B pixel plane + Channel A headless).
+# Opengeni canonical DESKTOP sandbox image (Channel B pixel plane + Channel A headless).
 #
 # Productionized from spikes/desktop-stack (PASSED locally: noVNC vnc.html 200,
 # websockify WS upgrade 101 + RFB banner, OCR'd SECRET123 off the live framebuffer)
@@ -9,7 +9,7 @@
 # The stack (Xvfb -> XFCE -> x11vnc -viewonly -> websockify:6080 -> noVNC) is launched
 # via ensureDisplayStack over `exec` (NOT a container CMD) so it re-establishes
 # idempotently after a snapshot rollover / box re-election. The entrypoint stays
-# `sleep infinity`: OpenGeni / the provider owns the keep-alive root, the stack is a
+# `sleep infinity`: Opengeni / the provider owns the keep-alive root, the stack is a
 # set of idempotent exec commands.
 #
 # MANDATORY (the 07-credentialed finding): DEBIAN_FRONTEND=noninteractive + TZ=Etc/UTC

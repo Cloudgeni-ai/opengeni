@@ -20,7 +20,7 @@ for a channel to the same replica (consistent-hash / session affinity keyed on
 the channel) whenever more than one relay replica runs. See `docs/deployment.md`
 (Connected Machines) for the full relay/NATS/secret wiring.
 
-Keep OpenGeni workloads in the provider-neutral Helm chart. This root should only create cloud substrate and emit non-secret Helm values.
+Keep Opengeni workloads in the provider-neutral Helm chart. This root should only create cloud substrate and emit non-secret Helm values.
 
 Managed Postgres defaults to `edition = "ENTERPRISE"` and `availability_type = "REGIONAL"` for production resilience. Short-lived evaluation stacks can set `postgres.availability_type = "ZONAL"` with `deletion_protection = false` to reduce cost.
 
@@ -47,4 +47,4 @@ terraform -chdir=deploy/terraform/gcp apply -var-file=terraform.tfvars
 ```
 
 Do not commit state, kubeconfigs, generated database passwords, service-account keys, GCP credentials, or filled secret values.
-The official Temporal chart still needs durable Postgres databases prepared outside the OpenGeni app chart before Helm install.
+The official Temporal chart still needs durable Postgres databases prepared outside the Opengeni app chart before Helm install.

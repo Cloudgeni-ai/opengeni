@@ -265,7 +265,7 @@ export function formatNativeRelativeTime(
 
   const days = Math.floor(hours / 24);
   if (days < 14) return formatLabel(labels.relativeDays, { value: days });
-  // oxlint-disable-next-line architecture/no-unsafe-date-format -- Timeline age intentionally matches OpenGeni's device-local relative-time formatter; this is not an organization-domain date.
+  // oxlint-disable-next-line architecture/no-unsafe-date-format -- Timeline age intentionally matches Opengeni's device-local relative-time formatter; this is not an organization-domain date.
   return new Date(iso).toLocaleDateString();
 }
 

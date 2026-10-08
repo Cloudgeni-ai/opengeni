@@ -196,7 +196,7 @@ export type AppDependencies = {
    * App credentials; standalone deployments fall back to @opengeni/github.
    */
   githubAppApi?: GitHubAppApiPort;
-  /** Optional provider seam for the separately registered OpenGeni Lens App. */
+  /** Optional provider seam for the separately registered Opengeni Lens App. */
   prReviewGithubAppApi?: GitHubAppApiPort;
   /**
    * Optional host-owned connection credential seam. API-side consumers use

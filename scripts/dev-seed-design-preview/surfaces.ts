@@ -91,7 +91,7 @@ export const DISPLAY_ACTIVE_SCHEDULES: Record<string, string[]> = {
   "Design preview": ["Screenshot regression sweep"],
 };
 
-const SCHEDULER = { kind: "service", label: "OpenGeni scheduler", subjectId: "scheduler" } as const;
+const SCHEDULER = { kind: "service", label: "Opengeni scheduler", subjectId: "scheduler" } as const;
 export const SCHEDULER_INITIATOR = SCHEDULER;
 
 const awsRun = (anomaly: string | null) => (b: ConversationBuilder) => {

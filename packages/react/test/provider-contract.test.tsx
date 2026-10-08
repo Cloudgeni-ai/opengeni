@@ -107,7 +107,7 @@ describe("OpenGeniProvider deployment contract", () => {
     sessionStorage.removeItem(`opengeni.reloadForApiContract:${actual}`);
   });
 
-  test("embedded hosts are never blocked or reloaded when OpenGeni changes its contract", async () => {
+  test("embedded hosts are never blocked or reloaded when Opengeni changes its contract", async () => {
     const actual = "future-contract-embedded";
     let workspaceReads = 0;
     const client = fakeClient({

@@ -121,7 +121,7 @@ new writes use `voiceInput`.
 Finalization verifies the client totals against durable upload truth, reads every
 chunk from object storage, and checks exact byte length and SHA-256 before ffmpeg
 sees it. Segmentation produces mono 16 kHz PCM WAV output. The segment duration
-is the lower of the OpenGeni 50-second target and the selected service's maximum;
+is the lower of the Opengeni 50-second target and the selected service's maximum;
 recordings that would require more than 1,000 segments fail before ffmpeg starts.
 Generation and pre-provider attempt leases become reclaimable after 15 minutes.
 Immediately before a provider call, the server refreshes the durable attempt

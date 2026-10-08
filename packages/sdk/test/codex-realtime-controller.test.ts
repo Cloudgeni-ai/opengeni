@@ -937,7 +937,7 @@ describe("Codex realtime browser controller", () => {
     }
   });
 
-  test("rotates at OpenGeni's proactive-rotation interval, reuses media, and retires the old generation only after activation", async () => {
+  test("rotates at Opengeni's proactive-rotation interval, reuses media, and retires the old generation only after activation", async () => {
     const browser = rotatingBrowserFixture();
     const timers = timerFixture();
     const storage = storageFixture();

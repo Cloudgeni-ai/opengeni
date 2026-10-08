@@ -22,7 +22,7 @@ import { startDatabaseTiming } from "./database-timing";
 // `PostgresJsDatabase<typeof schema>` to `PgDatabase<any, typeof schema>` is a
 // pure TYPE change — no runtime behavior changes — that lets an embedded host
 // inject ANY drizzle pg driver handle (node-postgres, neon-http, etc.) bound to
-// OpenGeni's schema, not just the postgres-js handle `createDb` builds. The
+// Opengeni's schema, not just the postgres-js handle `createDb` builds. The
 // `any` for the query-result HKT is deliberate: it keeps `db.execute(sql\`…\`)`
 // callable across drivers whose raw-result shapes differ (postgres-js returns a
 // row array; node-postgres returns `{ rows }`). The three raw `db.execute(…)`
@@ -146,16 +146,16 @@ type RlsContextSettings = {
 };
 
 /**
- * RLS posture for the connection OpenGeni's query layer runs over (Step I, §7.7).
+ * RLS posture for the connection Opengeni's query layer runs over (Step I, §7.7).
  *
- * - `"force"` (DEFAULT — today's standalone behavior, byte-for-byte): OpenGeni
+ * - `"force"` (DEFAULT — today's standalone behavior, byte-for-byte): Opengeni
  *   connects as a NON-OWNER role (`opengeni_app`) and every table carries
  *   `FORCE ROW LEVEL SECURITY`, so the workspace/account GUCs set by
  *   `setRlsContext` are the ONLY thing that admits rows — even the table owner
  *   is subject to RLS. This is the Fork-A isolation guarantee.
- * - `"scoped"` (embedded Fork-B opt-in): the host runs OpenGeni's queries over a
+ * - `"scoped"` (embedded Fork-B opt-in): the host runs Opengeni's queries over a
  *   role that OWNS the dedicated schema (RLS need not be forced for that role),
- *   relying on the host's own tenant boundary. OpenGeni STILL emits the
+ *   relying on the host's own tenant boundary. Opengeni STILL emits the
  *   `set_config('opengeni.account_id'/'workspace_id', …)` GUCs defensively on
  *   every scoped query, so the application query path is byte-identical between
  *   the two strategies and the app code is RLS-mode-agnostic. The strategy is a
@@ -173,7 +173,7 @@ export type RlsStrategy = "force" | "scoped";
  * against Better Auth's `auth_users` table (see `getManagedUserByEmail`), which
  * relies on the postgres-js array-shaped `db.execute` result. An embedded host
  * whose identity lives elsewhere (a different IdP table, a different driver, or
- * a non-`auth_users` user store) injects this closure so OpenGeni never touches
+ * a non-`auth_users` user store) injects this closure so Opengeni never touches
  * `auth_users` directly. Returns the user id, or null when no such user exists.
  */
 export type UserLookup = (db: Database, email: string) => Promise<string | null>;
@@ -247,7 +247,7 @@ export function rlsStrategyFor(db: Database): RlsStrategy {
  * deliberately sets the query-result HKT to `any` so `db.execute(…)` is callable
  * across drivers whose raw-result shapes differ (postgres-js → row array;
  * node-postgres → `{ rows }`). A side effect is that `db.execute<T>(…)` now
- * resolves to `any`, erasing the per-row element type at the call site. OpenGeni's
+ * resolves to `any`, erasing the per-row element type at the call site. Opengeni's
  * OWN internal raw queries usually run over the postgres-js handle `createDb`
  * builds (array result), while an embedded host may inject a node-postgres style
  * driver (`{ rows }`). Normalize those two standard shapes in one place; reject
@@ -451,7 +451,7 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
   // Transaction-local writer identity covers supported injected/embedded
   // database handles whose connection-level application_name is host-owned.
   // Standalone createDb connections also carry version receipts in their exact
-  // application_name, while old OpenGeni binaries set neither current receipt.
+  // application_name, while old Opengeni binaries set neither current receipt.
   //
   // JIT is off for these short request transactions: row-level security
   // functions inflate planner cost estimates past jit_above_cost, so PostgreSQL

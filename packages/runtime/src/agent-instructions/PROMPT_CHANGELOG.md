@@ -1,5 +1,10 @@
 # Modular prompt changelog
 
+Product identity and generated guidance now spell the brand Opengeni in both
+legacy and modular compositions. Only capitalization changes; instruction
+behavior and layer order are preserved. Legacy prompt digests are refreshed
+for this shared identity change. Reserved protocol namespaces remain stable.
+
 Sessions with an agent configuration (`sessions.agent_config` non-null) get their
 system instructions from this folder. Sessions without one keep the legacy
 composition (`operational-instructions.ts` + the persona template + CORE in

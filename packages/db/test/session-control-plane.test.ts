@@ -2482,7 +2482,7 @@ describe("clean session control plane", () => {
     ).toBe(true);
     expect(canonicalMixedOutput.at(-1)).toEqual({
       type: "input_text",
-      text: "[OpenGeni omitted 105 structured array items]",
+      text: "[Opengeni omitted 105 structured array items]",
     });
     expect(JSON.stringify(boundModelToolOutputItem(canonicalMixed))).toBe(
       JSON.stringify(canonicalMixed),

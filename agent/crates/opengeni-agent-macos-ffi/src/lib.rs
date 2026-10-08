@@ -1,6 +1,6 @@
 //! macOS desktop FFI, wrapped behind a small **safe** API.
 //!
-//! This is the leaf crate that lets the OpenGeni agent's desktop backend drive a
+//! This is the leaf crate that lets the Opengeni agent's desktop backend drive a
 //! real Mac: ScreenCaptureKit screenshots, CGEvent synthetic input, and the TCC
 //! (Screen Recording + Accessibility) preflight/grant calls. All of that is Apple
 //! FFI — `objc2` message sends, C functions, ARC/pointer handoff — which is

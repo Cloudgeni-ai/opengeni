@@ -215,7 +215,7 @@ function normalizeConfiguredPorts(ports: readonly number[] | undefined): number[
 function assertNoSnapshot(args: ReturnType<typeof normalizeSandboxClientCreateArgs>): void {
   if (args.snapshot && (args.snapshot as { type?: unknown }).type !== "noop") {
     throw new SandboxUnsupportedFeatureError(
-      "OpenSandbox v1 uses OpenGeni portable workspace archives and does not accept SDK snapshot specs.",
+      "OpenSandbox v1 uses Opengeni portable workspace archives and does not accept SDK snapshot specs.",
     );
   }
 }

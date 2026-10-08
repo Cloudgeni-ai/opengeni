@@ -49,7 +49,7 @@ export function shellCodemodePath(value: string): string {
  * Derive the per-session token file beside the legacy manifest pointer.
  *
  * The manifest pointer stays box-global so an already-warm shared sandbox does
- * not receive an illegal environment delta. Every OpenGeni command overrides
+ * not receive an illegal environment delta. Every Opengeni command overrides
  * that pointer with this deterministic path. The hash is path hygiene and
  * avoids disclosing host/session ids in filenames; filesystem paths are not an
  * authorization boundary. The delegated bearer's session claim remains the

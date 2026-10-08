@@ -619,7 +619,7 @@ function openGeniSlackBotMetadataLabel(connection: ConnectionMetadata): string {
 }
 
 /**
- * The one destination a scheduled run may post to as the OpenGeni bot: the
+ * The one destination a scheduled run may post to as the Opengeni bot: the
  * channel a person chose on the task, through the bot connection frozen on the
  * run's session. The agent never supplies a channel. Every call re-reads the
  * task, so a person clearing or changing the channel takes effect at once.

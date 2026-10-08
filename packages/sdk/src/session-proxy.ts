@@ -43,7 +43,7 @@ export {
 
 type ProxyClient = OpenGeniEmbeddingClient;
 
-/** The `@opengeni/sdk/chat` `OpenGeni` facade, structurally. */
+/** The `@opengeni/sdk/chat` `Opengeni` facade, structurally. */
 type ProxyFacade = {
   readonly client: ProxyClient;
   readonly source: string;
@@ -55,7 +55,7 @@ type ProxyFacade = {
  * Who the authenticated request acts as, in your own ids. Never derive any of
  * it from the request body or path. `{ user, tenant }`: one workspace per
  * tenant. `{ user }`: one workspace per user. `{ user, workspaceId }`: your
- * own workspace. Tenant and per-user mapping require the `OpenGeni` facade
+ * own workspace. Tenant and per-user mapping require the `Opengeni` facade
  * from `@opengeni/sdk/chat`; workspaces are created on first use and Opengeni
  * adds the user on their first request.
  */
@@ -187,7 +187,7 @@ export type SessionProxyHandlerOptions = {
   authorizeMutation?: ((request: Request) => boolean | Promise<boolean>) | undefined;
   /**
    * Optional product-level session check (for example "this ticket's session
-   * belongs to this user"). OpenGeni still enforces membership and private
+   * belongs to this user"). Opengeni still enforces membership and private
    * visibility on every call.
    */
   authorizeSession?:
@@ -240,7 +240,7 @@ export type SessionProxyHandlerOptions = {
    * computer screenshots, published sandbox files, and generated video
    * playback. Workspace-level artifact reads must name their session in the
    * `x-opengeni-session-id` header (`SessionConversation` does this); the proxy
-   * runs `authorizeSession` and only forwards an artifact OpenGeni proves that
+   * runs `authorizeSession` and only forwards an artifact Opengeni proves that
    * session produced. Defaults to true.
    */
   files?: boolean | undefined;
@@ -254,7 +254,7 @@ export type SessionProxyHandlerOptions = {
   visitorUploads?: boolean | undefined;
   /**
    * Forward composer voice input (`POST .../transcriptions`, one recording per
-   * request) as the resolved user; OpenGeni still requires that user's
+   * request) as the resolved user; Opengeni still requires that user's
    * `sessions:create` permission and the workspace's voice-input setting.
    * `false` reports voice input unavailable in the client config so stock UIs
    * hide the microphone. Defaults to true.
@@ -277,7 +277,7 @@ export type SessionProxyHandlerOptions = {
   /**
    * Let the browser read a file from the session's sandbox (`POST .../fs/read`)
    * so `sandbox:` links in agent replies can be downloaded. Only `path`,
-   * `encoding`, and `maxBytes` are forwarded; OpenGeni still requires the
+   * `encoding`, and `maxBytes` are forwarded; Opengeni still requires the
    * user's `files:read` permission on that session. Explicit opt-in, default
    * false. Reads are confined to its working directory, including on Connected
    * Machines; symlinked paths are refused.
@@ -290,12 +290,12 @@ export type SessionProxyHandlerOptions = {
    *
    * Every request must name its session in the `x-opengeni-session-id` header
    * (`SessionArtifactViewer` and `SessionConversation` do this). The proxy
-   * runs `authorizeSession`, then only forwards an artifact OpenGeni associates with
+   * runs `authorizeSession`, then only forwards an artifact Opengeni associates with
    * that session, so the browser cannot open other workspace artifacts through
    * it. Editing still requires the user's own `artifacts:publish` grant. Site
    * tool calls are not proxied.
    *
-   * The editor's live socket is ticket-authenticated and connects to OpenGeni
+   * The editor's live socket is ticket-authenticated and connects to Opengeni
    * directly; the ticket binds the source session and the API revalidates its
    * authority while connected. `editableLiveUrl` overrides the derived URL.
    * Site HTML streams with backpressure and cancellation, with a 25 MiB
@@ -307,7 +307,7 @@ export type SessionProxyHandlerOptions = {
   /**
    * Chat list for `SessionList` / `OpenGeniChat` (`listSessionPage` only).
    * `"mine"` (default) lists sessions the resolved user created; `"visible"`
-   * lists every session OpenGeni lets that user read in the workspace (shared
+   * lists every session Opengeni lets that user read in the workspace (shared
    * chats included); `false` disables listing.
    */
   sessionList?: "mine" | "visible" | false | undefined;
@@ -653,7 +653,7 @@ export function createSessionProxyHandler(
       if (root === "config") {
         if (rest.length === 1 && rest[0] === "client" && method === "GET") {
           // The browser speaks this proxy's contract, not the upstream deployment's:
-          // report the server SDK's revision so an OpenGeni deploy never makes the
+          // report the server SDK's revision so an Opengeni deploy never makes the
           // embedded page look stale (and never triggers a host reload).
           const config = await client.requestJson<Record<string, unknown>>(
             "GET",
@@ -799,7 +799,7 @@ export function createSessionProxyHandler(
       }
 
       if (area === "artifacts") {
-        // Retained media a session produced: only an artifact OpenGeni proves
+        // Retained media a session produced: only an artifact Opengeni proves
         // that session produced, never an arbitrary workspace artifact.
         const [artifactId, ...artifactOp] = tail as [string | undefined, ...string[]];
         const route = `${method} ${artifactOp.join("/")}`;
@@ -1250,7 +1250,7 @@ function normalizeToolServer(toolServer: SessionProxyToolServer): NormalizedTool
     );
   }
   if (url.protocol !== "https:") {
-    // OpenGeni calls the tool server from its own network; use a tunnel locally.
+    // Opengeni calls the tool server from its own network; use a tunnel locally.
     throw new TypeError("toolServer.url must be an absolute https:// URL.");
   }
   const id = toolServer.id ?? "app";
@@ -1321,7 +1321,7 @@ const TICKET_FIELDS = [
   "commandProtocolVersion",
   "committedTransactionProtocolVersion",
 ] as const;
-// Same delivery contract as OpenGeni's own route: the browser fetches the
+// Same delivery contract as Opengeni's own route: the browser fetches the
 // HTML and renders it in a sandboxed frame; opening the URL downloads it.
 const SITE_HTML_HEADERS = {
   "Content-Type": "text/html; charset=utf-8",
@@ -1941,7 +1941,7 @@ function warnRejectedApiKey(error: OpenGeniApiError, notice: { sent: boolean }):
   );
 }
 
-/** Preserve OpenGeni's error envelope so the browser SDK keeps codes, retryability, and outcome facts. */
+/** Preserve Opengeni's error envelope so the browser SDK keeps codes, retryability, and outcome facts. */
 function errorResponse(error: unknown, rejectedKeyNotice: { sent: boolean }): Response {
   if (error instanceof ProxyRejection) return errorJson(error.status, error.code, error.message);
   if (error instanceof OpenGeniSetupError) {

@@ -37,7 +37,7 @@ export function frozenScheduledOccurrenceInitiator(
   return {
     initiator:
       task.createdBy.subjectId === "scheduler" && !task.createdBy.label
-        ? { ...task.createdBy, label: "OpenGeni scheduler" }
+        ? { ...task.createdBy, label: "Opengeni scheduler" }
         : task.createdBy,
     context: { ...serviceContext, ...scheduler.context },
     initiatingHumanSubjectId: null,

@@ -49,7 +49,7 @@ use crate::job::{run_job, JobCommand, JobConfig, JobEnd, JobExit, JobHooks, JobP
 pub const LEGACY_ORIGIN: &str = "legacy";
 
 /// Builds the process-internal operation identity. The wire id remains unchanged;
-/// the local connection scope prevents unrelated OpenGeni deployments from
+/// the local connection scope prevents unrelated Opengeni deployments from
 /// colliding in the shared registry/admission/router.
 #[must_use]
 pub fn scoped_op_id(scope: &str, wire_op_id: &str) -> OpId {

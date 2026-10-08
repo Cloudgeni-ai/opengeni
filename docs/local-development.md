@@ -79,7 +79,7 @@ after successful canonical main CI; a just-merged or modified checkout may need
 a source build until matching assets exist. Download-cache reuse rechecks provider
 metadata; already prepared installations can be reused offline without Rust.
 No unrelated latest binary is substituted. For a source build,
-OpenGeni reads `packages/artifact-tool/kernel/rust-toolchain.toml` and
+Opengeni reads `packages/artifact-tool/kernel/rust-toolchain.toml` and
 invokes Cargo and rustc through `rustup run <exact-pin>`; unrelated Homebrew or
 system Rust binaries earlier on `PATH` are ignored. Cargo is also bound to the
 pinned toolchain's absolute compiler path, so ambient compiler/wrapper variables

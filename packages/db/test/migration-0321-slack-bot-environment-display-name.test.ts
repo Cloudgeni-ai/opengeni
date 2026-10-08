@@ -33,7 +33,7 @@ describe("migration 0321 Slack bot environment display name", () => {
       where conrelid = 'slack_installation_bindings'::regclass
         and conname = 'slack_installation_bindings_identity_check'`;
     expect(constraint?.definition).toContain(
-      "bot_display_name = ANY (ARRAY['OpenGeni'::text, 'OpenGeni Staging'::text])",
+      "bot_display_name = ANY (ARRAY['Opengeni'::text, 'Opengeni Staging'::text, 'OpenGeni'::text, 'OpenGeni Staging'::text])",
     );
   });
 });

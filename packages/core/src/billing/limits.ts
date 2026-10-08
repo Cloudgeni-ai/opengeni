@@ -145,7 +145,7 @@ async function checkCreditBalance(
   externallyBilled: boolean,
 ): Promise<LimitDecision> {
   if (externallyBilled) {
-    return { allowed: true }; // paid outside OpenGeni — zero OpenGeni credits
+    return { allowed: true }; // paid outside Opengeni — zero Opengeni credits
   }
   if (!usesCreditLimits(deps) || !isCostlyAction(input.action)) {
     return { allowed: true };

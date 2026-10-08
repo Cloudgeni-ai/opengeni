@@ -555,7 +555,7 @@ export default defineConfig({
             response.end(archive);
           } catch {
             response.statusCode = 503;
-            response.end("OpenGeni Browser extension is not built yet.");
+            response.end("Opengeni Browser extension is not built yet.");
           }
         });
       },

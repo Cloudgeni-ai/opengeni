@@ -145,7 +145,7 @@ async function botConnection(grant: Awaited<ReturnType<typeof workspaceGrant>>) 
       botUserId: `U${identity}`,
       botId: `B${identity}`,
       // The verified installation binding requires the canonical bot identity.
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: new Date(0).toISOString(),
     },
     createdBySubjectId: grant.subjectId,

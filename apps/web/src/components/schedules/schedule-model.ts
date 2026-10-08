@@ -547,14 +547,14 @@ export function updateRequestFromDraft(
    -------------------------------------------------------------------------- */
 
 /**
- * What the server said, in a sentence, without the "OpenGeni API 422:" prefix
+ * What the server said, in a sentence, without the "Opengeni API 422:" prefix
  * or the request reference (that belongs in Technical details).
  */
 export function scheduleErrorText(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
   const clean = raw
     .replace(/\s*Reference:\s*[\w-]+\.?\s*$/i, "")
-    .replace(/^OpenGeni API \d+:\s*/i, "")
+    .replace(/^(?:Opengeni|OpenGeni) API \d+:\s*/i, "")
     .replace(/^API\s+\d+:\s*/i, "")
     .trim();
   if (!clean) return "Something went wrong. Try again.";
@@ -569,11 +569,11 @@ export function scheduleErrorReference(error: unknown): string | undefined {
 }
 
 /* ----------------------------------------------------------------------------
-   Create with OpenGeni.
+   Create with Opengeni.
    -------------------------------------------------------------------------- */
 
 /**
- * The first message of a "Create with OpenGeni" chat. The person says what
+ * The first message of a "Create with Opengeni" chat. The person says what
  * should happen and how often. Setup guidance belongs in the bundled
  * opengeni-schedules Skill, which the agent reads when this request is relevant.
  */

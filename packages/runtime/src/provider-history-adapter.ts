@@ -46,7 +46,7 @@ function historicalFact(item: Record<string, unknown>): Record<string, unknown> 
     // This is transcript evidence, never a privileged instruction. Keeping it
     // in the assistant role avoids elevating arbitrary historical tool output.
     role: "assistant",
-    content: `[OpenGeni historical ${String(item.type ?? "provider item")} fact]\n${boundedJson(item)}`,
+    content: `[Opengeni historical ${String(item.type ?? "provider item")} fact]\n${boundedJson(item)}`,
   };
 }
 

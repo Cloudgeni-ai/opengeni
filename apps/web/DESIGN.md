@@ -320,7 +320,7 @@ Cancel and the action as the primary.
 - No scopes, IDs, UUIDs, enums, tags, endpoints or registry names outside "Technical details" or a
   CopyField.
 - Unavailable: say why and who can fix it, and disable or hide the action.
-- Errors: what happened + what to do. Never a raw `OpenGeni API 404 ... Reference: <uuid>` string;
+- Errors: what happened + what to do. Never a raw `Opengeni API 404 ... Reference: <uuid>` string;
   the reference goes in Technical details. Use `lib/api-error.ts`: `userErrorText` for toasts and
   form errors, `ErrorMessage {...apiErrorDetails(error)}` for a failed section (what happened, the
   advice, Try again, the reference behind Technical details).

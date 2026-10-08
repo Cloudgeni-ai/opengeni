@@ -292,7 +292,7 @@ describe("modular composer: identity and precedence (AC12, AC14)", () => {
       agentConfig: { ...base, identity: "You are Acme Assistant." },
     });
     expect(custom.layers[0]).toMatchObject({ id: "identity", content: "You are Acme Assistant." });
-    expect(custom.composed).not.toContain("OpenGeni workspace agent");
+    expect(custom.composed).not.toContain("Opengeni workspace agent");
     expect(custom.layers.slice(1)).toEqual(standard.layers.slice(1));
   });
 

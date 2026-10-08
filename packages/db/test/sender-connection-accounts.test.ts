@@ -611,7 +611,7 @@ test("owner inventory works without private conversation activation and isolates
       reasoningEffort: "low",
       latencyMode: "standard",
       sandboxBackend: "none",
-      createdBy: { kind: "service", subjectId: "scheduler", label: "OpenGeni scheduler" },
+      createdBy: { kind: "service", subjectId: "scheduler", label: "Opengeni scheduler" },
       createdByContext: { scheduledTaskId: scheduled.id, scheduledTaskRunId: run.id },
       createIdempotencyKey: acceptedExecution.generatedSessionBinding!.createIdempotencyKey,
       maxNestedAgentDepthOverride: null,

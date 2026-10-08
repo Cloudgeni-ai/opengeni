@@ -46,9 +46,9 @@ spec:
   groups:
     - name: opengeni.rules
       # Make every alert and recording rule self-identifying when one Prometheus
-      # evaluates more than one OpenGeni deployment. Dashboard and Alertmanager
+      # evaluates more than one Opengeni deployment. Dashboard and Alertmanager
       # consumers can then select the exact release instead of matching globally.
-      # These output labels do not fence input series: every OpenGeni metric and
+      # These output labels do not fence input series: every Opengeni metric and
       # record reference below must also select namespace/release/environment.
       # Scrape-owned up has namespace/release, not exporter environment labels.
       labels:
@@ -161,7 +161,7 @@ spec:
         # single-node profile intentionally leaves the resource-based turn worker
         # unbounded so Temporal can tune concurrency against real headroom. These
         # records map node-exporter instances onto Kubernetes nodes, then retain
-        # alerts only for nodes currently hosting this OpenGeni release.
+        # alerts only for nodes currently hosting this Opengeni release.
         # Group labels identify output series; they do not scope expression
         # inputs. Every reference to a release-owned record must select this
         # deployment, otherwise co-located releases duplicate the join's RHS.
@@ -330,7 +330,7 @@ spec:
         # Per model request (every tool-loop step, not only the first): SDK
         # model entry -> literal provider dispatch. Admission, the durable
         # history checkpoint, credit revalidation and the request audit are
-        # OpenGeni work and should stay well under a second.
+        # Opengeni work and should stay well under a second.
         - alert: OpenGeniModelRequestPreDispatchP95High
           expr: |
             histogram_quantile(

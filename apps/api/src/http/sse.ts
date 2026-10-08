@@ -704,7 +704,7 @@ export type WorkspaceInteractionSseOptions = SseDeliveryOptions & {
 
 /**
  * One HTTP connection for the two workspace-wide invalidation domains used by
- * every visible OpenGeni surface. Keeping these as separate HTTP/1 streams
+ * every visible Opengeni surface. Keeping these as separate HTTP/1 streams
  * consumes all six per-origin browser connections with only two windows and
  * starves ordinary mutations/terminal grants. The durable cursors remain
  * independent; this function only multiplexes their already-bounded SSE frames.

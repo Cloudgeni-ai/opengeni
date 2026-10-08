@@ -179,7 +179,7 @@ postgresDescribe("Slack file upload ordinary-RLS durable ledger", () => {
         slackTeamName: "Slack uploads",
         botId: `B${suffix}`,
         botUserId: `U${suffix}`,
-        botDisplayName: "OpenGeni",
+        botDisplayName: "Opengeni",
         verifiedAt: new Date().toISOString(),
       },
     });

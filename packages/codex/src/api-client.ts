@@ -132,7 +132,7 @@ export async function fetchCodexRateLimitResetCredits(
  * POST /wham/rate-limit-reset-credits/consume with the exact v0.144.6 body.
  * `idempotencyKey` identifies one logical human redemption and MUST be reused
  * by the server on retries. Supplying `creditId` is preferred; omission leaves
- * provider selection in control and is therefore not used by OpenGeni's
+ * provider selection in control and is therefore not used by Opengeni's
  * human-only flow.
  */
 export async function consumeCodexRateLimitResetCredit(

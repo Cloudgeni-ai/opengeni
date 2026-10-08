@@ -39,7 +39,7 @@ export const SandboxRecoveryProjection = z
      * new empty workspace because no usable checkpoint survived the loss. */
     automaticLane: z.enum(["checkpoint", "fresh_workspace"]).optional(),
     /** For a timed recovery wait: the earliest time a Retry or a new message
-     * can let OpenGeni decide again. Nothing proceeds by itself before then. */
+     * can let Opengeni decide again. Nothing proceeds by itself before then. */
     availableAt: z.string().datetime().optional(),
   })
   .strict();
@@ -104,7 +104,7 @@ export function automaticSandboxRecoveryDiscontinuity(
     scope === "shared"
       ? "the latest verified checkpoint of the sandbox this session shares with other sessions"
       : "this session's latest verified checkpoint";
-  return `Filesystem discontinuity: after the managed sandbox was lost, OpenGeni selected ${subject}, captured at ${selection.capturedAt} (archive generation ${selection.archiveGeneration}, pre-recovery workspace generation ${selection.workspaceGeneration}). Newer filesystem changes may be unavailable; the generation gap is not a count of lost files or edits. Conversation and tool receipts remain historical evidence, not proof that their files still exist. External effects are not undone. Verify the restored filesystem before relying on previous work. Never automatically replay prior commands or operations with unknown outcomes. Checkpoint selection alone is not proof that restoration succeeded.`;
+  return `Filesystem discontinuity: after the managed sandbox was lost, Opengeni selected ${subject}, captured at ${selection.capturedAt} (archive generation ${selection.archiveGeneration}, pre-recovery workspace generation ${selection.workspaceGeneration}). Newer filesystem changes may be unavailable; the generation gap is not a count of lost files or edits. Conversation and tool receipts remain historical evidence, not proof that their files still exist. External effects are not undone. Verify the restored filesystem before relying on previous work. Never automatically replay prior commands or operations with unknown outcomes. Checkpoint selection alone is not proof that restoration succeeded.`;
 }
 
 /** Stable tail instructions for continuing on a new empty workspace. The text
@@ -112,5 +112,5 @@ export function automaticSandboxRecoveryDiscontinuity(
 export function freshWorkspaceSandboxRecoveryDiscontinuity(
   recovery: SandboxFreshWorkspaceRecovery,
 ): string {
-  return `Filesystem discontinuity: the previous managed sandbox was lost at ${recovery.lostAt} and there is no checkpoint OpenGeni can restore automatically, so OpenGeni continued this session on a new empty workspace. Files, repository clones, installed packages and running processes from before that time are not available in this workspace; do not assume they exist. Anything now in the workspace was created after that loss. Conversation and tool receipts from before it remain historical evidence, not proof that their files still exist. External effects are not undone. Verify the current filesystem before relying on previous work, and recreate what you need deliberately. Never automatically replay prior commands or operations with unknown outcomes.`;
+  return `Filesystem discontinuity: the previous managed sandbox was lost at ${recovery.lostAt} and there is no checkpoint Opengeni can restore automatically, so Opengeni continued this session on a new empty workspace. Files, repository clones, installed packages and running processes from before that time are not available in this workspace; do not assume they exist. Anything now in the workspace was created after that loss. Conversation and tool receipts from before it remain historical evidence, not proof that their files still exist. External effects are not undone. Verify the current filesystem before relying on previous work, and recreate what you need deliberately. Never automatically replay prior commands or operations with unknown outcomes.`;
 }

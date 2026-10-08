@@ -6,7 +6,7 @@ import type { CreditDebitAttribution } from "@opengeni/db";
  * Server-owned upstream budget for one provider attempt. Resumable recording
  * claims remain fenced for longer than this budget before another worker may
  * reclaim them. Provider adapters must honor the supplied AbortSignal and must
- * not return while their upstream request is still live; OpenGeni does not
+ * not return while their upstream request is still live; Opengeni does not
  * claim remote-side idempotency or cancellation for vendors that cannot meet
  * that adapter contract.
  */

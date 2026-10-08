@@ -140,7 +140,7 @@ describe("frozen setup credential provenance", () => {
 
 describe("accepted scheduled service provenance", () => {
   const scheduler = {
-    initiator: { kind: "service" as const, subjectId: "scheduler", label: "OpenGeni scheduler" },
+    initiator: { kind: "service" as const, subjectId: "scheduler", label: "Opengeni scheduler" },
     context: { updateIds: ["update-1"], scheduledRunIds: ["run-1"] },
   };
 

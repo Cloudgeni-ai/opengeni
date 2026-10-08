@@ -11,7 +11,7 @@ metadata:
 
 Use the preinstalled `anydoc` CLI when a task needs the contents of a local
 office document, ebook, CSV, or text-based PDF. This is read-only extraction;
-it does not edit the source or replace OpenGeni's durable artifact tools.
+it does not edit the source or replace Opengeni's durable artifact tools.
 
 ```bash
 anydoc report.docx

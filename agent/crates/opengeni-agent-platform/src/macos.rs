@@ -222,7 +222,7 @@ impl DesktopBackend for MacosDesktop {
         // cannot perform.
         if !macffi::screen_capture_granted() {
             return Some(
-                "Screen Recording permission not granted — enable it for OpenGeni in \
+                "Screen Recording permission not granted — enable it for Opengeni in \
                  System Settings → Privacy & Security → Screen & System Audio Recording, \
                  availability refreshes automatically after permission is granted."
                     .to_string(),

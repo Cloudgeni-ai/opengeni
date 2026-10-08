@@ -534,7 +534,7 @@ describe("production facade over the real native addon", () => {
           config: {
             geometry: "textbox",
             name: "Master title",
-            text: "OpenGeni",
+            text: "Opengeni",
             position: { left: 40, top: 20, width: 300, height: 48 },
           },
         },

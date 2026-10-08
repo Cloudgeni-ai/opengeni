@@ -1,4 +1,4 @@
-//! Native accessibility and capture adapter for OpenGeni ComputerSessions.
+//! Native accessibility and capture adapter for Opengeni ComputerSessions.
 //!
 //! The placement-local Bun controller owns public session authority, durable
 //! operation receipts, and media grants. This crate owns only the genuinely

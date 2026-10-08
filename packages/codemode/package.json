@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/codemode",
   "version": "1.4.4",
-  "description": "Attempt-frozen programmatic tool catalog and execution authority for OpenGeni.",
+  "description": "Attempt-frozen programmatic tool catalog and execution authority for Opengeni.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

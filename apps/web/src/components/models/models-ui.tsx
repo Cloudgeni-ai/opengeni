@@ -135,7 +135,7 @@ export function payerShortLabel(row: { billingClass: string; providerLabel: stri
   }
 }
 
-/** Who pays for a model, in product words: "Codex plan", "OpenGeni credits". */
+/** Who pays for a model, in product words: "Codex plan", "Opengeni credits". */
 export function payerLabel(billingClass: string, fallback?: string): string {
   switch (billingClass) {
     case "codex_subscription":

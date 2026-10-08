@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/api-router",
   "version": "1.4.4",
-  "description": "OpenGeni HTTP surface: the Hono adapter/router (createApp), routes, MCP HTTP transport, and HTTP access adapters over @opengeni/core. An engine-distribution surface — its runtime closure includes engine-internal packages.",
+  "description": "Opengeni HTTP surface: the Hono adapter/router (createApp), routes, MCP HTTP transport, and HTTP access adapters over @opengeni/core. An engine-distribution surface — its runtime closure includes engine-internal packages.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

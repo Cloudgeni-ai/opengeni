@@ -1,4 +1,4 @@
-# OpenGeni chart workload configuration hooks
+# Opengeni chart workload configuration hooks
 
 ## Release identity
 
@@ -12,10 +12,10 @@ position so saved values reproduce the same pod template on later upgrades.
 
 ## Service links
 
-Every OpenGeni pod sets `enableServiceLinks: false`. Kubernetes otherwise
+Every Opengeni pod sets `enableServiceLinks: false`. Kubernetes otherwise
 injects `<SERVICE>_PORT=tcp://<ip>:<port>` variables for each Service in the
 namespace. For a Service such as `opengeni-api-metrics` that yields
-`OPENGENI_API_METRICS_PORT`, which collides with an OpenGeni setting and fails
+`OPENGENI_API_METRICS_PORT`, which collides with an Opengeni setting and fails
 settings parsing at startup in any pod that does not set it explicitly. Pods
 reach services through DNS.
 

@@ -392,7 +392,7 @@ function citedAssistantMessage() {
     content: [
       {
         type: "output_text",
-        text: "OpenGeni is documented here [1].",
+        text: "Opengeni is documented here [1].",
         providerData: {
           annotations: [
             {
@@ -400,7 +400,7 @@ function citedAssistantMessage() {
               start_index: 28,
               end_index: 31,
               url: "https://docs.opengeni.example/search",
-              title: "OpenGeni search documentation",
+              title: "Opengeni search documentation",
             },
           ],
         },
@@ -574,7 +574,7 @@ describe("turn exact-content boundaries", () => {
     ).toMatchObject({
       type: "url_citation",
       url: "https://docs.opengeni.example/search",
-      title: "OpenGeni search documentation",
+      title: "Opengeni search documentation",
     });
   });
 
@@ -589,7 +589,7 @@ describe("turn exact-content boundaries", () => {
         type: "web_search_call",
         id: "ws_123",
         status: "completed",
-        action: { type: "search", query: "OpenGeni" },
+        action: { type: "search", query: "Opengeni" },
       },
     };
 
@@ -1926,7 +1926,7 @@ describe("production model-response usage callback authority", () => {
     );
     const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
       async () => {
-        throw new Error("workspace Gateway usage must not debit OpenGeni credits");
+        throw new Error("workspace Gateway usage must not debit Opengeni credits");
       },
     );
     try {

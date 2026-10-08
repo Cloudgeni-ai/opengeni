@@ -1,6 +1,6 @@
-# Embedding the OpenGeni Workbench
+# Embedding the Opengeni Workbench
 
-This guide is for a host app that wants to drop the OpenGeni **session workspace**
+This guide is for a host app that wants to drop the Opengeni **session workspace**
 — the Changes / Files / Terminal / Browser / Computer dock, with instant cold paint and the
 machine-state chip — into its own UI. It is the frontend companion to the
 standalone SDK/proxy integration as well as the advanced in-process path in
@@ -23,7 +23,7 @@ mount one component.
 npm install @opengeni/react @opengeni/sdk react react-dom
 ```
 
-`@opengeni/react` depends only on `@opengeni/sdk` among OpenGeni packages (a
+`@opengeni/react` depends only on `@opengeni/sdk` among Opengeni packages (a
 client-clean closure — no server code is pulled in). `react` and `react-dom`
 (v18 or v19) are required peers.
 
@@ -70,13 +70,13 @@ still work after setup. See the [React peer setup](../packages/react/README.md#o
 
 ## 2. Provider And Trust Boundary
 
-Wrap the tree once in `OpenGeniProvider`, giving it an OpenGeni client and the
+Wrap the tree once in `OpenGeniProvider`, giving it an Opengeni client and the
 workspace id. Every hook and component below reads the client from here (there is
 no app-context coupling — that is what makes the workbench embeddable).
 
-Keep privileged OpenGeni credentials on the host server. The browser client
+Keep privileged Opengeni credentials on the host server. The browser client
 below points at a tenant-scoped, same-origin host proxy that preserves the
-OpenGeni route contract. A host may instead pass any structural client matching
+Opengeni route contract. A host may instead pass any structural client matching
 the methods used by the mounted surfaces.
 
 ```tsx
@@ -165,7 +165,7 @@ Repository discovery walks the workspace filesystem without a fixed nesting
 depth, recognizes both ordinary `.git` directories and linked-worktree `.git`
 files, and prunes dependency/build residue. The walk is still bounded by a
 timeout and repository-count guard. If either guard trips or discovery fails,
-OpenGeni persists and announces an explicit degraded revision instead of an
+Opengeni persists and announces an explicit degraded revision instead of an
 authoritative-looking empty capture; consumers keep live files authoritative.
 
 An embedder can expose only the surfaces that belong in its product. For

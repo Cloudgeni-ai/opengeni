@@ -488,11 +488,11 @@ export async function checkDevelopmentSourceBuildPrerequisites(
 function assertPrerequisites(errors: string[]): void {
   if (errors.length > 0) {
     console.error(
-      "OpenGeni startup prerequisites are missing:\n" +
+      "Opengeni startup prerequisites are missing:\n" +
         errors.map((error) => `  - ${error}`).join("\n"),
     );
     throw new Error(
-      "OpenGeni startup prerequisites are not satisfied; no prerequisite installation was attempted",
+      "Opengeni startup prerequisites are not satisfied; no prerequisite installation was attempted",
     );
   }
 }

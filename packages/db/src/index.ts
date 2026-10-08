@@ -3590,7 +3590,7 @@ export async function getWorkspaceGrant(
  * EMBEDDED (Step I `userLookup` port): when the handle was built via
  * `createDb({ userLookup })` (or registered with `registerDbBinding`), this
  * delegates to the host's resolver instead — so a host whose identity lives in
- * a different IdP/table/driver never forces OpenGeni to touch `auth_users`. The
+ * a different IdP/table/driver never forces Opengeni to touch `auth_users`. The
  * raw query also assumes the postgres-js array-shaped `db.execute` result; the
  * port is the cross-driver escape hatch for that too.
  *
@@ -6223,7 +6223,7 @@ export async function markStripeWebhookProcessed(db: Database, id: string): Prom
 }
 
 /**
- * Whether the organization holds a positive OpenGeni credit balance, whatever
+ * Whether the organization holds a positive Opengeni credit balance, whatever
  * its source: a purchase, an operator grant, a test credit, or the one-time
  * verified-signup trial grant. It turns false again once usage brings the
  * balance to zero or below. Read-only; it never gates credit admission.
@@ -6358,7 +6358,7 @@ export type UpdateScheduledTaskInput = Partial<{
    */
   expectedExecutionDigest: string;
   /**
-   * Re-freeze an agent-created task's OpenGeni tools and permissions (the
+   * Re-freeze an agent-created task's Opengeni tools and permissions (the
    * owner's explicit access refresh). Applies only to a row whose creator
    * tools are already frozen; the creator session policy is never rewritten.
    */
@@ -12202,7 +12202,11 @@ export async function listSlackInstallationBindings(
         slackTeamName: binding.slackTeamName,
         botId: binding.botId,
         botUserId: binding.botUserId,
-        botDisplayName: binding.botDisplayName as "OpenGeni" | "OpenGeni Staging",
+        botDisplayName: binding.botDisplayName as
+          | "Opengeni"
+          | "Opengeni Staging"
+          | "OpenGeni"
+          | "OpenGeni Staging",
         state: binding.state,
         quarantineReason: binding.quarantineReason,
         version: binding.version,
@@ -14186,7 +14190,7 @@ function slackRowNullableDate(
 
 export class SlackBotLifecycleSuccessAuditError extends Error {
   constructor() {
-    super("OpenGeni Slack bot lifecycle success audit failed");
+    super("Opengeni Slack bot lifecycle success audit failed");
     this.name = "SlackBotLifecycleSuccessAuditError";
   }
 }
@@ -25845,8 +25849,8 @@ const CODEX_ACTIVE_READ_RETRY_MS = 50;
  * True iff: the turn's model is a `codex/<slug>` id (`isCodexBilledModel`) AND
  * the deployment flag is on AND the workspace has an ACTIVE credential. A true
  * result means the turn is paid by the USER's ChatGPT/Codex plan and MUST consume
- * ZERO OpenGeni credits: callers skip the credit-balance / model-cost / token
- * gates and skip OpenGeni pricing + credit debit.
+ * ZERO Opengeni credits: callers skip the credit-balance / model-cost / token
+ * gates and skip Opengeni pricing + credit debit.
  *
  * The prefix ALONE never returns true: an unconnected user typing `codex/...`
  * gets the normal gates (and the worker fails the turn for a missing credential),
@@ -25862,7 +25866,7 @@ export async function isCodexBilledTurn(input: {
    * already resolved the active flag for provider injection, pass it here so the
    * billed-turn predicate and the routing overlay read the credential ONCE and
    * cannot disagree across a concurrent disconnect/reconnect — a drift that would
-   * either wrongly debit OpenGeni credits for a ChatGPT-paid turn or the inverse.
+   * either wrongly debit Opengeni credits for a ChatGPT-paid turn or the inverse.
    */
   active?: boolean;
 }): Promise<boolean> {
@@ -48661,7 +48665,7 @@ const DEFINITIVE_CHECKPOINT_FAILURES: ReadonlySet<string> = new Set([
   "archive_hash_mismatch",
   "checkpoint_artifact_invalid",
 ]);
-/** OpenGeni validates OPENGENI_MODAL_TIMEOUT_SECONDS to at most 24h, Modal's
+/** Opengeni validates OPENGENI_MODAL_TIMEOUT_SECONDS to at most 24h, Modal's
  * own hard cap, and Modal lifetimes are never renewed. */
 const MODAL_SANDBOX_MAX_LIFETIME_MS = 24 * 60 * 60_000;
 /** A recorded deadline is stamped from the create call's start; the provider
@@ -49113,7 +49117,7 @@ async function automaticRecoveryLaneTx(
       loss,
     };
   }
-  // No checkpoint OpenGeni can restore automatically. An empty workspace is
+  // No checkpoint Opengeni can restore automatically. An empty workspace is
   // irreversible for the running sandbox, so it additionally waits until the
   // lost object is past its hard provider lifetime: no Modal sandbox outlives
   // it in any workspace, so a misconfigured credential or namespace cannot
@@ -66032,7 +66036,7 @@ export async function revokeViewer(
 // Warm-time metering (P2.1) — the COST hole the lease design opens.
 //
 // A box held warm by a viewer with no agent turn running emits ZERO model usage
-// today; the provider bills by wall-clock and OpenGeni meters nothing. Warm-time
+// today; the provider bills by wall-clock and Opengeni meters nothing. Warm-time
 // accrues on TWO stateless ticks: (a) the turn's existing activity heartbeat
 // (while a turn runs); (b) the reaper sweep (for viewer-only boxes between turns).
 //
@@ -74277,7 +74281,7 @@ export async function claimSessionWorkForAttempt(
               initiator: {
                 kind: "service",
                 subjectId: "compaction",
-                label: "OpenGeni compaction",
+                label: "Opengeni compaction",
               },
               context: {},
             };
@@ -74536,7 +74540,7 @@ export async function claimSessionWorkForAttempt(
             initiator: {
               kind: "service",
               subjectId: "internal-update",
-              label: "OpenGeni internal update",
+              label: "Opengeni internal update",
             },
             context: {
               updateIds: delivered.updates.map((update) => update.id),
@@ -74565,7 +74569,7 @@ export async function claimSessionWorkForAttempt(
               initiator: {
                 kind: "service",
                 subjectId: "internal-update",
-                label: "OpenGeni internal update",
+                label: "Opengeni internal update",
               },
               initiatingHumanSubjectId: turnHuman(receiverContext),
               context: contextForCausalTurn(
@@ -74621,7 +74625,7 @@ export async function claimSessionWorkForAttempt(
               initiator: {
                 kind: "service",
                 subjectId: "goal-continuation",
-                label: "OpenGeni goal continuation",
+                label: "Opengeni goal continuation",
               },
               context: {
                 updateIds: delivered.updates.map((update) => update.id),
@@ -74638,7 +74642,7 @@ export async function claimSessionWorkForAttempt(
               initiator: {
                 kind: "service",
                 subjectId: "scheduler",
-                label: "OpenGeni scheduler",
+                label: "Opengeni scheduler",
               },
               context: {
                 updateIds: delivered.updates.map((update) => update.id),

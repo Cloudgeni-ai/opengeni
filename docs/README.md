@@ -1,4 +1,4 @@
-# OpenGeni Docs Map
+# Opengeni Docs Map
 
 This map defines who each doc tier serves and where volatile facts belong.
 
@@ -6,12 +6,12 @@ This map defines who each doc tier serves and where volatile facts belong.
 
 | Audience | Reads | Notes |
 | --- | --- | --- |
-| Integrator | `docs/product-integration.md`, `packages/sdk/README.md`, `packages/react/README.md`, `docs/embedding-workbench.md`, `examples/chat-quickstart` | Products consuming a standalone OpenGeni deployment; start with the default `SessionConversation` embed behind `createSessionProxyHandler`; the `@opengeni/sdk/chat` facade and chat quickstart are a text-only fallback for existing chat UIs; `docs/embedding.md` is only for advanced in-process hosts. |
+| Integrator | `docs/product-integration.md`, `packages/sdk/README.md`, `packages/react/README.md`, `docs/embedding-workbench.md`, `examples/chat-quickstart` | Products consuming a standalone Opengeni deployment; start with the default `SessionConversation` embed behind `createSessionProxyHandler`; the `@opengeni/sdk/chat` facade and chat quickstart are a text-only fallback for existing chat UIs; `docs/embedding.md` is only for advanced in-process hosts. |
 | Maintainer | `CONTRIBUTING.md`, `docs/local-development.md`, `docs/architecture.md`, topic docs | Contributors changing code, packages, workflows, or release mechanics. |
 | Repo agent | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, this map | Coding agents working in this repository. |
 | Integration agent | `.agents/skills/opengeni-client/SKILL.md` and its references | Customer-side coding agents choosing and implementing a product integration shape. |
 | Product agent | Curated opt-in Skills in `packages/runtime/src/curated_skill_library` plus native tool-bound Skills in `packages/runtime/src/bundled_artifact_skills`, `packages/runtime/src/bundled_site_skills`, and `packages/runtime/src/bundled_video_skills` | Versioned product content; not covered by this freshness system. |
-| Operator | `docs/deployment.md`, deployment contracts and chart docs | People deploying and operating OpenGeni. |
+| Operator | `docs/deployment.md`, deployment contracts and chart docs | People deploying and operating Opengeni. |
 | Record | `docs/design/**` | Public-safe point-in-time architecture and product-design records; never raw operator evidence. |
 | Product user / evaluator | `docs-site/` (published at docs.opengeni.ai) | Public product docs built with Mintlify from `main`; concept and workflow level, linking to the canonical homes below for volatile details. |
 
@@ -51,10 +51,10 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Credential taxonomy | `docs/credentials.md` | `docs/embedding.md`, `docs/capabilities.md`, route comments should link instead of re-listing token types. |
 | GitHub App workspace binding | `docs/github-app.md` | `README.md`, `docs/architecture.md`, API/MCP/UI copy should summarize without weakening the authority matrix. |
 | Personal GitHub identity, repository authority, local setup, and propagation | `docs/personal-github.md` | `docs/github-app.md`, `docs/deployment.md`, API/runtime/UI copy should link instead of restating token custody or grant semantics. |
-| OpenGeni Review Bot PR-review automation | `docs/pr-review.md` | `docs/github-app.md`, architecture, SDK, and UI copy should link instead of restating provider permissions, delivery semantics, or exact-head authority. |
+| Opengeni Review Bot PR-review automation | `docs/pr-review.md` | `docs/github-app.md`, architecture, SDK, and UI copy should link instead of restating provider permissions, delivery semantics, or exact-head authority. |
 | Google Drive connection, scheduled source sync, and release readiness | `docs/google-drive.md` | Capabilities UI, connector code, and deployment guides should link instead of restating OAuth scope, explicit enablement, bounded sync/retry behavior, release gates, or ACL/citation boundaries. |
 | Scheduled task access drift, owner refresh, and failed-access notices | `docs/scheduled-task-access.md` | Schedules UI copy, `docs/agent-session-authority.md`, and `AGENTS.md` should link instead of restating the refresh authority or the notice semantics. |
-| OpenGeni Slack bot connection | `docs/slack-bot.md` | Capabilities/scheduled-task UI and architecture should link instead of restating manifest or routing rules. |
+| Opengeni Slack bot connection | `docs/slack-bot.md` | Capabilities/scheduled-task UI and architecture should link instead of restating manifest or routing rules. |
 | Social connectors (X / Reddit) | `docs/social-connectors.md` | `docs/architecture.md`, capability UI copy and marketing guidance should link instead of restating OAuth endpoints, scopes, or token-handling rules. |
 | Fiken connector (accounting) | `docs/fiken.md` | Capabilities UI copy and architecture should link instead of restating token verification, company scoping, or the single-concurrent-request rule. |
 | First-party local MCP bridges | `docs/design/first-party-mcp-bridges.md` | Provider bridge adapters, catalog/runtime registration, and follow-ups must preserve its authority, destination, and mutation-replay contract. |

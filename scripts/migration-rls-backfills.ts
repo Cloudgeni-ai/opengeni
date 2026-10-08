@@ -1,9 +1,9 @@
 /**
  * Static analysis for migration-time backfills that silently no-op
- * under OpenGeni's production migration principal.
+ * under Opengeni's production migration principal.
  *
  * `FORCE ROW LEVEL SECURITY` binds the TABLE OWNER, not merely ordinary roles;
- * only a genuine `SUPERUSER` (or `BYPASSRLS`) escapes it. OpenGeni's documented
+ * only a genuine `SUPERUSER` (or `BYPASSRLS`) escapes it. Opengeni's documented
  * deployment posture (`docs/deployment.md`) runs migrations as a NON-superuser
  * owner without `BYPASSRLS`. During a migration no `opengeni.account_id` /
  * `opengeni.workspace_id` GUC is set, so a GUC-gated `workspace_isolation`

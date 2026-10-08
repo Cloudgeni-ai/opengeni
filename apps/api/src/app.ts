@@ -612,7 +612,7 @@ export function createAppComposition(deps: AppDependencies): {
       });
       observability.incrementCounter({
         name: "opengeni_http_errors_total",
-        help: "Total OpenGeni HTTP request failures by bounded route, status, and stable code.",
+        help: "Total Opengeni HTTP request failures by bounded route, status, and stable code.",
         labels: { route, status: String(status), code },
       });
     } catch {
@@ -3668,7 +3668,7 @@ export function apiContractAdmission(
 }
 
 /**
- * State-changing OpenGeni HTTP calls must never cross an incompatible rollout
+ * State-changing Opengeni HTTP calls must never cross an incompatible rollout
  * boundary. Standard third-party protocols and externally initiated callbacks
  * are intentionally outside this product API contract.
  */

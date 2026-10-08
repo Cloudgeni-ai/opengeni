@@ -182,7 +182,7 @@ if (args.skipAgent) {
         `session ${toolSessionId} with selected MCP tool ended with status ${status}${turnFailureSuffix(events)}`,
       );
     }
-    return `session ${toolSessionId} reached idle with OpenGeni MCP selected`;
+    return `session ${toolSessionId} reached idle with Opengeni MCP selected`;
   });
 
   if (args.skipScheduledTasks) {
@@ -295,7 +295,7 @@ const ok = !results.some((result) => result.status === "failed");
 if (args.json) {
   console.log(JSON.stringify({ ok, results }, null, 2));
 } else {
-  console.log("OpenGeni deployment conformance");
+  console.log("Opengeni deployment conformance");
   for (const result of results) {
     console.log(`  - ${result.id}: ${result.status} - ${result.detail}`);
   }

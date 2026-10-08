@@ -500,7 +500,7 @@ function SchedulesEmpty({
   filtered: boolean;
   now: Date;
   onNew: () => void;
-  /** "Create with OpenGeni"; absent without the permissions to start it. */
+  /** "Create with Opengeni"; absent without the permissions to start it. */
   onAsk?: () => void;
   onTemplate: (templateId: string) => void;
 }) {

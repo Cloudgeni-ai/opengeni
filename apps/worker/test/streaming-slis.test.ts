@@ -197,7 +197,7 @@ describe("StreamTimingMetrics — TTFT + inter-delta gaps", () => {
     }
   });
 
-  test("splits OpenGeni pre-dispatch work from provider first-content latency", async () => {
+  test("splits Opengeni pre-dispatch work from provider first-content latency", async () => {
     const observability = worker();
     let now = 0;
     const timing = new StreamTimingMetrics(observability, {

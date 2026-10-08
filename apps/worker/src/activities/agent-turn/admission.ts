@@ -324,7 +324,7 @@ export async function ensureRunAllowed(
   let creditPolicyRevision: number | undefined;
   // Upstream settlement and workspace-facing cost are independent. External
   // metering skips the token cap; free/subscription/workspace cost skips the
-  // OpenGeni credit gate. The agent-run COUNT cap below is a volume/fairness
+  // Opengeni credit gate. The agent-run COUNT cap below is a volume/fairness
   // quota and is intentionally kept for every funding path.
   //
   // §7.5 P3 — host-entitlements DELEGATION (the worker half of the same seam the

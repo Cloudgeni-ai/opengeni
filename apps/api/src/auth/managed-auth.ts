@@ -648,7 +648,7 @@ export type ManagedAuthOAuthAttempt = {
 };
 
 /**
- * Resolve OpenGeni's server-only login transaction proof from Better Auth's
+ * Resolve Opengeni's server-only login transaction proof from Better Auth's
  * database-backed OAuth state before the provider callback consumes it.
  */
 export async function resolveManagedAuthOAuthAttempt(

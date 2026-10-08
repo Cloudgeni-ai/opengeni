@@ -211,14 +211,14 @@ describe("GitHub app manifest helpers", () => {
     expect(
       githubAppBotIdentityWarnings({
         githubClientId: "configured-client",
-        gitAuthorName: "OpenGeni",
+        gitAuthorName: "Opengeni",
         gitAuthorEmail: "bot@opengeni.dev",
       } as any),
     ).toEqual([]);
     expect(
       githubAppBotIdentityWarnings({
         githubClientId: "configured-client",
-        gitAuthorName: "OpenGeni",
+        gitAuthorName: "Opengeni",
       } as any),
     ).toEqual([GITHUB_APP_BOT_IDENTITY_UNAVAILABLE_WARNING]);
   });
@@ -458,7 +458,7 @@ describe("GitHub app manifest helpers", () => {
     }
   });
 
-  test("keeps OpenGeni Lens identity separate and narrows its installation token", async () => {
+  test("keeps Opengeni Lens identity separate and narrows its installation token", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const settings = {
       ...authoritySettings(),

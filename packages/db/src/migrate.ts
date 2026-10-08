@@ -54,7 +54,7 @@ export type MigrationRuntimeOptions = {
    */
   preinstalledVector?: boolean;
   /**
-   * Exact database login roles that may run an OpenGeni API or worker against
+   * Exact database login roles that may run an Opengeni API or worker against
    * this target. Maintenance cutovers use this list to reject a live mixed-
    * version fleet, and rolling ACL migrations use it to preserve old-binary
    * readiness until later role provisioning converges. Dedicated-schema and
@@ -106,7 +106,7 @@ export function parseConcurrentIndexMigration(
   const directive = concurrentIndexDirective.exec(directiveLine);
   if (!directive) {
     if (directiveLine.startsWith("-- opengeni:")) {
-      throw new Error(`Unsupported OpenGeni migration directive in ${file}`);
+      throw new Error(`Unsupported Opengeni migration directive in ${file}`);
     }
     return null;
   }
@@ -468,7 +468,7 @@ async function persistDeploymentDepthPolicy(
 }
 
 /**
- * Apply the OpenGeni SQL migration chain.
+ * Apply the Opengeni SQL migration chain.
  *
  * STANDALONE (default, unchanged): `migrate()` / `migrate(databaseUrl)` runs the
  * whole chain with NO search_path manipulation, so every unqualified

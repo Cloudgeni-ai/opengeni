@@ -1399,7 +1399,7 @@ const diskPressure: RichSessionSeed = {
         output: mcpJson({
           id: "INC-2317",
           status: "acknowledged",
-          acknowledgedBy: "OpenGeni on behalf of Bendik Hansen",
+          acknowledgedBy: "Opengeni on behalf of Bendik Hansen",
         }),
       })
       .exec(

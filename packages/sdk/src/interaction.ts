@@ -66,7 +66,7 @@ export type InteractionControlFailure = {
   message: string;
 };
 
-/** Decodes the bounded typed control-failure details emitted by OpenGeni. Raw
+/** Decodes the bounded typed control-failure details emitted by Opengeni. Raw
  * provider/OS detail is intentionally absent; both correlation ids are opaque. */
 export function interactionControlFailureFromError(
   error: unknown,

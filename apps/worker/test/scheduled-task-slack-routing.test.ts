@@ -110,7 +110,7 @@ async function botConnection(
       credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
       credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
       ...identity,
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: new Date(0).toISOString(),
     },
     createdBySubjectId: "subject-a",
@@ -163,7 +163,7 @@ async function taskFixture(
     runMode,
     overlapPolicy: "allow_concurrent",
     agentConfig: {
-      prompt: "Use the explicitly selected OpenGeni Slack bot",
+      prompt: "Use the explicitly selected Opengeni Slack bot",
       resources: [],
       tools: [],
       metadata: {},
@@ -174,7 +174,7 @@ async function taskFixture(
   });
 }
 
-describe("scheduled OpenGeni Slack bot routing", () => {
+describe("scheduled Opengeni Slack bot routing", () => {
   test("binds the exact connection with safe creation evidence and revalidates revocation", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();

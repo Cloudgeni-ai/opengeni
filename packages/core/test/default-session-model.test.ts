@@ -90,7 +90,7 @@ test("scoped grants choose a funded credit model without overriding saved choice
 });
 
 // A deployment shaped like the hosted one: a free OpenRouter default, the
-// OpenGeni credits catalog, and both connected-subscription rails enabled.
+// Opengeni credits catalog, and both connected-subscription rails enabled.
 function hostedSettings(overrides: Partial<Settings> = {}): Settings {
   return testSettings({
     openrouterApiKey: "openrouter-test-key",
@@ -207,11 +207,11 @@ describe("default model precedence", () => {
     });
   });
 
-  test("a subscription wins over an OpenGeni credit balance", () => {
+  test("a subscription wins over an Opengeni credit balance", () => {
     expect(decide(hostedSettings(), { codex: true, credits: true }).source).toBe("subscription");
   });
 
-  test("an OpenGeni credit balance selects GPT-6 Luna at extra high reasoning", () => {
+  test("an Opengeni credit balance selects GPT-6 Luna at extra high reasoning", () => {
     expect(decide(hostedSettings(), { credits: true })).toEqual({
       model: "gpt-6-luna",
       reasoningEffort: "xhigh",

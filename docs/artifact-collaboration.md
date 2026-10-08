@@ -6,7 +6,7 @@
 
 ## One object, several clients
 
-An editable artifact has one authoritative head in OpenGeni. Postgres owns its
+An editable artifact has one authoritative head in Opengeni. Postgres owns its
 identity, authorization, causal transaction log, receipts, and checkpoints;
 object storage owns immutable snapshots, source imports, media, and exported
 bytes. The Rust kernel is the only authority allowed to turn typed commands

@@ -104,7 +104,7 @@ export type BrowserViewerNotification = {
 };
 
 export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride & {
-  /** The selected OpenGeni agent/session. Peer BrowserSessions stay discoverable. */
+  /** The selected Opengeni agent/session. Peer BrowserSessions stay discoverable. */
   sessionId: string;
   enabled?: boolean | undefined;
   /** Whether the Browser tab is selected. Keeps the mounted media stream warm

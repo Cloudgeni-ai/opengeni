@@ -119,7 +119,7 @@ function fakeModalFilesystemSession(root: string) {
   return { session, read };
 }
 
-describe("OpenGeni Modal 0.9 snapshot policy", () => {
+describe("Opengeni Modal 0.9 snapshot policy", () => {
   test("the pinned Modal patch binds both native snapshot operations to caller UUIDs", async () => {
     // This is deliberately a distribution-level assertion. The takeover
     // contract depends on the request UUID reaching Modal's protobuf, beneath

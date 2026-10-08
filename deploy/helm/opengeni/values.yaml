@@ -1,6 +1,6 @@
 global:
   # Default to the public GHCR images so a vanilla `helm install` pulls the
-  # released OpenGeni images with no extra config. Per-cloud example values
+  # released Opengeni images with no extra config. Per-cloud example values
   # override this with their own registry. The image tags below are left empty
   # and resolve to the chart appVersion (see the opengeni.image helper).
   imageRegistry: "ghcr.io/cloudgeni-ai"
@@ -25,7 +25,7 @@ opensandbox:
     namespace: opensandbox
 
 # Optional release-local Pod priority tiers. They do not reserve or cap CPU or
-# memory. They tell the kubelet which OpenGeni roles to evict first when the
+# memory. They tell the kubelet which Opengeni roles to evict first when the
 # node is under pressure. `Never` keeps priority from preempting a running pod
 # merely to admit another one.
 priorityClasses:
@@ -49,7 +49,7 @@ networkPolicy:
   enabled: false
   egress:
     enabled: false
-    # Environment-specific rules appended after OpenGeni's canonical recording
+    # Environment-specific rules appended after Opengeni's canonical recording
     # and alert rules. This list never replaces the built-in safety catalog.
     rules: []
   ingressController:
@@ -136,7 +136,7 @@ config:
   # (catalog-document entry schemas, no pricing; ignored in database mode).
   # See docs/model-providers.md "Code-mode managed model lists":
   # OPENGENI_MANAGED_MODELS_JSON: '{"opperModels":[{"upstreamModelId":"aws/claude-opus-5-5",...}]}'
-  # Default for new work while an organization holds OpenGeni credits and has
+  # Default for new work while an organization holds Opengeni credits and has
   # no connected subscription (see docs/model-providers.md):
   # OPENGENI_CREDITS_DEFAULT_MODEL: gpt-6-luna
   # OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT: xhigh
@@ -150,7 +150,7 @@ config:
   OPENGENI_SANDBOX_BACKEND: modal
   OPENGENI_SANDBOX_PREPARATION_PROFILES: none
 
-# Digest-pinned Modal Computer/Browser box. Defaults to OpenGeni's public image
+# Digest-pinned Modal Computer/Browser box. Defaults to Opengeni's public image
 # and overwrites config.OPENGENI_MODAL_IMAGE_REF. Override it with another image
 # built from docker/desktop.Dockerfile, never the headless opengeni-sandbox image.
 desktop:

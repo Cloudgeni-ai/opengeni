@@ -1,4 +1,4 @@
-//! Deterministic, runtime-neutral model kernel for OpenGeni artifacts.
+//! Deterministic, runtime-neutral model kernel for Opengeni artifacts.
 
 #![forbid(unsafe_code)]
 

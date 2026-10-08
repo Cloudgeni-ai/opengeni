@@ -855,7 +855,7 @@ function withDockerNetwork(client: SandboxClient, network: string | undefined): 
     ...(exactResume
       ? {
           // Docker's ordinary SDK resume creates a replacement when the exact
-          // container is absent. Preserve OpenGeni's non-replacing attach path
+          // container is absent. Preserve Opengeni's non-replacing attach path
           // through the network decorator; dropping it would turn an exact
           // recovery probe into a provider mutation.
           resumeExact: async (state: SandboxSessionState) =>
@@ -972,7 +972,7 @@ export function sandboxStateEntryFromRunState(state: unknown): Record<string, un
  * `Manifest` instance at `sessionState.providerState.manifest`; the SDK restore
  * path always overlays the canonical outer value, so the duplicate is neither
  * read nor JSON-protocol-safe. Remove only that known redundant field before the
- * envelope crosses OpenGeni's durable canonical-JSON boundary.
+ * envelope crosses Opengeni's durable canonical-JSON boundary.
  */
 function sandboxEntryForPersistence(entry: Record<string, unknown>): Record<string, unknown> {
   const sessionState = entry.sessionState;
@@ -1101,7 +1101,7 @@ export async function deserializeSandboxSessionStateEnvelope(
     if (!observedInstanceId) {
       const instanceIdField = PROVIDER_REGISTRY[backend as SandboxBackend]?.instanceIdFields[0];
       if (instanceIdField) {
-        // New envelopes persist one provider-neutral OpenGeni identity. SDK
+        // New envelopes persist one provider-neutral Opengeni identity. SDK
         // deserializers still require their legacy provider-specific address,
         // so materialize it into a cloned payload at this adapter boundary.
         // The live resumed handle is independently identity-checked before use.
@@ -1455,7 +1455,7 @@ type ResumeCapableClient = {
   backendId: string;
   deserializeSessionState?: (state: Record<string, unknown>) => Promise<unknown>;
   resume?: (state: unknown, options?: unknown) => Promise<unknown>;
-  /** OpenGeni extension implemented by providers whose ordinary SDK resume may
+  /** Opengeni extension implemented by providers whose ordinary SDK resume may
    * create a replacement. This method must either return the addressed wrapper
    * or prove it unavailable without creating anything. */
   resumeExact?: (state: unknown) => Promise<unknown>;
@@ -1522,7 +1522,7 @@ function legacySandboxProviderInstanceIdFromEnvelope(
   return resolvedBackend ? liveProviderInstanceIdFromState(resolvedBackend, providerState) : null;
 }
 
-/** Resolve the stable OpenGeni identity first, then legacy SDK provider keys.
+/** Resolve the stable Opengeni identity first, then legacy SDK provider keys.
  * The fallback is compatibility-only: new envelopes always persist the stable
  * top-level identity, so downstream lease/reaper code remains provider-neutral. */
 export function sandboxProviderInstanceIdFromEnvelope(
@@ -1535,7 +1535,7 @@ export function sandboxProviderInstanceIdFromEnvelope(
 }
 
 /** Validate rolling-format envelopes before addressing a provider. The stable
- * OpenGeni identity is authoritative, but a disagreeing legacy SDK address is
+ * Opengeni identity is authoritative, but a disagreeing legacy SDK address is
  * corruption/staleness—not evidence that the provider disappeared. */
 export function assertConsistentSandboxProviderIdentity(
   backend: SandboxBackend | string,
@@ -1679,7 +1679,7 @@ export async function resumeExactSandboxSession(
   const actualInstanceId = readInstanceId(backend, session);
   if (!actualInstanceId) {
     // Do not tear down an unidentifiable handle: it may be the requested live
-    // provider. The adapter must expose a stable identity before OpenGeni can
+    // provider. The adapter must expose a stable identity before Opengeni can
     // safely command, publish, snapshot, or delete it.
     throw new SandboxResumeIdentityUnavailableError(backend, expectedInstanceId);
   }
@@ -2301,7 +2301,7 @@ export async function establishSandboxSessionFromEnvelope(
           }
         }
         // Native provider snapshots are restored by their exact opaque receipt.
-        // OpenGeni verifies receipt identity/hash before hydration, but it must not
+        // Opengeni verifies receipt identity/hash before hydration, but it must not
         // impose a tar/inode equivalence contract on the provider's filesystem
         // image. Tar archives remain content-verified after hydration.
         if (workspaceArchive.kind === "tar" || workspaceArchive.kind === "host_spool") {
@@ -2355,8 +2355,8 @@ export async function establishSandboxSessionFromEnvelope(
 
   // Does the envelope carry a RESUMABLE box id (warm reattach), or only a
   // restorable archive (cold lease)? Archive-only state is not resumable: the
-  // provider's deserialize/resume path would reject it before OpenGeni could
-  // cold-restore. New envelopes use the stable OpenGeni identity; legacy SDK
+  // provider's deserialize/resume path would reject it before Opengeni could
+  // cold-restore. New envelopes use the stable Opengeni identity; legacy SDK
   // provider keys remain readable during rollout.
   const persistedInstanceId = assertConsistentSandboxProviderIdentity(backend, envelope);
   const hasResumableInstance = persistedInstanceId !== null;
