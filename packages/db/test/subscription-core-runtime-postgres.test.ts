@@ -135,6 +135,85 @@ async function fixture(connectionKind: "subscription" | "api_key" = "subscriptio
   };
 }
 
+/**
+ * Run work with the Codex refresh seam owned by a NOSUPERUSER, NOBYPASSRLS
+ * role, as in production. The shared test database's objects are owned by a
+ * superuser, which ignores FORCE RLS and would hide a missing refresh policy.
+ */
+async function withNonSuperuserRefreshOwners<T>(work: () => Promise<T>): Promise<T> {
+  const probeRole = `subscription_refresh_owner_${crypto.randomUUID().replaceAll("-", "_")}`;
+  const [originalOwners] = await shared!.admin<
+    {
+      connectionOwner: string;
+      capabilityOwner: string;
+      refreshPolicyOwner: string;
+      beginOwner: string;
+      persistOwner: string;
+    }[]
+  >`
+    select pg_get_userbyid(connection.relowner) as "connectionOwner",
+      pg_get_userbyid(capability.relowner) as "capabilityOwner",
+      pg_get_userbyid(refresh_policy.proowner) as "refreshPolicyOwner",
+      pg_get_userbyid(begin_refresh.proowner) as "beginOwner",
+      pg_get_userbyid(persist.proowner) as "persistOwner"
+    from pg_class connection
+    join pg_namespace connection_schema on connection_schema.oid = connection.relnamespace
+      and connection_schema.nspname = current_schema()
+    join pg_class capability on capability.oid =
+      'opengeni_private.subscription_runtime_capabilities'::regclass
+    join pg_proc begin_refresh on begin_refresh.oid = pg_catalog.to_regprocedure(
+      'opengeni_private.begin_subscription_codex_refresh(uuid,uuid,uuid,uuid,text,text,uuid,text,bigint)'
+    )
+    join pg_proc persist on persist.oid = pg_catalog.to_regprocedure(
+      'opengeni_private.persist_subscription_codex_refresh(uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)'
+    )
+    join pg_proc refresh_policy on refresh_policy.oid = pg_catalog.to_regprocedure(
+      'opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid)'
+    )
+    where connection.relname = 'subscription_connections'`;
+  if (!originalOwners) throw new Error("Codex refresh seam objects are missing");
+  try {
+    await shared!.admin.unsafe(`
+      create role ${probeRole} nosuperuser nobypassrls nologin;
+      grant create, usage on schema public, opengeni_private to ${probeRole};
+      grant all privileges on all tables in schema public, opengeni_private to ${probeRole};
+      grant all privileges on all sequences in schema public, opengeni_private to ${probeRole};
+      grant execute on all functions in schema public, opengeni_private to ${probeRole};
+      alter table subscription_connections owner to ${probeRole};
+      alter table opengeni_private.subscription_runtime_capabilities owner to ${probeRole};
+      alter function opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid)
+        owner to ${probeRole};
+      alter function opengeni_private.begin_subscription_codex_refresh(
+        uuid,uuid,uuid,uuid,text,text,uuid,text,bigint
+      ) owner to ${probeRole};
+      alter function opengeni_private.persist_subscription_codex_refresh(
+        uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz
+      ) owner to ${probeRole};
+    `);
+    const [owner] = await shared!.admin<{ superuser: boolean; bypassrls: boolean }[]>`
+      select rolsuper as superuser, rolbypassrls as bypassrls from pg_roles
+      where rolname = ${probeRole}`;
+    expect(owner).toEqual({ superuser: false, bypassrls: false });
+    return await work();
+  } finally {
+    await shared!.admin.unsafe(`
+      alter function opengeni_private.persist_subscription_codex_refresh(
+        uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz
+      ) owner to ${originalOwners.persistOwner};
+      alter function opengeni_private.begin_subscription_codex_refresh(
+        uuid,uuid,uuid,uuid,text,text,uuid,text,bigint
+      ) owner to ${originalOwners.beginOwner};
+      alter function opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid)
+        owner to ${originalOwners.refreshPolicyOwner};
+      alter table opengeni_private.subscription_runtime_capabilities
+        owner to ${originalOwners.capabilityOwner};
+      alter table subscription_connections owner to ${originalOwners.connectionOwner};
+      drop owned by ${probeRole};
+      drop role if exists ${probeRole};
+    `);
+  }
+}
+
 async function ownerlessFixture(
   accountId: string,
   workspaceId: string,
@@ -2045,61 +2124,9 @@ describe("provider-neutral subscription runtime persistence", () => {
       }
       expect(malformedAuthorityError).toBeDefined();
 
-      // Exercise UPDATE RLS as the production-style table/function owner. A
-      // superuser-owned fixture bypasses FORCE RLS and would miss a missing
-      // refresh capability before SELECT ... FOR UPDATE.
-      const probeRole = `subscription_refresh_owner_${crypto.randomUUID().replaceAll("-", "_")}`;
-      const [originalOwners] = await shared!.admin<
-        {
-          connectionOwner: string;
-          capabilityOwner: string;
-          refreshPolicyOwner: string;
-          beginOwner: string;
-          persistOwner: string;
-        }[]
-      >`
-        select pg_get_userbyid(connection.relowner) as "connectionOwner",
-          pg_get_userbyid(capability.relowner) as "capabilityOwner",
-          pg_get_userbyid(refresh_policy.proowner) as "refreshPolicyOwner",
-          pg_get_userbyid(begin_refresh.proowner) as "beginOwner",
-          pg_get_userbyid(persist.proowner) as "persistOwner"
-        from pg_class connection
-        join pg_namespace connection_schema on connection_schema.oid = connection.relnamespace
-          and connection_schema.nspname = current_schema()
-        join pg_class capability on capability.oid =
-          'opengeni_private.subscription_runtime_capabilities'::regclass
-        join pg_proc begin_refresh on begin_refresh.oid = pg_catalog.to_regprocedure(
-          'opengeni_private.begin_subscription_codex_refresh(uuid,uuid,uuid,uuid,text,text,uuid,text,bigint)'
-        )
-        join pg_proc persist on persist.oid = pg_catalog.to_regprocedure(
-          'opengeni_private.persist_subscription_codex_refresh(uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)'
-        )
-        join pg_proc refresh_policy on refresh_policy.oid = pg_catalog.to_regprocedure(
-          'opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid)'
-        )
-        where connection.relname = 'subscription_connections'`;
-      expect(originalOwners).toBeDefined();
-      let refreshed: Awaited<ReturnType<typeof withSubscriptionCoreCodexRefreshLock>>;
-      try {
-        await shared!.admin.unsafe(`
-          create role ${probeRole} nosuperuser nobypassrls nologin;
-          grant create, usage on schema public, opengeni_private to ${probeRole};
-          grant all privileges on all tables in schema public, opengeni_private to ${probeRole};
-          grant all privileges on all sequences in schema public, opengeni_private to ${probeRole};
-          grant execute on all functions in schema public, opengeni_private to ${probeRole};
-          alter table subscription_connections owner to ${probeRole};
-          alter table opengeni_private.subscription_runtime_capabilities owner to ${probeRole};
-          alter function opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid)
-            owner to ${probeRole};
-          alter function opengeni_private.begin_subscription_codex_refresh(
-            uuid,uuid,uuid,uuid,text,text,uuid,text,bigint
-          ) owner to ${probeRole};
-          alter function opengeni_private.persist_subscription_codex_refresh(
-            uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz
-          ) owner to ${probeRole};
-        `);
-
-        refreshed = await withSubscriptionCoreCodexRefreshLock(client!.db, request, async (db) => {
+      // Exercise UPDATE RLS as the production-style table/function owner.
+      const refreshed = await withNonSuperuserRefreshOwners(() =>
+        withSubscriptionCoreCodexRefreshLock(client!.db, request, async (db) => {
           const persisted = await persistSubscriptionCodexRefresh(db, refreshInput);
           // One begin authorizes exactly one write, even at the next generation.
           const persistedAgain = await persistSubscriptionCodexRefresh(db, {
@@ -2113,26 +2140,8 @@ describe("provider-neutral subscription runtime persistence", () => {
               returning id
             `);
           return { persisted, persistedAgain, unauthorizedScopeWrite };
-        });
-      } finally {
-        if (originalOwners) {
-          await shared!.admin.unsafe(`
-            alter function opengeni_private.persist_subscription_codex_refresh(
-              uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz
-            ) owner to ${originalOwners.persistOwner};
-            alter function opengeni_private.begin_subscription_codex_refresh(
-              uuid,uuid,uuid,uuid,text,text,uuid,text,bigint
-            ) owner to ${originalOwners.beginOwner};
-            alter function opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid)
-              owner to ${originalOwners.refreshPolicyOwner};
-            alter table opengeni_private.subscription_runtime_capabilities
-              owner to ${originalOwners.capabilityOwner};
-            alter table subscription_connections owner to ${originalOwners.connectionOwner};
-            drop owned by ${probeRole};
-            drop role if exists ${probeRole};
-          `);
-        }
-      }
+        }),
+      );
       expect(refreshed).toMatchObject({
         status: "completed",
         value: { persisted: true, persistedAgain: false, unauthorizedScopeWrite: [] },
@@ -2510,22 +2519,6 @@ describe("provider-neutral subscription runtime persistence", () => {
           ${state.accountId}::uuid, ${scopeManagerSubject}, 'admin', 'active',
           ${managerPersonalWorkspace!.id}::uuid
         )`;
-      const refreshPromise = withSubscriptionCoreCodexRefreshLock(
-        client!.db,
-        request,
-        async (db, credential) => {
-          signalAuthorized();
-          // The provider has accepted the old refresh token and rotated it.
-          await providerCall;
-          return await persistSubscriptionCodexRefresh(db, {
-            ...request,
-            expectedRefreshGeneration: credential.refreshGeneration,
-            credentialEncrypted: rotated,
-            expiresAt: new Date(Date.now() + 60 * 60_000),
-            lastRefreshAt: new Date(),
-          });
-        },
-      );
       const withinFiveSeconds = <T>(work: Promise<T>, label: string) =>
         Promise.race([
           work,
@@ -2533,8 +2526,27 @@ describe("provider-neutral subscription runtime persistence", () => {
             throw new Error(`${label} waited on the in-flight refresh`);
           }),
         ]);
-      try {
-        await authorizedSignal;
+      // Production-style non-superuser owners, so the write really depends on
+      // the refresh-only SELECT and UPDATE policies once visibility is revoked.
+      const refreshResult = await withNonSuperuserRefreshOwners(async () => {
+        const refreshPromise = withSubscriptionCoreCodexRefreshLock(
+          client!.db,
+          request,
+          async (db, credential) => {
+            signalAuthorized();
+            // The provider has accepted the old refresh token and rotated it.
+            await providerCall;
+            return await persistSubscriptionCodexRefresh(db, {
+              ...request,
+              expectedRefreshGeneration: credential.refreshGeneration,
+              credentialEncrypted: rotated,
+              expiresAt: new Date(Date.now() + 60 * 60_000),
+              lastRefreshAt: new Date(),
+            });
+          },
+        );
+        try {
+          await authorizedSignal;
         // No row lock is held across the provider call: lease release and an
         // administrator revoking this workspace's access both complete.
         const released = await withinFiveSeconds(
@@ -2568,10 +2580,12 @@ describe("provider-neutral subscription runtime persistence", () => {
           "connection rescope",
         );
         expect(rescoped).toBe("people");
-      } finally {
-        finishProviderCall();
-      }
-      expect(await refreshPromise).toEqual({ status: "completed", value: true });
+        } finally {
+          finishProviderCall();
+        }
+        return await refreshPromise;
+      });
+      expect(refreshResult).toEqual({ status: "completed", value: true });
       const [stored] = await shared!.admin<
         { credential_encrypted: string; refresh_generation: string; scope_kind: string }[]
       >`
@@ -2588,6 +2602,58 @@ describe("provider-neutral subscription runtime persistence", () => {
         Promise.resolve("must not run"),
       );
       expect(reacquired.status).not.toBe("completed");
+    },
+    180_000,
+  );
+
+  test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
+    "ownerless turns refresh a shared organization connection they lease",
+    async () => {
+      const state = await fixture();
+      const ownerless = await ownerlessFixture(state.accountId, state.workspaceId);
+      const request = {
+        accountId: state.accountId,
+        workspaceId: state.workspaceId,
+        sessionId: ownerless.sessionId,
+        turnId: ownerless.turnId,
+        sessionOwnerSubjectId: null,
+        sessionOwnerMembershipId: null,
+        initiatingHumanSubjectId: null,
+        provider: "codex" as const,
+        connectionId: state.connectionId,
+        holderId: `ownerless-refresh-ok-${crypto.randomUUID()}`,
+        generation: 1,
+      };
+      expect(
+        await withSessionRlsActorContext(
+          { subjectId: "service:subscription-core", initiatingHumanSubjectId: null },
+          () =>
+            withRlsContext(
+              client!.db,
+              { accountId: state.accountId, workspaceId: state.workspaceId },
+              (db) => acquireSubscriptionTurnLease(db, { ...request, ttlMs: 60_000 }),
+            ),
+        ),
+      ).toMatchObject({ turnId: ownerless.turnId, generation: 1 });
+      const rotated = "v1:b3duZXJsZXNzLW9r:c2VjcmV0";
+      const refreshed = await withNonSuperuserRefreshOwners(() =>
+        withSubscriptionCoreCodexRefreshLock(client!.db, request, async (db, credential) =>
+          persistSubscriptionCodexRefresh(db, {
+            ...request,
+            expectedRefreshGeneration: credential.refreshGeneration,
+            credentialEncrypted: rotated,
+            expiresAt: null,
+            lastRefreshAt: new Date(),
+          }),
+        ),
+      );
+      expect(refreshed).toEqual({ status: "completed", value: true });
+      const [stored] = await shared!.admin<
+        { credential_encrypted: string; refresh_generation: string }[]
+      >`
+        select credential_encrypted, refresh_generation::text from subscription_connections
+        where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid`;
+      expect(stored).toEqual({ credential_encrypted: rotated, refresh_generation: "2" });
     },
     180_000,
   );

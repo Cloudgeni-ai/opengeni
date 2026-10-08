@@ -353,8 +353,9 @@ compatibility projections and event aliases below.
 #### Rolling precursor and drained cutover sequence
 
 M3 begins with a rolling-compatible precursor that adds only nullable v2
-accepted-authority storage and an inactive, exact-turn/live-lease-fenced Codex
-credential-refresh helper. It performs no backfill, secret copy, data move, or
+accepted-authority storage and an inactive Codex credential-refresh seam whose
+authorization is exact-turn and live-lease fenced before the provider call. It
+performs no backfill, secret copy, data move, or
 cutover-gate activation. Every provider continues to read its existing v1
 accepted authority, and old API/worker binaries remain compatible. The
 selector/materializer can be deployed only after this precursor is present;
