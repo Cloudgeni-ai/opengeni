@@ -121,6 +121,9 @@ const context = {
   client,
   session: null,
   accessContext: { subjectId: "rename-qa" },
+  // A deployment without the idle-session archive: the rail's browse menu
+  // reads this to decide whether to offer Read-only chats.
+  clientConfig: { auth: { mode: "none" } },
   sessionChannelProjectionAuthority: new SessionChannelProjectionAuthority(),
   setSession: () => {},
   resetSessionView: () => {},
