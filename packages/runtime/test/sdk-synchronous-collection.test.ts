@@ -7,7 +7,6 @@ import { ModalSandboxSession } from "@openai/agents-extensions/sandbox/modal";
 import { E2BSandboxSession } from "@openai/agents-extensions/sandbox/e2b";
 import { BlaxelSandboxSession } from "@openai/agents-extensions/sandbox/blaxel";
 import { VercelSandboxSession } from "@openai/agents-extensions/sandbox/vercel";
-import { RunloopSandboxSession } from "@openai/agents-extensions/sandbox/runloop";
 import { DaytonaSandboxSession } from "@openai/agents-extensions/sandbox/daytona";
 import { CloudflareSandboxSession } from "@openai/agents-extensions/sandbox/cloudflare";
 import type { ChannelASession } from "../src/sandbox/channel-a";
@@ -638,7 +637,7 @@ async function localCommand(command: string, environment: Record<string, string>
   return { stdout, stderr, exitCode };
 }
 
-function cappedSdk(provider: "runloop" | "daytona", corrupt?: (text: string) => string) {
+function daytonaSdk(corrupt?: (text: string) => string) {
   let starts = 0;
   let lastCommand = "";
   const manifest = new Manifest({ root: "/workspace" });
@@ -649,97 +648,46 @@ function cappedSdk(provider: "runloop" | "daytona", corrupt?: (text: string) => 
     const result = await localCommand(command, env);
     return { ...result, stdout: corrupt ? corrupt(result.stdout) : result.stdout };
   };
-  const session =
-    provider === "runloop"
-      ? new RunloopSandboxSession({
-          state: { devboxId: "db-stream", manifest, pauseOnExit: false, environment },
-          sdk: {
-            devbox: {
-              create: async () => {
-                throw new Error("must not provision");
-              },
-              createFromBlueprintName: async () => {
-                throw new Error("must not provision");
-              },
-              fromId: () => {
-                throw new Error("must not reconnect");
-              },
-            },
-          },
-          devbox: (() => {
-            // The pinned SDK really requests only the last 2,000 lines. Emulate
-            // that native transport contract, not a fabricated trusted page.
-            const source = {
-              id: "db-stream",
-              cmd: {
-                exec: async (command: string, params?: Record<string, unknown>) => {
-                  expect(params?.last_n).toBe("2000");
-                  const result = await run(command);
-                  const tail = (text: string) => text.split("\n").slice(-2_001).join("\n");
-                  return {
-                    exitCode: result.exitCode,
-                    stdout: async () => tail(result.stdout),
-                    stderr: async () => tail(result.stderr),
-                  };
-                },
-              },
-              file: {
-                read: async () => "",
-                write: async () => {},
-                download: async () => ({}),
-                upload: async () => {},
-              },
-              resume: async () => {},
-              suspend: async () => {},
-              shutdown: async () => {},
-            };
-            return source;
-          })(),
-        })
-      : new DaytonaSandboxSession({
-          state: { sandboxId: "sb-stream", manifest, pauseOnExit: false, environment },
-          sandbox: {
-            id: "sb-stream",
-            start: async () => {},
-            stop: async () => {},
-            delete: async () => {},
-            fs: {
-              createFolder: async () => {},
-              uploadFile: async () => {},
-              downloadFile: async () => Buffer.alloc(0),
-              deleteFile: async () => {},
-            },
-            process: {
-              executeCommand: async (command, cwd, env) => {
-                expect(cwd).toBe("/workspace");
-                expect(env).toEqual(environment);
-                const result = await run(command, env);
-                // Daytona's actual public response has no separate stderr field.
-                return {
-                  exitCode: result.exitCode,
-                  result: result.stdout + result.stderr,
-                  artifacts: { stdout: result.stdout },
-                };
-              },
-            },
-          },
-        });
+  const session = new DaytonaSandboxSession({
+    state: { sandboxId: "sb-stream", manifest, pauseOnExit: false, environment },
+    sandbox: {
+      id: "sb-stream",
+      start: async () => {},
+      stop: async () => {},
+      delete: async () => {},
+      fs: {
+        createFolder: async () => {},
+        uploadFile: async () => {},
+        downloadFile: async () => Buffer.alloc(0),
+        deleteFile: async () => {},
+      },
+      process: {
+        executeCommand: async (command, cwd, env) => {
+          expect(cwd).toBe("/workspace");
+          expect(env).toEqual(environment);
+          const result = await run(command, env);
+          // Daytona's actual public response has no separate stderr field.
+          return {
+            exitCode: result.exitCode,
+            result: result.stdout + result.stderr,
+            artifacts: { stdout: result.stdout },
+          };
+        },
+      },
+    },
+  });
   return { session, starts: () => starts, command: () => lastCommand };
 }
 
 test.each([
-  ["runloop", 1, 0],
-  ["runloop", 10_000, 0],
-  ["runloop", 1, 7],
-  ["runloop", 10_000, 7],
-  ["daytona", 1, 0],
-  ["daytona", 10_000, 0],
-  ["daytona", 1, 7],
-  ["daytona", 10_000, 7],
+  [1, 0],
+  [10_000, 0],
+  [1, 7],
+  [10_000, 7],
 ] as const)(
-  "the actual %s SDK proves complete multi-line streams at %s tokens and exit %s",
-  async (provider, maxOutputTokens, exitCode) => {
-    const fixture = cappedSdk(provider);
+  "the actual Daytona SDK proves complete multi-line streams at %s tokens and exit %s",
+  async (maxOutputTokens, exitCode) => {
+    const fixture = daytonaSdk();
     const stdout = `original\n${"out\n".repeat(6_000)}`;
     const stderr = `  err\n${"err\n".repeat(6_000)}`;
     const command = `printf '%s\\n' "$CAPTURE_MODE"; i=0; while [ "$i" -lt 6000 ]; do printf 'out\\n'; i=$((i+1)); done; printf '  err\\n' >&2; i=0; while [ "$i" -lt 6000 ]; do printf 'err\\n' >&2; i=$((i+1)); done; exit ${exitCode}`;
@@ -750,13 +698,13 @@ test.each([
       });
       expect(result).toMatchObject({ stdout, stderr, exitCode });
       expect(fixture.starts()).toBe(1);
-      expect(fixture.command()).toContain("__OPENGENI_FS_COMPLETION__");
+      expect(fixture.command()).toContain("__OPENGENI_FS_COMPLETION_");
       const ordinary = await fixture.session.execCommand({
         cmd: "printf ordinary; printf diagnostic >&2",
         maxOutputTokens: 1,
       });
       expect(ordinary).not.toStartWith("Native output receipt:");
-      expect(fixture.command()).not.toContain("__OPENGENI_FS_COMPLETION__");
+      expect(fixture.command()).not.toContain("__OPENGENI_FS_COMPLETION_");
       expect(fixture.starts()).toBe(2);
     } finally {
       await fixture.session.close();
@@ -764,23 +712,20 @@ test.each([
   },
 );
 
-test.each(["runloop", "daytona"] as const)(
-  "the actual %s SDK rejects a byte-truncated completion without replay",
-  async (provider) => {
-    const fixture = cappedSdk(provider, (text) => text.slice(0, -30));
-    try {
-      await expect(
-        executeSynchronousCommand(fixture.session, {
-          cmd: "printf original; printf diagnostic >&2",
-          maxOutputTokens: 1,
-        }),
-      ).rejects.toMatchObject({ name: "SynchronousCommandOutcomeUnknownError" });
-      expect(fixture.starts()).toBe(1);
-    } finally {
-      await fixture.session.close();
-    }
-  },
-);
+test("the actual Daytona SDK rejects a byte-truncated completion without replay", async () => {
+  const fixture = daytonaSdk((text) => text.slice(0, -30));
+  try {
+    await expect(
+      executeSynchronousCommand(fixture.session, {
+        cmd: "printf original; printf diagnostic >&2",
+        maxOutputTokens: 1,
+      }),
+    ).rejects.toMatchObject({ name: "SynchronousCommandOutcomeUnknownError" });
+    expect(fixture.starts()).toBe(1);
+  } finally {
+    await fixture.session.close();
+  }
+});
 
 test.each([
   ["blaxel", 1, 0],

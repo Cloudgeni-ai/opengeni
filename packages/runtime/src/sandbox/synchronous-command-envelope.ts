@@ -28,12 +28,16 @@ function sha256(bytes: Uint8Array): string {
  * provider cwd/environment and completes inside the one foreground invocation.
  * Its streams become data, never status-looking output or a presentation tail. */
 export function synchronousCommandEnvelope(command: string, nonce: string) {
-  const encoded = Buffer.from(command, "utf8").toString("base64");
-  const commandSha256 = sha256(Buffer.from(command, "utf8"));
-  const wrapped = [
-    "python3 -I -S - <<'__OPENGENI_FS_COMPLETION__'",
+  const commandBytes = Buffer.from(command, "utf8");
+  const commandSha256 = sha256(commandBytes);
+  let delimiter = `__OPENGENI_FS_COMPLETION_${nonce.replaceAll("-", "_")}__`;
+  while (command.split("\n").includes(delimiter)) delimiter += "_";
+  const script = [
     "import base64, hashlib, json, subprocess, sys",
-    `command = base64.b64decode(${JSON.stringify(encoded)})`,
+    "source = sys.stdin.buffer.read()",
+    `if len(source) != ${commandBytes.byteLength + 1} or source[-1:] != b'\\n': sys.exit(125)`,
+    "command = source[:-1]",
+    `if hashlib.sha256(command).hexdigest() != ${JSON.stringify(commandSha256)}: sys.exit(125)`,
     "process = subprocess.Popen(['/bin/sh', '-c', command.decode('utf-8')], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)",
     "stdout, stderr = process.communicate()",
     "exit_code = process.returncode if process.returncode >= 0 else 128 - process.returncode",
@@ -43,8 +47,11 @@ export function synchronousCommandEnvelope(command: string, nonce: string) {
     "sys.stdout.write(json.dumps(receipt, separators=(',', ':')) + '\\n')",
     "sys.stdout.flush()",
     "sys.exit(exit_code)",
-    "__OPENGENI_FS_COMPLETION__",
   ].join("\n");
+  // Keep large admitted command source literal and present only once. Base64
+  // inflation here would undo the filesystem/cancellation argv-size budget.
+  const quotedScript = `'${script.replaceAll("'", "'\\''")}'`;
+  const wrapped = `python3 -I -S -c ${quotedScript} <<'${delimiter}'\n${command}\n${delimiter}`;
   return {
     command: wrapped,
     decode(
@@ -80,7 +87,11 @@ export function synchronousCommandEnvelope(command: string, nonce: string) {
           sha256(bytes) !== page.sha256
         )
           return null;
-        output[name] = bytes.toString("utf8");
+        try {
+          output[name] = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        } catch {
+          return null;
+        }
       }
       return output;
     },

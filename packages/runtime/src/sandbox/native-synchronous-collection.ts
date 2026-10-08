@@ -12,7 +12,10 @@ import { DaytonaSandboxSession } from "@openai/agents-extensions/sandbox/daytona
 import { CloudflareSandboxSession } from "@openai/agents-extensions/sandbox/cloudflare";
 import type { ChannelASession } from "./channel-a";
 import { parseExecResponseBanner } from "./exec-banner";
-import type { SynchronousCommandPage } from "./synchronous-command";
+import {
+  SynchronousCommandOutcomeUnknownError,
+  type SynchronousCommandPage,
+} from "./synchronous-command";
 import { synchronousCommandEnvelope } from "./synchronous-command-envelope";
 import { collectCloudflareCommandOutput } from "./cloudflare-command-output";
 
@@ -46,6 +49,10 @@ const formattedStarts = new AsyncLocalStorage<{
   page?: SynchronousCommandPage;
   capture?: Capture;
 }>();
+const cloudflareRequest = Object.getOwnPropertyDescriptor(
+  CloudflareSandboxSession.prototype,
+  "fetch",
+)?.value;
 
 function snapshot(adapter: Adapter, capture: Capture): SynchronousCommandPage {
   if (capture.unavailable) {
@@ -270,9 +277,11 @@ function installRemoteCollection(session: RemoteCollectionSession): Adapter | un
             ? RunloopCollectionAccess.hook(session)
             : undefined;
   const attached = new WeakSet<object>();
+  let cloudflareBinding:
+    | ((path: string, init: RequestInit, timeout?: number) => Promise<Response>)
+    | undefined;
   const attach = () => {
     if (session instanceof CloudflareSandboxSession) {
-      if (attached.has(session)) return true;
       // This pinned SDK has no declared raw command extension hook. Its known
       // bound Worker request method is the narrow native transport boundary:
       // leave URL/auth/timeout/body unchanged, and tee only the same exec reply.
@@ -280,36 +289,45 @@ function installRemoteCollection(session: RemoteCollectionSession): Adapter | un
         CloudflareSandboxSession.prototype,
         "fetch",
       );
-      if (typeof descriptor?.value !== "function" || Object.hasOwn(session, "fetch")) return false;
-      const fetch = descriptor.value.bind(session) as (
+      const own = Object.getOwnPropertyDescriptor(session, "fetch");
+      if (
+        typeof cloudflareRequest !== "function" ||
+        descriptor?.value !== cloudflareRequest ||
+        (cloudflareBinding ? own?.value !== cloudflareBinding : own !== undefined)
+      )
+        throw new SynchronousCommandOutcomeUnknownError(
+          null,
+          { stdout: "", stderr: "" },
+          new Error("Unsupported pinned Cloudflare command request binding"),
+        );
+      if (cloudflareBinding) return true;
+      const fetch = cloudflareRequest.bind(session) as (
         path: string,
         init: RequestInit,
         timeout?: number,
       ) => Promise<Response>;
-      Object.defineProperty(session, "fetch", {
-        configurable: true,
-        value: async (path: string, init: RequestInit, timeout?: number) => {
-          const capture = launches.getStore();
-          if (
-            !capture ||
-            scopes.getStore()?.adapter !== adapter ||
-            path !== `/v1/sandbox/${session.state.sandboxId}/exec` ||
-            init.method !== "POST"
-          )
-            return await fetch(path, init, timeout);
-          if (capture.started) capture.unavailable = true;
-          capture.started = true;
-          const response = await fetch(path, init, timeout);
-          capture.completion = collectCloudflareCommandOutput(response.clone())
-            .then((result) => {
-              captureRemoteResult(capture, result, true);
-            })
-            .catch(() => {
-              capture.unavailable = true;
-            });
-          return response;
-        },
-      });
+      cloudflareBinding = async (path: string, init: RequestInit, timeout?: number) => {
+        const capture = launches.getStore();
+        if (
+          !capture ||
+          scopes.getStore()?.adapter !== adapter ||
+          path !== `/v1/sandbox/${session.state.sandboxId}/exec` ||
+          init.method !== "POST"
+        )
+          return await fetch(path, init, timeout);
+        if (capture.started) capture.unavailable = true;
+        capture.started = true;
+        const response = await fetch(path, init, timeout);
+        capture.completion = collectCloudflareCommandOutput(response.clone())
+          .then((result) => {
+            captureRemoteResult(capture, result, true);
+          })
+          .catch(() => {
+            capture.unavailable = true;
+          });
+        return response;
+      };
+      Object.defineProperty(session, "fetch", { configurable: true, value: cloudflareBinding });
       attached.add(session);
       return true;
     }
@@ -353,11 +371,43 @@ function installRemoteCollection(session: RemoteCollectionSession): Adapter | un
         const capture = launches.getStore();
         if (!capture || scopes.getStore()?.adapter !== adapter)
           return await run(command, params, options);
-        const envelope = synchronousCommandEnvelope(command, crypto.randomUUID());
-        return await captureCall(
-          () => run(envelope.command, params, options),
-          async (result) => envelope.decode(await result.stdout(), result.exitCode),
-        );
+        if (capture.started) capture.unavailable = true;
+        capture.started = true;
+        const result = await run(command, params, options);
+        // The native result's no-limit public methods retrieve full logs from
+        // this same execution when its initial last_n response is truncated.
+        // Cache those reads for Agents' formatter, avoiding another log drain.
+        const logs = await Promise.allSettled([
+          Promise.resolve().then(() => result.stdout()),
+          Promise.resolve().then(() => result.stderr()),
+        ]);
+        if (logs[0].status !== "fulfilled" || logs[1].status !== "fulfilled") {
+          capture.unavailable = true;
+          throw new SynchronousCommandOutcomeUnknownError(
+            null,
+            {
+              stdout: logs[0].status === "fulfilled" ? logs[0].value : "",
+              stderr: logs[1].status === "fulfilled" ? logs[1].value : "",
+            },
+            new AggregateError(
+              logs.filter((log) => log.status === "rejected").map((log) => log.reason),
+              "Original execution output retrieval failed",
+            ),
+          );
+        }
+        const [stdout, stderr] = [logs[0].value, logs[1].value];
+        captureRemoteResult(capture, { stdout, stderr, exitCode: result.exitCode }, true);
+        return new Proxy(result, {
+          get(target, property) {
+            if (property === "stdout" || property === "stderr")
+              return (numLines?: number) =>
+                numLines === undefined
+                  ? Promise.resolve(property === "stdout" ? stdout : stderr)
+                  : target[property](numLines);
+            const value = Reflect.get(target, property, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
       };
     } else {
       const source = (native as ConstructorParameters<typeof DaytonaSandboxSession>[0]["sandbox"])
@@ -394,9 +444,16 @@ function installRemoteCollection(session: RemoteCollectionSession): Adapter | un
     if (!hook) attach();
     const capture = createCapture();
     scope.captures.add(capture);
-    const raw = await remoteStarts.run(capture, () =>
-      hook ? exec(args) : launches.run(capture, () => exec(args)),
-    );
+    let raw: string;
+    try {
+      raw = await remoteStarts.run(capture, () =>
+        hook ? exec(args) : launches.run(capture, () => exec(args)),
+      );
+    } catch (error) {
+      if (!capture.started || error instanceof SynchronousCommandOutcomeUnknownError) throw error;
+      capture.unavailable = true;
+      throw new SynchronousCommandOutcomeUnknownError(null, { stdout: "", stderr: "" }, error);
+    }
     if (!capture.started) capture.unavailable = true;
     return await formattedReceipt(adapter, capture, raw);
   };

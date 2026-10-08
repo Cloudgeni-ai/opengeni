@@ -1,4 +1,3 @@
-import { StringDecoder } from "node:string_decoder";
 import { z } from "zod";
 
 const exit = z.object({ exit_code: z.number().int() });
@@ -14,7 +13,10 @@ export async function collectCloudflareCommandOutput(response: Response): Promis
   if (!response.ok || !response.body) return null;
   const reader = response.body.getReader();
   const text = new TextDecoder("utf-8", { fatal: true });
-  const decoders = { stdout: new StringDecoder("utf8"), stderr: new StringDecoder("utf8") };
+  const decoders = {
+    stdout: new TextDecoder("utf-8", { fatal: true }),
+    stderr: new TextDecoder("utf-8", { fatal: true }),
+  };
   const output = { stdout: "", stderr: "" };
   let exitCode: number | undefined;
   let buffer = "";
@@ -36,7 +38,7 @@ export async function collectCloudflareCommandOutput(response: Response): Promis
       const bytes = Buffer.from(atob(encoded), "latin1");
       if (bytes.toString("base64").replace(/=+$/u, "") !== encoded.replace(/=+$/u, ""))
         throw new Error("Invalid native output bytes");
-      output[type] += decoders[type].write(bytes);
+      output[type] += decoders[type].decode(bytes, { stream: true });
     } else if (type === "exit") {
       const parsed = exit.parse(JSON.parse(value));
       if (exitCode !== undefined || !Number.isSafeInteger(parsed.exit_code))
@@ -66,8 +68,8 @@ export async function collectCloudflareCommandOutput(response: Response): Promis
     drain();
     // Undispatched/truncated frames cannot be silently accepted as EOF.
     if (buffer.trim() || exitCode === undefined) return null;
-    output.stdout += decoders.stdout.end();
-    output.stderr += decoders.stderr.end();
+    output.stdout += decoders.stdout.decode();
+    output.stderr += decoders.stderr.decode();
     return { ...output, exitCode };
   } catch {
     return null;
