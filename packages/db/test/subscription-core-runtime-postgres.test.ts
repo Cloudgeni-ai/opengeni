@@ -2775,7 +2775,20 @@ describe("provider-neutral subscription runtime persistence", () => {
         await adminWriteError(sql`update subscription_connections
           set refresh_generation = 9007199254740992
           where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid`),
-      ).toContain("subscription_connections_refresh_generation_safe_chk");
+      ).toContain("refresh generation changes only with the credential");
+      expect(
+        await adminWriteError(sql`update subscription_connections
+          set refresh_generation = 3
+          where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid`),
+      ).toContain("refresh generation changes only with the credential");
+      // The safe-integer CHECK still backs the trigger for any other writer.
+      const [bound] = await shared!.admin<{ present: boolean }[]>`
+        select exists (
+          select 1 from pg_constraint
+          where conname = 'subscription_connections_refresh_generation_safe_chk'
+            and convalidated
+        ) as present`;
+      expect(bound?.present).toBe(true);
       const [stored] = await shared!.admin<
         { credential_encrypted: string; refresh_generation: string; version: number }[]
       >`

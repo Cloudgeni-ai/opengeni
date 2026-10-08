@@ -766,6 +766,11 @@ BEGIN
           RAISE EXCEPTION 'a credential change advances refresh generation by exactly one'
             USING ERRCODE = '23514';
         END IF;
+      ELSIF NEW.refresh_generation <> OLD.refresh_generation THEN
+        -- Without a credential change the generation is fixed, so it grows by
+        -- one per credential write and its safe-integer ceiling is unreachable.
+        RAISE EXCEPTION 'refresh generation changes only with the credential'
+          USING ERRCODE = '23514';
       END IF;
       RETURN NEW;
     END;
