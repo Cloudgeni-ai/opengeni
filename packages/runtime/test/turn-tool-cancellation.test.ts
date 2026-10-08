@@ -11,7 +11,10 @@ import {
   createTurnToolCancellationController,
   isBareInteractiveShellCommand,
 } from "../src/sandbox/turn-tool-cancellation";
-import { notifyDurableOpOwnershipTransferStarted } from "../src/sandbox/op-correlation";
+import {
+  notifyDurableOpOwnershipTransferStarted,
+  notifyDurableOpOwnershipTransferred,
+} from "../src/sandbox/op-correlation";
 import { parseExecResponseBanner } from "../src/sandbox/exec-banner";
 import {
   RoutingMutationOutcomeUnknownError,
@@ -1487,6 +1490,98 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     },
   );
 
+  test.each([0, 7])(
+    "synchronous remote-operation commands observe their exact numeric handle through exit %s",
+    async (exitCode) => {
+      const controller = createTurnToolCancellationController();
+      let starts = 0;
+      const reads: number[] = [];
+      let readCount = 0;
+      const session = {
+        commandCancellationTransport: async () => "remote_operation" as const,
+        cancelExecCommand: async () => true,
+        exec: async () => {
+          starts++;
+          return running(219, "started\n");
+        },
+        writeStdin: async () => {
+          throw new Error("must use the exact process-control read");
+        },
+        writeStdinForProcessControl: async ({ sessionId }: { sessionId: number }) => {
+          reads.push(sessionId);
+          return readCount++ === 0
+            ? running(sessionId, "middle\n")
+            : exited(exitCode, "finished\n");
+        },
+      };
+
+      const result = await controller.runSandboxCommandSynchronous(session, { cmd: "write once" });
+      await controller.waitForQuiescence();
+
+      expect(result).toMatchObject({
+        stdout: "started\nmiddle\nfinished\n",
+        exitCode,
+      });
+      expect(starts).toBe(1);
+      expect(reads).toEqual([219, 219]);
+    },
+  );
+
+  test("remote numeric-handle cancellation waits for its exact terminal read", async () => {
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    let markReadStarted!: () => void;
+    let releaseRead!: (result: string) => void;
+    let markCancelRequested!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      markReadStarted = resolve;
+    });
+    const cancelRequested = new Promise<void>((resolve) => {
+      markCancelRequested = resolve;
+    });
+    const pendingRead = new Promise<string>((resolve) => {
+      releaseRead = resolve;
+    });
+    let starts = 0;
+    let cancellations = 0;
+    const readHandles: number[] = [];
+    const session = {
+      commandCancellationTransport: async () => "remote_operation" as const,
+      cancelExecCommand: async () => {
+        cancellations++;
+        markCancelRequested();
+        return true;
+      },
+      exec: async () => {
+        starts++;
+        return running(220, "initial\n");
+      },
+      writeStdinForProcessControl: async ({ sessionId }: { sessionId: number }) => {
+        readHandles.push(sessionId);
+        markReadStarted();
+        return await pendingRead;
+      },
+    };
+
+    const operation = controller.runSandboxCommandSynchronous(session, { cmd: "write once" });
+    await readStarted;
+    abort.abort(new Error("cancel while observing original command"));
+    const drain = controller.waitForQuiescence();
+    await cancelRequested;
+    expect(await pendingAfterMicrotasks(drain)).toBe(true);
+
+    releaseRead(exited(0, "terminal\n"));
+    await expect(operation).rejects.toMatchObject({
+      name: "TurnSandboxCommandCancelledError",
+      message: "cancel while observing original command",
+    });
+    await drain;
+
+    expect(starts).toBe(1);
+    expect(cancellations).toBe(1);
+    expect(readHandles).toEqual([220]);
+  });
+
   test("native pending launch cancellation waits for its retained handoff without numeric helpers", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
@@ -1754,7 +1849,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(cancelledOpIds).toEqual(["call_2e_machine_2f_1:0"]);
   });
 
-  test("Steer cannot cancel a connected-machine op after durable adoption starts", async () => {
+  test("Steer joins a pending connected-machine adoption until durable commit without cancelling it", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
     let finishExec!: (output: string) => void;
@@ -1776,7 +1871,9 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const exec = functionTool("exec_command", async () => {
       notifyDurableOpOwnershipTransferStarted("call_2e_machine_2f_adopted:0");
       markTransferred();
-      return await output;
+      const result = await output;
+      notifyDurableOpOwnershipTransferred("call_2e_machine_2f_adopted:0");
+      return result;
     });
     const [wrapped] = controller.wrapTools([exec], session) as Array<
       Extract<Tool<unknown>, { type: "function" }>
@@ -1796,9 +1893,12 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     );
     await transferred;
     abort.abort(new Error("steered after adoption"));
+    const drain = controller.waitForQuiescence();
+    expect(await pendingAfterMicrotasks(drain)).toBe(true);
+    expect(cancelledOpIds).toEqual([]);
     finishExec("Command running in background");
     await invocation;
-    await controller.waitForQuiescence();
+    await drain;
 
     expect(cancelledOpIds).toEqual([]);
   });

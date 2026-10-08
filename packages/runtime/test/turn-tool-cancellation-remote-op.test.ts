@@ -1,21 +1,23 @@
 import { describe, expect, test } from "bun:test";
-import { OpFrame, type ControlRequest, type ExecRequest } from "@opengeni/agent-proto";
-import type { ControlRpc } from "../src/sandbox/selfhosted/control-rpc";
+import type { Tool } from "@openai/agents";
+import { shell } from "@openai/agents/sandbox";
+import { ErrorCode, OpFrame, type ControlRequest, type ExecRequest } from "@opengeni/agent-proto";
+import { SelfhostedControlError, type ControlRpc } from "../src/sandbox/selfhosted/control-rpc";
 import {
   FakeOpRunner,
   InMemoryOpStreamTransport,
   type FakeOpScript,
 } from "../src/sandbox/selfhosted/op-testing";
-import { SelfhostedSession } from "../src/sandbox/selfhosted/session";
+import { SelfhostedSession, type SelfhostedSessionDeps } from "../src/sandbox/selfhosted/session";
 import { SandboxChannelAService } from "../src/sandbox/channel-a";
 import {
   createTurnToolCancellationController,
   TurnSandboxCommandCancelledError,
 } from "../src/sandbox/turn-tool-cancellation";
 
-const WORKSPACE = "ope-701-workspace";
-const AGENT = "ope-701-agent";
-const CONNECTION = "ope-701-connection";
+const WORKSPACE = "remote-custody-workspace";
+const AGENT = "remote-custody-agent";
+const CONNECTION = "remote-custody-connection";
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -46,6 +48,10 @@ async function remainsPending(promise: Promise<unknown>): Promise<boolean> {
 function makeRig(input: {
   beforeRequest?: (request: ControlRequest) => void | Promise<void>;
   defaultScript?: (exec: ExecRequest, opId: string) => FakeOpScript | Promise<FakeOpScript>;
+  sessionDeps?: Pick<
+    SelfhostedSessionDeps,
+    "adoptBackgroundCommand" | "resolveOperationAdmission" | "execTimeoutMs"
+  >;
 }) {
   const transport = new InMemoryOpStreamTransport();
   const runner = new FakeOpRunner({
@@ -79,8 +85,25 @@ function makeRig(input: {
       silenceTimeoutMs: 100,
       reconnectHoldMs: 600,
     },
+    ...input.sessionDeps,
   });
   return { transport, runner, requests, session };
+}
+
+function sdkExec(
+  controller: ReturnType<typeof createTurnToolCancellationController>,
+  session: SelfhostedSession,
+): Extract<Tool<unknown>, { type: "function" }> {
+  const exec = shell({ configureTools: (tools) => controller.wrapTools(tools, session) })
+    .clone()
+    .bind(session)
+    .tools()
+    .find(
+      (tool): tool is Extract<Tool<unknown>, { type: "function" }> =>
+        tool.type === "function" && tool.name === "exec_command",
+    );
+  if (!exec) throw new Error("SDK shell did not expose exec_command");
+  return exec;
 }
 
 function opIdFromStart(request: ControlRequest): string | null {
@@ -88,6 +111,167 @@ function opIdFromStart(request: ControlRequest): string | null {
 }
 
 describe("remote synchronous command custody", () => {
+  test.each(["synchronous", "model"] as const)(
+    "trusted local admission refusal settles an unstarted %s command with no RPC",
+    async (mode) => {
+      let admissionCalls = 0;
+      const rig = makeRig({
+        sessionDeps: {
+          resolveOperationAdmission: async () => {
+            admissionCalls++;
+            return null;
+          },
+        },
+      });
+      const controller = createTurnToolCancellationController();
+
+      if (mode === "synchronous") {
+        await expect(
+          controller.runSandboxCommandSynchronous(rig.session, { cmd: "must not start" }),
+        ).rejects.toThrow("no authoritative live runner connection");
+      } else {
+        const result = await sdkExec(controller, rig.session).invoke(
+          {} as never,
+          JSON.stringify({ cmd: "must not start" }),
+          {
+            toolCall: {
+              type: "function_call",
+              callId: "unstarted_model",
+              name: "exec_command",
+              arguments: "{}",
+            },
+          },
+        );
+        expect(result).toContain("no authoritative live runner connection");
+      }
+
+      const drain = controller.waitForQuiescence();
+      expect(await remainsPending(drain)).toBe(false);
+      await drain;
+      expect(admissionCalls).toBe(1);
+      expect(rig.requests).toEqual([]);
+      expect(rig.runner.starts).toEqual([]);
+      expect(rig.runner.runs.size).toBe(0);
+      expect(rig.transport.decodedAcks()).toEqual([]);
+    },
+  );
+
+  test("failed durable transfer keeps exact cleanup joined until cancellation recovers", async () => {
+    let cancellationAvailable = false;
+    let adoptionAttempts = 0;
+    const rig = makeRig({
+      beforeRequest: (request) => {
+        if (request.op?.$case === "opCancel" && !cancellationAvailable) {
+          throw new Error("cancellation receipt unavailable");
+        }
+      },
+      defaultScript: () => ({
+        frames: [{ channel: "stdout", bytes: "retained during failed transfer" }],
+        live: true,
+        holdUntilCancel: true,
+      }),
+      sessionDeps: {
+        execTimeoutMs: 0,
+        adoptBackgroundCommand: async () => {
+          adoptionAttempts++;
+          throw new Error("adoption did not commit");
+        },
+      },
+    });
+    const controller = createTurnToolCancellationController();
+    const opId = "failed_transfer:0";
+    try {
+      const result = await sdkExec(controller, rig.session).invoke(
+        {} as never,
+        JSON.stringify({ cmd: "long running command", yield_time_ms: 1 }),
+        {
+          toolCall: {
+            type: "function_call",
+            callId: "failed_transfer",
+            name: "exec_command",
+            arguments: "{}",
+          },
+        },
+      );
+      expect(result).toContain("cancellation receipt unavailable");
+      expect(adoptionAttempts).toBe(1);
+      expect(rig.runner.starts.map((start) => start.opId)).toEqual([opId]);
+      expect(rig.runner.runs.get(opId)?.exit.cancelled).toBe(false);
+
+      const drain = controller.waitForQuiescence();
+      expect(await remainsPending(drain)).toBe(true);
+      expect(rig.runner.runs.get(opId)?.exit.cancelled).toBe(false);
+      cancellationAvailable = true;
+      await drain;
+
+      const run = rig.runner.runs.get(opId)!;
+      expect(run.exit.cancelled).toBe(true);
+      expect(run.startCount).toBe(1);
+      expect(run.finalAcked).toBe(false);
+      expect(run.acks.some((ack) => ack.final)).toBe(false);
+      expect(run.frames.some((frame) => frame.body?.$case === "data")).toBe(true);
+      expect(
+        rig.requests
+          .filter((request) => request.op?.$case === "opCancel")
+          .every(
+            (request) => request.op?.$case === "opCancel" && request.op.opCancel.opId === opId,
+          ),
+      ).toBe(true);
+      expect(rig.runner.starts).toHaveLength(1);
+    } finally {
+      cancellationAvailable = true;
+      await rig.session.cancelExecCommand(opId);
+    }
+  });
+
+  test("pending durable transfer stays joined without cancelling a committed background command", async () => {
+    const adoptionStarted = deferred();
+    const releaseAdoption = deferred();
+    let adoptionCommits = 0;
+    const commandId = "11111111-1111-4111-8111-111111111111";
+    const opId = "committed_transfer:0";
+    const rig = makeRig({
+      defaultScript: () => ({ frames: [], live: true, holdUntilCancel: true }),
+      sessionDeps: {
+        execTimeoutMs: 0,
+        adoptBackgroundCommand: async () => {
+          adoptionStarted.resolve();
+          await releaseAdoption.promise;
+          adoptionCommits++;
+          return { commandId };
+        },
+      },
+    });
+    const controller = createTurnToolCancellationController();
+    const invocation = sdkExec(controller, rig.session).invoke(
+      {} as never,
+      JSON.stringify({ cmd: "long running command", yield_time_ms: 1 }),
+      {
+        toolCall: {
+          type: "function_call",
+          callId: "committed_transfer",
+          name: "exec_command",
+          arguments: "{}",
+        },
+      },
+    );
+    await adoptionStarted.promise;
+    const drain = controller.waitForQuiescence();
+    expect(await remainsPending(drain)).toBe(true);
+    expect(rig.requests.some((request) => request.op?.$case === "opCancel")).toBe(false);
+    releaseAdoption.resolve();
+    const result = await invocation;
+    await drain;
+
+    expect(result).toContain(`command ID ${commandId}`);
+    expect(adoptionCommits).toBe(1);
+    expect(rig.runner.starts.map((start) => start.opId)).toEqual([opId]);
+    expect(rig.runner.runs.get(opId)?.exit.cancelled).toBe(false);
+    expect(rig.requests.some((request) => request.op?.$case === "opCancel")).toBe(false);
+    expect(rig.runner.runs.get(opId)?.finalAcked).toBe(false);
+    await rig.session.cancelExecCommand(opId);
+  });
+
   test("recovers exact terminal output after an observation transport loss without restarting", async () => {
     let failFirstAttach = true;
     const rig = makeRig({
@@ -142,7 +326,14 @@ describe("remote synchronous command custody", () => {
             firstAttachEntered.resolve();
             await firstAttachRelease.promise;
           }
-          if (failAttachments) throw new Error("observer temporarily unavailable");
+          if (failAttachments)
+            throw new SelfhostedControlError({
+              message: "observer temporarily unavailable",
+              code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+              reason: "agent_offline",
+              retryable: false,
+              agentOffline: true,
+            });
         },
         defaultScript: () => ({
           frames: [{ channel: "stdout", bytes: "retained-before-terminal" }],
