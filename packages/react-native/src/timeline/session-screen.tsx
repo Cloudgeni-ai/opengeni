@@ -13,7 +13,7 @@ import {
   type ComponentRef,
   type ReactNode,
 } from "react";
-import { ActivityIndicator, Pressable, Text, View, type TextInput } from "react-native";
+import { ActivityIndicator, Image, Pressable, Text, View, type TextInput } from "react-native";
 import {
   defaultChatComposerMessages,
   type ChatComposerMessages,
@@ -263,6 +263,7 @@ function SessionScreenBody({
         onPause: () => void composer.pause(),
         onResume: () => void composer.resume(),
         onAttach: composerSlots?.onAttach ?? (() => void attachments.pickImages()),
+        onPasteImages: (files) => void attachments.addFiles(files),
         renderLeading: composerSlots?.renderLeading,
         options: composerSlots?.options,
         placeholder: composerSlots?.placeholder,
@@ -404,6 +405,77 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
       {attachments.attachments.map((item) => {
         const failed = item.status === "failed";
         const busy = item.status === "uploading" || item.status === "preparing";
+        if (item.kind === "image" && item.previewUri) {
+          // Photos show as photos, as on the web: a thumbnail with its state on top.
+          return (
+            <View key={item.id} style={{ width: 56, height: 56 }}>
+              <Pressable
+                accessibilityRole={failed ? "button" : "image"}
+                accessibilityLabel={failed ? `Retry ${item.name}` : item.name}
+                disabled={!failed}
+                onPress={() => void attachments.retry(item.id)}
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: theme.radius.md,
+                  overflow: "hidden",
+                  borderWidth: 1,
+                  borderColor: failed ? withAlpha(c["status-failed"], 0.6) : c.border,
+                  backgroundColor: c["surface-2"],
+                }}
+              >
+                <Image
+                  source={{ uri: item.previewUri }}
+                  style={{ width: "100%", height: "100%" }}
+                  resizeMode="cover"
+                />
+                {busy || failed ? (
+                  <View
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      alignItems: "center",
+                      justifyContent: "center",
+                      backgroundColor: failed
+                        ? withAlpha(c["status-failed"], 0.35)
+                        : "rgba(0,0,0,0.35)",
+                    }}
+                  >
+                    {busy ? (
+                      <ActivityIndicator size="small" color="#FFFFFF" />
+                    ) : (
+                      <Icon name="rotate-ccw" size={16} color="#FFFFFF" />
+                    )}
+                  </View>
+                ) : null}
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Remove ${item.name}`}
+                onPress={() => attachments.remove(item.id)}
+                hitSlop={8}
+                style={{
+                  position: "absolute",
+                  top: -6,
+                  right: -6,
+                  width: 20,
+                  height: 20,
+                  borderRadius: 10,
+                  alignItems: "center",
+                  justifyContent: "center",
+                  backgroundColor: c.fg,
+                  borderWidth: 1.5,
+                  borderColor: c["surface-1"],
+                }}
+              >
+                <Icon name="x" size={10} color={c.bg} />
+              </Pressable>
+            </View>
+          );
+        }
         return (
           <View
             key={item.id}

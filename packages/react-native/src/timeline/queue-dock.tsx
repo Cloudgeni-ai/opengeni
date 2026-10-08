@@ -13,6 +13,7 @@ import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
 import { blendOver, withAlpha } from "./primitives";
+import { CompactSignalsContext } from "./session-signals";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
 
@@ -81,7 +82,7 @@ export function QueueDock({
   return (
     <View style={{ gap: 6 }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-        {leading}
+        <CompactSignalsContext.Provider value={true}>{leading}</CompactSignalsContext.Provider>
         <View
           style={{
             flexDirection: "row",

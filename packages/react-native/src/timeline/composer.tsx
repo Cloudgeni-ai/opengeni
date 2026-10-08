@@ -20,7 +20,9 @@ import { Icon, type NativeIconName } from "./icon";
 import { withAlpha } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import type { NativeVoiceInput } from "../voice-input";
+import type { NativePickedFile } from "../adapters";
 import { useNativeTimelineMessages } from "./messages";
+import { useComposerImagePaste } from "./paste";
 
 /* ----------------------------------------------------------------------------
    The session composer, designed for each platform rather than copied from
@@ -80,6 +82,8 @@ export interface SessionComposerProps {
   onActionFeedback?: (() => void) | undefined;
   /** Dictation: a mic beside the leading actions, and the recording strip while it runs. */
   voice?: NativeVoiceInput | undefined;
+  /** Images pasted into the field (iOS), added as attachments. */
+  onPasteImages?: ((files: NativePickedFile[]) => void) | undefined;
 }
 
 /** Whether to draw Liquid Glass: iOS 26+, the native module present, transparency allowed. */
@@ -166,6 +170,7 @@ export function SessionComposer(props: SessionComposerProps) {
   const m = useNativeTimelineMessages();
   const c = theme.colors;
   const ios = Platform.OS === "ios";
+  const pasteInputId = useComposerImagePaste(props.onPasteImages);
   const [height, setHeight] = useState(22);
   const empty = !props.value;
   useEffect(() => {
@@ -220,6 +225,7 @@ export function SessionComposer(props: SessionComposerProps) {
   const field = (inline: boolean) => (
     <TextInput
       ref={props.inputRef}
+      testID={pasteInputId}
       accessibilityLabel={messages.inputLabel}
       value={props.value}
       onChangeText={props.onChangeText}
