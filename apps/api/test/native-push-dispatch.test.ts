@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import type { ClaimedNativePushDelivery } from "@opengeni/db";
-import { createFcmSender, nativePushAlert, nativePushData } from "../src/native-push-dispatch";
+import {
+  createFcmSender,
+  nativePushAlert,
+  nativePushCategory,
+  nativePushData,
+} from "../src/native-push-dispatch";
 import { nativeAppRedirectAllowed, pkceS256Challenge } from "../src/routes/native-app-auth";
 
 const payload: ClaimedNativePushDelivery["payload"] = {
@@ -25,6 +30,19 @@ function delivery(token = "fcm-token-123"): ClaimedNativePushDelivery {
 }
 
 describe("native push presentation", () => {
+  test("questions and approvals carry the category whose actions answer them", () => {
+    expect(nativePushCategory({ ...payload, eventType: "session.requiresAction" })).toBe(
+      "og.approval",
+    );
+    expect(nativePushCategory({ ...payload, eventType: "session.humanInput.requested" })).toBe(
+      "og.question",
+    );
+    expect(nativePushCategory({ ...payload, rule: "agent", eventType: "turn.completed" })).toBe(
+      undefined,
+    );
+    expect(nativePushCategory(payload)).toBe(undefined);
+  });
+
   test("falls back to a title per rule and keeps the agent's text", () => {
     expect(nativePushAlert(payload)).toEqual({
       title: "The agent needs you",

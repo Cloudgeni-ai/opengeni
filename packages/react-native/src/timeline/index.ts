@@ -54,6 +54,13 @@ export type { SessionComposerProps } from "./composer";
 export { ApprovalStrip, defaultApprovalStripMessages, HumanInputCard } from "./decisions";
 export type { ApprovalStripMessages, ApprovalStripProps, HumanInputCardProps } from "./decisions";
 export { Button, IconButton } from "./controls";
+export {
+  NativeInboxList,
+  nativeInboxAttentionCount,
+  useNativeInbox,
+  type NativeInboxClient,
+  type NativeInboxListProps,
+} from "./inbox";
 export type { ButtonVariant } from "./controls";
 export { NativeMessageAttachments } from "./message-attachments";
 export { QueueDock } from "./queue-dock";

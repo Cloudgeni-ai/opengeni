@@ -56,7 +56,20 @@ export function nativePushData(payload: ClaimedNativePushDelivery["payload"]) {
     workspaceId: payload.workspaceId,
     subjectId: payload.subjectId,
     rule: payload.rule,
+    ...(payload.eventType ? { eventType: payload.eventType } : {}),
   };
+}
+
+/**
+ * The notification category the app registers actions for: an approval can be
+ * approved (behind device unlock) or denied, a question answered inline.
+ */
+export function nativePushCategory(
+  payload: ClaimedNativePushDelivery["payload"],
+): "og.approval" | "og.question" | undefined {
+  if (payload.eventType === "session.requiresAction") return "og.approval";
+  if (payload.eventType === "session.humanInput.requested") return "og.question";
+  return undefined;
 }
 
 function base64Url(input: Buffer | string): string {
@@ -122,12 +135,14 @@ export function createApnsSender(input: {
     const host =
       delivery.environment === "development" ? "api.sandbox.push.apple.com" : "api.push.apple.com";
     const alert = nativePushAlert(delivery.payload);
+    const category = nativePushCategory(delivery.payload);
     const body = JSON.stringify({
       aps: {
         alert,
         sound: "default",
         "thread-id": delivery.payload.sessionId,
         "interruption-level": delivery.payload.rule === "needs_input" ? "time-sensitive" : "active",
+        ...(category ? { category } : {}),
       },
       body: nativePushData(delivery.payload),
     });

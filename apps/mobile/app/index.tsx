@@ -13,6 +13,8 @@ import {
   SectionLabel,
   SessionComposer,
   SessionRowList,
+  nativeInboxAttentionCount,
+  useNativeInbox,
   useNativeTimelineTheme,
 } from "@opengeni/react-native/timeline";
 import { Stack, router, useFocusEffect } from "expo-router";
@@ -112,6 +114,9 @@ function Home() {
   const [draft, setDraft] = useState("");
   const [creating, setCreating] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
+  // What waits on the person, for the Inbox button's badge.
+  const inbox = useNativeInbox(client);
+  const waiting = nativeInboxAttentionCount(inbox.data);
 
   const load = useCallback(async () => {
     if (!workspaceId) return;
@@ -135,7 +140,8 @@ function Home() {
   useFocusEffect(
     useCallback(() => {
       void load();
-    }, [load]),
+      void inbox.refresh();
+    }, [load, inbox.refresh]),
   );
 
   // The new session's model: the person's pick in this workspace, else the
@@ -264,7 +270,7 @@ function Home() {
           headerTitle: HeaderWorkspaceTitle,
           headerTitleAlign: "center",
           headerLeft: HeaderMenuButton,
-          headerRight: HeaderAccountButton,
+          headerRight: () => <HeaderRightButtons waiting={waiting} />,
           // iOS: real bar button items, so the system draws its own glass in
           // light and dark (custom views get a tinted capsule that reads wrong).
           ...(Platform.OS === "ios"
@@ -279,6 +285,19 @@ function Home() {
                   },
                 ],
                 unstable_headerRightItems: () => [
+                  {
+                    type: "button" as const,
+                    label: "Inbox",
+                    accessibilityLabel: waiting > 0 ? `Inbox, ${waiting} waiting` : "Inbox",
+                    icon: {
+                      type: "sfSymbol" as const,
+                      name: waiting > 0 ? "tray.full" : "tray",
+                    },
+                    ...(waiting > 0
+                      ? { badge: { value: waiting > 99 ? "99+" : String(waiting) } }
+                      : {}),
+                    onPress: () => router.push("/inbox"),
+                  },
                   {
                     type: "menu" as const,
                     label: "Account",
@@ -485,16 +504,52 @@ function HeaderMenuButton() {
   );
 }
 
-function HeaderAccountButton() {
+/* Android and older iOS: the Inbox and account buttons drawn by the app. */
+function HeaderRightButtons({ waiting }: { waiting: number }) {
   return (
     <AppThemeProvider>
-      <AccountButton />
+      <View style={{ flexDirection: "row", alignItems: "center" }}>
+        <InboxButton waiting={waiting} />
+        <AccountMenuButton />
+      </View>
     </AppThemeProvider>
   );
 }
 
-function AccountButton() {
-  return <AccountMenuButton />;
+function InboxButton({ waiting }: { waiting: number }) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={waiting > 0 ? `Inbox, ${waiting} waiting` : "Inbox"}
+      hitSlop={8}
+      onPress={() => router.push("/inbox")}
+      style={{ width: 44, height: 44, alignItems: "center", justifyContent: "center" }}
+    >
+      <Icon name="inbox" size={20} color={c.fg} />
+      {waiting > 0 ? (
+        <View
+          style={{
+            position: "absolute",
+            top: 6,
+            right: 4,
+            minWidth: 16,
+            height: 16,
+            paddingHorizontal: 4,
+            borderRadius: 8,
+            alignItems: "center",
+            justifyContent: "center",
+            backgroundColor: c["status-waiting"],
+          }}
+        >
+          <Text style={{ ...fontStyle(theme, 600), fontSize: 10, lineHeight: 12, color: "#fff" }}>
+            {waiting > 99 ? "99+" : waiting}
+          </Text>
+        </View>
+      ) : null}
+    </Pressable>
+  );
 }
 
 function MenuButton() {
