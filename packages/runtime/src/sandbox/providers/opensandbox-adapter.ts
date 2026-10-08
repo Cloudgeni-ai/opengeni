@@ -991,6 +991,11 @@ export class OpenSandboxSession {
 
   async exec(args: ExecCommandArgs): Promise<SandboxExecResult> {
     if (args.tty) {
+      // This provider-owned refusal precedes beginCommand and all transport
+      // selection. Retire only this invocation's provisional cancellation join;
+      // no remote failure or absence of a response can supply the same proof.
+      const opId = nextDurableOpId();
+      if (opId !== null) notifyRemoteOperationNotDispatched(opId);
       throw new SandboxUnsupportedFeatureError(
         "OpenSandbox v1 does not expose a bidirectional PTY; run the command with tty=false.",
       );
