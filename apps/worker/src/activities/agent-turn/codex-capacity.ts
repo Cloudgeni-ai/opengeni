@@ -182,6 +182,10 @@ export function codexCutoverDisposition(
 export async function selectCodexTurnCapacity(
   deps: CapacityPhaseDeps,
 ): Promise<CapacityPhaseOutcome> {
+  // This phase is invoked for every turn. Only Codex-billed work may read or
+  // be blocked by Codex's one-way cutover state.
+  if (!deps.billingState.isCodexTurn) return { ok: true };
+
   const cutover = await withRlsContext(
     deps.db,
     { accountId: deps.input.accountId, workspaceId: deps.input.workspaceId },
