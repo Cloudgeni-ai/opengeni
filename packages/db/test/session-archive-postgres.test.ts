@@ -196,9 +196,12 @@ describe("idle-session archive lifecycle", () => {
     );
 
     // Every export table is readable for the bundle while archiving.
+    // A fresh pool: no connection carries a human subject from earlier calls,
+    // like the archive worker's own pool.
+    const exporter = createDb(shared.appUrl);
     const exported: Record<string, number> = {};
     for (const spec of SESSION_ARCHIVE_EXPORT_TABLES) {
-      const page = await readSessionArchiveRows(client.db, scope, spec, {
+      const page = await readSessionArchiveRows(exporter.db, scope, spec, {
         after: null,
         limit: 1000,
       });
@@ -219,6 +222,9 @@ describe("idle-session archive lifecycle", () => {
     expect(exported.session_history_items).toBeGreaterThanOrEqual(1);
     expect(exported.session_attempt_model_context_snapshots).toBe(1);
     expect(exported.session_turns).toBeGreaterThanOrEqual(1);
+    // Visible only to the initiating human under RLS, yet part of the bundle.
+    expect(exported.preference_registry_snapshots).toBe(1);
+    await exporter.close();
 
     const transcript = await readSessionArchiveTranscriptEvents(client.db, scope, {
       afterSequence: 0,

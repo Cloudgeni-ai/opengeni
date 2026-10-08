@@ -122,7 +122,6 @@ const context = {
   session: null,
   accessContext: { subjectId: "rename-qa" },
   sessionChannelProjectionAuthority: new SessionChannelProjectionAuthority(),
-  // SessionList reads deployment features (Read-only chats) from client config.
   clientConfig: {},
   setSession: () => {},
   resetSessionView: () => {},
