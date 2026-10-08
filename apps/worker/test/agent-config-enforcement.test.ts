@@ -195,6 +195,10 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       return input.catalog;
     }),
     spyOn(db, "getExternalLinkTurnAuthorization").mockResolvedValue(null),
+    // The turn resolves built-in tool defaults against the workspace's settings.
+    spyOn(db, "requireWorkspace").mockResolvedValue({
+      settings: {},
+    } as Awaited<ReturnType<typeof db.requireWorkspace>>),
     ...(typeof db.sessionHasToolRouterHistory === "function"
       ? [spyOn(db, "sessionHasToolRouterHistory").mockResolvedValue(false)]
       : []),
