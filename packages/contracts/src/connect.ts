@@ -1,5 +1,8 @@
 import { z } from "zod";
 import { IntegrationInstanceKey, IntegrationSource } from "./index";
+import { PreparedMcpSetup } from "./prepared-mcp-setup";
+
+export { PreparedMcpSetup, preparedMcpHeaders } from "./prepared-mcp-setup";
 
 const opaqueId = z.string().min(1).max(512);
 export const ConnectOwnership = z.enum(["personal", "workspace"]);
@@ -127,6 +130,9 @@ export const ConnectAttempt = z
     account: ConnectAccount.optional(),
     installationTarget: ConnectInstallationTarget.optional(),
     source: IntegrationSource.optional(),
+    mcpSetup: PreparedMcpSetup.optional(),
+    /** Exact installed catalog identity after a verified prepared MCP setup. */
+    mcpCapabilityId: opaqueId.optional(),
     error: z
       .object({ code: opaqueId, message: z.string().max(2048), retryable: z.boolean() })
       .strict()
@@ -198,5 +204,15 @@ export const BeginConnectRequest = z
     idempotencyKey: opaqueId,
     reconnectAccountId: opaqueId.optional(),
     installationTarget: ConnectInstallationTarget.optional(),
+    mcpSetup: PreparedMcpSetup.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (value.mcpSetup && value.providerId !== "mcp-headers")
+      context.addIssue({
+        code: "custom",
+        path: ["mcpSetup"],
+        message: "Prepared header setup requires the MCP headers provider",
+      });
+  });
+export type BeginConnectRequest = z.infer<typeof BeginConnectRequest>;

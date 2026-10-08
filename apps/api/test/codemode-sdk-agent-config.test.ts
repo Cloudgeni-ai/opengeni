@@ -49,6 +49,28 @@ function expectForbidden(action: () => void) {
 }
 
 describe("configured Codemode SDK proxy ceiling", () => {
+  test("prepared MCP setup does not grant other connection or OAuth management routes", () => {
+    const enabled = config({ from: "none", workspaceAdmin: true });
+    const disabled = config({ from: "all", workspaceAdmin: false });
+    const id = "00000000-0000-4000-8000-000000000003";
+    for (const [path, method] of [
+      ["/connect/attempts", "POST"],
+      [`/connect/attempts/${id}`, "GET"],
+      [`/connect/attempts/${id}/advance`, "POST"],
+      [`/connect/attempts/${id}/cancel`, "POST"],
+    ]) {
+      expect(() => checkPath(enabled, path!, method!)).not.toThrow();
+      expectForbidden(() => checkPath(disabled, path!, method!));
+    }
+    for (const path of [
+      "/connections",
+      "/connect/catalog",
+      "/connect/accounts",
+      "/connect/attempts/not-an-id/advance",
+    ])
+      expectForbidden(() => checkPath(enabled, path, "POST"));
+  });
+
   test("stale widened live tools cannot restore subagent permissions (AC9)", () => {
     const agentConfig = config({
       from: "all",

@@ -90,6 +90,7 @@ export * from "./application/session-mcp-credential-rotation";
 export * from "./application/external-link-work-admission";
 export * from "./application/connect-authority";
 export * from "./application/connect-operation";
+export * from "./application/prepared-mcp-connection";
 export * from "./session-authorization";
 
 // Billing / usage-limit admission (checkLimit / requireLimit / recordWorkspaceUsage).

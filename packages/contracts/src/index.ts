@@ -1,4 +1,5 @@
 import { modelLogoUrl } from "./model-display";
+import { CustomMcpSetupRequest } from "./prepared-mcp-setup";
 import {
   ClaudeProviderAccountAuthoritySnapshotV1,
   WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -14356,27 +14357,7 @@ export const ToolAuthNeededPayload = z
       })
       .optional(),
     /** An agent suggestion, not a catalog entry or authority to contact this URL. */
-    setupRequest: z
-      .object({
-        kind: z.literal("mcp"),
-        name: z.string().trim().min(1).max(256),
-        endpointUrl: z
-          .string()
-          .url()
-          .max(2048)
-          .refine((url) => {
-            const parsed = new URL(url);
-            return (
-              parsed.protocol === "https:" &&
-              !parsed.username &&
-              !parsed.password &&
-              !parsed.hash &&
-              !parsed.search
-            );
-          }),
-        rationale: z.string().trim().min(1).max(2000),
-      })
-      .optional(),
+    setupRequest: CustomMcpSetupRequest.optional(),
   })
   .superRefine((payload, context) => {
     if (payload.setupRequest && (payload.capability || payload.authoritySource === "host")) {

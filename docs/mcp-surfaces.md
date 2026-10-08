@@ -19,6 +19,12 @@ page exists so you pick the right one in one read.
 
 ### Workspace Streamable HTTP
 
+For new remote API-key or bearer MCPs, the agent can prepare the native
+[connection configuration](remote-mcp-credentials.md#agent-prepared-api-key-connections).
+An authorized agent with the credential uses the protected Connect request path;
+otherwise the chat card asks the person only for the missing key. Neither path
+widens the accepted attempt's tool selection or bypasses existing permissions.
+
 The unified `/v1/workspaces/:id/mcp` endpoint uses a fresh stateless
 JSON-response transport per POST. It does not offer a server-to-client SSE
 stream: authorized GET requests return `405 Method Not Allowed` with
