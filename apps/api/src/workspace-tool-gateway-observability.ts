@@ -16,6 +16,43 @@ export type WorkspaceToolGatewayOutcome =
 const DURATION_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60];
 
 /**
+ * Bounded preparation telemetry: how long the request spent constructing,
+ * credentialing, connecting, and listing connectors before any execution, and
+ * whether a call used target-only preparation through a catalog attestation.
+ */
+export function recordWorkspaceToolGatewayPreparation(
+  observability: Observability | null | undefined,
+  input: {
+    operation: "catalog" | "call";
+    scope: "complete" | "target";
+    attestation: "hit" | "miss" | "mismatch" | "bypass" | "record";
+    durationSeconds: number;
+  },
+): void {
+  try {
+    const labels = {
+      operation: input.operation,
+      scope: input.scope,
+      attestation: input.attestation,
+    };
+    observability?.incrementCounter({
+      name: "opengeni_tool_gateway_preparations_total",
+      help: "Workspace tool gateway HTTP preparations by bounded operation, scope, and catalog attestation outcome.",
+      labels,
+    });
+    observability?.observeHistogram({
+      name: "opengeni_tool_gateway_preparation_duration_seconds",
+      help: "Workspace tool gateway HTTP preparation wall time in seconds, before execution.",
+      labels,
+      buckets: DURATION_BUCKETS,
+      value: Math.max(0, input.durationSeconds),
+    });
+  } catch {
+    // Telemetry must never change gateway execution truth.
+  }
+}
+
+/**
  * Low-cardinality gateway telemetry shared by HTTP/SDK/Site and aggregate MCP
  * adapters. Tool names, workspace/subject ids, arguments, results, credentials,
  * and approval tokens are excluded by construction.

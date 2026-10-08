@@ -10,6 +10,7 @@ import type {
   ToolGatewayResult,
 } from "./types";
 import { OpenGeniApiError } from "./errors";
+import { createSharedCatalogLoader } from "./shared-catalog-loader";
 
 export type OpenGeniToolCallOptions = {
   operationId?: string;
@@ -124,7 +125,19 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
 
   forWorkspace(workspaceId: string): OpenGeniWorkspaceTools {
     const normalizedWorkspaceId = requiredId(workspaceId, "workspaceId");
-    let catalogSnapshot: ToolGatewayCatalog | null = null;
+    const catalogPath = `/v1/workspaces/${encodeURIComponent(normalizedWorkspaceId)}/tools/catalog`;
+    const catalogLoader = createSharedCatalogLoader<ToolGatewayCatalog>(
+      async () =>
+        await this.transport.requestJson<ToolGatewayCatalog>(
+          "GET",
+          catalogPath,
+          undefined,
+          {},
+          // A shared load serves every waiter; one waiter's abort must not
+          // cancel it for its siblings. Each waiter races its own signal.
+          {},
+        ),
+    );
     const approvalBindings = new Map<
       string,
       {
@@ -135,18 +148,16 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
     >();
     const catalog = async (
       options: { refresh?: boolean; signal?: AbortSignal } = {},
-    ): Promise<ToolGatewayCatalog> => {
-      if (catalogSnapshot && !options.refresh) return catalogSnapshot;
-      const next = await this.transport.requestJson<ToolGatewayCatalog>(
-        "GET",
-        `/v1/workspaces/${encodeURIComponent(normalizedWorkspaceId)}/tools/catalog`,
-        undefined,
-        {},
-        options.signal ? { signal: options.signal } : {},
-      );
-      catalogSnapshot = next;
-      return next;
-    };
+    ): Promise<ToolGatewayCatalog> =>
+      await catalogLoader.load({
+        ...(options.refresh ? { refresh: true } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    /** Reload after `staleDigest` was rejected, joining a sibling's newer load. */
+    const catalogAfterStale = async (
+      staleDigest: string,
+      signal: AbortSignal | undefined,
+    ): Promise<ToolGatewayCatalog> => await catalogLoader.reloadAfterStale(staleDigest, signal);
     const callResolvedIdentity = async (
       resolveIdentity: (current: ToolGatewayCatalog) => ToolGatewayIdentity,
       argumentsValue: Record<string, unknown>,
@@ -195,13 +206,13 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
             options.signal ? { signal: options.signal } : {},
           );
         } catch (error) {
-          if (isCatalogStaleApiError(error)) catalogSnapshot = null;
+          if (isCatalogStaleApiError(error)) catalogLoader.invalidate(current.digest);
           else if (options.approvalToken) approvalBindings.delete(options.approvalToken);
           throw error;
         }
         if (options.approvalToken) approvalBindings.delete(options.approvalToken);
         if (response.catalogDigest !== current.digest) {
-          catalogSnapshot = null;
+          catalogLoader.invalidate(current.digest);
         }
         if (response.result.isError) throw new OpenGeniToolCallError(response.result);
         const entry = findCatalogEntry(current, identity);
@@ -214,10 +225,7 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
       } catch (error) {
         if (!isCatalogStaleApiError(error)) throw error;
       }
-      const refreshed = await catalog({
-        refresh: true,
-        ...(options.signal ? { signal: options.signal } : {}),
-      });
+      const refreshed = await catalogAfterStale(initial.digest, options.signal);
       const refreshedIdentity = resolveIdentity(refreshed);
       if (options.approvalToken && refreshed.digest !== initial.digest) {
         throw new OpenGeniToolReapprovalRequiredError(
@@ -270,7 +278,7 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
           });
           return response;
         } catch (error) {
-          if (isCatalogStaleApiError(error)) catalogSnapshot = null;
+          if (isCatalogStaleApiError(error)) catalogLoader.invalidate(current.digest);
           throw error;
         }
       };
@@ -280,10 +288,7 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
       } catch (error) {
         if (!isCatalogStaleApiError(error)) throw error;
       }
-      const refreshed = await catalog({
-        refresh: true,
-        ...(options.signal ? { signal: options.signal } : {}),
-      });
+      const refreshed = await catalogAfterStale(initial.digest, options.signal);
       return await approve(refreshed);
     };
     const invokePath = async (

@@ -1461,7 +1461,11 @@ never a retry of an existing or ambiguous operation. Submission conflicts never
 reconcile to an existing row; ambiguous failures adopt one only after exact
 scope, catalog, identity and argument comparison. Recovery never replays the
 tool ([run lifecycle](run-lifecycle.md#codemode-recovery)). The current-human
-gateway rebuilds live authority per request. Native connection-backed providers
+gateway rebuilds live authority per request. HTTP calls may rebuild only the
+target identity's connector when their complete catalog digest has a
+content-free per-process attestation for the same caller scope and the live
+entry is identical; otherwise they prepare the complete catalog
+([MCP surfaces](mcp-surfaces.md)). Native connection-backed providers
 use the same account-qualified identities as agent catalogs. Shared projection
 lives in `packages/core/src/domain/mcp-account-routes.ts`; services see workspace
 accounts only, and human transports may see their own eligible accounts.

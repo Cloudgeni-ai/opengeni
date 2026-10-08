@@ -87,6 +87,10 @@ import { buildDocumentsMcpServer } from "./mcp/documents";
 import { buildFilesMcpServer } from "./mcp/files";
 import { buildOpenGeniMcpServer } from "./mcp/server";
 import { startWorkspaceToolGatewayObservation } from "./workspace-tool-gateway-observability";
+import {
+  digestWorkspaceToolGatewayCatalogEntry,
+  type WorkspaceToolGatewayCatalogAttestations,
+} from "./workspace-tool-gateway-attestations";
 import type { Observability } from "@opengeni/observability";
 
 export type PreparedWorkspaceToolGateway = Pick<
@@ -156,6 +160,14 @@ export function requireWorkspaceToolGatewayAuthorization(
 export async function prepareWorkspaceToolGateway(
   routeDeps: ApiRouteDeps,
   authorization: AccessGrantAuthorization,
+  options: {
+    /**
+     * Prepare only these exact (account-qualified) identities. Servers outside
+     * them are never constructed, credentialed, connected, or listed; the
+     * resulting catalog and digest describe only this subset.
+     */
+    allowedIdentities?: readonly ToolGatewayIdentity[];
+  } = {},
 ): Promise<PreparedWorkspaceToolGateway> {
   const grant = requireWorkspaceToolGatewayAuthorization(authorization);
   const external = externalActorContinuationForAuthorization(authorization);
@@ -197,7 +209,7 @@ export async function prepareWorkspaceToolGateway(
   const prepared = await prepareWorkspaceToolGatewayForGrantInternal(
     routeDeps,
     grant,
-    undefined,
+    options.allowedIdentities,
     reauthorize,
   );
   try {
@@ -207,6 +219,190 @@ export async function prepareWorkspaceToolGateway(
     throw error;
   }
   return { ...prepared, ...(reauthorize ? { reauthorize } : {}) };
+}
+
+/**
+ * Bounded caller scope for catalog attestations. It binds the exact caller,
+ * actor class, and permission set; attestations still grant no authority.
+ */
+export function workspaceToolGatewayAttestationScope(
+  authorization: AccessGrantAuthorization,
+): string {
+  const grant = authorization.grant;
+  const external = externalActorContinuationForAuthorization(authorization);
+  return digestCanonicalJson({
+    version: 1,
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
+    principalKind: grant.principalKind ?? null,
+    permissions: [...new Set(grant.permissions)].sort(),
+    actor: isVerifiedOrganizationServiceAuthorization(authorization)
+      ? "service"
+      : external
+        ? { external: digestCanonicalJson(external) }
+        : "human",
+  });
+}
+
+export type WorkspaceToolGatewayPreparationScope = "complete" | "target";
+export type WorkspaceToolGatewayAttestationOutcome = "hit" | "miss" | "mismatch" | "bypass";
+
+export type WorkspaceToolGatewayTiming = {
+  /** Wall time spent preparing gateways (all preparations, including fallback). */
+  prepareMs: number;
+  /** Wall time from the last successful preparation to the response. */
+  callMs: number;
+  scope: WorkspaceToolGatewayPreparationScope;
+  attestation: WorkspaceToolGatewayAttestationOutcome;
+};
+
+/** Prepare one complete current-caller catalog and remember its content-free attestation. */
+export async function prepareAttestedWorkspaceToolGateway(
+  routeDeps: ApiRouteDeps,
+  authorization: AccessGrantAuthorization,
+  attestations: WorkspaceToolGatewayCatalogAttestations | undefined,
+  prepare: typeof prepareWorkspaceToolGateway = prepareWorkspaceToolGateway,
+): Promise<PreparedWorkspaceToolGateway> {
+  const prepared = await prepare(routeDeps, authorization);
+  attestations?.record(
+    workspaceToolGatewayAttestationScope(authorization),
+    prepared.toolGatewayCatalog,
+  );
+  return prepared;
+}
+
+/**
+ * HTTP/SDK/Site call adapter. When the caller's `catalogDigest` names a
+ * complete catalog this process prepared for the same caller scope, only the
+ * target identity's connector is prepared live and its entry must match the
+ * attested entry exactly. Every other case (approval capability, unknown or
+ * expired digest, missing/changed entry) prepares the complete catalog and
+ * applies the unchanged stale-catalog contract.
+ */
+export async function callWorkspaceToolGatewayForCaller(
+  routeDeps: ApiRouteDeps,
+  authorization: AccessGrantAuthorization,
+  request: ToolGatewayCallRequest,
+  options: {
+    attestations?: WorkspaceToolGatewayCatalogAttestations;
+    observability?: Observability;
+    /** Must enforce current-caller gateway authorization before provider work. */
+    prepare?: typeof prepareWorkspaceToolGateway;
+    authorizeSiteTool?: AuthorizeWorkspaceSiteTool;
+    resolveOrigin?: typeof resolveSiteSessionOrigin;
+  } = {},
+): Promise<{ response: ToolGatewayCallResponse; timing: WorkspaceToolGatewayTiming }> {
+  // `prepare` (prepareWorkspaceToolGateway in production) rejects any caller
+  // without live current-caller gateway authority before provider work. The
+  // attestation lookup below grants nothing and reveals nothing to a caller
+  // that preparation then rejects.
+  const grant = authorization.grant;
+  const prepare = options.prepare ?? prepareWorkspaceToolGateway;
+  const callGateway = (
+    prepared: PreparedWorkspaceToolGateway,
+    callRequest: ToolGatewayCallRequest,
+  ) =>
+    callWorkspaceToolGateway(
+      prepared,
+      grant,
+      callRequest,
+      routeDeps.db,
+      undefined,
+      options.observability,
+      options.authorizeSiteTool,
+      options.resolveOrigin,
+    );
+  const scope = workspaceToolGatewayAttestationScope(authorization);
+  let prepareMs = 0;
+  const timedPrepare = async (allowedIdentities?: readonly ToolGatewayIdentity[]) => {
+    const startedAt = performance.now();
+    try {
+      return await prepare(
+        routeDeps,
+        authorization,
+        allowedIdentities ? { allowedIdentities } : {},
+      );
+    } finally {
+      prepareMs += performance.now() - startedAt;
+    }
+  };
+  const attestedEntry =
+    request.approvalToken === undefined
+      ? options.attestations?.entryDigest(scope, request.catalogDigest, request.identity)
+      : undefined;
+  let attestation: WorkspaceToolGatewayAttestationOutcome =
+    request.approvalToken !== undefined || !options.attestations
+      ? "bypass"
+      : attestedEntry
+        ? "hit"
+        : "miss";
+  if (attestedEntry) {
+    const target = await timedPrepare([request.identity]);
+    try {
+      const entry = target.toolGatewayCatalog.entries.find(
+        (candidate) =>
+          candidate.identity.serverId === request.identity.serverId &&
+          candidate.identity.toolName === request.identity.toolName,
+      );
+      if (entry && digestWorkspaceToolGatewayCatalogEntry(entry) === attestedEntry) {
+        const callStartedAt = performance.now();
+        // The target-only gateway verifies its own digest; the caller's
+        // complete digest was verified through the exact attested entry.
+        const response = await callGateway(target, {
+          ...request,
+          catalogDigest: target.toolGatewayCatalog.digest,
+        });
+        return {
+          response: ToolGatewayCallResponse.parse({
+            ...response,
+            catalogDigest: request.catalogDigest,
+          }),
+          timing: {
+            prepareMs,
+            callMs: performance.now() - callStartedAt,
+            scope: "target",
+            attestation,
+          },
+        };
+      }
+      attestation = "mismatch";
+    } finally {
+      await target.close();
+    }
+  }
+  const prepared = await timedPrepare();
+  try {
+    options.attestations?.record(scope, prepared.toolGatewayCatalog);
+    const callStartedAt = performance.now();
+    const response = await callGateway(prepared, request);
+    return {
+      response,
+      timing: {
+        prepareMs,
+        callMs: performance.now() - callStartedAt,
+        scope: "complete",
+        attestation,
+      },
+    };
+  } finally {
+    await prepared.close();
+  }
+}
+
+/** Content-free Server-Timing for gateway preparation versus execution. */
+export function workspaceToolGatewayServerTiming(timing: {
+  prepareMs: number;
+  callMs?: number;
+  scope: WorkspaceToolGatewayPreparationScope;
+  attestation?: WorkspaceToolGatewayAttestationOutcome;
+}): string {
+  const prepare = `gw-prepare;dur=${timing.prepareMs.toFixed(1)};desc="${timing.scope}${
+    timing.attestation ? `/${timing.attestation}` : ""
+  }"`;
+  return timing.callMs === undefined
+    ? prepare
+    : `${prepare}, gw-call;dur=${timing.callMs.toFixed(1)}`;
 }
 
 export async function prepareMcpOAuthWorkspaceToolGateway(
