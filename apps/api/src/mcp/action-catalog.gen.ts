@@ -1789,20 +1789,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
-    "id": "GET /v1/inbox",
-    "method": "GET",
-    "path": "/v1/inbox",
-    "request": [],
-    "response": []
-  },
-  {
-    "id": "GET /v1/inbox/settings",
-    "method": "GET",
-    "path": "/v1/inbox/settings",
-    "request": [],
-    "response": []
-  },
-  {
     "id": "GET /v1/organizations/:accountId/insights/calls",
     "method": "GET",
     "path": "/v1/organizations/:accountId/insights/calls",
@@ -2409,6 +2395,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ExternalIdentityLink"
     ],
     "browserOnly": "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user"
+  },
+  {
+    "id": "getInboxSettings",
+    "method": "GET",
+    "path": "/v1/inbox/settings",
+    "request": [],
+    "response": [
+      "InboxSettings"
+    ]
   },
   {
     "id": "getInstalledPluginDetails",
@@ -3662,6 +3657,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "browserOnly": "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user"
   },
   {
+    "id": "listInbox",
+    "method": "GET",
+    "path": "/v1/inbox",
+    "request": [],
+    "response": [
+      "ListInboxResponse"
+    ]
+  },
+  {
     "id": "listInstalledPlugins",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/plugins",
@@ -4479,13 +4483,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
-    "id": "PATCH /v1/inbox/items/:itemId",
-    "method": "PATCH",
-    "path": "/v1/inbox/items/:itemId",
-    "request": [],
-    "response": []
-  },
-  {
     "id": "PATCH /v1/organizations/:organizationId/codex/accounts/:accountId",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId",
@@ -4925,13 +4922,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceArtifactMutationResponse"
     ]
-  },
-  {
-    "id": "PUT /v1/inbox/settings",
-    "method": "PUT",
-    "path": "/v1/inbox/settings",
-    "request": [],
-    "response": []
   },
   {
     "id": "PUT /v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
@@ -6365,6 +6355,26 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionGoal"
+    ]
+  },
+  {
+    "id": "updateInboxItem",
+    "method": "PATCH",
+    "path": "/v1/inbox/items/:itemId",
+    "request": [
+      "InboxItem"
+    ],
+    "response": []
+  },
+  {
+    "id": "updateInboxSettings",
+    "method": "PUT",
+    "path": "/v1/inbox/settings",
+    "request": [
+      "InboxSettings"
+    ],
+    "response": [
+      "InboxSettings"
     ]
   },
   {
