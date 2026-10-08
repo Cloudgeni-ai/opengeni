@@ -218,6 +218,8 @@ describe("idle-session archive lifecycle", () => {
     expect(exported.session_events).toBeGreaterThan(3);
     expect(exported.session_history_items).toBeGreaterThanOrEqual(1);
     expect(exported.session_attempt_model_context_snapshots).toBe(1);
+    // Visible only to the turn's initiator, yet still part of the bundle.
+    expect(exported.preference_registry_snapshots).toBe(1);
     expect(exported.session_turns).toBeGreaterThanOrEqual(1);
 
     const transcript = await readSessionArchiveTranscriptEvents(client.db, scope, {

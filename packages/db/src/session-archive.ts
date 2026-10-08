@@ -2,6 +2,7 @@ import type { SessionEvent, SessionEventType } from "@opengeni/contracts";
 import { and, asc, eq, gt, isNull, notInArray, sql, type SQL } from "drizzle-orm";
 import {
   rawRows,
+  setSubjectRlsContext,
   withRlsContext,
   withSessionActivityRlsContext,
   withWorkspaceSessionActivityRls,
@@ -58,7 +59,16 @@ export const SESSION_ARCHIVE_PURGED_EVENT_TYPES = [
 ] as const;
 
 type KeyColumn = { column: string; cast: string };
-export type SessionArchiveExportTable = { table: string; keys: KeyColumn[] };
+export type SessionArchiveExportTable = {
+  table: string;
+  keys: KeyColumn[];
+  /**
+   * Rows visible only to the person who started the turn (RLS compares this
+   * column with the current subject). The archive reads them once per human
+   * initiator of the session's turns, since a workspace scope alone sees none.
+   */
+  initiatorScoped?: true;
+};
 
 /**
  * Everything the bundle carries, in bundle order. Keyset columns follow an
@@ -101,7 +111,7 @@ export const SESSION_ARCHIVE_EXPORT_TABLES: readonly SessionArchiveExportTable[]
     table: "session_pending_tool_calls",
     keys: [{ column: "turn_id", cast: "uuid" }, uuidKey("id")],
   },
-  { table: "preference_registry_snapshots", keys: [uuidKey("id")] },
+  { table: "preference_registry_snapshots", keys: [uuidKey("id")], initiatorScoped: true },
 ];
 
 function uuidKey(column: string): KeyColumn {
@@ -321,16 +331,42 @@ export async function readSessionArchiveRows(
     db,
     { accountId: scope.accountId, workspaceId: scope.workspaceId },
     async (scoped) => {
-      const rows = await rawRows<Record<string, string>>(
-        scoped,
-        sql`select row_to_json(t)::text as row, ${keyText}
-          from ${sql.identifier(spec.table)} t
-          where t.workspace_id = ${scope.workspaceId}::uuid
-            and t.session_id = ${scope.sessionId}::uuid
-            and ${after}
-          order by ${order}
-          limit ${input.limit}`,
-      );
+      const page = async () =>
+        await rawRows<Record<string, string>>(
+          scoped,
+          sql`select row_to_json(t)::text as row, ${keyText}
+            from ${sql.identifier(spec.table)} t
+            where t.workspace_id = ${scope.workspaceId}::uuid
+              and t.session_id = ${scope.sessionId}::uuid
+              and ${after}
+            order by ${order}
+            limit ${input.limit}`,
+        );
+      let rows: Record<string, string>[];
+      if (spec.initiatorScoped) {
+        // Each initiator sees only their own rows: read a page as each, then
+        // merge to the first `limit` rows in key order (one uuid key, so its
+        // lowercase text sorts exactly like the uuid).
+        if (spec.keys.length !== 1 || spec.keys[0]!.cast !== "uuid") {
+          throw new Error(`Initiator-scoped archive table ${spec.table} needs one uuid key`);
+        }
+        const initiators = await rawRows<{ subject_id: string }>(
+          scoped,
+          sql`select distinct initiating_human_subject_id as subject_id from session_turns
+            where workspace_id = ${scope.workspaceId}::uuid
+              and session_id = ${scope.sessionId}::uuid
+              and initiating_human_subject_id is not null`,
+        );
+        rows = [];
+        for (const { subject_id } of initiators) {
+          await setSubjectRlsContext(scoped, subject_id);
+          rows.push(...(await page()));
+        }
+        rows.sort((a, b) => (a.k0! < b.k0! ? -1 : a.k0! > b.k0! ? 1 : 0));
+        rows = rows.slice(0, input.limit);
+      } else {
+        rows = await page();
+      }
       const lastRow = rows.at(-1);
       return {
         rows: rows.map((row) => row.row!),
