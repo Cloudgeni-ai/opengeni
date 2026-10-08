@@ -9,6 +9,7 @@ export type KnowledgeTab = "library" | "instructions" | "review";
 export type KnowledgeSubpage =
   | "add"
   | "edit"
+  /** Old links: Agent learning is Settings > Agent learning now, and redirects there. */
   | "learning"
   | "instructions"
   | "identity"

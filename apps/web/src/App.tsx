@@ -1047,17 +1047,6 @@ function WorkspaceSettings() {
       />
     );
   }
-  // Agent learning is the Learning page of Knowledge now.
-  if (section === "learning") {
-    return (
-      <Navigate
-        to="/workspaces/$workspaceId/state"
-        params={{ workspaceId }}
-        search={{ page: "learning" }}
-        replace
-      />
-    );
-  }
   return (
     <LazyWorkspaceSettingsRoute
       workspaceId={workspaceId}

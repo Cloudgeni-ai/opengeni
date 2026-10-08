@@ -97,7 +97,7 @@ shortcuts edit those same records:
 - Chat: the session dock's Agent tab, beside the chat's identity and
   capabilities; + > Chat settings opens it. A new chat sets its draft choice in
   + > Chat settings. No persistent composer toggle.
-- Organization identity (owners only): a row on Knowledge > Agent learning in the
+- Organization identity (owners only): a row on Settings > Agent learning in the
   same Off / Review first / Automatic words, backed by the separate
   company-profile agent policy.
 
