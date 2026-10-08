@@ -673,10 +673,12 @@ function InboxSettingsSections() {
 
   const change = async (next: Partial<InboxSettings>) => {
     const previous = settings;
-    if (previous) setSettings({ ...previous, ...next });
+    if (!previous) return;
+    const wanted = { ...previous, ...next };
+    setSettings(wanted);
     setSaving(true);
     try {
-      setSettings(await context.client.updateInboxSettings(next));
+      setSettings(await context.client.updateInboxSettings(wanted));
     } catch (error) {
       setSettings(previous);
       toast.error(userErrorText(error, "Couldn't save that. Try again."));
@@ -699,7 +701,7 @@ function InboxSettingsSections() {
               description="When an agent pauses a goal it's working on for you. Off keeps them in their sessions only."
               control={
                 <Switch
-                  checked={settings.pausedGoals}
+                  checked={settings.pausedGoals ?? false}
                   pending={saving}
                   onCheckedChange={(checked) => void change({ pausedGoals: checked })}
                 />

@@ -6,7 +6,6 @@ import {
   InboxSettings,
   ListInboxResponse,
   UpdateInboxItemRequest,
-  UpdateInboxSettingsRequest,
   type AccessContext,
   type InboxItem,
 } from "@opengeni/contracts";
@@ -159,7 +158,7 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.put("/v1/inbox/settings", async (c) => {
     const context = await requireAccessContext(c, deps);
     const subjectId = requirePerson(context);
-    const parsed = UpdateInboxSettingsRequest.safeParse(await c.req.json().catch(() => null));
+    const parsed = InboxSettings.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HTTPException(400, { message: "Invalid inbox settings" });
     // The setting is the person's own; apply it in every organization they belong to.
     let settings: InboxSettings = { tidyPolicy: "own_sessions", pausedGoals: false };

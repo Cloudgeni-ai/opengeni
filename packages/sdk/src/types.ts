@@ -5516,12 +5516,12 @@ export type InboxTidyPolicy = "own_sessions" | "any_agent";
 
 export type InboxSettings = {
   tidyPolicy: InboxTidyPolicy;
-  /** Goals an agent paused in the person's own sessions reach the inbox. Off by default. */
-  pausedGoals: boolean;
+  /**
+   * Goals an agent paused in the person's own sessions reach the inbox. Off by
+   * default. Always present in responses; leave it out of an update to keep it.
+   */
+  pausedGoals?: boolean;
 };
-
-/** Change some inbox settings; omitted ones stay as they are. */
-export type UpdateInboxSettingsInput = Partial<InboxSettings>;
 
 // --- Native app sign-in (authorization code + PKCE over the app's scheme) ----------------------
 

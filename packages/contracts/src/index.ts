@@ -14494,18 +14494,21 @@ export const InboxItem = z.object({
   sourceKey: z.string(),
   title: z.string(),
   /** A notification's subtitle; empty otherwise. */
-  subtitle: z.string(),
+  subtitle: z.string().default(""),
   /** Plain text, or for a notification its message (paragraphs, "- " bullets, **bold**, `code`, links). */
   body: z.string(),
   /** A notification's label/value facts; empty otherwise. */
-  facts: z.array(z.object({ label: z.string(), value: z.string() })).max(4),
+  facts: z
+    .array(z.object({ label: z.string(), value: z.string() }))
+    .max(4)
+    .default([]),
   /** A notification's link outside the session, or null. */
-  link: z.object({ url: z.string(), label: z.string() }).nullable(),
+  link: z.object({ url: z.string(), label: z.string() }).nullable().default(null),
   /**
    * The session event that opened or last updated the item, so opening it can
    * land on that point in the session's timeline. Null for older items.
    */
-  eventSequence: z.number().int().positive().nullable(),
+  eventSequence: z.number().int().positive().nullable().optional(),
   /** One-tap answers for a single short choice question; empty otherwise. */
   choices: z.array(z.object({ id: z.string(), label: z.string() })).max(4),
   urgency: NotificationUrgency,
@@ -14558,19 +14561,13 @@ export type InboxTidyPolicy = z.infer<typeof InboxTidyPolicy>;
 
 export const InboxSettings = z.object({
   tidyPolicy: InboxTidyPolicy,
-  /** Show goals an agent paused in the person's own sessions. Off by default. */
-  pausedGoals: z.boolean(),
+  /**
+   * Show goals an agent paused in the person's own sessions. Off by default.
+   * Always present in responses; a request that leaves it out keeps it as is.
+   */
+  pausedGoals: z.boolean().optional(),
 });
 export type InboxSettings = z.infer<typeof InboxSettings>;
-
-/** Change some inbox settings; omitted ones stay as they are. */
-export const UpdateInboxSettingsRequest = z
-  .object({ tidyPolicy: InboxTidyPolicy.optional(), pausedGoals: z.boolean().optional() })
-  .strict()
-  .refine((value) => value.tidyPolicy !== undefined || value.pausedGoals !== undefined, {
-    message: "Change at least one setting",
-  });
-export type UpdateInboxSettingsRequest = z.infer<typeof UpdateInboxSettingsRequest>;
 
 export const ToolAuthNeededPayload = z
   .object({
