@@ -10,7 +10,7 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "2bae284287a1bfd0fff12ea5ef61309d9f7f041975afbf9e1b26a2c124e21f15"
+      "sha256": "a95edaf47917c6f48a518fd1436819ea409d99f8c43a204a23cd155f2fedb79b"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -78,11 +78,11 @@
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "a4e1ab2578db4dc490428fccb0629d52089d93e3e80bad2b3b873c1933ded91f"
+      "sha256": "2bd474695cf7dd2c1f113d589d24620173bde07f5dd7b67161d6e46339eae772"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
-      "sha256": "da5abbdaed9b9cae98ac515096a2a6fbcc116fc0de018e68b39cb9a69b6e8627"
+      "sha256": "5c1db464ef984fa12b25ee477ada75d076cca330b281657f39d7c1023a7ab25e"
     },
     {
       "path": ".github/workflows/release-publication-admission.yml",
@@ -94,7 +94,7 @@
     },
     {
       "path": ".github/workflows/release.yml",
-      "sha256": "0731a8d1caa945480fb340bb75d9c3b6b1d5241d8573c8f35ca56635f8ccb4a9"
+      "sha256": "eb8c7dcba198651cda023f00621b53536cc3895b6973374acd47c523226f07b5"
     },
     {
       "path": ".github/workflows/retain-release-controller.yml",
@@ -114,7 +114,7 @@
     },
     {
       "path": ".github/workflows/verify-public-container-packages.yml",
-      "sha256": "4b1f305f95190ccb428338e77413359707d70dead3c9bc64902a0685485bbad4"
+      "sha256": "d741d74897672d7c6e6a50bfbb772c9679cc98d997a915cc2814045e10dfbde8"
     }
   ],
   "actions": [
@@ -299,7 +299,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "macOS assemble + sign + notarize .app bundle (if creds present)",
-      "sha256": "91450a7a2bd6992a76b161a598065e5bbb80c39f9158bae167b3d2ebb57b5792"
+      "sha256": "705bdb6f90307d0a1c16ec635292fdc7d2b34956bc6f9ca8b4a9663f8591753a"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -1127,7 +1127,7 @@
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Publish immutable source-SHA candidate receipt",
-      "sha256": "d75b0aea38ca6703654cf9b2063f838045264b148845bfdb3ab3c6227343ade1"
+      "sha256": "e03705f245936cdd193b72b00fb5e29fb0053860a84e493cff008df284585a72"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
@@ -1259,7 +1259,7 @@
       "workflow": ".github/workflows/release-embedded.yml",
       "job": "release",
       "step": "Publish immutable source-bound release receipt",
-      "sha256": "be482695a3c2ba909981c6bd7b46824f0ebabe0ab05ca5491a38652bdc391be8"
+      "sha256": "9579b58aeaf1b4530425df44af003ec1022222d1831820e415893d2d4b58554d"
     },
     {
       "workflow": ".github/workflows/release-embedded.yml",
@@ -1397,7 +1397,7 @@
       "workflow": ".github/workflows/release.yml",
       "job": "images",
       "step": "Publish immutable source-SHA release BOM",
-      "sha256": "fe9931253109f6ffc6455c25343cfaaecd07d181f68404977e57303db33e64e9"
+      "sha256": "46a3ef6d6a8910110df6b10c49b7d5d22f8ff04fb7e72fe54d576d44ddbd2563"
     },
     {
       "workflow": ".github/workflows/release.yml",

@@ -133,7 +133,7 @@ async function fixture() {
     createdBy: {
       kind: "service",
       subjectId: "scheduler",
-      label: "Opengeni scheduler",
+      label: "OpenGeni scheduler",
     },
     createdByContext: {
       scheduledTaskId: task.id,
