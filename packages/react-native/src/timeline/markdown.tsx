@@ -1,6 +1,7 @@
-import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 import { Image, Pressable, ScrollView, Text, View, type TextStyle } from "react-native";
 import Markdown, { MarkdownIt, renderRules, type RenderRules } from "react-native-markdown-display";
+import Svg, { Defs, LinearGradient, Rect, Stop } from "react-native-svg";
 import {
   isReservedOpenGeniLink,
   parseOpenGeniLink,
@@ -329,6 +330,9 @@ function MarkdownTable({
     [available, columns, natural, scrolls],
   );
   const [copied, setCopied] = useState(false);
+  // A soft edge says "more columns this way" until the reader reaches the end.
+  const [atEnd, setAtEnd] = useState(false);
+  const scroller = useRef<ScrollView>(null);
   const body = (
     <TableColumnsContext.Provider value={widths}>{children}</TableColumnsContext.Provider>
   );
@@ -338,15 +342,40 @@ function MarkdownTable({
       onLayout={(event) => setAvailable(Math.round(event.nativeEvent.layout.width))}
     >
       {scrolls ? (
-        <ScrollView
-          horizontal
-          nestedScrollEnabled
-          directionalLockEnabled
-          showsHorizontalScrollIndicator
-          accessibilityHint="Scroll sideways to see every column"
-        >
-          <View style={{ width: naturalWidth }}>{body}</View>
-        </ScrollView>
+        <View>
+          <ScrollView
+            ref={scroller}
+            horizontal
+            nestedScrollEnabled
+            directionalLockEnabled
+            showsHorizontalScrollIndicator
+            scrollEventThrottle={32}
+            onLayout={() => scroller.current?.flashScrollIndicators()}
+            onScroll={(event) => {
+              const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+              setAtEnd(contentOffset.x + layoutMeasurement.width >= contentSize.width - 8);
+            }}
+            accessibilityHint="Scroll sideways to see every column"
+          >
+            <View style={{ width: naturalWidth }}>{body}</View>
+          </ScrollView>
+          {atEnd ? null : (
+            <Svg
+              pointerEvents="none"
+              width={36}
+              height="100%"
+              style={{ position: "absolute", top: 0, right: 0, bottom: 0 }}
+            >
+              <Defs>
+                <LinearGradient id="table-edge" x1="0" y1="0" x2="1" y2="0">
+                  <Stop offset="0" stopColor={theme.colors.bg} stopOpacity={0} />
+                  <Stop offset="1" stopColor={theme.colors.bg} stopOpacity={0.95} />
+                </LinearGradient>
+              </Defs>
+              <Rect x="0" y="0" width="36" height="100%" fill="url(#table-edge)" />
+            </Svg>
+          )}
+        </View>
       ) : (
         body
       )}
