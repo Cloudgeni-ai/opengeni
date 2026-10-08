@@ -1151,23 +1151,33 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         if (initialPage) {
           const readProcess =
             session.writeStdinForProcessControl?.bind(session) ?? session.writeStdin?.bind(session);
-          const result = await observeSynchronousCommand(initialPage, async (originalSessionId) => {
-            if (!readProcess) {
-              throw new Error("Remote command did not report terminal completion");
-            }
-            const raw = await readProcess({
-              sessionId: originalSessionId,
-              chars: "",
-              yieldTimeMs: TURN_PROVIDER_YIELD_SLICE_MS,
-              ...(args.maxOutputTokens !== undefined
-                ? { maxOutputTokens: args.maxOutputTokens }
-                : {}),
+          let result: SynchronousCommandResult;
+          try {
+            result = await observeSynchronousCommand(initialPage, async (originalSessionId) => {
+              if (!readProcess) {
+                throw new Error("Remote command did not report terminal completion");
+              }
+              const raw = await readProcess({
+                sessionId: originalSessionId,
+                chars: "",
+                yieldTimeMs: TURN_PROVIDER_YIELD_SLICE_MS,
+                ...(args.maxOutputTokens !== undefined
+                  ? { maxOutputTokens: args.maxOutputTokens }
+                  : {}),
+              });
+              if (typeof raw !== "string") {
+                throw new Error("Remote command observation returned an invalid result");
+              }
+              return synchronousCommandPage(session as ChannelASession, raw, originalSessionId);
             });
-            if (typeof raw !== "string") {
-              throw new Error("Remote command observation returned an invalid result");
+          } catch (error) {
+            // Output uncertainty does not release joined physical cleanup, but
+            // cancellation that already won remains the invocation's result.
+            if (this.cancelled && !remoteExec?.ownershipTransferred) {
+              throw cancellationError(this.reason);
             }
-            return synchronousCommandPage(session as ChannelASession, raw, originalSessionId);
-          });
+            throw error;
+          }
           // A numeric provider session is an exact observation handle too.
           // Keep the remote cancellation fence until its terminal receipt has
           // been read, then let the caller apply cancellation before success.
