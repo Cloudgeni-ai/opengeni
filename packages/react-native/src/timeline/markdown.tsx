@@ -30,6 +30,7 @@ import {
   useNativeTimelineTheme,
   type NativeTimelineTheme,
 } from "./theme";
+import { useNativeTimelineMessages } from "./messages";
 
 /**
  * One parser for every message, configured like the web's `remark-gfm`: no typographic
@@ -178,6 +179,7 @@ function CodeFence({
   onCopy?: ((text: string) => void) | undefined;
 }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const styles = webMarkdownStyles(theme, "body");
   const [copied, setCopied] = useState(false);
   // The code scrolls in the space left of the language label and copy button, which
@@ -239,7 +241,7 @@ function CodeFence({
         {onCopy ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Copy code"
+            accessibilityLabel={m.copyCode}
             hitSlop={8}
             onPress={() => {
               onCopy(content);
@@ -325,6 +327,7 @@ function MarkdownTable({
   onCopy?: ((text: string) => void) | undefined;
 }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const rows = useMemo(() => tableRows(node), [node]);
   const columns = useMemo(() => tableColumns(rows), [rows]);
   const natural = useMemo(() => columns.map(naturalColumnWidth), [columns]);
@@ -363,7 +366,7 @@ function MarkdownTable({
               const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
               setAtEnd(contentOffset.x + layoutMeasurement.width >= contentSize.width - 8);
             }}
-            accessibilityHint="Scroll sideways to see every column"
+            accessibilityHint={m.scrollTableHint}
           >
             <View style={{ width: naturalWidth }}>{body}</View>
           </ScrollView>
@@ -390,7 +393,7 @@ function MarkdownTable({
       {onCopy ? (
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Copy table"
+          accessibilityLabel={m.copyTable}
           hitSlop={8}
           onPress={() => {
             onCopy(rows.map((row) => row.join("\t")).join("\n"));
@@ -616,6 +619,7 @@ function InteractiveFence({
 /** Plain image URLs load directly; retained files need the host's `renderImage`. */
 function MarkdownImage({ src, alt }: { src: string; alt: string }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const [ratio, setRatio] = useState<number | null>(null);
   const [failed, setFailed] = useState(false);
   const remote = /^https?:\/\//i.test(src) && !parseRetainedFileReference(src);
@@ -624,13 +628,13 @@ function MarkdownImage({ src, alt }: { src: string; alt: string }) {
       <Text
         style={{ ...fontStyle(theme), color: theme.colors["fg-muted"], fontSize: theme.size.sm }}
       >
-        {alt || "Image"} (preview unavailable)
+        {m.previewUnavailable(alt || m.image)}
       </Text>
     );
   }
   return (
     <Image
-      accessibilityLabel={alt || "Image"}
+      accessibilityLabel={alt || m.image}
       source={{ uri: src }}
       resizeMode="contain"
       onLoad={(event) => {

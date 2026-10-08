@@ -38,6 +38,12 @@ export type {
 } from "./theme";
 export { AttachmentChips, NativeSessionScreen } from "./session-screen";
 export type { NativeSessionScreenProps } from "./session-screen";
+export {
+  defaultNativeTimelineMessages,
+  NativeTimelineMessagesProvider,
+  useNativeTimelineMessages,
+} from "./messages";
+export type { NativeTimelineMessages } from "./messages";
 export { ComposerPill, SessionComposer } from "./composer";
 export { ModelPickerSheet } from "./model-picker";
 export { BottomSheet } from "./sheet";

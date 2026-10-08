@@ -20,6 +20,7 @@ import { Button } from "./controls";
 import { Icon } from "./icon";
 import { blendOver, withAlpha } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
+import { useNativeTimelineMessages } from "./messages";
 
 /* ----------------------------------------------------------------------------
    Decision surfaces: the web HumanInputSurface/HumanInputForm (waiting tone,
@@ -323,6 +324,7 @@ function QuestionControls({
   onChange: (next: (draft: HumanInputAnswerDraft) => HumanInputAnswerDraft) => void;
 }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const c = theme.colors;
   const messages = useContext(HumanInputMessagesContext);
   const multi = question.kind === "multi_select";
@@ -394,7 +396,7 @@ function QuestionControls({
           multiline
           value={draft.values[0] ?? ""}
           onChangeText={(text) => onChange((current) => ({ ...current, values: [text] }))}
-          placeholder="Type your answer..."
+          placeholder={m.typeYourAnswer}
           placeholderTextColor={c["fg-subtle"]}
           style={{ ...input, minHeight: 64, textAlignVertical: "top" }}
         />
@@ -475,7 +477,7 @@ function QuestionControls({
                     )
                   }
                   onChangeText={(text) => onChange((current) => ({ ...current, other: text }))}
-                  placeholder="Type a value..."
+                  placeholder={m.typeAValue}
                   placeholderTextColor={c["fg-subtle"]}
                   style={input}
                 />

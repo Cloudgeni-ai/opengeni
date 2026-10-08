@@ -20,6 +20,7 @@ import {
 import { Button } from "./controls";
 import { Icon } from "./icon";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
+import { useNativeTimelineMessages } from "./messages";
 
 /* ----------------------------------------------------------------------------
    Reply feedback, as the web timeline offers it beside Copy: thumbs up/down
@@ -124,6 +125,7 @@ export function FeedbackSheet(props: {
   onSubmitted: (sentiment: FeedbackSentiment) => void;
 }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const c = theme.colors;
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState(false);
@@ -235,9 +237,9 @@ export function FeedbackSheet(props: {
             </Text>
           ) : null}
           <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
-            <Button label="Cancel" variant="ghost" onPress={close} disabled={busy} />
+            <Button label={m.cancel} variant="ghost" onPress={close} disabled={busy} />
             <Button
-              label={busy ? "Sending…" : "Send feedback"}
+              label={busy ? m.sending : m.sendFeedback}
               variant="primary"
               onPress={() => void submit()}
               disabled={busy}

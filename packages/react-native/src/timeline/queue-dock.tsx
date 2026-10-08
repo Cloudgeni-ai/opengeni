@@ -14,6 +14,7 @@ import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
 import { blendOver, withAlpha } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
+import { useNativeTimelineMessages } from "./messages";
 
 /* ----------------------------------------------------------------------------
    The web session-chrome queue dock above the composer: a "N queued · Steer"
@@ -46,6 +47,7 @@ export function QueueDock({
   leading?: ReactNode;
 }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const c = theme.colors;
   const [open, setOpen] = useState(true);
   const [replaceDraftFor, setReplaceDraftFor] = useState<string | null>(null);
@@ -110,7 +112,7 @@ export function QueueDock({
           <View style={{ width: 1, height: 14, backgroundColor: c.border }} />
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Steer first queued message"
+            accessibilityLabel={m.steerFirstQueued}
             disabled={queue.mutating || queue.mutationFor(first.id) !== null}
             onPress={() => void queue.steerTurn(first.id)}
             hitSlop={{ top: 7, bottom: 7 }}
@@ -124,13 +126,13 @@ export function QueueDock({
             }}
           >
             <Icon name="corner-down-right" size={13} color={c["fg-muted"]} />
-            <Text style={small}>Steer</Text>
+            <Text style={small}>{m.steer}</Text>
           </Pressable>
         </View>
       </View>
       {open ? (
         <View
-          accessibilityLabel="Queued prompts"
+          accessibilityLabel={m.queuedPrompts}
           style={{
             borderRadius: theme.radius.lg,
             // Opaque: the dock floats over scrolling conversation.

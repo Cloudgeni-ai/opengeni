@@ -1,3 +1,4 @@
+import { NativeTimelineMessagesProvider, type NativeTimelineMessages } from "./messages";
 import {
   conversationTimeline,
   type AgentMessageItem,
@@ -36,6 +37,7 @@ import { SessionCommandsList, SessionSignals } from "./session-signals";
 import type { ClientModel, OpenGeniClient, SessionBackgroundCommand } from "@opengeni/sdk";
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
+import { useNativeTimelineMessages } from "./messages";
 
 /* ----------------------------------------------------------------------------
    The web session page body at phone width: timeline (with the question card
@@ -81,6 +83,15 @@ export interface NativeSessionScreenProps extends Omit<
   client?: OpenGeniClient | undefined;
   /** Model catalog for the agents panel rows. */
   models?: readonly ClientModel[] | undefined;
+  /** Translations for the strings the native surfaces draw (merged over any provider above). */
+  timelineMessages?: Partial<NativeTimelineMessages> | undefined;
+  /**
+   * Draw the composer yourself. Receives exactly the props the shared
+   * `SessionComposer` would get (queue dock, approvals and attachment chips
+   * included), so a host can restyle it or render its own native composer.
+   * A floating composer must report its height through `onHeightChange`.
+   */
+  renderComposer?: ((props: SessionComposerProps) => ReactNode) | undefined;
 }
 
 export function NativeSessionScreen({
@@ -95,10 +106,51 @@ export function NativeSessionScreen({
   approvalMessages,
   client,
   models,
+  timelineMessages,
+  renderComposer,
   renderMessageActions: hostMessageActions,
   ...timelineProps
 }: NativeSessionScreenProps) {
+  return (
+    <NativeTimelineMessagesProvider messages={timelineMessages}>
+      <SessionScreenBody
+        controller={controller}
+        composer={composerSlots}
+        trailing={trailing}
+        topBar={topBar}
+        bottomInset={bottomInset}
+        keyboardBottomOffset={keyboardBottomOffset}
+        feedback={feedback}
+        humanInputMessages={humanInputMessages}
+        approvalMessages={approvalMessages}
+        client={client}
+        models={models}
+        renderComposer={renderComposer}
+        renderMessageActions={hostMessageActions}
+        {...timelineProps}
+      />
+    </NativeTimelineMessagesProvider>
+  );
+}
+
+function SessionScreenBody({
+  controller,
+  composer: composerSlots,
+  trailing,
+  topBar,
+  bottomInset,
+  keyboardBottomOffset,
+  feedback,
+  humanInputMessages,
+  approvalMessages,
+  client,
+  models,
+  renderComposer,
+  renderMessageActions: hostMessageActions,
+  ...timelineProps
+}: Omit<NativeSessionScreenProps, "timelineMessages">) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const { composer, queue, humanInput, approvals, control, attachments } = controller;
   const composerInput = useRef<ComponentRef<typeof TextInput>>(null);
   // The composer floats over the conversation; its occupied height insets the timeline.
@@ -168,7 +220,7 @@ export function NativeSessionScreen({
         emptyState={
           empty && failed ? (
             <LoadFailure
-              message={loadFailureMessage(controller.error)}
+              message={loadFailureMessage(controller.error, m.connectionFailed)}
               onRetry={() => void controller.refresh()}
             />
           ) : empty && controller.initialLoading ? (
@@ -196,44 +248,42 @@ export function NativeSessionScreen({
           </>
         }
       />
-      <SessionComposer
-        floating
-        onHeightChange={(height) => setComposerHeight(Math.round(height))}
-        onActionFeedback={composerSlots?.onActionFeedback}
-        value={composer.value}
-        onChangeText={composer.setValue}
-        onSend={() => void composer.send()}
-        canSend={composer.canSend && !busy}
-        sending={composer.sending}
-        running={controller.runActive}
-        paused={paused}
-        pauseBusy={composer.pausing || composer.resuming}
-        onPause={() => void composer.pause()}
-        onResume={() => void composer.resume()}
-        onAttach={composerSlots?.onAttach ?? (() => void attachments.pickImages())}
-        renderLeading={composerSlots?.renderLeading}
-        options={composerSlots?.options}
-        placeholder={composerSlots?.placeholder}
-        bottomInset={bottomInset}
-        keyboardBottomOffset={keyboardBottomOffset}
-        inputRef={composerInput}
-        messages={composerSlots?.messages}
-        voice={composerSlots?.voice}
-        below={
-          composer.draftConflict ? (
-            <DraftConflictStrip
-              messages={composerSlots?.messages}
-              onResolve={(choice) => void composer.resolveDraftConflict(choice)}
-            />
-          ) : null
-        }
-        header={
+      {(renderComposer ?? renderSharedComposer)({
+        floating: true,
+        onHeightChange: (height) => setComposerHeight(Math.round(height)),
+        onActionFeedback: composerSlots?.onActionFeedback,
+        value: composer.value,
+        onChangeText: composer.setValue,
+        onSend: () => void composer.send(),
+        canSend: composer.canSend && !busy,
+        sending: composer.sending,
+        running: controller.runActive,
+        paused: paused,
+        pauseBusy: composer.pausing || composer.resuming,
+        onPause: () => void composer.pause(),
+        onResume: () => void composer.resume(),
+        onAttach: composerSlots?.onAttach ?? (() => void attachments.pickImages()),
+        renderLeading: composerSlots?.renderLeading,
+        options: composerSlots?.options,
+        placeholder: composerSlots?.placeholder,
+        bottomInset: bottomInset,
+        keyboardBottomOffset: keyboardBottomOffset,
+        inputRef: composerInput,
+        messages: composerSlots?.messages,
+        voice: composerSlots?.voice,
+        below: composer.draftConflict ? (
+          <DraftConflictStrip
+            messages={composerSlots?.messages}
+            onResolve={(choice) => void composer.resolveDraftConflict(choice)}
+          />
+        ) : null,
+        header: (
           <>
             {composerSlots?.header}
             <AttachmentChips attachments={attachments} />
           </>
-        }
-        above={
+        ),
+        above: (
           <>
             <QueueDock
               queue={queue}
@@ -271,8 +321,8 @@ export function NativeSessionScreen({
               />
             ) : null}
           </>
-        }
-      />
+        ),
+      })}
     </View>
   );
 }
@@ -298,24 +348,25 @@ function useAutoRecover(failed: boolean, live: boolean, refresh: () => Promise<v
 }
 
 /** Transport failures read as a connection problem, never as a native stack. */
-function loadFailureMessage(error: Error | null): string | undefined {
+function loadFailureMessage(error: Error | null, connectionFailed: string): string | undefined {
   if (!error) return undefined;
   if (
     error.name === "TypeError" ||
     /fetch failed|network request failed|could not connect|offline|timed out/i.test(error.message)
   ) {
-    return "Couldn't connect. Check your connection; this retries automatically.";
+    return connectionFailed;
   }
   return error.message;
 }
 
 function LoadFailure({ message, onRetry }: { message?: string | undefined; onRetry: () => void }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   return (
     <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 10, padding: 24 }}>
       <Icon name="circle-alert" size={20} color={theme.colors["status-failed"]} />
       <Text style={{ ...fontStyle(theme, 500), fontSize: 15, color: theme.colors.fg }}>
-        Couldn't load this session
+        {m.loadFailedTitle}
       </Text>
       {message ? (
         <Text
@@ -330,7 +381,7 @@ function LoadFailure({ message, onRetry }: { message?: string | undefined; onRet
           {message}
         </Text>
       ) : null}
-      <Button label="Retry" onPress={onRetry} />
+      <Button label={m.retry} onPress={onRetry} />
     </View>
   );
 }
@@ -488,4 +539,8 @@ function NativeSessionCommands(props: {
     [client, load, sessionId, workspaceId],
   );
   return <SessionCommandsList commands={{ commands, loading, error, cancel }} />;
+}
+
+function renderSharedComposer(props: SessionComposerProps): ReactNode {
+  return <SessionComposer {...props} />;
 }
