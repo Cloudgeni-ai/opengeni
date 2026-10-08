@@ -884,6 +884,7 @@ export type {
   InboxTidyPolicy,
   ListInboxResponse,
   UpdateInboxItemInput,
+  UpdateInboxSettingsInput,
   RegisterNativePushDeviceInput,
   CreateCapabilityCatalogItemRequest,
   OpenGeniSlackBotInstallRequest,
