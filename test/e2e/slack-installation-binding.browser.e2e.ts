@@ -156,6 +156,8 @@ async function installApiFixture(page: Page, state: FixtureState): Promise<void>
         headers: { "x-opengeni-api-contract": apiContractRevision },
         body: JSON.stringify(body),
       });
+    if (url.pathname === "/v1/inbox" && request.method() === "GET")
+      return json({ items: [], needsYouCount: 0, unreadCount: 0 });
     if (url.pathname.endsWith("/skills/search")) return json({ items: [], nextCursor: null });
     if (url.pathname === "/v1/config/client") {
       return json({
