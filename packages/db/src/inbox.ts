@@ -10,7 +10,7 @@ export type InboxItemRow = {
   id: string;
   workspaceId: string;
   sessionId: string;
-  kind: "question" | "approval" | "goal_paused" | "notification";
+  kind: "question" | "approval" | "goal_paused" | "notification" | "reply";
   sourceKey: string;
   title: string;
   subtitle: string;
@@ -235,26 +235,40 @@ export async function setInboxTidyPolicy(
   return row?.policy ?? input.policy;
 }
 
-export type InboxSettingsValue = { tidyPolicy: InboxTidyPolicyValue; pausedGoals: boolean };
+export type InboxSettingsValue = {
+  tidyPolicy: InboxTidyPolicyValue;
+  pausedGoals: boolean;
+  replies: boolean;
+};
 
-/** The person's inbox settings in one account (0663). */
+type InboxSettingsRecord = {
+  tidy_policy: InboxTidyPolicyValue;
+  paused_goals: boolean;
+  replies: boolean;
+};
+
+/** The person's inbox settings in one account (0663, 0665). */
 export async function getInboxSettings(
   db: Database,
   input: { accountId: string; subjectId: string },
 ): Promise<InboxSettingsValue> {
-  const [row] = await rawRows<{ tidy_policy: InboxTidyPolicyValue; paused_goals: boolean }>(
+  const [row] = await rawRows<InboxSettingsRecord>(
     db,
-    sql`select * from opengeni_private.inbox_settings_v2(
+    sql`select * from opengeni_private.inbox_settings_v3(
       ${input.accountId}::uuid, ${input.subjectId}::text
     )`,
   );
   return {
     tidyPolicy: row?.tidy_policy ?? "own_sessions",
     pausedGoals: row?.paused_goals ?? false,
+    replies: row?.replies ?? false,
   };
 }
 
-/** Change some of the person's inbox settings; omitted ones stay as they are. */
+/**
+ * Change some of the person's inbox settings; omitted ones stay as they are.
+ * Turning replies off takes the reply items out of the inbox.
+ */
 export async function setInboxSettings(
   db: Database,
   input: {
@@ -262,18 +276,21 @@ export async function setInboxSettings(
     subjectId: string;
     tidyPolicy?: InboxTidyPolicyValue | undefined;
     pausedGoals?: boolean | undefined;
+    replies?: boolean | undefined;
   },
 ): Promise<InboxSettingsValue> {
-  const [row] = await rawRows<{ tidy_policy: InboxTidyPolicyValue; paused_goals: boolean }>(
+  const [row] = await rawRows<InboxSettingsRecord>(
     db,
-    sql`select * from opengeni_private.set_inbox_settings_v2(
+    sql`select * from opengeni_private.set_inbox_settings_v3(
       ${input.accountId}::uuid, ${input.subjectId}::text,
-      ${input.tidyPolicy ?? null}::text, ${input.pausedGoals ?? null}::boolean
+      ${input.tidyPolicy ?? null}::text, ${input.pausedGoals ?? null}::boolean,
+      ${input.replies ?? null}::boolean
     )`,
   );
   return {
     tidyPolicy: row?.tidy_policy ?? input.tidyPolicy ?? "own_sessions",
     pausedGoals: row?.paused_goals ?? input.pausedGoals ?? false,
+    replies: row?.replies ?? input.replies ?? false,
   };
 }
 

@@ -10,7 +10,11 @@ import type {
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
 import { HumanInputForm } from "@opengeni/react/session-ui";
-import { parseNotificationText, type NotificationSpan } from "@opengeni/react/timeline-model";
+import {
+  notificationPlainText,
+  parseNotificationText,
+  type NotificationSpan,
+} from "@opengeni/react/timeline-model";
 import { useNavigate } from "@tanstack/react-router";
 import {
   ArrowUpRightIcon,
@@ -20,6 +24,7 @@ import {
   CirclePauseIcon,
   InboxIcon,
   MessageCircleQuestionIcon,
+  MessageSquareTextIcon,
   MoreHorizontalIcon,
   ShieldCheckIcon,
   XIcon,
@@ -59,7 +64,7 @@ import { Switch } from "@/components/ui/switch";
 import { Toolbar } from "@/components/ui/toolbar";
 import { useAppContext } from "@/context";
 import { apiErrorFacts, userErrorText } from "@/lib/api-error";
-import { useInbox } from "@/lib/inbox";
+import { isNeedsYouKind, useInbox } from "@/lib/inbox";
 import { cn } from "@/lib/utils";
 
 const KIND_WORD: Record<InboxItem["kind"], string> = {
@@ -67,12 +72,14 @@ const KIND_WORD: Record<InboxItem["kind"], string> = {
   approval: "Approval",
   goal_paused: "Goal paused",
   notification: "",
+  reply: "Reply",
 };
 
 function KindIcon({ item }: { item: InboxItem }) {
   if (item.kind === "question") return <MessageCircleQuestionIcon />;
   if (item.kind === "approval") return <ShieldCheckIcon />;
   if (item.kind === "goal_paused") return <CirclePauseIcon />;
+  if (item.kind === "reply") return <MessageSquareTextIcon />;
   return item.urgency === "time_sensitive" ? (
     <BellRingIcon className="text-status-waiting" />
   ) : (
@@ -331,8 +338,11 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   const showScope = workspacesWithItems.size > 1 || !workspacesWithItems.has(workspaceId);
   const scoped = items.filter((item) => scope === "all" || item.workspaceId === workspaceId);
   const awake = scoped.filter((item) => !isSnoozed(item, now));
-  const needsYou = awake.filter((item) => item.kind !== "notification");
+  // Most important first: what waits on the person, then what agents wanted
+  // them to know, then replies.
+  const needsYou = awake.filter((item) => isNeedsYouKind(item.kind));
   const fromAgents = awake.filter((item) => item.kind === "notification");
+  const replies = awake.filter((item) => item.kind === "reply");
   const snoozed = scoped.filter((item) => isSnoozed(item, now));
 
   useEffect(() => {
@@ -440,6 +450,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
         </code>
       );
     }
+    if (item.kind === "reply") return notificationPlainText(item.body) || undefined;
     return undefined;
   };
 
@@ -449,7 +460,9 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     if (item.kind === "notification" && item.urgency === "time_sensitive") {
       parts.push("Time-sensitive");
     }
-    if (item.kind === "goal_paused" || item.kind === "question") parts.push(KIND_WORD[item.kind]);
+    if (item.kind === "goal_paused" || item.kind === "question" || item.kind === "reply") {
+      parts.push(KIND_WORD[item.kind]);
+    }
     if (item.kind === "approval" && !item.body) parts.push(KIND_WORD.approval);
     parts.push(item.sessionTitle ?? "Untitled session");
     if (scope === "all" && workspacesWithItems.size > 1) {
@@ -514,7 +527,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
       <InboxRow
         key={item.id}
         item={item}
-        unread={item.kind === "notification" && unread}
+        unread={(item.kind === "notification" || item.kind === "reply") && unread}
         title={item.title}
         subtitle={item.subtitle || undefined}
         body={description(item)}
@@ -540,7 +553,9 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
               </>
             )}
             <DropdownMenuItem onSelect={() => dismiss(item)}>
-              {item.kind === "notification" ? "Dismiss" : "Remove from inbox"}
+              {item.kind === "notification" || item.kind === "reply"
+                ? "Dismiss"
+                : "Remove from inbox"}
             </DropdownMenuItem>
           </>
         }
@@ -585,6 +600,11 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
         {fromAgents.length > 0 ? (
           <Section title="From your agents">
             <InboxList label="From your agents">{fromAgents.map(row)}</InboxList>
+          </Section>
+        ) : null}
+        {replies.length > 0 ? (
+          <Section title="Replies">
+            <InboxList label="Replies">{replies.map(row)}</InboxList>
           </Section>
         ) : null}
         {awake.length === 0 ? (
@@ -664,7 +684,8 @@ function InboxSettingsSections() {
         if (current) setSettings(loaded);
       })
       .catch(() => {
-        if (current) setSettings({ tidyPolicy: "own_sessions", pausedGoals: false });
+        if (current)
+          setSettings({ tidyPolicy: "own_sessions", pausedGoals: false, replies: false });
       });
     return () => {
       current = false;
@@ -704,6 +725,17 @@ function InboxSettingsSections() {
                   checked={settings.pausedGoals ?? false}
                   pending={saving}
                   onCheckedChange={(checked) => void change({ pausedGoals: checked })}
+                />
+              }
+            />
+            <SettingRow
+              label="Replies"
+              description="Each session's latest reply, below what needs you. It stays, read or not, until you dismiss it."
+              control={
+                <Switch
+                  checked={settings.replies ?? false}
+                  pending={saving}
+                  onCheckedChange={(checked) => void change({ replies: checked })}
                 />
               }
             />
