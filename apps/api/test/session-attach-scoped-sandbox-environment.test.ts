@@ -305,6 +305,20 @@ describe("session attach with a Sandbox Environment homed in another workspace",
         rigVersionId: session.rigVersionId,
       });
     }
+
+    // An organization member without access to the session's workspace is
+    // refused by the scoped seam (42501), which is an explicit 403.
+    const outsider = await workspace(
+      (
+        await shared!.admin<{ external_id: string }[]>`
+        select external_id from managed_accounts where id = ${team.accountId}`
+      )[0]!.external_id,
+      "outsider-personal",
+      `user:${crypto.randomUUID()}`,
+    );
+    expect(outsider.accountId).toBe(team.accountId);
+    await organizationMember(outsider);
+    expect(await runtimeStatus(stored, outsider.subjectId)).toEqual({ status: 403 });
   });
 
   test("a personal environment resolves for its owner and is refused to anyone else", async () => {
