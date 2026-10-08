@@ -235,6 +235,8 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   wait_for_input: "runtime",
   // Reaching the person: a push to the phones of whoever started the session.
   notify_user: "humanInput",
+  notification_withdraw: "humanInput",
+  inbox_tidy: "humanInput",
   command_wait: "sandbox",
   command_read: "sandbox",
 

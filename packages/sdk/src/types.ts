@@ -3424,6 +3424,8 @@ export type FirstPartyMcpToolName =
   | "instruction_policy_get"
   | "set_session_title"
   | "notify_user"
+  | "notification_withdraw"
+  | "inbox_tidy"
   | "goal_set"
   | "goal_update"
   | "goal_progress"
@@ -5425,6 +5427,57 @@ export type McpConnectionRequest = {
 export type McpConnectionDecision =
   | { decision: "deny" }
   | { decision: "approve"; organizationId: string; access: OrganizationAccessPolicy };
+
+// --- Inbox ---------------------------------------------------------------------------------------
+
+/** Why an inbox item waits on the person. */
+export type InboxItemKind = "question" | "approval" | "goal_paused" | "notification";
+
+/**
+ * One thing that waits on the person: a question, an approval, a goal the agent
+ * paused on them, or an agent's notification. It leaves the inbox when it is
+ * answered, resolved, withdrawn or dismissed; it stays in the session's timeline.
+ */
+export type InboxItem = {
+  id: string;
+  workspaceId: string;
+  sessionId: string;
+  sessionTitle: string | null;
+  kind: InboxItemKind;
+  /** The question or approval id, or the notification key. */
+  sourceKey: string;
+  title: string;
+  body: string;
+  urgency: "normal" | "time_sensitive";
+  status: "open" | "resolved" | "withdrawn" | "dismissed";
+  /** True while the person has not seen the item's current content. */
+  unread: boolean;
+  snoozedUntil: string | null;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt: string | null;
+};
+
+export type ListInboxResponse = {
+  items: InboxItem[];
+  /** Open, unsnoozed items that need the person (questions, approvals, paused goals). */
+  needsYouCount: number;
+  /** Open, unsnoozed, unread items of any kind. */
+  unreadCount: number;
+};
+
+/** The person's own attention on an item; answering happens in the session. */
+export type UpdateInboxItemInput = {
+  seen?: true;
+  /** ISO time to hide the item until, or null to unsnooze. */
+  snoozedUntil?: string | null;
+  dismissed?: true;
+};
+
+/** Which agents may withdraw or dismiss the person's notifications. */
+export type InboxTidyPolicy = "own_sessions" | "any_agent";
+
+export type InboxSettings = { tidyPolicy: InboxTidyPolicy };
 
 // --- Native app sign-in (authorization code + PKCE over the app's scheme) ----------------------
 

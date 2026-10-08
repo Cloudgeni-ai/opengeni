@@ -268,6 +268,8 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
         "goal_resume",
         "goal_set",
         "goal_update",
+        "inbox_tidy",
+        "notification_withdraw",
         "notify_user",
         "set_session_title",
         "wait_for_input",

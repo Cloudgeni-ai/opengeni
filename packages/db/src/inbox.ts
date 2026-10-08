@@ -1,5 +1,6 @@
-import { sql } from "drizzle-orm";
-import { rawRows, type Database } from "./database";
+import { and, eq, inArray, sql } from "drizzle-orm";
+import { rawRows, withWorkspaceRls, type Database } from "./database";
+import * as schema from "./schema";
 
 // The inbox (0654). Session events open and close items in the event writer's
 // transaction; these owner-run functions read them and record the person's own
@@ -182,4 +183,25 @@ export async function setInboxTidyPolicy(
     ) as policy`,
   );
   return row?.policy ?? input.policy;
+}
+
+/** Titles of sessions in one workspace, read under that workspace's context. */
+export async function getSessionTitles(
+  db: Database,
+  workspaceId: string,
+  sessionIds: readonly string[],
+): Promise<Map<string, string | null>> {
+  if (sessionIds.length === 0) return new Map();
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({ id: schema.sessions.id, title: schema.sessions.title })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, workspaceId),
+          inArray(schema.sessions.id, [...sessionIds]),
+        ),
+      );
+    return new Map(rows.map((row) => [row.id, row.title]));
+  });
 }
