@@ -37,6 +37,10 @@
       "types": "./src/sites.ts",
       "default": "./src/sites.ts"
     },
+    "./native-previews": {
+      "types": "./src/native-previews.ts",
+      "default": "./src/native-previews.ts"
+    },
     "./connect.css": {
       "types": "./styles/connect.d.ts",
       "style": "./styles/connect.css",

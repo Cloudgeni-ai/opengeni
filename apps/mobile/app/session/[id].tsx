@@ -13,6 +13,8 @@ import {
   useNativeTimelineTheme,
 } from "@opengeni/react-native/timeline";
 import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markdown";
+import { createNativePreviewRenderers } from "@opengeni/react-native/timeline/previews";
+import type { OpenGeniLinkTarget } from "@opengeni/sdk";
 import * as Haptics from "expo-haptics";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -33,8 +35,7 @@ import { useWorkspaceModelCatalog } from "@/model-catalog";
 import { ComposerPlusMenu } from "@/new-session-options";
 import { AppThemeProvider } from "@/theme";
 import { useComposerVoice } from "@/voice";
-
-const renderMarkdown = createWebMarkdownRenderer({ onCopy: (text) => void copyText(text) });
+import { openOnWeb } from "@/web-links";
 
 /** The session menu item that sends outside calls (Siri, Phone, Shortcuts) to this session. */
 const CALL_PIN_ACTION = "opengeni.take-calls-here";
@@ -77,6 +78,39 @@ function LiveSession(props: {
     () => ({ client: props.client, workspaceId: props.workspaceId, sessionId: props.sessionId }),
     [props.client, props.workspaceId, props.sessionId],
   );
+  const { account } = useAccount();
+  const webBaseUrl = account?.baseUrl ?? null;
+  // Agent images and previews resolve through this workspace; artifacts and Sites open on web.
+  const renderMarkdown = useMemo(() => {
+    const openLink = (target: OpenGeniLinkTarget) => {
+      if (!webBaseUrl) return;
+      const workspace = encodeURIComponent(props.workspaceId);
+      if (target.kind === "site")
+        openOnWeb(
+          webBaseUrl,
+          `/workspaces/${workspace}/artifacts/${encodeURIComponent(target.artifactId)}`,
+        );
+      else if (target.kind === "file")
+        openOnWeb(
+          webBaseUrl,
+          `/workspaces/${workspace}/artifacts/files/${encodeURIComponent(target.fileId)}`,
+        );
+      else if (target.kind === "editable-artifact")
+        openOnWeb(
+          webBaseUrl,
+          `/workspaces/${workspace}/artifacts/editable/${encodeURIComponent(target.artifactId)}`,
+        );
+    };
+    return createWebMarkdownRenderer({
+      onCopy: (text) => void copyText(text),
+      onOpenGeniLink: openLink,
+      ...createNativePreviewRenderers({
+        client: props.client,
+        workspaceId: props.workspaceId,
+        onOpenLink: openLink,
+      }),
+    });
+  }, [props.client, props.workspaceId, webBaseUrl]);
   const catalog = useWorkspaceModelCatalog(props.workspaceId);
   const computeLabel = useSessionComputeLabel(props.workspaceId, props.sessionId);
   const [pickerOpen, setPickerOpen] = useState(false);
