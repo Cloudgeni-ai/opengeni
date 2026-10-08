@@ -1989,6 +1989,155 @@ describe("provider-neutral subscription runtime persistence", () => {
   );
 
   test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
+    "ownerless Codex refresh rejects a people-scoped connection despite prior owned-session access",
+    async () => {
+      const state = await fixture();
+      const ownerless = await ownerlessFixture(state.accountId, state.workspaceId);
+      const [membership] = await shared!.admin<{ id: string }[]>`
+        select id::text as id from organization_memberships
+        where account_id = ${state.accountId}::uuid and subject_id = ${state.subjectId}
+          and status = 'active' and revoked_at is null limit 1`;
+      const request = {
+        accountId: state.accountId,
+        workspaceId: state.workspaceId,
+        sessionId: ownerless.sessionId,
+        turnId: ownerless.turnId,
+        sessionOwnerSubjectId: null,
+        sessionOwnerMembershipId: null,
+        initiatingHumanSubjectId: null,
+        provider: "codex" as const,
+        connectionId: state.connectionId,
+        holderId: `ownerless-refresh-${crypto.randomUUID()}`,
+        generation: 1,
+      };
+      const actor = {
+        subjectId: "service:subscription-core",
+        initiatingHumanSubjectId: null,
+      };
+      const lease = await withSessionRlsActorContext(actor, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: state.accountId, workspaceId: state.workspaceId },
+          (db) => acquireSubscriptionTurnLease(db, { ...request, ttlMs: 60_000 }),
+        ),
+      );
+      expect(lease).toMatchObject({ turnId: ownerless.turnId, generation: 1 });
+
+      // Model an administrator tightening a previously shared organization
+      // connection after placement has already leased it.
+      const scopeManagerSubject = `user:subscription-refresh-scope-admin-${crypto.randomUUID()}`;
+      const [managerPersonalWorkspace] = await shared!.admin<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${state.accountId}::uuid, 'Subscription refresh scope manager Personal')
+        returning id::text as id`;
+      await shared!.admin`
+        insert into organization_memberships (
+          account_id, subject_id, role, status, personal_workspace_id
+        ) values (
+          ${state.accountId}::uuid, ${scopeManagerSubject}, 'admin', 'active',
+          ${managerPersonalWorkspace!.id}::uuid
+        )`;
+      const changedScope = await withSessionRlsActorContext(
+        { subjectId: scopeManagerSubject },
+        () =>
+          withRlsContext(
+            client!.db,
+            { accountId: state.accountId, workspaceId: state.workspaceId },
+            async (db) => {
+              const [row] = await rawRows<{ scope_kind: string }>(
+                db,
+                sql`update subscription_connections set scope_kind = 'people'
+                where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid
+                returning scope_kind`,
+              );
+              return row?.scope_kind;
+            },
+          ),
+      );
+      expect(changedScope).toBe("people");
+      await shared!.admin`
+        insert into subscription_connection_people (account_id, connection_id, organization_membership_id)
+        values (${state.accountId}::uuid, ${state.connectionId}::uuid, ${membership!.id}::uuid)`;
+
+      const transactionResult = await client!.db.transaction(async (transaction) => {
+        const ownedSessionAuthorized = await withSessionRlsActorContext(
+          { subjectId: state.subjectId, initiatingHumanSubjectId: state.subjectId },
+          () =>
+            withRlsContext(
+              transaction as never,
+              { accountId: state.accountId, workspaceId: state.workspaceId },
+              async (db) => {
+                const [row] = await rawRows<{ authorized: boolean }>(
+                  db,
+                  sql`select opengeni_private.authorize_subscription_session_access(
+                    ${state.accountId}::uuid, ${state.workspaceId}::uuid,
+                    ${state.sessionId}::uuid, ${state.turnId}::uuid,
+                    ${state.subjectId}, ${state.subjectId}
+                  ) as authorized`,
+                );
+                return row?.authorized === true;
+              },
+            ),
+        );
+
+        const refresh = await withSubscriptionCoreCodexRefreshLock(
+          transaction as never,
+          request,
+          async (db) => {
+            const [visibility] = await rawRows<{ visible: boolean }>(
+              db,
+              sql`select opengeni_private.subscription_connection_visible(
+                ${state.accountId}::uuid, ${state.workspaceId}::uuid,
+                ${state.connectionId}::uuid, 'shared', 'people', null, null, 'codex'
+              ) as visible`,
+            );
+            const persisted = await persistSubscriptionCodexRefresh(db, {
+              ...request,
+              expectedRefreshGeneration: 1,
+              credentialEncrypted: "v1:b3duZXJsZXNzLXRva2Vu:c2VjcmV0",
+              expiresAt: new Date(Date.now() + 60 * 60_000),
+              lastRefreshAt: new Date(),
+            });
+            return { visible: visibility?.visible === true, persisted };
+          },
+        );
+        const [context] = await rawRows<{
+          owner: string;
+          human: string;
+          refreshCapability: boolean;
+        }>(
+          transaction as never,
+          sql`select current_setting('opengeni.session_owner_subject_id', true) as owner,
+              current_setting('opengeni.turn_human_subject_id', true) as human,
+              opengeni_private.subscription_codex_refresh_write_allowed(
+                ${state.accountId}::uuid, ${state.workspaceId}::uuid, ${state.connectionId}::uuid
+              ) as "refreshCapability"`,
+        );
+        return { ownedSessionAuthorized, refresh, context };
+      });
+
+      expect(transactionResult).toMatchObject({
+        ownedSessionAuthorized: true,
+        refresh: {
+          status: "completed",
+          value: { visible: true, persisted: false },
+        },
+        context: { owner: "", human: "", refreshCapability: false },
+      });
+      const [unchanged] = await shared!.admin<
+        { credential_encrypted: string; scope_kind: string }[]
+      >`
+        select credential_encrypted, scope_kind from subscription_connections
+        where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid`;
+      expect(unchanged).toMatchObject({
+        credential_encrypted: "v1:test",
+        scope_kind: "people",
+      });
+    },
+    180_000,
+  );
+
+  test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
     "holds the accepted lease row through refresh so concurrent release cannot race the write",
     async () => {
       const state = await fixture();

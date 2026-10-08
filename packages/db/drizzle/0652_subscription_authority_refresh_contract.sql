@@ -791,6 +791,20 @@ BEGIN
           AND capability.account_id = p_account_id AND capability.connection_id = p_connection_id;
         RETURN false;
       END IF;
+      IF ownerless_session AND (
+        target.ownership IS DISTINCT FROM 'shared'
+        OR (
+          target.scope_kind IS DISTINCT FROM 'organization'
+          AND target.scope_kind IS DISTINCT FROM 'workspaces'
+        )
+      ) THEN
+        DELETE FROM opengeni_private.subscription_runtime_capabilities capability
+        WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+          AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+          AND capability.capability_kind IN ('personal_access', 'codex_refresh_write')
+          AND capability.account_id = p_account_id AND capability.connection_id = p_connection_id;
+        RETURN false;
+      END IF;
       IF target.ownership = 'personal' AND NOT personal_authorized THEN
         DELETE FROM opengeni_private.subscription_runtime_capabilities capability
         WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
