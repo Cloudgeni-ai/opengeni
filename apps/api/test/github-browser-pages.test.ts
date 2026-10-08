@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
+  githubConnectFailureHtml,
   githubInstallationChooserHtml,
   githubSetupPendingHtml,
   githubOwnerApprovedHtml,
   githubSetupSuccessHtml,
   githubSuccessHtml,
+  prReviewInstallationChooserHtml,
+  prReviewSetupPendingHtml,
+  prReviewSetupSuccessHtml,
 } from "../src/routes/github-browser-pages";
 
 const candidate = {
@@ -109,6 +113,11 @@ describe("API GitHub browser pages", () => {
       githubSetupSuccessHtml("owner", "https://opengeni.test/"),
       githubSetupPendingHtml("https://opengeni.test/"),
       githubOwnerApprovedHtml("https://opengeni.test/"),
+      githubConnectFailureHtml("expired", "https://opengeni.test/"),
+      githubSuccessHtml(["OPENGENI_GITHUB_APP_ID=1"]),
+      prReviewInstallationChooserHtml([candidate], "state", "https://api.opengeni.test/select"),
+      prReviewSetupSuccessHtml("owner", "https://opengeni.test/"),
+      prReviewSetupPendingHtml(),
     ]) {
       expect(html).toContain("prefers-color-scheme:light");
       expect(html).toContain('class="wordmark">Opengeni<');
@@ -116,5 +125,70 @@ describe("API GitHub browser pages", () => {
       expect(html).toContain('@font-face{font-family:"Inter Variable"');
       expect(html).toContain('@font-face{font-family:"DM Sans Variable"');
     }
+  });
+
+  test("every page shows the GitHub mark next to the Opengeni mark, in both themes", () => {
+    for (const html of [
+      githubInstallationChooserHtml(
+        [candidate],
+        "state",
+        "workspace-id",
+        "https://api.opengeni.test",
+      ),
+      githubSetupSuccessHtml("owner", "https://opengeni.test/"),
+      githubSetupPendingHtml(),
+      githubOwnerApprovedHtml("https://opengeni.test/"),
+      ...(
+        [
+          "expired",
+          "cancelled",
+          "not_owner",
+          "forbidden",
+          "policy_denied",
+          "signed_out",
+          "failed",
+        ] as const
+      ).map((failure) => githubConnectFailureHtml(failure, "https://opengeni.test/")),
+      githubSuccessHtml(["OPENGENI_GITHUB_APP_ID=1"]),
+      prReviewInstallationChooserHtml([candidate], "state", "https://api.opengeni.test/select"),
+      prReviewSetupSuccessHtml("owner", "https://opengeni.test/"),
+      prReviewSetupPendingHtml(),
+    ]) {
+      const lockup = html.match(
+        /<div class="lockup" role="img" aria-label="Opengeni and GitHub">([\s\S]*?)<\/div>/,
+      );
+      expect(lockup).not.toBeNull();
+      expect(lockup![1]).toContain('class="opengeni-mark"');
+      // The Octocat path, filled with the text color so it flips with the theme.
+      expect(lockup![1]).toMatch(
+        /<svg class="github-mark" viewBox="0 0 24 24" fill="currentColor"[^>]*><path d="M12 \.7a11\.5/,
+      );
+      expect(html).toMatch(/\.lockup-tile\{[^}]*color:var\(--fg\)/);
+    }
+  });
+
+  test("Opengeni Lens pages keep their forms and escape user content", () => {
+    const chooser = prReviewInstallationChooserHtml(
+      [
+        {
+          ...candidate,
+          installation: { ...candidate.installation, accountLogin: "<b>x</b>" },
+        },
+      ],
+      'signed" x="y',
+      'https://api.opengeni.test/select?a="b',
+    );
+    expect(chooser).toContain('action="https://api.opengeni.test/select?a=&quot;b"');
+    expect(chooser).toContain('name="state" value="signed&quot; x=&quot;y"');
+    expect(chooser).toContain('name="installation_id" value="42" required');
+    expect(chooser).toContain('name="installation_id" value="new" formnovalidate');
+    expect(chooser).toContain("&lt;b&gt;x&lt;/b&gt;");
+    const success = prReviewSetupSuccessHtml("<i>org</i>", 'https://opengeni.test/?r="x"');
+    expect(success).toContain("Opengeni Lens connected");
+    expect(success).toContain("&lt;i&gt;org&lt;/i&gt;");
+    expect(success).toContain('href="https://opengeni.test/?r=&quot;x&quot;"');
+    expect(prReviewSetupPendingHtml()).toContain(
+      "A GitHub organization owner must approve Opengeni Lens",
+    );
   });
 });
