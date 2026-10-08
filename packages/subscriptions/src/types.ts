@@ -106,7 +106,9 @@ export type SubscriptionAssignmentPolicy = {
   workspaceId: string;
   inferencePool: InferencePool;
   allowedModelIds: readonly ModelId[] | null;
+  excludedModelIds?: readonly ModelId[];
   allocatorEnabled: boolean;
+  managedByWorkspaceId?: string | null;
 };
 
 /** Per workspace and provider switches (SUB-SET-06). */

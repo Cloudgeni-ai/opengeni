@@ -2,7 +2,9 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 import {
+  acquireSubscriptionTurnLease,
   acquireSubscriptionOperationLease,
+  assertSubscriptionTurnLeaseCurrent,
   assertSubscriptionOperationLeaseCurrent,
   claimSubscriptionCapacityWakeDeliveries,
   createDb,
@@ -10,12 +12,16 @@ import {
   enqueueSessionTurn,
   ensureManagedAccessForUser,
   listSubscriptionConnectionAssignmentPolicies,
+  listSubscriptionConnectionsForPlacement,
+  isSubscriptionProviderCutoverEnabled,
   markSubscriptionCapacityWakeDelivered,
   observeSubscriptionCapacityWaiterWake,
   readSubscriptionSessionBinding,
   writeSubscriptionSessionBinding,
   releaseSubscriptionOperationLease,
+  releaseSubscriptionTurnLease,
   renewSubscriptionOperationLease,
+  renewSubscriptionTurnLease,
   upsertSubscriptionCapacityWaiter,
   wakeSubscriptionCapacityWaiter,
   withRlsContext,
@@ -99,6 +105,97 @@ async function fixture() {
 }
 
 describe("provider-neutral subscription runtime persistence", () => {
+  test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
+    "chat-turn leases are generation-fenced and provider cutovers fail closed by default",
+    async () => {
+      const state = await fixture();
+      const actor = {
+        subjectId: "service:subscription-test",
+        initiatingHumanSubjectId: state.subjectId,
+      };
+      const first = {
+        accountId: state.accountId,
+        workspaceId: state.workspaceId,
+        sessionId: state.sessionId,
+        turnId: state.turnId,
+        provider: "codex" as const,
+        connectionId: state.connectionId,
+        holderId: `worker-${crypto.randomUUID()}`,
+        generation: 1,
+      };
+      expect(
+        await withSessionRlsActorContext(actor, () =>
+          withRlsContext(
+            client!.db,
+            { accountId: state.accountId, workspaceId: state.workspaceId },
+            (db) =>
+              isSubscriptionProviderCutoverEnabled(db, {
+                accountId: state.accountId,
+                provider: "codex",
+              }),
+          ),
+        ),
+      ).toBe(false);
+      await shared!.admin`
+        insert into subscription_provider_cutovers (account_id, provider, enabled)
+        values (${state.accountId}::uuid, 'codex', true)`;
+
+      await withSessionRlsActorContext(actor, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: state.accountId, workspaceId: state.workspaceId },
+          async (db) => {
+            expect(
+              await isSubscriptionProviderCutoverEnabled(db, {
+                accountId: state.accountId,
+                provider: "codex",
+              }),
+            ).toBe(true);
+            expect(
+              await acquireSubscriptionTurnLease(db, { ...first, ttlMs: 60_000 }),
+            ).toMatchObject({ generation: 1, turnId: state.turnId });
+            expect(await assertSubscriptionTurnLeaseCurrent(db, first)).toBe(true);
+            expect(
+              await acquireSubscriptionTurnLease(db, {
+                ...first,
+                holderId: `replacement-${crypto.randomUUID()}`,
+                generation: 2,
+                ttlMs: 60_000,
+              }),
+            ).toBeNull();
+            expect(
+              await renewSubscriptionTurnLease(db, { ...first, ttlMs: 60_000 }),
+            ).toBeInstanceOf(Date);
+          },
+        ),
+      );
+
+      await shared!.admin`
+        update subscription_leases set leased_until = clock_timestamp() - interval '1 second'
+        where account_id = ${state.accountId}::uuid and turn_id = ${state.turnId}::uuid`;
+      const reclaimed = {
+        ...first,
+        holderId: `reclaimer-${crypto.randomUUID()}`,
+        generation: 2,
+      };
+      await withSessionRlsActorContext(actor, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: state.accountId, workspaceId: state.workspaceId },
+          async (db) => {
+            expect(
+              await acquireSubscriptionTurnLease(db, { ...reclaimed, ttlMs: 60_000 }),
+            ).toMatchObject({ generation: 2, turnId: state.turnId });
+            expect(await assertSubscriptionTurnLeaseCurrent(db, first)).toBe(false);
+            expect(await releaseSubscriptionTurnLease(db, first)).toBe(false);
+            expect(await releaseSubscriptionTurnLease(db, reclaimed)).toBe(true);
+          },
+        ),
+      );
+    },
+    180_000,
+  );
+
   test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
     "operation leases are independent of chat leases and fenced by attempt and generation",
     async () => {
@@ -367,6 +464,32 @@ describe("provider-neutral subscription runtime persistence", () => {
               ["organization", false],
               ["workspace", true],
             ]);
+            const placementConnections = await listSubscriptionConnectionsForPlacement(db, {
+              accountId: state.accountId,
+              workspaceId: state.workspaceId,
+              provider: "codex",
+            });
+            expect(placementConnections).toHaveLength(1);
+            expect(placementConnections[0]).toMatchObject({
+              id: state.connectionId,
+              provider: "codex",
+              ownership: { kind: "shared", scope: { kind: "organization" } },
+              assignmentPolicies: [
+                {
+                  inferencePool: "organization",
+                  allocatorEnabled: false,
+                  allowedModelIds: ["codex/b"],
+                  excludedModelIds: ["codex/a"],
+                },
+                {
+                  inferencePool: "workspace",
+                  allocatorEnabled: true,
+                  allowedModelIds: ["codex/a"],
+                  excludedModelIds: ["codex/b"],
+                },
+              ],
+              quota: null,
+            });
 
             const binding = {
               accountId: state.accountId,
@@ -400,6 +523,22 @@ describe("provider-neutral subscription runtime persistence", () => {
           },
         ),
       );
+      await shared!.admin`
+        delete from subscription_connection_assignment_policies
+        where account_id = ${state.accountId}::uuid and connection_id = ${state.connectionId}::uuid`;
+      const unassigned = await withSessionRlsActorContext(actor, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: state.accountId, workspaceId: state.workspaceId },
+          (db) =>
+            listSubscriptionConnectionsForPlacement(db, {
+              accountId: state.accountId,
+              workspaceId: state.workspaceId,
+              provider: "codex",
+            }),
+        ),
+      );
+      expect(unassigned[0]?.assignmentPolicies).toEqual([]);
     },
     180_000,
   );

@@ -339,6 +339,25 @@ describe("provider switches", () => {
     ).toMatchObject({ kind: "wait", reason: "no_eligible_capacity" });
   });
 
+  test("an empty shared assignment list fails closed instead of using the legacy pool fallback", () => {
+    const unassigned = connection("codex-unassigned", "codex", {
+      ownership: {
+        kind: "shared",
+        scope: { kind: "organization" },
+        managedByWorkspaceId: null,
+      },
+      assignmentPolicies: [],
+    });
+    const placement = input({ connections: [unassigned] });
+    expect(authorizationIneligibility(placement, unassigned)).toContain(
+      "inference_source_excludes_connection",
+    );
+    expect(decidePlacement(placement)).toMatchObject({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+    });
+  });
+
   test("an explicit automatic source overrides a conflicting compatibility boolean", () => {
     const organizationAccount = connection("codex-org", "codex", {
       ownership: {

@@ -207,7 +207,9 @@ function staticServiceIneligibility(
   const assignmentAllowsModel =
     assignments === undefined ||
     assignments.some(
-      (policy) => policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId),
+      (policy) =>
+        (policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId)) &&
+        !policy.excludedModelIds?.includes(modelId),
     );
   if (!connectionAllowsModel || !assignmentAllowsModel) {
     reasons.push("model_not_allowed_by_connection");
@@ -217,7 +219,8 @@ function staticServiceIneligibility(
     const hasServingAssignment = assignments.some(
       (policy) =>
         policy.allocatorEnabled &&
-        (policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId)),
+        (policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId)) &&
+        !policy.excludedModelIds?.includes(modelId),
     );
     if (assignmentAllowsModel && hasAllocatableAssignment && !hasServingAssignment) {
       reasons.push("source_assignment_allocator_mismatch");
