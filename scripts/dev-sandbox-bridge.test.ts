@@ -214,7 +214,7 @@ describe("Docker sandbox route forwarder", () => {
     for (const path of [
       "/v1/workspaces/ws-1/mcp",
       "/v1/workspaces/ws-1/codemode/run",
-      "/v1/sessions",
+      "/v1/workspaces/ws-1/sessions",
       `${SANDBOX_BRIDGE_HEALTH_PATH}/extra`,
     ]) {
       const response = await fetch(`${base}${path}`, { method: "POST", body: "{}" });
