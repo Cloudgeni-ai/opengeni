@@ -206,7 +206,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0514_failed_session_variable_set_attach.sql",
     );
     const subscriptionAuthorityRefreshContract = sourceContract.migrations.find(
-      (migration) => migration.path === "0654_subscription_authority_refresh_contract.sql",
+      (migration) => migration.path === "0655_subscription_authority_refresh_contract.sql",
     );
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(sourceContract.migrations.at(-1)?.path ?? null);
@@ -2123,7 +2123,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
-      "0654_subscription_authority_refresh_contract.sql",
+      "0655_subscription_authority_refresh_contract.sql",
       "0647_slack_bot_branding.sql",
       // Exclusion membership is unordered; keep this addition away from the shared tail.
       "0640_knowledge_entry_created_since.sql",

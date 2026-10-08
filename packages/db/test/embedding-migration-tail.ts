@@ -115,5 +115,5 @@ export const embeddingMigrationTail = [
   "0651_session_event_delta_folding.sql",
   "0652_session_archive_guard_search_path.sql",
   "0653_session_archive_tenancy_fence.sql",
-  "0654_subscription_authority_refresh_contract.sql",
+  "0655_subscription_authority_refresh_contract.sql",
 ];
