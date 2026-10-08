@@ -1,9 +1,14 @@
-import type { NativePushDevice, NativePushRule } from "@opengeni/sdk";
+import type {
+  ListInboxResponse,
+  NativePushDevice,
+  NativePushRule,
+  OpenGeniClient,
+} from "@opengeni/sdk";
 import Constants from "expo-constants";
 import * as Notifications from "expo-notifications";
 import { router, usePathname } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Linking, Platform } from "react-native";
+import { AppState, Linking, Platform } from "react-native";
 import { useAccount } from "@/account";
 import type { SettingsSection } from "@/settings-model";
 
@@ -27,6 +32,123 @@ export interface PushData {
   sessionId?: string;
   workspaceId?: string;
   subjectId?: string;
+  rule?: NativePushRule;
+  eventType?: string;
+}
+
+/*
+ * Actions on the notification itself. Approve asks for the device to be
+ * unlocked first; Deny and an inline answer don't open the app. Categories
+ * are static, so a question's own options open the app instead of showing as
+ * buttons.
+ */
+const APPROVE_ACTION = "og.approve";
+const DENY_ACTION = "og.deny";
+const REPLY_ACTION = "og.reply";
+void Notifications.setNotificationCategoryAsync("og.approval", [
+  {
+    identifier: APPROVE_ACTION,
+    buttonTitle: "Approve",
+    options: { opensAppToForeground: false, isAuthenticationRequired: true },
+  },
+  {
+    identifier: DENY_ACTION,
+    buttonTitle: "Deny",
+    options: { opensAppToForeground: false, isDestructive: true },
+  },
+]).catch(() => undefined);
+void Notifications.setNotificationCategoryAsync("og.question", [
+  {
+    identifier: REPLY_ACTION,
+    buttonTitle: "Answer",
+    textInput: { submitButtonTitle: "Send", placeholder: "Your answer" },
+    options: { opensAppToForeground: false, isAuthenticationRequired: true },
+  },
+]).catch(() => undefined);
+
+/**
+ * Act on a notification's button without opening the app: decide the one open
+ * approval in that session, or answer its one open question. Returns false when
+ * the app has to open (several open, or a question that needs the full form).
+ */
+async function actOnNotification(
+  client: OpenGeniClient,
+  data: PushData,
+  action: string,
+  text: string | undefined,
+): Promise<boolean> {
+  if (!data.sessionId) return false;
+  const inbox = await client.listInbox();
+  const kind = action === REPLY_ACTION ? "question" : "approval";
+  const open = inbox.items.filter(
+    (item) => item.sessionId === data.sessionId && item.kind === kind,
+  );
+  const item = open[0];
+  if (open.length !== 1 || !item) return false;
+  if (kind === "approval") {
+    await client.sendApprovalDecision(item.workspaceId, item.sessionId, {
+      approvalId: item.sourceKey,
+      decision: action === APPROVE_ACTION ? "approve" : "reject",
+    });
+    return true;
+  }
+  const answer = text?.trim();
+  if (!answer) return false;
+  const request = await client.getHumanInputRequest(
+    item.workspaceId,
+    item.sessionId,
+    item.sourceKey,
+  );
+  const question = request.questions[0];
+  if (request.status !== "pending" || request.questions.length !== 1 || !question) return false;
+  if (question.kind === "text") {
+    await client.submitHumanInputResponse(item.workspaceId, item.sessionId, item.sourceKey, {
+      outcome: "answered",
+      answers: [{ questionId: question.id, values: [answer] }],
+    });
+    return true;
+  }
+  // A choice question takes a typed answer only where it allows its own words.
+  if (!question.allowOther) return false;
+  await client.submitHumanInputResponse(item.workspaceId, item.sessionId, item.sourceKey, {
+    outcome: "answered",
+    answers: [{ questionId: question.id, values: [], other: answer }],
+  });
+  return true;
+}
+
+/**
+ * Keep the phone in step with the inbox: the app badge counts what waits on
+ * the person, and delivered notifications whose item was answered, decided or
+ * withdrawn (here or anywhere else) leave Notification Center.
+ */
+export async function syncInboxBadge(inbox: ListInboxResponse): Promise<void> {
+  const now = Date.now();
+  const awake = inbox.items.filter(
+    (item) => item.snoozedUntil === null || Date.parse(item.snoozedUntil) <= now,
+  );
+  const count = awake.filter((item) => item.kind !== "notification" || item.unread).length;
+  await Notifications.setBadgeCountAsync(count).catch(() => undefined);
+  const presented = await Notifications.getPresentedNotificationsAsync().catch(() => []);
+  for (const notification of presented) {
+    const data = notification.request.content.data as PushData | undefined;
+    if (!data?.sessionId) continue;
+    const kinds =
+      data.rule === "needs_input"
+        ? ["question", "approval", "goal_paused"]
+        : data.rule === "agent"
+          ? ["notification"]
+          : null;
+    if (!kinds) continue;
+    const stillOpen = inbox.items.some(
+      (item) => item.sessionId === data.sessionId && kinds.includes(item.kind),
+    );
+    if (!stillOpen) {
+      await Notifications.dismissNotificationAsync(notification.request.identifier).catch(
+        () => undefined,
+      );
+    }
+  }
 }
 
 function appId(): string {
@@ -224,12 +346,33 @@ export function NotificationRouting() {
   // account state through a ref.
   const openRef = useRef(open);
   openRef.current = open;
+  const clientRef = useRef(client);
+  clientRef.current = client;
   const handled = useRef(new Set<string>());
   const respond = useCallback((response: Notifications.NotificationResponse) => {
     const id = response.notification.request.identifier;
-    if (handled.current.has(id)) return;
-    handled.current.add(id);
-    openRef.current(response.notification.request.content.data as PushData);
+    const action = response.actionIdentifier;
+    const key = `${id}:${action}`;
+    if (handled.current.has(key)) return;
+    handled.current.add(key);
+    const data = response.notification.request.content.data as PushData;
+    if (action === APPROVE_ACTION || action === DENY_ACTION || action === REPLY_ACTION) {
+      // Settled from the notification: confirm quietly, or open the session when
+      // the action needs more than a button (several open, a full form).
+      void actOnNotification(clientRef.current, data, action, response.userText)
+        .then(async (settled) => {
+          if (!settled) {
+            openRef.current(data);
+            return;
+          }
+          await Notifications.dismissNotificationAsync(id).catch(() => undefined);
+          const inbox = await clientRef.current.listInbox().catch(() => null);
+          if (inbox) await syncInboxBadge(inbox);
+        })
+        .catch(() => openRef.current(data));
+      return;
+    }
+    openRef.current(data);
   }, []);
   useEffect(() => {
     const subscription = Notifications.addNotificationResponseReceivedListener(respond);
@@ -244,6 +387,22 @@ export function NotificationRouting() {
       if (response) respond(response);
     });
   }, [respond, status]);
+
+  // Coming to the foreground brings the badge and Notification Center in step
+  // with the inbox, so answered or withdrawn items don't linger on the phone.
+  useEffect(() => {
+    if (status !== "ready") return;
+    const sync = () =>
+      void client
+        .listInbox()
+        .then(syncInboxBadge)
+        .catch(() => undefined);
+    sync();
+    const subscription = AppState.addEventListener("change", (next) => {
+      if (next === "active") sync();
+    });
+    return () => subscription.remove();
+  }, [client, status]);
 
   // Tokens rotate: re-register the current token for the active account.
   useEffect(() => {

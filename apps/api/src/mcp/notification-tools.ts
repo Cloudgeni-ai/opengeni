@@ -17,6 +17,7 @@ import {
   dismissInboxNotification,
   getInboxTidyPolicy,
   getSession,
+  getSessionInboxRecipient,
   listInboxItems,
   type InboxItemRow,
 } from "@opengeni/db";
@@ -45,20 +46,13 @@ export type RegisterNotificationToolsInput = {
   json: JsonResult;
 };
 
-/** The person a session belongs to, or null for sessions started by a key or service. */
+/** The person a session works for (its owner, else who started it), or null when no person does. */
 async function sessionOwner(
   deps: ApiRouteDeps,
   workspaceId: string,
   sessionId: string,
 ): Promise<{ subjectId: string; parentSessionId: string | null } | null> {
-  const session = await getSession(deps.db, workspaceId, sessionId);
-  if (!session) return null;
-  const creator = session.createdBy;
-  const subjectId =
-    creator?.kind === "subject" && creator.subjectId?.startsWith("user:")
-      ? creator.subjectId
-      : null;
-  return subjectId ? { subjectId, parentSessionId: session.parentSessionId ?? null } : null;
+  return await getSessionInboxRecipient(deps.db, workspaceId, sessionId);
 }
 
 /** Whether `ancestorId` is `sessionId` or one of the sessions above it (bounded). */

@@ -346,4 +346,25 @@ describe("0655 inbox", () => {
       where session_id = ${person.session.id}`;
     expect(count?.count).toBe(0);
   });
+
+  test("a session's owner is its recipient, else the person who started it (0656)", async () => {
+    if (!client) return;
+    const rows = await owned!.admin<Array<{ recipient: string | null }>>`
+      select opengeni_private.session_recipient_v1(owner, creator) as recipient
+      from (values
+        ('user:owner', 'internal-update', 1),
+        (null, 'user:starter', 2),
+        ('user:owner', 'user:starter', 3),
+        (null, 'internal-update', 4),
+        ('apikey:x', 'apikey:y', 5)
+      ) as cases(owner, creator, position)
+      order by position`;
+    expect(rows.map((row) => row.recipient)).toEqual([
+      "user:owner",
+      "user:starter",
+      "user:owner",
+      null,
+      null,
+    ]);
+  });
 });

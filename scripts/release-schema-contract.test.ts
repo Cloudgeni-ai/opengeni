@@ -2478,6 +2478,7 @@ describe("release schema contract", () => {
       "0653_session_archive_tenancy_fence.sql",
       "0654_private_child_causal_initiator.sql",
       "0655_inbox.sql",
+      "0656_inbox_owner_recipient.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

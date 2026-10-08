@@ -78,8 +78,10 @@ Off by default. Enable it per deployment:
 
 The archive requires the deployment's object storage. The same maintenance
 Schedule runs it after content compaction; each pass keeps archiving batches
-of eligible sessions until its time budget ends or none remain, so a backlog
-drains steadily after the archive is first enabled.
+of eligible sessions until its ten-minute budget ends or none remain, so a
+backlog drains steadily after the archive is first enabled. Compaction and
+delta folding get the same budget in the same workflow, so neither starves the
+other while a backlog drains.
 
 ### What qualifies
 
@@ -110,7 +112,10 @@ all of these hold for the idle period:
    archive.
 2. The worker streams two zstd-compressed JSON-lines objects to a temporary
    file and uploads them through the bounded object-storage path, which reads
-   every byte back before success:
+   every byte back before success. On object stores without read-after-write
+   consistency a just-written object can briefly read as missing, so readback
+   is retried with a short backoff (about 16 seconds in total) before the
+   attempt fails; size or digest mismatches fail at once:
    - `bundle.jsonl.zst`: a header with the exact `sessions` row, then every row
      of the session's turns, attempts, goals, goal revisions, all events,
      history items, machine inputs, realtime entries, code-mode calls, tool
