@@ -1,12 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { shell } from "@openai/agents/sandbox";
 import {
+  ConnectionConfig,
   DefaultAdapterFactory,
   SandboxApiException,
   type AdapterFactory,
   type CreateSandboxRequest,
   type Endpoint,
 } from "@alibaba-group/opensandbox";
+import {
+  OpenSandboxCommandStreamError,
+  withOpenSandboxCommandStreamProof,
+} from "../src/sandbox/providers/opensandbox-command-stream";
 import {
   Manifest,
   SandboxArchiveError,
@@ -437,6 +442,541 @@ function heldOutputProvider(exitCode = 0) {
   fake.holdCommand();
   return fake;
 }
+
+function wireEvent(event: Record<string, unknown>): string {
+  return `data: ${JSON.stringify({ timestamp: 1, ...event })}\n\n`;
+}
+
+/** Real SDK command/status/interrupt adapters and HTTP streams; only the
+ * unrelated lifecycle, health and filesystem services are fixture-backed. */
+async function wireSession(
+  body: string | Uint8Array | ((command: string) => ReadableStream),
+  contentType = "text/event-stream",
+) {
+  const starts: string[] = [];
+  const statusIds: string[] = [];
+  const interrupted: string[] = [];
+  const statuses = new Map<string, { id?: string; running: boolean; exit_code: number | null }>();
+  let onStatus: ((id: string) => void) | undefined;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url);
+      if (url.pathname === "/command" && request.method === "POST") {
+        const { command } = (await request.json()) as { command: string };
+        starts.push(command);
+        return new Response(typeof body === "function" ? body(command) : body, {
+          headers: { "content-type": contentType },
+        });
+      }
+      if (url.pathname === "/command" && request.method === "DELETE") {
+        interrupted.push(url.searchParams.get("id")!);
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname.startsWith("/command/status/")) {
+        const id = decodeURIComponent(url.pathname.slice("/command/status/".length));
+        statusIds.push(id);
+        const status = statuses.get(id) ?? { id, running: true, exit_code: null };
+        onStatus?.(id);
+        return Response.json(status);
+      }
+      return new Response("unexpected fixture request", { status: 404 });
+    },
+  });
+  const fake = new FakeOpenSandbox();
+  const originalStack = fake.adapterFactory.createExecdStack.bind(fake.adapterFactory);
+  fake.adapterFactory.createExecdStack = (options) => ({
+    ...originalStack(options),
+    commands: new DefaultAdapterFactory().createExecdStack({
+      ...options,
+      execdBaseUrl: server.url.origin,
+    }).commands,
+  });
+  const session = await createClient(fake).create();
+  return {
+    session,
+    starts,
+    statusIds,
+    interrupted,
+    statuses,
+    onStatus(callback: (id: string) => void) {
+      onStatus = callback;
+    },
+    commands() {
+      return withOpenSandboxCommandStreamProof(new DefaultAdapterFactory()).createExecdStack({
+        connectionConfig: new ConnectionConfig({ domain: server.url.origin }),
+        execdBaseUrl: server.url.origin,
+      }).commands;
+    },
+    async close() {
+      await session.close();
+      await server.stop(true);
+    },
+  };
+}
+
+describe("OpenSandbox default wire proof", () => {
+  test("legal multiline SSE preserves output and a nonzero execution error", async () => {
+    const wire = await wireSession(
+      wireEvent({ type: "init", text: "exec-original" }) +
+        'data: {"type":"stdout",\r\ndata: "text":"first\\nsecond ☃"}\r\n\r\n' +
+        'data: {"type":"error",\ndata: "error":{"ename":"CommandExecutionError","evalue":"7","traceback":[]}}\n\n' +
+        wireEvent({ type: "stderr", text: "separate" }) +
+        wireEvent({ type: "execution_complete", execution_time: 1 }),
+    );
+    try {
+      expect(
+        await executeSynchronousCommand(wire.session, { cmd: "original once", maxOutputTokens: 1 }),
+      ).toMatchObject({ stdout: "first\nsecond ☃", stderr: "separate", exitCode: 7 });
+      expect(wire.starts).toEqual(["original once"]);
+    } finally {
+      await wire.close();
+    }
+  });
+
+  test.each(["json", "utf8", "truncated", "missing-completion"] as const)(
+    "accepted malformed %s wire cannot authorize synchronous success",
+    async (mode) => {
+      const init = wireEvent({ type: "init", text: "exec-original" });
+      const complete = wireEvent({ type: "execution_complete", execution_time: 1 });
+      let body: string | Uint8Array =
+        mode === "json"
+          ? `${init}data: {not json}\n\n${complete}`
+          : mode === "truncated"
+            ? `${init}${complete.trimEnd()}\n`
+            : `${init}${wireEvent({ type: "stdout", text: "prefix" })}`;
+      if (mode === "utf8")
+        body = new Uint8Array([
+          ...new TextEncoder().encode(`${init}data: {"type":"stdout","text":"`),
+          0xc3,
+          0x28,
+          ...new TextEncoder().encode(`"}\n\n${complete}`),
+        ]);
+      const wire = await wireSession(body);
+      try {
+        const initial = await runWithToolCallCorrelation("wire-original", () =>
+          wire.session.exec({ cmd: "original once", yieldTimeMs: 1_000 }),
+        );
+        expect(initial.sessionId).toBe(1);
+        expect(synchronousCommandPage(wire.session, initial)).toMatchObject({
+          exitCode: null,
+          collectionUnavailable: true,
+        });
+        expect(wire.session.hasRetainedProcess(1)).toBe(true);
+        expect(await wire.session.cancelExecCommand("wire-original:0")).toBe(true);
+        expect(wire.interrupted).toEqual(["exec-original"]);
+        expect(wire.starts).toEqual(["original once"]);
+      } finally {
+        await wire.close();
+      }
+    },
+  );
+
+  test("contradictory init retains and interrupts the first authenticated execution", async () => {
+    const wire = await wireSession(
+      wireEvent({ type: "init", text: "exec-original" }) +
+        wireEvent({ type: "stdout", text: "prefix" }) +
+        wireEvent({ type: "init", text: "exec-other" }) +
+        wireEvent({ type: "execution_complete", execution_time: 1 }),
+    );
+    try {
+      const initial = await runWithToolCallCorrelation("wire-original", () =>
+        wire.session.exec({ cmd: "original once", yieldTimeMs: 1_000 }),
+      );
+      expect(initial.sessionId).toBe(1);
+      expect(synchronousCommandPage(wire.session, initial)).toMatchObject({
+        stdout: "prefix",
+        collectionUnavailable: true,
+      });
+      expect(await wire.session.cancelExecCommand("wire-original:0")).toBe(true);
+      expect(wire.interrupted).toEqual(["exec-original"]);
+      expect(wire.starts).toEqual(["original once"]);
+    } finally {
+      await wire.close();
+    }
+  });
+
+  test.each(["foreign", "missing"] as const)(
+    "%s terminal status identity cannot retire the original execution",
+    async (mode) => {
+      const wire = await wireSession(wireEvent({ type: "init", text: "exec-original" }));
+      try {
+        const initial = await runWithToolCallCorrelation("wire-original", () =>
+          wire.session.exec({ cmd: "original once", yieldTimeMs: 1_000 }),
+        );
+        wire.statuses.set("exec-original", {
+          ...(mode === "foreign" ? { id: "exec-other" } : {}),
+          running: false,
+          exit_code: 0,
+        });
+        await expect(
+          wire.session.writeStdinForProcessControl({ sessionId: initial.sessionId!, chars: "" }),
+        ).rejects.toThrow("identity");
+        expect(wire.session.hasRetainedProcess(initial.sessionId!)).toBe(true);
+        expect(await wire.session.cancelExecCommand("wire-original:0")).toBe(true);
+        expect(wire.interrupted).toEqual(["exec-original"]);
+        expect(wire.statusIds).toEqual(["exec-original"]);
+        wire.statuses.set("exec-original", { id: "exec-original", running: true, exit_code: null });
+        const running = await wire.session.writeStdinForProcessControl({ sessionId: 1, chars: "" });
+        const partial = synchronousCommandPage(wire.session, running, 1);
+        expect(partial).toMatchObject({
+          sessionId: 1,
+          exitCode: null,
+          collectionUnavailable: true,
+        });
+        await wire.session.acknowledgeCommandOutput(running);
+        expect(wire.session.getSynchronousCommandOutput(running)).toBe(partial);
+        wire.statuses.set("exec-original", { id: "exec-original", running: false, exit_code: 7 });
+        const terminal = await wire.session.writeStdinForProcessControl({
+          sessionId: 1,
+          chars: "",
+        });
+        const proof = synchronousCommandPage(wire.session, terminal, 1);
+        expect(proof).toMatchObject({ exitCode: 7, collectionUnavailable: true });
+        expect(proof.sessionId).toBeUndefined();
+        expect(wire.session.hasRetainedProcess(1)).toBe(false);
+        await expect(observeSynchronousCommand(partial, async () => proof)).rejects.toMatchObject({
+          code: "synchronous_command_outcome_unknown",
+        });
+        expect(wire.statusIds).toEqual(["exec-original", "exec-original", "exec-original"]);
+        expect(wire.starts).toEqual(["original once"]);
+      } finally {
+        await wire.close();
+      }
+    },
+  );
+
+  test.each([0, 7])(
+    "byte-fragmented SSE, repeated identical init and exit %s remain lossless",
+    async (exitCode) => {
+      const bytes = new TextEncoder().encode(
+        ": heartbeat\r\n" +
+          wireEvent({ type: "init", text: "exec-original", id: "exec-original" }) +
+          wireEvent({ type: "init", text: "exec-original" }) +
+          'event: output\rid: event-cursor\rretry: 1\rdata: {"type":"stdout",\rdata: "text":"☃\\n尾"}\r\r' +
+          wireEvent({ type: "stderr", text: "err ☃" }) +
+          (exitCode
+            ? wireEvent({
+                type: "error",
+                error: { ename: "CommandExecutionError", evalue: String(exitCode), traceback: [] },
+              })
+            : "") +
+          wireEvent({ type: "execution_complete", id: "exec-original", execution_time: 1 }),
+      );
+      const wire = await wireSession(() => {
+        let cursor = 0;
+        return new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (cursor === bytes.length) controller.close();
+            else controller.enqueue(bytes.slice(cursor, ++cursor));
+          },
+        });
+      });
+      try {
+        expect(
+          await executeSynchronousCommand(wire.session, {
+            cmd: "original once",
+            maxOutputTokens: 1,
+          }),
+        ).toMatchObject({ stdout: "☃\n尾", stderr: "err ☃", exitCode });
+        expect(wire.starts).toEqual(["original once"]);
+        expect(wire.statusIds).toEqual([]);
+      } finally {
+        await wire.close();
+      }
+    },
+  );
+
+  test.each(["stdout", "execution_complete"])(
+    "contradictory %s identity cannot authenticate output or exit",
+    async (type) => {
+      const wire = await wireSession(
+        wireEvent({ type: "init", text: "exec-original" }) +
+          wireEvent({ type: "stdout", text: "prefix" }) +
+          wireEvent({ type, id: "exec-other", text: "foreign", execution_time: 1 }) +
+          (type === "stdout" ? wireEvent({ type: "execution_complete", execution_time: 1 }) : ""),
+      );
+      try {
+        const result = await runWithToolCallCorrelation("wire-original", () =>
+          wire.session.exec({ cmd: "original once", yieldTimeMs: 1_000 }),
+        );
+        expect(synchronousCommandPage(wire.session, result)).toMatchObject({
+          stdout: "prefix",
+          stderr: "",
+          sessionId: 1,
+          exitCode: null,
+          collectionUnavailable: true,
+        });
+        expect(await wire.session.cancelExecCommand("wire-original:0")).toBe(true);
+        expect(wire.interrupted).toEqual(["exec-original"]);
+        expect(wire.starts).toEqual(["original once"]);
+      } finally {
+        await wire.close();
+      }
+    },
+  );
+
+  test("malformed wire without init stays unknown rather than becoming an unstarted failure", async () => {
+    const wire = await wireSession(
+      `data: {not json}\n\n${wireEvent({ type: "execution_complete" })}`,
+    );
+    try {
+      const result = await runWithToolCallCorrelation("wire-original", () =>
+        wire.session.exec({ cmd: "original once", yieldTimeMs: 1_000 }),
+      );
+      expect(synchronousCommandPage(wire.session, result)).toMatchObject({
+        sessionId: 1,
+        exitCode: null,
+        collectionUnavailable: true,
+      });
+      expect(await wire.session.cancelExecCommand("wire-original:0")).toBe(false);
+      await expect(
+        wire.session.writeStdinForProcessControl({ sessionId: 1, chars: "" }),
+      ).rejects.toThrow("identity");
+      expect(wire.session.hasRetainedProcess(1)).toBe(true);
+      expect(wire.starts).toEqual(["original once"]);
+      expect(wire.statusIds).toEqual([]);
+      expect(wire.interrupted).toEqual([]);
+    } finally {
+      await wire.close();
+    }
+  });
+
+  test("archive completion polling ignores foreign terminal status until original proof", async () => {
+    const wire = await wireSession(wireEvent({ type: "init", text: "exec-original" }));
+    const firstQuery = deferred();
+    wire.statuses.set("exec-original", { id: "exec-other", running: false, exit_code: 0 });
+    wire.onStatus(() => firstQuery.resolve());
+    try {
+      let returned = false;
+      const pending = wire.session.persistWorkspaceTar().then(
+        () => {
+          returned = true;
+          return null;
+        },
+        (error: unknown) => {
+          returned = true;
+          return error;
+        },
+      );
+      await firstQuery.promise;
+      await Promise.resolve();
+      expect(returned).toBe(false);
+      wire.statuses.set("exec-original", { id: "exec-original", running: false, exit_code: 7 });
+      expect(await pending).toBeInstanceOf(SandboxArchiveError);
+      expect(wire.starts).toHaveLength(1);
+      expect(wire.statusIds).toEqual(["exec-original", "exec-original"]);
+    } finally {
+      await wire.close();
+    }
+  });
+
+  test("concurrent default streams retain independent identity, output and recovery", async () => {
+    const release = deferred();
+    const entered = deferred();
+    let requests = 0;
+    const wire = await wireSession(
+      (command) =>
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            const event = (value: Record<string, unknown>) =>
+              controller.enqueue(new TextEncoder().encode(wireEvent(value)));
+            event({ type: "init", text: `exec-${command}` });
+            event({ type: "stdout", text: command });
+            if (++requests === 2) entered.resolve();
+            void release.promise.then(() => {
+              if (command !== "lost") {
+                event({ type: "stderr", text: "separate" });
+                event({ type: "execution_complete", execution_time: 1 });
+              }
+              controller.close();
+            });
+          },
+        }),
+    );
+    try {
+      const good = wire.session.exec({ cmd: "good", yieldTimeMs: 50 });
+      const lost = runWithToolCallCorrelation("lost-wire", () =>
+        wire.session.exec({ cmd: "lost", yieldTimeMs: 50 }),
+      );
+      await entered.promise;
+      const [goodInitial, lostInitial] = await Promise.all([good, lost]);
+      const goodPage = synchronousCommandPage(wire.session, goodInitial);
+      const lostPage = synchronousCommandPage(wire.session, lostInitial);
+      expect(goodPage.stdout).toBe("good");
+      expect(lostPage.stdout).toBe("lost");
+      release.resolve();
+      expect(
+        await observeSynchronousCommand(goodPage, async (sessionId) =>
+          synchronousCommandPage(
+            wire.session,
+            await wire.session.writeStdinForProcessControl({
+              sessionId,
+              chars: "",
+              yieldTimeMs: 1_000,
+            }),
+            sessionId,
+          ),
+        ),
+      ).toMatchObject({ stdout: "good", stderr: "separate", exitCode: 0 });
+      const lostRead = await wire.session.writeStdinForProcessControl({
+        sessionId: lostInitial.sessionId!,
+        chars: "",
+        yieldTimeMs: 1_000,
+      });
+      expect(synchronousCommandPage(wire.session, lostRead, lostInitial.sessionId!)).toMatchObject({
+        collectionUnavailable: true,
+      });
+      expect(await wire.session.cancelExecCommand("lost-wire:0")).toBe(true);
+      expect(wire.interrupted).toEqual(["exec-lost"]);
+      wire.statuses.set("exec-lost", { id: "exec-lost", running: false, exit_code: 7 });
+      const terminal = await wire.session.writeStdinForProcessControl({
+        sessionId: lostInitial.sessionId!,
+        chars: "",
+      });
+      expect(synchronousCommandPage(wire.session, terminal, lostInitial.sessionId!)).toMatchObject({
+        exitCode: 7,
+        collectionUnavailable: true,
+      });
+      expect(wire.statusIds.length).toBeGreaterThan(0);
+      expect(new Set(wire.statusIds)).toEqual(new Set(["exec-lost"]));
+      expect(wire.starts.toSorted()).toEqual(["good", "lost"]);
+    } finally {
+      release.resolve();
+      await wire.close();
+    }
+  });
+
+  test.each(["application/x-ndjson", "text/event-stream"])(
+    "SDK-supported NDJSON output under %s and nonzero error remain lossless",
+    async (contentType) => {
+      const wire = await wireSession(
+        [
+          { type: "init", text: "exec-original" },
+          { type: "stdout", text: "☃\n尾" },
+          { type: "stderr", text: "separate" },
+          { type: "error", error: { ename: "CommandExecutionError", evalue: "7", traceback: [] } },
+          { type: "execution_complete", execution_time: 1 },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n"),
+        contentType,
+      );
+      try {
+        expect(
+          await executeSynchronousCommand(wire.session, {
+            cmd: "original once",
+            maxOutputTokens: 1,
+          }),
+        ).toMatchObject({ stdout: "☃\n尾", stderr: "separate", exitCode: 7 });
+        expect(wire.starts).toEqual(["original once"]);
+      } finally {
+        await wire.close();
+      }
+    },
+  );
+
+  test.each(["invalid-json", "trailing-utf8", "unframed-completion"] as const)(
+    "completion followed by %s cannot prove stream EOF",
+    async (mode) => {
+      const prefix =
+        wireEvent({ type: "init", text: "exec-original" }) +
+        wireEvent({ type: "stdout", text: "prefix" });
+      const complete = wireEvent({ type: "execution_complete", execution_time: 1 });
+      const body =
+        mode === "trailing-utf8"
+          ? new Uint8Array([...new TextEncoder().encode(prefix + complete), 0xe2, 0x98])
+          : mode === "invalid-json"
+            ? `${prefix}${complete}data: {not json}\n\n`
+            : `${prefix}data: {"type":"execution_complete"}`;
+      const wire = await wireSession(body);
+      try {
+        const initial = await runWithToolCallCorrelation("wire-original", () =>
+          wire.session.exec({ cmd: "original once", yieldTimeMs: 1_000 }),
+        );
+        const page = synchronousCommandPage(wire.session, initial);
+        expect(page).toMatchObject({
+          stdout: "prefix",
+          sessionId: 1,
+          exitCode: null,
+          collectionUnavailable: true,
+        });
+        await expect(
+          observeSynchronousCommand(page, async () => {
+            throw new Error("must not poll unknown bytes");
+          }),
+        ).rejects.toMatchObject({ code: "synchronous_command_outcome_unknown" });
+        expect(await wire.session.cancelExecCommand("wire-original:0")).toBe(true);
+        expect(wire.interrupted).toEqual(["exec-original"]);
+        expect(wire.starts).toEqual(["original once"]);
+      } finally {
+        await wire.close();
+      }
+    },
+  );
+
+  test("public runStream receives legal multiline events through the same strict wire seam", async () => {
+    const wire = await wireSession(
+      wireEvent({ type: "init", text: "exec-original" }) +
+        'data: {"type":"stdout",\ndata: "text":"first\\nsecond"}\n\n' +
+        'data: {"type":"error",\ndata: "error":{"ename":"CommandExecutionError","evalue":"7","traceback":[]}}\n\n' +
+        wireEvent({ type: "execution_complete", execution_time: 1 }),
+    );
+    try {
+      const events = [];
+      for await (const event of wire.commands().runStream("original once")) events.push(event);
+      expect(events).toHaveLength(4);
+      expect(events[1]).toMatchObject({ type: "stdout", text: "first\nsecond" });
+      expect(events[2]).toMatchObject({ type: "error", error: { evalue: "7" } });
+      expect(wire.starts).toEqual(["original once"]);
+    } finally {
+      await wire.close();
+    }
+  });
+
+  test("public runStream rejects malformed events rather than silently skipping them", async () => {
+    const wire = await wireSession(
+      wireEvent({ type: "init", text: "exec-original" }) +
+        `data: {not json}\n\n${wireEvent({ type: "execution_complete", execution_time: 1 })}`,
+    );
+    try {
+      const events = [];
+      const read = async () => {
+        for await (const event of wire.commands().runStream("original once")) events.push(event);
+      };
+      await expect(read()).rejects.toBeInstanceOf(OpenSandboxCommandStreamError);
+      expect(events).toEqual([expect.objectContaining({ type: "init", text: "exec-original" })]);
+      expect(wire.starts).toEqual(["original once"]);
+    } finally {
+      await wire.close();
+    }
+  });
+
+  test("large default wire output remains separate and complete at presentation token limit one", async () => {
+    const stdout = `first\r\n${"☃".repeat(400_000)}tail`;
+    const stderr = `err\r\n${"尾".repeat(400_000)}tail`;
+    const wire = await wireSession(
+      wireEvent({ type: "init", text: "exec-original" }) +
+        wireEvent({ type: "stdout", text: stdout }) +
+        wireEvent({ type: "stderr", text: stderr }) +
+        wireEvent({
+          type: "error",
+          error: { ename: "CommandExecutionError", evalue: "7", traceback: [] },
+        }) +
+        wireEvent({ type: "execution_complete", execution_time: 1 }),
+    );
+    try {
+      expect(
+        await executeSynchronousCommand(wire.session, { cmd: "original once", maxOutputTokens: 1 }),
+      ).toMatchObject({ stdout, stderr, exitCode: 7 });
+      expect(wire.starts).toEqual(["original once"]);
+      expect(wire.statusIds).toEqual([]);
+    } finally {
+      await wire.close();
+    }
+  });
+});
 
 describe("OpenSandbox adapter", () => {
   test("create returns the accepted ID before endpoint, health, or manifest work", async () => {

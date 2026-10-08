@@ -62,6 +62,10 @@ import { nextDurableOpId } from "../op-correlation";
 import { parseOpenSandboxSignedUriPath, redactOpenSandboxSignedUriPath } from "../stream-port";
 import type { RuntimeMetricsHooks } from "../../metrics";
 import type { SynchronousCommandPage } from "../synchronous-command";
+import {
+  OpenSandboxCommandStreamError,
+  withOpenSandboxCommandStreamProof,
+} from "./opensandbox-command-stream";
 
 const WORKSPACE_ROOT = "/workspace";
 const PRIVATE_ROOT = "/tmp/opengeni-private";
@@ -545,7 +549,9 @@ export class OpenSandboxSession {
         connectionConfig: connectionOptions(this.options),
         sandboxId: this.state.sandboxId,
         readyTimeoutSeconds: this.options.readyTimeoutSeconds,
-        ...(this.options.adapterFactory ? { adapterFactory: this.options.adapterFactory } : {}),
+        adapterFactory: withOpenSandboxCommandStreamProof(
+          this.options.adapterFactory ?? createDefaultAdapterFactory(),
+        ),
       })
         .then(async (provider) => {
           const info = await provider.getInfo();
@@ -740,8 +746,16 @@ export class OpenSandboxSession {
           },
           {
             onInit: (init) => {
-              process.executionId = init.id;
-              process.resolveExecutionId(init.id);
+              this.bindExecutionIdentity(process, init.id);
+            },
+            onEvent: (event) => {
+              if (!event || typeof event !== "object") return;
+              const fields = event as Record<string, unknown>;
+              if (fields.type === "init") this.bindExecutionIdentity(process, fields.text);
+              for (const field of ["id", "execution_id", "executionId"] as const) {
+                if (fields[field] !== undefined && fields[field] !== process.executionId)
+                  throw new SandboxProviderError("OpenSandbox command event identity mismatch");
+              }
             },
             onStdout: (message) => {
               process.events.push({ stream: "stdout", text: message.text });
@@ -751,10 +765,7 @@ export class OpenSandboxSession {
             },
           },
         );
-        if (!process.executionId) {
-          process.executionId = execution.id ?? null;
-          process.resolveExecutionId(process.executionId);
-        }
+        this.bindExecutionIdentity(process, execution.id);
         const exitCode = execution.exitCode;
         if (!execution.complete || !Number.isSafeInteger(exitCode)) {
           // A resolved transport without its completion envelope is not stream
@@ -774,9 +785,10 @@ export class OpenSandboxSession {
           text: `${error instanceof Error ? error.message : String(error)}\n`,
           commandOutput: false,
         });
-        if (process.executionId) {
+        if (process.executionId || error instanceof OpenSandboxCommandStreamError) {
           process.transportUncertain = true;
           process.outputUnavailable = true;
+          process.resolveExecutionId(process.executionId);
           return { exitCode: null, error, uncertain: true };
         }
         process.resolveExecutionId(null);
@@ -791,6 +803,22 @@ export class OpenSandboxSession {
     return process;
   }
 
+  private bindExecutionIdentity(process: RetainedProcess, id: unknown): void {
+    if (typeof id !== "string" || !id.trim())
+      throw new OpenSandboxCommandStreamError("command execution identity is missing");
+    if (process.executionId !== null && process.executionId !== id)
+      throw new OpenSandboxCommandStreamError("command execution identity mismatch");
+    if (process.executionId === null) {
+      process.executionId = id;
+      process.resolveExecutionId(id);
+    }
+  }
+
+  private assertStatusIdentity(statusId: unknown, executionId: string): void {
+    if (statusId !== executionId)
+      throw new SandboxProviderError("OpenSandbox command status identity mismatch");
+  }
+
   private async settleTransportUncertainProcess(process: RetainedProcess): Promise<ProcessOutcome> {
     const executionId = process.executionId ?? (await process.executionIdReady);
     if (!executionId) {
@@ -802,6 +830,7 @@ export class OpenSandboxSession {
     while (true) {
       try {
         const status = await provider.commands.getCommandStatus(executionId);
+        this.assertStatusIdentity(status.id, executionId);
         if (status.running === false && Number.isSafeInteger(status.exitCode)) {
           if (status.error) {
             process.events.push({
@@ -967,6 +996,7 @@ export class OpenSandboxSession {
       }
       const provider = await this.ensureStarted();
       const status = await provider.commands.getCommandStatus(executionId);
+      this.assertStatusIdentity(status.id, executionId);
       if (status.error) {
         process.events.push({ stream: "stderr", text: `${status.error}\n`, commandOutput: false });
       }
