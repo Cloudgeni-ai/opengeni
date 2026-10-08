@@ -4,7 +4,12 @@ import {
   CLAUDE_CREDENTIAL_LEASE_TTL_MS,
   heartbeatClaudeCredentialLeaseUntil,
   heartbeatCodexCredentialLeaseUntil,
+  releaseCodexCredentialLease,
+  releaseSubscriptionTurnLease,
   heartbeatXaiCredentialLeaseUntil,
+  assertSubscriptionTurnLeaseCurrent,
+  renewSubscriptionTurnLease,
+  withRlsContext,
 } from "@opengeni/db";
 import type { SharedActivityServices } from "../types";
 import {
@@ -31,6 +36,7 @@ export type TurnCredentialLeaseDeps = {
   workspaceId: string;
   codexWorkspaceKey: string;
   getTurnId: () => string | undefined;
+  getSessionId?: () => string | undefined;
 };
 
 /**
@@ -39,12 +45,36 @@ export type TurnCredentialLeaseDeps = {
  * TTL. A killed worker stops heartbeating and the holder self-expires.
  */
 export class CodexTurnLease extends SubscriptionTurnLease {
+  private readonly codexDeps: TurnCredentialLeaseDeps;
+  private subscriptionCoreConnectionId: string | null = null;
+
   constructor(deps: TurnCredentialLeaseDeps) {
     super({
       ttlMs: CODEX_CREDENTIAL_LEASE_TTL_MS,
       getTurnId: deps.getTurnId,
-      heartbeat: ({ turnId, holderId, generation }) =>
-        heartbeatCodexCredentialLeaseUntil(
+      heartbeat: ({ turnId, holderId, generation }) => {
+        const connectionId = this.subscriptionCoreConnectionId;
+        if (connectionId) {
+          const sessionId = deps.getSessionId?.();
+          if (!sessionId) return Promise.resolve(null);
+          return withRlsContext(
+            deps.db,
+            { accountId: deps.accountId, workspaceId: deps.workspaceId },
+            (scoped) =>
+              renewSubscriptionTurnLease(scoped, {
+                accountId: deps.accountId,
+                workspaceId: deps.workspaceId,
+                sessionId,
+                turnId,
+                provider: "codex",
+                connectionId,
+                holderId,
+                generation,
+                ttlMs: CODEX_CREDENTIAL_LEASE_TTL_MS,
+              }),
+          );
+        }
+        return heartbeatCodexCredentialLeaseUntil(
           deps.db,
           deps.accountId,
           deps.workspaceId,
@@ -52,7 +82,8 @@ export class CodexTurnLease extends SubscriptionTurnLease {
           holderId,
           generation,
           CODEX_CREDENTIAL_LEASE_TTL_MS,
-        ),
+        );
+      },
       lostError: (reason) => new CodexCredentialLeaseLostError(reason),
       onLost: (reason) => {
         deps.observability.incrementCounter({
@@ -86,6 +117,85 @@ export class CodexTurnLease extends SubscriptionTurnLease {
         });
       },
     });
+    this.codexDeps = deps;
+  }
+
+  /** Route heartbeat renewal to the canonical per-turn lease after core placement. */
+  useSubscriptionCoreLease(connectionId: string): void {
+    if (!connectionId.trim()) throw new Error("Core Codex lease connection id is required");
+    this.subscriptionCoreConnectionId = connectionId;
+  }
+
+  /** Keep legacy routing explicit when placement has not crossed cutover. */
+  useLegacyCodexLease(): void {
+    this.subscriptionCoreConnectionId = null;
+  }
+
+  /** Recheck the canonical lease at the last boundary before Codex network I/O. */
+  async assertCurrentForDispatch(): Promise<void> {
+    this.assertUsable();
+    const connectionId = this.subscriptionCoreConnectionId;
+    if (!connectionId) return;
+    const turnId = this.codexDeps.getTurnId();
+    const sessionId = this.codexDeps.getSessionId?.();
+    if (!turnId || !sessionId || !this.holderId || this.generation === null) {
+      this.markLost("not_found");
+      this.assertUsable();
+      return;
+    }
+    const current = await withRlsContext(
+      this.codexDeps.db,
+      { accountId: this.codexDeps.accountId, workspaceId: this.codexDeps.workspaceId },
+      (scoped) =>
+        assertSubscriptionTurnLeaseCurrent(scoped, {
+          accountId: this.codexDeps.accountId,
+          workspaceId: this.codexDeps.workspaceId,
+          sessionId,
+          turnId,
+          provider: "codex",
+          connectionId,
+          holderId: this.holderId!,
+          generation: this.generation!,
+        }),
+    );
+    if (!current) {
+      this.markLost("not_found");
+      this.assertUsable();
+    }
+  }
+
+  /** Release the lease system that acquired this turn's Codex connection. */
+  async releaseCurrent(): Promise<boolean> {
+    const turnId = this.codexDeps.getTurnId();
+    if (!turnId || !this.holderId || this.generation === null) return false;
+    const connectionId = this.subscriptionCoreConnectionId;
+    if (!connectionId) {
+      return await releaseCodexCredentialLease(
+        this.codexDeps.db,
+        this.codexDeps.accountId,
+        this.codexDeps.workspaceId,
+        turnId,
+        this.holderId,
+        this.generation,
+      );
+    }
+    const sessionId = this.codexDeps.getSessionId?.();
+    if (!sessionId) return false;
+    return await withRlsContext(
+      this.codexDeps.db,
+      { accountId: this.codexDeps.accountId, workspaceId: this.codexDeps.workspaceId },
+      (scoped) =>
+        releaseSubscriptionTurnLease(scoped, {
+          accountId: this.codexDeps.accountId,
+          workspaceId: this.codexDeps.workspaceId,
+          sessionId,
+          turnId,
+          provider: "codex",
+          connectionId,
+          holderId: this.holderId!,
+          generation: this.generation!,
+        }),
+    );
   }
 }
 

@@ -301,6 +301,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       workspaceId: input.workspaceId,
       codexWorkspaceKey,
       getTurnId: () => attempt.turnId,
+      getSessionId: () => input.sessionId,
     });
 
     const sandboxRuntime = createSandboxTurnRuntime({
@@ -701,8 +702,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     onUsageHeaders: (snapshot) => {
                       providerTurn.latestCodexUsage = snapshot;
                     }, // latest wins; flushed once in finally
-                    beforeProviderDispatch: () => {
-                      leases.codex.assertUsable();
+                    beforeProviderDispatch: async () => {
+                      await leases.codex.assertCurrentForDispatch();
                       observeProviderDispatch();
                     },
                     onRequestPreparationDiagnostic: (phase) => {

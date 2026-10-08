@@ -23,6 +23,11 @@ import {
   type SubscriptionQuota,
   type SubscriptionSettingValues,
 } from "../src/index";
+import { checkPlacementDecision, toReferenceWorld } from "../src/reference";
+import {
+  checkDecision as checkReferenceDecision,
+  decide as decideReference,
+} from "../src/reference-model";
 
 const NOW = 10_000_000;
 
@@ -356,6 +361,88 @@ describe("provider switches", () => {
       kind: "wait",
       reason: "no_eligible_capacity",
     });
+  });
+
+  test("ownerless service sessions can use shared scope but never person or personal pools", () => {
+    const ownerless = input({
+      session: {
+        ownerMembershipId: null,
+        visibility: "shared",
+        personalAuthority: [{ provider: "codex", ownerMembershipId: "member-a" }],
+      },
+      personalFallbackOptIn: true,
+      settings: { personalFallbackAllowed: true },
+      connections: [
+        connection("org", "codex"),
+        connection("person-scoped", "codex", {
+          ownership: {
+            kind: "shared",
+            scope: { kind: "people", membershipIds: ["member-a"] },
+            managedByWorkspaceId: null,
+          },
+        }),
+        personal("personal", "codex"),
+      ],
+    });
+
+    const sharedDecision = decidePlacement(ownerless);
+    expect(sharedDecision).toMatchObject({
+      kind: "run",
+      connectionId: "org",
+    });
+    expect(checkPlacementDecision(ownerless, sharedDecision)).toEqual([]);
+    const sharedReference = toReferenceWorld(ownerless);
+    expect(sharedReference.world.sessions[0]?.ownerId).toBeNull();
+    const sharedReferenceDecision = decideReference(
+      sharedReference.world,
+      sharedReference.sessionId,
+      NOW,
+    );
+    expect(sharedReferenceDecision.kind).toBe("run");
+    expect(
+      checkReferenceDecision(
+        sharedReference.world,
+        sharedReference.sessionId,
+        NOW,
+        sharedReferenceDecision,
+      ),
+    ).toEqual([]);
+
+    const noShared = input({
+      session: { ownerMembershipId: null, visibility: "shared" },
+      connections: [
+        connection("person-scoped", "codex", {
+          ownership: {
+            kind: "shared",
+            scope: { kind: "people", membershipIds: ["member-a"] },
+            managedByWorkspaceId: null,
+          },
+        }),
+        personal("personal", "codex"),
+      ],
+    });
+    const restrictedDecision = decidePlacement(noShared);
+    expect(restrictedDecision).toMatchObject({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+    });
+    expect(checkPlacementDecision(noShared, restrictedDecision)).toEqual([]);
+    const restrictedReference = toReferenceWorld(noShared);
+    expect(restrictedReference.world.sessions[0]?.ownerId).toBeNull();
+    const restrictedReferenceDecision = decideReference(
+      restrictedReference.world,
+      restrictedReference.sessionId,
+      NOW,
+    );
+    expect(restrictedReferenceDecision.kind).toBe("wait");
+    expect(
+      checkReferenceDecision(
+        restrictedReference.world,
+        restrictedReference.sessionId,
+        NOW,
+        restrictedReferenceDecision,
+      ),
+    ).toEqual([]);
   });
 
   test("an explicit automatic source overrides a conflicting compatibility boolean", () => {

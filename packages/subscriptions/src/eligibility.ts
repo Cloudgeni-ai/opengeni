@@ -172,7 +172,9 @@ export function authorizationIneligibility(
     (scope.kind === "workspaces" &&
       (scope.workspaceIds.includes(workspace.id) ||
         (workspace.kind === "personal" && scope.allowPersonalWorkspaces))) ||
-    (scope.kind === "people" && scope.membershipIds.includes(session.ownerMembershipId));
+    (scope.kind === "people" &&
+      session.ownerMembershipId !== null &&
+      scope.membershipIds.includes(session.ownerMembershipId));
   if (!inScope) reasons.push("out_of_scope");
   return reasons;
 }
@@ -278,6 +280,7 @@ export function servableAgainAt(
 
 /** The owner opted in and the effective setting allows personal fallback (SUB-SEL-02, D-12). */
 export function personalFallbackActive(input: PlacementInput): boolean {
+  if (input.session.ownerMembershipId === null) return false;
   return (
     input.settings.personalFallbackAllowed &&
     !!findPerson(input, input.session.ownerMembershipId)?.personalFallbackOptIn

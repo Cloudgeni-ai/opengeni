@@ -209,7 +209,8 @@ export type PlacementSession = {
   id: string;
   workspaceId: string;
   visibility: "private" | "shared";
-  ownerMembershipId: string;
+  /** Null only for a deliberately ownerless service session; it can use shared pools only. */
+  ownerMembershipId: string | null;
   preferredModelId: ModelId;
   reasoningLevel: string;
   binding: SessionBinding | null;

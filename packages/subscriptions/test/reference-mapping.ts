@@ -192,6 +192,7 @@ export function toPlacementInput(
   now: number,
 ): PlacementInput {
   const session = world.sessions.find((candidate) => candidate.id === sessionId)!;
+  const ownerMembershipId = session.ownerId;
   const workspace = world.workspaces.find((candidate) => candidate.id === session.workspaceId)!;
   const connections = world.connections.map((connection) => mapConnection(connection, now));
   const providers = [...new Set(world.models.map((model) => model.provider))];
@@ -250,10 +251,13 @@ export function toPlacementInput(
         : [],
       // The reference has no accepted-authority concept: the owner's work
       // carries personal authority for every provider.
-      personalAuthority: providers.map((provider) => ({
-        provider,
-        ownerMembershipId: session.ownerId,
-      })),
+      personalAuthority:
+        ownerMembershipId !== null
+          ? providers.map((provider) => ({
+              provider,
+              ownerMembershipId,
+            }))
+          : [],
       compactionProviderLock: null,
     },
     settings: effectiveSettings(mapSettingsPolicy(world), workspace.id).values,

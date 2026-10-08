@@ -14,6 +14,7 @@ import {
   listSubscriptionConnectionAssignmentPolicies,
   listSubscriptionConnectionsForPlacement,
   isSubscriptionProviderCutoverEnabled,
+  readSubscriptionProviderCutoverState,
   markSubscriptionCapacityWakeDelivered,
   observeSubscriptionCapacityWaiterWake,
   readSubscriptionSessionBinding,
@@ -136,9 +137,22 @@ describe("provider-neutral subscription runtime persistence", () => {
           ),
         ),
       ).toBe(false);
+      expect(
+        await withSessionRlsActorContext(actor, () =>
+          withRlsContext(
+            client!.db,
+            { accountId: state.accountId, workspaceId: state.workspaceId },
+            (db) =>
+              readSubscriptionProviderCutoverState(db, {
+                accountId: state.accountId,
+                provider: "codex",
+              }),
+          ),
+        ),
+      ).toBe("not_configured");
       await shared!.admin`
         insert into subscription_provider_cutovers (account_id, provider, enabled)
-        values (${state.accountId}::uuid, 'codex', true)`;
+        values (${state.accountId}::uuid, 'codex', false)`;
 
       await withSessionRlsActorContext(actor, () =>
         withRlsContext(
@@ -146,11 +160,26 @@ describe("provider-neutral subscription runtime persistence", () => {
           { accountId: state.accountId, workspaceId: state.workspaceId },
           async (db) => {
             expect(
+              await readSubscriptionProviderCutoverState(db, {
+                accountId: state.accountId,
+                provider: "codex",
+              }),
+            ).toBe("disabled");
+            expect(
               await isSubscriptionProviderCutoverEnabled(db, {
                 accountId: state.accountId,
                 provider: "codex",
               }),
-            ).toBe(true);
+            ).toBe(false);
+            await shared!.admin`
+              update subscription_provider_cutovers set enabled = true
+              where account_id = ${state.accountId}::uuid and provider = 'codex'`;
+            expect(
+              await readSubscriptionProviderCutoverState(db, {
+                accountId: state.accountId,
+                provider: "codex",
+              }),
+            ).toBe("enabled");
             expect(
               await acquireSubscriptionTurnLease(db, { ...first, ttlMs: 60_000 }),
             ).toMatchObject({ generation: 1, turnId: state.turnId });
