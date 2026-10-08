@@ -471,6 +471,7 @@ import type {
   UpdateSessionChannelRequest,
   UpdateSessionAttentionRequest,
   UpdateSessionArchiveRequest,
+  UpdateSessionRetentionRequest,
   UpdateSessionPinRequest,
   UpdateSessionVisibilityRequest,
   UpdateSessionVisibilityResponse,
@@ -697,6 +698,8 @@ export type SessionListPageOptions = {
   includeTotals?: boolean;
   /** Filter attention rows before pagination. */
   needsYouOnly?: boolean;
+  /** Only read-only sessions moved to the idle-session archive. */
+  contentArchivedOnly?: boolean;
   /** Created through this Site. In a Site-bound client, "current" resolves to its own Site. */
   originSiteId?: string;
   limit?: number;
@@ -750,6 +753,7 @@ const SESSION_PAGE_STRING_QUERY_KEYS = [
 function hasSessionPageFilters(options: SessionListPageOptions): boolean {
   return (
     Boolean(options.needsYouOnly) ||
+    Boolean(options.contentArchivedOnly) ||
     SESSION_PAGE_FILTER_KEYS.some((key) => options[key] !== undefined)
   );
 }
@@ -1732,6 +1736,7 @@ export class OpenGeniClient {
       if (options.pinsOnly) query.pinsOnly = "true";
       if (options.includeTotals) query.includeTotals = "true";
       if (options.needsYouOnly) query.needsYouOnly = "true";
+      if (options.contentArchivedOnly) query.contentArchivedOnly = "true";
       if (options.includePinned === false) query.includePinned = "false";
       if (options.archivedOnly) query.archivedOnly = "true";
       result = await this.requestJson<SessionListResponse | SessionListEntryResponse | Session[]>(
@@ -1791,6 +1796,8 @@ export class OpenGeniClient {
       throw unsupportedSessionPage("complete session totals");
     if (options.needsYouOnly && response.needsYouOnly !== true)
       throw unsupportedSessionPage("attention session filtering");
+    if (options.contentArchivedOnly && response.contentArchivedOnly !== true)
+      throw unsupportedSessionPage("read-only session filtering");
     if (filtered && response.filtersApplied !== true) {
       throw unsupportedSessionPage("filtered session lists");
     }
@@ -1886,6 +1893,22 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PUT",
       `${sessionPath(workspaceId, sessionId)}/archive`,
+      request,
+    );
+  }
+
+  /**
+   * Keep a session out of the idle-session archive (or allow archiving again).
+   * Fails with 409 SESSION_ARCHIVED_READ_ONLY once the session is archived.
+   */
+  async updateSessionRetention(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionRetentionRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `${sessionPath(workspaceId, sessionId)}/retention`,
       request,
     );
   }

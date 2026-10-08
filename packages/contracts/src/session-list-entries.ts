@@ -82,6 +82,7 @@ export function sessionListEntry(session: SessionListEntryInput): SessionListEnt
     archived: session.archived ?? false,
     archivedAt: session.archivedAt ?? null,
     importedArchive: session.importedArchive,
+    ...(session.retention ? { retention: session.retention } : {}),
     archiveVersion: session.archiveVersion ?? 0,
     treeStats: session.treeStats,
     requiresActionSince: session.requiresActionSince,

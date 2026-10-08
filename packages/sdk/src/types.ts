@@ -1653,6 +1653,11 @@ export type Session = {
    * Never model-facing conversation history.
    */
   importedArchive?: { importId: string; importedAt: string; readOnly: true } | undefined;
+  /**
+   * Idle-session archive state and keep-live exemption, workspace-wide and
+   * independent of the personal `archived` flag. Absent on older servers.
+   */
+  retention?: SessionRetention | undefined;
   /** Optimistic archive-state revision. */
   archiveVersion?: number;
   /** Server-authoritative descendant counts populated by session-list reads. */
@@ -1727,6 +1732,7 @@ export type SessionListEntry = Pick<
   | "archived"
   | "archivedAt"
   | "importedArchive"
+  | "retention"
   | "archiveVersion"
   | "treeStats"
   | "requiresActionSince"
@@ -1763,6 +1769,8 @@ export type SessionListTotals = {
 export type SessionListResponse = {
   totals?: SessionListTotals;
   needsYouOnly?: true;
+  /** Receipt for the read-only (archived idle session) filter. */
+  contentArchivedOnly?: true;
   pinned: Session[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
@@ -1899,6 +1907,20 @@ export type UpdateSessionAttentionRequest = {
   acknowledgedThroughSequence?: number;
   activelyWorking?: boolean;
   expectedVersion?: number;
+};
+
+/**
+ * Idle-session archive state. `archive` is null while the session is live; an
+ * archived session keeps its readable timeline but is read-only.
+ */
+export type SessionRetention = {
+  /** Never archive this session, however long it stays idle. */
+  keepLive: boolean;
+  archive: { state: "archiving" | "archived"; archivedAt: string | null } | null;
+};
+
+export type UpdateSessionRetentionRequest = {
+  keepLive: boolean;
 };
 
 export type UpdateSessionArchiveRequest = {
@@ -3228,6 +3250,8 @@ export type CreateSessionRequest = {
   requestedSessionId?: string | undefined;
   visibility?: SessionVisibility | undefined;
   initialMessage?: string | undefined;
+  /** Exempt the new session from the idle-session archive, e.g. for a persistent agent. */
+  keepLive?: boolean | undefined;
   /** Create an idle session shell so realtime voice can be the first interaction. */
   startMode?: "realtime" | undefined;
   /** Model-visible application context attached to the initial user message; omitted by standard timeline rendering. */
@@ -4371,6 +4395,11 @@ export type ClientConfig = {
    * what workspaces without their own setting get (`split` = half of sessions).
    */
   codeSearch?: { available: boolean; workspaceDefault: "off" | "on" | "split" } | undefined;
+  /**
+   * Present only when this deployment archives idle sessions: after `idleDays`
+   * without activity a session (unless kept live) becomes read-only.
+   */
+  sessionArchive?: { enabled: true; idleDays: number } | undefined;
   /** Agent configuration rollout and per-capability availability. */
   agentConfig?: ClientAgentConfig | undefined;
   productAccessMode: ProductAccessMode;

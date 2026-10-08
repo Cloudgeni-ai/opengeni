@@ -2954,6 +2954,21 @@ export function SessionList() {
               showEmptyGroups={showEmptyGroups}
               onShowEmptyGroupsChange={(show) => updateBrowsePreferences({ showEmptyGroups: show })}
             />
+            {context.clientConfig.sessionArchive ? (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onSelect={() =>
+                    void navigate({
+                      to: "/workspaces/$workspaceId/read-only-chats",
+                      params: { workspaceId: rail.workspaceId },
+                    })
+                  }
+                >
+                  Read-only chats
+                </DropdownMenuItem>
+              </>
+            ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>

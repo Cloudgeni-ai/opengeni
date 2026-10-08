@@ -1409,6 +1409,15 @@ export function createAppComposition(deps: AppDependencies): {
         })),
         firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings),
         codeSearch: codeSearchDeploymentPolicy(deps.settings),
+        // Archiving needs object storage; without it the worker never archives.
+        ...(deps.settings.sessionArchiveEnabled && objectStorage
+          ? {
+              sessionArchive: {
+                enabled: true as const,
+                idleDays: deps.settings.sessionArchiveIdleDays,
+              },
+            }
+          : {}),
         agentConfig: clientAgentConfig(deps.settings),
         fileUploads: {
           enabled: objectStorage !== null,

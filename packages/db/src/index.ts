@@ -1,3 +1,4 @@
+import { sessionRetentionFromRow } from "./session-archive";
 export * from "./organization-slack-bots";
 export * from "./voice-transcription-settlement";
 import {
@@ -36388,6 +36389,8 @@ export type SessionListFilterOptions = {
   createdBefore?: Date;
   /** Restrict root pages to workstreams requiring human attention. */
   needsYouOnly?: boolean;
+  /** Only sessions moved to the idle-session archive (read-only). */
+  contentArchivedOnly?: boolean;
   /** Exact opaque end-user label pair (both parts). */
   scopeSubjectId?: SessionScopeSubjectId;
 };
@@ -37521,6 +37524,7 @@ function sessionFilters(
     | "createdBefore"
     | "scopeSubjectId"
     | "needsYouOnly"
+    | "contentArchivedOnly"
   >,
 ): SQL[] {
   const filters: SQL[] = [
@@ -37534,6 +37538,9 @@ function sessionFilters(
     )`,
   ];
   if (options.needsYouOnly) filters.push(sessionNeedsYouSql(options.authorizationScope));
+  if (options.contentArchivedOnly) {
+    filters.push(sql`${schema.sessions.contentArchiveState} = 'archived'`);
+  }
   if (options.originSiteId) {
     filters.push(
       sql`${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'siteId' = ${options.originSiteId}`,
@@ -37781,7 +37788,8 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     !options.createdFrom &&
     !options.createdBefore &&
     !options.scopeSubjectId &&
-    !options.needsYouOnly
+    !options.needsYouOnly &&
+    !options.contentArchivedOnly
   ) {
     return "all";
   }
@@ -37795,6 +37803,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     options.createdBefore ? ["createdBefore", options.createdBefore.toISOString()] : null,
     options.scopeSubjectId ? ["scopeSubjectId", options.scopeSubjectId] : null,
     ...(options.needsYouOnly ? [["needsYouOnly", true]] : []),
+    ...(options.contentArchivedOnly ? [["contentArchivedOnly", true]] : []),
   ]);
 }
 
@@ -38572,6 +38581,7 @@ async function readSessionListForSubject(
             projection: "summary",
             ...(totals ? { totals } : {}),
             ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
+            ...(options.contentArchivedOnly ? { contentArchivedOnly: true as const } : {}),
             pinned: pinnedRows.map((row) => sessionListEntry(mapListSession(row))),
             pinnedTruncated,
             sessions: pageRows.map((row) => sessionListEntry(mapListSession(row))),
@@ -38582,6 +38592,7 @@ async function readSessionListForSubject(
         return {
           ...(totals ? { totals } : {}),
           ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
+          ...(options.contentArchivedOnly ? { contentArchivedOnly: true as const } : {}),
           pinned: pinnedRows.map(mapListSession),
           pinnedTruncated,
           sessions: pageRows.map(mapListSession),
@@ -41153,6 +41164,38 @@ type SessionEventProjectionMetadataRow = {
 type SessionEventProjectionSource = {
   [Key in keyof SessionEventProjectionRow]: SQLWrapper;
 };
+
+/**
+ * The last sequence a reader positioned after `after` may treat as covered
+ * because storage intentionally holds nothing there (an archived session's
+ * purged telemetry, for example). Sequences are allocated under the session
+ * row lock, so a committed later event or `last_sequence` proves every lower
+ * sequence already committed or was removed. One statement reads both in one
+ * snapshot: the next stored sequence minus one, or `last_sequence` when
+ * nothing is stored after `after`. Never less than `after`.
+ */
+export async function readSessionEventStorageGapEnd(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  after: number,
+): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await rawRows<{ next: number | null; last: number | null }>(
+      scopedDb,
+      sql`select
+          (select min(e.sequence) from session_events e
+            where e.workspace_id = ${workspaceId}::uuid
+              and e.session_id = ${sessionId}::uuid
+              and e.sequence > ${after}) as next,
+          (select s.last_sequence from sessions s
+            where s.workspace_id = ${workspaceId}::uuid and s.id = ${sessionId}::uuid) as last`,
+    );
+    const next = row?.next === null || row?.next === undefined ? null : Number(row.next);
+    const last = row?.last === null || row?.last === undefined ? after : Number(row.last);
+    return Math.max(after, next === null ? last : next - 1);
+  });
+}
 
 /**
  * Read one direction-aware session-event page. Full mode selects the canonical
@@ -84632,7 +84675,10 @@ export async function addSessionSystemUpdateWithSourceMutation<
           input.sessionId,
           { workspaceControl: locks.control ?? undefined },
         );
-        if (session.status === "cancelled") {
+        // An archived session is read-only: machine input addressed to it (a
+        // late child result, schedule or media completion) is settled exactly
+        // like input to a cancelled session instead of being retried forever.
+        if (session.status === "cancelled" || session.contentArchiveState !== null) {
           await mutateSource(tx as unknown as Database, null, null, "session_cancelled");
           return { added: false, reason: "session_cancelled" } as const;
         }
@@ -87712,6 +87758,7 @@ function mapSession(
           },
         }
       : {}),
+    retention: sessionRetentionFromRow(row),
     admissionBlock: projectSessionAdmissionBlock(row.admissionBlock),
     initialMessage: fromPostgresLosslessText(row.initialMessage, row.initialMessageCodecVersion),
     title: row.title ?? null,
@@ -89052,6 +89099,7 @@ export * from "./attempt-tool-catalogs";
 export * from "./model-context-snapshots";
 export * from "./session-content-blobs";
 export * from "./session-content-compaction";
+export * from "./session-archive";
 export * from "./codemode-operations";
 export * from "./codemode-approvals";
 export * from "./tool-action-reviews";

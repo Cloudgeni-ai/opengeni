@@ -4,6 +4,7 @@ import {
   SESSION_HISTORY_IMPORT_MAX_BODY_BYTES,
 } from "@opengeni/contracts";
 import { ExternalIdentityReference } from "@opengeni/contracts/external-identities";
+import { SessionArchivedError } from "@opengeni/db";
 import {
   accountScopedApiKeyWorkspaceAuthority,
   ArchivedSessionImportError,
@@ -144,7 +145,10 @@ export async function readSessionHistoryImportJson(request: Request): Promise<un
   }
 }
 
-/** Also used by the composed API for imported-session Send/Steer refusals. */
+export const SESSION_ARCHIVED_MESSAGE =
+  "This session is archived and read-only. Start a new session to continue the work.";
+
+/** Also used by the composed API for imported- and archived-session Send/Steer refusals. */
 export function archivedSessionImportErrorResponse(c: Context, error: unknown): Response | null {
   // SQLSTATE OG002 is also used for unrelated admission refusals. Match the
   // archive guard's closed message on the exact driver error, including a
@@ -159,6 +163,12 @@ export function archivedSessionImportErrorResponse(c: Context, error: unknown): 
         { code: "SESSION_IMPORTED_READ_ONLY", message: "Imported session history is read-only" },
         409,
       );
+    }
+    if (
+      candidate instanceof SessionArchivedError ||
+      (failure.code === "OG002" && failure.message === "SESSION_ARCHIVED_READ_ONLY")
+    ) {
+      return c.json({ code: "SESSION_ARCHIVED_READ_ONLY", message: SESSION_ARCHIVED_MESSAGE }, 409);
     }
     candidate = failure.cause;
   }

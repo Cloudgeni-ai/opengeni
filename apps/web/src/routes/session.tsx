@@ -122,6 +122,10 @@ import {
   TerminalSessionBanner,
   UserMessageBody,
 } from "@/components/session/banners";
+import {
+  ReadOnlySessionNotice,
+  sessionReadOnlyArchive,
+} from "@/components/session/session-retention";
 import { useRail } from "@/components/rail/rail-context";
 import { sessionComputeLabel } from "@opengeni/react/sandbox-label-model";
 import { useBackgroundAttentionTitle } from "@/lib/background-attention-title";
@@ -1900,7 +1904,10 @@ function SessionChatPane(props: {
     () => createWorkspaceRetainedVideoLoader(context.client, props.session.workspaceId),
     [context.client, props.session.workspaceId],
   );
-  const terminal = isTerminalSessionStatus(props.session.status);
+  const cancelled = isTerminalSessionStatus(props.session.status);
+  // Moved to long-term storage after a long idle period: readable, not continuable.
+  const readOnlyArchive = sessionReadOnlyArchive(props.session);
+  const terminal = cancelled || readOnlyArchive !== null;
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
   const [modelPickerSession, setModelPickerSession] = useState<string | null>(null);
@@ -2462,11 +2469,13 @@ function SessionChatPane(props: {
   chatSendContext.current = {
     blocked: isTerminalSessionStatus(props.session.status)
       ? "This chat has ended. Start a new chat to use a repository."
-      : connectionAccounts.requiresAccountChoice
-        ? "Choose an account for this chat's connected tools in the composer first."
-        : personalAttachment.requiresDecision
-          ? "Finish the personal access choice in the composer first."
-          : null,
+      : sessionReadOnlyArchive(props.session)
+        ? "This chat is read-only. Start a new chat to use a repository."
+        : connectionAccounts.requiresAccountChoice
+          ? "Choose an account for this chat's connected tools in the composer first."
+          : personalAttachment.requiresDecision
+            ? "Finish the personal access choice in the composer first."
+            : null,
     awaitingHuman: props.session.status === "requires_action",
     extras: {
       ...(composer.policy ?? {}),
@@ -3059,10 +3068,18 @@ function SessionChatPane(props: {
               />
             </Suspense>
           ) : null}
-          {terminal ? (
+          {cancelled ? (
             <div className="mx-auto w-full max-w-3xl px-4 pt-6 sm:px-6">
               <TerminalSessionBanner session={props.session} onNewSession={props.onNewSession} />
               <TerminalSessionArchive session={props.session} eventCount={props.timeline.length} />
+            </div>
+          ) : readOnlyArchive ? (
+            <div className="mx-auto w-full max-w-3xl px-4 pt-6 sm:px-6">
+              <ReadOnlySessionNotice
+                session={props.session}
+                idleDays={context.clientConfig.sessionArchive?.idleDays}
+                onNewSession={props.onNewSession}
+              />
             </div>
           ) : null}
           {
@@ -3306,7 +3323,12 @@ function SessionChatPane(props: {
             </div>
           </div>
 
-          <div ref={composerRegionRef} className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
+          {/* A read-only chat can't continue: its notice offers a new chat instead. */}
+          <div
+            ref={composerRegionRef}
+            data-read-only-composer={readOnlyArchive ? "hidden" : undefined}
+            className={`shrink-0 px-4 pb-4 pt-1 sm:px-6${readOnlyArchive ? " hidden" : ""}`}
+          >
             <div className="mx-auto w-full max-w-3xl">
               <PersonalResourceAttachmentSurface
                 controller={personalAttachment}
