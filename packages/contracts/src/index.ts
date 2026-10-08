@@ -862,6 +862,8 @@ export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
 export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "set_session_title",
   "notify_user",
+  "notification_withdraw",
+  "inbox_tidy",
   "goal_set",
   "goal_update",
   "goal_progress",
@@ -13850,6 +13852,10 @@ export const SessionEventType = z.enum([
   "session.realtime.ended",
   "session.requiresAction",
   "session.humanInput.requested",
+  // An agent's notification to the person who owns the session (notify_user),
+  // and its withdrawal. They drive that person's inbox and phone notifications.
+  "session.notification.posted",
+  "session.notification.withdrawn",
   "session.context.compaction.requested",
   "session.context.compaction.started",
   "session.context.compacted",
@@ -14175,6 +14181,8 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.wait.finished",
     "session.requiresAction",
     "session.humanInput.requested",
+    "session.notification.posted",
+    "session.notification.withdrawn",
     "user.pause",
     "user.approvalDecision",
     "user.humanInputResponse",
@@ -14312,6 +14320,135 @@ export function resolveSessionEventTypeFilters(input: ResolveSessionEventTypeFil
   for (const type of excluded) included.delete(type);
   return { includeTypes: [...included], excludeTypes: [...excluded] };
 }
+
+/* ----------------------------------------------------------------------------
+   Notifications and the inbox
+
+   An agent notifies the person who owns its session (notify_user). The
+   notification is a session event, so it stays in the session's timeline and
+   reaches webhook subscribers; it also opens an item in that person's inbox,
+   next to the questions and approvals that wait on them. The inbox is a
+   to-do surface: an item leaves when it is answered, resolved, withdrawn or
+   dismissed, never because time passed.
+   -------------------------------------------------------------------------- */
+
+export const NOTIFICATION_KEY_MAX_CHARS = 120;
+export const NOTIFICATION_TITLE_MAX_CHARS = 80;
+export const NOTIFICATION_BODY_MAX_CHARS = 240;
+
+/** A stable key: posting the same key again updates the item in place. */
+export const NotificationKey = z
+  .string()
+  .trim()
+  .min(1)
+  .max(NOTIFICATION_KEY_MAX_CHARS)
+  .regex(/^[A-Za-z0-9._:-]+$/u, "letters, digits and . _ : - only");
+
+/** Time-sensitive breaks through Focus on the phone; use it only for what cannot wait. */
+export const NotificationUrgency = z.enum(["normal", "time_sensitive"]);
+export type NotificationUrgency = z.infer<typeof NotificationUrgency>;
+
+export const SessionNotificationPostedPayload = z
+  .object({
+    key: NotificationKey,
+    title: z.string().trim().min(1).max(NOTIFICATION_TITLE_MAX_CHARS),
+    body: z.string().trim().max(NOTIFICATION_BODY_MAX_CHARS).default(""),
+    urgency: NotificationUrgency.default("normal"),
+    /** True when this post replaced an earlier one with the same key (no new alert). */
+    replaced: z.boolean().default(false),
+  })
+  .strict();
+export type SessionNotificationPostedPayload = z.infer<typeof SessionNotificationPostedPayload>;
+
+export const SessionNotificationWithdrawnPayload = z
+  .object({
+    key: NotificationKey,
+    /** The session that withdrew it, when another session tidied the inbox. */
+    bySessionId: z.string().uuid().optional(),
+  })
+  .strict();
+export type SessionNotificationWithdrawnPayload = z.infer<
+  typeof SessionNotificationWithdrawnPayload
+>;
+
+/** Why an item waits on the person. */
+export const InboxItemKind = z.enum([
+  /** The agent asked a question. */
+  "question",
+  /** A tool call waits for approval. */
+  "approval",
+  /** The session's goal is paused until the person acts. */
+  "goal_paused",
+  /** An agent chose to notify the person. */
+  "notification",
+]);
+export type InboxItemKind = z.infer<typeof InboxItemKind>;
+
+export const InboxItemStatus = z.enum(["open", "resolved", "withdrawn", "dismissed"]);
+export type InboxItemStatus = z.infer<typeof InboxItemStatus>;
+
+export const InboxItem = z.object({
+  id: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  sessionId: z.string().uuid(),
+  sessionTitle: z.string().nullable(),
+  kind: InboxItemKind,
+  /** The question or approval id, or the notification key. */
+  sourceKey: z.string(),
+  title: z.string(),
+  body: z.string(),
+  /** One-tap answers for a single short choice question; empty otherwise. */
+  choices: z.array(z.object({ id: z.string(), label: z.string() })).max(4),
+  urgency: NotificationUrgency,
+  status: InboxItemStatus,
+  /** True while the person has not seen the item's current content. */
+  unread: z.boolean(),
+  snoozedUntil: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  resolvedAt: z.string().nullable(),
+});
+export type InboxItem = z.infer<typeof InboxItem>;
+
+export const ListInboxResponse = z.object({
+  items: z.array(InboxItem),
+  /** Open items that need the person (questions, approvals, paused goals). */
+  needsYouCount: z.number().int().nonnegative(),
+  /** Open, unread, unsnoozed items of any kind. */
+  unreadCount: z.number().int().nonnegative(),
+});
+export type ListInboxResponse = z.infer<typeof ListInboxResponse>;
+
+/** The person's own attention on an item. Answering happens in the session. */
+export const UpdateInboxItemRequest = z
+  .object({
+    seen: z.literal(true).optional(),
+    /** ISO time to hide the item until, or null to unsnooze. */
+    snoozedUntil: z.string().datetime({ offset: true }).nullable().optional(),
+    dismissed: z.literal(true).optional(),
+  })
+  .strict()
+  .refine(
+    (value) =>
+      value.seen !== undefined || value.snoozedUntil !== undefined || value.dismissed !== undefined,
+    { message: "seen, snoozedUntil or dismissed is required" },
+  );
+export type UpdateInboxItemRequest = z.infer<typeof UpdateInboxItemRequest>;
+
+/**
+ * Which agents may withdraw or dismiss the person's notifications. Agents never
+ * answer or approve on the person's behalf, whatever this says.
+ */
+export const InboxTidyPolicy = z.enum([
+  /** The session that posted an item, and the sessions above it. */
+  "own_sessions",
+  /** Any agent acting for the person. */
+  "any_agent",
+]);
+export type InboxTidyPolicy = z.infer<typeof InboxTidyPolicy>;
+
+export const InboxSettings = z.object({ tidyPolicy: InboxTidyPolicy });
+export type InboxSettings = z.infer<typeof InboxSettings>;
 
 export const ToolAuthNeededPayload = z
   .object({

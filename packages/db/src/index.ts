@@ -955,6 +955,7 @@ export {
 } from "./integration-oauth-pending-states";
 export * from "./workspace-integrations";
 export * from "./native-push";
+export * from "./inbox";
 export {
   decryptEnvironmentValue as decryptVariableSetValue,
   encryptEnvironmentValue as encryptVariableSetValue,

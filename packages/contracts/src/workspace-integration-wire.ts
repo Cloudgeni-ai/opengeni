@@ -11,6 +11,8 @@ export const WORKSPACE_WEBHOOK_EVENT_TYPES = [
   "session.status.changed",
   "session.requiresAction",
   "session.humanInput.requested",
+  "session.notification.posted",
+  "session.notification.withdrawn",
   "usage.threshold_reached",
   "usage.exhausted",
   "usage.period_reset",

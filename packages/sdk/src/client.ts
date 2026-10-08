@@ -324,6 +324,10 @@ import type {
   NativeAppAuthorizeInput,
   NativeAppTokenInput,
   NativeAppToken,
+  InboxItem,
+  InboxSettings,
+  ListInboxResponse,
+  UpdateInboxItemInput,
   NativePushDevice,
   RegisterNativePushDeviceInput,
   CreateCapabilityCatalogItemRequest,
@@ -8943,6 +8947,36 @@ export class OpenGeniClient {
       `/v1/mcp-connections/requests/${encodeURIComponent(requestToken)}`,
       decision,
     );
+  }
+
+  // --- Inbox --------------------------------------------------------------------------------------
+
+  /**
+   * What waits on the signed-in person across their workspaces, newest first.
+   * Pass a workspace to see only its items.
+   */
+  async listInbox(options: { workspaceId?: string } = {}): Promise<ListInboxResponse> {
+    const query = options.workspaceId
+      ? `?workspaceId=${encodeURIComponent(options.workspaceId)}`
+      : "";
+    return await this.requestJson<ListInboxResponse>("GET", `/v1/inbox${query}`);
+  }
+
+  /** Mark an item seen, snooze it, or dismiss it. */
+  async updateInboxItem(itemId: InboxItem["id"], input: UpdateInboxItemInput): Promise<void> {
+    await this.requestJson<unknown>(
+      "PATCH",
+      `/v1/inbox/items/${encodeURIComponent(itemId)}`,
+      input,
+    );
+  }
+
+  async getInboxSettings(): Promise<InboxSettings> {
+    return await this.requestJson<InboxSettings>("GET", "/v1/inbox/settings");
+  }
+
+  async updateInboxSettings(input: InboxSettings): Promise<InboxSettings> {
+    return await this.requestJson<InboxSettings>("PUT", "/v1/inbox/settings", input);
   }
 
   // --- Native app sign-in ------------------------------------------------------------------------

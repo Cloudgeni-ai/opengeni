@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { useKnowledgeReviewIndicator } from "./use-knowledge-review-indicator";
 import { useScheduledTaskAttentionIndicator } from "./use-scheduled-task-attention";
+import { InboxLink } from "@/components/rail/inbox-link";
 import { useRail } from "@/components/rail/rail-context";
 import { NewSessionLink } from "@/components/rail/session-list";
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
@@ -119,6 +120,7 @@ export function PrimaryNav() {
         <SquarePenIcon className="size-4 shrink-0" />
         {rail.collapsed ? null : <span className="min-w-0 truncate">New session</span>}
       </NewSessionLink>
+      <InboxLink />
 
       {rail.isMobile ? null : rail.collapsed ? (
         <WorkspaceShortcutLinks
