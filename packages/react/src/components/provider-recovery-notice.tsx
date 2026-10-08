@@ -15,7 +15,7 @@ export const PROVIDER_RECOVERY_NOTICE_DETAIL =
   "Your message is saved. Opengeni keeps retrying automatically for a few minutes.";
 
 export const SANDBOX_WAIT_NOTICE_DETAIL =
-  "Your message is saved and runs as soon as the sandbox is ready. This usually takes a few minutes.";
+  "The turn continues automatically as soon as the sandbox is ready.";
 
 /**
  * One calm, live status line while the same turn waits for an automatic retry

@@ -29,6 +29,9 @@ export type ProviderRecoveryFacts = {
   /** True while the turn waits for its sandbox to be saved and replaced. It
    * has no retry budget: it resumes as soon as the successor box is ready. */
   sandboxWait?: boolean;
+  /** Recorded lifecycle fence of a sandbox wait (`capture_in_progress`,
+   * `rotation_in_progress`, `provider_recovery_in_progress`), when known. */
+  sandboxTransition?: string | null;
 };
 
 const MODEL_CODES: ReadonlySet<string> = new Set([
@@ -38,12 +41,14 @@ const MODEL_CODES: ReadonlySet<string> = new Set([
   "post_compaction_continuation_empty",
 ]);
 
-/** A recovering turn parked behind a sandbox rotation (worker
- * `failure-settlement.ts`). Before OPE-743 this showed only "Recovering" with
- * no reason, for up to an hour in staging session 5040c525. */
+/** A recovering turn parked behind a sandbox lifecycle transition (worker
+ * `failure-settlement.ts`). Before, this showed only "Recovering" with no
+ * reason, for up to an hour in staging session 5040c525. A superseded lease
+ * counts only when the worker recorded the pending transition it waits for. */
 const SANDBOX_WAIT_CODES: ReadonlySet<string> = new Set([
   "sandbox_deadline_rotation",
   "sandbox_lifecycle_transition",
+  "sandbox_lease_superseded",
 ]);
 
 const RECOVERY_CODES: ReadonlySet<string> = new Set([
@@ -101,6 +106,9 @@ export function parseProviderRecovery(payload: unknown): ProviderRecoveryFacts |
   const record = payload as Record<string, unknown>;
   const code = text(record.code) ?? text(record.reason);
   if (!code || !RECOVERY_CODES.has(code)) return null;
+  const rotation = text(record.rotationReason);
+  const transition = text(record.transitionReason);
+  if (code === "sandbox_lease_superseded" && !rotation && !transition) return null;
   // A live recovery request is retryable; a spent budget is explicitly marked.
   if (record.recoveryExhausted !== true && record.retryable === false) return null;
   const attempt = count(record.providerRecoveryCount);
@@ -112,7 +120,12 @@ export function parseProviderRecovery(payload: unknown): ProviderRecoveryFacts |
     attempt,
     maxAttempts: count(record.maxProviderRecoveryCount) ?? DEFAULT_MAX_ATTEMPTS,
     modelRoute: MODEL_CODES.has(code),
-    ...(SANDBOX_WAIT_CODES.has(code) ? { sandboxWait: true } : {}),
+    ...(SANDBOX_WAIT_CODES.has(code)
+      ? {
+          sandboxWait: true,
+          sandboxTransition: transition ?? (rotation ? "rotation_in_progress" : null),
+        }
+      : {}),
   };
 }
 
@@ -144,9 +157,16 @@ export function providerRecoverySubject(facts: ProviderRecoveryFacts): string {
     case "turn_execution_policy_definition_mismatch":
       return "Opengeni is applying a configuration update";
     case "sandbox_deadline_rotation":
-      return "The sandbox reached its maximum lifetime, so Opengeni is saving the workspace and moving it to a fresh sandbox";
+      return "The sandbox reached its maximum lifetime, so Opengeni is moving the workspace to a fresh sandbox";
     case "sandbox_lifecycle_transition":
-      return "Opengeni is saving the sandbox before it can be used again";
+    case "sandbox_lease_superseded":
+      return facts.sandboxTransition === "capture_in_progress"
+        ? "Opengeni is saving the sandbox workspace"
+        : facts.sandboxTransition === "provider_recovery_in_progress"
+          ? "Opengeni is recovering the sandbox"
+          : facts.sandboxTransition === "rotation_in_progress"
+            ? "Opengeni is moving the workspace to a fresh sandbox"
+            : "Opengeni is preparing the sandbox";
     default:
       return "A service this turn depends on is temporarily unavailable";
   }
