@@ -1371,11 +1371,22 @@ export function createCodexRealtimeController(
       if (state.status === "active" && state.realtimeId === lifecycle.realtimeId) return;
       const record = readOwnerRecord(storage, storageKey, options);
       if (!record || record.operationId !== lifecycle.operationId) {
-        closeBrowserResources();
-        owner = null;
         const leaseExpiresAt = Date.parse(lifecycle.leaseExpiresAt);
         const remainingLeaseMs = leaseExpiresAt - now().getTime();
-        if (Number.isFinite(remainingLeaseMs) && remainingLeaseMs <= 0) {
+        const leaseExpired = Number.isFinite(remainingLeaseMs) && remainingLeaseMs <= 0;
+        // An earlier call whose lease already ran out (its end not yet in the
+        // events) is not another owner: it must not fail the call this
+        // browser is starting.
+        if (
+          leaseExpired &&
+          lifecycle.realtimeId !== state.realtimeId &&
+          (connectionTask || state.status === "starting")
+        ) {
+          return;
+        }
+        closeBrowserResources();
+        owner = null;
+        if (leaseExpired) {
           transitionEnded("Realtime lease expired");
           return;
         }
