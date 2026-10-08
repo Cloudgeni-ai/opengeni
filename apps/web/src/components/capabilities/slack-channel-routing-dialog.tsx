@@ -223,7 +223,7 @@ function SlackChannelRoutingDialogBody({
   }
 
   return (
-    <DialogContent className="max-w-lg">
+    <DialogContent>
       <DialogHeader>
         <DialogTitle>Where Slack channels start work</DialogTitle>
         <DialogDescription>
