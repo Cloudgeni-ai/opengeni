@@ -198,6 +198,48 @@ export async function setInboxTidyPolicy(
   return row?.policy ?? input.policy;
 }
 
+export type InboxSettingsValue = { tidyPolicy: InboxTidyPolicyValue; pausedGoals: boolean };
+
+/** The person's inbox settings in one account (0663). */
+export async function getInboxSettings(
+  db: Database,
+  input: { accountId: string; subjectId: string },
+): Promise<InboxSettingsValue> {
+  const [row] = await rawRows<{ tidy_policy: InboxTidyPolicyValue; paused_goals: boolean }>(
+    db,
+    sql`select * from opengeni_private.inbox_settings_v2(
+      ${input.accountId}::uuid, ${input.subjectId}::text
+    )`,
+  );
+  return {
+    tidyPolicy: row?.tidy_policy ?? "own_sessions",
+    pausedGoals: row?.paused_goals ?? false,
+  };
+}
+
+/** Change some of the person's inbox settings; omitted ones stay as they are. */
+export async function setInboxSettings(
+  db: Database,
+  input: {
+    accountId: string;
+    subjectId: string;
+    tidyPolicy?: InboxTidyPolicyValue | undefined;
+    pausedGoals?: boolean | undefined;
+  },
+): Promise<InboxSettingsValue> {
+  const [row] = await rawRows<{ tidy_policy: InboxTidyPolicyValue; paused_goals: boolean }>(
+    db,
+    sql`select * from opengeni_private.set_inbox_settings_v2(
+      ${input.accountId}::uuid, ${input.subjectId}::text,
+      ${input.tidyPolicy ?? null}::text, ${input.pausedGoals ?? null}::boolean
+    )`,
+  );
+  return {
+    tidyPolicy: row?.tidy_policy ?? input.tidyPolicy ?? "own_sessions",
+    pausedGoals: row?.paused_goals ?? input.pausedGoals ?? false,
+  };
+}
+
 /**
  * The person a session works for (its owner, else the person who started it)
  * and its parent, or null for sessions no person owns. Matches the recipient

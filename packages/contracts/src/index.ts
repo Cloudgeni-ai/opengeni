@@ -14453,8 +14453,21 @@ export const InboxTidyPolicy = z.enum([
 ]);
 export type InboxTidyPolicy = z.infer<typeof InboxTidyPolicy>;
 
-export const InboxSettings = z.object({ tidyPolicy: InboxTidyPolicy });
+export const InboxSettings = z.object({
+  tidyPolicy: InboxTidyPolicy,
+  /** Show goals an agent paused in the person's own sessions. Off by default. */
+  pausedGoals: z.boolean(),
+});
 export type InboxSettings = z.infer<typeof InboxSettings>;
+
+/** Change some inbox settings; omitted ones stay as they are. */
+export const UpdateInboxSettingsRequest = z
+  .object({ tidyPolicy: InboxTidyPolicy.optional(), pausedGoals: z.boolean().optional() })
+  .strict()
+  .refine((value) => value.tidyPolicy !== undefined || value.pausedGoals !== undefined, {
+    message: "Change at least one setting",
+  });
+export type UpdateInboxSettingsRequest = z.infer<typeof UpdateInboxSettingsRequest>;
 
 export const ToolAuthNeededPayload = z
   .object({
