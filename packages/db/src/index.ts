@@ -74654,7 +74654,7 @@ export async function claimSessionWorkForAttempt(
               initiator: {
                 kind: "service",
                 subjectId: "scheduler",
-                label: "Opengeni scheduler",
+                label: "OpenGeni scheduler",
               },
               context: {
                 updateIds: delivered.updates.map((update) => update.id),

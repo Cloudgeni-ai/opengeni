@@ -1961,7 +1961,7 @@ describe("scheduled task personal MCP authority", () => {
       createdBy: {
         kind: "service",
         subjectId: "scheduler",
-        label: "Opengeni scheduler",
+        label: "OpenGeni scheduler",
       },
       createdByContext: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
       createIdempotencyKey: `scheduled-task-run:${run.id}`,
@@ -2114,7 +2114,7 @@ describe("scheduled task personal MCP authority", () => {
       createdBy: {
         kind: "service",
         subjectId: "scheduler",
-        label: "Opengeni scheduler",
+        label: "OpenGeni scheduler",
       },
       createdByContext: { scheduledTaskId: task.id, scheduledTaskRunId: runId },
       model: settings.openaiModel,

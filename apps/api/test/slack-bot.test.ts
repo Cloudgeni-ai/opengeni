@@ -5180,7 +5180,7 @@ describe("scheduled task posting to a fixed Slack channel", () => {
       },
       createdBy: { kind: "service", subjectId: "scheduler" },
       createdByContext: {
-        label: "Opengeni scheduler",
+        label: "OpenGeni scheduler",
         scheduledTaskId: task.id,
         scheduledTaskRunId: runId,
       },

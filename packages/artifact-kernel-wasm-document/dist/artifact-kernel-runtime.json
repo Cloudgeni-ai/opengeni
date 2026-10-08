@@ -7,8 +7,8 @@
     "packageName": "@opengeni/artifact-kernel-wasm-document",
     "packageVersion": "1.4.4",
     "artifactToolVersion": "1.4.4",
-    "buildIdentity": "opengeni-artifact-kernel/0.1.0;abi=1;command=2;query=1;snapshot=2;collaboration-snapshot=2;committed-transaction=2;spreadsheet-model=2;document-snapshot=1;document-command=1;document-query=1;presentation-snapshot=1;presentation-command=1;presentation-query=1;text-layout-fonts=1;text-layout-request=1;text-layout-response=1;render-tile=1;render-patch=1;source=55d664975637b72c0aa70bf8d05b96a6dfa3d6aa6d7cce0f3a0ac557a4ef2f9a;toolchain=1367261bf04dd2fc4b2c6aa0ef397c21659ee1c973a9d98dcb8d84b46d68b06f",
-    "kernelVersion": "opengeni-artifact-kernel/0.1.0;abi=1;command=2;query=1;snapshot=2;collaboration-snapshot=2;committed-transaction=2;spreadsheet-model=2;document-snapshot=1;document-command=1;document-query=1;presentation-snapshot=1;presentation-command=1;presentation-query=1;text-layout-fonts=1;text-layout-request=1;text-layout-response=1;render-tile=1;render-patch=1;source=55d664975637b72c0aa70bf8d05b96a6dfa3d6aa6d7cce0f3a0ac557a4ef2f9a;toolchain=1367261bf04dd2fc4b2c6aa0ef397c21659ee1c973a9d98dcb8d84b46d68b06f",
+    "buildIdentity": "opengeni-artifact-kernel/0.1.0;abi=1;command=2;query=1;snapshot=2;collaboration-snapshot=2;committed-transaction=2;spreadsheet-model=2;document-snapshot=1;document-command=1;document-query=1;presentation-snapshot=1;presentation-command=1;presentation-query=1;text-layout-fonts=1;text-layout-request=1;text-layout-response=1;render-tile=1;render-patch=1;source=3a0d75aa95c4cac8af9d49e1b8ff74fe164708fd8f0bce009be5adf9c3ef20e0;toolchain=1367261bf04dd2fc4b2c6aa0ef397c21659ee1c973a9d98dcb8d84b46d68b06f",
+    "kernelVersion": "opengeni-artifact-kernel/0.1.0;abi=1;command=2;query=1;snapshot=2;collaboration-snapshot=2;committed-transaction=2;spreadsheet-model=2;document-snapshot=1;document-command=1;document-query=1;presentation-snapshot=1;presentation-command=1;presentation-query=1;text-layout-fonts=1;text-layout-request=1;text-layout-response=1;render-tile=1;render-patch=1;source=3a0d75aa95c4cac8af9d49e1b8ff74fe164708fd8f0bce009be5adf9c3ef20e0;toolchain=1367261bf04dd2fc4b2c6aa0ef397c21659ee1c973a9d98dcb8d84b46d68b06f",
     "abiVersion": 1,
     "protocolVersion": 1,
     "modelSchemaVersion": 1,
@@ -27,8 +27,8 @@
     {
       "path": "artifact_kernel_document_bg.wasm",
       "bytes": 296577,
-      "sha256": "sha256:782a14d61a9e364ed724247d32086adf583916a362af5b6074fe7abb8b3f42a2",
-      "gzipBytes": 99081
+      "sha256": "sha256:06332f3bdc81f49f852dbc5efb7c09baa8ad3876cc7bacb251a9936926682bb3",
+      "gzipBytes": 99084
     },
     {
       "path": "artifact_kernel_document_bg.wasm.d.ts",
@@ -49,12 +49,12 @@
     {
       "path": "index.d.ts",
       "bytes": 2496,
-      "sha256": "sha256:54f747b9808f1acd536c7c2130a73a2a43646e5221b614cb0eab3a25b41e6c2e"
+      "sha256": "sha256:f3c9cab846bfd5f3c068acc870ba0981fb98e2966c9532728cbb9dff60de6777"
     },
     {
       "path": "index.js",
       "bytes": 2384,
-      "sha256": "sha256:5a1168df6f233939825bc41f3f9bc5e9e90daffd66da7664afc4a33871b3419b"
+      "sha256": "sha256:b221c36147cac7760f5c765b8285ae932e9fe05be3b106f2eeb9c6f2833c87e7"
     }
   ]
 }

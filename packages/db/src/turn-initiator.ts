@@ -21,7 +21,9 @@ export type FrozenTurnInitiator = {
   initiatingHumanSubjectId?: string | null;
 };
 
-/** A legacy task has no asserted service identity. Its occurrence is still
+/** The scheduler label is frozen authority proof shared with migrations 0275/0414,
+ * not presentation copy. Preserve its exact historical bytes.
+ * A legacy task has no asserted service identity. Its occurrence is still
  * initiated by the scheduler, not by the missing-attribution sentinel. */
 export function frozenScheduledOccurrenceInitiator(
   task: { createdBy: TurnInitiator; createdByContext: TurnInitiatorContext },
@@ -37,7 +39,7 @@ export function frozenScheduledOccurrenceInitiator(
   return {
     initiator:
       task.createdBy.subjectId === "scheduler" && !task.createdBy.label
-        ? { ...task.createdBy, label: "Opengeni scheduler" }
+        ? { ...task.createdBy, label: "OpenGeni scheduler" }
         : task.createdBy,
     context: { ...serviceContext, ...scheduler.context },
     initiatingHumanSubjectId: null,

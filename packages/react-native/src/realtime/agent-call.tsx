@@ -315,20 +315,23 @@ function ActiveAgentCall(
     target: sessionId,
   });
 
-  // Start once, as soon as the session and voice model are ready.
+  // Start once, as soon as the session and voice model are ready. The voice
+  // catalog must have loaded: a model chosen from the placeholder catalog would
+  // be replaced right after the start, which aborts the connection.
   const startedRef = useRef(false);
   const { canStart, start } = call;
+  const ready = canStart && selection.catalogReady;
   const onCallStartingRef = useRef(props.onCallStarting);
   onCallStartingRef.current = props.onCallStarting;
   useEffect(() => {
-    if (startedRef.current || !canStart) return;
+    if (startedRef.current || !ready) return;
     startedRef.current = true;
     onCallStartingRef.current?.();
     void start().catch((error: unknown) => {
       onError(messages.couldNotStart, error instanceof Error ? error.message : undefined);
       onFinished();
     });
-  }, [canStart, messages.couldNotStart, onError, onFinished, start]);
+  }, [messages.couldNotStart, onError, onFinished, ready, start]);
   // A call that ran and ended (here, on the lock screen or by the agent) closes.
   useEffect(() => {
     if (startedRef.current && call.phase === "idle" && !call.error) onFinished();

@@ -1398,7 +1398,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 createdBy: {
                   kind: "service",
                   subjectId: "scheduler",
-                  label: "Opengeni scheduler",
+                  label: "OpenGeni scheduler",
                 },
                 createdByContext: {
                   scheduledTaskId: task.id,
@@ -2452,7 +2452,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
       createdBy: {
         kind: "service",
         subjectId: "scheduler",
-        label: "Opengeni scheduler",
+        label: "OpenGeni scheduler",
       },
       createdByContext: {
         scheduledTaskId: task.id,
@@ -2614,7 +2614,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
       session.createdBy.subjectId !== "scheduler" ||
       stableJson(session.createdByContext) !==
         stableJson({
-          label: "Opengeni scheduler",
+          label: "OpenGeni scheduler",
           scheduledTaskId: task.id,
           scheduledTaskRunId: canonicalGeneratedRunId,
         }) ||
