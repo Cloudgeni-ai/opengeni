@@ -10,6 +10,7 @@ import {
   completeConnectorActionExecution,
   getScheduledVariableSetExpectedGenerationForAttempt,
   persistAttemptToolCatalog,
+  requireWorkspace,
   prepareConnectorActionApproval,
   recordUsageEvent,
   previewConnectorActionApproval,
@@ -49,7 +50,11 @@ import { buildGitHubRestMcpForTurn } from "../../github-rest-mcp";
 import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
 import { materializeGmailFile, readGmailFileFromChannel } from "../gmail-files";
 import { objectStorageForSandboxDownloads } from "./file-resources";
-import { allowedFirstPartyMcpToolsForSession, type Settings } from "@opengeni/config";
+import {
+  allowedFirstPartyMcpToolsForSession,
+  resolveSessionFirstPartyMcpTools,
+  type Settings,
+} from "@opengeni/config";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { mergeResourceRefs } from "../common";
 import {
@@ -63,6 +68,7 @@ import {
   withFrozenPersonalConnectionDelegations,
   resolveTurnToolPolicy,
   scheduledTurnMcpServerIds,
+  scheduledTurnFirstPartyMcpTools,
   hasPermission,
   requireExplicitPermissionDelegation,
   createWebSearchBilling,
@@ -583,7 +589,16 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     sandboxAttached: (activeSandboxBackend ?? groupBoxBackend) !== "none",
   });
   const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
-    allowedFirstPartyMcpToolsForSession(runSettings, session.firstPartyMcpTools),
+    scheduledTurnMcpServerIds(turn) !== null
+      ? allowedFirstPartyMcpToolsForSession(
+          runSettings,
+          scheduledTurnFirstPartyMcpTools(turn) ?? session.firstPartyMcpTools,
+        )
+      : resolveSessionFirstPartyMcpTools(
+          runSettings,
+          session,
+          (await requireWorkspace(db, input.workspaceId)).settings,
+        ),
   );
   // Frozen with the selection and ceiling above; instructions only.
   const promptToolAvailability = promptToolAvailabilityForTurn({

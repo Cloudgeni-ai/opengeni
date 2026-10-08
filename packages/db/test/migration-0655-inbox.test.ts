@@ -11,8 +11,10 @@ import {
   createSession,
   dismissInboxNotification,
   getInboxItem,
+  getInboxSettings,
   getInboxTidyPolicy,
   listInboxItems,
+  setInboxSettings,
   setInboxTidyPolicy,
   updateInboxItemAttention,
   type DbClient,
@@ -227,9 +229,78 @@ describe("0655 inbox", () => {
     expect(bySource.get("multi")).toEqual([]);
   });
 
+  test("paused goals stay out of the inbox until the person turns them on (0663)", async () => {
+    if (!client) return;
+    const person = await personWithSession("goal-off");
+    const owner = { accountId: person.scope.accountId, subjectId: person.subjectId };
+    expect(await getInboxSettings(db(), owner)).toEqual({
+      tidyPolicy: "own_sessions",
+      pausedGoals: false,
+      replies: false,
+    });
+    await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+      {
+        type: "goal.paused",
+        payload: { actor: "agent", reason: "agent", rationale: "Done for now" },
+      },
+    ]);
+    expect(await inbox(person)).toHaveLength(0);
+    // A partial change keeps the other setting.
+    await setInboxSettings(db(), { ...owner, tidyPolicy: "any_agent" });
+    expect(await setInboxSettings(db(), { ...owner, pausedGoals: true })).toEqual({
+      tidyPolicy: "any_agent",
+      pausedGoals: true,
+      replies: false,
+    });
+  });
+
+  test("replies keep one item per session until cleared, only when turned on (0665)", async () => {
+    if (!client) return;
+    const person = await personWithSession("replies");
+    const owner = { accountId: person.scope.accountId, subjectId: person.subjectId };
+    const reply = (text: string) =>
+      appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+        { type: "agent.message.completed", payload: { text } },
+        { type: "turn.completed", payload: {} },
+      ]);
+    await reply("Off by default");
+    expect(await inbox(person)).toHaveLength(0);
+    await setInboxSettings(db(), { ...owner, replies: true });
+    const [message] = await reply("## Deployed **2.4**\nAll services are green.");
+    let items = await inbox(person);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "reply",
+      title: "Deployed 2.4",
+      body: "All services are green.",
+      unread: true,
+      eventSequence: message!.sequence,
+    });
+    // Seen, it stays; a new reply updates the same item and is unread again.
+    await updateInboxItemAttention(db(), { itemId: items[0]!.id, ...owner, seen: true });
+    expect((await inbox(person))[0]).toMatchObject({ unread: false });
+    await reply("Second reply");
+    items = await inbox(person);
+    expect(items.map((item) => [item.kind, item.title, item.unread])).toEqual([
+      ["reply", "Second reply", true],
+    ]);
+    // Cleared, a later reply brings it back; turning replies off takes it away.
+    await updateInboxItemAttention(db(), { itemId: items[0]!.id, ...owner, dismissed: true });
+    expect(await inbox(person)).toHaveLength(0);
+    await reply("Third reply");
+    expect((await inbox(person)).map((item) => item.title)).toEqual(["Third reply"]);
+    await setInboxSettings(db(), { ...owner, replies: false });
+    expect(await inbox(person)).toHaveLength(0);
+  });
+
   test("an agent's pause waits on the person until the goal resumes", async () => {
     if (!client) return;
     const person = await personWithSession("goal");
+    await setInboxSettings(db(), {
+      accountId: person.scope.accountId,
+      subjectId: person.subjectId,
+      pausedGoals: true,
+    });
     await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
       { type: "goal.paused", payload: { actor: "user", reason: "user" } },
     ]);
@@ -276,6 +347,50 @@ describe("0655 inbox", () => {
     ]);
     const items = await inbox(person);
     expect(items.map((item) => [item.kind, item.sessionId])).toEqual([["question", child.id]]);
+  });
+
+  test("a notification carries its subtitle, message, facts and link; every item its moment (0664)", async () => {
+    if (!client) return;
+    const person = await personWithSession("notify-rich");
+    const [question] = await appendSessionEvents(
+      db(),
+      person.scope.workspaceId,
+      person.session.id,
+      [
+        {
+          type: "session.humanInput.requested",
+          payload: { request: { id: "rich-q", questions: [{ prompt: "Ship it?" }] } },
+        },
+      ],
+    );
+    const body = `Deployed **all** services:\n- api\n- web\n${"x".repeat(600)}`;
+    const [posted] = await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+      {
+        type: "session.notification.posted",
+        payload: {
+          key: "release",
+          title: "Release is out",
+          subtitle: "v2.4.0",
+          body,
+          facts: [{ label: "Tests", value: "412 passed" }],
+          link: { url: "https://example.com/pr/1", label: "Pull request" },
+          urgency: "time_sensitive",
+          replaced: false,
+        },
+      },
+    ]);
+    const items = await inbox(person);
+    const note = items.find((item) => item.kind === "notification");
+    expect(note).toMatchObject({
+      subtitle: "v2.4.0",
+      body,
+      facts: [{ label: "Tests", value: "412 passed" }],
+      link: { url: "https://example.com/pr/1", label: "Pull request" },
+      urgency: "time_sensitive",
+      eventSequence: posted!.sequence,
+    });
+    // Every item remembers the moment that raised it (0664).
+    expect(items.find((item) => item.kind === "question")?.eventSequence).toBe(question!.sequence);
   });
 
   test("notifications update in place, keep the person's dismissal, and can be withdrawn", async () => {

@@ -170,6 +170,10 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
   context.eventing.publish = async () => {};
   const skillCatalogWrites: string[] = [];
   const persistence = [
+    spyOn(db, "requireWorkspace").mockResolvedValue({
+      id: SCOPE.workspaceId,
+      settings: {},
+    } as Awaited<ReturnType<typeof db.requireWorkspace>>),
     spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
     spyOn(db, "getWorkspaceVideoGenerationPolicy").mockResolvedValue({
       schemaVersion: 1,

@@ -48,6 +48,8 @@ import {
   type OrganizationCodexPool,
 } from "@/components/models/codex-models";
 import { CodexProviderSwitchRow } from "@/components/models/codex-provider-switch-row";
+import { ModelCompactionPage } from "./model-compaction-page";
+import { SettingNavRow } from "@/components/ui/setting-row";
 import {
   ConnectAudienceFields,
   EVERYONE,
@@ -798,6 +800,15 @@ export function WorkspaceModelsPageBody({
           fields={note}
         />
       );
+  } else if (view === "compaction" && workspacePage) {
+    page = (
+      <ModelCompactionPage
+        key={workspaceId}
+        workspaceId={workspaceId}
+        canManage={canManageSettings}
+        onClose={backToList}
+      />
+    );
   } else if (view === "allowed-models") {
     page = (
       <AllowedModelsFormPage
@@ -1004,6 +1015,7 @@ export function WorkspaceModelsPageBody({
             }
             whoCanConnect={canConnect ? null : <WhoCanConnect />}
             onEditAllowed={() => nav.openView("allowed-models")}
+            onEditCompaction={() => nav.openView("compaction")}
             onConnect={() => nav.openView("connect")}
             accountsNote={
               <CodexPoolNotice
@@ -1323,6 +1335,7 @@ function ModelsList({
   describePayer,
   whoCanConnect,
   onEditAllowed,
+  onEditCompaction,
   onConnect,
   accountsNote,
   accounts,
@@ -1340,6 +1353,7 @@ function ModelsList({
   /** For people who can't add accounts: who can. */
   whoCanConnect: ReactNode;
   onEditAllowed: () => void;
+  onEditCompaction: () => void;
   onConnect: () => void;
   /** The line above the list that says which Codex accounts new work uses. */
   accountsNote?: ReactNode;
@@ -1370,6 +1384,11 @@ function ModelsList({
             describePayer={describePayer}
           />
           <AllowedModelsRow state={policy} onEdit={onEditAllowed} />
+          <SettingNavRow
+            label="Context & compaction"
+            description="When to summarize long conversations, by model."
+            onOpen={onEditCompaction}
+          />
         </SettingRowGroup>
       </Section>
       <Section

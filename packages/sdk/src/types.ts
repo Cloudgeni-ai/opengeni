@@ -3739,6 +3739,16 @@ export type ModelCredentialReadinessV1 = {
 };
 
 export type WorkspaceModelCatalogModel = ClientModel & {
+  /** Workspace preference, separate from immutable model execution limits. */
+  compactionPolicy?:
+    | {
+        defaultTokens: number;
+        overrideTokens: number | null;
+        effectiveTokens: number;
+        minimumTokens: number;
+        maximumTokens: number;
+      }
+    | undefined;
   credentialReadiness: ModelCredentialReadinessV1;
   creditFunding?: "promotional" | "general" | "unavailable" | undefined;
   /** Exact workspace-policy verdict without exposing provider identity. */
@@ -5088,6 +5098,8 @@ export type Workspace = {
 };
 
 export type WorkspaceSettings = {
+  /** Exact product-model preferences. Invalid/newer values are ignored per model. */
+  modelCompactionThresholds?: unknown;
   memoryEnabled?: boolean | undefined;
   /** Reversible Memory V1 prompt composition rollout. */
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
@@ -5183,6 +5195,8 @@ export type WorkspaceVoiceInputSettings = {
 };
 
 export type UpdateWorkspaceSettingsRequest = {
+  /** Independent model patches; null restores that model's default. */
+  modelCompactionThresholds?: Record<string, number | null>;
   memoryEnabled?: boolean | undefined;
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   sessionDefaults?: WorkspaceSessionDefaults | undefined;
@@ -5431,7 +5445,7 @@ export type McpConnectionDecision =
 // --- Inbox ---------------------------------------------------------------------------------------
 
 /** Why an inbox item waits on the person. */
-export type InboxItemKind = "question" | "approval" | "goal_paused" | "notification";
+export type InboxItemKind = "question" | "approval" | "goal_paused" | "notification" | "reply";
 
 /**
  * One thing that waits on the person: a question, an approval, a goal the agent
@@ -5447,7 +5461,19 @@ export type InboxItem = {
   /** The question or approval id, or the notification key. */
   sourceKey: string;
   title: string;
+  /** A notification's subtitle; empty otherwise. */
+  subtitle: string;
+  /** Plain text, or for a notification its message (paragraphs, "- " bullets, **bold**, `code`, links). */
   body: string;
+  /** A notification's label/value facts (at most four); empty otherwise. */
+  facts: InboxItemFact[];
+  /** A notification's link outside the session, or null. */
+  link: InboxItemLink | null;
+  /**
+   * The session event that opened or last updated the item: open the session
+   * at this point. Null for items from before this was recorded.
+   */
+  eventSequence: number | null;
   /** One-tap answers for a single short choice question; empty otherwise. */
   choices: InboxItemChoice[];
   urgency: "normal" | "time_sensitive";
@@ -5459,6 +5485,12 @@ export type InboxItem = {
   updatedAt: string;
   resolvedAt: string | null;
 };
+
+/** A short label and value an agent attached to a notification. */
+export type InboxItemFact = { label: string; value: string };
+
+/** A place outside the session an agent's notification points to. */
+export type InboxItemLink = { url: string; label: string };
 
 /** An option of the question behind an inbox item, answerable in one tap. */
 export type InboxItemChoice = { id: string; label: string };
@@ -5482,7 +5514,19 @@ export type UpdateInboxItemInput = {
 /** Which agents may withdraw or dismiss the person's notifications. */
 export type InboxTidyPolicy = "own_sessions" | "any_agent";
 
-export type InboxSettings = { tidyPolicy: InboxTidyPolicy };
+export type InboxSettings = {
+  tidyPolicy: InboxTidyPolicy;
+  /**
+   * Goals an agent paused in the person's own sessions reach the inbox. Off by
+   * default. Always present in responses; leave it out of an update to keep it.
+   */
+  pausedGoals?: boolean;
+  /**
+   * Keep each session's latest reply in the inbox until the person clears it.
+   * Off by default. Always present in responses; leave it out to keep it.
+   */
+  replies?: boolean;
+};
 
 // --- Native app sign-in (authorization code + PKCE over the app's scheme) ----------------------
 

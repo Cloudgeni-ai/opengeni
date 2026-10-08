@@ -27,7 +27,6 @@ import {
   Linking,
   Modal,
   Pressable,
-  ScrollView,
   Text,
   View,
   useWindowDimensions,
@@ -35,6 +34,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
 import { Icon } from "./icon";
+import { NativeImageViewer } from "./image-viewer";
 import type { NativeInteractiveBlock } from "./markdown";
 import { fontStyle, useNativeTimelineTheme, type NativeTimelineTheme } from "./theme";
 
@@ -906,69 +906,14 @@ function RetainedImage({
         ) : null}
       </Pressable>
       {state.status === "image" ? (
-        <ImageViewer
-          url={state.url}
-          alt={label}
+        <NativeImageViewer
+          images={[{ url: state.url, alt: label }]}
+          index={0}
           visible={viewer}
           onClose={() => setViewer(false)}
-          closeLabel={labels.close}
+          labels={{ close: labels.close }}
         />
       ) : null}
     </>
-  );
-}
-
-/** Full-screen image with pinch zoom (iOS scroll-view zoom). */
-function ImageViewer({
-  url,
-  alt,
-  visible,
-  onClose,
-  closeLabel,
-}: {
-  url: string;
-  alt: string;
-  visible: boolean;
-  onClose: () => void;
-  closeLabel: string;
-}) {
-  const insets = useSafeAreaInsets();
-  const { width, height } = useWindowDimensions();
-  return (
-    <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
-      <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.94)" }}>
-        <ScrollView
-          maximumZoomScale={4}
-          minimumZoomScale={1}
-          centerContent
-          showsHorizontalScrollIndicator={false}
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={{ width, height, alignItems: "center", justifyContent: "center" }}
-        >
-          <Pressable onPress={onClose} accessibilityLabel={alt} style={{ width, height }}>
-            <Image source={{ uri: url }} resizeMode="contain" style={{ width, height }} />
-          </Pressable>
-        </ScrollView>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={closeLabel}
-          hitSlop={10}
-          onPress={onClose}
-          style={{
-            position: "absolute",
-            top: insets.top + 8,
-            right: 12,
-            width: 40,
-            height: 40,
-            borderRadius: 20,
-            alignItems: "center",
-            justifyContent: "center",
-            backgroundColor: "rgba(255,255,255,0.14)",
-          }}
-        >
-          <Icon name="x" size={18} color="#ffffff" />
-        </Pressable>
-      </View>
-    </Modal>
   );
 }

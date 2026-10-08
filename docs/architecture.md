@@ -442,6 +442,17 @@ catalog/billing. `openrouter/*` and `workspace-openrouter/*` (likewise `opper/*`
 identities for identical slugs. Claude setup:
 `apps/api/src/routes/workspace-model-providers.ts`; transport:
 `packages/runtime/src/anthropic-messages.ts`.
+Claude request-byte and independent image bounds live in
+`packages/runtime/src/anthropic-request-size.ts`; exact checkpoint-prefix fitting
+is in `packages/runtime/src/anthropic-compaction.ts`. The worker claims a fenced,
+durable one-per-turn byte-recovery allowance before summarizing a prefix and
+preserving its complete suffix. See [context compaction](context-compaction.md).
+Workspace `modelCompactionThresholds` preferences resolve through
+`workspaceModelCompactionPolicy` in config at model preparation. The API catalog
+and Models → Context & compaction page expose the same default/override/effective
+values without changing immutable model definitions or frozen compaction modes.
+Per-model PATCH/reset is atomic in the workspace settings store; request-byte
+guards remain independent of the token preference.
 The shared `claudeNativeModelProfile` in `packages/config/src/index.ts` owns
 native model effort vocabularies, defaults, context windows and output ceilings;
 both catalog projection and request shaping consume it.
