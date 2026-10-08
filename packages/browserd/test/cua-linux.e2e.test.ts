@@ -14,7 +14,7 @@ test.skipIf(process.platform !== "linux" || process.env.OPENGENI_CUA_E2E !== "1"
       computerSessionId: randomUUID(),
       controllerGeneration: randomUUID(),
     }));
-    const allocator = new LinuxVirtualComputerEnvironmentAllocator();
+    const allocator = new LinuxVirtualComputerEnvironmentAllocator({ compositing: true });
     const children: ReturnType<typeof Bun.spawn>[] = [];
     const states = new Map<string, string>();
     const supervisor = await ComputerSupervisor.open({
@@ -62,6 +62,8 @@ test.skipIf(process.platform !== "linux" || process.env.OPENGENI_CUA_E2E !== "1"
       expect(first!.displayId).not.toBe(second!.displayId);
       expect(first!.adapter).toBe("opengeni.cua.linux.v1");
       const firstState = await actual(0);
+      expect(firstState.composited).toBe(true);
+      expect((await actual(1)).composited).toBe(true);
       const target = first!.targets.find((target) => target.processId === firstState.pid)!;
       expect(target).toBeDefined();
       expect(second!.targets.some((target) => target.processId === firstState.pid)).toBe(false);

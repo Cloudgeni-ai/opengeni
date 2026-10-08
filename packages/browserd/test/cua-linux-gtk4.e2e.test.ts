@@ -15,7 +15,7 @@ for (const decorations of ["server", "client"]) {
         computerSessionId: randomUUID(),
         controllerGeneration: randomUUID(),
       };
-      const allocator = new LinuxVirtualComputerEnvironmentAllocator();
+      const allocator = new LinuxVirtualComputerEnvironmentAllocator({ compositing: true });
       let statePath = "";
       const supervisor = await ComputerSupervisor.open({
         rootDirectory: root,

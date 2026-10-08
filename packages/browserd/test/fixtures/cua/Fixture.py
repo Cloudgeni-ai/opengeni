@@ -4,7 +4,7 @@ import os
 import sys
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, GLib
+from gi.repository import Gtk, GLib, Gdk
 
 state_path, title = sys.argv[1:]
 window = Gtk.Window(title=title)
@@ -21,7 +21,8 @@ pointer_events = []
 
 def save():
     state = {"pid": os.getpid(), "value": entry.get_text(), "clicks": count,
-             "pointer_events": pointer_events}
+             "pointer_events": pointer_events,
+             "composited": Gdk.Screen.get_default().is_composited()}
     with open(state_path + ".tmp", "w") as output:
         json.dump(state, output)
     os.replace(state_path + ".tmp", state_path)

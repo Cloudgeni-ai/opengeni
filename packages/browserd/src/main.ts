@@ -65,7 +65,9 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
         displaceExistingSessions: config.computerEnvironmentMode === "existing",
         environmentAllocator:
           config.computerEnvironmentMode === "isolated_linux"
-            ? new LinuxVirtualComputerEnvironmentAllocator()
+            ? new LinuxVirtualComputerEnvironmentAllocator({
+                compositing: config.computerBackend === "cua",
+              })
             : new ExistingComputerEnvironmentAllocator({
                 allowWindows: config.computerBackend === "cua",
               }),
