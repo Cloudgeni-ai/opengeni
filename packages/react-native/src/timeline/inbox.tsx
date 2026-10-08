@@ -97,6 +97,18 @@ function tomorrowMorning(): Date {
   return date;
 }
 
+/** How long ago, or until when a snoozed item stays hidden. */
+function when(item: InboxItem): string {
+  if (item.snoozedUntil === null || Date.parse(item.snoozedUntil) <= Date.now()) {
+    return relative(item.updatedAt);
+  }
+  const until = new Date(item.snoozedUntil);
+  const time = until.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return until.toDateString() === new Date().toDateString()
+    ? `Until ${time}`
+    : `Until ${until.toLocaleDateString(undefined, { weekday: "short" })} ${time}`;
+}
+
 export interface NativeInboxListProps {
   client: NativeInboxClient;
   inbox: ReturnType<typeof useNativeInbox>;
@@ -304,7 +316,7 @@ export function NativeInboxList({
         ) : null}
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={`${item.title}. ${meta(item)}, ${relative(item.updatedAt)}`}
+          accessibilityLabel={`${item.title}. ${meta(item)}, ${when(item)}`}
           accessibilityHint="Opens the session"
           onPress={() => onOpenSession(item)}
           onLongPress={() => openMenu(item)}
@@ -404,7 +416,7 @@ export function NativeInboxList({
                 numberOfLines={1}
                 style={{ ...fontStyle(theme), fontSize: 12, lineHeight: 18, color: c["fg-subtle"] }}
               >
-                {` · ${relative(item.updatedAt)}`}
+                {` · ${when(item)}`}
               </Text>
             </View>
             {rowActions ? (

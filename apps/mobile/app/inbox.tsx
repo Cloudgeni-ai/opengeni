@@ -29,6 +29,7 @@ function Inbox() {
   const insets = useSafeAreaInsets();
   const { client, workspaces, workspaceId, setWorkspaceId } = useAccount();
   const inbox = useNativeInbox(client, { pollMs: 10_000 });
+  const refreshInbox = inbox.refresh;
   const [pulling, setPulling] = useState(false);
   const workspaceNames = useMemo(
     () => new Map(workspaces.map((workspace) => [workspace.id, workspace.name])),
@@ -37,8 +38,8 @@ function Inbox() {
 
   useFocusEffect(
     useCallback(() => {
-      void inbox.refresh();
-    }, [inbox.refresh]),
+      void refreshInbox();
+    }, [refreshInbox]),
   );
   // The app badge and delivered notifications follow what is still open.
   useEffect(() => {

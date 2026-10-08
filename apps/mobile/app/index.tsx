@@ -116,6 +116,7 @@ function Home() {
   const [listError, setListError] = useState<string | null>(null);
   // What waits on the person, for the Inbox button's badge.
   const inbox = useNativeInbox(client);
+  const refreshInbox = inbox.refresh;
   const waiting = nativeInboxAttentionCount(inbox.data);
 
   const load = useCallback(async () => {
@@ -140,8 +141,8 @@ function Home() {
   useFocusEffect(
     useCallback(() => {
       void load();
-      void inbox.refresh();
-    }, [load, inbox.refresh]),
+      void refreshInbox();
+    }, [load, refreshInbox]),
   );
 
   // The new session's model: the person's pick in this workspace, else the
@@ -270,7 +271,7 @@ function Home() {
           headerTitle: HeaderWorkspaceTitle,
           headerTitleAlign: "center",
           headerLeft: HeaderMenuButton,
-          headerRight: () => <HeaderRightButtons waiting={waiting} />,
+          headerRight: HeaderRightButtons,
           // iOS: real bar button items, so the system draws its own glass in
           // light and dark (custom views get a tinted capsule that reads wrong).
           ...(Platform.OS === "ios"
@@ -505,20 +506,22 @@ function HeaderMenuButton() {
 }
 
 /* Android and older iOS: the Inbox and account buttons drawn by the app. */
-function HeaderRightButtons({ waiting }: { waiting: number }) {
+function HeaderRightButtons() {
   return (
     <AppThemeProvider>
       <View style={{ flexDirection: "row", alignItems: "center" }}>
-        <InboxButton waiting={waiting} />
+        <InboxButton />
         <AccountMenuButton />
       </View>
     </AppThemeProvider>
   );
 }
 
-function InboxButton({ waiting }: { waiting: number }) {
+function InboxButton() {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
+  const { client } = useAccount();
+  const waiting = nativeInboxAttentionCount(useNativeInbox(client).data);
   return (
     <Pressable
       accessibilityRole="button"
