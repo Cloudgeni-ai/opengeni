@@ -6,7 +6,8 @@ import { createCuaRuntime } from "../src/cua/sdk";
 
 // Release generation reads only the bundled driver's static tool inventory.
 // No app discovery, screenshots, native input, or permission prompts.
-const directory = process.platform === "linux" ? await mkdtemp(join(tmpdir(), "cua-catalog-")) : null;
+const directory =
+  process.platform === "linux" ? await mkdtemp(join(tmpdir(), "cua-catalog-")) : null;
 const runtime = await createCuaRuntime(
   directory ? { ...process.env, HOME: directory, XDG_RUNTIME_DIR: directory } : process.env,
 );

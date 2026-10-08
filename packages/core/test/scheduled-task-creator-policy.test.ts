@@ -127,6 +127,7 @@ function origin(restricted: "turn" | "session" | "neither") {
   const session = {
     id: actor.sessionId,
     firstPartyMcpTools: ["set_session_title"],
+    toolPolicy: { mode: "explicit", firstPartyMode: "explicit", inheritedFromSessionId: null },
     firstPartyMcpPermissions: ["sessions:read", "scheduled_tasks:manage", "connections:read"],
     agentAccess: "session",
     scopeSubjectId: "user:fixture",
@@ -134,6 +135,9 @@ function origin(restricted: "turn" | "session" | "neither") {
     metadata: metadata(restricted === "session"),
   };
   track(spyOn(db, "getSession").mockResolvedValue(session as never));
+  track(
+    spyOn(db, "requireWorkspace").mockResolvedValue({ id: workspaceId, settings: {} } as never),
+  );
   const turn = track(
     spyOn(db, "getSessionTurnForAttempt").mockResolvedValue({
       id: actor.turnId,
