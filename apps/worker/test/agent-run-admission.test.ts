@@ -341,6 +341,10 @@ describe("worker agent-run admission funding", () => {
       initiator: { kind: "service", subjectId: "scheduler" },
     } as Awaited<ReturnType<typeof opengeniDb.getLatestStartedSessionTurn>>);
     const policy = spyOn(opengeniDb, "getWorkspaceModelPolicy").mockResolvedValue(null);
+    const workspace = spyOn(opengeniDb, "requireWorkspace").mockResolvedValue({
+      id: WORKSPACE,
+      settings: {},
+    } as Awaited<ReturnType<typeof opengeniDb.requireWorkspace>>);
     const event = { type: "goal.paused" };
     const lockedDb = {} as opengeniDb.Database;
     const materialize = spyOn(opengeniDb, "materializeGoalContinuation").mockImplementation(
@@ -408,6 +412,7 @@ describe("worker agent-run admission funding", () => {
       session.mockRestore();
       previous.mockRestore();
       policy.mockRestore();
+      workspace.mockRestore();
       materialize.mockRestore();
       source.mockRestore();
       restoreCodex();
