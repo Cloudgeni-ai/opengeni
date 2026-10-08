@@ -34,6 +34,14 @@ export interface PushData {
   subjectId?: string;
   rule?: NativePushRule;
   eventType?: string;
+  /** The session event the push is about; opening lands on it. */
+  sequence?: number;
+}
+
+function sessionPath(data: PushData): string {
+  return data.sequence
+    ? `/session/${data.sessionId}?at=${data.sequence}`
+    : `/session/${data.sessionId}`;
 }
 
 /*
@@ -326,7 +334,7 @@ export function NotificationRouting() {
         return;
       }
       if (data.workspaceId) setWorkspaceId(data.workspaceId);
-      router.push(`/session/${data.sessionId}`);
+      router.push(sessionPath(data));
     },
     [account, accounts, setWorkspaceId, switchAccount],
   );
@@ -338,7 +346,7 @@ export function NotificationRouting() {
     pending.current = null;
     const data = target.data;
     if (data.workspaceId) setWorkspaceId(data.workspaceId);
-    router.push(`/session/${data.sessionId}`);
+    router.push(sessionPath(data));
   }, [account?.id, setWorkspaceId, status]);
 
   // Each tapped notification opens once: one subscription for the app's life

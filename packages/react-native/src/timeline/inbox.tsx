@@ -2,9 +2,22 @@
 // approvals, goals paused on them) and what they chose to tell them. The same
 // rules as the web Inbox page: rows are messages, approvals decide in place, a
 // single short choice answers in one tap, everything else opens its session.
+import { parseNotificationText, type NotificationSpan } from "@opengeni/react/timeline-model";
 import type { InboxItem, ListInboxResponse, OpenGeniClient } from "@opengeni/sdk";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ActionSheetIOS, Alert, AppState, Platform, Pressable, Text, View } from "react-native";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  ActionSheetIOS,
+  Alert,
+  Animated,
+  AppState,
+  Linking,
+  PanResponder,
+  Platform,
+  Pressable,
+  Text,
+  View,
+  type LayoutChangeEvent,
+} from "react-native";
 
 import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
@@ -79,6 +92,254 @@ const KIND_ICON: Record<InboxItem["kind"], NativeIconName> = {
   notification: "bell",
 };
 
+function kindIcon(item: InboxItem): NativeIconName {
+  return item.kind === "notification" && item.urgency === "time_sensitive"
+    ? "bell-ring"
+    : KIND_ICON[item.kind];
+}
+
+const MONO = Platform.OS === "ios" ? "Menlo" : "monospace";
+
+function Spans({ spans }: { spans: NotificationSpan[] }) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  return spans.map((span, index) =>
+    span.kind === "bold" ? (
+      <Text key={index} style={{ ...fontStyle(theme, 500), color: c.fg }}>
+        {span.text}
+      </Text>
+    ) : span.kind === "code" ? (
+      <Text key={index} style={{ fontFamily: MONO, fontSize: 13, color: c.fg }}>
+        {span.text}
+      </Text>
+    ) : span.kind === "link" ? (
+      <Text
+        key={index}
+        accessibilityRole="link"
+        onPress={() => void Linking.openURL(span.href)}
+        style={{ color: c.fg, textDecorationLine: "underline" }}
+      >
+        {span.text}
+      </Text>
+    ) : (
+      <Text key={index}>{span.text}</Text>
+    ),
+  );
+}
+
+/**
+ * An agent's notification under its title: the subtitle, the message (short
+ * paragraphs and bullets) and its facts as a quiet two-column list.
+ */
+function NotificationContent({ item }: { item: InboxItem }) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const blocks = parseNotificationText(item.body);
+  const text = { ...fontStyle(theme), fontSize: 14, lineHeight: 20, color: c["fg-muted"] };
+  return (
+    <>
+      {item.subtitle ? (
+        <Text
+          numberOfLines={1}
+          style={{ ...fontStyle(theme), fontSize: 14, lineHeight: 20, color: c.fg }}
+        >
+          {item.subtitle}
+        </Text>
+      ) : null}
+      {blocks.length > 0 ? (
+        <View style={{ gap: 6, marginTop: 2 }}>
+          {blocks.map((block, index) =>
+            block.kind === "paragraph" ? (
+              <Text key={index} style={text}>
+                <Spans spans={block.spans} />
+              </Text>
+            ) : (
+              <View key={index} style={{ gap: 2 }}>
+                {block.items.map((spans, bullet) => (
+                  <View key={bullet} style={{ flexDirection: "row", gap: 8 }}>
+                    <View
+                      style={{
+                        width: 4,
+                        height: 4,
+                        borderRadius: 2,
+                        marginTop: 8,
+                        marginLeft: 2,
+                        backgroundColor: c["fg-subtle"],
+                      }}
+                    />
+                    <Text style={[text, { flex: 1 }]}>
+                      <Spans spans={spans} />
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            ),
+          )}
+        </View>
+      ) : null}
+      {item.facts.length > 0 ? (
+        <View style={{ marginTop: 8, gap: 2 }}>
+          {item.facts.map((fact) => (
+            <View key={fact.label} style={{ flexDirection: "row", gap: 16 }}>
+              <Text
+                numberOfLines={1}
+                style={{
+                  ...fontStyle(theme),
+                  width: 96,
+                  fontSize: 13,
+                  lineHeight: 20,
+                  color: c["fg-subtle"],
+                }}
+              >
+                {fact.label}
+              </Text>
+              <Text
+                numberOfLines={1}
+                style={{
+                  ...fontStyle(theme),
+                  flex: 1,
+                  fontSize: 13,
+                  lineHeight: 20,
+                  color: c.fg,
+                  fontVariant: ["tabular-nums"],
+                }}
+              >
+                {fact.value}
+              </Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
+    </>
+  );
+}
+
+/** How far a row travels before letting go acts. */
+const SWIPE_COMMIT = 96;
+
+/**
+ * A row that swipes like Mail: toward the left to dismiss, toward the right to
+ * snooze. Past the commit point the action's color fills and the host's haptic
+ * fires; letting go there acts, anywhere else springs back.
+ */
+function SwipeRow(props: {
+  children: ReactNode;
+  leading: { label: string; icon: NativeIconName; color: string; onCommit: () => void };
+  trailing: { label: string; icon: NativeIconName; color: string; onCommit: () => void };
+  onThreshold?: (() => void) | undefined;
+}) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const x = useRef(new Animated.Value(0)).current;
+  const width = useRef(0);
+  const armed = useRef<"leading" | "trailing" | null>(null);
+  const [side, setSide] = useState<"leading" | "trailing" | null>(null);
+  const latest = useRef(props);
+  latest.current = props;
+  const responder = useMemo(
+    () =>
+      PanResponder.create({
+        // Claim clearly horizontal drags only, so the list still scrolls.
+        onMoveShouldSetPanResponderCapture: (_event, gesture) =>
+          Math.abs(gesture.dx) > 12 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.6,
+        onPanResponderTerminationRequest: () => false,
+        onPanResponderGrant: () => x.stopAnimation(),
+        onPanResponderMove: (_event, gesture) => {
+          x.setValue(gesture.dx);
+          setSide(gesture.dx > 0 ? "leading" : gesture.dx < 0 ? "trailing" : null);
+          const next =
+            gesture.dx > SWIPE_COMMIT ? "leading" : gesture.dx < -SWIPE_COMMIT ? "trailing" : null;
+          if (next !== armed.current) {
+            armed.current = next;
+            if (next) latest.current.onThreshold?.();
+          }
+        },
+        onPanResponderRelease: () => {
+          const commit = armed.current;
+          armed.current = null;
+          if (!commit) {
+            Animated.spring(x, { toValue: 0, useNativeDriver: true, bounciness: 0 }).start(() =>
+              setSide(null),
+            );
+            return;
+          }
+          const action = commit === "leading" ? latest.current.leading : latest.current.trailing;
+          if (commit === "trailing") {
+            // Dismissing slides the row away before it leaves the list.
+            Animated.timing(x, {
+              toValue: -(width.current || 400),
+              duration: 160,
+              useNativeDriver: true,
+            }).start(() => {
+              action.onCommit();
+              // Back in place in case the row stays (the dismissal failed).
+              setTimeout(() => {
+                x.setValue(0);
+                setSide(null);
+              }, 800);
+            });
+            return;
+          }
+          Animated.spring(x, { toValue: 0, useNativeDriver: true, bounciness: 0 }).start(() =>
+            setSide(null),
+          );
+          action.onCommit();
+        },
+        onPanResponderTerminate: () => {
+          armed.current = null;
+          Animated.spring(x, { toValue: 0, useNativeDriver: true, bounciness: 0 }).start(() =>
+            setSide(null),
+          );
+        },
+      }),
+    [x],
+  );
+  const action = side === "leading" ? props.leading : side === "trailing" ? props.trailing : null;
+  const fill = x.interpolate({
+    inputRange: [-SWIPE_COMMIT - 1, -SWIPE_COMMIT, 0, SWIPE_COMMIT, SWIPE_COMMIT + 1],
+    outputRange: [1, 0.55, 0.55, 0.55, 1],
+    extrapolate: "clamp",
+  });
+  return (
+    <View
+      onLayout={(event: LayoutChangeEvent) => {
+        width.current = event.nativeEvent.layout.width;
+      }}
+      style={{ overflow: "hidden", borderRadius: theme.radius.md }}
+    >
+      {action ? (
+        <Animated.View
+          style={{
+            position: "absolute",
+            top: 0,
+            bottom: 0,
+            left: 0,
+            right: 0,
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: side === "leading" ? "flex-start" : "flex-end",
+            paddingHorizontal: 20,
+            gap: 8,
+            backgroundColor: action.color,
+            opacity: fill,
+          }}
+        >
+          <Icon name={action.icon} size={18} color={c["accent-fg"]} />
+          <Text style={{ ...fontStyle(theme, 600), fontSize: 14, color: c["accent-fg"] }}>
+            {action.label}
+          </Text>
+        </Animated.View>
+      ) : null}
+      <Animated.View
+        {...responder.panHandlers}
+        style={{ transform: [{ translateX: x }], backgroundColor: c.bg }}
+      >
+        {props.children}
+      </Animated.View>
+    </View>
+  );
+}
+
 function relative(iso: string): string {
   const seconds = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
   if (seconds < 60) return "Just now";
@@ -118,6 +379,8 @@ export interface NativeInboxListProps {
   workspaceNames?: ReadonlyMap<string, string> | undefined;
   /** A short confirmation after an action ("Approved"). */
   onNotice?: ((message: string) => void) | undefined;
+  /** A light haptic when a swipe passes the point where letting go acts. */
+  onSwipeThreshold?: (() => void) | undefined;
 }
 
 /** The Inbox's sections and rows; the host supplies the screen around it. */
@@ -127,6 +390,7 @@ export function NativeInboxList({
   onOpenSession,
   workspaceNames,
   onNotice,
+  onSwipeThreshold,
 }: NativeInboxListProps) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
@@ -213,6 +477,45 @@ export function NativeInboxList({
       await client.updateInboxItem(item.id, { dismissed: true });
     });
 
+  const showSheet = (
+    title: string,
+    actions: Array<{ label: string; run: () => void; destructive?: boolean }>,
+  ) => {
+    if (Platform.OS === "ios") {
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          title,
+          options: [...actions.map((action) => action.label), "Cancel"],
+          cancelButtonIndex: actions.length,
+          destructiveButtonIndex: actions.findIndex((action) => action.destructive),
+        },
+        (index) => actions[index]?.run(),
+      );
+      return;
+    }
+    Alert.alert(title, undefined, [
+      ...actions.map((action) => ({
+        text: action.label,
+        style: action.destructive ? ("destructive" as const) : ("default" as const),
+        onPress: action.run,
+      })),
+      { text: "Cancel", style: "cancel" as const },
+    ]);
+  };
+
+  // A swipe toward the right snoozes: pick how long, or bring a snoozed one back.
+  const swipeSnooze = (item: InboxItem) => {
+    if (snoozedNow(item, Date.now())) {
+      snooze(item, null);
+      onNotice?.("Back in your inbox");
+      return;
+    }
+    showSheet("Snooze", [
+      { label: "For 1 hour", run: () => snooze(item, new Date(Date.now() + 3_600_000)) },
+      { label: "Until tomorrow morning", run: () => snooze(item, tomorrowMorning()) },
+    ]);
+  };
+
   const openMenu = (item: InboxItem) => {
     const isSnoozed = snoozedNow(item, Date.now());
     const actions: Array<{ label: string; run: () => void; destructive?: boolean }> = [
@@ -232,31 +535,15 @@ export function NativeInboxList({
         destructive: true,
       },
     ];
-    if (Platform.OS === "ios") {
-      ActionSheetIOS.showActionSheetWithOptions(
-        {
-          title: item.title,
-          options: [...actions.map((action) => action.label), "Cancel"],
-          cancelButtonIndex: actions.length,
-          destructiveButtonIndex: actions.findIndex((action) => action.destructive),
-        },
-        (index) => actions[index]?.run(),
-      );
-      return;
-    }
-    Alert.alert(item.title, undefined, [
-      ...actions.map((action) => ({
-        text: action.label,
-        style: action.destructive ? ("destructive" as const) : ("default" as const),
-        onPress: action.run,
-      })),
-      { text: "Cancel", style: "cancel" as const },
-    ]);
+    showSheet(item.title, actions);
   };
 
   // Where it comes from; the time sits apart so a long session title never hides it.
   const meta = (item: InboxItem): string => {
     const parts: string[] = [];
+    if (item.kind === "notification" && item.urgency === "time_sensitive") {
+      parts.push("Time-sensitive");
+    }
     if (item.kind === "question") parts.push("Question");
     if (item.kind === "goal_paused") parts.push("Goal paused");
     if (item.kind === "approval" && !item.body) parts.push("Approval");
@@ -302,6 +589,16 @@ export function NativeInboxList({
         <Button label="Answer" disabled={Boolean(pending)} onPress={() => onOpenSession(item)} />
       );
     }
+    if (item.kind === "notification" && item.link) {
+      const url = item.link.url;
+      return (
+        <Button
+          label={item.link.label}
+          icon="arrow-up-right"
+          onPress={() => void Linking.openURL(url)}
+        />
+      );
+    }
     return null;
   };
 
@@ -314,136 +611,163 @@ export function NativeInboxList({
         {index > 0 ? (
           <View style={{ height: 1, marginLeft: 48, backgroundColor: c.border }} />
         ) : null}
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`${item.title}. ${meta(item)}, ${when(item)}`}
-          accessibilityHint="Opens the session"
-          onPress={() => onOpenSession(item)}
-          onLongPress={() => openMenu(item)}
-          style={({ pressed }) => ({
-            flexDirection: "row",
-            gap: 12,
-            paddingVertical: 14,
-            paddingHorizontal: 4,
-            borderRadius: theme.radius.md,
-            backgroundColor: pressed ? c.hover : "transparent",
-          })}
+        <SwipeRow
+          onThreshold={onSwipeThreshold}
+          leading={{
+            label: snoozedNow(item, now) ? "Unsnooze" : "Snooze",
+            icon: "alarm-clock",
+            color: c["status-waiting"],
+            onCommit: () => swipeSnooze(item),
+          }}
+          trailing={{
+            label: item.kind === "notification" ? "Dismiss" : "Remove",
+            icon: "x",
+            color: c["danger-fill"],
+            onCommit: () => dismiss(item),
+          }}
         >
-          <View style={{ width: 32, height: 32, marginTop: 1 }}>
-            <View
-              style={{
-                width: 32,
-                height: 32,
-                borderRadius: 10,
-                alignItems: "center",
-                justifyContent: "center",
-                borderWidth: 1,
-                borderColor: c.border,
-                backgroundColor: c["surface-2"],
-              }}
-            >
-              <Icon name={KIND_ICON[item.kind]} size={16} color={c["fg-muted"]} />
-            </View>
-            {unread ? (
-              <View
-                accessibilityLabel="Unread"
-                style={{
-                  position: "absolute",
-                  top: -3,
-                  right: -3,
-                  width: 10,
-                  height: 10,
-                  borderRadius: 5,
-                  borderWidth: 2,
-                  borderColor: c.bg,
-                  backgroundColor: c.accent,
-                }}
-              />
-            ) : null}
-          </View>
-          <View style={{ flex: 1, minWidth: 0 }}>
-            <Text
-              numberOfLines={2}
-              style={{ ...fontStyle(theme, 500), fontSize: 15, lineHeight: 20, color: c.fg }}
-            >
-              {item.title}
-            </Text>
-            {item.body && item.kind === "approval" ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`${item.title}. ${meta(item)}, ${when(item)}`}
+            accessibilityHint="Opens the session"
+            accessibilityActions={[
+              { name: "snooze", label: snoozedNow(item, now) ? "Unsnooze" : "Snooze" },
+              {
+                name: "dismiss",
+                label: item.kind === "notification" ? "Dismiss" : "Remove from inbox",
+              },
+            ]}
+            onAccessibilityAction={(event) => {
+              if (event.nativeEvent.actionName === "snooze") swipeSnooze(item);
+              if (event.nativeEvent.actionName === "dismiss") dismiss(item);
+            }}
+            onPress={() => onOpenSession(item)}
+            onLongPress={() => openMenu(item)}
+            style={({ pressed }) => ({
+              flexDirection: "row",
+              gap: 12,
+              paddingVertical: 14,
+              paddingHorizontal: 4,
+              borderRadius: theme.radius.md,
+              backgroundColor: pressed ? c.hover : "transparent",
+            })}
+          >
+            <View style={{ width: 32, height: 32, marginTop: 1 }}>
               <View
                 style={{
-                  alignSelf: "flex-start",
-                  maxWidth: "100%",
-                  marginTop: 4,
-                  paddingHorizontal: 6,
-                  paddingVertical: 2,
-                  borderRadius: 6,
+                  width: 32,
+                  height: 32,
+                  borderRadius: 10,
+                  alignItems: "center",
+                  justifyContent: "center",
+                  borderWidth: 1,
+                  borderColor: c.border,
                   backgroundColor: c["surface-2"],
                 }}
               >
+                <Icon name={kindIcon(item)} size={16} color={c["fg-muted"]} />
+              </View>
+              {unread ? (
+                <View
+                  accessibilityLabel="Unread"
+                  style={{
+                    position: "absolute",
+                    top: -3,
+                    right: -3,
+                    width: 10,
+                    height: 10,
+                    borderRadius: 5,
+                    borderWidth: 2,
+                    borderColor: c.bg,
+                    backgroundColor: c.accent,
+                  }}
+                />
+              ) : null}
+            </View>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text
+                numberOfLines={2}
+                style={{ ...fontStyle(theme, 500), fontSize: 15, lineHeight: 20, color: c.fg }}
+              >
+                {item.title}
+              </Text>
+              {item.body && item.kind === "approval" ? (
+                <View
+                  style={{
+                    alignSelf: "flex-start",
+                    maxWidth: "100%",
+                    marginTop: 4,
+                    paddingHorizontal: 6,
+                    paddingVertical: 2,
+                    borderRadius: 6,
+                    backgroundColor: c["surface-2"],
+                  }}
+                >
+                  <Text
+                    numberOfLines={1}
+                    style={{
+                      fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
+                      fontSize: 12,
+                      color: c.fg,
+                    }}
+                  >
+                    {item.body}
+                  </Text>
+                </View>
+              ) : item.kind === "notification" ? (
+                <NotificationContent item={item} />
+              ) : null}
+              <View style={{ flexDirection: "row", marginTop: 2 }}>
                 <Text
                   numberOfLines={1}
                   style={{
-                    fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
+                    ...fontStyle(theme),
+                    flexShrink: 1,
                     fontSize: 12,
-                    color: c.fg,
+                    lineHeight: 18,
+                    color: c["fg-subtle"],
                   }}
                 >
-                  {item.body}
+                  {meta(item)}
+                </Text>
+                <Text
+                  numberOfLines={1}
+                  style={{
+                    ...fontStyle(theme),
+                    fontSize: 12,
+                    lineHeight: 18,
+                    color: c["fg-subtle"],
+                  }}
+                >
+                  {` · ${when(item)}`}
                 </Text>
               </View>
-            ) : item.body && item.kind === "notification" ? (
-              <Text
-                numberOfLines={2}
-                style={{ ...fontStyle(theme), fontSize: 14, lineHeight: 20, color: c["fg-muted"] }}
-              >
-                {item.body}
-              </Text>
-            ) : null}
-            <View style={{ flexDirection: "row", marginTop: 2 }}>
-              <Text
-                numberOfLines={1}
-                style={{
-                  ...fontStyle(theme),
-                  flexShrink: 1,
-                  fontSize: 12,
-                  lineHeight: 18,
-                  color: c["fg-subtle"],
-                }}
-              >
-                {meta(item)}
-              </Text>
-              <Text
-                numberOfLines={1}
-                style={{ ...fontStyle(theme), fontSize: 12, lineHeight: 18, color: c["fg-subtle"] }}
-              >
-                {` · ${when(item)}`}
-              </Text>
+              {rowActions ? (
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
+                  {rowActions}
+                </View>
+              ) : null}
             </View>
-            {rowActions ? (
-              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
-                {rowActions}
-              </View>
-            ) : null}
-          </View>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`More actions for ${item.title}`}
-            hitSlop={8}
-            onPress={() => openMenu(item)}
-            style={({ pressed }) => ({
-              width: 32,
-              height: 32,
-              marginTop: -4,
-              marginRight: -4,
-              alignItems: "center",
-              justifyContent: "center",
-              borderRadius: 10,
-              backgroundColor: pressed ? c["surface-3"] : "transparent",
-            })}
-          >
-            <Icon name="ellipsis" size={16} color={c["fg-subtle"]} />
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`More actions for ${item.title}`}
+              hitSlop={8}
+              onPress={() => openMenu(item)}
+              style={({ pressed }) => ({
+                width: 32,
+                height: 32,
+                marginTop: -4,
+                marginRight: -4,
+                alignItems: "center",
+                justifyContent: "center",
+                borderRadius: 10,
+                backgroundColor: pressed ? c["surface-3"] : "transparent",
+              })}
+            >
+              <Icon name="ellipsis" size={16} color={c["fg-subtle"]} />
+            </Pressable>
           </Pressable>
-        </Pressable>
+        </SwipeRow>
       </View>
     );
   };

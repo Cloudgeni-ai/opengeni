@@ -9,6 +9,9 @@
     "ios": {
       "bundleIdentifier": "ai.opengeni.app",
       "supportsTablet": true,
+      "entitlements": {
+        "com.apple.developer.usernotifications.time-sensitive": true
+      },
       "infoPlist": {
         "UIApplicationShortcutItems": [
           {

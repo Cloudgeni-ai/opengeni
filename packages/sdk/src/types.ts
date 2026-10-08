@@ -5447,7 +5447,19 @@ export type InboxItem = {
   /** The question or approval id, or the notification key. */
   sourceKey: string;
   title: string;
+  /** A notification's subtitle; empty otherwise. */
+  subtitle: string;
+  /** Plain text, or for a notification its message (paragraphs, "- " bullets, **bold**, `code`, links). */
   body: string;
+  /** A notification's label/value facts (at most four); empty otherwise. */
+  facts: InboxItemFact[];
+  /** A notification's link outside the session, or null. */
+  link: InboxItemLink | null;
+  /**
+   * The session event that opened or last updated the item: open the session
+   * at this point. Null for items from before this was recorded.
+   */
+  eventSequence: number | null;
   /** One-tap answers for a single short choice question; empty otherwise. */
   choices: InboxItemChoice[];
   urgency: "normal" | "time_sensitive";
@@ -5459,6 +5471,12 @@ export type InboxItem = {
   updatedAt: string;
   resolvedAt: string | null;
 };
+
+/** A short label and value an agent attached to a notification. */
+export type InboxItemFact = { label: string; value: string };
+
+/** A place outside the session an agent's notification points to. */
+export type InboxItemLink = { url: string; label: string };
 
 /** An option of the question behind an inbox item, answerable in one tap. */
 export type InboxItemChoice = { id: string; label: string };

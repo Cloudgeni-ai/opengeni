@@ -1803,6 +1803,19 @@ function SessionChatPane(props: {
       }),
     [context.client],
   );
+  // Opened on a moment (an inbox item, a notification): when it is older than
+  // the loaded tail, load the window around it; the timeline then lands on it.
+  const momentSequence = props.searchTarget.find ? undefined : props.searchTarget.at;
+  const loadedMoment = useRef<number | null>(null);
+  const { onJumpToSequence, initialLoading: historyLoading } = props;
+  const firstLoadedSequence = props.events[0]?.sequence;
+  useEffect(() => {
+    if (!momentSequence || historyLoading || loadedMoment.current === momentSequence) return;
+    loadedMoment.current = momentSequence;
+    if (firstLoadedSequence !== undefined && firstLoadedSequence > momentSequence) {
+      void onJumpToSequence(momentSequence);
+    }
+  }, [momentSequence, historyLoading, firstLoadedSequence, onJumpToSequence]);
   const [findOpen, setFindOpen] = useState(!!props.searchTarget.find);
   const [findMounted, setFindMounted] = useState(!!props.searchTarget.find);
   const [findFocusRevision, setFindFocusRevision] = useState(0);
@@ -3158,6 +3171,7 @@ function SessionChatPane(props: {
                       className="h-full"
                       items={timelineWithStartup}
                       searchTarget={activeSearchTarget}
+                      focusSequence={momentSequence}
                       events={props.events}
                       status={props.session.status}
                       computeLabel={computeLabel}

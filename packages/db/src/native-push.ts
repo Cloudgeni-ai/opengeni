@@ -134,6 +134,12 @@ export type ClaimedNativePushDelivery = {
     subjectId: string;
     title?: string;
     body?: string;
+    /** An agent notification's subtitle, facts and urgency (0664). */
+    subtitle?: string;
+    facts?: Array<{ label: string; value: string }>;
+    urgency?: "normal" | "time_sensitive";
+    /** The session event the push is about, so a tap lands on it (0664). */
+    sequence?: number;
   };
   attempts: number;
 };

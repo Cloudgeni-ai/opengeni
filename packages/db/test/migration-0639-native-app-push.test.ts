@@ -142,7 +142,8 @@ describe("0639 native app push", () => {
       from pg_proc procedure
       join pg_namespace namespace on namespace.oid = procedure.pronamespace
       where namespace.nspname = 'opengeni_private' and procedure.proname like '%native_push%'`;
-    expect(rows.length).toBe(8);
+    // Eight from 0639, plus enqueue_native_push_v2 (0664).
+    expect(rows.length).toBe(9);
     for (const row of rows) {
       expect(row.securityDefiner).toBe(true);
       expect(row.publicExecute).toBe(false);

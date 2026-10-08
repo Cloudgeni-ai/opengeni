@@ -110,3 +110,10 @@ export {
   questionNavTarget,
 } from "./timeline/question-nav-model";
 export type { QuestionNavPrompt } from "./timeline/question-nav-model";
+export { timelineGroupIndexAtSequence, timelineGroupSequences } from "./timeline/focus-sequence";
+export {
+  notificationPlainText,
+  parseNotificationInline,
+  parseNotificationText,
+} from "./notification-text";
+export type { NotificationBlock, NotificationSpan } from "./notification-text";
