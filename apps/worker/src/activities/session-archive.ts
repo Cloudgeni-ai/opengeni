@@ -295,29 +295,40 @@ export function createSessionArchiveActivities(
       return result;
     }
     const idleSeconds = settings.sessionArchiveIdleDays * 24 * 60 * 60;
-    const candidates = await listSessionArchiveCandidates(db, {
-      idleSeconds,
-      limit: candidatesPerPass,
-    });
-    for (const scope of candidates) {
+    // Keep taking batches until the budget ends or nothing new qualifies, so a
+    // large backlog (for example right after enabling) drains steadily. A
+    // session that failed or was skipped is not retried in the same pass.
+    const attempted = new Set<string>();
+    for (;;) {
       if (now() >= deadline) break;
-      try {
-        const outcome = await archiveOne(db, objectStorage, scope, idleSeconds);
-        if (outcome === "skipped") {
-          result.skipped += 1;
-          continue;
+      const candidates = (
+        await listSessionArchiveCandidates(db, {
+          idleSeconds,
+          limit: candidatesPerPass + attempted.size,
+        })
+      ).filter((candidate) => !attempted.has(candidate.sessionId));
+      if (candidates.length === 0) break;
+      for (const scope of candidates.slice(0, candidatesPerPass)) {
+        if (now() >= deadline) break;
+        attempted.add(scope.sessionId);
+        try {
+          const outcome = await archiveOne(db, objectStorage, scope, idleSeconds);
+          if (outcome === "skipped") {
+            result.skipped += 1;
+            continue;
+          }
+          result.archived += 1;
+          result.purgedRows += await purgeUntilDone(db, scope, deadline);
+        } catch (error) {
+          result.failed += 1;
+          observability.warn("session archive failed; the session stays live", {
+            workspaceId: scope.workspaceId,
+            sessionId: scope.sessionId,
+            errorName: error instanceof Error ? error.name : "unknown",
+            // Content-free classification only: database errors can echo row values.
+            errorCode: String((error as { code?: unknown } | null)?.code ?? "unknown").slice(0, 64),
+          });
         }
-        result.archived += 1;
-        result.purgedRows += await purgeUntilDone(db, scope, deadline);
-      } catch (error) {
-        result.failed += 1;
-        observability.warn("session archive failed; the session stays live", {
-          workspaceId: scope.workspaceId,
-          sessionId: scope.sessionId,
-          errorName: error instanceof Error ? error.name : "unknown",
-          // Content-free classification only: database errors can echo row values.
-          errorCode: String((error as { code?: unknown } | null)?.code ?? "unknown").slice(0, 64),
-        });
       }
     }
     if (result.archived + result.failed + result.abandoned + result.objectsDeleted > 0) {

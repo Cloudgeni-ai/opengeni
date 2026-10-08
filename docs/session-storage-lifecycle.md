@@ -77,15 +77,22 @@ Off by default. Enable it per deployment:
 | `OPENGENI_SESSION_ARCHIVE_IDLE_DAYS` | `sessionArchive.idleDays` | `30` |
 
 The archive requires the deployment's object storage. The same maintenance
-Schedule runs it after content compaction.
+Schedule runs it after content compaction; each pass keeps archiving batches
+of eligible sessions until its time budget ends or none remain, so a backlog
+drains steadily after the archive is first enabled.
 
 ### What qualifies
 
 Each session is judged on its own, not by its tree. A session qualifies when
 all of these hold for the idle period:
 
-- no turn was created or updated, the session row did not change, and the
-  session is `idle`, `failed` or `cancelled` with no active turn;
+- it is older than the idle period, no turn was created or updated in it, and
+  the session is `idle`, `failed` or `cancelled` with no active turn. Activity
+  is measured by turns, because every message, steer, child result or
+  scheduled wake creates or advances one. The session row's `updated_at` and
+  bookkeeping events (visibility changes, machine link notices) are not
+  activity: bulk maintenance and infrastructure appends touch them on idle
+  sessions;
 - it is not marked keep-live, is not an imported archive, and has no session
   wait;
 - it has no pending human input request, active goal, pending machine input or
