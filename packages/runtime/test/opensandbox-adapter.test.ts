@@ -452,6 +452,7 @@ function wireEvent(event: Record<string, unknown>): string {
 async function wireSession(
   body: string | Uint8Array | ((command: string) => ReadableStream),
   contentType = "text/event-stream",
+  transport: { method?: string; useRequest?: boolean } = {},
 ) {
   const starts: string[] = [];
   const statusIds: string[] = [];
@@ -486,13 +487,33 @@ async function wireSession(
   });
   const fake = new FakeOpenSandbox();
   const originalStack = fake.adapterFactory.createExecdStack.bind(fake.adapterFactory);
-  fake.adapterFactory.createExecdStack = (options) => ({
-    ...originalStack(options),
-    commands: new DefaultAdapterFactory().createExecdStack({
-      ...options,
-      execdBaseUrl: server.url.origin,
-    }).commands,
-  });
+  fake.adapterFactory.createExecdStack = (options) => {
+    const commandFetch = options.connectionConfig.sseFetch;
+    const methodFetch = ((input, init) => {
+      const requestInit = { ...init, method: transport.method };
+      return transport.useRequest
+        ? commandFetch(new Request(input, requestInit))
+        : commandFetch(input, requestInit);
+    }) as typeof fetch;
+    return {
+      ...originalStack(options),
+      commands: new DefaultAdapterFactory().createExecdStack({
+        ...options,
+        execdBaseUrl: server.url.origin,
+        ...(transport.method
+          ? {
+              connectionConfig: new Proxy(options.connectionConfig, {
+                get(target, property) {
+                  return property === "sseFetch"
+                    ? methodFetch
+                    : Reflect.get(target, property, target);
+                },
+              }),
+            }
+          : {}),
+      }).commands,
+    };
+  };
   const session = await createClient(fake).create();
   return {
     session,
@@ -517,6 +538,186 @@ async function wireSession(
 }
 
 describe("OpenSandbox default wire proof", () => {
+  test.each([
+    ["array exit", { ename: "CommandExecutionError", evalue: ["0"], traceback: [] }],
+    ["array name", { ename: ["CommandExecutionError"], evalue: "0", traceback: [] }],
+    ["object trace", { ename: "CommandExecutionError", evalue: "0", traceback: [{}] }],
+    ["numeric exit", { ename: "CommandExecutionError", evalue: 0, traceback: [] }],
+    ["conflicting exit aliases", { ename: "CommandExecutionError", evalue: "0", value: "7" }],
+    ["conflicting name aliases", { ename: "CommandExecutionError", name: "Other", evalue: "0" }],
+    ["shadowed malformed alias", { ename: "CommandExecutionError", evalue: "0", value: [] }],
+    ["null primary alias", { ename: "CommandExecutionError", evalue: null, value: "0" }],
+  ] as const)(
+    "malformed error DTO %s cannot be coerced into terminal success",
+    async (_label, error) => {
+      const wire = await wireSession(
+        wireEvent({ type: "init", text: "exec-original" }) +
+          wireEvent({ type: "stdout", text: "prefix" }) +
+          wireEvent({ type: "error", error }) +
+          wireEvent({ type: "execution_complete", execution_time: 1 }),
+      );
+      try {
+        const initial = await runWithToolCallCorrelation("wire-original", () =>
+          wire.session.exec({ cmd: "original once", yieldTimeMs: 1_000 }),
+        );
+        const page = synchronousCommandPage(wire.session, initial);
+        expect(page).toMatchObject({
+          stdout: "prefix",
+          sessionId: 1,
+          exitCode: null,
+          collectionUnavailable: true,
+        });
+        await expect(
+          observeSynchronousCommand(page, async () => {
+            throw new Error("must not poll unknown bytes");
+          }),
+        ).rejects.toMatchObject({ code: "synchronous_command_outcome_unknown" });
+        expect(await wire.session.cancelExecCommand("wire-original:0")).toBe(true);
+        expect(wire.interrupted).toEqual(["exec-original"]);
+        expect(wire.session.hasRetainedProcess(1)).toBe(true);
+        const running = await wire.session.writeStdinForProcessControl({ sessionId: 1, chars: "" });
+        const incomplete = synchronousCommandPage(wire.session, running, 1);
+        expect(incomplete).toMatchObject({
+          sessionId: 1,
+          exitCode: null,
+          collectionUnavailable: true,
+        });
+        await wire.session.acknowledgeCommandOutput(running);
+        expect(wire.session.getSynchronousCommandOutput(running)).toBe(incomplete);
+        wire.statuses.set("exec-original", { id: "exec-original", running: false, exit_code: 7 });
+        const terminal = await wire.session.writeStdinForProcessControl({
+          sessionId: 1,
+          chars: "",
+        });
+        expect(synchronousCommandPage(wire.session, terminal, 1)).toMatchObject({
+          exitCode: 7,
+          collectionUnavailable: true,
+        });
+        expect(wire.session.hasRetainedProcess(1)).toBe(false);
+        expect(wire.statusIds).toEqual(["exec-original", "exec-original"]);
+        expect(wire.starts).toEqual(["original once"]);
+      } finally {
+        await wire.close();
+      }
+    },
+  );
+
+  test.each([
+    ["array envelope", []],
+    ["empty envelope", {}],
+    ["unknown-only envelope", { other: "7" }],
+    ["array primary value", { ename: "CommandExecutionError", evalue: ["0"] }],
+    ["nested primary value", { evalue: { value: "0" } }],
+    ["numeric primary value", { evalue: 0 }],
+    ["boolean primary value", { evalue: false }],
+    ["null primary value", { evalue: null }],
+    ["array primary name", { ename: ["CommandExecutionError"], evalue: "0" }],
+    ["nested primary name", { ename: { name: "CommandExecutionError" }, evalue: "0" }],
+    ["numeric name alias", { name: 7, value: "0" }],
+    ["array value alias", { name: "CommandExecutionError", value: ["0"] }],
+    ["nested value alias", { name: "CommandExecutionError", value: { value: "0" } }],
+    ["string traceback", { evalue: "0", traceback: "trace" }],
+    ["object traceback", { evalue: "0", traceback: {} }],
+    ["null traceback", { evalue: "0", traceback: null }],
+    ["numeric traceback entry", { evalue: "0", traceback: [0] }],
+    ["object traceback entry", { evalue: "0", traceback: [{}] }],
+    ["array traceback entry", { evalue: "0", traceback: [[]] }],
+    ["null traceback entry", { evalue: "0", traceback: [null] }],
+    ["conflicting value aliases", { evalue: "0", value: "7" }],
+    ["conflicting name aliases", { ename: "First", name: "Second", evalue: "0" }],
+    ["malformed unused alias", { evalue: "0", value: {} }],
+  ] as const)("public SDK error DTO %s is rejected before coercion", async (_label, error) => {
+    const wire = await wireSession(
+      wireEvent({ type: "init", text: "exec-original" }) +
+        wireEvent({ type: "error", error }) +
+        wireEvent({ type: "execution_complete", execution_time: 1 }),
+    );
+    try {
+      const events = [];
+      const read = async () => {
+        for await (const event of wire.commands().runStream("original once")) events.push(event);
+      };
+      await expect(read()).rejects.toBeInstanceOf(OpenSandboxCommandStreamError);
+      expect(events).toEqual([expect.objectContaining({ type: "init", text: "exec-original" })]);
+      expect(wire.starts).toEqual(["original once"]);
+    } finally {
+      await wire.close();
+    }
+  });
+
+  test.each([
+    ["wire names", { ename: "CommandExecutionError", evalue: "7", traceback: ["first", "second"] }],
+    ["SDK aliases", { name: "CommandExecutionError", value: "7", traceback: [] }],
+    ["mixed value alias", { ename: "CommandExecutionError", value: "7" }],
+    ["mixed name alias", { name: "CommandExecutionError", evalue: "7" }],
+    [
+      "agreeing aliases",
+      { ename: "CommandExecutionError", name: "CommandExecutionError", evalue: "7", value: "7" },
+    ],
+    ["omitted name and traceback", { evalue: "7" }],
+    ["omitted primary name and traceback", { value: "7" }],
+  ] as const)("documented command error %s preserves nonzero exit", async (_label, error) => {
+    const wire = await wireSession(
+      wireEvent({ type: "init", text: "exec-original" }) +
+        wireEvent({ type: "stdout", text: "prefix" }) +
+        wireEvent({ type: "error", error }) +
+        wireEvent({ type: "execution_complete", execution_time: 1 }),
+    );
+    try {
+      expect(
+        await executeSynchronousCommand(wire.session, { cmd: "original once", maxOutputTokens: 1 }),
+      ).toMatchObject({ stdout: "prefix", stderr: "", exitCode: 7 });
+      expect(wire.starts).toEqual(["original once"]);
+    } finally {
+      await wire.close();
+    }
+  });
+
+  test.each([
+    { ename: "TypeError" },
+    { name: "TypeError" },
+    { traceback: ["a documented trace"] },
+    { evalue: "name is not defined" },
+    { ename: "", name: "", evalue: "", value: "", traceback: [] },
+  ])("optional documented nonnumeric error %j remains a valid wire event", async (error) => {
+    const wire = await wireSession(
+      wireEvent({ type: "init", text: "exec-original" }) +
+        wireEvent({ type: "error", error }) +
+        wireEvent({ type: "execution_complete", execution_time: 1 }),
+    );
+    try {
+      const events = [];
+      for await (const event of wire.commands().runStream("original once")) events.push(event);
+      expect(events[1]).toMatchObject({ type: "error", error });
+      expect(wire.starts).toEqual(["original once"]);
+    } finally {
+      await wire.close();
+    }
+  });
+
+  test.each([
+    { method: "post", useRequest: false },
+    { method: "POST", useRequest: false },
+    { method: "post", useRequest: true },
+  ])("Fetch-normalized POST %j cannot bypass multiline command proof", async (transport) => {
+    const wire = await wireSession(
+      wireEvent({ type: "init", text: "exec-original" }) +
+        'data: {"type":"stdout",\ndata: "text":"first\\nsecond"}\n\n' +
+        'data: {"type":"error",\ndata: "error":{"ename":"CommandExecutionError","evalue":"7","traceback":[]}}\n\n' +
+        wireEvent({ type: "execution_complete", execution_time: 1 }),
+      "text/event-stream",
+      transport,
+    );
+    try {
+      expect(
+        await executeSynchronousCommand(wire.session, { cmd: "original once", maxOutputTokens: 1 }),
+      ).toMatchObject({ stdout: "first\nsecond", stderr: "", exitCode: 7 });
+      expect(wire.starts).toEqual(["original once"]);
+    } finally {
+      await wire.close();
+    }
+  });
+
   test("legal multiline SSE preserves output and a nonzero execution error", async () => {
     const wire = await wireSession(
       wireEvent({ type: "init", text: "exec-original" }) +

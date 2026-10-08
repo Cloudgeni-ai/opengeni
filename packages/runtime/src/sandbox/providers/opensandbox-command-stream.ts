@@ -47,6 +47,38 @@ async function* wireLines(reader: ReadableStreamDefaultReader<Uint8Array>) {
   if (parts.length) yield { line: decode(), terminated: false };
 }
 
+/** The SDK coerces these fields with String(), which can turn an array value
+ * into a successful exit code. Validate the wire DTO before that conversion.
+ * Fields are optional in the provider schema; supplied aliases must agree. */
+function assertCommandError(value: unknown): void {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("invalid command error envelope");
+  const error = value as Record<string, unknown>;
+  let recognized = false;
+  for (const [primary, alias] of [
+    ["ename", "name"],
+    ["evalue", "value"],
+  ] as const) {
+    for (const field of [primary, alias]) {
+      if (error[field] === undefined) continue;
+      recognized = true;
+      if (typeof error[field] !== "string") throw new Error("invalid command error field");
+    }
+    if (
+      error[primary] !== undefined &&
+      error[alias] !== undefined &&
+      error[primary] !== error[alias]
+    )
+      throw new Error("contradictory command error aliases");
+  }
+  if (error.traceback !== undefined) {
+    recognized = true;
+    if (!Array.isArray(error.traceback) || error.traceback.some((line) => typeof line !== "string"))
+      throw new Error("invalid command error traceback");
+  }
+  if (!recognized) throw new Error("empty command error DTO");
+}
+
 async function* commandFrames(response: Response): AsyncGenerator<Uint8Array> {
   if (!response.body) throw new OpenSandboxCommandStreamError("missing response body");
   const reader = response.body.getReader();
@@ -76,8 +108,7 @@ async function* commandFrames(response: Response): AsyncGenerator<Uint8Array> {
     }
     if ((event.type === "stdout" || event.type === "stderr") && typeof event.text !== "string")
       throw new Error("invalid command output");
-    if (event.type === "error" && (!event.error || typeof event.error !== "object"))
-      throw new Error("invalid command error");
+    if (event.type === "error") assertCommandError(event.error);
     if (event.type === "execution_complete") {
       if (executionId === null) throw new Error("completion without execution identity");
       completed = true;
@@ -129,7 +160,8 @@ function strictCommandFetch(original: typeof fetch): typeof fetch {
     const url = input instanceof Request ? input.url : String(input);
     if (
       !response.ok ||
-      (init?.method ?? (input instanceof Request ? input.method : "GET")) !== "POST" ||
+      (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase() !==
+        "POST" ||
       !new URL(url).pathname.endsWith("/command")
     )
       return response;
