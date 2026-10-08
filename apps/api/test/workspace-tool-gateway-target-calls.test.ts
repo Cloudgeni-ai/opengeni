@@ -912,7 +912,7 @@ describe("delayed-connector setup benchmark", () => {
         targetSetupRequests: f.grafana.requests.length,
         unrelatedSetupRequests: f.unrelatedSetupRequests(),
       };
-      console.log(`[OPE-754 benchmark] ${JSON.stringify(sample)}`);
+      console.log(`[gateway setup benchmark] ${JSON.stringify(sample)}`);
       return sample;
     };
     let catalog: ToolGatewayCatalog;
@@ -920,7 +920,7 @@ describe("delayed-connector setup benchmark", () => {
       const catalogStartedAt = performance.now();
       catalog = await attestedCatalog(f, attestations);
       console.log(
-        `[OPE-754 benchmark] ${JSON.stringify({
+        `[gateway setup benchmark] ${JSON.stringify({
           label: "complete catalog",
           wallMs: Math.round(performance.now() - catalogStartedAt),
           connectors: 7,
