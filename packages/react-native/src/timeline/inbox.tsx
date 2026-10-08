@@ -135,13 +135,16 @@ function NotificationContent({ item }: { item: InboxItem }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const blocks = parseNotificationText(item.body);
+  // One label column for every fact, as wide as the longest label needs.
+  const longest = Math.max(0, ...item.facts.map((fact) => fact.label.length));
+  const labelWidth = Math.min(132, Math.max(56, Math.ceil(longest * 7.4) + 4));
   const text = { ...fontStyle(theme), fontSize: 14, lineHeight: 20, color: c["fg-muted"] };
   return (
     <>
       {item.subtitle ? (
         <Text
           numberOfLines={1}
-          style={{ ...fontStyle(theme), fontSize: 14, lineHeight: 20, color: c.fg }}
+          style={{ ...fontStyle(theme), fontSize: 13, lineHeight: 20, color: c["fg-subtle"] }}
         >
           {item.subtitle}
         </Text>
@@ -185,7 +188,7 @@ function NotificationContent({ item }: { item: InboxItem }) {
                 numberOfLines={1}
                 style={{
                   ...fontStyle(theme),
-                  width: 96,
+                  width: labelWidth,
                   fontSize: 13,
                   lineHeight: 20,
                   color: c["fg-subtle"],
@@ -216,6 +219,8 @@ function NotificationContent({ item }: { item: InboxItem }) {
 
 /** How far a row travels before letting go acts. */
 const SWIPE_COMMIT = 96;
+/** The width of a swipe action's icon and label. */
+const SWIPE_LABEL = 88;
 
 /**
  * A row that swipes like Mail: toward the left to dismiss, toward the right to
@@ -295,10 +300,15 @@ function SwipeRow(props: {
     [x],
   );
   const action = side === "leading" ? props.leading : side === "trailing" ? props.trailing : null;
-  const fill = x.interpolate({
-    inputRange: [-SWIPE_COMMIT - 1, -SWIPE_COMMIT, 0, SWIPE_COMMIT, SWIPE_COMMIT + 1],
-    outputRange: [1, 0.55, 0.55, 0.55, 1],
-    extrapolate: "clamp",
+  // The label rides in the middle of the uncovered strip, so it is always
+  // readable and slides out from under the row as the strip widens.
+  const labelShift = x.interpolate({
+    inputRange: [-1, 0, 1],
+    outputRange:
+      side === "leading"
+        ? [-SWIPE_LABEL / 2 - 0.5, -SWIPE_LABEL / 2, -SWIPE_LABEL / 2 + 0.5]
+        : [SWIPE_LABEL / 2 - 0.5, SWIPE_LABEL / 2, SWIPE_LABEL / 2 + 0.5],
+    extrapolate: "extend",
   });
   return (
     <View
@@ -308,27 +318,35 @@ function SwipeRow(props: {
       style={{ overflow: "hidden", borderRadius: theme.radius.md }}
     >
       {action ? (
-        <Animated.View
+        <View
           style={{
             position: "absolute",
             top: 0,
             bottom: 0,
             left: 0,
             right: 0,
-            flexDirection: "row",
-            alignItems: "center",
-            justifyContent: side === "leading" ? "flex-start" : "flex-end",
-            paddingHorizontal: 20,
-            gap: 8,
             backgroundColor: action.color,
-            opacity: fill,
           }}
         >
-          <Icon name={action.icon} size={18} color={c["accent-fg"]} />
-          <Text style={{ ...fontStyle(theme, 600), fontSize: 14, color: c["accent-fg"] }}>
-            {action.label}
-          </Text>
-        </Animated.View>
+          <Animated.View
+            style={{
+              position: "absolute",
+              top: 0,
+              bottom: 0,
+              width: SWIPE_LABEL,
+              ...(side === "leading" ? { left: 0 } : { right: 0 }),
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 4,
+              transform: [{ translateX: labelShift }],
+            }}
+          >
+            <Icon name={action.icon} size={18} color="#ffffff" />
+            <Text style={{ ...fontStyle(theme, 600), fontSize: 13, color: "#ffffff" }}>
+              {action.label}
+            </Text>
+          </Animated.View>
+        </View>
       ) : null}
       <Animated.View
         {...responder.panHandlers}
@@ -665,7 +683,15 @@ export function NativeInboxList({
                   backgroundColor: c["surface-2"],
                 }}
               >
-                <Icon name={kindIcon(item)} size={16} color={c["fg-muted"]} />
+                <Icon
+                  name={kindIcon(item)}
+                  size={16}
+                  color={
+                    item.kind === "notification" && item.urgency === "time_sensitive"
+                      ? c["status-waiting"]
+                      : c["fg-muted"]
+                  }
+                />
               </View>
               {unread ? (
                 <View
