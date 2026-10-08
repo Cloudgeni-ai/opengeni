@@ -96,3 +96,12 @@ export {
   OpenGeniNativeCallView,
   type OpenGeniNativeCallLabels,
 } from "./realtime/call-view";
+export {
+  DEFAULT_NATIVE_AGENT_CALL_MESSAGES,
+  NativeAgentCallProvider,
+  useNativeAgentCall,
+  type NativeAgentCallContextValue,
+  type NativeAgentCallMessages,
+  type NativeAgentCallProviderProps,
+  type NativeOutsideCallContext,
+} from "./realtime/agent-call";
