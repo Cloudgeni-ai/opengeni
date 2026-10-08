@@ -181,7 +181,13 @@ servers without awaiting exit.
 
 Internal filesystem completion is owned by
 `packages/runtime/src/sandbox/synchronous-command.ts`: one invocation,
-complete paged output and provider terminal/EOF proof. Channel A and routing
+complete separate-stream pages and provider terminal/EOF proof. SDK-native
+collection in `sandbox/native-synchronous-collection.ts` begins before Start,
+on the original process streams, rather than parsing bounded shell presentation.
+Provider adapters own trusted page identities and cursors; routing captures
+those pages before acknowledging or settling the original process. Physical
+exit can settle process custody without proving complete output, but cannot
+authorize a successful filesystem result. Channel A and routing
 keep this separate from interactive/background shell execution; the worker
 reuses its turn cancellation registration for Skill filesystem commands.
 

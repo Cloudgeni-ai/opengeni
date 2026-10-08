@@ -73,6 +73,11 @@ Then open the smallest source files that answer the question:
   milestones for elapsed startup latency. Runtime stream initialization is not
   the provider wire-dispatch milestone. See `docs/run-lifecycle.md`.
 - Runtime/sandbox/tools: `packages/runtime/src/index.ts` is the public agent-loop facade;
+  synchronous filesystem completion is owned by `sandbox/synchronous-command.ts`,
+  with pre-Start SDK stream capture in `sandbox/native-synchronous-collection.ts`.
+  Inspect provider-owned trusted pages, routing capture/settlement and
+  `sandbox/turn-tool-cancellation.ts` together; bounded shell presentation is not
+  lossless output, and observation failure is not physical quiescence.
   retained Modal command observation uses the versioned task-router byte-offset
   boundary in `sandbox/providers/modal-command-control.ts`; output and cursor
   capture is atomic in `packages/db/src/retained-provider-commands.ts`. Never

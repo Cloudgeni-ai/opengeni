@@ -2099,6 +2099,22 @@ Markers never substitute for original exit proof. An unobservable command
 remains pending/unknown and is not replayed through another write path.
 Existing interrupted-command recovery and physical settlement gates still apply.
 
+Complete output is a separate requirement from physical exit. Trusted adapter
+pages bind separate stdout/stderr bytes to the original identity and contiguous
+cursors; a truncated or merged presentation banner is not a collection receipt.
+The SDK-native collection scope starts before dispatch and tees the original
+process streams without replacing its child, handle, or ordinary shell behavior.
+Shared terminal reads and custody retries preserve the trusted page until
+capture and settlement succeed. A status query may prove physical quiescence
+after stream loss, but must not turn incomplete output into filesystem success.
+
+Remote cancellation joins survive observation loss and transfer-start. Only
+exact terminal proof or committed durable adoption releases the join; failed
+adoption restores cleanup through the original launch client. Locally proven
+pre-dispatch refusal retires a provisional join without inventing a remote
+process. Offline RPC errors are not that proof. The synchronous runner checks
+won cancellation before returning a terminal result, including exit-zero races.
+
 If that process's durable row already records exit or loss, a later model-visible
 `write_stdin` remains fenced before provider dispatch but returns the stored
 terminal exit/loss banner. It never labels a permanently dead handle as a
