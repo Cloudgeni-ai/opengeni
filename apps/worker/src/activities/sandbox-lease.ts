@@ -3621,7 +3621,9 @@ async function terminateDrainableBox(
       ...(captureClaim ? { expectedCaptureId: captureClaim.id } : {}),
       providerMissingBeforeCapture: providerMissing,
       idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
-      providerStopped: managedProvider,
+      // Mirrors terminateProviderBox: a selfhosted machine is never stopped.
+      providerStopped:
+        managedProvider && lease.backend !== "selfhosted" && lease.resumeBackendId !== "selfhosted",
     },
   );
   // The command terminal events and agent inputs are already durable in the

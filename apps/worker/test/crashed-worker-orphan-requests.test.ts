@@ -503,6 +503,25 @@ describe("requests left by a crashed worker (OPE-743)", () => {
     expect((await orphanRow(fixture)).settled_at).toBeNull();
   }, 60_000);
 
+  test("tar-style idle containment does not enroll around an orphan it could never drain", async () => {
+    const fixture = await crashedAttemptFixture({ backgroundCommand: true, persistence: "tar" });
+    await idleFor(fixture, 31);
+    expect(
+      await enrollRetainedCommandContainment(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sandboxGroupId: fixture.sandboxGroupId,
+        idleCommandContainmentMs: WINDOW_MS,
+      }),
+    ).toBeNull();
+    // The box stays warm and usable instead of being fenced behind a drain
+    // that can never capture.
+    expect(await readLease(db, fixture.workspaceId, fixture.sandboxGroupId)).toMatchObject({
+      liveness: "warm",
+      rotationRequestedAt: null,
+    });
+  }, 60_000);
+
   test("an orphan next to a request that may still finish keeps fencing the box", async () => {
     const fixture = await crashedAttemptFixture();
     // A sibling session's cancelled attempt left a request open on the same

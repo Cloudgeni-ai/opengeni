@@ -55135,6 +55135,7 @@ async function sandboxGroupIdleForCommandContainmentTx(
     sandboxGroupId: string;
     leaseId: string;
     windowMs: number;
+    writerMode: "physical" | "containment";
   },
 ): Promise<boolean> {
   const [facts] = await rawRows<{
@@ -55249,7 +55250,7 @@ async function sandboxGroupIdleForCommandContainmentTx(
       (await hasPendingSessionAttemptQuiescenceTx(tx, {
         workspaceId: input.workspaceId,
         sessionId: session.id,
-        writerMode: "containment",
+        writerMode: input.writerMode,
       }))
     )
       return false;
@@ -55276,12 +55277,34 @@ export const COMMAND_CONTAINMENT_TURN_STARTING_UPDATE_KINDS = (() => {
   };
 })();
 
+/** Whether a lease's provider capture images the paused box at one instant
+ * (Modal native filesystem/directory snapshots). Mirrors the runtime's
+ * `providerWorkspaceCaptureIsPointInTime` for the lease envelope: only such a
+ * capture may run around a crashed worker's orphaned request (OPE-743), so
+ * containment may treat the orphan as non-blocking only then; otherwise its
+ * drain could never capture and the box would stay fenced until it died. */
+function leaseCaptureIsPointInTime(backend: string, resumeState: unknown): boolean {
+  if (backend !== "modal" || !resumeState || typeof resumeState !== "object") return false;
+  const sessionState = (resumeState as { sessionState?: unknown }).sessionState;
+  const session =
+    sessionState && typeof sessionState === "object"
+      ? (sessionState as Record<string, unknown>)
+      : (resumeState as Record<string, unknown>);
+  const providerState =
+    session.providerState && typeof session.providerState === "object"
+      ? (session.providerState as Record<string, unknown>)
+      : null;
+  const persistence = providerState?.workspacePersistence ?? session.workspacePersistence;
+  return persistence === "snapshot_filesystem" || persistence === "snapshot_directory";
+}
+
 /** The deadline backstop's owner test is the idle rule's: a closed turn owner
  * must hold no pending quiescence (unsettled interruption or attempt writer). */
 async function deadlineOwnerQuiescencePending(
   tx: Database,
   workspaceId: string,
   processes: readonly { session_id: string; owner_attempt_id: string | null }[],
+  writerMode: "physical" | "containment",
 ): Promise<boolean> {
   for (const process of processes) {
     if (
@@ -55290,7 +55313,7 @@ async function deadlineOwnerQuiescencePending(
         workspaceId,
         sessionId: process.session_id,
         attemptId: process.owner_attempt_id,
-        writerMode: "containment",
+        writerMode,
       }))
     )
       return true;
@@ -55343,6 +55366,9 @@ export async function enrollRetainedCommandContainment(
             ...input,
             leaseId: lease.id,
             windowMs: input.idleCommandContainmentMs,
+            writerMode: leaseCaptureIsPointInTime(lease.backend, lease.resumeState)
+              ? "containment"
+              : "physical",
           }))));
     // Round-robin inventory: an ineligible live lease cannot starve later rows.
     // This updates only the inspection cursor, never provider/holder authority.
@@ -55454,10 +55480,13 @@ export async function enrollRetainedCommandContainment(
     )
       return null;
     // A request a crashed worker left on this exact box is not a writer that
-    // can finish; the drain captures around it and the cold commit settles it
-    // once the box is terminated (crashedWorkerOrphanAdmissionSql).
+    // can finish. Only a point-in-time drain captures around it (the cold
+    // commit settles it once the box is terminated); for a tar-style capture
+    // it stays a blocker, or the enrolled drain could never capture.
+    const pointInTime = leaseCaptureIsPointInTime(initial.backend, initial.resumeState);
+    const writerMode = pointInTime ? ("containment" as const) : ("physical" as const);
     const parents = new Set(processes.map((p) => p.parent_admission_id));
-    if (admissions.some((a) => !parents.has(a.id) && !a.orphaned)) return null;
+    if (admissions.some((a) => !parents.has(a.id) && !(pointInTime && a.orphaned))) return null;
     const holders = await rawRows<{ kind: string; holder_id: string }>(
       tx,
       sql`
@@ -55493,11 +55522,11 @@ export async function enrollRetainedCommandContainment(
     } else if (
       deadlineRotation &&
       processes.every((p) => p.deadline_ready) &&
-      !(await deadlineOwnerQuiescencePending(tx, input.workspaceId, processes)) &&
+      !(await deadlineOwnerQuiescencePending(tx, input.workspaceId, processes, writerMode)) &&
       !(await hasSandboxGroupAttemptActivityTx(tx, {
         ...input,
         idleGraceMs: deadlineStopGraceMs,
-        writerMode: "containment",
+        writerMode,
       }))
     ) {
       mode = "deadline";
@@ -55507,6 +55536,7 @@ export async function enrollRetainedCommandContainment(
         ...input,
         leaseId: lease.id,
         windowMs: input.idleCommandContainmentMs,
+        writerMode,
       }))
     ) {
       mode = "idle";
