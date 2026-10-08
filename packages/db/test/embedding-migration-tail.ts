@@ -108,5 +108,5 @@ export const embeddingMigrationTail = [
   "0644_subscription_inference_source_settings.sql",
   "0645_subscription_core_runtime.sql",
   "0646_subscription_core_people_assignment_read.sql",
-  "0648_subscription_authority_refresh_contract.sql",
+  "0652_subscription_authority_refresh_contract.sql",
 ];

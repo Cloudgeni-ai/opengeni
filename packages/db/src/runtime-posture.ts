@@ -673,6 +673,12 @@ export const SUBSCRIPTION_ACCOUNT_CAPABILITY_ROUTINES = [
   ...CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES,
 ];
 const CLAUDE_AUTHORITY_ROUTINE_SET = new Set(CLAUDE_AUTHORITY_ROUTINES);
+export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
+  "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
+  "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
+  "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)",
+  "persist_subscription_codex_refresh(uuid, uuid, uuid, uuid, text, text, uuid, text, bigint, bigint, text, timestamp with time zone, timestamp with time zone)",
+] as const;
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [
   "knowledge_index_claim(text, integer, integer)",
@@ -714,10 +720,6 @@ const UNIFIED_KNOWLEDGE_AUTHORITY_TABLES = [
   "documents",
 ] as const;
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
-  "authorize_subscription_ownerless_session_access(uuid,uuid,uuid,uuid)",
-  "authorize_subscription_personal_placement_access(uuid,uuid,uuid,uuid,text,uuid,bigint,text,text)",
-  "subscription_codex_refresh_write_allowed(uuid,uuid,uuid)",
-  "persist_subscription_codex_refresh(uuid,uuid,uuid,uuid,text,text,uuid,text,bigint,bigint,text,timestamp with time zone,timestamp with time zone)",
   "lock_live_native_original_origin_v2(jsonb)",
   "modal_native_origin_member_read_active(uuid, text)",
   ...CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES,
@@ -2453,6 +2455,33 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const tableByName = new Map(posture.tables.map((table) => [table.name, table]));
+  const privateSchemaOwner = posture.schemas.find(
+    (schema) => schema.name === "opengeni_private",
+  )?.owner;
+  const quotedTargetSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+  const precursorSearchPaths = new Set([
+    `search_path=pg_catalog, ${quotedTargetSchema}, opengeni_private, pg_temp`,
+    `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedTargetSchema}, opengeni_private, pg_temp`,
+  ]);
+  for (const expectedRoutine of SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES) {
+    const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
+    const safeSearchPath = (routine: RuntimeRoutinePosture) =>
+      routine.name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)"
+        ? routine.configuration?.includes("search_path=pg_catalog, opengeni_private, pg_temp")
+        : routine.configuration?.some((configuration) => precursorSearchPaths.has(configuration));
+    if (
+      matches.length !== 1 ||
+      !matches[0]!.execute ||
+      matches[0]!.publicExecute ||
+      !matches[0]!.securityDefiner ||
+      (privateSchemaOwner && matches[0]!.owner !== privateSchemaOwner) ||
+      !safeSearchPath(matches[0]!)
+    ) {
+      violations.push(
+        `subscription M3 precursor private routine ${expectedRoutine} is missing or unsafe`,
+      );
+    }
+  }
   if (tableByName.has("organization_integration_policies")) {
     for (const name of [
       "update_organization_integration_policy(uuid, text, jsonb)",

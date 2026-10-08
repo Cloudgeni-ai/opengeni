@@ -672,18 +672,21 @@ BEGIN
     SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
     AS $body$
     DECLARE
-      session_owner text := p_session_owner_subject_id;
-      turn_human text := p_turn_human_subject_id;
+      session_owner text;
+      turn_human text;
+      capability_owner text;
+      capability_human text;
       target subscription_connections%%ROWTYPE;
       authorized boolean := false;
+      personal_authorized boolean := false;
+      ownerless_session boolean := false;
+      lease_expires_at timestamptz;
       lease_current boolean := false;
       refresh_persisted boolean := false;
-      expected_subject text := nullif(current_setting('opengeni.initiating_human_subject_id', true), '');
     BEGIN
       IF p_account_id IS DISTINCT FROM nullif(current_setting('opengeni.account_id', true), '')::uuid
         OR p_workspace_id IS DISTINCT FROM nullif(current_setting('opengeni.workspace_id', true), '')::uuid
         OR p_connection_id IS NULL OR p_session_id IS NULL OR p_turn_id IS NULL
-        OR turn_human IS DISTINCT FROM expected_subject
         OR p_lease_generation < 1 OR p_expected_refresh_generation < 1
         OR p_holder_id IS NULL OR length(btrim(p_holder_id)) NOT BETWEEN 1 AND 256
         OR p_credential_encrypted IS NULL
@@ -695,6 +698,21 @@ BEGIN
       PERFORM pg_catalog.pg_advisory_xact_lock(
         pg_catalog.hashtextextended('subscription-refresh:' || p_connection_id::text, 0)
       );
+
+      -- Treat the accepted row as authoritative. The service-turn wrapper may
+      -- set the owner as the effective human GUC while the frozen turn human
+      -- remains NULL, so those values must not be conflated.
+      SELECT session.owner_subject_id, turn.initiating_human_subject_id
+        INTO session_owner, turn_human
+      FROM sessions session
+      JOIN session_turns turn ON turn.account_id = session.account_id
+        AND turn.workspace_id = session.workspace_id AND turn.session_id = session.id
+      WHERE session.account_id = p_account_id AND session.workspace_id = p_workspace_id
+        AND session.id = p_session_id AND turn.id = p_turn_id;
+      IF NOT FOUND OR session_owner IS DISTINCT FROM p_session_owner_subject_id
+        OR turn_human IS DISTINCT FROM p_turn_human_subject_id
+      THEN RETURN false; END IF;
+      ownerless_session := session_owner IS NULL;
 
       IF session_owner IS NULL THEN
         authorized := turn_human IS NULL
@@ -711,29 +729,55 @@ BEGIN
         );
       END IF;
       IF NOT authorized THEN RETURN false; END IF;
+      IF ownerless_session THEN
+        capability_owner := NULL;
+        capability_human := NULL;
+      ELSE
+        capability_owner := session_owner;
+        capability_human := coalesce(turn_human, session_owner);
+      END IF;
 
-      -- Establish the lease fence before minting a personal-connection read
-      -- capability. A rejected or expired lease must not leave credential
-      -- visibility behind in the caller's transaction.
-      SELECT EXISTS (
-        SELECT 1 FROM subscription_leases lease
-        WHERE lease.account_id = p_account_id AND lease.workspace_id = p_workspace_id
-          AND lease.session_id = p_session_id AND lease.turn_id = p_turn_id
-          AND lease.provider = 'codex' AND lease.connection_id = p_connection_id
-          AND lease.holder_id = p_holder_id AND lease.generation = p_lease_generation
-          AND lease.leased_until > pg_catalog.clock_timestamp()
-      ) INTO lease_current;
+      -- Validate the exact accepted turn's live lease before granting either
+      -- personal visibility or the narrowly scoped UPDATE policy capability.
+      -- Hold the exact lease row through credential persistence so release or
+      -- takeover cannot invalidate the holder between validation and write.
+      SELECT lease.leased_until INTO lease_expires_at
+      FROM subscription_leases lease
+      WHERE lease.account_id = p_account_id AND lease.workspace_id = p_workspace_id
+        AND lease.session_id = p_session_id AND lease.turn_id = p_turn_id
+        AND lease.provider = 'codex' AND lease.connection_id = p_connection_id
+        AND lease.holder_id = p_holder_id AND lease.generation = p_lease_generation
+        AND lease.leased_until > pg_catalog.clock_timestamp()
+      FOR UPDATE;
+      lease_current := FOUND AND lease_expires_at > pg_catalog.clock_timestamp();
       IF NOT lease_current THEN RETURN false; END IF;
 
-      -- Mint personal visibility only through the exact accepted v1 snapshot
-      -- before the RLS-constrained connection read. Shared connections do not
-      -- gain personal authority: the helper removes its provisional capability
-      -- when the connection is not personal.
-      authorized := opengeni_private.authorize_subscription_personal_access(
-        p_account_id, p_workspace_id, p_session_id, p_turn_id, p_connection_id,
-        'codex', session_owner, turn_human
-      );
+      -- A service or ownerless turn can refresh only shared credentials. For
+      -- human turns, the existing v1 helper grants visibility only for the
+      -- exact accepted personal connection and authority snapshot.
+      IF NOT ownerless_session AND turn_human IS NOT NULL THEN
+        personal_authorized := opengeni_private.authorize_subscription_personal_access(
+          p_account_id, p_workspace_id, p_session_id, p_turn_id, p_connection_id,
+          'codex', session_owner, turn_human
+        );
+      END IF;
 
+      INSERT INTO opengeni_private.subscription_runtime_capabilities (
+        backend_pid, transaction_id, capability_kind, account_id, workspace_id,
+        session_id, turn_id, connection_id, provider,
+        session_owner_subject_id, turn_human_subject_id
+      ) VALUES (
+        pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(), 'codex_refresh_write',
+        p_account_id, p_workspace_id, p_session_id, p_turn_id, p_connection_id, 'codex',
+        capability_owner, capability_human
+      ) ON CONFLICT (backend_pid, transaction_id, capability_kind, account_id, connection_id)
+        DO UPDATE SET workspace_id = EXCLUDED.workspace_id, session_id = EXCLUDED.session_id,
+          turn_id = EXCLUDED.turn_id, provider = EXCLUDED.provider,
+          session_owner_subject_id = EXCLUDED.session_owner_subject_id,
+          turn_human_subject_id = EXCLUDED.turn_human_subject_id;
+
+      -- UPDATE RLS also governs SELECT FOR UPDATE. Mint its exact-connection
+      -- capability first, then recheck the lease and generation after locking.
       SELECT connection.* INTO target
       FROM subscription_connections connection
       WHERE connection.account_id = p_account_id AND connection.id = p_connection_id
@@ -743,13 +787,18 @@ BEGIN
         DELETE FROM opengeni_private.subscription_runtime_capabilities capability
         WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
           AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
-          AND capability.capability_kind = 'personal_access'
-          AND capability.account_id = p_account_id AND capability.workspace_id = p_workspace_id
-          AND capability.session_id = p_session_id AND capability.turn_id = p_turn_id
-          AND capability.connection_id = p_connection_id AND capability.provider = 'codex';
+          AND capability.capability_kind IN ('personal_access', 'codex_refresh_write')
+          AND capability.account_id = p_account_id AND capability.connection_id = p_connection_id;
         RETURN false;
       END IF;
-      IF target.ownership = 'personal' AND NOT authorized THEN RETURN false; END IF;
+      IF target.ownership = 'personal' AND NOT personal_authorized THEN
+        DELETE FROM opengeni_private.subscription_runtime_capabilities capability
+        WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+          AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+          AND capability.capability_kind IN ('personal_access', 'codex_refresh_write')
+          AND capability.account_id = p_account_id AND capability.connection_id = p_connection_id;
+        RETURN false;
+      END IF;
       IF NOT opengeni_private.subscription_connection_visible(
         p_account_id, p_workspace_id, target.id, target.ownership, target.scope_kind,
         target.owner_organization_membership_id, target.owner_subject_id, target.provider
@@ -757,10 +806,8 @@ BEGIN
         DELETE FROM opengeni_private.subscription_runtime_capabilities capability
         WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
           AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
-          AND capability.capability_kind = 'personal_access'
-          AND capability.account_id = p_account_id AND capability.workspace_id = p_workspace_id
-          AND capability.session_id = p_session_id AND capability.turn_id = p_turn_id
-          AND capability.connection_id = p_connection_id AND capability.provider = 'codex';
+          AND capability.capability_kind IN ('personal_access', 'codex_refresh_write')
+          AND capability.account_id = p_account_id AND capability.connection_id = p_connection_id;
         RETURN false;
       END IF;
 
@@ -776,26 +823,10 @@ BEGIN
         DELETE FROM opengeni_private.subscription_runtime_capabilities capability
         WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
           AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
-          AND capability.capability_kind = 'personal_access'
-          AND capability.account_id = p_account_id AND capability.workspace_id = p_workspace_id
-          AND capability.session_id = p_session_id AND capability.turn_id = p_turn_id
-          AND capability.connection_id = p_connection_id AND capability.provider = 'codex';
+          AND capability.capability_kind IN ('personal_access', 'codex_refresh_write')
+          AND capability.account_id = p_account_id AND capability.connection_id = p_connection_id;
         RETURN false;
       END IF;
-
-      INSERT INTO opengeni_private.subscription_runtime_capabilities (
-        backend_pid, transaction_id, capability_kind, account_id, workspace_id,
-        session_id, turn_id, connection_id, provider,
-        session_owner_subject_id, turn_human_subject_id
-      ) VALUES (
-        pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(), 'codex_refresh_write',
-        p_account_id, p_workspace_id, p_session_id, p_turn_id, p_connection_id, 'codex',
-        session_owner, turn_human
-      ) ON CONFLICT (backend_pid, transaction_id, capability_kind, account_id, connection_id)
-        DO UPDATE SET workspace_id = EXCLUDED.workspace_id, session_id = EXCLUDED.session_id,
-          turn_id = EXCLUDED.turn_id, provider = EXCLUDED.provider,
-          session_owner_subject_id = EXCLUDED.session_owner_subject_id,
-          turn_human_subject_id = EXCLUDED.turn_human_subject_id;
 
       UPDATE subscription_connections
       SET credential_encrypted = p_credential_encrypted,
@@ -807,7 +838,15 @@ BEGIN
           updated_at = pg_catalog.clock_timestamp()
       WHERE account_id = p_account_id AND id = p_connection_id
         AND provider = 'codex' AND status = 'active'
-        AND refresh_generation = p_expected_refresh_generation;
+        AND refresh_generation = p_expected_refresh_generation
+        AND EXISTS (
+          SELECT 1 FROM subscription_leases lease
+          WHERE lease.account_id = p_account_id AND lease.workspace_id = p_workspace_id
+            AND lease.session_id = p_session_id AND lease.turn_id = p_turn_id
+            AND lease.provider = 'codex' AND lease.connection_id = p_connection_id
+            AND lease.holder_id = p_holder_id AND lease.generation = p_lease_generation
+            AND lease.leased_until > pg_catalog.clock_timestamp()
+        );
       refresh_persisted := FOUND;
 
       -- The app role has UPDATE privileges for other narrowly authorized
@@ -824,6 +863,13 @@ BEGIN
         AND capability.turn_id = p_turn_id
         AND capability.connection_id = p_connection_id
         AND capability.provider = 'codex';
+      DELETE FROM opengeni_private.subscription_runtime_capabilities capability
+      WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+        AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+        AND capability.capability_kind = 'personal_access'
+        AND capability.account_id = p_account_id AND capability.workspace_id = p_workspace_id
+        AND capability.session_id = p_session_id AND capability.turn_id = p_turn_id
+        AND capability.connection_id = p_connection_id AND capability.provider = 'codex';
       RETURN refresh_persisted;
     END
     $body$
