@@ -191,6 +191,13 @@ authorize a successful filesystem result. Channel A and routing
 keep this separate from interactive/background shell execution; the worker
 reuses its turn cancellation registration for Skill filesystem commands.
 
+Registered Daytona clients bind the same authenticated native sandbox before
+filesystem dispatch (`sandbox/providers/daytona-command-binding.ts`). Framed
+native sessions preserve exact stream bytes and require original-command exit
+plus both stream EOFs; lossy native log projections are not completion proof.
+Routing awaits retryable namespace cleanup only after durable output settlement.
+Session deletion or absence cannot prove cancellation or output completeness.
+
 OpenSandbox's `sandbox/providers/opensandbox-command-stream.ts` validates the
 original SSE/NDJSON frames before SDK projection and records invocation-local
 dispatch evidence at the bound transport. The adapter pins the first execution

@@ -2108,6 +2108,16 @@ Shared terminal reads and custody retries preserve the trusted page until
 capture and settlement succeed. A status query may prove physical quiescence
 after stream loss, but must not turn incomplete output into filesystem success.
 
+Daytona filesystem collection uses a runtime-owned binding to the registered
+client's exact authenticated sandbox and one framed native command session.
+`daytona-command-frames.ts` validates nonce/source-bound separate-stream frames,
+both EOFs and matching original exit; `daytona-framed-command.ts` recovers only
+that session and command. Existing marker/PGID control owns physical cancellation.
+After durable output capture and settlement, routing awaits native namespace
+cleanup before releasing the route. Cleanup failure remains retryable; deletion
+or a missing session never substitutes for exit/EOF proof. Ordinary shell and PTY
+execution stay outside this collection scope.
+
 OpenSandbox validates original SSE/NDJSON framing, UTF-8, error data and execution
 identity in `sandbox/providers/opensandbox-command-stream.ts` before the SDK can
 project or discard events. The adapter retains the first execution ID and launch

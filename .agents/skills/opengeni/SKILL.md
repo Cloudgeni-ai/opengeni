@@ -82,6 +82,11 @@ Then open the smallest source files that answer the question:
   `sandbox/providers/opensandbox-command-stream.ts`; its adapter's exact-ID
   physical observer does not consume output. Missing first identity after an
   attempted dispatch remains unknown and joined, never synthetic terminal proof.
+  Daytona's registered exact native binding and framed command collection live
+  in `sandbox/providers/daytona-command-{binding,frames}.ts` and
+  `daytona-framed-command.ts`; inspect routing's awaited output-release cleanup
+  separately from marker/PGID cancellation. Native session deletion is not exit
+  or stream-completion proof.
   Retained Modal command observation uses the versioned task-router byte-offset
   boundary in `sandbox/providers/modal-command-control.ts`; output and cursor
   capture is atomic in `packages/db/src/retained-provider-commands.ts`. Never
