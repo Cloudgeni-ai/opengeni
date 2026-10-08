@@ -56,6 +56,7 @@ export function AgentLearningSettingsPage({ workspaceId }: { workspaceId: string
       review={{
         count: queue.loading ? null : queue.count,
         partial: queue.partial,
+        failed: queue.error !== null,
         onOpen: () =>
           void navigate({
             to: "/workspaces/$workspaceId/state",

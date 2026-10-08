@@ -398,7 +398,16 @@ export interface LearningReviewSummary {
   count: number | null;
   /** More than one page of something is waiting. */
   partial: boolean;
+  /** Part of the queue couldn't be read, so the count may be short. */
+  failed: boolean;
   onOpen: () => void;
+}
+
+function reviewValue(review: LearningReviewSummary): string | null {
+  if (review.count === null) return null;
+  if (review.failed) return review.count === 0 ? "Couldn't check" : `${review.count}+ waiting`;
+  if (review.count === 0) return "Nothing waiting";
+  return `${review.count}${review.partial ? "+" : ""} waiting`;
 }
 
 /**
@@ -484,13 +493,7 @@ export function LearningSettings({
             <SettingNavRow
               label="Waiting for review"
               description="Approve or dismiss them there."
-              value={
-                review.count === null
-                  ? null
-                  : review.count === 0
-                    ? "Nothing waiting"
-                    : `${review.count}${review.partial ? "+" : ""} waiting`
-              }
+              value={reviewValue(review)}
               onOpen={review.onOpen}
             />
           </SettingRowGroup>

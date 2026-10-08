@@ -73,10 +73,12 @@ function Harness({
   canManageWorkspace,
   ownsOrganization = false,
   waiting = null,
+  failed = false,
 }: {
   canManageWorkspace: boolean;
   ownsOrganization?: boolean;
   waiting?: number | null;
+  failed?: boolean;
 }) {
   const shared = useLearningDefaults(workspaceId, "workspace");
   const mine = useLearningDefaults(workspaceId, "personal");
@@ -90,7 +92,7 @@ function Harness({
       shared={shared}
       mine={mine}
       identity={identity}
-      review={{ count: waiting, partial: false, onOpen: openReview }}
+      review={{ count: waiting, partial: false, failed, onOpen: openReview }}
     />
   );
 }
@@ -258,6 +260,31 @@ test("people who don't own the organization get no identity row and no policy re
     expect(getCompanyProfileAgentPolicy).not.toHaveBeenCalled();
     expect(container.textContent).not.toContain("Organization identity");
     expect(container.textContent).not.toContain("All of Acme Robotics");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("a Review queue that couldn't be read never says nothing is waiting", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const reviewText = () =>
+    [...container.querySelectorAll<HTMLElement>("[data-slot=setting-nav-row]")].find((row) =>
+      row.textContent?.includes("Waiting for review"),
+    )?.textContent ?? "";
+  try {
+    await act(async () => root.render(<Harness canManageWorkspace waiting={0} />));
+    await settle();
+    expect(reviewText()).toContain("Nothing waiting");
+    await act(async () => root.render(<Harness canManageWorkspace waiting={0} failed />));
+    await settle();
+    expect(reviewText()).not.toContain("Nothing waiting");
+    expect(reviewText()).toContain("Couldn't check");
+    await act(async () => root.render(<Harness canManageWorkspace waiting={2} failed />));
+    await settle();
+    expect(reviewText()).toContain("2+ waiting");
   } finally {
     await act(async () => root.unmount());
     container.remove();

@@ -43,7 +43,7 @@ do not carry a private one-turn tool list.
 
 Built-in runtime tools are not exposed as granular workspace preferences. They
 follow the existing deployment and workspace policy; removing the settings UI
-does not rewrite stored restrictions. **Knowledge → Learning** owns scoped
+does not rewrite stored restrictions. **Settings → Agent learning** owns scoped
 knowledge retention and instruction/skill improvement defaults, independently of
 tool availability and action approvals.
 **Settings → General → New session defaults** controls whether workspace defaults automatically
