@@ -180,6 +180,28 @@ async function ownerlessFixture(
 
 describe("provider-neutral subscription runtime persistence", () => {
   test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
+    "real PostgreSQL runtime tests use the non-superuser, non-bypass application role",
+    async () => {
+      const [role] = await rawRows<{
+        currentUser: string;
+        superuser: boolean;
+        bypassRls: boolean;
+      }>(
+        client!.db,
+        sql`select current_user as "currentUser", rolsuper as superuser,
+            rolbypassrls as "bypassRls"
+          from pg_catalog.pg_roles where rolname = current_user`,
+      );
+      expect(role).toEqual({
+        currentUser: "opengeni_app",
+        superuser: false,
+        bypassRls: false,
+      });
+    },
+    180_000,
+  );
+
+  test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
     "every private PostgreSQL function referenced by DB source exists after migrations",
     async () => {
       const references = sourcePrivateFunctionReferences();
