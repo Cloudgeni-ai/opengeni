@@ -21,11 +21,13 @@ const NO_INBOX: InboxState = { data: null, error: null, loading: false };
  * Only a signed-in person has an inbox (the API refuses keys, services and
  * development subjects), so nothing polls it for anyone else.
  */
-export function hasInbox(context: { subjectId: string; credential?: unknown }): boolean {
-  return context.subjectId.startsWith("user:") && !context.credential;
+export function hasInbox(
+  context: { subjectId: string; credential?: unknown } | null | undefined,
+): boolean {
+  return Boolean(context?.subjectId.startsWith("user:") && !context.credential);
 }
 
-class InboxStore {
+export class InboxStore {
   private state: InboxState = EMPTY;
   private listeners = new Set<() => void>();
   private inFlight: Promise<void> | null = null;
