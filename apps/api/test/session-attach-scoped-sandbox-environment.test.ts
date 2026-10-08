@@ -9,13 +9,19 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { signDelegatedAccessToken, type Permission, type Session } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
+  claimSessionWorkForAttempt,
   createDb,
   createRig,
   getRigVersion,
   getSession,
+  initializeSessionStartAtomically,
   type DbClient,
 } from "@opengeni/db";
-import { resolveSessionSandboxRuntime, type SessionWorkflowClient } from "@opengeni/core";
+import {
+  resolveSessionSandboxRuntime,
+  type SessionAttachRigAuthority,
+  type SessionWorkflowClient,
+} from "@opengeni/core";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -174,6 +180,62 @@ async function storedSession(grant: Grant, session: Session): Promise<Session> {
   return (await getSession(client.db, grant.workspaceId, session.id)) as Session;
 }
 
+const AGENT_SUBJECT = "worker:first-party-mcp";
+const AGENT_PERMISSIONS: Permission[] = ["sessions:read", "files:read", "terminal:attach"];
+
+/** Claim a live attempt on the session's first turn the way the worker does,
+ *  and return the agent-attempt grant claims that attempt carries. */
+async function liveAgentAttempt(grant: Grant, sessionId: string) {
+  const attemptId = crypto.randomUUID();
+  const claim = async () =>
+    await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId,
+      workflowId: `session-${sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+  let claimed = await claim();
+  if (claimed.action !== "claimed") {
+    await initializeSessionStartAtomically(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+      goal: null,
+    });
+    claimed = await claim();
+  }
+  if (claimed.action !== "claimed") throw new Error("test attempt was not claimed");
+  const metadata = {
+    sessionId,
+    turnId: claimed.turn.id,
+    attemptId,
+    executionGeneration: claimed.turn.executionGeneration,
+  };
+  return {
+    grant: {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: AGENT_SUBJECT,
+      permissions: AGENT_PERMISSIONS,
+      principalKind: "agent_attempt" as const,
+      metadata,
+    },
+    authorization: `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: AGENT_SUBJECT,
+      permissions: AGENT_PERMISSIONS,
+      principalKind: "agent_attempt",
+      ...metadata,
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    })}`,
+  };
+}
+
 /** The Terminal panel's viewer attach (the reported failing request). */
 async function attachTerminalViewer(grant: Grant, session: Session): Promise<Response> {
   return await app().request(`/v1/workspaces/${grant.workspaceId}/sessions/${session.id}/viewers`, {
@@ -188,12 +250,15 @@ async function attachTerminalViewer(grant: Grant, session: Session): Promise<Res
 
 async function runtimeStatus(
   session: Session,
-  subjectId: string | null,
+  authority: string | null | SessionAttachRigAuthority,
 ): Promise<{ rigVersionId: string | null } | { status: number }> {
   try {
-    const runtime = await resolveSessionSandboxRuntime(client.db, settings, session, {
-      subjectId,
-    });
+    const runtime = await resolveSessionSandboxRuntime(
+      client.db,
+      settings,
+      session,
+      authority !== null && typeof authority === "object" ? authority : { subjectId: authority },
+    );
     return { rigVersionId: runtime.rigVersion?.id ?? null };
   } catch (error) {
     if (error instanceof HTTPException) return { status: error.status };
@@ -264,6 +329,44 @@ describe("session attach with a Sandbox Environment homed in another workspace",
     // the refusal is an explicit 403 rather than an internal error.
     expect(await runtimeStatus(stored, colleagueTeam.subjectId)).toEqual({ status: 403 });
     expect(await runtimeStatus(stored, null)).toEqual({ status: 403 });
+  });
+
+  test("the owner's agent resolves a personal environment as its initiating human", async () => {
+    if (!available) return;
+    const { home, team } = await organization();
+    const rig = await createRig(client.db, {
+      ...home,
+      scope: "user",
+      name: "owner personal environment for agents",
+      createdBy: home.subjectId,
+    });
+    // Claiming an attempt on a personal-environment session needs the owner's
+    // personal-resource grant snapshot (turn-time authority, out of scope
+    // here). Claim on an unbound session, then bind the environment so the
+    // attach resolution is exercised under exactly that live attempt.
+    const created = await createSession(team);
+    const agent = await liveAgentAttempt(team, created.id);
+    await shared!.admin`
+      update sessions set rig_id = ${rig.id}, rig_version_id = ${rig.activeVersion!.id}
+      where id = ${created.id}`;
+    const session = await storedSession(team, created);
+    expect(session.rigVersionId).toBe(rig.activeVersion!.id);
+    const stored = await storedSession(team, session);
+
+    // The technical worker identity alone holds no organization membership.
+    expect(await runtimeStatus(stored, AGENT_SUBJECT)).toEqual({ status: 403 });
+    expect(await runtimeStatus(stored, { grant: agent.grant })).toEqual({
+      rigVersionId: session.rigVersionId,
+    });
+    const list = await app().request(
+      `/v1/workspaces/${team.workspaceId}/sessions/${session.id}/fs/list`,
+      {
+        method: "POST",
+        headers: { authorization: agent.authorization, "content-type": "application/json" },
+        body: JSON.stringify({ path: "/workspace" }),
+      },
+    );
+    expect(list.status).toBe(200);
   });
 
   test("another organization's environment is never resolved", async () => {

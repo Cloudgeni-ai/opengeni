@@ -3726,6 +3726,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
                 workspaceId,
                 session,
                 subjectId: authorization.grant.subjectId,
+                grant: authorization.grant,
               },
               async () => undefined,
             );
@@ -4511,6 +4512,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         workspaceId,
         session,
         viewerSubjectId: grant.subjectId,
+        grant,
         waitSignal: c.req.raw.signal,
         ...(parsed.data.viewerId ? { viewerId: parsed.data.viewerId } : {}),
       });

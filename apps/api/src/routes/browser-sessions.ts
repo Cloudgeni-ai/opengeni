@@ -952,6 +952,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             workspaceId,
             session: sourceSession,
             subjectId: grant.subjectId,
+            grant,
             waitSignal: context.req.raw.signal,
             operation: "browser.download.save",
           },
@@ -4103,7 +4104,7 @@ async function ensureInteractionHolder(
     throw new BrowserSessionStateError("BrowserSession lease placement is unavailable");
   }
   const sandboxRuntime = await resolveSessionSandboxRuntime(deps.db, deps.settings, sourceSession, {
-    subjectId: grant.subjectId,
+    grant,
   });
   const acquired = await acquireLease(deps.db, {
     accountId: grant.accountId,

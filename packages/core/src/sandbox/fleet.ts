@@ -30,6 +30,7 @@ import {
   type SandboxRecord,
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
+import { HTTPException } from "hono/http-exception";
 import {
   NatsControlRpc,
   NatsOpStreamTransport,
@@ -668,6 +669,9 @@ export async function swapActiveSandbox(
     try {
       readinessHold = await services.ensureSessionGroupReady(ctx);
     } catch (error) {
+      // An explicit refusal (e.g. the session's Sandbox Environment is not
+      // available to this caller) is not a recovery state; surface it as is.
+      if (error instanceof HTTPException && error.status === 403) throw error;
       const lease = await readLease(services.db, ctx.workspaceId, ctx.sessionGroupId);
       const restore = lease?.recovery.restore.status;
       const code =

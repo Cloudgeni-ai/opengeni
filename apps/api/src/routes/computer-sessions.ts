@@ -1522,7 +1522,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       deps.db,
       deps.settings,
       sourceSession,
-      { subjectId: grant.subjectId },
+      { grant },
     );
     const acquired = await acquireLease(deps.db, {
       accountId: grant.accountId,
