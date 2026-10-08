@@ -265,9 +265,11 @@ function LiveSession(props: {
       workspaceId,
     ],
   );
-  // Photos and files, as the web composer's + offers them.
+  // Camera, photos and files, as the web composer's + offers them.
+  const takePhoto = controller.attachments.takePhoto;
   const attachMenu = (
     <ComposerPlusMenu
+      onTakePhoto={takePhoto ? () => void takePhoto() : undefined}
       onPickImages={() => void controller.attachments.pickImages()}
       onPickFiles={() => void controller.attachments.pickDocuments()}
     />

@@ -63,6 +63,8 @@ export {
 } from "./inbox";
 export type { ButtonVariant } from "./controls";
 export { NativeMessageAttachments } from "./message-attachments";
+export { NativeImageViewer } from "./image-viewer";
+export type { NativeImageViewerLabels, NativeViewerImage } from "./image-viewer";
 export { QueueDock } from "./queue-dock";
 export { SessionCommandsList, SessionSignals } from "./session-signals";
 export { FeedbackSheet, TurnFeedbackButtons, useTurnRatings } from "./feedback";

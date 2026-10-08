@@ -35,6 +35,14 @@
       "expo-secure-store",
       "expo-web-browser",
       [
+        "expo-image-picker",
+        {
+          "cameraPermission": "Opengeni uses the camera so you can take a photo and send it to your agent.",
+          "photosPermission": "Opengeni lets you pick photos to send to your agent.",
+          "microphonePermission": false
+        }
+      ],
+      [
         "expo-notifications",
         {
           "mode": "development"
