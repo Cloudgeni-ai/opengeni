@@ -148,6 +148,7 @@ export const CLIENT_PAGES = [
   "setup-account",
   "account-auth",
   "personal-security",
+  "read-only-chats",
   "other",
 ] as const;
 export type ClientPage = (typeof CLIENT_PAGES)[number];
