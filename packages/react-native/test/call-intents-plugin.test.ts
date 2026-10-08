@@ -20,6 +20,7 @@ describe("native call config plugin", () => {
     expect(source).toContain('static let title: LocalizedStringResource = "Call the agent"');
     expect(source).toContain('"Call \\(.applicationName)"');
     expect(source).toContain('"Ring \\"\\(.applicationName)\\" now"');
+    expect(source).toContain("internal import OpenGeniCall");
     expect(source).toContain("OpenGeniCallLauncher.requestStart()");
     expect(source).toContain("struct OpenGeniCallShortcuts: AppShortcutsProvider");
   });
