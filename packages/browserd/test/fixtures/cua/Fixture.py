@@ -16,10 +16,12 @@ entry.get_accessible().set_name("Fixture text")
 button = Gtk.Button(label="Increment")
 label = Gtk.Label(label="Count: 0")
 count = 0
+pointer_events = []
 
 
 def save():
-    state = {"pid": os.getpid(), "value": entry.get_text(), "clicks": count}
+    state = {"pid": os.getpid(), "value": entry.get_text(), "clicks": count,
+             "pointer_events": pointer_events}
     with open(state_path + ".tmp", "w") as output:
         json.dump(state, output)
     os.replace(state_path + ".tmp", state_path)
@@ -34,6 +36,17 @@ def increment(_):
 
 
 button.connect("clicked", increment)
+
+
+def pointer_event(_, event):
+    pointer_events.append({"type": str(event.type), "x": event.x, "y": event.y,
+                           "screen_x": event.x_root, "screen_y": event.y_root})
+    save()
+    return False
+
+
+button.connect("button-press-event", pointer_event)
+button.connect("button-release-event", pointer_event)
 entry.connect("changed", lambda _: save())
 for child in [entry, button, label]:
     box.pack_start(child, False, False, 0)

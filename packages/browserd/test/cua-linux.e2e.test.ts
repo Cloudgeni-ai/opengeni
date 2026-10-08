@@ -155,8 +155,24 @@ test.skipIf(process.platform !== "linux" || process.env.OPENGENI_CUA_E2E !== "1"
         }),
       );
       expect(click.state).toBe("completed");
-      await Bun.sleep(150);
-      expect((await actual(0)).clicks).toBe(2);
+      // Dispatch completion is not application-effect proof. Observe the one
+      // dispatched click without replaying it, retaining evidence if it missed.
+      for (let i = 0; i < 20 && (await actual(0)).clicks !== 2; i++) await Bun.sleep(100);
+      const afterClick = await actual(0);
+      if (afterClick.clicks !== 2) {
+        const afterWindow = await supervisor.nativeCall(
+          command("get_window_state", { ...windowArgs, tree_format: "elements" }),
+        );
+        console.error(
+          JSON.stringify({
+            button: currentButton,
+            receipt: click,
+            fixture: afterClick,
+            afterWindow: afterWindow.observation?.result.structuredContent,
+          }),
+        );
+      }
+      expect(afterClick.clicks).toBe(2);
       expect((await actual(1)).clicks).toBe(0);
       // Background refusal is returned honestly; never escalated and retried.
       const background = await supervisor.nativeCall(
