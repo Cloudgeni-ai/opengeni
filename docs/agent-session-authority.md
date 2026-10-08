@@ -16,6 +16,13 @@ This policy applies only to authenticated `agent_attempt` callers. Human and
 service callers continue through their existing workspace, private-session, and
 optional embedding-host authorization rules.
 
+A private parent can create a same-owner private child from a live internal-update
+attempt as well as a human-message attempt. Internal updates keep their service
+audit attribution; they do not become human requests. The private-child database
+capability separately verifies the accepted turn's causal human against the
+parent's active owner and checks the exact parent, turn, attempt, generation and
+interruption state. A service label alone grants no private-child authority.
+
 Browser and desktop inventories apply `session.read` authorization to the chat
 that created each resource, for humans, services, API keys and agent attempts.
 This matches direct resource reads. A later observing/using association does not
