@@ -524,6 +524,14 @@ Home-compute selection proves establishment authority; invalid pointers reconcil
 visibly. Leases/reapers—not viewers—own sandboxes. Identity precedes setup; capture
 fences writers. Exact-instance loss never authorizes ambiguous replay. Routing stays
 lazy; raw handles serve setup/capture (`turn-sandbox-access.ts`).
+Docker drains attach only to capture the authenticated owned host workspace;
+they never call ordinary SDK resume or create a replacement execution wrapper.
+The protected SDK ownership receipt and current lease/capture fence precede
+descriptor-bound content reads. Missing legacy custody or failed capture retains
+data and unresolved lease truth; post-publication exact-container teardown
+preserves the host workspace. Canonical leaf:
+packages/runtime/src/sandbox/providers/docker-workspace-drain.ts.
+
 Pending cancellation accepts non-dispatch only from call-scoped routing admission
 proof or typed provider rejection. Credential command decorators preserve these
 invocation options up to routing, which never forwards proof callbacks to the
