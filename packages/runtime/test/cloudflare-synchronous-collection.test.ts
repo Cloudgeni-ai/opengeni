@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Manifest } from "@openai/agents/sandbox";
 import { CloudflareSandboxSession } from "@openai/agents-extensions/sandbox/cloudflare";
 import { collectCloudflareCommandOutput } from "../src/sandbox/cloudflare-command-output";
@@ -24,6 +27,7 @@ function nativeResponse(bytes: Uint8Array, lost = false) {
 }
 
 async function fixture(reply: (source: string) => Response | Promise<Response>) {
+  const root = await mkdtemp(join(tmpdir(), "cloudflare-synchronous-collection-"));
   const requests: { path: string; method: string; argv: string[]; timeout_ms?: number }[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -41,7 +45,7 @@ async function fixture(reply: (source: string) => Response | Promise<Response>) 
     state: {
       sandboxId: "sb-stream",
       workerUrl: server.url.origin,
-      manifest: new Manifest({ root: "/workspace" }),
+      manifest: new Manifest({ root }),
       environment: { ORIGINAL_ENV: "same" },
     },
   });
@@ -49,8 +53,15 @@ async function fixture(reply: (source: string) => Response | Promise<Response>) 
     session,
     requests,
     close: async () => {
-      await session.close();
-      server.stop(true);
+      try {
+        await session.close();
+      } finally {
+        try {
+          await server.stop(true);
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      }
     },
   };
 }

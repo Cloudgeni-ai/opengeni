@@ -486,6 +486,7 @@ async function workerSdk(
   exitReceipt: "valid" | "missing" | "fractional" | "duplicate" = "valid",
   holdEof = false,
 ) {
+  const root = await mkdtemp(join(tmpdir(), "worker-synchronous-collection-"));
   const exitSent = deferred();
   const eof = deferred();
   if (!holdEof) eof.resolve();
@@ -533,7 +534,7 @@ async function workerSdk(
     state: {
       sandboxId: "sb-stream",
       workerUrl: server.url.origin,
-      manifest: new Manifest({ root: "/workspace" }),
+      manifest: new Manifest({ root }),
       environment: { CAPTURE_MODE: "original" },
     },
   });
@@ -544,8 +545,15 @@ async function workerSdk(
     eof,
     close: async () => {
       eof.resolve();
-      await session.close();
-      server.stop(true);
+      try {
+        await session.close();
+      } finally {
+        try {
+          await server.stop(true);
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      }
     },
   };
 }

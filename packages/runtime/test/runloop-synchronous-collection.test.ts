@@ -1,4 +1,8 @@
 import { expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Manifest } from "@openai/agents/sandbox";
 import { RunloopSandboxSession } from "@openai/agents-extensions/sandbox/runloop";
 import { ExecutionResult } from "@runloop/api-client";
@@ -10,6 +14,7 @@ function fixture(
   fault?: "missing-exit" | "stdout-loss" | "stderr-loss",
   nativeEnvironment: Record<string, string> = {},
 ) {
+  const root = mkdtempSync(join(tmpdir(), "runloop-synchronous-collection-"));
   let starts = 0;
   const reads = { stdout: 0, stderr: 0 };
   const executionId = crypto.randomUUID();
@@ -31,7 +36,7 @@ function fixture(
   const session = new RunloopSandboxSession({
     state: {
       devboxId: "db-stream",
-      manifest: new Manifest({ root: "/workspace" }),
+      manifest: new Manifest({ root }),
       pauseOnExit: false,
       environment: { CAPTURE_MODE: "original" },
     },
@@ -115,6 +120,13 @@ function fixture(
     command: () => command,
     raw: () => raw,
     executionId,
+    close: async () => {
+      try {
+        await session.close();
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
   };
 }
 
@@ -144,7 +156,7 @@ test.each([
       expect(source.raw()?.executionId).toBe(source.executionId);
       expect(source.reads).toEqual({ stdout: truncated ? 1 : 0, stderr: truncated ? 1 : 0 });
     } finally {
-      await source.session.close();
+      await source.close();
     }
   },
 );
@@ -165,7 +177,7 @@ test.each(["missing-exit", "stdout-loss", "stderr-loss"] as const)(
       expect(source.raw()?.executionId).toBe(source.executionId);
       expect(source.command()).not.toContain("__OPENGENI_FS_COMPLETION_");
     } finally {
-      await source.session.close();
+      await source.close();
     }
   },
 );
@@ -184,7 +196,7 @@ test("the actual Runloop full-log path does not introduce a Python prerequisite"
     expect(source.reads).toEqual({ stdout: 1, stderr: 1 });
     expect(source.command()).not.toContain("__OPENGENI_FS_COMPLETION_");
   } finally {
-    await source.session.close();
+    await source.close();
   }
 });
 
@@ -206,6 +218,6 @@ test("ordinary Runloop SDK presentation remains outside trusted filesystem colle
     expect(source.starts()).toBe(2);
     expect(source.reads).toEqual({ stdout: 2, stderr: 2 });
   } finally {
-    await source.session.close();
+    await source.close();
   }
 });
