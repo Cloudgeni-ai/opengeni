@@ -16,7 +16,7 @@ type InboxClient = Pick<OpenGeniClient, "listInbox">;
 
 const EMPTY: InboxState = { data: null, error: null, loading: true };
 
-class InboxStore {
+export class InboxStore {
   private state: InboxState = EMPTY;
   private listeners = new Set<() => void>();
   private inFlight: Promise<void> | null = null;
@@ -44,7 +44,14 @@ class InboxStore {
     this.inFlight = this.client
       .listInbox()
       .then((data) => {
-        if (request === this.generation) this.set({ data, error: null, loading: false });
+        if (request !== this.generation) return;
+        // A proxy or older server can answer 200 without a list; never let that
+        // reach the rail, which renders on every workspace page.
+        if (!Array.isArray(data?.items)) {
+          this.set({ error: new Error("The inbox response had no items"), loading: false });
+          return;
+        }
+        this.set({ data, error: null, loading: false });
       })
       .catch((error: unknown) => {
         // Keep the last good list on a transient failure; the page says so.
@@ -86,11 +93,21 @@ function storeFor(client: InboxClient): InboxStore {
   return store;
 }
 
+/**
+ * Only a signed-in person has an inbox; the API refuses keys, services and
+ * other machine principals (routes/inbox.ts), so the web never asks for them.
+ */
+export function hasInbox(
+  accessContext: { subjectId: string; credential?: unknown } | null | undefined,
+): boolean {
+  return Boolean(accessContext?.subjectId.startsWith("user:") && !accessContext.credential);
+}
+
 /** The inbox, polled while mounted. `pollMs` is shortened while the Inbox page is open. */
 export function useInbox(options: { pollMs?: number; enabled?: boolean } = {}) {
-  const { client } = useAppContext();
+  const { client, accessContext } = useAppContext();
   const store = storeFor(client);
-  const enabled = options.enabled ?? true;
+  const enabled = (options.enabled ?? true) && hasInbox(accessContext);
   const pollMs = options.pollMs ?? 30_000;
   const state = useSyncExternalStore(
     store.subscribe,

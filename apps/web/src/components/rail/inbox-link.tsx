@@ -2,11 +2,18 @@ import { Link, useRouterState } from "@tanstack/react-router";
 import { InboxIcon } from "lucide-react";
 
 import { useRail } from "@/components/rail/rail-context";
-import { inboxAttentionCount, useInbox } from "@/lib/inbox";
+import { useAppContext } from "@/context";
+import { hasInbox, inboxAttentionCount, useInbox } from "@/lib/inbox";
 import { cn } from "@/lib/utils";
 
-/** The Inbox entry: always visible, with how many things wait on the person. */
+/** The Inbox entry, with how many things wait on the person. Only people have one. */
 export function InboxLink() {
+  const { accessContext } = useAppContext();
+  if (!hasInbox(accessContext)) return null;
+  return <PersonInboxLink />;
+}
+
+function PersonInboxLink() {
   const rail = useRail();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const active = pathname === `/workspaces/${rail.workspaceId}/inbox`;
