@@ -105,7 +105,9 @@ export async function prepareLocalAgentRuntime(): Promise<PreparedRuntime> {
     await run(command, repositoryRoot);
   }
   await run(["cargo", "build", "--release", "-p", "opengeni-computer-native"], agentRoot);
-  const cuaManifest = process.platform === "darwin" ? await stageCuaRuntime(process.arch) : null;
+  const cuaManifest = ["darwin", "linux"].includes(process.platform)
+    ? await stageCuaRuntime(process.arch)
+    : null;
 
   const agentBrowser = join(browserdRoot, "dist", `agent-browser${executableSuffix}`);
   const computerNative = join(

@@ -1,4 +1,5 @@
 import { ComputerDriver } from "../computer-driver";
+import { join } from "node:path";
 import type { ComputerSupervisorDriverContext } from "../computer-supervisor";
 import { CuaComputerBackend } from "./backend";
 import { createCuaRuntime } from "./sdk";
@@ -10,16 +11,28 @@ let occupied = false;
 export async function createCuaComputerDriver(
   context: ComputerSupervisorDriverContext,
 ): Promise<ComputerDriver> {
-  if (process.platform !== "darwin" && process.platform !== "win32")
+  if (!["darwin", "win32", "linux"].includes(process.platform))
     throw new Error(
-      "CUA computer pilot currently requires macOS or an interactive Windows desktop",
+      "CUA requires macOS, an isolated Linux seat, or an interactive Windows desktop",
     );
-  if (occupied) throw new Error("CUA desktop runtime is already owned by another ComputerSession");
-  occupied = true;
+  const physical = process.platform !== "linux";
+  if (
+    !physical &&
+    (context.seatId !== `linux-virtual:${context.computerSessionId}` ||
+      !context.displayId ||
+      context.environment.DISPLAY !== context.displayId ||
+      !context.environment.DBUS_SESSION_BUS_ADDRESS ||
+      context.environment.HOME !== join(context.sessionDirectory, "gui-home"))
+  )
+    throw new Error("CUA Linux requires an allocated display and accessibility bus");
+  if (physical && occupied)
+    throw new Error("CUA desktop runtime is already owned by another ComputerSession");
+  if (physical) occupied = true;
   try {
     // Lazy loading keeps the browser engine and normal native backend independent
     // of CUA's Node-API runtime. Never expose CUA browser tools or its raw SDK.
-    const sdk = await createCuaRuntime();
+    const environment = { ...context.environment };
+    const sdk = await createCuaRuntime(environment);
     let closed = false;
     const backend = await CuaComputerBackend.open(
       {
@@ -33,11 +46,11 @@ export async function createCuaComputerDriver(
           } finally {
             if ("uniffiDestroy" in sdk && typeof sdk.uniffiDestroy === "function")
               sdk.uniffiDestroy();
-            occupied = false;
+            if (physical) occupied = false;
           }
         },
       },
-      process.platform === "win32" ? "windows" : "macos",
+      process.platform === "win32" ? "windows" : process.platform === "linux" ? "linux" : "macos",
     );
     return new ComputerDriver({
       computerSessionId: context.computerSessionId,
@@ -47,7 +60,7 @@ export async function createCuaComputerDriver(
       // A new ComputerSession establishes new observations/capture authority.
     });
   } catch (error) {
-    occupied = false;
+    if (physical) occupied = false;
     throw error;
   }
 }

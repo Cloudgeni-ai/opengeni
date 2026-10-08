@@ -31,7 +31,7 @@ type Operation = {
 /** CUA owns OS delivery. Opengeni owns authority, receipts and public media.
  * Every call is serialized, including preview captures and shutdown. */
 export class CuaComputerBackend implements ComputerBackend {
-  readonly identity: { platform: "macos" | "windows"; adapterId: string };
+  readonly identity: { platform: "macos" | "windows" | "linux"; adapterId: string };
   readonly initialCapabilities: ComputerSessionCapabilities;
   private readonly session = `opengeni-${randomUUID()}`;
   private readonly nativeSession = `opengeni-${randomUUID()}`;
@@ -49,7 +49,7 @@ export class CuaComputerBackend implements ComputerBackend {
   private constructor(
     private readonly runtime: CuaDesktopRuntime,
     permissions: { accessibility: boolean; screen_recording: boolean },
-    platform: "macos" | "windows",
+    platform: "macos" | "windows" | "linux",
   ) {
     this.identity = { platform, adapterId: `opengeni.cua.${platform}.v1` };
     this.initialCapabilities = {
@@ -60,8 +60,8 @@ export class CuaComputerBackend implements ComputerBackend {
       screenCapture: false,
       semanticActions: permissions.accessibility,
       pointerInput:
-        platform === "macos" && permissions.accessibility && permissions.screen_recording,
-      keyboardInput: platform === "macos" && permissions.accessibility,
+        platform !== "windows" && permissions.accessibility && permissions.screen_recording,
+      keyboardInput: platform !== "windows" && permissions.accessibility,
       clipboard: false,
       backgroundActions: permissions.accessibility,
       backgroundInput: platform === "macos" && permissions.accessibility,
@@ -71,7 +71,7 @@ export class CuaComputerBackend implements ComputerBackend {
 
   static async open(
     runtime: CuaDesktopRuntime,
-    platform: "macos" | "windows" = "macos",
+    platform: "macos" | "windows" | "linux" = "macos",
   ): Promise<CuaComputerBackend> {
     try {
       const permissions = await readPermissions(runtime, platform);
@@ -86,13 +86,21 @@ export class CuaComputerBackend implements ComputerBackend {
 
   validateNative(request: ComputerNativeCallRequest): Promise<void> {
     return this.run(async () => {
-      this.nativeTools ??= new CuaNativeTools(this.runtime, this.nativeSession);
+      this.nativeTools ??= new CuaNativeTools(
+        this.runtime,
+        this.nativeSession,
+        this.identity.platform,
+      );
       await this.nativeTools.validate(request);
     });
   }
   callNative(request: ComputerNativeCallRequest) {
     return this.run(async () => {
-      this.nativeTools ??= new CuaNativeTools(this.runtime, this.nativeSession);
+      this.nativeTools ??= new CuaNativeTools(
+        this.runtime,
+        this.nativeSession,
+        this.identity.platform,
+      );
       await this.nativeTools.validate(request);
       if (!this.nativeSessionStarted) {
         await callDesktop(this.runtime, "start_session", { session: this.nativeSession });
@@ -112,11 +120,14 @@ export class CuaComputerBackend implements ComputerBackend {
         ...this.initialCapabilities,
         semanticObservation: permissions.accessibility,
         semanticActions: permissions.accessibility,
-        keyboardInput: macos && permissions.accessibility,
+        keyboardInput: this.identity.platform !== "windows" && permissions.accessibility,
         backgroundActions: permissions.accessibility,
         backgroundInput: macos && permissions.accessibility,
         windowCapture: permissions.screen_recording,
-        pointerInput: macos && permissions.accessibility && permissions.screen_recording,
+        pointerInput:
+          this.identity.platform !== "windows" &&
+          permissions.accessibility &&
+          permissions.screen_recording,
       };
     });
   }
@@ -320,7 +331,7 @@ export class CuaComputerBackend implements ComputerBackend {
       ...this.args(target),
       include_screenshot: false,
       include_accessibility_tree: true,
-      ...(this.identity.platform === "macos" ? { tree_format: "elements" } : {}),
+      ...(this.identity.platform !== "windows" ? { tree_format: "elements" } : {}),
       max_elements: 2000,
       max_depth: 25,
     });
@@ -375,15 +386,15 @@ export class CuaComputerBackend implements ComputerBackend {
       include_accessibility_tree: false,
       include_screenshot: true,
       max_image_dimension: longEdge,
-      ...(this.identity.platform === "macos" && !actionCapture ? { display_only: true } : {}),
+      ...(this.identity.platform !== "windows" && !actionCapture ? { display_only: true } : {}),
     });
     const state = WindowState.parse(data);
     const image = result.images[0];
     if (
       state.pid !== target.pid ||
       state.window_id !== target.windowId ||
-      ((actionCapture || this.identity.platform !== "macos") && !state.capture_id) ||
-      (this.identity.platform === "macos"
+      ((actionCapture || this.identity.platform === "windows") && !state.capture_id) ||
+      (this.identity.platform !== "windows"
         ? state.screenshot_frame_valid !== true
         : state.screenshot_frame_valid === false || data.screenshot_error !== undefined) ||
       !state.screenshot_width ||
@@ -490,7 +501,12 @@ export class CuaComputerBackend implements ComputerBackend {
         .find((entry) => entry.targetId === command.targetId)!;
       const x = (action.x * latest.width) / frame.width,
         y = (action.y * latest.height) / frame.height;
-      const delivery = { ...args, delivery_mode: "background" };
+      // Linux owns an isolated desktop: viewer input may focus within that seat.
+      // Attached physical desktops retain strictly background delivery.
+      const delivery = {
+        ...args,
+        delivery_mode: this.identity.platform === "linux" ? "foreground" : "background",
+      };
       if (action.action === "click" || action.action === "double_click")
         return [
           {
@@ -638,15 +654,31 @@ export class CuaComputerBackend implements ComputerBackend {
       return [
         {
           name: "type_text",
-          args: { ...args, ...focused, text: action.value, delivery_mode: "background" },
+          args: {
+            ...args,
+            ...focused,
+            text: action.value,
+            delivery_mode: this.identity.platform === "linux" ? "foreground" : "background",
+          },
         },
       ];
     const keys = action.value.split("+").map((key) => key.toLowerCase());
     const key = keys.pop()!;
-    const modifiers = keys.map(
-      (modifier) => ({ meta: "cmd", control: "ctrl", alt: "option" })[modifier] ?? modifier,
-    );
-    if (modifiers.some((modifier) => !["cmd", "ctrl", "option", "shift", "fn"].includes(modifier)))
+    const modifierAliases: Record<string, string> =
+      this.identity.platform === "linux"
+        ? { meta: "super", control: "ctrl", option: "alt" }
+        : { meta: "cmd", control: "ctrl", alt: "option" };
+    const modifiers = keys.map((modifier) => modifierAliases[modifier] ?? modifier);
+    if (
+      modifiers.some(
+        (modifier) =>
+          !(
+            this.identity.platform === "linux"
+              ? ["super", "ctrl", "alt", "shift"]
+              : ["cmd", "ctrl", "option", "shift", "fn"]
+          ).includes(modifier),
+      )
+    )
       throw unsupported("CUA keyboard modifier is unsupported");
     return [
       {
@@ -656,28 +688,36 @@ export class CuaComputerBackend implements ComputerBackend {
           ...focused,
           key: key === "enter" ? "return" : key,
           modifiers,
-          delivery_mode: "background",
+          delivery_mode: this.identity.platform === "linux" ? "foreground" : "background",
         },
       },
     ];
   }
 }
 
-async function readPermissions(runtime: CuaDesktopRuntime, platform: "macos" | "windows") {
+async function readPermissions(
+  runtime: CuaDesktopRuntime,
+  platform: "macos" | "windows" | "linux",
+) {
   const { data } = await callDesktop(
     runtime,
     "check_permissions",
-    platform === "windows" ? {} : { prompt: false, probe_direct_capture: false },
+    platform !== "macos" ? {} : { prompt: false, probe_direct_capture: false },
   );
   return {
     accessibility:
       platform === "windows"
         ? data.uia === true && data.post_message === true
-        : data.accessibility === true,
+        : platform === "linux"
+          ? data.atspi === true
+          : data.accessibility === true,
     // Windows has no Screen Recording grant. Interactive-seat admission is
     // checked before opening the SDK; each target capture still must prove its
     // native capture ID, exact window identity, PNG dimensions and bytes.
-    screen_recording: platform === "windows" || data.screen_recording === true,
+    screen_recording:
+      platform === "linux"
+        ? data.x11 === true
+        : platform === "windows" || data.screen_recording === true,
   };
 }
 

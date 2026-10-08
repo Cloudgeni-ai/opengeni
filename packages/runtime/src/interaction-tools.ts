@@ -1,4 +1,9 @@
-import { CUA_DESKTOP_TOOLS, AttemptToolResult, ComputerNativeReceipt } from "@opengeni/contracts";
+import {
+  CUA_DESKTOP_TOOLS,
+  cuaDesktopToolVariants,
+  AttemptToolResult,
+  ComputerNativeReceipt,
+} from "@opengeni/contracts";
 import { boundComputerNativeReceipt } from "@opengeni/interaction";
 import {
   AttachedBrowserBridge,
@@ -1580,13 +1585,31 @@ export function createInteractionAttemptToolDefinitions(
     input.transport.callNativeComputerTool
   ) {
     for (const tool of CUA_DESKTOP_TOOLS) {
-      const properties = { ...(tool.inputSchema.properties as Record<string, unknown>) };
-      delete properties.session;
-      properties.computerSessionId = {
-        type: "string",
-        format: "uuid",
-        description: "CUA ComputerSession from computer_open",
-      };
+      const variants = cuaDesktopToolVariants(tool.name);
+      const inputSchema = nativeCuaSchema(
+        variants.map(({ inputSchema }) => {
+          const properties = { ...(inputSchema.properties as Record<string, unknown>) };
+          delete properties.session;
+          properties.computerSessionId = {
+            type: "string",
+            format: "uuid",
+            description: "CUA ComputerSession from computer_open",
+          };
+          return {
+            ...inputSchema,
+            properties,
+            required: [
+              ...((inputSchema.required as string[] | undefined) ?? []).filter(
+                (name) => name !== "session",
+              ),
+              "computerSessionId",
+            ],
+          };
+        }),
+      );
+      const outputSchema = variants.every((variant) => variant.outputSchema)
+        ? nativeCuaSchema(variants.map((variant) => variant.outputSchema!))
+        : undefined;
       definitions.push({
         identity: { serverId: "interaction", toolName: "cua_" + tool.name },
         modelName: "interaction__cua_" + tool.name,
@@ -1595,17 +1618,8 @@ export function createInteractionAttemptToolDefinitions(
         description:
           "Native CUA computer tool; requires a CUA-backed computer_open session. " +
           tool.description,
-        inputSchema: {
-          ...tool.inputSchema,
-          properties,
-          required: [
-            ...((tool.inputSchema.required as string[] | undefined) ?? []).filter(
-              (name) => name !== "session",
-            ),
-            "computerSessionId",
-          ],
-        } as AttemptToolJsonSchema,
-        ...(tool.outputSchema ? { outputSchema: tool.outputSchema as AttemptToolJsonSchema } : {}),
+        inputSchema,
+        ...(outputSchema ? { outputSchema } : {}),
         // Read-like tools can write screenshots to files; all native calls use
         // the existing computer control authority, including ordered batches.
         annotations: { ...tool.annotations, readOnlyHint: false, idempotentHint: false },
@@ -1656,6 +1670,14 @@ export function createInteractionAttemptToolDefinitions(
     }
   }
   return definitions;
+}
+
+/** Preserve exact platform alternatives instead of flattening away constraints. */
+function nativeCuaSchema(variants: Record<string, unknown>[]): AttemptToolJsonSchema {
+  const unique = [...new Map(variants.map((schema) => [JSON.stringify(schema), schema])).values()];
+  return (
+    unique.length === 1 ? unique[0] : { type: "object", anyOf: unique }
+  ) as AttemptToolJsonSchema;
 }
 
 function filterDiscoveredSessions<

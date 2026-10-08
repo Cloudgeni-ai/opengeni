@@ -22,7 +22,9 @@ on:
       - "packages/browserd/scripts/stage-cua-runtime.ts"
       - "packages/browserd/scripts/build-cua-worker.ts"
       - "packages/browserd/test/cua-runtime-packaging.e2e.test.ts"
-      - "packages/browserd/test/fixtures/cua/PackagedProbe.ts"
+      - "packages/browserd/test/cua-linux.e2e.test.ts"
+      - "packages/browserd/test/fixtures/cua/**"
+      - "packages/contracts/src/cua-desktop-tools*"
       - "packages/browserd/package.json"
   push:
     branches:
@@ -35,7 +37,9 @@ on:
       - "packages/browserd/scripts/stage-cua-runtime.ts"
       - "packages/browserd/scripts/build-cua-worker.ts"
       - "packages/browserd/test/cua-runtime-packaging.e2e.test.ts"
-      - "packages/browserd/test/fixtures/cua/PackagedProbe.ts"
+      - "packages/browserd/test/cua-linux.e2e.test.ts"
+      - "packages/browserd/test/fixtures/cua/**"
+      - "packages/contracts/src/cua-desktop-tools*"
       - "packages/browserd/package.json"
 
 concurrency:
@@ -50,6 +54,43 @@ defaults:
     working-directory: agent
 
 jobs:
+  cua-linux:
+    name: Linux CUA (${{ matrix.runner }})
+    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install desktop and native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb xauth dbus-x11 at-spi2-core xfwm4 xterm x11vnc python3-gi gir1.2-gtk-3.0 \
+            clang pkg-config libdbus-1-dev libpipewire-0.3-dev libspa-0.2-dev libei-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev libxi-dev libxtst-dev libxext-dev \
+            libxdo-dev libssl-dev
+          bun install --frozen-lockfile
+      - name: Stage the native Linux worker and transport
+        run: bun packages/browserd/scripts/stage-cua-runtime.ts
+      - name: Verify isolated desktops and compiled packaging
+        env:
+          OPENGENI_CUA_E2E: "1"
+          OPENGENI_CUA_PACKAGING_E2E: "1"
+        run: |
+          bun test --timeout 120000 packages/browserd/test/cua-linux.e2e.test.ts
+          bun test --timeout 120000 packages/browserd/test/cua-runtime-packaging.e2e.test.ts
+
   native-command-supervisor:
     # Skip the main -> production promotion PR: its head already ran as a main push.
     if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}

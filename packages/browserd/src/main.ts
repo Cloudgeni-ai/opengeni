@@ -25,10 +25,12 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
   const config = await browserdConfig(environment);
   if (
     config.computerBackend === "cua" &&
-    (!["darwin", "win32"].includes(process.platform) ||
-      config.computerEnvironmentMode !== "existing")
+    (process.platform === "linux"
+      ? config.computerEnvironmentMode !== "isolated_linux"
+      : !["darwin", "win32"].includes(process.platform) ||
+        config.computerEnvironmentMode !== "existing")
   ) {
-    throw new Error("CUA computer pilot requires an existing macOS or interactive Windows desktop");
+    throw new Error("CUA requires an isolated Linux seat or an existing macOS/Windows desktop");
   }
   const agentBrowserBinary = config.agentBrowserBinaryPath
     ? await resolvePinnedAgentBrowserBinary({ binaryPath: config.agentBrowserBinaryPath })

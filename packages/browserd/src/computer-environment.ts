@@ -78,6 +78,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
       .digest("hex")
       .slice(0, 32);
     const runtimeDirectory = join("/tmp", `opengeni-cs-${environmentDigest}`);
+    const homeDirectory = join(context.sessionDirectory, "gui-home");
     const cacheDirectory = join(context.sessionDirectory, "gui-cache");
     const configDirectory = join(context.sessionDirectory, "gui-config");
     const dataDirectory = join(context.sessionDirectory, "gui-data");
@@ -87,6 +88,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
     const temporaryDirectory = join("/tmp", `ogct-${environmentDigest}`);
     const directories = [
       runtimeDirectory,
+      homeDirectory,
       cacheDirectory,
       configDirectory,
       dataDirectory,
@@ -139,7 +141,11 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
       const displayId = `:${displayNumber}`;
       const sessionEnvironment: NodeJS.ProcessEnv = {
         ...baseEnvironment,
+        HOME: homeDirectory,
         DISPLAY: displayId,
+        WAYLAND_DISPLAY: undefined,
+        XAUTHORITY: undefined,
+        AT_SPI_BUS_ADDRESS: undefined,
         XDG_RUNTIME_DIR: runtimeDirectory,
         XDG_CACHE_HOME: cacheDirectory,
         XDG_CONFIG_HOME: configDirectory,

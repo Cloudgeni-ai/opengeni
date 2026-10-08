@@ -1,6 +1,6 @@
 # CUA desktop adapter
 
-The macOS adapter uses CUA Driver source revision
+The macOS and Linux adapters use CUA Driver source revision
 `2e4736b3ebff61ef99e8c0c74270b5cd75894643`, including its non-invalidating preview
 capture and cursor support. `@trycua/cua-driver` 0.34.0 supplies the private-worker
 transport; the source-built executable performs desktop operations. The narrow
@@ -20,6 +20,14 @@ its AppKit cursor event loop. The child has no reconnectable endpoint and exits
 when its SDK owner closes. A second session cannot take this process's physical
 desktop while the first owns it. Separate visual cursors do not isolate focus or
 application state.
+
+On Linux, each ComputerSession receives its own Xvfb display, accessibility bus,
+home and application profile directories. The worker uses that allocated X11
+seat even when the host has Wayland or Xauthority settings. Its private process
+group is stopped before those directories are removed. This cleans up ordinary
+launched children; programs that deliberately detach into another process session
+are outside that group. Display/profile separation is not an OS security sandbox:
+process inspection and app management retain the host user's authority.
 
 Existing macOS accessibility and screen-recording permissions are required. The
 host application owns permission prompts; CUA does not raise a second prompt.
@@ -41,6 +49,7 @@ bun scripts/stage-cua-runtime.ts
 bun run typecheck
 bun test test/cua-backend.test.ts
 OPENGENI_CUA_E2E=1 bun test test/cua-computer.e2e.test.ts
+OPENGENI_CUA_E2E=1 bun test test/cua-linux.e2e.test.ts
 OPENGENI_CUA_PACKAGING_E2E=1 bun test test/cua-runtime-packaging.e2e.test.ts
 ```
 
@@ -52,6 +61,11 @@ test builds the real compiled loader and verifies that missing adjacent assets
 cannot be replaced by an ambient installation. Stage first to keep compilation
 outside the test timeout. Building both macOS architectures requires their Rust
 targets and Xcode tools.
+Linux builds require the X11, XTest, XRandR, XFixes, XInput, XRecord and DBus
+development libraries; execution requires Xvfb, an accessibility-enabled desktop,
+DBus, XFWM4, xterm, x11vnc and util-linux `setsid`. The Linux test checks two
+independent displays, cursor and clipboard state, native batches, viewer captures
+and cleanup of a launched non-GUI process. CI builds and runs it on x64 and arm64.
 
 ## Current limits
 
@@ -60,11 +74,14 @@ targets and Xcode tools.
   controls with upstream arguments and results. Foreground activation is explicit.
 - Background support depends on the target application's native controls. It
   does not make every desktop application fully operable in the background.
-- Linux and Windows have not completed adoption acceptance. Windows requires an
+- Linux supports semantic background actions within its isolated X11 seat;
+  foreground pointer input stays inside that seat. Unsupported native background
+  pointer requests are refused. Web/application acceptance is still required.
+- Windows has not completed adoption acceptance. Windows requires an
   unlocked interactive session on `WinSta0/Default`; Session 0 is refused.
   Only Windows semantic actions and window capture are admitted. Edit values
   and labels copied from those values are redacted when password metadata is absent.
-- Release staging is macOS-only. Signed application acceptance is required before
+- Release staging includes macOS and Linux. Signed macOS application acceptance is required before
   changing the default backend.
 
 Pointer frames supply coordinate dimensions, not one-shot action permission.
@@ -81,8 +98,10 @@ for semantic observations. Unknown input outcomes are never automatically replay
 The release catalog comes from the bundled worker's `listToolsJson()` via
 `bun packages/browserd/scripts/generate-cua-desktop-tools.ts`. It admits desktop
 workflow tools; lifecycle, escalation, configuration, updates and browser tools
-stay outside this interface. The current generated catalog is macOS-specific.
-Other platforms must supply their own qualified schemas before native admission.
+stay outside this interface. macOS and Linux each have a generated catalog;
+agent schemas preserve the union of their native variants, and the selected
+runtime checks its exact platform schema. Other platforms must supply their own
+qualified schemas before native admission.
 Each admitted tool's input/output schemas are checked against the running worker.
 
 Agents use `interaction__cua_<upstream_name>` or Code Mode

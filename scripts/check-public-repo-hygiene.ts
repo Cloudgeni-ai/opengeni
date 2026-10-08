@@ -73,6 +73,11 @@ const REVIEWED_UPSTREAM_LABEL_MATCHES: Record<
     sha256: "77834435f14f32bf3b32c8ff9a5ad38719a96908bf7a84e15c349e13c1d09a25",
     offsets: "all",
   },
+  "packages/contracts/src/cua-desktop-tools.linux.gen.json": {
+    bytes: 218_339,
+    sha256: "afc3b9b479b35c05f89736a36a965feceb217bd0944d8709605c0228ef129ed0",
+    offsets: "all",
+  },
   "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_010000.txt": {
     bytes: 10_000,
     sha256: "460689f95489b6336f81772e8c2288bda85e897ffa19109c7dd4589c0715cb7f",
