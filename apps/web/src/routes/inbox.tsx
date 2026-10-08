@@ -4,6 +4,7 @@
 // withdrawn or dismissed, and it always stays in its session's timeline.
 import type {
   InboxItem,
+  InboxTidyPolicy,
   SessionHumanInputRequest,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
@@ -39,6 +40,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
 import { EmptyState } from "@/components/ui/empty-state";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { Notice } from "@/components/ui/notice";
@@ -509,7 +511,10 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
               />
             </Toolbar>
           ) : null}
-          {body}
+          <SectionStack>
+            {body}
+            <TidySetting />
+          </SectionStack>
         </div>
       </div>
       <AnswerDialog
@@ -521,6 +526,78 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
         }}
       />
     </ContentPage>
+  );
+}
+
+/**
+ * Who may clear things out of the person's inbox. An agent can always update or
+ * withdraw what it posted; this decides whether other agents may tidy too.
+ * Answering and approving stay with the person either way.
+ */
+function TidySetting() {
+  const context = useAppContext();
+  const [policy, setPolicy] = useState<InboxTidyPolicy | null>(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    let current = true;
+    void context.client
+      .getInboxSettings()
+      .then((settings) => {
+        if (current) setPolicy(settings.tidyPolicy);
+      })
+      .catch(() => {
+        if (current) setPolicy("own_sessions");
+      });
+    return () => {
+      current = false;
+    };
+  }, [context.client]);
+
+  const change = async (next: InboxTidyPolicy) => {
+    const previous = policy;
+    setPolicy(next);
+    setSaving(true);
+    try {
+      await context.client.updateInboxSettings({ tidyPolicy: next });
+    } catch (error) {
+      setPolicy(previous);
+      toast.error(userErrorText(error, "Couldn't save that. Try again."));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Section
+      title="Who can tidy your inbox"
+      description="Agents never answer or approve for you. This only decides who may remove items."
+    >
+      {policy === null ? (
+        <div className="grid gap-3 pt-1" aria-busy="true">
+          <Skeleton className="h-5 w-1/2" />
+          <Skeleton className="h-5 w-1/2" />
+        </div>
+      ) : (
+        <ChoiceCards
+          variant="list"
+          aria-label="Who can tidy your inbox"
+          value={policy}
+          disabled={saving}
+          onValueChange={(value) => void change(value as InboxTidyPolicy)}
+        >
+          <ChoiceCard
+            value="own_sessions"
+            title="The agent that posted it"
+            description="Or the sessions that started that agent."
+          />
+          <ChoiceCard
+            value="any_agent"
+            title="Any agent working for you"
+            description="Lets one agent look after your inbox and clear what's done."
+          />
+        </ChoiceCards>
+      )}
+    </Section>
   );
 }
 
