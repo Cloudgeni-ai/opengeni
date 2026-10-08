@@ -12,7 +12,10 @@ import {
   createTurnToolCancellationController,
 } from "../src/sandbox/turn-tool-cancellation";
 import { mcpToolErrorOutput } from "../src/index";
-import { synchronousOutputFixture } from "./synchronous-output-fixture";
+import {
+  synchronousNativeOutputFixture,
+  synchronousOutputFixture,
+} from "./synchronous-output-fixture";
 
 function running(handle: number, output = ""): string {
   return `Process running with session ID ${handle}\n\nOutput:\n${output}`;
@@ -215,30 +218,47 @@ test("a competing collector's cursor advance cannot authorize a result with miss
 
 test("worker synchronous runner is non-PTY and collects protocol output without tail truncation", async () => {
   const controller = createTurnToolCancellationController();
+  const output = synchronousNativeOutputFixture();
   const prefix = "p".repeat(20_000);
   const userCommand = "filesystem protocol";
   let starts = 0;
+  let reads = 0;
   const result = await controller.runSandboxCommandSynchronous(
     {
+      getSynchronousCommandOutput: output.getSynchronousCommandOutput,
       execCommand: async (args) => {
         expect(args.tty).toBe(false);
         expect(args.cmd.indexOf(userCommand)).toBe(args.cmd.lastIndexOf(userCommand));
         // The cancellable group leader propagates the original shell's status.
         expect(args.cmd).toContain("__opengeni_status=$?");
         starts++;
-        return running(47, prefix);
+        return output.record(
+          running(47, "truncated presentation"),
+          prefix,
+          "warning prefix",
+          null,
+          47,
+        );
       },
       writeStdin: async ({ sessionId, chars }) => {
         expect(sessionId).toBe(47);
         expect(chars).toBe("");
-        return exited(9, "__OPENGENI_FS_BATCH_OK__");
+        reads++;
+        return output.record(
+          exited(9, "combined presentation tail"),
+          "__OPENGENI_FS_BATCH_OK__",
+          " warning tail",
+          9,
+        );
       },
     },
     { cmd: userCommand, maxOutputTokens: 1 },
   );
   expect(result.stdout).toBe(`${prefix}__OPENGENI_FS_BATCH_OK__`);
+  expect(result.stderr).toBe("warning prefix warning tail");
   expect(result.exitCode).toBe(9);
   expect(starts).toBe(1);
+  expect(reads).toBe(1);
   controller.cancel();
   await controller.waitForQuiescence();
 });
@@ -291,6 +311,7 @@ test("failed worker observation keeps the physical fence until exact retained se
 
 test("cancellation interrupts observation but drain still awaits original terminal proof", async () => {
   const controller = createTurnToolCancellationController();
+  const output = synchronousNativeOutputFixture();
   let entered!: () => void;
   const observing = new Promise<void>((resolve) => {
     entered = resolve;
@@ -303,9 +324,16 @@ test("cancellation interrupts observation but drain still awaits original termin
   let cancellationRequested = false;
   const userCommand = "write once";
   const session: ChannelASession = {
+    getSynchronousCommandOutput: output.getSynchronousCommandOutput,
     execCommand: async ({ cmd }) => {
       expect(cmd.indexOf(userCommand)).toBe(cmd.lastIndexOf(userCommand));
-      return running(50, "write markers");
+      return output.record(
+        running(50, "truncated presentation"),
+        "write markers",
+        "warning",
+        null,
+        50,
+      );
     },
     hasRetainedProcess: () => !originalSettled,
     reconcileRetainedProcess: async () => originalSettled,
@@ -323,7 +351,7 @@ test("cancellation interrupts observation but drain still awaits original termin
       }
       await terminalAvailable;
       originalSettled = true;
-      return exited(130);
+      return output.record(exited(130), "", "cancelled", 130);
     },
   };
   const run = controller.runSandboxCommandSynchronous(session, { cmd: userCommand });

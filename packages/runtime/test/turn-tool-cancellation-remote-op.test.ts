@@ -48,6 +48,7 @@ async function remainsPending(promise: Promise<unknown>): Promise<boolean> {
 function makeRig(input: {
   beforeRequest?: (request: ControlRequest) => void | Promise<void>;
   defaultScript?: (exec: ExecRequest, opId: string) => FakeOpScript | Promise<FakeOpScript>;
+  withOpStream?: boolean;
   sessionDeps?: Pick<
     SelfhostedSessionDeps,
     "adoptBackgroundCommand" | "resolveOperationAdmission" | "execTimeoutMs"
@@ -79,12 +80,16 @@ function makeRig(input: {
     timeoutMs: 100,
     execTimeoutMs: 5_000,
     retryClock: { sleep: async () => {}, jitter: () => 0.5 },
-    opStream: {
-      transport,
-      ackIntervalMs: 10,
-      silenceTimeoutMs: 100,
-      reconnectHoldMs: 600,
-    },
+    ...(input.withOpStream === false
+      ? {}
+      : {
+          opStream: {
+            transport,
+            ackIntervalMs: 10,
+            silenceTimeoutMs: 100,
+            reconnectHoldMs: 600,
+          },
+        }),
     ...input.sessionDeps,
   });
   return { transport, runner, requests, session };
@@ -149,6 +154,43 @@ describe("remote synchronous command custody", () => {
       expect(await remainsPending(drain)).toBe(false);
       await drain;
       expect(admissionCalls).toBe(1);
+      expect(rig.requests).toEqual([]);
+      expect(rig.runner.starts).toEqual([]);
+      expect(rig.runner.runs.size).toBe(0);
+      expect(rig.transport.decodedAcks()).toEqual([]);
+    },
+  );
+
+  test.each(["synchronous", "model"] as const)(
+    "missing op-stream settles an unstarted %s command with no RPC",
+    async (mode) => {
+      const rig = makeRig({ withOpStream: false });
+      const controller = createTurnToolCancellationController();
+      const message = "streaming command protocol required for exec";
+
+      if (mode === "synchronous") {
+        await expect(
+          controller.runSandboxCommandSynchronous(rig.session, { cmd: "must not start" }),
+        ).rejects.toThrow(message);
+      } else {
+        const result = await sdkExec(controller, rig.session).invoke(
+          {} as never,
+          JSON.stringify({ cmd: "must not start" }),
+          {
+            toolCall: {
+              type: "function_call",
+              callId: "unstarted_missing_stream",
+              name: "exec_command",
+              arguments: "{}",
+            },
+          },
+        );
+        expect(result).toContain(message);
+      }
+
+      const drain = controller.waitForQuiescence();
+      expect(await remainsPending(drain)).toBe(false);
+      await drain;
       expect(rig.requests).toEqual([]);
       expect(rig.runner.starts).toEqual([]);
       expect(rig.runner.runs.size).toBe(0);
