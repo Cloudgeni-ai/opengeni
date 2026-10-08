@@ -39,6 +39,7 @@ export { lockTurnAttemptWriteFenceTx } from "./session-attempt-fence";
 import {
   CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY,
   ToolReviewContext,
+  WorkspaceModelCompactionThresholdsPatch,
 } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
@@ -3474,6 +3475,24 @@ export async function updateWorkspaceSettings(
     controlLockTimeoutMs?: number;
   } = {},
 ): Promise<Workspace> {
+  const { modelCompactionThresholds, ...ordinaryPatch } = patch;
+  const thresholds =
+    modelCompactionThresholds === undefined
+      ? undefined
+      : WorkspaceModelCompactionThresholdsPatch.parse(modelCompactionThresholds);
+  // Merge each exact-model key inside the SQL update, not a read/modify/write
+  // in the API: simultaneous edits to different models must both survive.
+  const settingsPatch = (
+    base: typeof schema.workspaces.settings | ReturnType<typeof sql>,
+    values: Record<string, unknown>,
+  ) => {
+    const merged = sql`${base} || ${JSON.stringify(values)}::jsonb`;
+    return thresholds === undefined
+      ? merged
+      : sql`jsonb_set((${merged}), '{modelCompactionThresholds}',
+      jsonb_strip_nulls((case when jsonb_typeof(${schema.workspaces.settings}->'modelCompactionThresholds') = 'object'
+        then ${schema.workspaces.settings}->'modelCompactionThresholds' else '{}'::jsonb end) || ${JSON.stringify(thresholds)}::jsonb))`;
+  };
   if (Object.prototype.hasOwnProperty.call(patch, "maxNestedAgentDepth")) {
     const requested = patch.maxNestedAgentDepth;
     if (
@@ -3487,7 +3506,7 @@ export async function updateWorkspaceSettings(
     ) {
       throw new Error("maxNestedAgentDepth must be null or a non-negative 32-bit integer");
     }
-    const nextPatch = { ...patch };
+    const nextPatch = { ...ordinaryPatch };
     if (requested === null) delete nextPatch.maxNestedAgentDepth;
     return await withWorkspaceRls(
       db,
@@ -3507,8 +3526,11 @@ export async function updateWorkspaceSettings(
             .set({
               settings:
                 requested === null
-                  ? sql`(${schema.workspaces.settings} - 'maxNestedAgentDepth') || ${JSON.stringify(nextPatch)}::jsonb`
-                  : sql`${schema.workspaces.settings} || ${JSON.stringify(nextPatch)}::jsonb`,
+                  ? settingsPatch(
+                      sql`(${schema.workspaces.settings} - 'maxNestedAgentDepth')`,
+                      nextPatch,
+                    )
+                  : settingsPatch(schema.workspaces.settings, nextPatch),
               updatedAt: new Date(),
             })
             .where(eq(schema.workspaces.id, workspaceId))
@@ -3525,7 +3547,7 @@ export async function updateWorkspaceSettings(
   const [row] = await db
     .update(schema.workspaces)
     .set({
-      settings: sql`${schema.workspaces.settings} || ${JSON.stringify(patch)}::jsonb`,
+      settings: settingsPatch(schema.workspaces.settings, ordinaryPatch),
       updatedAt: new Date(),
     })
     .where(eq(schema.workspaces.id, workspaceId))

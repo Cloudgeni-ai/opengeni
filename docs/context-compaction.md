@@ -49,6 +49,39 @@ If a model has no explicit automatic limit, Opengeni uses
 0.9 and is clamped to 0.3–0.9. An explicit limit is capped at 90% of the raw
 window, matching Codex core.
 
+### Workspace preferences
+
+Open **Organization settings → Models → your workspace → Context & compaction**
+(including your Personal workspace). Pick the model and enter an input-token
+threshold, or leave it empty / choose **Use model default**. The page shows the
+model default, saved workspace override and effective value. Only workspace
+settings administrators can save; readers can inspect. Selecting a model here
+does not change any session's model or reasoning effort.
+
+Preferences apply when a subsequent turn attempt prepares its model, including
+existing sessions. An in-flight model call is unchanged. They never change the
+session's frozen portable/remote-v2 mode. The worker resolves the preference once
+for all model-facing paths in that attempt, including same-turn continuation.
+Provider usage anchors are still cleared after a checkpoint; a lowered threshold
+does not restore stale usage or cause an immediate compaction loop.
+
+The setting is `modelCompactionThresholds`, keyed by the exact product model ID
+(so API and subscription routes can differ). PATCH `/v1/workspaces/:workspaceId/settings`
+merges model keys atomically. Omission preserves a model; `null` removes only its
+override. Writes require whole numbers of at least 16,000 tokens. The effective
+value is bounded by both 90% of the raw window and the provider-safe input window.
+If a model's limits change, the saved preference remains visible but is clamped
+at execution. Malformed read values are ignored per model, not by resetting the
+whole workspace settings bag. The model catalog exposes `compactionPolicy` with
+default/override/effective/minimum/maximum tokens, separately from immutable model
+execution metadata.
+
+Haiku 5.5 defaults to 95,000 tokens; Opus 5.5 retains its 800,000-token default
+unless overridden (for example, to 250,000). These are proactive thresholds, not
+hard spending caps: checks run between steps and include provider-accounted
+context, so newly appended content or a large response may cross a price boundary.
+The independent request-byte guard described below always remains active.
+
 The Codex subscription catalog verified with Codex CLI 0.146.0 on 2026-07-29
 has the following limits, and billed GPT-5.6 Sol/Terra/Luna pin the same
 triple instead of the 1.05M deployment fallback:

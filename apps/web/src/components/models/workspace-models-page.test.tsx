@@ -540,6 +540,24 @@ function button(container: HTMLElement, text: string | RegExp): HTMLButtonElemen
   );
 }
 
+test("workspace Models exposes a reloadable compaction page to admins and readers", async () => {
+  for (const canManage of [true, false]) {
+    const view = await render(canManage);
+    try {
+      const open = button(view.container, /Context & compaction/);
+      expect(open).toBeDefined();
+      await act(async () => open!.click());
+      await flush();
+      expect(lastNavigation?.search.view).toBe("compaction");
+      expect(view.container.textContent).toContain(
+        "Connect a model account to configure compaction.",
+      );
+    } finally {
+      await cleanup(view);
+    }
+  }
+});
+
 describe("Codex rows", () => {
   for (const outcome of ["weekly", "empty", "error"] as const) {
     test(`waits for the live overview without flashing cached limits: ${outcome}`, async () => {

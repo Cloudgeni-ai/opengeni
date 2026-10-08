@@ -2395,6 +2395,62 @@ export const WorkspaceDefaultSandboxImage = z
   .max(512)
   .regex(/^[^\s]+$/, "image reference must not contain whitespace");
 
+export const ModelCompactionTokenThreshold = z.number().int().min(16_000).max(2_147_483_647);
+/** Independent exact product-model patches. Null resets just that model. */
+export const WorkspaceModelCompactionThresholdsPatch = z
+  .unknown()
+  .refine(
+    (value) =>
+      !value ||
+      typeof value !== "object" ||
+      !Object.keys(value).some((key) => ["__proto__", "constructor", "prototype"].includes(key)),
+    "Invalid model ID",
+  )
+  .pipe(
+    z
+      .record(
+        z
+          .string()
+          .min(1)
+          .max(512)
+          .refine((key) => !["__proto__", "constructor", "prototype"].includes(key)),
+        ModelCompactionTokenThreshold.nullable(),
+      )
+      .refine(
+        (value) => Object.keys(value).length <= 256,
+        "At most 256 model preferences per patch",
+      ),
+  );
+
+export const ModelCompactionPolicy = z.object({
+  defaultTokens: z.number().int().nonnegative(),
+  overrideTokens: ModelCompactionTokenThreshold.nullable(),
+  effectiveTokens: z.number().int().nonnegative(),
+  minimumTokens: z.number().int().nonnegative(),
+  maximumTokens: z.number().int().nonnegative(),
+});
+export type ModelCompactionPolicy = z.infer<typeof ModelCompactionPolicy>;
+
+/** Read one preference leniently; bad/newer fields cannot reset unrelated settings. */
+export function workspaceModelCompactionThreshold(
+  settings: unknown,
+  modelId: string,
+): number | null {
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) return null;
+  const values = (settings as Record<string, unknown>).modelCompactionThresholds;
+  if (
+    !values ||
+    typeof values !== "object" ||
+    Array.isArray(values) ||
+    !Object.hasOwn(values, modelId)
+  )
+    return null;
+  const parsed = ModelCompactionTokenThreshold.safeParse(
+    (values as Record<string, unknown>)[modelId],
+  );
+  return parsed.success ? parsed.data : null;
+}
+
 export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
@@ -2414,6 +2470,8 @@ export const WorkspaceSettingsSchema = z
     // Default compaction strategy for NEW Codex sessions created in this
     // workspace. Absent ⇒ remote_v2. Non-Codex sessions always freeze portable.
     codexCompactionDefault: CodexCompactionMode.optional(),
+    // Read leniently; each exact-model preference is resolved independently.
+    modelCompactionThresholds: z.unknown().optional(),
     // Whether agents may expose and invoke the built-in structured human-input
     // tool. Absent preserves the historical enabled behavior.
     agentHumanInputEnabled: z.boolean().optional(),
@@ -2610,6 +2668,7 @@ export const UpdateWorkspaceSettingsRequest = z
     transcription: WorkspaceTranscriptionPolicy.optional(),
     maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
     codexCompactionDefault: CodexCompactionMode.optional(),
+    modelCompactionThresholds: WorkspaceModelCompactionThresholdsPatch.optional(),
     agentHumanInputEnabled: z.boolean().optional(),
     // null returns the workspace to the deployment default.
     codeSearchEnabled: z.boolean().nullable().optional(),
@@ -18522,6 +18581,8 @@ export const WorkspaceModelCatalogModel =
       creditFunding: z.enum(["promotional", "general", "unavailable"]).optional(),
       /** Exact workspace-policy verdict without exposing provider identity. */
       policyAllowed: z.boolean().optional(),
+      /** Workspace preference, separate from immutable model execution limits. */
+      compactionPolicy: ModelCompactionPolicy.optional(),
       availability: ModelAvailabilityV1,
     }),
   );

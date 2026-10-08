@@ -273,9 +273,7 @@
       "sdk": [
         "OpenGeniClient.updateInboxSettings"
       ],
-      "request": [
-        "InboxSettings"
-      ],
+      "request": [],
       "response": [
         "InboxSettings"
       ]
@@ -15190,17 +15188,17 @@
     },
     "InboxSettings": {
       "io": [
-        "input",
         "output"
       ],
       "shape": {
         "$": "object",
+        "$.pausedGoals": "boolean!",
         "$.tidyPolicy": "ref(InboxTidyPolicy)!"
       }
     },
     "InboxTidyPolicy": {
       "io": [
-        "input"
+        "output"
       ],
       "shape": {
         "$": "enum=[\"\\\"any_agent\\\"\",\"\\\"own_sessions\\\"\"]"
@@ -17720,6 +17718,19 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"supported\\\"\",\"\\\"unknown\\\"\",\"\\\"unsupported\\\"\"]"
+      }
+    },
+    "ModelCompactionPolicy": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.defaultTokens": "integer!",
+        "$.effectiveTokens": "integer!",
+        "$.maximumTokens": "integer!",
+        "$.minimumTokens": "integer!",
+        "$.overrideTokens": "integer! null"
       }
     },
     "ModelContextContributionSource": {
@@ -24420,6 +24431,7 @@
         "$.maxNestedAgentDepth": "integer? null",
         "$.memoryEnabled": "boolean?",
         "$.memoryPromptMode": "ref(WorkspaceMemoryPromptMode)?",
+        "$.modelCompactionThresholds": "unknown?",
         "$.sessionAgentDefaults": "ref(WorkspaceAgentDefaults)? null",
         "$.sessionDefaults": "ref(WorkspaceSessionDefaults)?",
         "$.sessionToolDefaults": "ref(WorkspaceSessionToolDefaultsPatch)?",
@@ -25905,6 +25917,7 @@
         "$.availability": "ref(ModelAvailabilityV1)!",
         "$.billing": "ref(ModelBillingAttributionV1)?",
         "$.capabilities": "ref(ModelCapabilitiesV1)?",
+        "$.compactionPolicy": "ref(ModelCompactionPolicy)?",
         "$.contextWindowTokens": "integer?",
         "$.cost": "ref(ModelCostClassV1)?",
         "$.credentialReadiness": "ref(ModelCredentialReadinessV1)!",
@@ -27830,6 +27843,7 @@
       "UpdateConnectorToolPermissionsRequest": "type",
       "UpdateGitHubActionPolicyRequest": "type",
       "UpdateInboxItemInput": "type",
+      "UpdateInboxSettingsInput": "type",
       "UpdateKnowledgeMemoryRequest": "type",
       "UpdateMachineAgentResponse": "type",
       "UpdateMachineOperationPolicyRequest": "type",
@@ -35390,7 +35404,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"indexType\":{\"literal\":{\"type\":\"Literal\",\"value\":\"id\"},\"type\":\"TSLiteralType\"},\"objectType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxItem\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSIndexedAccessType\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateInboxItemInput\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateInboxSettings": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxSettings\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxSettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateInboxSettingsInput\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxSettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateMachineAgent": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateMachineAgentResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -37489,7 +37503,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"indexType\":{\"literal\":{\"type\":\"Literal\",\"value\":\"id\"},\"type\":\"TSLiteralType\"},\"objectType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxItem\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSIndexedAccessType\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateInboxItemInput\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateInboxSettings": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxSettings\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxSettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateInboxSettingsInput\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxSettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateMachineAgent": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateMachineAgentResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -39428,7 +39442,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"indexType\":{\"literal\":{\"type\":\"Literal\",\"value\":\"id\"},\"type\":\"TSLiteralType\"},\"objectType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxItem\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSIndexedAccessType\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateInboxItemInput\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateInboxSettings": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxSettings\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxSettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateInboxSettingsInput\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxSettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateMachineAgent": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateMachineAgentResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -41574,7 +41588,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"indexType\":{\"literal\":{\"type\":\"Literal\",\"value\":\"id\"},\"type\":\"TSLiteralType\"},\"objectType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxItem\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSIndexedAccessType\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateInboxItemInput\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateInboxSettings": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxSettings\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxSettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateInboxSettingsInput\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxSettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateMachineAgent": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateMachineAgentResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -43542,7 +43556,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"indexType\":{\"literal\":{\"type\":\"Literal\",\"value\":\"id\"},\"type\":\"TSLiteralType\"},\"objectType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxItem\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSIndexedAccessType\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateInboxItemInput\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateInboxSettings": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxSettings\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxSettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateInboxSettingsInput\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InboxSettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateMachineAgent": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateMachineAgentResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
