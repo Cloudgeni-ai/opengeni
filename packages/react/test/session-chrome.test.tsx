@@ -977,6 +977,40 @@ describe("SessionChrome", () => {
     expect(panel.querySelectorAll("li")).toHaveLength(4);
   });
 
+  test("background command results arrive as one incoming row", async () => {
+    const dismissed: string[] = [];
+    const lost = (index: number) => ({
+      ...pendingInput(),
+      id: `lost-${index}`,
+      kind: "background_command_result" as const,
+      classification: "failure" as const,
+      summary: `\`job-${index}\` stopped because its sandbox was shut down or lost; its exit status is unknown. Restart it if you still need it.`,
+    });
+    const inputs = [pendingInput(), ...Array.from({ length: 35 }, (_, index) => lost(index))];
+    mounted = await renderComponent(
+      <SessionChrome
+        defaultActive="incoming"
+        queue={queue({ queue: [], pendingInputs: inputs })}
+        onDismissIncoming={(id) => {
+          dismissed.push(id);
+        }}
+      />,
+    );
+    const panel = mounted.container.querySelector('[data-og-session-chrome-panel="incoming"]')!;
+    expect(panel.querySelectorAll("li")).toHaveLength(2);
+    expect(panel.textContent).toContain(
+      "35 background commands stopped because their sandbox was shut down or lost.",
+    );
+    expect(panel.textContent).not.toContain("job-3");
+    const dismissAll = panel.querySelector<HTMLButtonElement>(
+      '[aria-label="Dismiss incoming command results"]',
+    );
+    await act(async () => {
+      dismissAll?.click();
+    });
+    expect(dismissed).toHaveLength(35);
+  });
+
   test("inbox dismiss action appears when onDismissIncoming is provided", async () => {
     const dismissed: string[] = [];
     mounted = await renderComponent(

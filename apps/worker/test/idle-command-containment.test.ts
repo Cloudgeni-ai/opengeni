@@ -1203,7 +1203,7 @@ describe("idle command containment", () => {
     expect(record.finished).toHaveLength(1);
     // No capture happened, so the notice must not claim a saved workspace.
     expect(record.updates[0]?.summary).toBe(
-      "bun run dev --port 3000: result unavailable. Its exit status could not be confirmed.",
+      "`bun run dev --port 3000` stopped because its sandbox was shut down or lost; its exit status is unknown. Restart it if you still need it.",
     );
   }, 180_000);
 
@@ -1374,7 +1374,7 @@ describe("idle command containment", () => {
     });
     expect(record.finished).toHaveLength(1);
     expect(record.updates[0]?.summary).toBe(
-      "bun run dev --port 3000: result unavailable. Its exit status could not be confirmed.",
+      "`bun run dev --port 3000` stopped because its sandbox was shut down or lost; its exit status is unknown. Restart it if you still need it.",
     );
   }, 180_000);
 
@@ -1389,7 +1389,7 @@ describe("idle command containment", () => {
     const record = await commandTerminalRecord(fixture);
     expect(record.command?.settlement_reason).toBe("provider_instance_lost");
     expect(record.updates[0]?.summary).toBe(
-      "bun run dev --port 3000: result unavailable. Its exit status could not be confirmed.",
+      "`bun run dev --port 3000` stopped because its sandbox was shut down or lost; its exit status is unknown. Restart it if you still need it.",
     );
   }, 180_000);
 

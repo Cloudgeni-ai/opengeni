@@ -28,6 +28,7 @@ import {
   retainedProviderCommandPersistence,
   adoptLegacyModalCheckpointArtifact,
   confirmDrainCold,
+  markWarmLeaseInstanceLost,
   appendSessionEventToSandboxGroup,
   bindRetainedProcessProviderIdentity,
   claimWorkspaceArchiveCapture,
@@ -1649,10 +1650,18 @@ async function reconcileTerminalRetainedProcesses(
   const drainBudget: RetainedProcessDrainBudget = {
     until: Date.now() + RETAINED_PROCESS_OUTPUT_DRAIN_SWEEP_BUDGET_MS,
   };
+  // Boxes already retired as lost in this batch: their other commands were
+  // settled by that same transaction and need no probe of their own.
+  const lostBoxes = new Set<string>();
   for (const claim of claims) {
     let process = claim.process;
+    if (lostBoxes.has(`${process.leaseId}:${process.leaseEpoch}:${process.providerInstanceId}`))
+      continue;
     const expected = retainedProcessSettlementIdentity(process);
     let proof = retainedProcessReconciliationProof(process);
+    // The exact current box itself answered NotFound to this probe: that is
+    // loss proof for the whole box, not just this command (OPE-743).
+    let wholeBoxGone = false;
     const processScope = {
       accountId: process.accountId,
       workspaceId: process.workspaceId,
@@ -1918,6 +1927,10 @@ async function reconcileTerminalRetainedProcesses(
               throw new Error("Deadline cancellation no longer owns its rotating lease");
             if (!probeOutcome.ok) throw probeOutcome.error;
             observation = probeOutcome.value;
+            wholeBoxGone =
+              observation.status === "proved" &&
+              observation.proof.outcome === "lost" &&
+              observation.proof.reason === "provider_instance_not_found";
             if (supervised) {
               supervisionMetric(
                 (await commandPersistence.loadSupervisionReceipt())
@@ -1995,6 +2008,48 @@ async function reconcileTerminalRetainedProcesses(
       }
     }
 
+    if (wholeBoxGone) {
+      // Settle every blocker of the exact lost box in one transaction: all its
+      // commands, open requests, PTYs and process holders, then cold the lease
+      // and wake waiters. Settling one command per probe took a 20-per-sweep
+      // queue 11 minutes for 35 commands in staging session 5040c525 and kept
+      // the session waiting on a box that was already gone.
+      try {
+        const marked = await markWarmLeaseInstanceLost(db, {
+          accountId: process.accountId,
+          workspaceId: process.workspaceId,
+          sandboxGroupId: process.sandboxGroupId,
+          expectedEpoch: process.leaseEpoch,
+          expectedInstanceId: process.providerInstanceId,
+          expectedBackend: process.providerBackend,
+        });
+        if (marked.status === "marked") {
+          lostBoxes.add(`${process.leaseId}:${process.leaseEpoch}:${process.providerInstanceId}`);
+          recordRetainedProcessReconciliation(observability, "provider_lost_whole_box");
+          if (marked.backgroundCommandEvents?.length) {
+            await publishDurableSessionEvents(
+              bus,
+              process.workspaceId,
+              marked.backgroundCommandEvents,
+              (error) => {
+                observability.warn("sandbox reaper: lost-box command event fanout failed", {
+                  sandboxGroupId: process.sandboxGroupId,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              },
+            );
+          }
+          continue;
+        }
+      } catch (error) {
+        observability.warn("sandbox reaper: whole-box loss settlement failed", {
+          processId: process.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      // Stale (a draining drain or another observer owns the box): fall back
+      // to this command's own exact settlement below.
+    }
     try {
       const settlement = await settleRetainedProcess(db, {
         accountId: process.accountId,

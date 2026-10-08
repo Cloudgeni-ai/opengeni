@@ -87541,6 +87541,13 @@ async function backgroundCommandCausalAuthorityTx(
     : null;
 }
 
+/** Loss reasons that mean the whole sandbox box is gone, not just one exec. */
+const SANDBOX_GONE_COMMAND_REASONS: ReadonlySet<string> = new Set([
+  "provider_instance_lost",
+  "provider_instance_not_found",
+  "provider_instance_terminated",
+]);
+
 function backgroundCommandTerminalMutation(input: {
   accountId: string;
   workspaceId: string;
@@ -87669,11 +87676,13 @@ function backgroundCommandTerminalMutation(input: {
           ? `\`${commandLabel}\` was stopped because nobody used this session${idleMinutes ? ` for ${idleMinutes} minute${idleMinutes === 1 ? "" : "s"}` : ""} and nothing was waiting on it; the workspace was saved. Restart it if you still need it.`
           : command.state === "lost" && reason === DEADLINE_COMMAND_CONTAINMENT_REASON
             ? `\`${commandLabel}\` was stopped because the sandbox reached its maximum lifetime; the workspace was saved. Restart it if you still need it.`
-            : command.state === "lost"
-              ? `${commandLabel}: result unavailable. Its exit status could not be confirmed.`
-              : command.exitCode === 0
-                ? `${commandLabel}: completed successfully.`
-                : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
+            : command.state === "lost" && SANDBOX_GONE_COMMAND_REASONS.has(reason)
+              ? `\`${commandLabel}\` stopped because its sandbox was shut down or lost; its exit status is unknown. Restart it if you still need it.`
+              : command.state === "lost"
+                ? `${commandLabel}: result unavailable. Its exit status could not be confirmed.`
+                : command.exitCode === 0
+                  ? `${commandLabel}: completed successfully.`
+                  : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
       const payload = {
         type: "background_command_result" as const,
         commandId: command.id,

@@ -1320,6 +1320,12 @@ function IncomingPanel({
   onDismiss?: ((inputId: string) => void) | undefined;
   onOpenSession?: ((sessionId: string) => void) | undefined;
 }) {
+  // Many background commands usually finish or stop together (for example all
+  // of a sandbox's commands when the box is replaced). One row reads better
+  // than dozens of identical ones; each result still reaches the agent.
+  const commandResults = inputs.filter((input) => input.kind === "background_command_result");
+  const grouped = commandResults.length >= 2 ? commandResults : [];
+  const rows = grouped.length ? inputs.filter((input) => !grouped.includes(input)) : inputs;
   return (
     <div>
       <p className="mb-2 text-og-xs text-og-fg-subtle">Waiting to be included in an agent turn.</p>
@@ -1328,7 +1334,8 @@ function IncomingPanel({
         aria-label="Incoming updates"
         data-og-session-chrome-panel="incoming"
       >
-        {inputs.map((input) => (
+        {grouped.length ? <CommandResultsRow inputs={grouped} onDismiss={onDismiss} /> : null}
+        {rows.map((input) => (
           <li
             key={input.id}
             className="group flex items-start gap-1.5 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--_og-session-chrome-row-hover)]"
@@ -1367,6 +1374,65 @@ function IncomingPanel({
         ))}
       </ul>
     </div>
+  );
+}
+
+function commandResultsSummary(inputs: SessionPendingInputPreview[]): string {
+  const stoppedWithSandbox = inputs.filter((input) =>
+    input.summary.includes("stopped because its sandbox was shut down or lost"),
+  ).length;
+  if (stoppedWithSandbox === inputs.length) {
+    return `${inputs.length} background commands stopped because their sandbox was shut down or lost. Their exit status is unknown.`;
+  }
+  const failed = inputs.filter((input) => input.classification === "failure").length;
+  return failed
+    ? `${inputs.length} background command results (${failed} did not succeed).`
+    : `${inputs.length} background command results.`;
+}
+
+function CommandResultsRow({
+  inputs,
+  onDismiss,
+}: {
+  inputs: SessionPendingInputPreview[];
+  onDismiss?: ((inputId: string) => void) | undefined;
+}) {
+  const failure = inputs.some((input) => input.classification === "failure");
+  return (
+    <li
+      className="group flex items-start gap-1.5 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--_og-session-chrome-row-hover)]"
+      data-og-session-chrome-command-results={inputs.length}
+    >
+      <span
+        className={cn(
+          "mt-px shrink-0 rounded px-1 py-px text-[10px] font-medium leading-4",
+          failure
+            ? "bg-og-status-waiting/12 text-og-status-waiting"
+            : "bg-og-surface-3/80 text-og-fg-muted",
+        )}
+      >
+        Command results
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="break-words text-og-xs leading-4 text-og-fg">
+          {commandResultsSummary(inputs)}
+        </p>
+      </div>
+      {onDismiss ? (
+        <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">
+          <IconAction
+            label="Dismiss incoming command results"
+            tip="Dismiss all"
+            onClick={() => {
+              for (const input of inputs) onDismiss(input.id);
+            }}
+            danger
+          >
+            <Trash2Icon className="size-3" />
+          </IconAction>
+        </div>
+      ) : null}
+    </li>
   );
 }
 
