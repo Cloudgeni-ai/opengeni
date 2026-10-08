@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { Manifest } from "@openai/agents/sandbox";
 import { UnixLocalSandboxClient } from "@openai/agents/sandbox/local";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-cancellation";
 import {
   RoutingSandboxSession,
@@ -226,6 +229,108 @@ test.each(["none", "capture", "settlement"] as const)(
   },
 );
 
+test.each(["capture", "settlement"] as const)(
+  "external native terminal recovery releases output custody only after successful %s retry",
+  async (failure) => {
+    const session = await new UnixLocalSandboxClient().create(new Manifest());
+    const backend = { session, sandboxId: null, kind: "local", activeEpoch: 0 };
+    const durable = new Map<string, { stream: "stdout" | "stderr"; chunk: string }>();
+    const receipts: string[] = [];
+    const stdout = "x".repeat(2_000);
+    const stderr = "y".repeat(2_000);
+    const exec = session.exec.bind(session);
+    let starts = 0;
+    let reads = 0;
+    let failures = 2;
+    let settlements = 0;
+    session.exec = async (args) => {
+      starts++;
+      return await exec(args);
+    };
+    const route = new RoutingSandboxSession({
+      defaultResolved: backend,
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => backend,
+      beforeMutation: async () => "admitted",
+      afterMutation: async () => {
+        const write = session.writeStdin.bind(session);
+        session.writeStdin = async (args) => {
+          reads++;
+          const receipt = await write(args);
+          receipts.push(receipt);
+          return receipt;
+        };
+      },
+      captureProcessOutput: async (page) => {
+        expect(page.streamFidelity).toBe("separate");
+        durable.set(page.chunkId, page);
+        if (failure === "capture" && failures > 0) {
+          failures--;
+          throw new Error("capture reply unavailable");
+        }
+      },
+      settleProcess: async () => {
+        if (failure === "settlement" && failures > 0) {
+          failures--;
+          throw new Error("settlement reply unavailable");
+        }
+        settlements++;
+      },
+    });
+    const output = session as typeof session & {
+      getSynchronousCommandOutput(
+        result: unknown,
+      ): ReturnType<typeof synchronousCommandPage> | null;
+    };
+    try {
+      await expect(
+        route.execSynchronous({
+          cmd: `sleep 0.08; printf %s '${stdout}'; printf %s '${stderr}' >&2`,
+          yieldTimeMs: 1,
+          maxOutputTokens: 1,
+          login: false,
+        }),
+      ).rejects.toMatchObject({ code: "synchronous_command_outcome_unknown", sessionId: 1 });
+      expect(route.hasRetainedProcess(1)).toBe(true);
+      expect(receipts).toHaveLength(1);
+      expect(output.getSynchronousCommandOutput(receipts[0])).toMatchObject({
+        stdout,
+        stderr,
+        exitCode: 0,
+      });
+      await expect(
+        route.writeStdinForProcessControl({ sessionId: 1, chars: "", maxOutputTokens: 1 }),
+      ).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+      expect(route.hasRetainedProcess(1)).toBe(true);
+      expect(output.getSynchronousCommandOutput(receipts[0])).not.toBeNull();
+      const recovered = await route.writeStdinForProcessControl({
+        sessionId: 1,
+        chars: "",
+        maxOutputTokens: 1,
+      });
+      expect(recovered).toBe(receipts[0]!);
+      expect(route.hasRetainedProcess(1)).toBe(false);
+      expect(output.getSynchronousCommandOutput(recovered)).toBeNull();
+      expect(starts).toBe(1);
+      expect(reads).toBe(1);
+      expect(settlements).toBe(1);
+      for (const stream of ["stdout", "stderr"] as const)
+        expect(
+          [...durable.values()]
+            .filter((page) => page.stream === stream)
+            .map((page) => page.chunk)
+            .join(""),
+        ).toBe(stream === "stdout" ? stdout : stderr);
+      const retired = await session.writeStdin({ sessionId: 1, chars: "", maxOutputTokens: 1 });
+      expect(retired).not.toStartWith("Native output receipt:");
+      expect(output.getSynchronousCommandOutput(retired)).toBeNull();
+      expect(starts).toBe(1);
+    } finally {
+      await session.close();
+    }
+  },
+);
+
 test("banner-only terminal output cannot masquerade as separated streams through routing", async () => {
   const backend = {
     session: { execCommand: async () => "Process exited with code 0\n\nOutput:\nmerged" },
@@ -287,46 +392,87 @@ test.each([1, 20_000])(
   },
 );
 
-test("the worker collects a real local SDK yielded command through the native collection scope", async () => {
-  const session = await new UnixLocalSandboxClient().create(new Manifest());
-  const controller = createTurnToolCancellationController();
-  const command = `sleep 0.15; printf %s '${"x".repeat(2_000)}'; printf %s '${"y".repeat(2_000)}' >&2`;
-  const exec = session.execCommand.bind(session);
-  const write = session.writeStdin.bind(session);
-  let starts = 0;
-  let reads = 0;
-  session.execCommand = async (args) => {
-    if (args.cmd.includes(command)) {
+test.concurrent.each([1, 2, 3])(
+  "the worker collects a real local SDK yielded command through the native collection scope after %s exact-handle reads",
+  async (minimumReads) => {
+    const root = await mkdtemp(join(tmpdir(), "native-worker-output-"));
+    const release = join(root, "release");
+    const session = await new UnixLocalSandboxClient().create(new Manifest());
+    const controller = createTurnToolCancellationController();
+    const command = `while [ ! -e '${release}' ]; do sleep 0.01; done; printf %s '${"x".repeat(2_000)}'; printf %s '${"y".repeat(2_000)}' >&2`;
+    const exec = session.exec.bind(session);
+    const write = session.writeStdin.bind(session);
+    let starts = 0;
+    let originalHandle: number | undefined;
+    const reads: number[] = [];
+    const pages: ReturnType<typeof synchronousCommandPage>[] = [];
+    session.exec = async (args) => {
+      expect(args.cmd).toContain(command);
       expect(args.tty).toBe(false);
       starts++;
+      const result = await exec(args);
+      // The real SDK's structured initial result owns this handle; neither a
+      // guessed ID nor an Output body supplies identity to later observations.
+      expect(Number.isSafeInteger(result.sessionId)).toBe(true);
+      expect(result.sessionId).toBeGreaterThan(0);
+      originalHandle = result.sessionId;
+      return result;
+    };
+    session.writeStdin = async (args) => {
+      expect(args.sessionId).toBe(originalHandle!);
+      reads.push(args.sessionId);
+      if (reads.length === minimumReads) await writeFile(release, "release");
+      return await write(args);
+    };
+    try {
+      const result = await withNativeSynchronousCommandCollection(session, () => {
+        const outputSession = session as typeof session & {
+          getSynchronousCommandOutput: NonNullable<
+            Parameters<typeof synchronousCommandPage>[0]["getSynchronousCommandOutput"]
+          >;
+        };
+        const getter = outputSession.getSynchronousCommandOutput;
+        outputSession.getSynchronousCommandOutput = (receipt) => {
+          const page = getter(receipt);
+          if (page) pages.push(structuredClone(page));
+          return page;
+        };
+        return controller.runSandboxCommandSynchronous(session, {
+          cmd: command,
+          yieldTimeMs: 1,
+          maxOutputTokens: 1,
+        });
+      });
+      expect(result).toMatchObject({
+        stdout: "x".repeat(2_000),
+        stderr: "y".repeat(2_000),
+        exitCode: 0,
+      });
+      expect(starts).toBe(1);
+      expect(reads.length).toBeGreaterThanOrEqual(minimumReads);
+      expect(reads.every((handle) => handle === originalHandle)).toBe(true);
+      expect(
+        pages.some((page) => page.sessionId === originalHandle && page.exitCode === null),
+      ).toBe(true);
+      expect(pages.at(-1)).toMatchObject({
+        exitCode: 0,
+        outputCursor: { next: { stdout: 2_000, stderr: 2_000 } },
+      });
+      expect(pages.at(-1)?.sessionId).toBeUndefined();
+      expect(pages[0]?.outputCursor?.identity).toBeDefined();
+      expect(
+        pages.every((page) => page.outputCursor?.identity === pages[0]?.outputCursor?.identity),
+      ).toBe(true);
+    } finally {
+      await writeFile(release, "release");
+      controller.cancel();
+      await controller.waitForQuiescence();
+      await session.close();
+      await rm(root, { recursive: true, force: true });
     }
-    return await exec(args);
-  };
-  session.writeStdin = async (args) => {
-    reads++;
-    return await write(args);
-  };
-  try {
-    const result = await withNativeSynchronousCommandCollection(session, () =>
-      controller.runSandboxCommandSynchronous(session, {
-        cmd: command,
-        yieldTimeMs: 1,
-        maxOutputTokens: 1,
-      }),
-    );
-    expect(result).toMatchObject({
-      stdout: "x".repeat(2_000),
-      stderr: "y".repeat(2_000),
-      exitCode: 0,
-    });
-    expect(starts).toBe(1);
-    expect(reads).toBe(1);
-  } finally {
-    controller.cancel();
-    await controller.waitForQuiescence();
-    await session.close();
-  }
-}, 30_000);
+  },
+  30_000,
+);
 
 test.each([1, 1_000])(
   "native stream capture preserves output beyond the SDK presentation buffer at yield %s",

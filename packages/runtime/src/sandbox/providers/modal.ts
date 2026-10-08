@@ -13,6 +13,10 @@ import {
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxChannelAService, type ChannelASession } from "../channel-a";
 import { installModalCommandSession } from "./modal-command-session";
+import {
+  installModalSynchronousCommandCollection,
+  withNativeSynchronousCommandCollection,
+} from "../native-synchronous-collection";
 import { ModalCommandControl } from "./modal-command-control";
 import {
   ModalCommandStartPreDispatchUnavailableError,
@@ -117,6 +121,7 @@ export function modalSandboxAttributionTags(
 }
 
 type MutableModalSnapshotSandbox = {
+  exec?: ConstructorParameters<typeof ModalSandboxSession>[0]["sandbox"]["exec"];
   terminate?: (options?: { wait?: boolean }) => Promise<unknown>;
   detach?: () => void;
   snapshotFilesystem?: (...args: unknown[]) => Promise<unknown>;
@@ -149,6 +154,7 @@ type MutableModalSandboxSession = {
     snapshotFilesystemTimeoutMs?: number;
   };
   execCommand?: ChannelASession["execCommand"];
+  getSynchronousCommandOutput?: ChannelASession["getSynchronousCommandOutput"];
   cancelPendingExecCommand?: () => Promise<void>;
   readFile?: ChannelASession["readFile"];
   listDir?: ChannelASession["listDir"];
@@ -199,6 +205,7 @@ function installModalListDirCompatibility(session: MutableModalSandboxSession): 
   if (typeof session.listDir === "function") return;
   const execCommand = session.execCommand;
   const writeStdin = session.writeStdin?.bind(session);
+  const getOutput = session.getSynchronousCommandOutput?.bind(session);
   if (typeof execCommand !== "function" || typeof session.readFile !== "function") return;
   const workspaceRoot = session.state?.manifest?.root;
   if (!workspaceRoot) {
@@ -214,6 +221,7 @@ function installModalListDirCompatibility(session: MutableModalSandboxSession): 
       session: {
         execCommand: execCommand.bind(session),
         ...(writeStdin ? { writeStdin } : {}),
+        ...(getOutput ? { getSynchronousCommandOutput: getOutput } : {}),
         ...(session.cancelPendingExecCommand
           ? { cancelPendingExecCommand: session.cancelPendingExecCommand.bind(session) }
           : {}),
@@ -222,12 +230,14 @@ function installModalListDirCompatibility(session: MutableModalSandboxSession): 
       workspaceRoot,
       ...(args.runAs ? { runAs: args.runAs } : {}),
     });
-    const listed = await service.fsList({
-      path: relativePath,
-      depth: 1,
-      maxEntries: MODAL_LIST_DIR_MAX_ENTRIES,
-      includeHidden: true,
-    });
+    const listed = await withNativeSynchronousCommandCollection(session as ChannelASession, () =>
+      service.fsList({
+        path: relativePath,
+        depth: 1,
+        maxEntries: MODAL_LIST_DIR_MAX_ENTRIES,
+        includeHidden: true,
+      }),
+    );
     if (listed.truncated || listed.root.truncated) {
       throw new Error(
         `Modal listDir exceeded the ${MODAL_LIST_DIR_MAX_ENTRIES}-entry safety bound`,
@@ -625,10 +635,11 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
   assertPinnedModalSdk(mutable);
   if (mutable.modal) installModalCommandStartContext(mutable.modal);
   installModalTerminationConfirmation(mutable);
-  installModalListDirCompatibility(mutable);
   installModalNativeSnapshotRetention(mutable);
   installModalExecCompletionRecovery(mutable);
   installModalPendingExecCancellation(mutable);
+  installModalSynchronousCommandCollection(mutable, () => mutable.sandbox);
+  installModalListDirCompatibility(mutable);
   if (
     mutable.modal?.cpClient &&
     mutable.modal.version &&

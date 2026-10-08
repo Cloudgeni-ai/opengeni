@@ -92,7 +92,9 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@daytonaio/sdk": "0.162.0",
     "@opengeni/ogtool": "workspace:*",
+    "@runloop/api-client": "1.16.2",
     "tsup": "^8.5.0",
     "typescript": "7.0.2"
   }

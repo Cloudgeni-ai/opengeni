@@ -88,7 +88,12 @@ import {
   type SynchronousCommandResult,
   type SynchronousCommandPage,
 } from "../synchronous-command";
-import { withNativeSynchronousCommandCollection } from "../native-synchronous-collection";
+import {
+  withNativeSynchronousCommandCollection,
+  withoutNativeSynchronousCommandCollection,
+  releaseNativeSynchronousCommandOutput,
+  isNativeSynchronousCommandHandle,
+} from "../native-synchronous-collection";
 import { observeSynchronousCommand, synchronousCommandPage } from "../synchronous-command";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../exec-banner";
 import {
@@ -1309,6 +1314,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         process: record.process,
         proof: pending.proof,
       });
+      await releaseNativeSynchronousCommandOutput(record.backend.session, pending.result);
       this.retainedProcesses.delete(record.process.providerSessionId);
       record.pendingTerminal = null;
     })();
@@ -1322,6 +1328,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         // local provider-session-lost banner), but state + exit code are the
         // immutable physical truth. Forget the local route without replaying.
         record.settlement = null;
+        await releaseNativeSynchronousCommandOutput(record.backend.session, pending.result);
         record.pendingTerminal = null;
         this.retainedProcesses.delete(record.process.providerSessionId);
         return;
@@ -2692,6 +2699,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const record = this.retainedProcesses.get(providerSessionId);
     return (
       record !== undefined &&
+      !isNativeSynchronousCommandHandle(record.backend.session, providerSessionId) &&
       record.backend.kind !== "local" &&
       record.backend.kind !== "docker" &&
       record.backend.kind !== "opensandbox"
@@ -2776,6 +2784,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     return (
       record.backend.kind !== "selfhosted" &&
       record.backend.kind !== "opensandbox" &&
+      !isNativeSynchronousCommandHandle(record.backend.session, providerSessionId) &&
       typeof record.backend.session.writeStdin === "function"
     );
   }
@@ -2840,14 +2849,16 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const execCommand = record.backend.session.execCommand;
     if (execCommand) {
       return await this.invokeProviderOperation("execCommand", record.backend, () =>
-        execCommand.call(record.backend.session, args),
+        withoutNativeSynchronousCommandCollection(() =>
+          execCommand.call(record.backend.session, args),
+        ),
       );
     }
     const exec = record.backend.session.exec;
     if (exec) {
       return formatExecResult(
         await this.invokeProviderOperation("execCommand", record.backend, () =>
-          exec.call(record.backend.session, args),
+          withoutNativeSynchronousCommandCollection(() => exec.call(record.backend.session, args)),
         ),
       );
     }

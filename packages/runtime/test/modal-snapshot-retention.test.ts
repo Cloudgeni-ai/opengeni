@@ -92,6 +92,10 @@ function modalExecResponse(output: string, exitCode: number): string {
 }
 
 function fakeModalFilesystemSession(root: string) {
+  const pages = new Map<
+    string,
+    import("../src/sandbox/synchronous-command").SynchronousCommandPage
+  >();
   const read = async ({ path, maxBytes }: { path: string; maxBytes?: number }) => {
     const bytes = new Uint8Array(await readFile(path.startsWith("/") ? path : join(root, path)));
     return typeof maxBytes === "number" ? bytes.subarray(0, maxBytes) : bytes;
@@ -102,6 +106,8 @@ function fakeModalFilesystemSession(root: string) {
       manifest: new Manifest({ root }),
     },
     readFile: read,
+    getSynchronousCommandOutput: (result: unknown) =>
+      typeof result === "string" ? (pages.get(result) ?? null) : null,
     execCommand: async ({ cmd }: { cmd: string }) => {
       const child = Bun.spawn(["/bin/bash", "--noprofile", "--norc", "-c", cmd], {
         cwd: root,
@@ -114,10 +120,14 @@ function fakeModalFilesystemSession(root: string) {
         new Response(child.stderr).text(),
         child.exited,
       ]);
-      return modalExecResponse(`${stdout}${stderr}`, exitCode);
+      const receipt = modalExecResponse(`${stdout}${stderr}`, exitCode);
+      // This host-process facade knows its actual separated streams. It is
+      // compatibility fixture evidence, not proof of a shipped SDK transport.
+      pages.set(receipt, { stdout, stderr, exitCode, wallTimeSeconds: 0 });
+      return receipt;
     },
   });
-  return { session, read };
+  return { session, read, pages };
 }
 
 describe("OpenGeni Modal 0.9 snapshot policy", () => {
@@ -456,22 +466,34 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
   test("compatibility listing observes delayed commands through the original bound stdin and injected runner", async () => {
     const root = await mkdtemp(join(tmpdir(), "opengeni-modal-list-pages-"));
     try {
-      const { session } = fakeModalFilesystemSession(root);
+      const { session, pages } = fakeModalFilesystemSession(root);
       const originalExec = session.execCommand.bind(session);
       let starts = 0;
       let reads = 0;
       let runners = 0;
       let terminal = "";
+      const activeProcesses = new Map<number, unknown>();
       session.execCommand = async (args) => {
         terminal = await originalExec(args);
         starts++;
-        return "Process running with session ID 900\n\nOutput:\n";
+        const receipt = "Process running with session ID 900\n\nOutput:\n";
+        pages.set(receipt, {
+          stdout: "",
+          stderr: "",
+          exitCode: null,
+          sessionId: 900,
+          wallTimeSeconds: 0,
+        });
+        activeProcesses.set(900, {});
+        return receipt;
       };
       const withStdin = Object.assign(session, {
+        activeProcesses,
         writeStdin: async ({ sessionId, chars }: { sessionId: number; chars?: string }) => {
           expect(sessionId).toBe(900);
           expect(chars).toBe("");
           reads++;
+          activeProcesses.delete(sessionId);
           return terminal;
         },
       });
