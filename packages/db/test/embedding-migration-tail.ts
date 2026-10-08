@@ -125,4 +125,9 @@ export const embeddingMigrationTail = [
   // Replaces the inbox projection trigger from withheld 0661; replay after it
   // so the replayed 0661 body does not overwrite the newer one.
   "0663_inbox_paused_goal_setting.sql",
+  // Each rewrites the inbox projection trigger and reads inbox_settings.paused_goals
+  // from 0663; replay them after it, in order, so the newest trigger body wins.
+  "0664_inbox_rich_notifications.sql",
+  "0665_inbox_replies.sql",
+  "0666_inbox_reply_current_turn.sql",
 ];

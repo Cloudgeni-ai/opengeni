@@ -20,9 +20,15 @@ const admissionRefusalsMigration = "0539_scheduled_admission_refusals.sql";
 // its 0501 sharing behavior. Replay it only after both prerequisites exist.
 const receiverExecutionContextMigration = "0608_receiver_execution_context.sql";
 // 0661 compiles its inbox person resolver against scheduled_tasks.owner_subject_id
-// from this cutover, and 0663 replaces 0661's inbox projection trigger.
+// from this cutover, and 0663-0666 replace 0661's inbox projection trigger and
+// read the paused-goal setting 0663 adds.
 const inboxScheduleOwnerMigration = "0661_inbox_subagent_goals_and_schedules.sql";
 const inboxPausedGoalSettingMigration = "0663_inbox_paused_goal_setting.sql";
+const inboxTriggerTailMigrations = [
+  "0664_inbox_rich_notifications.sql",
+  "0665_inbox_replies.sql",
+  "0666_inbox_reply_current_turn.sql",
+];
 const withheldMigrations = [
   migration,
   accountBindingsMigration,
@@ -32,6 +38,7 @@ const withheldMigrations = [
   receiverExecutionContextMigration,
   inboxScheduleOwnerMigration,
   inboxPausedGoalSettingMigration,
+  ...inboxTriggerTailMigrations,
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 
