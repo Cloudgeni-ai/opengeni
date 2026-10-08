@@ -258,11 +258,36 @@ describe("0655 inbox", () => {
     if (!client) return;
     const person = await personWithSession("replies");
     const owner = { accountId: person.scope.accountId, subjectId: person.subjectId };
-    const reply = (text: string) =>
-      appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
-        { type: "agent.message.completed", payload: { text } },
-        { type: "turn.completed", payload: {} },
+    let position = 0;
+    const reply = async (text: string | null) => {
+      const turnId = crypto.randomUUID();
+      position += 1;
+      await owned!.admin.begin(async (tx) => {
+        await tx`select set_config('opengeni.session_inference_claim', '1', true)`;
+        await tx`select set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
+        await tx`select set_config('opengeni.account_id', ${person.scope.accountId}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${person.scope.workspaceId}, true)`;
+        await tx`
+          insert into session_turns (
+            id, account_id, workspace_id, session_id, trigger_event_id,
+            temporal_workflow_id, status, source, position, prompt, model,
+            reasoning_effort, sandbox_backend, execution_generation,
+            initiator_kind, initiator_subject_id, initiator_context,
+            initiating_human_subject_id
+          ) values (
+            ${turnId}, ${person.scope.accountId}, ${person.scope.workspaceId},
+            ${person.session.id}, ${crypto.randomUUID()}, ${`inbox-reply-${turnId}`},
+            'queued', 'user', ${position}, 'work', 'test-model', 'medium', 'none', 1,
+            'subject', ${person.subjectId}, '{}'::jsonb, ${person.subjectId}
+          )`;
+      });
+      return await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+        ...(text === null
+          ? []
+          : [{ type: "agent.message.completed" as const, turnId, payload: { text } }]),
+        { type: "turn.completed", turnId, payload: {} },
       ]);
+    };
     await reply("Off by default");
     expect(await inbox(person)).toHaveLength(0);
     await setInboxSettings(db(), { ...owner, replies: true });
@@ -289,6 +314,13 @@ describe("0655 inbox", () => {
     expect(await inbox(person)).toHaveLength(0);
     await reply("Third reply");
     expect((await inbox(person)).map((item) => item.title)).toEqual(["Third reply"]);
+    // A turn without a reply of its own leaves the item as it was (0666).
+    const [seen] = await inbox(person);
+    await updateInboxItemAttention(db(), { itemId: seen!.id, ...owner, seen: true });
+    await reply(null);
+    expect((await inbox(person)).map((item) => [item.title, item.unread])).toEqual([
+      ["Third reply", false],
+    ]);
     await setInboxSettings(db(), { ...owner, replies: false });
     expect(await inbox(person)).toHaveLength(0);
   });

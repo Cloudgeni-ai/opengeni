@@ -2506,6 +2506,7 @@ describe("release schema contract", () => {
       "0663_inbox_paused_goal_setting.sql",
       "0664_inbox_rich_notifications.sql",
       "0665_inbox_replies.sql",
+      "0666_inbox_reply_current_turn.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
