@@ -1,7 +1,3 @@
-import {
-  ComputerNativeReceipt as ContractComputerNativeReceipt,
-  ComputerActionReceipt as ContractComputerActionReceipt,
-} from "@opengeni/contracts";
 import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
 import type {
   ClaudeSubscriptionAccountsResponse,
@@ -4777,15 +4773,17 @@ export class OpenGeniClient {
     operationId: string,
     options: OpenGeniRequestOptions = {},
   ): Promise<ComputerNativeReceipt> {
-    return ContractComputerNativeReceipt.parse(
-      await this.requestJson(
-        "GET",
-        `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/operations/${encodeURIComponent(operationId)}`,
-        undefined,
-        {},
-        options,
-      ),
+    const receipt = await this.requestJson<ComputerNativeReceipt>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/operations/${encodeURIComponent(operationId)}`,
+      undefined,
+      {},
+      options,
     );
+    // The shared receipt endpoint can return either operation kind. Keep the
+    // SDK's native/browser bundle schema-free while refusing the wrong kind.
+    if (receipt?.targetId !== null) throw new Error("Expected a native computer receipt");
+    return receipt;
   }
 
   async getComputerActionReceipt(
@@ -4794,15 +4792,16 @@ export class OpenGeniClient {
     operationId: string,
     options: OpenGeniRequestOptions = {},
   ): Promise<ComputerActionReceipt> {
-    return ContractComputerActionReceipt.parse(
-      await this.requestJson<ComputerActionReceipt>(
-        "GET",
-        `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/operations/${encodeURIComponent(operationId)}`,
-        undefined,
-        {},
-        options,
-      ),
+    const receipt = await this.requestJson<ComputerActionReceipt>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/operations/${encodeURIComponent(operationId)}`,
+      undefined,
+      {},
+      options,
     );
+    if (typeof receipt?.targetId !== "string")
+      throw new Error("Expected a computer action receipt");
+    return receipt;
   }
 
   async attachComputerSession(
