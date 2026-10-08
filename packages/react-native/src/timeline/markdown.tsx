@@ -1,4 +1,12 @@
-import { createContext, useContext, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentRef,
+  type ReactNode,
+} from "react";
 import { Image, Pressable, ScrollView, Text, View, type TextStyle } from "react-native";
 import Markdown, { MarkdownIt, renderRules, type RenderRules } from "react-native-markdown-display";
 import Svg, { Defs, LinearGradient, Rect, Stop } from "react-native-svg";
@@ -332,7 +340,7 @@ function MarkdownTable({
   const [copied, setCopied] = useState(false);
   // A soft edge says "more columns this way" until the reader reaches the end.
   const [atEnd, setAtEnd] = useState(false);
-  const scroller = useRef<ScrollView>(null);
+  const scroller = useRef<ComponentRef<typeof ScrollView>>(null);
   const body = (
     <TableColumnsContext.Provider value={widths}>{children}</TableColumnsContext.Provider>
   );
