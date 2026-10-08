@@ -563,6 +563,43 @@ export async function acquireSubscriptionTurnLease(
   return row ? { ...turnLeaseIdentity(input), leasedUntil: new Date(row.leased_until) } : null;
 }
 
+/**
+ * Persist one successful Codex token refresh through the private, lease-fenced
+ * database seam. Call inside withSubscriptionCoreCodexRefreshLock; SQL repeats
+ * the accepted-turn, connection-visibility and live-generation checks so a
+ * caller cannot turn the helper into a general credential update API.
+ */
+export async function persistSubscriptionCodexRefresh(
+  db: Database,
+  input: SubscriptionTurnLeaseIdentity & {
+    sessionOwnerSubjectId: string | null;
+    initiatingHumanSubjectId: string | null;
+    expectedRefreshGeneration: number;
+    credentialEncrypted: string;
+    expiresAt: Date | null;
+    lastRefreshAt: Date;
+  },
+): Promise<boolean> {
+  assertPositiveGeneration(input.generation);
+  assertPositiveGeneration(input.expectedRefreshGeneration);
+  if (!input.holderId.trim() || input.holderId.length > 256) {
+    throw new Error("Subscription lease holder id must contain 1-256 characters");
+  }
+  if (input.provider !== "codex") throw new Error("Codex refresh requires the Codex provider");
+  const [row] = await rawRows<{ persisted: boolean }>(
+    db,
+    sql`select opengeni_private.persist_subscription_codex_refresh(
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+      ${input.sessionId}::uuid, ${input.turnId}::uuid,
+      ${input.sessionOwnerSubjectId}, ${input.initiatingHumanSubjectId}, ${input.connectionId}::uuid,
+      ${input.holderId}, ${input.generation}::bigint, ${input.expectedRefreshGeneration}::bigint,
+      ${input.credentialEncrypted}, ${input.expiresAt?.toISOString() ?? null}::timestamptz,
+      ${input.lastRefreshAt.toISOString()}::timestamptz
+    ) as persisted`,
+  );
+  return row?.persisted === true;
+}
+
 /** Renew only the exact, still-live chat-turn lease generation. */
 export async function renewSubscriptionTurnLease(
   db: Database,

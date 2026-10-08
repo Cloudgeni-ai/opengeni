@@ -83,6 +83,7 @@ export {
   listDueSubscriptionCapacityWaiters,
   markSubscriptionCapacityWakeDelivered,
   observeSubscriptionCapacityWaiterWake,
+  persistSubscriptionCodexRefresh,
   readSubscriptionEffectiveSettings,
   readSubscriptionProviderCutoverState,
   readSubscriptionSessionBinding,

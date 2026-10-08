@@ -247,7 +247,17 @@ request; it marks the lease for failover at the next model-call boundary.
   private sessions or Personal workspace. The check is a `SECURITY DEFINER`
   function that takes the session owner and the turn's human as explicit
   arguments and reads memberships through the existing per-transaction
-  capability pattern (0234), never through an empty subject.
+  capability pattern (0234), never through an empty subject. The v2 personal
+  placement helper also requires that provider's cutover row to be enabled,
+  the exact `session_access` capability to exist, effective personal access to
+  be enabled, and the frozen resource-authority generation to match an active,
+  non-revoked resource. It leaves only per-connection, owner/provider-scoped
+  capabilities in the transaction. Before drained cutover, this helper is
+  inert and v1 remains authoritative.
+- Ownerless sessions are shared-only: they may use organization- or
+  workspace-scoped shared connections only. The database rejects personal and
+  people-scoped connections for ownerless turns. Bindings remain denied because
+  they do not carry an exact accepted-turn identity.
 - Binding, lease, waiter and failure rows reference the session and inherit
   `session_visibility_isolation`. Core operations run with the acting turn's
   initiating human (`withSubscriptionPoolSessionAccess`, SUB-ACCESS-02..04).
@@ -339,6 +349,24 @@ Claude and SuperGrok continue through their existing paths and retain the M1
 shadow comparison. No web UI redesign or new visible control is in scope. The
 existing Codex account/session surfaces must continue to work through the
 compatibility projections and event aliases below.
+
+#### Rolling precursor and drained cutover sequence
+
+M3 begins with a rolling-compatible precursor that adds only nullable v2
+accepted-authority storage and an inactive, exact-turn/live-lease-fenced Codex
+credential-refresh helper. It performs no backfill, secret copy, data move, or
+cutover-gate activation. Every provider continues to read its existing v1
+accepted authority, and old API/worker binaries remain compatible. The
+selector/materializer can be deployed only after this precursor is present;
+the final one-way migration still requires the complete runtime drain described
+below, then backfills v2 authority and activates the Codex cutover together.
+
+The precursor also repairs the gated ownerless-session authorization seam: an
+ownerless session is shared-only, must be workspace-visible, and may lease only
+shared organization- or workspace-scoped connections. Private sessions,
+human-initiated turns, personal connections, people-scoped connections, and
+ownerless session bindings remain rejected. This is a database authorization
+fix, not a v2 authority writer or an early selector activation.
 
 #### Runtime and consumer entry points
 
@@ -603,26 +631,43 @@ passing production-path tests.
 
 #### Focused implementation PR sequence
 
-Keep the implementation reviewable in three dependent changesets: (1) the
-provider-neutral production runtime repository, operation-lease support,
-assignment-policy relation, effective `inference_source` resolver and generic
-capacity wait/recovery/wake path on the new tables, with Codex still disabled
-behind the switch; (2) the Codex adapter, every listed Codex consumer, compatibility
-route/SDK/event projections and removal of the legacy Codex selector/branches;
-(3) the drained maintenance migration, cutover switch activation semantics,
-release-schema registration and deployment runbook. The migration and
-consumer code ship as one matched release and are activated only after the
-required drain. Retire legacy Codex executable paths in M3; retain old tables
-only where needed for later provider cutovers or the planned M6 schema cleanup.
+The provider-neutral runtime repository, operation leases, assignment-policy
+relation, effective `inference_source` resolver, generic wait/recovery path and
+gated placement-world foundation are delivered in the earlier M1/M2 PRs; they
+remain non-authoritative for Codex while the provider switch is disabled. Keep
+the remaining M3 implementation reviewable in three dependent changesets:
+(0) this rolling-compatible additive precursor: nullable v2 accepted-authority
+storage plus inactive exact-turn personal-placement and Codex refresh-write
+helpers; no v2 reader/writer, data move, or gate enablement, and v1 remains
+authoritative for every provider. Older workers continue unchanged. This
+precursor also supplies the ownerless shared-only authorization routines
+referenced by the already-merged gated foundation; those routines are exercised
+against migrated PostgreSQL rather than left as fail-closed placeholders;
+(1) the Codex selector, credential materialization/refresh, every listed Codex
+consumer, compatibility route/SDK/event projections and removal of the legacy
+Codex selector/branches, all still behind the disabled provider switch; and
+(2) the drained maintenance migration, cutover activation semantics,
+release-schema registration and deployment runbook. The selector and migration
+ship as one matched release and activate only after the required drain. Retire
+legacy Codex executable paths in M3; retain old tables only where needed for
+later provider cutovers or the planned M6 schema cleanup.
 
-The PR1 runtime-store migration is also maintenance-mode, although it moves no
-records and opens no `NO FORCE` window: the standalone runtime-posture contract
-is exact, so an older binary rejects the newly added FORCE-RLS relations and
-grants. Drain old API, control-worker, and turn-worker processes before applying
-0645, then start only binaries that include its matching runtime-posture and
-repository contract. The provider switch remains disabled; it cannot make this
-schema change a per-organization rolling rollout. PR3 remains the separate
-one-way Codex data-move and switch-activation maintenance cutover.
+The precursor corrects two authorization gaps found while reviewing the
+already-merged gated foundation: the ownerless-session authorization function
+was referenced but not defined, and its lease guard rejected the intended
+ownerless shared-only path. It also defines (but does not activate) the v2
+personal-placement helper. These repairs do not enable routing or change v1
+authority; the exact provider cutover gate remains off until the drained step.
+
+The earlier M2 runtime-store migration 0645 is maintenance-mode, although it
+moves no records and opens no `NO FORCE` window: the standalone runtime-posture
+contract is exact, so an older binary rejects the newly added FORCE-RLS
+relations and grants. Drain old API, control-worker, and turn-worker processes
+before applying 0645, then start only binaries that include its matching
+runtime-posture and repository contract. The provider switch remains disabled;
+it cannot make that schema change a per-organization rolling rollout. M3's
+final migration remains the separate one-way Codex data-move and
+switch-activation maintenance cutover.
 
 Do not merge a partial Codex caller cutover that can strand Codex on the
 core-disabled path. Each

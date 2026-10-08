@@ -29,6 +29,7 @@ import type {
   SessionGoalMutationPolicy,
   SessionGoalSnapshot,
   SlackUserLinkAccessRequest,
+  SubscriptionPersonalAuthorityV2,
   TimelineAnnotation,
   ToolGatewayIdentity,
   UserResourceDelegation,
@@ -7166,6 +7167,11 @@ export const sessionTurns = pgTable(
       .$type<ClaudeProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
+    // Additive M3 v2 slot. v1 remains the authority source until the drained
+    // Codex cutover migration backfills and activates this value.
+    subscriptionAuthority: jsonb(
+      "subscription_authority",
+    ).$type<SubscriptionPersonalAuthorityV2 | null>(),
     cancelledBy: text("cancelled_by"),
     cancelReason: text("cancel_reason"),
     // Leftover unused counter from the removed per-turn Codemode call cap

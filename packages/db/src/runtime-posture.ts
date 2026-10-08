@@ -714,6 +714,10 @@ const UNIFIED_KNOWLEDGE_AUTHORITY_TABLES = [
   "documents",
 ] as const;
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  "authorize_subscription_ownerless_session_access(uuid,uuid,uuid,uuid)",
+  "authorize_subscription_personal_placement_access(uuid,uuid,uuid,uuid,text,uuid,bigint,text,text)",
+  "subscription_codex_refresh_write_allowed(uuid,uuid,uuid)",
+  "persist_subscription_codex_refresh(uuid,uuid,uuid,uuid,text,text,uuid,text,bigint,bigint,text,timestamp with time zone,timestamp with time zone)",
   "lock_live_native_original_origin_v2(jsonb)",
   "modal_native_origin_member_read_active(uuid, text)",
   ...CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES,

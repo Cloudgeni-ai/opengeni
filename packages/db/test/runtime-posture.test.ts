@@ -1932,7 +1932,10 @@ describe("runtime database posture evaluator", () => {
         routine.name.includes("scoped_enrollment") ||
         routine.name.includes("scoped_sandbox") ||
         routine.name.includes("scoped_machine_dependent_sessions") ||
-        routine.name.includes("personal_machine")
+        routine.name.includes("personal_machine") ||
+        routine.name.includes("subscription_codex_refresh") ||
+        routine.name.includes("authorize_subscription_ownerless_session_access") ||
+        routine.name.includes("authorize_subscription_personal_placement_access")
       ) {
         routine.owner = "pg_database_owner";
       }

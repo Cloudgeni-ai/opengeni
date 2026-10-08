@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { decidePlacement } from "@opengeni/subscriptions";
 import { sql } from "drizzle-orm";
@@ -18,6 +20,7 @@ import {
   readSubscriptionProviderCutoverState,
   markSubscriptionCapacityWakeDelivered,
   observeSubscriptionCapacityWaiterWake,
+  persistSubscriptionCodexRefresh,
   readSubscriptionSessionBinding,
   writeSubscriptionSessionBinding,
   releaseSubscriptionOperationLease,
@@ -25,17 +28,40 @@ import {
   renewSubscriptionOperationLease,
   renewSubscriptionTurnLease,
   withSubscriptionCorePlacementWorld,
+  withSubscriptionCoreCodexRefreshLock,
   upsertSubscriptionCapacityWaiter,
   wakeSubscriptionCapacityWaiter,
   withRlsContext,
   withSessionRlsActorContext,
   type DbClient,
 } from "../src";
+import { rawRows } from "../src/database";
 import { withPoolWakeServiceScopeInTransaction } from "../src/subscription-session-access";
 
 setDefaultTimeout(180_000);
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
+const dbPackageRoot = resolve(import.meta.dir, "..");
+
+function sourcePrivateFunctionReferences(): string[] {
+  const references = new Set<string>();
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory() && entry.name === "node_modules") continue;
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(path);
+      } else if (/\.[cm]?tsx?$/.test(entry.name)) {
+        const source = readFileSync(path, "utf8");
+        for (const match of source.matchAll(/opengeni_private\.([a-z_][a-z0-9_]*)\s*\(/gi)) {
+          references.add(match[1]!.toLowerCase());
+        }
+      }
+    }
+  };
+  visit(join(dbPackageRoot, "src"));
+  return [...references].sort();
+}
 
 beforeAll(async () => {
   if (process.env.OPENGENI_REQUIRE_REAL_DB !== "1") return;
@@ -107,7 +133,324 @@ async function fixture() {
   };
 }
 
+async function ownerlessFixture(
+  accountId: string,
+  workspaceId: string,
+  initiatingHumanSubjectId: string | null = null,
+) {
+  const sessionId = crypto.randomUUID();
+  const session = await createSession(client!.db, {
+    requestedSessionId: sessionId,
+    accountId,
+    workspaceId,
+    initialMessage: "ownerless subscription authorization fixture",
+    resources: [],
+    metadata: {},
+    model: "fixture-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+  });
+  const actor = {
+    subjectId: "service:subscription-core",
+    initiatingHumanSubjectId,
+  };
+  const turn = await withSessionRlsActorContext(actor, () =>
+    enqueueSessionTurn(client!.db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      triggerEventId: crypto.randomUUID(),
+      temporalWorkflowId: `ownerless-subscription-${session.id}`,
+      source: "user",
+      prompt: "ownerless subscription authorization fixture",
+      resources: [],
+      tools: [],
+      model: "fixture-model",
+      reasoningEffort: "medium",
+      sandboxBackend: "none",
+      metadata: {},
+      initiator: initiatingHumanSubjectId
+        ? { kind: "subject", subjectId: initiatingHumanSubjectId }
+        : { kind: "service", subjectId: "service:subscription-core" },
+    }),
+  );
+  return { sessionId: session.id, turnId: turn.id };
+}
+
 describe("provider-neutral subscription runtime persistence", () => {
+  test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
+    "every private PostgreSQL function referenced by DB source exists after migrations",
+    async () => {
+      const references = sourcePrivateFunctionReferences();
+      expect(references.length).toBeGreaterThan(0);
+      const procedures = await shared!.admin<{ name: string }[]>`
+        select distinct procedure.proname as name
+        from pg_catalog.pg_proc procedure
+        join pg_catalog.pg_namespace namespace on namespace.oid = procedure.pronamespace
+        where namespace.nspname = 'opengeni_private'
+          and procedure.proname = any(${references}::text[])`;
+      const available = new Set(procedures.map((procedure) => procedure.name));
+      expect(references.filter((name) => !available.has(name))).toEqual([]);
+    },
+    180_000,
+  );
+
+  test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
+    "ownerless accepted turns authorize only shared organization/workspace connections",
+    async () => {
+      const state = await fixture();
+      const actor = {
+        subjectId: "service:subscription-core",
+        initiatingHumanSubjectId: null,
+      };
+      const [workspaceConnection] = await shared!.admin<{ id: string }[]>`
+        insert into subscription_connections (
+          account_id, provider, credential_encrypted, ownership, scope_kind
+        ) values (
+          ${state.accountId}::uuid, 'codex', 'v1:ownerless-workspace', 'shared', 'workspaces'
+        ) returning id::text as id`;
+      await shared!.admin`
+        insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
+        values (
+          ${state.accountId}::uuid, ${workspaceConnection!.id}::uuid, ${state.workspaceId}::uuid
+        )`;
+      const ownerless = await ownerlessFixture(state.accountId, state.workspaceId);
+      const leaseResult = await withSessionRlsActorContext(actor, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: state.accountId, workspaceId: state.workspaceId },
+          async (db) => {
+            const lease = await acquireSubscriptionTurnLease(db, {
+              accountId: state.accountId,
+              workspaceId: state.workspaceId,
+              sessionId: ownerless.sessionId,
+              turnId: ownerless.turnId,
+              provider: "codex",
+              connectionId: workspaceConnection!.id,
+              holderId: `ownerless-${crypto.randomUUID()}`,
+              generation: 1,
+              ttlMs: 60_000,
+            });
+            const [context] = await db.execute(sql`
+              select current_setting('opengeni.session_owner_subject_id', true) as owner_subject_id,
+                current_setting('opengeni.turn_human_subject_id', true) as turn_human_subject_id`);
+            return { lease, context };
+          },
+        ),
+      );
+      expect(leaseResult.lease).toMatchObject({ turnId: ownerless.turnId, generation: 1 });
+      expect(leaseResult.context).toMatchObject({
+        owner_subject_id: "",
+        turn_human_subject_id: "",
+      });
+      const operationLease = await withSessionRlsActorContext(actor, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: state.accountId, workspaceId: state.workspaceId },
+          (db) =>
+            acquireSubscriptionOperationLease(db, {
+              accountId: state.accountId,
+              workspaceId: state.workspaceId,
+              operationId: crypto.randomUUID(),
+              attemptId: crypto.randomUUID(),
+              operationKind: "image",
+              sessionId: ownerless.sessionId,
+              turnId: ownerless.turnId,
+              provider: "codex",
+              connectionId: workspaceConnection!.id,
+              holderId: `ownerless-operation-${crypto.randomUUID()}`,
+              generation: 1,
+              ttlMs: 60_000,
+            }),
+        ),
+      );
+      expect(operationLease?.turnId).toBe(ownerless.turnId);
+      await expect(
+        withSessionRlsActorContext(actor, () =>
+          withRlsContext(
+            client!.db,
+            { accountId: state.accountId, workspaceId: state.workspaceId },
+            (db) =>
+              writeSubscriptionSessionBinding(db, {
+                accountId: state.accountId,
+                workspaceId: state.workspaceId,
+                sessionId: ownerless.sessionId,
+                provider: "codex",
+                connectionId: workspaceConnection!.id,
+                modelId: "fixture-model",
+                choice: "automatic",
+                onlyThisModel: false,
+                lastModelCallAt: null,
+                lastSwitchReason: null,
+              }),
+          ),
+        ),
+      ).rejects.toThrow();
+
+      const ownerlessHumanTurn = await ownerlessFixture(
+        state.accountId,
+        state.workspaceId,
+        state.subjectId,
+      );
+      const authorizationChecks = await withSessionRlsActorContext(actor, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: state.accountId, workspaceId: state.workspaceId },
+          async (db) => {
+            const authorize = async (
+              accountId: string,
+              workspaceId: string,
+              sessionId: string,
+              turnId: string,
+            ) => {
+              const [row] = await db.execute(sql`
+                select opengeni_private.authorize_subscription_ownerless_session_access(
+                  ${accountId}::uuid, ${workspaceId}::uuid, ${sessionId}::uuid, ${turnId}::uuid
+                ) as authorized`);
+              return row?.authorized === true;
+            };
+            return {
+              wrongAccount: await authorize(
+                crypto.randomUUID(),
+                state.workspaceId,
+                ownerless.sessionId,
+                ownerless.turnId,
+              ),
+              wrongWorkspace: await authorize(
+                state.accountId,
+                crypto.randomUUID(),
+                ownerless.sessionId,
+                ownerless.turnId,
+              ),
+              wrongTurn: await authorize(
+                state.accountId,
+                state.workspaceId,
+                ownerless.sessionId,
+                crypto.randomUUID(),
+              ),
+              humanTurn: await authorize(
+                state.accountId,
+                state.workspaceId,
+                ownerlessHumanTurn.sessionId,
+                ownerlessHumanTurn.turnId,
+              ),
+              ownedSession: await authorize(
+                state.accountId,
+                state.workspaceId,
+                state.sessionId,
+                state.turnId,
+              ),
+            };
+          },
+        ),
+      );
+      expect(authorizationChecks).toEqual({
+        wrongAccount: false,
+        wrongWorkspace: false,
+        wrongTurn: false,
+        humanTurn: false,
+        ownedSession: false,
+      });
+
+      await expect(
+        createSession(client!.db, {
+          accountId: state.accountId,
+          workspaceId: state.workspaceId,
+          visibility: "user_private",
+          initialMessage: "invalid ownerless private session",
+          resources: [],
+          metadata: {},
+          model: "fixture-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+        }),
+      ).rejects.toThrow();
+
+      const [membership] = await shared!.admin<{ id: string }[]>`
+        select id::text as id from organization_memberships
+        where account_id = ${state.accountId}::uuid and subject_id = ${state.subjectId}
+          and status = 'active' and revoked_at is null limit 1`;
+      const [peopleConnection] = await shared!.admin<{ id: string }[]>`
+        insert into subscription_connections (
+          account_id, provider, credential_encrypted, ownership, scope_kind
+        ) values (
+          ${state.accountId}::uuid, 'codex', 'v1:ownerless-people', 'shared', 'people'
+        ) returning id::text as id`;
+      await shared!.admin`
+        insert into subscription_connection_people (account_id, connection_id, organization_membership_id)
+        values (${state.accountId}::uuid, ${peopleConnection!.id}::uuid, ${membership!.id}::uuid)`;
+      const personalConnectionId = crypto.randomUUID();
+      const authorityId = crypto.randomUUID();
+      await shared!.admin`
+        insert into organization_user_resource_authorities (
+          id, account_id, organization_membership_id, resource_kind, resource_id, generation, status
+        ) values (
+          ${authorityId}::uuid, ${state.accountId}::uuid, ${membership!.id}::uuid,
+          'subscription_connection', ${personalConnectionId}::uuid, 1, 'active'
+        )`;
+      await shared!.admin`
+        insert into subscription_connections (
+          id, account_id, provider, credential_encrypted, ownership, scope_kind,
+          owner_organization_membership_id, owner_subject_id, authority_id,
+          authority_resource_kind, authority_generation
+        ) values (
+          ${personalConnectionId}::uuid, ${state.accountId}::uuid, 'codex', 'v1:ownerless-personal',
+          'personal', 'people', ${membership!.id}::uuid, ${state.subjectId}, ${authorityId}::uuid,
+          'subscription_connection', 1
+        )`;
+
+      for (const connectionId of [peopleConnection!.id, personalConnectionId]) {
+        const deniedTurn = await ownerlessFixture(state.accountId, state.workspaceId);
+        await expect(
+          withSessionRlsActorContext(actor, () =>
+            withRlsContext(
+              client!.db,
+              { accountId: state.accountId, workspaceId: state.workspaceId },
+              (db) =>
+                acquireSubscriptionTurnLease(db, {
+                  accountId: state.accountId,
+                  workspaceId: state.workspaceId,
+                  sessionId: deniedTurn.sessionId,
+                  turnId: deniedTurn.turnId,
+                  provider: "codex",
+                  connectionId,
+                  holderId: `ownerless-deny-${crypto.randomUUID()}`,
+                  generation: 1,
+                  ttlMs: 60_000,
+                }),
+            ),
+          ),
+        ).rejects.toThrow();
+        await expect(
+          withSessionRlsActorContext(actor, () =>
+            withRlsContext(
+              client!.db,
+              { accountId: state.accountId, workspaceId: state.workspaceId },
+              (db) =>
+                acquireSubscriptionOperationLease(db, {
+                  accountId: state.accountId,
+                  workspaceId: state.workspaceId,
+                  operationId: crypto.randomUUID(),
+                  attemptId: crypto.randomUUID(),
+                  operationKind: "image",
+                  sessionId: deniedTurn.sessionId,
+                  turnId: deniedTurn.turnId,
+                  provider: "codex",
+                  connectionId,
+                  holderId: `ownerless-operation-deny-${crypto.randomUUID()}`,
+                  generation: 1,
+                  ttlMs: 60_000,
+                }),
+            ),
+          ),
+        ).rejects.toThrow();
+      }
+    },
+    180_000,
+  );
+
   test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
     "placement world reads owner preferences without direct membership-table access",
     async () => {
@@ -181,6 +524,500 @@ describe("provider-neutral subscription runtime persistence", () => {
         expect(result.value.models).toHaveLength(2);
         expect(result.value.allowedModelIds).toEqual(["codex/b"]);
         expect(result.value.decision).toMatchObject({ kind: "run", modelId: "codex/b" });
+      }
+    },
+    180_000,
+  );
+
+  test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
+    "personal placement authority is cutover-gated, exact-turn scoped, and generation-fenced",
+    async () => {
+      const state = await fixture();
+      const [membership] = await shared!.admin<{ id: string; personal_workspace_id: string }[]>`
+        select id::text as id, personal_workspace_id::text as personal_workspace_id
+        from organization_memberships
+        where account_id = ${state.accountId}::uuid and subject_id = ${state.subjectId}
+          and status = 'active' and revoked_at is null limit 1`;
+      expect(membership).toBeDefined();
+
+      const personalSession = await withSessionRlsActorContext({ subjectId: state.subjectId }, () =>
+        createSession(client!.db, {
+          accountId: state.accountId,
+          workspaceId: membership!.personal_workspace_id,
+          initialMessage: "personal placement authority fixture",
+          resources: [],
+          metadata: {},
+          model: "fixture-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          createdBy: { kind: "subject", subjectId: state.subjectId },
+          createdByContext: {},
+        }),
+      );
+      const personalTurn = await withSessionRlsActorContext({ subjectId: state.subjectId }, () =>
+        enqueueSessionTurn(client!.db, {
+          accountId: state.accountId,
+          workspaceId: membership!.personal_workspace_id,
+          sessionId: personalSession.id,
+          triggerEventId: crypto.randomUUID(),
+          temporalWorkflowId: `personal-subscription-${personalSession.id}`,
+          source: "user",
+          prompt: "personal placement authority fixture",
+          resources: [],
+          tools: [],
+          model: "fixture-model",
+          reasoningEffort: "medium",
+          sandboxBackend: "none",
+          metadata: {},
+          initiator: { kind: "subject", subjectId: state.subjectId },
+        }),
+      );
+
+      const connectionId = crypto.randomUUID();
+      const authorityId = crypto.randomUUID();
+      await shared!.admin`
+        insert into organization_user_resource_authorities (
+          id, account_id, organization_membership_id, resource_kind, resource_id, generation, status
+        ) values (
+          ${authorityId}::uuid, ${state.accountId}::uuid, ${membership!.id}::uuid,
+          'subscription_connection', ${connectionId}::uuid, 1, 'active'
+        )`;
+      await shared!.admin`
+        insert into subscription_connections (
+          id, account_id, provider, credential_encrypted, ownership, scope_kind,
+          owner_organization_membership_id, owner_subject_id, authority_id,
+          authority_resource_kind, authority_generation
+        ) values (
+          ${connectionId}::uuid, ${state.accountId}::uuid, 'codex', 'v1:personal-placement',
+          'personal', 'people', ${membership!.id}::uuid, ${state.subjectId}, ${authorityId}::uuid,
+          'subscription_connection', 1
+        )`;
+      await shared!.admin`
+        insert into subscription_settings (
+          account_id, rotation, providers, cross_provider_failover, fallback_order,
+          personal_connections_allowed, personal_fallback_allowed
+        ) values (
+          ${state.accountId}::uuid, '{}'::jsonb, '{}'::jsonb, false, '{}'::jsonb, true, true
+        ) on conflict (account_id, workspace_id) do update
+          set personal_connections_allowed = true`;
+      await shared!.admin`
+        update session_turns
+        set subscription_authority = ${shared!.admin.json({
+          version: 2,
+          personal: [
+            {
+              provider: "codex",
+              ownerMembershipId: membership!.id,
+              authorityGeneration: 1,
+            },
+          ],
+        })}::jsonb
+        where account_id = ${state.accountId}::uuid and id = ${personalTurn.id}::uuid`;
+
+      const [sharedWorkspace] = await shared!.admin<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${state.accountId}::uuid, 'Subscription placement shared workspace')
+        returning id::text as id`;
+      await shared!.admin`
+        insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+        values (
+          ${state.accountId}::uuid, ${sharedWorkspace!.id}::uuid, ${state.subjectId}, 'owner'
+        )`;
+      await shared!.admin`
+        insert into workspace_inference_controls (workspace_id, account_id)
+        values (${sharedWorkspace!.id}::uuid, ${state.accountId}::uuid)`;
+      const sharedSession = await withSessionRlsActorContext({ subjectId: state.subjectId }, () =>
+        createSession(client!.db, {
+          accountId: state.accountId,
+          workspaceId: sharedWorkspace!.id,
+          initialMessage: "shared-workspace personal denial fixture",
+          resources: [],
+          metadata: {},
+          model: "fixture-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          createdBy: { kind: "subject", subjectId: state.subjectId },
+          createdByContext: {},
+        }),
+      );
+      const sharedTurn = await withSessionRlsActorContext({ subjectId: state.subjectId }, () =>
+        enqueueSessionTurn(client!.db, {
+          accountId: state.accountId,
+          workspaceId: sharedWorkspace!.id,
+          sessionId: sharedSession.id,
+          triggerEventId: crypto.randomUUID(),
+          temporalWorkflowId: `shared-workspace-personal-denial-${sharedSession.id}`,
+          source: "user",
+          prompt: "shared-workspace personal denial fixture",
+          resources: [],
+          tools: [],
+          model: "fixture-model",
+          reasoningEffort: "medium",
+          sandboxBackend: "none",
+          metadata: {},
+          initiator: { kind: "subject", subjectId: state.subjectId },
+        }),
+      );
+      await shared!.admin`
+        update session_turns
+        set subscription_authority = ${shared!.admin.json({
+          version: 2,
+          personal: [
+            {
+              provider: "codex",
+              ownerMembershipId: membership!.id,
+              authorityGeneration: 1,
+            },
+          ],
+        })}::jsonb
+        where account_id = ${state.accountId}::uuid and id = ${sharedTurn.id}::uuid`;
+      const coMemberSubjectId = `user:subscription-co-member-${crypto.randomUUID()}`;
+      const [coMemberWorkspace] = await shared!.admin<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${state.accountId}::uuid, 'Subscription co-member Personal')
+        returning id::text as id`;
+      await shared!.admin`
+        insert into organization_memberships (
+          account_id, subject_id, role, status, personal_workspace_id
+        ) values (
+          ${state.accountId}::uuid, ${coMemberSubjectId}, 'member', 'active',
+          ${coMemberWorkspace!.id}::uuid
+        )`;
+
+      const rollback = new Error("rollback cutover authorization fixture");
+      const runAccessCase = async (input: {
+        provider?: "codex" | "claude" | "xai";
+        ownerMembershipId?: string;
+        generation?: number;
+        ownerSubjectId?: string;
+        humanSubjectId?: string | null;
+        cutover: "enabled" | "disabled" | "absent";
+        cutoverProvider?: "codex" | "claude" | "xai";
+        personalEnabled?: boolean;
+        workspaceId?: string;
+        sessionId?: string;
+        turnId?: string;
+      }) => {
+        let observed:
+          | { authorized: boolean; visible: boolean; owner: string | null; human: string | null }
+          | undefined;
+        try {
+          await client!.db.transaction(async (transaction) => {
+            await withSessionRlsActorContext({ subjectId: state.subjectId }, () =>
+              withRlsContext(
+                transaction as never,
+                {
+                  accountId: state.accountId,
+                  workspaceId: membership!.personal_workspace_id,
+                },
+                async (ownerDb) => {
+                  if (input.cutover !== "absent") {
+                    await rawRows(
+                      ownerDb,
+                      sql`insert into subscription_provider_cutovers (account_id, provider, enabled)
+                        values (${state.accountId}::uuid, ${input.cutoverProvider ?? "codex"}, ${input.cutover === "enabled"})
+                        on conflict (account_id, provider) do update set enabled = excluded.enabled`,
+                    );
+                  }
+                  if (input.personalEnabled === false) {
+                    await rawRows(
+                      ownerDb,
+                      sql`update subscription_settings set personal_connections_allowed = false
+                        where account_id = ${state.accountId}::uuid and workspace_id is null`,
+                    );
+                  }
+                  await withSessionRlsActorContext(
+                    {
+                      subjectId: "service:subscription-core",
+                      initiatingHumanSubjectId: input.humanSubjectId ?? state.subjectId,
+                    },
+                    () =>
+                      withRlsContext(
+                        ownerDb,
+                        {
+                          accountId: state.accountId,
+                          workspaceId: input.workspaceId ?? membership!.personal_workspace_id,
+                        },
+                        async (db) => {
+                          await rawRows(
+                            db,
+                            sql`select opengeni_private.authorize_subscription_session_access(
+                              ${state.accountId}::uuid, ${input.workspaceId ?? membership!.personal_workspace_id}::uuid,
+                              ${input.sessionId ?? personalSession.id}::uuid,
+                              ${input.turnId ?? personalTurn.id}::uuid,
+                              ${input.ownerSubjectId ?? state.subjectId},
+                              ${input.humanSubjectId ?? state.subjectId}
+                            ) as authorized`,
+                          );
+                          const [authorization] = await rawRows<{ authorized: boolean }>(
+                            db,
+                            sql`select opengeni_private.authorize_subscription_personal_placement_access(
+                              ${state.accountId}::uuid, ${input.workspaceId ?? membership!.personal_workspace_id}::uuid,
+                              ${input.sessionId ?? personalSession.id}::uuid,
+                              ${input.turnId ?? personalTurn.id}::uuid,
+                              ${input.provider ?? "codex"},
+                              ${input.ownerMembershipId ?? membership!.id}::uuid,
+                              ${input.generation ?? 1}::bigint,
+                              ${input.ownerSubjectId ?? state.subjectId},
+                              ${input.humanSubjectId ?? state.subjectId}
+                            ) as authorized`,
+                          );
+                          const [visibility] = await rawRows<{ visible: boolean }>(
+                            db,
+                            sql`select opengeni_private.subscription_connection_visible(
+                              ${state.accountId}::uuid, ${input.workspaceId ?? membership!.personal_workspace_id}::uuid,
+                              ${connectionId}::uuid, 'personal', 'people', ${membership!.id}::uuid,
+                              ${state.subjectId}, 'codex'
+                            ) as visible`,
+                          );
+                          const [context] = await rawRows<{
+                            owner: string | null;
+                            human: string | null;
+                          }>(
+                            db,
+                            sql`select nullif(current_setting('opengeni.session_owner_subject_id', true), '') as owner,
+                              nullif(current_setting('opengeni.turn_human_subject_id', true), '') as human`,
+                          );
+                          observed = {
+                            authorized: authorization?.authorized === true,
+                            visible: visibility?.visible === true,
+                            owner: context?.owner ?? null,
+                            human: context?.human ?? null,
+                          };
+                        },
+                      ),
+                  );
+                },
+              ),
+            );
+            throw rollback;
+          });
+        } catch (error) {
+          if (error !== rollback) throw error;
+        }
+        return observed;
+      };
+
+      expect(await runAccessCase({ cutover: "absent" })).toMatchObject({
+        authorized: false,
+        visible: false,
+      });
+      expect(await runAccessCase({ cutover: "disabled" })).toMatchObject({
+        authorized: false,
+        visible: false,
+      });
+      expect(await runAccessCase({ cutover: "enabled" })).toMatchObject({
+        authorized: true,
+        visible: true,
+        owner: state.subjectId,
+        human: state.subjectId,
+      });
+      expect(
+        await runAccessCase({
+          cutover: "enabled",
+          provider: "claude",
+          cutoverProvider: "claude",
+        }),
+      ).toMatchObject({ authorized: false, visible: false });
+      expect(await runAccessCase({ cutover: "enabled", generation: 2 })).toMatchObject({
+        authorized: false,
+        visible: false,
+      });
+      expect(
+        await runAccessCase({ cutover: "enabled", ownerMembershipId: crypto.randomUUID() }),
+      ).toMatchObject({ authorized: false, visible: false });
+      expect(
+        await runAccessCase({
+          cutover: "enabled",
+          humanSubjectId: coMemberSubjectId,
+        }),
+      ).toMatchObject({ authorized: false, visible: false });
+      expect(await runAccessCase({ cutover: "enabled", personalEnabled: false })).toMatchObject({
+        authorized: false,
+        visible: false,
+      });
+      expect(
+        await runAccessCase({
+          cutover: "enabled",
+          ownerSubjectId: "user:not-the-session-owner",
+        }),
+      ).toMatchObject({ authorized: false, visible: false });
+      expect(
+        await runAccessCase({
+          cutover: "enabled",
+          workspaceId: sharedWorkspace!.id,
+          sessionId: sharedSession.id,
+          turnId: sharedTurn.id,
+        }),
+      ).toMatchObject({ authorized: false, visible: false });
+
+      const missingTurn = await withSessionRlsActorContext({ subjectId: state.subjectId }, () =>
+        enqueueSessionTurn(client!.db, {
+          accountId: state.accountId,
+          workspaceId: membership!.personal_workspace_id,
+          sessionId: personalSession.id,
+          triggerEventId: crypto.randomUUID(),
+          temporalWorkflowId: `personal-subscription-missing-v2-${personalSession.id}`,
+          source: "user",
+          prompt: "missing v2 authority fixture",
+          resources: [],
+          tools: [],
+          model: "fixture-model",
+          reasoningEffort: "medium",
+          sandboxBackend: "none",
+          metadata: {},
+          initiator: { kind: "subject", subjectId: state.subjectId },
+        }),
+      );
+      expect(await runAccessCase({ cutover: "enabled", turnId: missingTurn.id })).toMatchObject({
+        authorized: false,
+        visible: false,
+      });
+
+      const ownerless = await ownerlessFixture(state.accountId, state.workspaceId);
+      expect(
+        await runAccessCase({
+          cutover: "enabled",
+          workspaceId: state.workspaceId,
+          sessionId: ownerless.sessionId,
+          turnId: ownerless.turnId,
+          ownerSubjectId: "",
+          humanSubjectId: null,
+        }),
+      ).toMatchObject({ authorized: false, visible: false });
+
+      const placementRequest = (input: {
+        workspaceId: string;
+        sessionId: string;
+        turnId: string;
+        ownerSubjectId: string | null;
+        ownerMembershipId: string | null;
+        humanSubjectId: string | null;
+        acceptedAuthorityV2: {
+          version: 2;
+          personal: Array<{
+            provider: "codex" | "claude" | "xai";
+            ownerMembershipId: string;
+            authorityGeneration: number;
+          }>;
+        };
+      }) => ({
+        accountId: state.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        sessionOwnerSubjectId: input.ownerSubjectId,
+        sessionOwnerMembershipId: input.ownerMembershipId,
+        initiatingHumanSubjectId: input.humanSubjectId,
+        acceptedAuthorityV2: input.acceptedAuthorityV2,
+        preferredModelId: "codex/model",
+        reasoningLevel: "medium",
+        models: [{ id: "codex/model", provider: "codex" as const, reasoningLevels: ["medium"] }],
+        reselectionPoints: [],
+        now: new Date(),
+      });
+      const rollbackWorld = new Error("rollback placement-world cutover row");
+      const loadPlacementWorld = async (
+        request: ReturnType<typeof placementRequest>,
+        enableCutover: boolean,
+      ) => {
+        let result:
+          | Awaited<
+              ReturnType<
+                typeof withSubscriptionCorePlacementWorld<{
+                  connectionIds: string[];
+                  personalAuthority: unknown[];
+                }>
+              >
+            >
+          | undefined;
+        try {
+          await client!.db.transaction(async (transaction) => {
+            await withSessionRlsActorContext({ subjectId: state.subjectId }, () =>
+              withRlsContext(
+                transaction as never,
+                { accountId: state.accountId, workspaceId: membership!.personal_workspace_id },
+                async (ownerDb) => {
+                  if (enableCutover) {
+                    await rawRows(
+                      ownerDb,
+                      sql`insert into subscription_provider_cutovers (account_id, provider, enabled)
+                        values (${state.accountId}::uuid, 'codex', true)
+                        on conflict (account_id, provider) do update set enabled = true`,
+                    );
+                  }
+                  result = await withSubscriptionCorePlacementWorld(
+                    ownerDb,
+                    request,
+                    async (_tx, placement) => ({
+                      connectionIds: placement.connections.map((connection) => connection.id),
+                      personalAuthority: [...placement.session.personalAuthority],
+                    }),
+                  );
+                },
+              ),
+            );
+            throw rollbackWorld;
+          });
+        } catch (error) {
+          if (error !== rollbackWorld) throw error;
+        }
+        return result;
+      };
+      const ownedWorld = await loadPlacementWorld(
+        placementRequest({
+          workspaceId: state.workspaceId,
+          sessionId: state.sessionId,
+          turnId: state.turnId,
+          ownerSubjectId: state.subjectId,
+          ownerMembershipId: membership!.id,
+          humanSubjectId: state.subjectId,
+          acceptedAuthorityV2: { version: 2, personal: [] },
+        }),
+        false,
+      );
+      expect(ownedWorld?.status).toBe("completed");
+
+      const ownerlessPlacement = await ownerlessFixture(state.accountId, state.workspaceId);
+      const ownerlessWorld = await loadPlacementWorld(
+        placementRequest({
+          workspaceId: state.workspaceId,
+          sessionId: ownerlessPlacement.sessionId,
+          turnId: ownerlessPlacement.turnId,
+          ownerSubjectId: null,
+          ownerMembershipId: null,
+          humanSubjectId: null,
+          acceptedAuthorityV2: { version: 2, personal: [] },
+        }),
+        false,
+      );
+      expect(ownerlessWorld?.status).toBe("completed");
+
+      const personalWorld = await loadPlacementWorld(
+        placementRequest({
+          workspaceId: membership!.personal_workspace_id,
+          sessionId: personalSession.id,
+          turnId: personalTurn.id,
+          ownerSubjectId: state.subjectId,
+          ownerMembershipId: membership!.id,
+          humanSubjectId: state.subjectId,
+          acceptedAuthorityV2: {
+            version: 2,
+            personal: [
+              { provider: "codex", ownerMembershipId: membership!.id, authorityGeneration: 1 },
+            ],
+          },
+        }),
+        true,
+      );
+      expect(personalWorld?.status).toBe("completed");
+      if (personalWorld?.status === "completed") {
+        expect(personalWorld.value.connectionIds).toContain(connectionId);
+        expect(personalWorld.value.personalAuthority).toEqual([
+          { provider: "codex", ownerMembershipId: membership!.id },
+        ]);
       }
     },
     180_000,
@@ -738,6 +1575,258 @@ describe("provider-neutral subscription runtime persistence", () => {
           },
         ),
       );
+    },
+    180_000,
+  );
+
+  test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
+    "Codex token refresh writes require the exact live turn lease and cannot authorize other column writes",
+    async () => {
+      const state = await fixture();
+      const actor = {
+        subjectId: "service:subscription-refresh-test",
+        initiatingHumanSubjectId: state.subjectId,
+      };
+      const request = {
+        accountId: state.accountId,
+        workspaceId: state.workspaceId,
+        sessionId: state.sessionId,
+        turnId: state.turnId,
+        sessionOwnerSubjectId: state.subjectId,
+        sessionOwnerMembershipId: (
+          await shared!.admin<{ id: string }[]>`
+            select id::text as id from organization_memberships
+            where account_id = ${state.accountId}::uuid and subject_id = ${state.subjectId}
+              and status = 'active' and revoked_at is null limit 1`
+        )[0]!.id,
+        initiatingHumanSubjectId: state.subjectId,
+        provider: "codex" as const,
+        connectionId: state.connectionId,
+        holderId: `refresh-${crypto.randomUUID()}`,
+        generation: 1,
+      };
+      const refreshInput = {
+        ...request,
+        expectedRefreshGeneration: 1,
+        credentialEncrypted: "v1:dG9rZW4=:c2VjcmV0",
+        expiresAt: new Date(Date.now() + 60 * 60_000),
+        lastRefreshAt: new Date(),
+      };
+      const lease = await withSessionRlsActorContext(actor, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: state.accountId, workspaceId: state.workspaceId },
+          (db) => acquireSubscriptionTurnLease(db, { ...request, ttlMs: 60_000 }),
+        ),
+      );
+      expect(lease).toMatchObject({ generation: 1, turnId: state.turnId });
+
+      await shared!.admin`
+        update session_turns set subscription_authority = ${shared!.admin.json({
+          version: 2,
+          personal: [
+            {
+              provider: "codex",
+              ownerMembershipId: request.sessionOwnerMembershipId,
+              authorityGeneration: 1,
+            },
+          ],
+        })}::jsonb
+        where account_id = ${state.accountId}::uuid and id = ${state.turnId}::uuid`;
+      let malformedAuthorityError: unknown;
+      try {
+        await shared!.admin`
+          update session_turns set subscription_authority = ${shared!.admin.json({
+            version: 2,
+            personal: [
+              {
+                provider: "codex",
+                ownerMembershipId: request.sessionOwnerMembershipId,
+                authorityGeneration: 1,
+              },
+              {
+                provider: "codex",
+                ownerMembershipId: request.sessionOwnerMembershipId,
+                authorityGeneration: 1,
+              },
+            ],
+          })}::jsonb
+          where account_id = ${state.accountId}::uuid and id = ${state.turnId}::uuid`;
+      } catch (error) {
+        malformedAuthorityError = error;
+      }
+      expect(malformedAuthorityError).toBeDefined();
+
+      const refreshed = await withSubscriptionCoreCodexRefreshLock(
+        client!.db,
+        request,
+        async (db) => {
+          const persisted = await persistSubscriptionCodexRefresh(db, refreshInput);
+          const unauthorizedScopeWrite = await db.execute(sql`
+            update subscription_connections set scope_kind = 'workspaces'
+            where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid
+            returning id
+          `);
+          return { persisted, unauthorizedScopeWrite };
+        },
+      );
+      expect(refreshed).toMatchObject({
+        status: "completed",
+        value: { persisted: true, unauthorizedScopeWrite: [] },
+      });
+      const refreshRoutinePosture = await shared!.admin<
+        {
+          name: string;
+          owner: string;
+          table_owner: string;
+          security_definer: boolean;
+          search_path: string;
+          app_execute: boolean;
+          public_execute: boolean;
+        }[]
+      >`
+        select proc.proname as name,
+          pg_get_userbyid(proc.proowner) as owner,
+          pg_get_userbyid(connection_table.relowner) as table_owner,
+          proc.prosecdef as security_definer,
+          array_to_string(proc.proconfig, ',') as search_path,
+          has_function_privilege('opengeni_app', proc.oid, 'EXECUTE') as app_execute,
+          coalesce((
+            select bool_or(acl_entry.grantee = 0 and acl_entry.privilege_type = 'EXECUTE')
+            from aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl_entry
+          ), false) as public_execute
+        from pg_proc proc
+        join pg_namespace namespace on namespace.oid = proc.pronamespace
+        join pg_class connection_table on connection_table.oid = 'subscription_connections'::regclass
+        where namespace.nspname = 'opengeni_private'
+          and proc.proname in (
+            'authorize_subscription_ownerless_session_access',
+            'authorize_subscription_personal_placement_access',
+            'subscription_codex_refresh_write_allowed',
+            'persist_subscription_codex_refresh'
+          )
+        order by proc.proname`;
+      expect(refreshRoutinePosture).toHaveLength(4);
+      for (const routine of refreshRoutinePosture) {
+        expect(routine.owner).toBe(routine.table_owner);
+        expect(routine.security_definer).toBe(true);
+        expect(routine.search_path.split("search_path=")[1]?.split(", ")).toEqual(
+          routine.name === "subscription_codex_refresh_write_allowed"
+            ? ["pg_catalog", "opengeni_private", "pg_temp"]
+            : ["pg_catalog", "public", "opengeni_private", "pg_temp"],
+        );
+        expect(routine.app_execute).toBe(true);
+        expect(routine.public_execute).toBe(false);
+      }
+      const [persisted] = await shared!.admin<
+        { credential_encrypted: string; refresh_generation: string; scope_kind: string }[]
+      >`
+        select credential_encrypted, refresh_generation, scope_kind
+        from subscription_connections where account_id = ${state.accountId}::uuid
+          and id = ${state.connectionId}::uuid`;
+      expect(persisted).toMatchObject({
+        credential_encrypted: refreshInput.credentialEncrypted,
+        refresh_generation: "2",
+        scope_kind: "organization",
+      });
+
+      // A wrong turn, lease holder, or another organization's connection
+      // cannot reuse the refresh API, even while the caller has session access.
+      const anotherOrganization = await fixture();
+      const wrongTurn = await withSessionRlsActorContext(actor, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: state.accountId, workspaceId: state.workspaceId },
+          (db) =>
+            persistSubscriptionCodexRefresh(db, {
+              ...refreshInput,
+              expectedRefreshGeneration: 2,
+              turnId: crypto.randomUUID(),
+            }),
+        ),
+      );
+      expect(wrongTurn).toBe(false);
+      const foreignLease = await withSessionRlsActorContext(actor, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: state.accountId, workspaceId: state.workspaceId },
+          (db) =>
+            persistSubscriptionCodexRefresh(db, {
+              ...refreshInput,
+              expectedRefreshGeneration: 2,
+              holderId: `foreign-${crypto.randomUUID()}`,
+            }),
+        ),
+      );
+      expect(foreignLease).toBe(false);
+      const otherOrganizationConnection = await withSessionRlsActorContext(actor, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: state.accountId, workspaceId: state.workspaceId },
+          (db) =>
+            persistSubscriptionCodexRefresh(db, {
+              ...refreshInput,
+              expectedRefreshGeneration: 2,
+              connectionId: anotherOrganization.connectionId,
+            }),
+        ),
+      );
+      expect(otherOrganizationConnection).toBe(false);
+
+      await shared!.admin`
+        update subscription_leases set leased_until = clock_timestamp() - interval '1 second'
+        where account_id = ${state.accountId}::uuid and turn_id = ${state.turnId}::uuid`;
+      const expiredLease = await withSessionRlsActorContext(actor, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: state.accountId, workspaceId: state.workspaceId },
+          (db) =>
+            persistSubscriptionCodexRefresh(db, {
+              ...refreshInput,
+              expectedRefreshGeneration: 2,
+            }),
+        ),
+      );
+      expect(expiredLease).toBe(false);
+
+      // A workspace co-member cannot use another member's accepted turn.
+      const coMemberSubject = `user:subscription-refresh-comember-${crypto.randomUUID()}`;
+      const [personalWorkspace] = await shared!.admin<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${state.accountId}::uuid, 'Subscription refresh co-member')
+        returning id::text as id`;
+      await shared!.admin`
+        insert into organization_memberships (
+          account_id, subject_id, role, status, personal_workspace_id
+        ) values (
+          ${state.accountId}::uuid, ${coMemberSubject}, 'member', 'active', ${personalWorkspace!.id}::uuid
+        )`;
+      await shared!.admin`
+        insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+        values (${state.accountId}::uuid, ${state.workspaceId}::uuid, ${coMemberSubject}, 'member')`;
+      const coMemberRefresh = await withSessionRlsActorContext(
+        { subjectId: coMemberSubject, initiatingHumanSubjectId: coMemberSubject },
+        () =>
+          withRlsContext(
+            client!.db,
+            { accountId: state.accountId, workspaceId: state.workspaceId },
+            (db) =>
+              persistSubscriptionCodexRefresh(db, {
+                ...refreshInput,
+                expectedRefreshGeneration: 2,
+              }),
+          ),
+      );
+      expect(coMemberRefresh).toBe(false);
+      const [unchanged] = await shared!.admin<
+        { credential_encrypted: string; scope_kind: string }[]
+      >`
+        select credential_encrypted, scope_kind from subscription_connections
+        where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid`;
+      expect(unchanged).toMatchObject({
+        credential_encrypted: refreshInput.credentialEncrypted,
+        scope_kind: "organization",
+      });
     },
     180_000,
   );
