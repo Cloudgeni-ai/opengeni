@@ -63,7 +63,7 @@ function withCallIntentsSource(config, options) {
     const projectName = mod.modRequest.projectName;
     const filepath = `${projectName}/${SWIFT_FILE}`;
     if (!mod.modResults.hasFile(filepath)) {
-      IOSConfig.XcodeUtils.addBuildSourceFile({
+      IOSConfig.XcodeUtils.addBuildSourceFileToGroup({
         filepath,
         groupName: projectName,
         project: mod.modResults,
