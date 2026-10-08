@@ -108,4 +108,11 @@ export const embeddingMigrationTail = [
   "0644_subscription_inference_source_settings.sql",
   "0645_subscription_core_runtime.sql",
   "0646_subscription_core_people_assignment_read.sql",
+  // The session storage lifecycle extends the withheld 0560 import guards and
+  // reads the 0402 input wait; replay after them.
+  "0649_session_content_archive.sql",
+  "0650_session_archive_activity.sql",
+  "0651_session_event_delta_folding.sql",
+  "0652_session_archive_guard_search_path.sql",
+  "0653_session_archive_tenancy_fence.sql",
 ];
