@@ -9,6 +9,7 @@ import { ActionSheetIOS, Alert, AppState, Platform, Pressable, Text, View } from
 import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
 import { withAlpha } from "./primitives";
+import { SectionLabel } from "./session-list";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 
 export type NativeInboxClient = Pick<
@@ -241,6 +242,7 @@ export function NativeInboxList({
     ]);
   };
 
+  // Where it comes from; the time sits apart so a long session title never hides it.
   const meta = (item: InboxItem): string => {
     const parts: string[] = [];
     if (item.kind === "question") parts.push("Question");
@@ -250,7 +252,6 @@ export function NativeInboxList({
     const workspace = spansWorkspaces ? workspaceNames?.get(item.workspaceId) : undefined;
     if (workspace) parts.push(workspace);
     if (item.kind === "question" && item.body) parts.push(item.body);
-    parts.push(relative(item.updatedAt));
     return parts.join(" · ");
   };
 
@@ -303,7 +304,7 @@ export function NativeInboxList({
         ) : null}
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={`${item.title}. ${meta(item)}`}
+          accessibilityLabel={`${item.title}. ${meta(item)}, ${relative(item.updatedAt)}`}
           accessibilityHint="Opens the session"
           onPress={() => onOpenSession(item)}
           onLongPress={() => openMenu(item)}
@@ -386,18 +387,26 @@ export function NativeInboxList({
                 {item.body}
               </Text>
             ) : null}
-            <Text
-              numberOfLines={1}
-              style={{
-                ...fontStyle(theme),
-                fontSize: 12,
-                lineHeight: 18,
-                marginTop: 2,
-                color: c["fg-subtle"],
-              }}
-            >
-              {meta(item)}
-            </Text>
+            <View style={{ flexDirection: "row", marginTop: 2 }}>
+              <Text
+                numberOfLines={1}
+                style={{
+                  ...fontStyle(theme),
+                  flexShrink: 1,
+                  fontSize: 12,
+                  lineHeight: 18,
+                  color: c["fg-subtle"],
+                }}
+              >
+                {meta(item)}
+              </Text>
+              <Text
+                numberOfLines={1}
+                style={{ ...fontStyle(theme), fontSize: 12, lineHeight: 18, color: c["fg-subtle"] }}
+              >
+                {` · ${relative(item.updatedAt)}`}
+              </Text>
+            </View>
             {rowActions ? (
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
                 {rowActions}
@@ -429,20 +438,10 @@ export function NativeInboxList({
 
   const section = (title: string, list: InboxItem[], first: boolean) =>
     list.length === 0 ? null : (
-      <View key={title} style={{ marginTop: first ? 8 : 28 }}>
-        <Text
-          accessibilityRole="header"
-          style={{
-            ...fontStyle(theme, 600),
-            fontSize: 15,
-            lineHeight: 20,
-            color: c.fg,
-            marginBottom: 4,
-            paddingHorizontal: 4,
-          }}
-        >
-          {title}
-        </Text>
+      <View key={title} style={{ marginTop: first ? 16 : 32 }}>
+        <View style={{ paddingHorizontal: 2 }}>
+          <SectionLabel>{title}</SectionLabel>
+        </View>
         {list.map(row)}
       </View>
     );
