@@ -184,7 +184,7 @@ function AtlassianSourceDialogBody({
   const sites = [...new Set(visibleItems.map((item) => item.siteName))];
 
   return (
-    <DialogContent className="max-h-[90vh] max-w-xl grid-rows-[auto_minmax(0,1fr)_auto_auto] overflow-hidden">
+    <DialogContent className="max-h-[90vh] grid-rows-[auto_minmax(0,1fr)_auto_auto] overflow-hidden sm:max-w-xl">
       <DialogHeader>
         <DialogTitle>Choose Jira & Confluence sources</DialogTitle>
         <DialogDescription>

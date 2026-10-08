@@ -311,7 +311,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       ) : null}
 
       <Dialog open={enrollOpen && machines.canManage} onOpenChange={setEnrollOpen}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Connect a machine</DialogTitle>
             <DialogDescription>
