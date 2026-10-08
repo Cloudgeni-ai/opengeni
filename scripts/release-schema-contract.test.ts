@@ -206,7 +206,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0514_failed_session_variable_set_attach.sql",
     );
     const subscriptionAuthorityRefreshContract = sourceContract.migrations.find(
-      (migration) => migration.path === "0652_subscription_authority_refresh_contract.sql",
+      (migration) => migration.path === "0654_subscription_authority_refresh_contract.sql",
     );
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(sourceContract.migrations.at(-1)?.path ?? null);
@@ -214,7 +214,7 @@ describe("release schema contract", () => {
     }
     if (subscriptionAuthorityRefreshContract) {
       expect(sourceContract.latestMigration).toBe(
-        "0652_subscription_authority_refresh_contract.sql",
+        "0654_subscription_authority_refresh_contract.sql",
       );
       expect(subscriptionAuthorityRefreshContract.deploymentMode).toBe("rolling");
     }
@@ -2126,7 +2126,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
-      "0652_subscription_authority_refresh_contract.sql",
+      "0654_subscription_authority_refresh_contract.sql",
       "0647_slack_bot_branding.sql",
       // Exclusion membership is unordered; keep this addition away from the shared tail.
       "0640_knowledge_entry_created_since.sql",
@@ -2473,6 +2473,12 @@ describe("release schema contract", () => {
       "0644_subscription_inference_source_settings.sql",
       "0645_subscription_core_runtime.sql",
       "0646_subscription_core_people_assignment_read.sql",
+      "0648_session_content_blobs.sql",
+      "0649_session_content_archive.sql",
+      "0650_session_archive_activity.sql",
+      "0651_session_event_delta_folding.sql",
+      "0652_session_archive_guard_search_path.sql",
+      "0653_session_archive_tenancy_fence.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

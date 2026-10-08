@@ -266,7 +266,7 @@ confirmation, and Automatic activates eligible proposals without another
 prompt. Every mode requires an exact live turn from the active organization
 owner and the company-profile compare-and-swap lifecycle; workspace Learning
 mode and admin authority cannot widen this scope. The web app shows it as an
-owner-only row on Knowledge > Agent learning, in the same Off / Review first /
+owner-only row on Settings > Agent learning, in the same Off / Review first /
 Automatic words as the workspace modes, while each store stays separate.
 
 Accepted conversation and tool content stays intact at its canonical boundary;
@@ -1098,7 +1098,8 @@ Library, Instructions and Review tabs on the Knowledge page (`/state`).
 navigation, including old Files, Skills, Memory and Documents links (a Documents
 `?authority=` link keeps its scope as the Library filter). Agent learning has one
 home per scope in the web app: workspace and private-chat defaults (plus the
-owner-only organization identity row) on Knowledge > Agent learning, and one
+owner-only organization identity row) on Settings > Agent learning (also opened
+from Knowledge's ⋯ menu), and one
 chat's override in the session dock's Agent tab beside its identity and
 capabilities (`apps/web/src/components/session/agent-configuration-panel.tsx`);
 the composer's Chat settings opens that tab. Groups appear
@@ -1368,6 +1369,15 @@ Projects uses the shared catalog/reader; hosts can exclude `builtin:opengeni-pro
 Capabilities define integration/tool shapes. Connections bind credentials and
 ownership. Session policy selects authorized tools.
 MCP/Codemode execute tools; neither grants authority.
+
+Agent-prepared API-key MCP setup uses the native Connect attempt lifecycle, not
+a parallel credential store. `apps/api/src/prepared-mcp-actor.ts` fences the
+exact causal owner and frozen/live permissions; the core
+`prepared-mcp-connection.ts` helper probes before the atomic connection,
+installation, and completion receipt. Missing keys use the protected inline
+Connect form; existing credentials use the same lifecycle through the narrow
+Codemode Connect route. Neither admits new tools to a frozen attempt.
+See [prepared MCP setup](remote-mcp-credentials.md#agent-prepared-api-key-connections).
 
 Omitted personal selections restore existing exact-owner grants; explicit empty
 selections suppress restoration. Children inherit captured authority. Canonical:
@@ -2101,6 +2111,8 @@ Keep mechanics and rollout in [`README.md`](README.md)'s focused docs.
 Goals: [semantics](goals.md).
 
 Filtered session page ownership and its maintenance boundary: [session pagination](session-pagination.md).
+
+Session content blobs, legacy compaction and the idle-session archive: [session storage lifecycle](session-storage-lifecycle.md).
 
 Workspace timers: [implementation and rollout](workspace-pause-timers.md).
 

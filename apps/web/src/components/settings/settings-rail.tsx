@@ -83,7 +83,7 @@ export const WORKSPACE_SETTINGS_COPY: Record<
   },
   learning: {
     title: "Agent learning",
-    description: () => "How agents save knowledge, instructions and skills.",
+    description: () => "What agents can change on their own, and what waits for your OK.",
   },
 };
 
@@ -97,12 +97,14 @@ const SECTION_ICONS = {
   developer: CodeIcon,
 } as const;
 
-// Agent learning is still a settings URL, but it opens the Learning page of Knowledge.
+// Agent learning sits with the workspace's own settings. A Personal workspace
+// keeps it too: it holds your private-chat modes.
 // Models is not a workspace page: every model setting, each workspace's included,
 // lives on Organization > Models, and the old workspace URL redirects there.
 const SECTION_ORDER: readonly WorkspaceSettingsSection[] = [
   "general",
   "access",
+  "learning",
   "usage",
   "api-keys",
   "developer",

@@ -88,6 +88,7 @@ import {
   UpdateSessionChannelRequest,
   UpdateSessionAttentionRequest,
   UpdateSessionArchiveRequest,
+  UpdateSessionRetentionRequest,
   UpdateSessionPinRequest,
   UpdateSessionGoalRequest,
   UpdateSessionMcpApprovalPolicyRequest,
@@ -212,6 +213,7 @@ import {
   sessionLatestWorkspaceCapture,
   renewSessionRealtimeInTransaction,
   syncSessionRealtimeLedgerInTransaction,
+  setSessionKeepLive,
   withWorkspaceSessionActivityRls,
   withWorkspaceRls,
   workspaceCaptureAtRevision,
@@ -325,6 +327,7 @@ import {
   updateSessionToolPolicy,
   updateSessionAgent,
   updateSessionTitle,
+  setSessionRetention,
   workflowIdForSession,
   sessionWithEffectiveToolPolicy,
   workspaceSessionEffectiveToolsContext,
@@ -689,6 +692,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     } catch (error) {
       return sessionCreateErrorResponse(c, error);
     }
+    // A creator may exempt its new session from the idle-session archive (a
+    // persistent agent, for example). Creation committed; this only marks it.
+    if ((payload as { keepLive?: unknown }).keepLive === true) {
+      const kept = await setSessionKeepLive(db, {
+        workspaceId,
+        sessionId: session.id,
+        keepLive: true,
+      });
+      if (kept.status === "updated") session = { ...session, retention: kept.retention };
+    }
     // Creation has committed by this point. Keep response projection outside
     // the create-rejection boundary so a post-commit policy read cannot be
     // misreported as though the session itself was rejected.
@@ -876,6 +889,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           ...(query.pinsOnly ? { pinsOnly: true } : {}),
           ...(query.includeTotals ? { includeTotals: true } : {}),
           ...(query.needsYouOnly ? { needsYouOnly: true } : {}),
+          ...(query.contentArchivedOnly ? { contentArchivedOnly: true } : {}),
           ...(query.includePinned === false ? { includePinned: false } : {}),
           ...(query.archivedOnly ? { archivedOnly: true } : {}),
           ...(query.sortBy ? { sortBy: query.sortBy } : {}),
@@ -2559,6 +2573,43 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
+    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+  });
+
+  // Workspace-wide keep-live exemption from the idle-session archive. Distinct
+  // from the personal rail archive above; archived sessions are read-only.
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/retention", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = await parseRequestJson(c, UpdateSessionRetentionRequest);
+    const { result, relatedSessionAccess } = await setSessionRetention(
+      deps,
+      grant,
+      sessionId,
+      payload.keepLive,
+    );
+    if (result.status === "not_found") {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    if (result.status === "archived") {
+      return c.json(
+        {
+          code: "SESSION_ARCHIVED_READ_ONLY",
+          message:
+            "This session is already archived, so its keep-live setting can no longer change.",
+        },
+        409,
+      );
+    }
+    const session = await getSessionForSubject(
+      db,
+      workspaceId,
+      sessionId,
+      grant.subjectId,
+      relatedSessionAccess,
+    );
+    if (!session) throw new HTTPException(404, { message: "session not found" });
     return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
   });
 
@@ -5275,6 +5326,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/pin" && verb === "PUT") return "session.pin.write";
   if (suffix === "/attention" && verb === "PUT") return "session.attention.write";
   if (suffix === "/archive" && verb === "PUT") return "session.archive.write";
+  if (suffix === "/retention" && verb === "PUT") return "session.retention.write";
   if (suffix === "/visibility" && verb === "PUT") return "session.visibility.write";
   if (suffix === "/forks" && verb === "POST") return "session.fork.create";
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
@@ -5543,6 +5595,7 @@ export function sessionListQuery(
   includePinned: boolean;
   includeTotals: boolean;
   needsYouOnly: boolean;
+  contentArchivedOnly: boolean;
   archivedOnly: boolean;
   sortBy: "updatedAt" | "createdAt" | "name" | undefined;
   archiveStatus: "active" | "archived" | "all" | undefined;
@@ -5592,12 +5645,13 @@ export function sessionListQuery(
     throw new HTTPException(400, { message: 'includePinned must be "true" or "false"' });
   }
   const includePinned = query.includePinned !== "false";
-  for (const key of ["includeTotals", "needsYouOnly"]) {
+  for (const key of ["includeTotals", "needsYouOnly", "contentArchivedOnly"]) {
     if (query[key] !== undefined && !["true", "false"].includes(query[key]!))
       throw new HTTPException(400, { message: `${key} must be "true" or "false"` });
   }
   const includeTotals = query.includeTotals === "true";
   const needsYouOnly = query.needsYouOnly === "true";
+  const contentArchivedOnly = query.contentArchivedOnly === "true";
   if (includeTotals && (!allowCursor || (parentSessionId !== "null" && !pinsOnly)))
     throw new HTTPException(400, { message: "includeTotals requires a root page" });
   if (needsYouOnly && !allowCursor)
@@ -5696,6 +5750,7 @@ export function sessionListQuery(
   }
   const hasPageFilters =
     needsYouOnly ||
+    contentArchivedOnly ||
     originSiteId !== undefined ||
     channelId !== undefined ||
     createdByKind !== undefined ||
@@ -5730,6 +5785,7 @@ export function sessionListQuery(
     includePinned,
     includeTotals,
     needsYouOnly,
+    contentArchivedOnly,
     archivedOnly,
     sortBy: sortBy.data,
     archiveStatus: archiveStatus.data,

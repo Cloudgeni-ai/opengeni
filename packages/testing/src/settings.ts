@@ -156,6 +156,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     voiceInputResumableMaxDurationSeconds: 2 * 60 * 60,
     voiceInputResumableMaxSizeBytes: 512 * 1024 * 1024,
     voiceInputResumableMaxChunkSizeBytes: 8 * 1024 * 1024,
+    sessionArchiveEnabled: false,
+    sessionArchiveIdleDays: 30,
     voiceInputResumableRetentionSeconds: 24 * 60 * 60,
     voiceInputFfmpegPath: "ffmpeg",
     voiceInputProviderOrder: "codex-subscription,openai,azure-openai",

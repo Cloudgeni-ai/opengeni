@@ -16,7 +16,7 @@ import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markd
 import { createNativePreviewRenderers } from "@opengeni/react-native/timeline/previews";
 import type { OpenGeniLinkTarget } from "@opengeni/sdk";
 import * as Haptics from "expo-haptics";
-import { Stack, router, useLocalSearchParams } from "expo-router";
+import { Stack, router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -35,10 +35,12 @@ import { useWorkspaceModelCatalog } from "@/model-catalog";
 import { ComposerPlusMenu } from "@/new-session-options";
 import { AppThemeProvider } from "@/theme";
 import { useComposerVoice } from "@/voice";
-import { openOnWeb } from "@/web-links";
+import { openOnWeb, webPaths } from "@/web-links";
 
 /** The session menu item that sends outside calls (Siri, Phone, Shortcuts) to this session. */
 const CALL_PIN_ACTION = "opengeni.take-calls-here";
+/** The session menu item that opens this conversation in the web app. */
+const OPEN_ON_WEB_ACTION = "opengeni.open-on-web";
 
 export default function SessionScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -134,6 +136,15 @@ function LiveSession(props: {
   const title = session ? sessionDisplayTitle(session) : "";
   const agentCall = useAgentCall();
   const onCall = agentCall.sessionId === props.sessionId;
+  // In the call's own conversation the green phone button returns to the call,
+  // so the floating on-call pill would only cover the header.
+  const { hidePillFor } = agentCall;
+  useFocusEffect(
+    useCallback(
+      () => (onCall ? hidePillFor(props.sessionId) : undefined),
+      [hidePillFor, onCall, props.sessionId],
+    ),
+  );
   const callPreferences = useOutsideCallPreferences();
   const takesCalls =
     callPreferences.target === "pinned" && callPreferences.pinned?.sessionId === props.sessionId;
@@ -183,6 +194,15 @@ function LiveSession(props: {
               renderMenu={({ actions, trigger }) => (
                 <NativeMenu
                   actions={[
+                    ...(webBaseUrl
+                      ? [
+                          {
+                            id: OPEN_ON_WEB_ACTION,
+                            title: "Open in web",
+                            image: "safari" as MenuAction["image"],
+                          },
+                        ]
+                      : []),
                     {
                       id: CALL_PIN_ACTION,
                       title: takesCalls ? "Stop taking calls here" : "Take calls here",
@@ -200,6 +220,11 @@ function LiveSession(props: {
                     })),
                   ]}
                   onPressAction={({ nativeEvent }) => {
+                    if (nativeEvent.event === OPEN_ON_WEB_ACTION) {
+                      if (webBaseUrl)
+                        openOnWeb(webBaseUrl, webPaths.session(workspaceId, props.sessionId));
+                      return;
+                    }
                     if (nativeEvent.event === CALL_PIN_ACTION) {
                       void Haptics.selectionAsync();
                       if (takesCalls) unpinCallSession();
@@ -227,6 +252,7 @@ function LiveSession(props: {
       takesCalls,
       theme.colors.fg,
       title,
+      webBaseUrl,
       workspaceId,
     ],
   );

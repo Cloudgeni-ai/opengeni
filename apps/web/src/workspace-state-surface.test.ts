@@ -7,7 +7,7 @@ async function source(path: string): Promise<string> {
 }
 
 describe("Knowledge surface", () => {
-  test("one /state page; Memory, Documents and Agent learning links redirect into it", async () => {
+  test("one /state page; Memory and Documents links redirect into it", async () => {
     const app = await source("App.tsx");
     expect(app).toContain('path: "state"');
     expect(app).toContain('import("@/routes/workspace-state")');
@@ -15,7 +15,10 @@ describe("Knowledge surface", () => {
     // Old Memory and Documents links open Knowledge instead of rendering their own page.
     expect(app).not.toContain('import("@/routes/memory")');
     expect(app).not.toContain('import("@/routes/documents")');
-    expect(app).toContain('search={{ page: "learning" }}');
+    // Agent learning is Settings > Agent learning; its settings URL renders there.
+    expect(app).not.toContain('search={{ page: "learning" }}');
+    const knowledge = await source("components/knowledge/knowledge-page.tsx");
+    expect(knowledge).toContain('search={{ section: "learning" }}');
   });
 
   test("parses tabs, pages and entries, and drops what it doesn't know", () => {

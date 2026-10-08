@@ -803,6 +803,60 @@ describe("ordinary session Codex realtime control", () => {
     expect(requests).toBe(1);
   });
 
+  test("reports the catalog ready only once the real catalog has loaded", async () => {
+    const workspaceId = "88888888-8888-4888-8888-888888888888";
+    let resolveCatalog!: (value: { models: unknown[] }) => void;
+    const response = new Promise<{ models: unknown[] }>((resolve) => {
+      resolveCatalog = resolve;
+    });
+    const client = {
+      getWorkspaceRealtimeModelCatalog: async () => await response,
+    } as unknown as OpenGeniClient;
+
+    function Selection() {
+      const selection = useRealtimeModelSelection({ client, workspaceId, codexConnected: false });
+      return <output>{String(selection.catalogReady)}</output>;
+    }
+
+    await act(async () => root.render(<Selection />));
+    expect(container.querySelector("output")?.textContent).toBe("false");
+    await act(async () => {
+      resolveCatalog({
+        models: [
+          {
+            id: "gpt-live-1-boulder-alpha",
+            label: "Codex Live",
+            provider: "Connected Codex",
+            description: "Deep session integration",
+            available: false,
+            unavailableReason: "Connect Codex",
+            recommended: false,
+          },
+        ],
+      });
+      await response;
+    });
+    expect(container.querySelector("output")?.textContent).toBe("true");
+  });
+
+  test("treats the fallback as final when the catalog cannot load", async () => {
+    const workspaceId = "66666666-6666-4666-8666-666666666666";
+    const client = {
+      getWorkspaceRealtimeModelCatalog: async () => {
+        throw new Error("catalog unavailable");
+      },
+    } as unknown as OpenGeniClient;
+
+    function Selection() {
+      const selection = useRealtimeModelSelection({ client, workspaceId, codexConnected: false });
+      return <output>{String(selection.catalogReady)}</output>;
+    }
+
+    await act(async () => root.render(<Selection />));
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(container.querySelector("output")?.textContent).toBe("true");
+  });
+
   test("aborts a shared catalog read only after its final mounted consumer leaves", async () => {
     const workspaceId = "99999999-9999-4999-8999-999999999999";
     const nativeSignals: AbortSignal[] = [];

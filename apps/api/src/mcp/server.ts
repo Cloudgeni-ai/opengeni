@@ -6388,7 +6388,7 @@ function registerCapabilityDiscoveryTools(
     "custom_mcp_setup_request",
     {
       description:
-        "Show a review card for a remote HTTPS MCP server that is not in the workspace catalog. Use only an endpoint supplied by the user or established by reliable documentation; do not invent a URL. Never include query parameters or secrets in this URL; the human can edit it in the protected setup form. The agent cannot add, enable, or contact the server. Search the catalog first and do not propose an already available integration.",
+        "Prepare a remote HTTPS MCP connection when the person has the missing key. Search the catalog first and reuse available connections. Use only an endpoint supplied by the user or reliable documentation. For API-key or bearer auth, include explicit personal/workspace ownership and the complete non-secret mcpSetup (matching name and endpointUrl, fixed non-secret headers, secret references with any prefix/suffix, and labeled secret fields). The inline card asks only for those secret values; never put credentials in these tool arguments or chat. If you already have the key and delegated connections:read, connections:write and capabilities:manage, use environmentCodemodeClient().sessionRequest with the native /v1/workspaces/site-host/connect/attempts begin/advance lifecycle and the same mcpSetup; supply values only in that protected credential request, not a tool call. No human card is needed for that authorized path. Omit ownership/mcpSetup for a legacy server-review or OAuth setup. Posting this card does not contact or connect the server.",
       inputSchema: {
         name: z4.string().trim().min(1).max(256),
         endpointUrl: z4
@@ -6406,29 +6406,91 @@ function registerCapabilityDiscoveryTools(
             );
           }),
         rationale: z4.string().trim().min(1).max(2000),
+        ownership: z4.enum(["personal", "workspace"]).optional(),
+        mcpSetup: z4
+          .object({
+            name: z4.string().trim().min(1).max(256),
+            endpointUrl: z4.string().url().max(2048),
+            headers: z4
+              .array(
+                z4.union([
+                  z4
+                    .object({
+                      name: z4.string().min(1).max(256),
+                      value: z4.string().min(1).max(16_384),
+                    })
+                    .strict(),
+                  z4
+                    .object({
+                      name: z4.string().min(1).max(256),
+                      secret: z4.string().min(1).max(64),
+                      prefix: z4.string().max(16_384).optional(),
+                      suffix: z4.string().max(16_384).optional(),
+                    })
+                    .strict(),
+                ]),
+              )
+              .min(1)
+              .max(32),
+            secretFields: z4
+              .array(
+                z4
+                  .object({
+                    id: z4.string().min(1).max(64),
+                    label: z4.string().min(1).max(256),
+                  })
+                  .strict(),
+              )
+              .max(32),
+          })
+          .strict()
+          .optional(),
       },
     },
-    async ({ name, endpointUrl, rationale }) => {
+    async ({ name, endpointUrl, rationale, ownership, mcpSetup }) => {
       await authorize();
-      const current = await catalog();
-      const existing = current.items.find(
-        (item) => item.kind === "mcp" && item.endpointUrl === endpointUrl && !item.stale,
-      );
-      if (existing) {
-        return json({
-          status: "already_in_catalog",
-          capabilityId: existing.id,
-          message: "Use the catalog authorization flow for this server instead.",
-        });
-      }
-      const claims = exactAgentCommandContext(grant, sessionId);
       const payload = ToolAuthNeededPayload.parse({
         serverId: "opengeni",
         toolName: "custom_mcp_setup_request",
         providerDomain: new URL(endpointUrl).hostname,
         reason: "missing_connection",
-        setupRequest: { kind: "mcp", name, endpointUrl, rationale },
+        setupRequest: {
+          kind: "mcp",
+          name,
+          endpointUrl,
+          rationale,
+          ...(ownership ? { ownership } : {}),
+          ...(mcpSetup ? { mcpSetup } : {}),
+        },
       });
+      const current = await catalog();
+      const candidates = current.items.filter(
+        (item) => item.kind === "mcp" && item.endpointUrl === endpointUrl && !item.stale,
+      );
+      // Workspace is the default scope in public connection projections. Match
+      // scope before choosing a catalog entry; one endpoint can have both.
+      const existing = mcpSetup
+        ? candidates.find(
+            (item) =>
+              item.connectionRef &&
+              (item.connectionRef.subjectScope ?? "workspace") ===
+                (ownership === "personal" ? "subject" : "workspace"),
+          )
+        : candidates[0];
+      const setup =
+        existing?.enabled && mcpSetup ? (await setupProjections([existing]))[0] : undefined;
+      // A missing tool does not establish that the saved key is missing. Keep
+      // unknown discovery failures distinct from an actual connect request.
+      const reusablePrepared = setup && setup.status !== "authorization_required";
+      if (existing && (!mcpSetup || reusablePrepared)) {
+        return json({
+          status: "already_in_catalog",
+          capabilityId: existing.id,
+          ...(setup ? { setup } : {}),
+          message: "Use the catalog authorization flow for this server instead.",
+        });
+      }
+      const claims = exactAgentCommandContext(grant, sessionId);
       const appended = await appendAndPublishTurnEventsFenced(
         deps.db,
         deps.bus,
@@ -6445,7 +6507,9 @@ function registerCapabilityDiscoveryTools(
       return json({
         status: "setup_requested",
         eventId: appended.events[0]?.id ?? null,
-        message: "The human review card was posted. No server was added or contacted.",
+        message: mcpSetup
+          ? "The prepared connection card was posted. The person enters only the missing key in its protected fields. No server was added or contacted."
+          : "The human review card was posted. No server was added or contacted.",
       });
     },
   );

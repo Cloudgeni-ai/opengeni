@@ -1,7 +1,7 @@
 import type { ClientModel, LineageNode, SessionBackgroundCommand } from "@opengeni/sdk";
 import type { UseGoalResult } from "@opengeni/react/session";
 import { sessionAgentsSignal, sessionGoalStateLabel } from "@opengeni/react/session-agents-model";
-import { useState, type ReactNode } from "react";
+import { createContext, useContext, useState, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, View, type TextStyle } from "react-native";
 import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
@@ -9,6 +9,9 @@ import { SessionRow } from "./session-list";
 import { BottomSheet } from "./sheet";
 import { fontStyle, useNativeTimelineTheme, type NativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
+
+/** True where the signals share their row (beside the queue): icon chips only. */
+export const CompactSignalsContext = createContext(false);
 
 /* ----------------------------------------------------------------------------
    The web session chrome's goal, agents and commands segments: one row of
@@ -34,6 +37,8 @@ export function SessionSignals(props: {
   readOnly?: boolean | undefined;
 }) {
   const m = useNativeTimelineMessages();
+  // Beside the queue the row is shared: chips keep only their icon, count and dot.
+  const compact = useContext(CompactSignalsContext);
   const [open, setOpen] = useState<"goal" | "agents" | "commands" | null>(null);
   const goal = props.goal?.goal ?? null;
   const agents = sessionAgentsSignal(props.agents);
@@ -53,6 +58,7 @@ export function SessionSignals(props: {
             label={m.goal}
             detail={sessionGoalStateLabel(goal)}
             tone={goal.status === "active" ? "running" : "neutral"}
+            compact={compact}
             onPress={() => setOpen("goal")}
           />
         ) : null}
@@ -60,8 +66,10 @@ export function SessionSignals(props: {
           <Chip
             icon="bot"
             label={`${agents.count} agent${agents.count === 1 ? "" : "s"}`}
+            count={agents.count}
             detail={agents.detail}
             tone={agents.tone}
+            compact={compact}
             onPress={() => setOpen("agents")}
           />
         ) : null}
@@ -69,8 +77,10 @@ export function SessionSignals(props: {
           <Chip
             icon="terminal"
             label={`${props.commandsCount} command${props.commandsCount === 1 ? "" : "s"}`}
+            count={props.commandsCount}
             detail={m.running}
             tone="running"
+            compact={compact}
             onPress={() => setOpen("commands")}
           />
         ) : null}
@@ -119,8 +129,10 @@ export function SessionSignals(props: {
 function Chip(props: {
   icon: NativeIconName;
   label: string;
+  count?: number | undefined;
   detail: string;
   tone: "running" | "waiting" | "neutral";
+  compact?: boolean | undefined;
   onPress: () => void;
 }) {
   const theme = useNativeTimelineTheme();
@@ -139,10 +151,19 @@ function Chip(props: {
       accessibilityLabel={`${props.label}, ${props.detail}`}
       onPress={props.onPress}
       hitSlop={{ top: 7, bottom: 7, left: 3, right: 3 }}
-      style={({ pressed }) => signalChipStyle(theme, pressed)}
+      style={({ pressed }) => [
+        signalChipStyle(theme, pressed),
+        props.compact ? { paddingHorizontal: 9, gap: 4 } : null,
+      ]}
     >
       <Icon name={props.icon} size={13} color={c["fg-muted"]} />
-      <Text style={signalChipText(theme)}>{props.label}</Text>
+      {props.compact ? (
+        props.count !== undefined ? (
+          <Text style={signalChipText(theme)}>{props.count}</Text>
+        ) : null
+      ) : (
+        <Text style={signalChipText(theme)}>{props.label}</Text>
+      )}
       <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: toneColor }} />
     </Pressable>
   );

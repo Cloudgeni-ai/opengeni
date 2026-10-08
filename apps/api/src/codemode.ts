@@ -41,6 +41,7 @@ import {
   type Session,
 } from "@opengeni/contracts";
 import { permissionsRequiredByFirstPartyTools } from "./mcp/first-party-tool-permissions";
+import { isPreparedMcpConnectPath, preparedMcpProxyPermissions } from "./prepared-mcp-permissions";
 
 /** The REST authority a Codemode SDK proxy token may ever carry. */
 export const CODEMODE_SESSION_PROXY_PERMISSION_CEILING = [
@@ -85,7 +86,7 @@ export async function codemodeSessionRequest(
   resolveProxySettings?: (session: Session) => FirstPartyMcpToolPolicySettings,
 ): Promise<Request> {
   siteSessionPath(path, grant.workspaceId, request.method);
-  const { authority, turn } = await requireActiveCodemodeCatalog(deps, grant);
+  const { authority, turn, catalog } = await requireActiveCodemodeCatalog(deps, grant);
   const session = await getSession(deps.db, authority.workspaceId, authority.sessionId);
   const secret = resolveFirstPartyDelegationSecret(deps.settings);
   if (!session || !secret) throw new CodemodeAuthorityError("invalid_grant");
@@ -93,6 +94,24 @@ export async function codemodeSessionRequest(
     resolveProxySettings?.(session) ?? deps.settings,
     session,
   );
+  if (
+    isPreparedMcpConnectPath(
+      siteSessionPath(path, grant.workspaceId, request.method),
+      request.method,
+    )
+  ) {
+    const selection = allowedFirstPartyMcpToolsForSession(
+      resolveProxySettings?.(session) ?? deps.settings,
+      session.firstPartyMcpTools,
+    );
+    if (selection.includes("custom_mcp_setup_request"))
+      permissions.push(
+        ...preparedMcpProxyPermissions(
+          catalog,
+          session.firstPartyMcpPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+        ),
+      );
+  }
   const turnPolicy = readTurnExecutionPolicyV1(turn.metadata);
   const initialPolicy = readTurnExecutionPolicyV1(session.metadata);
   const restricted =

@@ -173,6 +173,8 @@ import {
   submitHumanPromptInTransaction,
   appendSessionEventsWithLockedSessionUpdate,
   updateSessionTitleWithEvent,
+  setSessionKeepLive,
+  type SetSessionKeepLiveResult,
   withWorkspaceSubjectSessionActivityRls,
   type CreateSessionMcpServerInput,
   type Database,
@@ -4495,6 +4497,35 @@ export async function updateSessionTitle(
     title: result.title,
     relatedSessionAccess: authorization?.relatedSessionAccess ?? "root",
   };
+}
+
+/**
+ * Set or clear the session's keep-live exemption from the idle-session archive.
+ * Archived sessions are read-only and reject the change.
+ */
+export async function setSessionRetention(
+  deps: {
+    db: Database;
+    sessionAuthorization?: SessionAuthorizationPort | null;
+  },
+  grant: AccessGrant,
+  sessionId: string,
+  keepLive: boolean,
+): Promise<{
+  result: SetSessionKeepLiveResult;
+  relatedSessionAccess: "target" | "root";
+}> {
+  const authorization = await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.retention.write",
+    surface: "core",
+  });
+  const result = await setSessionKeepLive(deps.db, {
+    workspaceId: grant.workspaceId,
+    sessionId,
+    keepLive,
+  });
+  return { result, relatedSessionAccess: authorization?.relatedSessionAccess ?? "root" };
 }
 
 /** Change future defaults without accepting a prompt or touching accepted work. */

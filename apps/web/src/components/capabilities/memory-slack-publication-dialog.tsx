@@ -6,28 +6,29 @@ import type {
   SlackPublicationChannel,
 } from "@opengeni/sdk";
 import { OpenGeniMemorySlackClient } from "@opengeni/sdk/memory-slack";
-import {
-  AlertTriangleIcon,
-  CheckCircle2Icon,
-  Clock3Icon,
-  Loader2Icon,
-  RefreshCwIcon,
-} from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Loader2Icon, RefreshCwIcon } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { userErrorText } from "@/lib/api-error";
+import { apiErrorFacts, userErrorText } from "@/lib/api-error";
 
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Select } from "@/components/ui/select";
+import { Field } from "@/components/ui/field";
+import { MetaChip } from "@/components/ui/meta-chip";
+import { Notice } from "@/components/ui/notice";
+import { RelativeTime } from "@/components/ui/relative-time";
+import { SegmentedControl, type SegmentedControlOption } from "@/components/ui/segmented-control";
+import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
+import { StatusBadge, type StatusBadgeProps } from "@/components/ui/status-badge";
 import { useAppContext } from "@/context";
-import { openGeniSlackBotConnectionLabel } from "@/lib/slack-bot";
+import { openGeniSlackBotConnectionOptions } from "@/lib/slack-bot";
 import type { ConnectionMetadata } from "@/types";
 
 const IMPORTANCES: MemorySlackImportance[] = ["major", "normal", "minor"];
@@ -39,17 +40,33 @@ export function createMemorySlackClient(
   return new OpenGeniMemorySlackClient(coreClient);
 }
 
-type DraftPolicy = Record<MemorySlackImportance, "auto" | "review" | "never">;
+type PolicyChoice = "auto" | "review" | "never";
+type DraftPolicy = Record<MemorySlackImportance, PolicyChoice>;
+
+/** The same three words as the Agent learning settings. */
+const POLICY_OPTIONS: readonly SegmentedControlOption<PolicyChoice>[] = [
+  { value: "auto", label: "Automatic" },
+  { value: "review", label: "Review first" },
+  { value: "never", label: "Off" },
+];
+
+const IMPORTANCE_COPY: Record<MemorySlackImportance, { label: string; example: string }> = {
+  major: { label: "Major", example: "Decisions, rollbacks and policy changes" },
+  normal: { label: "Normal", example: "Useful lessons from agent work" },
+  minor: { label: "Minor", example: "Routine maintenance notes" },
+};
 
 /**
- * Publish important Memory decisions to one verified, bot-member Slack channel.
- * Opened from the Slack integration sheet; the sheet's option switch reflects the
- * saved configuration and this dialog edits it and shows delivery history.
+ * Where Knowledge and Agent learning summaries are posted in Slack, and which
+ * ones. Opened from the Slack integration's "Publish important decisions to
+ * Slack" option; the on/off switch itself lives there. Opened by an attempt to
+ * turn it on (`enableOnSave`), saving here also turns it on.
  */
 export function MemorySlackPublicationDialog({
   workspaceId,
   connections,
   canManage,
+  enableOnSave = false,
   open,
   onOpenChange,
   onSaved,
@@ -57,20 +74,18 @@ export function MemorySlackPublicationDialog({
   workspaceId: string;
   connections: ConnectionMetadata[];
   canManage: boolean;
+  enableOnSave?: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSaved?: (configuration: MemorySlackPublicationConfiguration) => void;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+      <DialogContent className="max-h-[90dvh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>Publish important decisions to Slack</DialogTitle>
           <DialogDescription>
-            Route short summaries of workspace Knowledge changes and finished Agent learning
-            outcomes to one verified, bot-member channel. Major items can publish automatically;
-            lower-signal items can wait for review or stay quiet. Slack is a notification surface,
-            never the authoritative record.
+            Posts short summaries of Knowledge changes and Agent learning to one Slack channel.
           </DialogDescription>
         </DialogHeader>
         {open ? (
@@ -78,6 +93,8 @@ export function MemorySlackPublicationDialog({
             workspaceId={workspaceId}
             connections={connections}
             canManage={canManage}
+            enableOnSave={enableOnSave}
+            onClose={() => onOpenChange(false)}
             onSaved={onSaved}
           />
         ) : null}
@@ -90,24 +107,30 @@ function MemorySlackPublicationSettings({
   workspaceId,
   connections,
   canManage,
+  enableOnSave,
+  onClose,
   onSaved,
 }: {
   workspaceId: string;
   connections: ConnectionMetadata[];
   canManage: boolean;
+  enableOnSave: boolean;
+  onClose: () => void;
   onSaved?: (configuration: MemorySlackPublicationConfiguration) => void;
 }) {
   const { client: coreClient } = useAppContext();
   const client = useMemo(() => new OpenGeniMemorySlackClient(coreClient), [coreClient]);
-  const activeConnections = useMemo(
-    () => connections.filter((connection) => connection.status === "active"),
+  const installations = useMemo(
+    () =>
+      openGeniSlackBotConnectionOptions(
+        connections.filter((connection) => connection.status === "active"),
+      ),
     [connections],
   );
   const [configuration, setConfiguration] = useState<MemorySlackPublicationConfiguration | null>(
     null,
   );
   const [publications, setPublications] = useState<MemorySlackPublication[]>([]);
-  const [enabled, setEnabled] = useState(false);
   const [connectionId, setConnectionId] = useState<string | null>(null);
   const [channelId, setChannelId] = useState<string | null>(null);
   const [channelName, setChannelName] = useState<string | null>(null);
@@ -117,30 +140,44 @@ function MemorySlackPublicationSettings({
     minor: "never",
   });
   const [channels, setChannels] = useState<SlackPublicationChannel[]>([]);
+  const [channelsVersion, setChannelsVersion] = useState(0);
+  const [channelsError, setChannelsError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [channelsLoading, setChannelsLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [actingId, setActingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The saved installation is no longer connected, so its channel was dropped.
+  const [installationReplaced, setInstallationReplaced] = useState(false);
 
-  const applyConfiguration = useCallback(
-    (next: MemorySlackPublicationConfiguration | null) => {
-      setConfiguration(next);
-      setEnabled(next?.enabled ?? false);
-      setConnectionId(next?.connectionId ?? activeConnections[0]?.id ?? null);
-      setChannelId(next?.slackChannelId ?? null);
-      setChannelName(next?.slackChannelName ?? null);
-      setPolicy({
-        major: policyForImportance(next, "major"),
-        normal: policyForImportance(next, "normal"),
-        minor: policyForImportance(next, "minor"),
-      });
-    },
-    [activeConnections],
-  );
+  // Read through a ref: a new connections array must never reload the saved
+  // settings over unsaved edits.
+  const installationsRef = useRef(installations);
+  useEffect(() => {
+    installationsRef.current = installations;
+  }, [installations]);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
+  /** The only writer of `configuration`: its revision and on/off state back the next save. */
+  const applyConfiguration = useCallback((next: MemorySlackPublicationConfiguration | null) => {
+    const available = installationsRef.current;
+    const storedConnectionId = next?.connectionId ?? null;
+    const storedAvailable =
+      storedConnectionId !== null &&
+      available.some((option) => option.connection.id === storedConnectionId);
+    const replaced = storedConnectionId !== null && !storedAvailable;
+    setConfiguration(next);
+    setInstallationReplaced(replaced);
+    setConnectionId(storedAvailable ? storedConnectionId : (available[0]?.connection.id ?? null));
+    setChannelId(replaced ? null : (next?.slackChannelId ?? null));
+    setChannelName(replaced ? null : (next?.slackChannelName ?? null));
+    setPolicy({
+      major: policyForImportance(next, "major"),
+      normal: policyForImportance(next, "normal"),
+      minor: policyForImportance(next, "minor"),
+    });
+  }, []);
+
+  const loadSettings = useCallback(async () => {
     setError(null);
     try {
       const [config, history] = await Promise.all([
@@ -156,7 +193,24 @@ function MemorySlackPublicationSettings({
     }
   }, [applyConfiguration, client, workspaceId]);
 
-  useEffect(() => void refresh(), [refresh]);
+  /** Re-reads only the history, so unsaved edits and the saved revision stay as they are. */
+  const loadHistory = useCallback(async () => {
+    try {
+      const history = await client.listMemorySlackPublications(workspaceId);
+      setPublications(history.publications);
+    } catch (loadError) {
+      toast.error("Couldn't refresh recent posts", { description: userErrorText(loadError) });
+    }
+  }, [client, workspaceId]);
+
+  useEffect(() => void loadSettings(), [loadSettings]);
+
+  // Installations that arrive after the settings loaded still get a default.
+  useEffect(() => {
+    if (!loading && connectionId === null && installations.length > 0) {
+      setConnectionId(installations[0]!.connection.id);
+    }
+  }, [connectionId, installations, loading]);
 
   useEffect(() => {
     if (!canManage || !connectionId) {
@@ -165,6 +219,7 @@ function MemorySlackPublicationSettings({
     }
     let cancelled = false;
     setChannelsLoading(true);
+    setChannelsError(null);
     void (async () => {
       const collected: SlackPublicationChannel[] = [];
       let cursor: string | undefined;
@@ -186,9 +241,7 @@ function MemorySlackPublicationSettings({
       .catch((channelError) => {
         if (!cancelled) {
           setChannels([]);
-          toast.error("Could not load eligible Slack channels", {
-            description: userErrorText(channelError),
-          });
+          setChannelsError(`Couldn't load Slack channels. ${userErrorText(channelError)}`);
         }
       })
       .finally(() => {
@@ -197,13 +250,15 @@ function MemorySlackPublicationSettings({
     return () => {
       cancelled = true;
     };
-  }, [canManage, client, connectionId, workspaceId]);
+  }, [canManage, channelsVersion, client, connectionId, workspaceId]);
+
+  // Saving keeps the current on/off state unless this dialog was opened to turn it on.
+  const enabled = enableOnSave || (configuration?.enabled ?? false);
+  const missingChannel = enabled && (!connectionId || !channelId);
+  const editable = canManage && !saving && !loading;
 
   async function save() {
-    if (enabled && (!connectionId || !channelId)) {
-      toast.error("Choose a verified Slack installation and an eligible channel first");
-      return;
-    }
+    if (missingChannel) return;
     setSaving(true);
     try {
       const next = await client.updateMemorySlackPublicationConfiguration(workspaceId, {
@@ -215,14 +270,25 @@ function MemorySlackPublicationSettings({
         autoImportances: IMPORTANCES.filter((importance) => policy[importance] === "auto"),
         reviewImportances: IMPORTANCES.filter((importance) => policy[importance] === "review"),
       });
-      applyConfiguration(next);
       onSaved?.(next);
-      toast.success("Slack decision publication settings saved");
-      await refresh();
+      toast.success(
+        enableOnSave && !configuration?.enabled
+          ? "Decision publication turned on"
+          : "Slack publication settings saved",
+      );
+      onClose();
     } catch (saveError) {
-      toast.error("Could not save Slack publication settings", {
-        description: userErrorText(saveError),
-      });
+      if (apiErrorFacts(saveError).status === 409) {
+        // Someone else saved first: show their settings rather than failing every retry.
+        toast.error("These settings changed while you were editing", {
+          description: "The latest settings are shown. Make your change again and save.",
+        });
+        await loadSettings();
+      } else {
+        toast.error("Could not save Slack publication settings", {
+          description: userErrorText(saveError),
+        });
+      }
     } finally {
       setSaving(false);
     }
@@ -236,197 +302,205 @@ function MemorySlackPublicationSettings({
         expectedState: publication.state,
       });
       toast.success(
-        action === "approve"
-          ? "Publication approved"
-          : action === "reject"
-            ? "Publication rejected"
-            : "Retry queued",
+        action === "approve" ? "Post approved" : action === "reject" ? "Post rejected" : "Retrying",
       );
-      await refresh();
     } catch (actionError) {
-      toast.error(`Couldn't ${action} this publication`, {
+      toast.error(`Couldn't ${action} this post`, {
         description: userErrorText(actionError),
       });
-      await refresh();
     } finally {
+      await loadHistory();
       setActingId(null);
     }
   }
 
+  const storedChannelMissing =
+    Boolean(channelId) &&
+    !channelsLoading &&
+    !channelsError &&
+    !channels.some((channel) => channel.id === channelId);
+  const channelOptions: SelectOption[] = [
+    ...(storedChannelMissing && channelId
+      ? [
+          {
+            value: channelId,
+            label: channelName ? `#${channelName}` : "The chosen channel",
+            meta: "Unavailable",
+            disabled: true,
+          },
+        ]
+      : []),
+    ...channels.map((channel) => ({
+      value: channel.id,
+      label: channel.isPrivate ? (channel.name ?? channel.id) : `#${channel.name ?? channel.id}`,
+      ...(channel.isPrivate ? { meta: "Private" } : {}),
+    })),
+  ];
+  const channelHint = storedChannelMissing
+    ? "Opengeni can no longer post there. Invite it back in Slack, or choose another channel."
+    : !channelsLoading && channels.length === 0 && connectionId
+      ? "Opengeni isn't in any channel yet. Invite it to one in Slack, then reload."
+      : "Only channels Opengeni has been invited to.";
+
   return (
-    <div>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            disabled={loading}
-            onClick={() => void refresh()}
-          >
-            {loading ? (
-              <Loader2Icon className="size-3.5 animate-spin" />
-            ) : (
-              <RefreshCwIcon className="size-3.5" />
-            )}
-            Refresh
-          </Button>
-          <label className="flex items-center gap-2 text-xs font-medium text-fg">
-            <input
-              type="checkbox"
-              checked={enabled}
-              disabled={!canManage || saving || activeConnections.length === 0}
-              onChange={(event) => setEnabled(event.target.checked)}
-            />
-            Enabled
-          </label>
-        </div>
-      </div>
+    <>
+      <div className="-mx-1 min-h-0 overflow-y-auto px-1">
+        {error ? (
+          <Notice tone="failed" className="mb-4">
+            {error}
+          </Notice>
+        ) : null}
+        {installations.length === 0 ? (
+          <Notice tone="waiting" className="mb-4">
+            Install or reconnect the Opengeni Slack bot first.
+          </Notice>
+        ) : installationReplaced ? (
+          <Notice tone="waiting" className="mb-4">
+            The saved Slack installation is no longer connected. Choose a channel again.
+          </Notice>
+        ) : null}
 
-      {error ? (
-        <div className="mt-3 flex items-start gap-2 rounded-md border border-border bg-bg p-3 text-2xs text-danger">
-          <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" /> {error}
-        </div>
-      ) : null}
-
-      {activeConnections.length === 0 ? (
-        <div className="mt-3 flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 p-3 text-2xs text-fg-muted">
-          <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-warning" />
-          Install or reinstall the workspace Slack bot before configuring a publication destination.
-        </div>
-      ) : null}
-
-      <div className="mt-3 grid gap-3 md:grid-cols-2">
-        <label className="text-2xs font-medium text-fg-muted">
-          Verified Slack installation
-          <Select
-            className="mt-1"
-            value={connectionId ?? ""}
-            disabled={!canManage || saving}
-            onChange={(event) => {
-              setConnectionId(event.target.value || null);
-              setChannelId(null);
-              setChannelName(null);
-            }}
-          >
-            <option value="">Choose an installation</option>
-            {activeConnections.map((connection) => (
-              <option key={connection.id} value={connection.id}>
-                {openGeniSlackBotConnectionLabel(connection) ?? connection.id}
-              </option>
-            ))}
-          </Select>
-        </label>
-
-        <label className="text-2xs font-medium text-fg-muted">
-          Destination channel
-          <Select
-            className="mt-1"
-            value={channelId ?? ""}
-            disabled={!canManage || saving || channelsLoading || !connectionId}
-            onChange={(event) => {
-              const selected = channels.find((channel) => channel.id === event.target.value);
-              setChannelId(selected?.id ?? null);
-              setChannelName(selected?.name ?? null);
-            }}
-          >
-            <option value="">
-              {channelsLoading ? "Loading eligible channels…" : "Choose a bot-member channel"}
-            </option>
-            {channels.map((channel) => (
-              <option key={channel.id} value={channel.id}>
-                {channel.isPrivate ? "Private · " : "#"}
-                {channel.name ?? channel.id}
-              </option>
-            ))}
-          </Select>
-          <span className="mt-1 block font-normal text-fg-subtle">
-            Archived and shared Slack Connect conversations are excluded. Opengeni never auto-joins.
-          </span>
-        </label>
-      </div>
-
-      <div className="mt-3 overflow-x-auto rounded-md border border-border bg-bg">
-        <table className="w-full text-left text-2xs">
-          <thead className="border-b border-border text-fg-subtle">
-            <tr>
-              <th className="p-2 font-medium">Importance</th>
-              <th className="p-2 font-medium">Behavior</th>
-              <th className="p-2 font-medium">Example</th>
-            </tr>
-          </thead>
-          <tbody>
-            {IMPORTANCES.map((importance) => (
-              <tr key={importance} className="border-b border-border/60 last:border-0">
-                <td className="p-2 font-semibold capitalize text-fg">{importance}</td>
-                <td className="p-2">
-                  <Select
-                    aria-label={`${importance} publication behavior`}
-                    value={policy[importance]}
-                    disabled={!canManage || saving}
-                    onChange={(event) =>
-                      setPolicy({
-                        ...policy,
-                        [importance]: event.target.value as DraftPolicy[MemorySlackImportance],
-                      })
-                    }
-                  >
-                    <option value="auto">Publish automatically</option>
-                    <option value="review">Require review</option>
-                    <option value="never">Do not publish</option>
-                  </Select>
-                </td>
-                <td className="p-2 text-fg-muted">{importanceExample(importance)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-        <p className="text-2xs text-fg-subtle">
-          Configuration revisions are immutable; queued work is cancelled if its exact destination
-          revision changes.
-        </p>
-        {canManage ? (
-          <Button type="button" size="sm" disabled={saving || loading} onClick={() => void save()}>
-            {saving ? <Loader2Icon className="animate-spin" /> : null}Save publication settings
-          </Button>
-        ) : (
-          <p className="text-2xs text-fg-subtle">
-            Workspace administrator permission is required to change this setting.
-          </p>
-        )}
-      </div>
-
-      <div className="mt-4 border-t border-border/70 pt-3">
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-xs font-semibold text-fg">Recent delivery history</p>
-          <p className="text-2xs text-fg-subtle">Attempts and receipts are durable</p>
-        </div>
         {loading ? (
-          <p className="mt-3 flex items-center gap-2 text-2xs text-fg-subtle">
-            <Loader2Icon className="size-3 animate-spin" /> Loading delivery history…
+          <p className="flex items-center gap-2 py-6 text-sm text-fg-muted">
+            <Loader2Icon className="size-4 animate-spin" /> Loading settings…
           </p>
-        ) : publications.length === 0 ? (
-          <p className="mt-3 text-2xs text-fg-subtle">
-            No Slack publication attempts have been recorded yet.
-          </p>
-        ) : (
-          <div className="mt-2 grid gap-2">
-            {publications.slice(0, 12).map((publication) => (
-              <PublicationRow
-                key={publication.id}
-                publication={publication}
-                canManage={canManage}
-                acting={actingId === publication.id}
-                onAct={act}
+        ) : installations.length === 0 ? null : (
+          <div className="flex flex-col gap-6">
+            {installations.length > 1 ? (
+              <Field label="Slack workspace">
+                <SelectMenu
+                  options={installations.map((option) => ({
+                    value: option.connection.id,
+                    label: option.label,
+                  }))}
+                  value={connectionId}
+                  onValueChange={(value) => {
+                    setConnectionId(value);
+                    setChannelId(null);
+                    setChannelName(null);
+                  }}
+                  placeholder="Choose a Slack workspace"
+                  disabled={!editable}
+                  className="w-full"
+                />
+              </Field>
+            ) : null}
+
+            <Field
+              label="Channel"
+              hint={channelsError ? undefined : channelHint}
+              error={channelsError ?? undefined}
+              aside={
+                canManage && connectionId ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="xs"
+                    disabled={channelsLoading}
+                    onClick={() => setChannelsVersion((version) => version + 1)}
+                  >
+                    <RefreshCwIcon className={channelsLoading ? "animate-spin" : undefined} />
+                    Reload
+                  </Button>
+                ) : null
+              }
+            >
+              <SelectMenu
+                variant={channelOptions.length > 8 ? "combobox" : "menu"}
+                options={channelOptions}
+                value={channelId}
+                onValueChange={(value) => {
+                  const selected = channels.find((channel) => channel.id === value);
+                  setChannelId(selected?.id ?? null);
+                  setChannelName(selected?.name ?? null);
+                }}
+                placeholder={connectionId ? "Choose a channel" : "Choose a Slack workspace first"}
+                searchPlaceholder="Search channels"
+                emptyMessage="No channels yet"
+                disabled={!editable || !connectionId}
+                loading={channelsLoading}
+                loadingLabel="Loading channels…"
+                invalid={Boolean(channelsError)}
+                className="w-full"
               />
-            ))}
+            </Field>
+
+            <Field
+              label="What to post"
+              hint="Review first holds a post in Recent posts until an admin approves it."
+              group
+            >
+              <div className="flex flex-col divide-y divide-border">
+                {IMPORTANCES.map((importance) => (
+                  <div
+                    key={importance}
+                    className="flex flex-col gap-2 py-3 first:pt-0 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-fg">
+                        {IMPORTANCE_COPY[importance].label}
+                      </p>
+                      <p className="text-xs leading-4.5 text-fg-muted">
+                        {IMPORTANCE_COPY[importance].example}
+                      </p>
+                    </div>
+                    <SegmentedControl
+                      aria-label={`${IMPORTANCE_COPY[importance].label} items`}
+                      options={POLICY_OPTIONS}
+                      value={policy[importance]}
+                      onValueChange={(value) => setPolicy({ ...policy, [importance]: value })}
+                      disabled={!editable}
+                      size="sm"
+                      className="shrink-0 max-sm:w-full max-sm:[&_[data-slot=segmented-control-item]]:flex-1"
+                    />
+                  </div>
+                ))}
+              </div>
+            </Field>
+
+            <section aria-labelledby="slack-publication-history">
+              <h3 id="slack-publication-history" className="text-sm font-medium text-fg">
+                Recent posts
+              </h3>
+              {publications.length === 0 ? (
+                <p className="mt-1.5 text-xs text-fg-muted">Nothing posted yet.</p>
+              ) : (
+                <ul className="mt-1 flex flex-col divide-y divide-border">
+                  {publications.slice(0, 12).map((publication) => (
+                    <PublicationRow
+                      key={publication.id}
+                      publication={publication}
+                      canManage={canManage}
+                      acting={actingId === publication.id}
+                      onAct={act}
+                    />
+                  ))}
+                </ul>
+              )}
+            </section>
           </div>
         )}
       </div>
-    </div>
+
+      <DialogFooter className="sm:items-center">
+        {!canManage ? (
+          <p className="mr-auto text-xs text-fg-muted">Only workspace admins can change this.</p>
+        ) : null}
+        <Button type="button" variant="outline" onClick={onClose}>
+          Cancel
+        </Button>
+        {canManage ? (
+          <Button
+            type="button"
+            disabled={!editable || missingChannel || installations.length === 0}
+            onClick={() => void save()}
+          >
+            {saving ? <Loader2Icon className="animate-spin" /> : null}
+            {enableOnSave && !configuration?.enabled ? "Turn on" : "Save"}
+          </Button>
+        ) : null}
+      </DialogFooter>
+    </>
   );
 }
 
@@ -444,100 +518,102 @@ function PublicationRow({
     action: "approve" | "reject" | "retry",
   ) => Promise<void>;
 }) {
-  const latestReceipt = publication.receipts.at(-1);
+  const status = publicationStatus(publication.state);
   return (
-    <div className="rounded-md border border-border bg-bg p-3">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            {stateIcon(publication.state)}
-            <p className="text-xs font-semibold text-fg">{publication.sourceLabel}</p>
-            <span className="rounded bg-surface-2 px-1.5 py-0.5 text-2xs capitalize text-fg-muted">
-              {publication.importance}
-            </span>
-          </div>
-          <p className="mt-1 max-w-3xl text-2xs leading-5 text-fg-muted">{publication.summary}</p>
-          <p className="mt-1 text-2xs text-fg-subtle">
-            {stateLabel(publication.state)} · {publication.attemptCount} delivery attempt
-            {publication.attemptCount === 1 ? "" : "s"} · {formatDate(publication.updatedAt)}
-            {publication.lastErrorCode ? ` · ${publication.lastErrorCode}` : ""}
-          </p>
-          {latestReceipt ? (
-            <p className="mt-1 font-mono text-[10px] text-fg-subtle">
-              receipt {latestReceipt.sequence}: {latestReceipt.kind}
-            </p>
+    <li className="flex flex-col gap-2 py-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+      <div className="min-w-0">
+        <p className="text-sm text-fg">{publication.summary}</p>
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-fg-muted">
+          <StatusBadge variant="dot" {...status} />
+          <span aria-hidden>·</span>
+          <span>{publication.sourceLabel}</span>
+          <MetaChip variant="soft">{IMPORTANCE_COPY[publication.importance].label}</MetaChip>
+          <span aria-hidden>·</span>
+          <RelativeTime date={publication.updatedAt} focusable={false} />
+          {publication.attemptCount > 1 ? (
+            <>
+              <span aria-hidden>·</span>
+              <span>{publication.attemptCount} attempts</span>
+            </>
+          ) : null}
+          {publication.state === "failed" && publication.lastErrorCode ? (
+            <>
+              <span aria-hidden>·</span>
+              <span className="font-mono">{publication.lastErrorCode}</span>
+            </>
           ) : null}
         </div>
-        {canManage ? (
-          <div className="flex shrink-0 gap-2">
-            {publication.state === "review_pending" ? (
-              <>
-                <Button
-                  variant="outline"
-                  type="button"
-                  size="sm"
-                  disabled={acting}
-                  onClick={() => void onAct(publication, "approve")}
-                >
-                  Approve
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  disabled={acting}
-                  onClick={() => void onAct(publication, "reject")}
-                >
-                  Reject
-                </Button>
-              </>
-            ) : null}
-            {publication.state === "failed" ? (
+      </div>
+      {canManage ? (
+        <div className="flex shrink-0 gap-2">
+          {publication.state === "review_pending" ? (
+            <>
               <Button
                 variant="outline"
                 type="button"
                 size="sm"
                 disabled={acting}
-                onClick={() => void onAct(publication, "retry")}
+                onClick={() => void onAct(publication, "approve")}
               >
-                {acting ? <Loader2Icon className="animate-spin" /> : null}Retry
+                Approve
               </Button>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
-    </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={acting}
+                onClick={() => void onAct(publication, "reject")}
+              >
+                Reject
+              </Button>
+            </>
+          ) : null}
+          {publication.state === "failed" ? (
+            <Button
+              variant="outline"
+              type="button"
+              size="sm"
+              disabled={acting}
+              onClick={() => void onAct(publication, "retry")}
+            >
+              {acting ? <Loader2Icon className="animate-spin" /> : null}Retry
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+    </li>
   );
 }
 
 function policyForImportance(
   configuration: MemorySlackPublicationConfiguration | null,
   importance: MemorySlackImportance,
-): "auto" | "review" | "never" {
+): PolicyChoice {
   if (configuration?.autoImportances.includes(importance)) return "auto";
   if (configuration?.reviewImportances.includes(importance)) return "review";
+  if (configuration) return "never";
   return importance === "major" ? "auto" : importance === "normal" ? "review" : "never";
 }
 
-function importanceExample(importance: MemorySlackImportance) {
-  if (importance === "major") return "A durable decision, rollback, or high-impact policy change";
-  if (importance === "normal")
-    return "A useful operational learning that benefits from human review";
-  return "Low-signal maintenance context that should normally stay in the authoritative record";
-}
-
-function stateIcon(state: MemorySlackPublicationState) {
-  if (state === "delivered") return <CheckCircle2Icon className="size-4 shrink-0 text-success" />;
-  if (state === "failed" || state === "cancelled" || state === "rejected")
-    return <AlertTriangleIcon className="size-4 shrink-0 text-warning" />;
-  return <Clock3Icon className="size-4 shrink-0 text-fg-subtle" />;
-}
-
-function stateLabel(state: MemorySlackPublicationState) {
-  return state.replaceAll("_", " ");
-}
-
-function formatDate(value: string) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+function publicationStatus(
+  state: MemorySlackPublicationState,
+): Pick<StatusBadgeProps, "status" | "tone" | "children"> {
+  switch (state) {
+    case "review_pending":
+      return { status: "pending_review" };
+    case "queued":
+      return { status: "queued" };
+    case "delivering":
+      return { tone: "progress", children: "Posting" };
+    case "retry_wait":
+      return { tone: "progress", children: "Retrying soon" };
+    case "delivered":
+      return { tone: "success", children: "Posted" };
+    case "rejected":
+      return { tone: "neutral", children: "Rejected" };
+    case "cancelled":
+      return { tone: "neutral", children: "Cancelled" };
+    case "failed":
+      return { status: "failed" };
+  }
 }

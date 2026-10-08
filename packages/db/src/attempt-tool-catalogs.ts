@@ -4,6 +4,11 @@ import { and, eq } from "drizzle-orm";
 import type { Database } from "./database";
 import { withRlsContext } from "./database";
 import * as schema from "./schema";
+import {
+  encodeAttemptToolCatalogContent,
+  hydrateStoredAttemptToolCatalog,
+  writeSessionContentBlobs,
+} from "./session-content-blobs";
 
 export class AttemptToolCatalogAuthorityError extends Error {
   readonly code = "attempt_tool_catalog_authority_mismatch";
@@ -59,6 +64,16 @@ export async function persistAttemptToolCatalog(
           throw new AttemptToolCatalogAuthorityError();
         }
 
+        const encoded = encodeAttemptToolCatalogContent(catalog);
+        await writeSessionContentBlobs(
+          tx,
+          {
+            accountId: catalog.accountId,
+            workspaceId: catalog.workspaceId,
+            sessionId: catalog.sessionId,
+          },
+          encoded.blobs,
+        );
         await tx
           .insert(schema.sessionAttemptToolCatalogs)
           .values({
@@ -71,7 +86,8 @@ export async function persistAttemptToolCatalog(
             catalogVersion: catalog.version,
             generation: catalog.generation,
             digest: catalog.digest,
-            catalog,
+            catalog: encoded.stored,
+            contentRefs: encoded.refs,
             createdAt: new Date(catalog.createdAt),
           })
           .onConflictDoNothing({ target: schema.sessionAttemptToolCatalogs.attemptId });
@@ -85,7 +101,7 @@ export async function persistAttemptToolCatalog(
         if (stored.digest !== catalog.digest || stored.generation !== catalog.generation) {
           throw new AttemptToolCatalogConflictError();
         }
-        return parseVerifiedAttemptToolCatalog(stored.catalog);
+        return parseVerifiedAttemptToolCatalog(await hydrateStoredAttemptToolCatalog(tx, stored));
       }),
   );
 }
@@ -103,7 +119,9 @@ export async function getAttemptToolCatalog(
         input.workspaceId,
         input.attemptId,
       );
-      return stored ? parseVerifiedAttemptToolCatalog(stored.catalog) : null;
+      return stored
+        ? parseVerifiedAttemptToolCatalog(await hydrateStoredAttemptToolCatalog(scopedDb, stored))
+        : null;
     },
   );
 }
@@ -118,6 +136,7 @@ async function attemptToolCatalogByAttemptTx(
       generation: schema.sessionAttemptToolCatalogs.generation,
       digest: schema.sessionAttemptToolCatalogs.digest,
       catalog: schema.sessionAttemptToolCatalogs.catalog,
+      contentRefs: schema.sessionAttemptToolCatalogs.contentRefs,
     })
     .from(schema.sessionAttemptToolCatalogs)
     .where(

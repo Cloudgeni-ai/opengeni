@@ -213,6 +213,12 @@ function OperationalWorkspaceSettingsRoute({
         )
       ) : null}
 
+      {section === "learning" ? (
+        <Suspense fallback={<SettingsRowsFallback label="Loading agent learning" />}>
+          <LazyAgentLearningSettingsPage key={workspaceId} workspaceId={workspaceId} />
+        </Suspense>
+      ) : null}
+
       {section === "usage" ? (
         personal ? (
           <Notice tone="muted" title="Budgets apply to shared workspaces">
@@ -903,6 +909,11 @@ const LazySessionDefaultsPage = lazy(async () => {
 });
 
 // Usage reads load only on their page, never with the rest of settings.
+const LazyAgentLearningSettingsPage = lazy(async () => {
+  const module = await import("@/components/settings/agent-learning-page");
+  return { default: module.AgentLearningSettingsPage };
+});
+
 const LazyWorkspaceUsagePage = lazy(async () => {
   const module = await import("@/components/usage/workspace-usage-page");
   return { default: module.WorkspaceUsagePage };

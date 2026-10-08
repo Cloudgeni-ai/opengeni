@@ -19,6 +19,12 @@ page exists so you pick the right one in one read.
 
 ### Workspace Streamable HTTP
 
+For new remote API-key or bearer MCPs, the agent can prepare the native
+[connection configuration](remote-mcp-credentials.md#agent-prepared-api-key-connections).
+An authorized agent with the credential uses the protected Connect request path;
+otherwise the chat card asks the person only for the missing key. Neither path
+widens the accepted attempt's tool selection or bypasses existing permissions.
+
 The unified `/v1/workspaces/:id/mcp` endpoint uses a fresh stateless
 JSON-response transport per POST. It does not offer a server-to-client SSE
 stream: authorized GET requests return `405 Method Not Allowed` with
@@ -298,7 +304,7 @@ The retired Memory and reviewed-claim tools are not registered for new work.
 
 First-party Opengeni MCP company-profile tools (separate organization policy):
 
-- `company_profile_propose` / `company_profile_confirm` - explicit organization-identity administration for an exact agent attempt whose live turn was initiated by the organization owner. The separate owner-managed organization policy (set on Knowledge > Agent learning) defaults to Review first (`suggest`): Off creates nothing, Review first stages one inactive immutable identity/mission revision and returns the exact `request_human_input` payload for `confirm`, and Automatic activates the proposal immediately through the existing compare-and-swap lifecycle and returns `status=activated`. Every mode retains exact live-owner admission and immutable receipts; this policy is independent of workspace Learning mode (see [`company-profile.md`](company-profile.md)).
+- `company_profile_propose` / `company_profile_confirm` - explicit organization-identity administration for an exact agent attempt whose live turn was initiated by the organization owner. The separate owner-managed organization policy (set on Settings > Agent learning) defaults to Review first (`suggest`): Off creates nothing, Review first stages one inactive immutable identity/mission revision and returns the exact `request_human_input` payload for `confirm`, and Automatic activates the proposal immediately through the existing compare-and-swap lifecycle and returns `status=activated`. Every mode retains exact live-owner admission and immutable receipts; this policy is independent of workspace Learning mode (see [`company-profile.md`](company-profile.md)).
 
 First-party Opengeni MCP session monitoring tools (`sessions:read`):
 

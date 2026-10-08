@@ -1,4 +1,5 @@
 import { registerClaudeSubscriptionAccountRoutes } from "./routes/claude-subscription-accounts";
+import { isPreparedMcpConnectPath } from "./prepared-mcp-permissions";
 import { registerWorkspaceModelProviderRoutes } from "./routes/workspace-model-providers";
 import { registerClaudeSubscriptionOAuthRoutes } from "./routes/claude-subscription-oauth";
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
@@ -1409,6 +1410,15 @@ export function createAppComposition(deps: AppDependencies): {
         })),
         firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings),
         codeSearch: codeSearchDeploymentPolicy(deps.settings),
+        // Archiving needs object storage; without it the worker never archives.
+        ...(deps.settings.sessionArchiveEnabled && objectStorage
+          ? {
+              sessionArchive: {
+                enabled: true as const,
+                idleDays: deps.settings.sessionArchiveIdleDays,
+              },
+            }
+          : {}),
         agentConfig: clientAgentConfig(deps.settings),
         fileUploads: {
           enabled: objectStorage !== null,
@@ -2299,6 +2309,8 @@ export function assertConfiguredCodemodeSessionProxyPath(
       } else {
         allowed = families.subagents;
       }
+    } else if (surface === "connect") {
+      allowed = allows("custom_mcp_setup_request") && isPreparedMcpConnectPath(pathname, verb);
     } else if (surface === "files") {
       allowed = families.allowsMcpServer("files");
     } else if (surface === "skills") {

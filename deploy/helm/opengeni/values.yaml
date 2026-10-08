@@ -1226,6 +1226,16 @@ nats:
     controlPasswordSecretKey: OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD
     calloutPasswordSecretKey: OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD
 
+# Idle-session archive (docs/session-storage-lifecycle.md). Off by default.
+# When enabled, the control worker moves the bulky content of sessions that
+# have been quiet for idleDays to the configured object storage as a verified
+# bundle and purges it from PostgreSQL. Archived sessions stay readable but are
+# read-only; sessions marked keep-live, waiting on a person, a timer, a queue or
+# a schedule are never archived. Requires object storage.
+sessionArchive:
+  enabled: false
+  idleDays: 30
+
 # Bring-your-own-compute (selfhosted SandboxBackend) NON-SECRET wiring threaded
 # into the api/worker configmap. The SECRET values live in the runtime secret
 # (see the DEPLOY NOTES / secret keys below). Disabled by default so existing

@@ -2954,6 +2954,34 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("prepared key cards retain exact scope and mappings across timeline reconstruction", () => {
+    reset();
+    const mcpSetup = {
+      name: "Records MCP",
+      endpointUrl: "https://mcp.example.test/mcp",
+      headers: [{ name: "X-API-Key", secret: "key" }],
+      secretFields: [{ id: "key", label: "API key" }],
+    };
+    const items = buildTimeline([
+      event("tool.auth_needed", {
+        serverId: "opengeni",
+        toolName: "custom_mcp_setup_request",
+        providerDomain: "mcp.example.test",
+        reason: "missing_connection",
+        setupRequest: {
+          kind: "mcp",
+          name: mcpSetup.name,
+          endpointUrl: mcpSetup.endpointUrl,
+          rationale: "Find records.",
+          ownership: "personal",
+          mcpSetup,
+        },
+      }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ setupRequest: { ownership: "personal", mcpSetup } });
+  });
+
   test("historical tool.auth_needed without a concrete tool call stays out of chat", () => {
     reset();
     const items = buildTimeline([

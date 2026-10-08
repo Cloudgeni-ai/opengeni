@@ -437,12 +437,14 @@ system; a new main-rail page of things follows them.
   outline, Approve (or "Approve and next") as the primary, and a ⋯ for Open entry and Approve all
   from the same chat. A decision moves straight to the next change, and the last one returns to
   the list. Edit replaces the text with the form on the same page. The learning mode is not a
-  line over the list: it lives in the page's ⋯ ("Agent learning · Automatic"), and an empty
-  Review says in one sentence why nothing waits, with Agent learning as its action.
+  line over the list: the page's ⋯ shows it ("Agent learning · Automatic") and opens Settings >
+  Agent learning, and an empty Review says in one sentence why nothing waits, with Agent learning
+  as its action. Settings > Agent learning links back to Review with what is waiting.
 - **One home per scope for agent settings.** Decided 4 Oct 2026. Agent learning is always
   "Agent learning" with modes Off / Review first / Automatic. Workspace and private-chat
-  defaults, and (owners only) the organization identity, are rows on Knowledge > Agent
-  learning; one chat's identity, capabilities and Agent learning are the session dock's Agent
+  defaults, and (owners only) the organization identity, are rows on Settings > Agent learning
+  (in the Workspace section of the settings rail, Personal workspaces included; Knowledge's ⋯
+  opens it); one chat's identity, capabilities and Agent learning are the session dock's Agent
   tab (Identity, Capabilities, Agent learning sections, each saying where its default comes
   from). Anything else that shows one of these settings is a one-line summary linking there.
 

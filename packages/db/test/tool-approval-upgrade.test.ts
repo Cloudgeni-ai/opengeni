@@ -12,7 +12,6 @@ import {
   createSession,
   initializeSessionStartAtomically,
   claimSessionWorkForAttempt,
-  persistAttemptToolCatalog,
 } from "../src";
 import { executeMigrationFile, migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
@@ -78,6 +77,15 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
         subjectId: "human:upgrade-fixture",
       })
     ).workspaceGrants[0]!;
+    // Current session adapters select columns from later migrations. Supply
+    // only those reader columns for the seed, and remove them before replay.
+    await owner`alter table sessions
+      add column keep_live boolean not null default false,
+      add column content_archive_state text,
+      add column content_archive_started_at timestamptz,
+      add column content_archived_at timestamptz,
+      add column content_archive jsonb,
+      add column content_archive_purged_at timestamptz`;
     const session = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -131,7 +139,13 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
         },
       ],
     }).catalog;
-    await persistAttemptToolCatalog(client.db, catalog);
+    // The previous ledger stores catalogs inline (pre-0648 legacy form).
+    await owned.admin`insert into session_attempt_tool_catalogs
+      (attempt_id,account_id,workspace_id,session_id,turn_id,execution_generation,catalog_version,
+       generation,digest,catalog,created_at)
+      values(${attemptId},${scope.accountId},${scope.workspaceId},${scope.sessionId},${scope.turnId},
+       ${scope.executionGeneration},${catalog.version},${catalog.generation},${catalog.digest},
+       ${owned.admin.json(catalog as unknown as postgres.JSONValue)},${new Date(catalog.createdAt)})`;
     const requestId = crypto.randomUUID();
     await owned.admin`insert into connector_action_requests
       (id,account_id,workspace_id,session_id,turn_id,creation_attempt_id,creation_execution_generation,
@@ -188,6 +202,13 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
     expect(
       await owner`select column_name from information_schema.columns where table_name='session_attempt_codemode_calls' and column_name='durable_approval'`,
     ).toHaveLength(0);
+    await owner`alter table sessions
+      drop column keep_live,
+      drop column content_archive_state,
+      drop column content_archive_started_at,
+      drop column content_archived_at,
+      drop column content_archive,
+      drop column content_archive_purged_at`;
     // The real runner commits one file at a time: the rolling default may
     // succeed, but activation must refuse a still-connected runtime login.
     await expect(

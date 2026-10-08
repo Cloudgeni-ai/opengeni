@@ -4649,6 +4649,15 @@ export const sessions = pgTable(
     importedArchiveRequestHash: text("imported_archive_request_hash"),
     importedArchiveSubjectId: text("imported_archive_subject_id"),
     importedArchiveNextOffset: integer("imported_archive_next_offset"),
+    /** Never move this session's content to the idle-session archive. */
+    keepLive: boolean("keep_live").notNull().default(false),
+    /** Idle-session archive lifecycle: null (live), archiving, or archived (read-only). */
+    contentArchiveState: text("content_archive_state").$type<"archiving" | "archived">(),
+    contentArchiveStartedAt: timestamp("content_archive_started_at", { withTimezone: true }),
+    contentArchivedAt: timestamp("content_archived_at", { withTimezone: true }),
+    /** Archive plan while archiving; verified manifest once archived. */
+    contentArchive: jsonb("content_archive").$type<Record<string, unknown>>(),
+    contentArchivePurgedAt: timestamp("content_archive_purged_at", { withTimezone: true }),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     skills: jsonb("skills").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
@@ -4930,6 +4939,26 @@ export const sessions = pgTable(
         and ${table.importedArchiveRequestHash} ~ '^[0-9a-f]{64}$' and ${table.importedArchiveSubjectId} is not null
         and ${table.importedArchiveNextOffset} is not null and ${table.importedArchiveNextOffset} >= 0)`,
     ),
+    contentArchiveState: check(
+      "sessions_content_archive_state_check",
+      sql`
+      (${table.contentArchiveState} is null and ${table.contentArchiveStartedAt} is null
+        and ${table.contentArchivedAt} is null and ${table.contentArchive} is null
+        and ${table.contentArchivePurgedAt} is null)
+      or (${table.contentArchiveState} = 'archiving' and ${table.contentArchiveStartedAt} is not null
+        and ${table.contentArchivedAt} is null and jsonb_typeof(${table.contentArchive}) = 'object'
+        and ${table.contentArchivePurgedAt} is null)
+      or (${table.contentArchiveState} = 'archived' and ${table.contentArchiveStartedAt} is not null
+        and ${table.contentArchivedAt} is not null and jsonb_typeof(${table.contentArchive}) = 'object'
+        and ${table.contentArchive} ? 'sha256')`,
+    ),
+    contentArchiveSize: check(
+      "sessions_content_archive_size_check",
+      sql`${table.contentArchive} is null or octet_length(${table.contentArchive}::text) <= 65536`,
+    ),
+    contentArchiveStateIndex: index("sessions_content_archive_state_idx")
+      .on(table.contentArchiveState, table.contentArchiveStartedAt)
+      .where(sql`${table.contentArchiveState} is not null`),
     importedArchiveInert: check(
       "sessions_imported_archive_inert_check",
       sql`
@@ -7830,6 +7859,8 @@ export const sessionAttemptToolCatalogs = pgTable(
     generation: integer("generation").notNull(),
     digest: text("digest").notNull(),
     catalog: jsonb("catalog").$type<AttemptToolCatalog>().notNull(),
+    /** Session content-blob digests for `catalog.entries`; NULL means inline legacy form. */
+    contentRefs: jsonb("content_refs").$type<{ v: 1; entries: string[] }>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   },
   (table) => ({
@@ -7907,6 +7938,15 @@ export const sessionAttemptModelContextSnapshots = pgTable(
     requestIndex: integer("request_index").notNull(),
     capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
     snapshot: jsonb("snapshot").$type<ModelContextSnapshot>().notNull(),
+    /** Session content-blob digests for externalized snapshot values; NULL means inline. */
+    contentRefs: jsonb("content_refs").$type<{
+      v: 1;
+      instructions: string;
+      layers: string;
+      tools: string;
+      skills: string;
+      body: string[] | null;
+    }>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
   },
@@ -7944,6 +7984,40 @@ export const sessionAttemptModelContextSnapshots = pgTable(
         and jsonb_typeof(${table.snapshot}->'layers') = 'array'
         and jsonb_typeof(${table.snapshot}->'tools') = 'array'
         and jsonb_typeof(${table.snapshot}->'skills') = 'array'`,
+    ),
+  }),
+);
+
+/** Session-owned content-addressed JSON values (see `session-content-blobs.ts`). */
+export const sessionContentBlobs = pgTable(
+  "session_content_blobs",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    digest: text("digest").notNull(),
+    value: jsonb("value").$type<unknown>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({
+      name: "session_content_blobs_pkey",
+      columns: [table.workspaceId, table.sessionId, table.digest],
+    }),
+    sessionOwner: foreignKey({
+      name: "session_content_blobs_session_fk",
+      columns: [table.sessionId],
+      foreignColumns: [sessions.id],
+    }).onDelete("cascade"),
+    workspaceAccount: foreignKey({
+      name: "session_content_blobs_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    session: index("session_content_blobs_session_idx").on(table.sessionId),
+    digestValid: check(
+      "session_content_blobs_digest_check",
+      sql`${table.digest} ~ '^[0-9a-f]{64}$'`,
     ),
   }),
 );

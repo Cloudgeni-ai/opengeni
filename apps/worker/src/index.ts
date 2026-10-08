@@ -138,6 +138,8 @@ export const KNOWLEDGE_INDEXING_SCHEDULE_ID = "opengeni-knowledge-indexing";
 export const KNOWLEDGE_INDEXING_PERIOD_MS = 15_000;
 export const FILE_UPLOAD_REAPER_SCHEDULE_ID = "opengeni-file-upload-reaper";
 export const FILE_UPLOAD_REAPER_PERIOD_MS = 15 * 60 * 1_000;
+export const SESSION_STORAGE_MAINTENANCE_SCHEDULE_ID = "opengeni-session-storage-maintenance";
+export const SESSION_STORAGE_MAINTENANCE_PERIOD_MS = 5 * 60 * 1_000;
 export const SITE_AUTH_MAINTENANCE_SCHEDULE_ID = "opengeni-site-auth-maintenance";
 export const SITE_AUTH_MAINTENANCE_PERIOD_MS = 60 * 1_000;
 export type OpenGeniWorkerRole = "control" | "turn";
@@ -769,6 +771,50 @@ export async function registerFileUploadReaperSchedule(
   }
 }
 
+/**
+ * Register the deployment-wide session storage maintenance Schedule. Always
+ * registered: legacy content compaction is lossless. Overlap is skipped so one
+ * pass never races another.
+ */
+export async function registerSessionStorageMaintenanceSchedule(
+  settings: Settings,
+  observability: Observability,
+): Promise<{ registered: boolean; close: () => Promise<void> }> {
+  const connection = await Connection.connect(temporalConnectionOptions(settings));
+  const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
+  try {
+    await temporal.schedule.create({
+      scheduleId: SESSION_STORAGE_MAINTENANCE_SCHEDULE_ID,
+      spec: { intervals: [{ every: SESSION_STORAGE_MAINTENANCE_PERIOD_MS }] },
+      action: {
+        type: "startWorkflow",
+        workflowType: "sessionStorageMaintenanceWorkflow",
+        taskQueue: settings.temporalTaskQueue,
+        args: [],
+      },
+      policies: {
+        overlap: ScheduleOverlapPolicy.SKIP,
+        catchupWindow: "1m",
+        pauseOnFailure: false,
+      },
+    });
+    observability.info("Registered the session storage maintenance Schedule", {
+      scheduleId: SESSION_STORAGE_MAINTENANCE_SCHEDULE_ID,
+      periodMs: SESSION_STORAGE_MAINTENANCE_PERIOD_MS,
+    });
+    return { registered: true, close: async () => connection.close() };
+  } catch (error) {
+    if (error instanceof ScheduleAlreadyRunning) {
+      observability.info("Session storage maintenance Schedule already registered", {
+        scheduleId: SESSION_STORAGE_MAINTENANCE_SCHEDULE_ID,
+      });
+      return { registered: false, close: async () => connection.close() };
+    }
+    await connection.close().catch(() => undefined);
+    throw error;
+  }
+}
+
 /** Register the deployment-wide maintained-auth dispatcher. Its one-minute
  * cadence matches the minimum public policy interval; DB claims own overlap,
  * crash recovery, and exact session idempotency. */
@@ -1046,6 +1092,13 @@ export async function createOpenGeniWorkerService(
         await retryStartupDependency(
           "Temporal schedule (file upload reaper)",
           () => registerFileUploadReaperSchedule(settings, observability),
+          { ...retryOptions, onRetry },
+        ),
+      );
+      schedules.push(
+        await retryStartupDependency(
+          "Temporal schedule (session storage maintenance)",
+          () => registerSessionStorageMaintenanceSchedule(settings, observability),
           { ...retryOptions, onRetry },
         ),
       );

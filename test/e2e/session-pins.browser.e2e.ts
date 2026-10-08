@@ -646,18 +646,33 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       }
 
       const paginationRequests: URL[] = [];
-      page.on("request", (request) => {
+      const sessionPageRead = (request: PlaywrightRequest): URL | null => {
         const url = new URL(request.url());
-        if (
-          request.method() === "GET" &&
+        return request.method() === "GET" &&
           url.pathname === `/v1/workspaces/${workspaceId}/sessions` &&
-          url.searchParams.get("view") === "page" &&
-          // The separate Recent sessions panel needs full model/resource data.
-          // Identify sidebar reads by their query shape, independently of projection.
-          (url.searchParams.get("parentSessionId") === "null" ||
-            url.searchParams.has("channelId") ||
-            url.searchParams.get("pinsOnly") === "true")
-        ) {
+          url.searchParams.get("view") === "page"
+          ? url
+          : null;
+      };
+      // The home page's Recent sessions panel also reads top-level roots
+      // (parentSessionId=null), but with the full projection because it shows
+      // model labels. It carries no archive filter, pin or project scope.
+      const isRecentSessionsRead = (url: URL) =>
+        url.searchParams.get("parentSessionId") === "null" &&
+        !url.searchParams.has("archiveStatus") &&
+        !url.searchParams.has("channelId") &&
+        !url.searchParams.has("pinsOnly");
+      // Identify sidebar reads by their query shape, independently of projection:
+      // the rail's root page always sends its archive filter, project windows a
+      // channelId, and the global pin section pinsOnly.
+      const isSidebarRead = (url: URL) =>
+        (url.searchParams.get("parentSessionId") === "null" &&
+          url.searchParams.has("archiveStatus")) ||
+        url.searchParams.has("channelId") ||
+        url.searchParams.get("pinsOnly") === "true";
+      page.on("request", (request) => {
+        const url = sessionPageRead(request);
+        if (url && isSidebarRead(url)) {
           paginationRequests.push(url);
         }
       });
@@ -667,12 +682,21 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
             successfulSessionPageResponse(response, workspaceId, { cursor }) &&
             new URL(response.url()).searchParams.get("channelId") === channelId,
         );
+      const recentSessionsRequest = page.waitForRequest((request) => {
+        const url = sessionPageRead(request);
+        return url !== null && isRecentSessionsRead(url);
+      });
       const [projectAResponse, projectBResponse, emptyProjectResponse] = await Promise.all([
         projectPage(projectA.id, null),
         projectPage(projectB.id, null),
         projectPage(emptyProject.id, null),
         page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`),
       ]);
+      // Prove the classification instead of depending on request order: the
+      // Recent panel's read is observed on every load and is never counted as
+      // a sidebar read, wherever it lands relative to the project windows.
+      const recentSessionsUrl = sessionPageRead(await recentSessionsRequest)!;
+      expect(isSidebarRead(recentSessionsUrl)).toBe(false);
       const projectAPage = (await projectAResponse.json()) as BrowserSessionPage;
       const projectBPage = (await projectBResponse.json()) as BrowserSessionPage;
       const emptyProjectPage = (await emptyProjectResponse.json()) as BrowserSessionPage;

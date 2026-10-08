@@ -365,6 +365,7 @@ function Home() {
             sending={creating}
             placeholder="Describe a task for the agent..."
             voice={voice}
+            onPasteImages={(files) => void attachments.addFiles(files)}
             renderLeading={() => (
               <ComposerPlusMenu
                 onPickImages={() => void attachments.pickImages()}

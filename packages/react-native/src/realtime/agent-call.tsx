@@ -58,6 +58,11 @@ export type NativeAgentCallContextValue = {
   callSession(sessionId: string): void;
   /** A call from outside the app: `sessionId`, or wherever the host sends outside calls. */
   callFromOutside(sessionId: string | null): Promise<void>;
+  /**
+   * Hide the on-call pill while a screen shows this session's conversation
+   * (its own call button already returns to the call). Returns the release.
+   */
+  hidePillFor: (sessionId: string) => () => void;
 };
 
 export type NativeOutsideCallContext = {
@@ -88,6 +93,11 @@ export type NativeAgentCallProviderProps = {
   onError?(title: string, message?: string): void;
   /** Wraps the call screen and on-call pill (for example in the host's theme). */
   renderSurface?(surface: ReactNode): ReactNode;
+  /**
+   * Distance of the on-call pill below the top safe area. The default (56)
+   * keeps it under a standard navigation bar, clear of its buttons.
+   */
+  pillTopOffset?: number;
   messages?: Partial<NativeAgentCallMessages>;
   children?: ReactNode;
 };
@@ -96,6 +106,7 @@ const NativeAgentCallContext = createContext<NativeAgentCallContextValue>({
   sessionId: null,
   callSession: () => undefined,
   callFromOutside: async () => undefined,
+  hidePillFor: () => () => undefined,
 });
 
 /** The app's call: who is on it, and starting one from a session or from outside. */
@@ -204,9 +215,22 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
     return unsubscribe;
   }, [callAdapter, workspaceId]);
 
+  const [pillHiddenFor, setPillHiddenFor] = useState<readonly string[]>([]);
+  const hidePillFor = useCallback((sessionId: string) => {
+    setPillHiddenFor((current) => [...current, sessionId]);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      setPillHiddenFor((current) => {
+        const index = current.indexOf(sessionId);
+        return index < 0 ? current : [...current.slice(0, index), ...current.slice(index + 1)];
+      });
+    };
+  }, []);
   const value = useMemo(
-    () => ({ sessionId: target?.sessionId ?? null, callSession, callFromOutside }),
-    [callFromOutside, callSession, target?.sessionId],
+    () => ({ sessionId: target?.sessionId ?? null, callSession, callFromOutside, hidePillFor }),
+    [callFromOutside, callSession, hidePillFor, target?.sessionId],
   );
   const finish = useCallback(() => {
     setTarget(null);
@@ -224,6 +248,7 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
           messages={messages}
           onError={onError}
           expanded={expanded}
+          pillHidden={pillHiddenFor.includes(target.sessionId)}
           onExpand={() => setExpanded(true)}
           onMinimize={() => setExpanded(false)}
           onFinished={finish}
@@ -239,6 +264,7 @@ function ActiveAgentCall(
     messages: NativeAgentCallMessages;
     onError(title: string, message?: string): void;
     expanded: boolean;
+    pillHidden: boolean;
     onExpand(): void;
     onMinimize(): void;
     onFinished(): void;
@@ -289,20 +315,23 @@ function ActiveAgentCall(
     target: sessionId,
   });
 
-  // Start once, as soon as the session and voice model are ready.
+  // Start once, as soon as the session and voice model are ready. The voice
+  // catalog must have loaded: a model chosen from the placeholder catalog would
+  // be replaced right after the start, which aborts the connection.
   const startedRef = useRef(false);
   const { canStart, start } = call;
+  const ready = canStart && selection.catalogReady;
   const onCallStartingRef = useRef(props.onCallStarting);
   onCallStartingRef.current = props.onCallStarting;
   useEffect(() => {
-    if (startedRef.current || !canStart) return;
+    if (startedRef.current || !ready) return;
     startedRef.current = true;
     onCallStartingRef.current?.();
     void start().catch((error: unknown) => {
       onError(messages.couldNotStart, error instanceof Error ? error.message : undefined);
       onFinished();
     });
-  }, [canStart, messages.couldNotStart, onError, onFinished, start]);
+  }, [messages.couldNotStart, onError, onFinished, ready, start]);
   // A call that ran and ended (here, on the lock screen or by the agent) closes.
   useEffect(() => {
     if (startedRef.current && call.phase === "idle" && !call.error) onFinished();
@@ -345,10 +374,11 @@ function ActiveAgentCall(
           />,
         )}
       </Modal>
-      {!props.expanded
+      {!props.expanded && !props.pillHidden
         ? surface(
             <OnCallPill
               title={title}
+              topOffset={props.pillTopOffset ?? 56}
               status={
                 call.phase === "active"
                   ? call.muted
@@ -398,13 +428,17 @@ function CallScreen(props: {
 function OnCallPill(props: {
   title: string;
   status: string;
+  topOffset: number;
   accessibilityLabel(status: string, title: string): string;
   onPress(): void;
 }) {
   const insets = useSafeAreaInsets();
   const theme = useNativeTimelineTheme();
   return (
-    <View pointerEvents="box-none" style={[styles.pillLayer, { top: insets.top + 6 }]}>
+    <View
+      pointerEvents="box-none"
+      style={[styles.pillLayer, { top: insets.top + props.topOffset }]}
+    >
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={props.accessibilityLabel(props.status, props.title)}

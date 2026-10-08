@@ -290,6 +290,14 @@ type EnableCapabilityInput = {
   capabilityId: string;
   payload: EnableCapabilityRequest;
   probeMcpServer?: McpCapabilityProbe;
+  /** Server-owned receipt from a just-verified native Connect credential.
+   * Never projected into EnableCapabilityRequest or accepted from a client. */
+  verifiedConnection?: {
+    id: string;
+    version: number;
+    endpointUrl: string;
+    connectivity: Record<string, unknown>;
+  };
 };
 
 export async function enableCapability(
@@ -387,21 +395,26 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
           }),
       };
     }
-    const headers = await resolveMcpCredentialHeaders(input, item);
+    const headers = input.verifiedConnection
+      ? null
+      : await resolveMcpCredentialHeaders(input, item);
     const connectionRef = input.payload.connectionRef
       ? await validateMcpCapabilityConnectionRef(input, item, input.payload.connectionRef)
       : null;
     assertRequiredMcpCredentialHeaders(item, headers, connectionRef);
+    if (input.verifiedConnection) await validateVerifiedMcpConnection(input, item);
     installationMetadata = {
       ...installationMetadata,
-      ...(connectionRef && !headers
-        ? authDeferredMcpConnectivity()
-        : await validateMcpCapabilityConnection(
-            item,
-            input.probeMcpServer,
-            headers ?? undefined,
-            input.settings,
-          )),
+      ...(input.verifiedConnection
+        ? input.verifiedConnection.connectivity
+        : connectionRef && !headers
+          ? authDeferredMcpConnectivity()
+          : await validateMcpCapabilityConnection(
+              item,
+              input.probeMcpServer,
+              headers ?? undefined,
+              input.settings,
+            )),
     };
     if (connectionRef) {
       installationConfig.connectionRef = connectionRef;
@@ -425,11 +438,44 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
   return {
     commit: (db: Database) =>
       item.kind === "mcp"
-        ? withOrganizationIntegrationAcquisition(db, installation, ["custom:mcp"], (tx) =>
-            enableCapabilityInstallation(tx, installation),
-          )
+        ? withOrganizationIntegrationAcquisition(db, installation, ["custom:mcp"], async (tx) => {
+            if (input.verifiedConnection)
+              await validateVerifiedMcpConnection({ ...input, db: tx }, item);
+            return enableCapabilityInstallation(tx, installation);
+          })
         : enableCapabilityInstallation(db, installation),
   };
+}
+
+async function validateVerifiedMcpConnection(
+  input: EnableCapabilityInput,
+  item: CapabilityCatalogItem,
+) {
+  const proof = input.verifiedConnection;
+  const ref = input.payload.connectionRef;
+  if (
+    !proof ||
+    !ref ||
+    item.endpointUrl !== proof.endpointUrl ||
+    ref.resource !== proof.endpointUrl
+  )
+    throw new HTTPException(409, { message: "MCP verification no longer matches the connection" });
+  const connection = await getConnectionMetadata(
+    input.db,
+    input.workspaceId,
+    proof.id,
+    input.grant.subjectId,
+  );
+  if (
+    !connection ||
+    connection.version !== proof.version ||
+    connection.status !== "active" ||
+    connection.providerDomain !== ref.providerDomain ||
+    connection.kind !== ref.kind ||
+    connection.subjectId !== (ref.subjectScope === "subject" ? input.grant.subjectId : null) ||
+    connection.metadata.mcpUrl !== proof.endpointUrl
+  )
+    throw new HTTPException(409, { message: "MCP connection changed after verification" });
 }
 
 /** A no-effect reconciliation is not a new acquisition. Validate ordinary

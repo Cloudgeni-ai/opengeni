@@ -158,7 +158,11 @@ function ScopedSetup({
           {attempt.ownership === "personal" ? "Personal connection" : "Workspace connection"}
         </p>
         <p role="status" className="og-connect-setup-status">
-          {awaitingOwner ? "Waiting for an organization owner" : setupStatus[attempt.state]}
+          {awaitingOwner
+            ? "Waiting for an organization owner"
+            : attempt.mcpSetup && attempt.state === "credential_input"
+              ? "Enter the requested key"
+              : setupStatus[attempt.state]}
         </p>
         <p className="og-connect-setup-description">
           {attempt.ownership === "personal"
@@ -186,7 +190,9 @@ function ScopedSetup({
         <p role="alert">
           {attempt.error?.code === "source_changed"
             ? "The integration source changed. Review the updated tools before adding them."
-            : "Connection setup could not continue. Refresh its status before trying again."}
+            : attempt.error?.code === "mcp_verification_failed"
+              ? "Could not verify this connection. Check the key and server, then submit again. Nothing was connected."
+              : "Connection setup could not continue. Refresh its status before trying again."}
         </p>
       )}
       {!terminal && (
@@ -195,7 +201,9 @@ function ScopedSetup({
             {["credentials", "select_account", "select_resources", "preview"].includes(
               action.type,
             ) ? (
-              <legend>Connection details</legend>
+              <legend className={attempt.mcpSetup ? "og-capability-catalog-sr-only" : undefined}>
+                Connection details
+              </legend>
             ) : null}
             {attempt.state === "connected_but_incomplete" &&
               action.type === "none" &&
@@ -298,7 +306,13 @@ function ScopedSetup({
                 className="og-connect-setup-primary"
                 disabled={action.type === "select_resources" && Boolean(action.cursor)}
               >
-                {action.type === "preview" ? "Add selected tools" : "Continue"}
+                {action.type === "preview"
+                  ? "Add selected tools"
+                  : attempt.mcpSetup && action.type === "credentials"
+                    ? view.busy
+                      ? "Verifying connection…"
+                      : "Connect"
+                    : "Continue"}
               </button>
             )}
             {action.type === "authorize" && (
