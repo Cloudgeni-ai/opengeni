@@ -43,7 +43,9 @@ const CALL_PIN_ACTION = "opengeni.take-calls-here";
 const OPEN_ON_WEB_ACTION = "opengeni.open-on-web";
 
 export default function SessionScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, at } = useLocalSearchParams<{ id: string; at?: string }>();
+  // Opened from the inbox or a notification: land on that moment.
+  const focusSequence = at && /^[1-9][0-9]*$/u.test(at) ? Number(at) : undefined;
   const { client, models, workspaceId } = useAccount();
   if (!workspaceId || !id) {
     return (
@@ -54,12 +56,19 @@ export default function SessionScreen() {
   }
   return (
     <AppThemeProvider>
-      <LiveSession client={client} models={models} sessionId={id} workspaceId={workspaceId} />
+      <LiveSession
+        client={client}
+        models={models}
+        sessionId={id}
+        workspaceId={workspaceId}
+        focusSequence={focusSequence}
+      />
     </AppThemeProvider>
   );
 }
 
 function LiveSession(props: {
+  focusSequence?: number | undefined;
   client: ReturnType<typeof useAccount>["client"];
   models: ReturnType<typeof useAccount>["models"];
   sessionId: string;
@@ -256,9 +265,11 @@ function LiveSession(props: {
       workspaceId,
     ],
   );
-  // Photos and files, as the web composer's + offers them.
+  // Camera, photos and files, as the web composer's + offers them.
+  const takePhoto = controller.attachments.takePhoto;
   const attachMenu = (
     <ComposerPlusMenu
+      onTakePhoto={takePhoto ? () => void takePhoto() : undefined}
       onPickImages={() => void controller.attachments.pickImages()}
       onPickFiles={() => void controller.attachments.pickDocuments()}
     />
@@ -277,6 +288,7 @@ function LiveSession(props: {
       />
       <NativeSessionScreen
         controller={controller}
+        focusSequence={props.focusSequence}
         client={props.client}
         models={props.models}
         renderMarkdown={renderMarkdown}

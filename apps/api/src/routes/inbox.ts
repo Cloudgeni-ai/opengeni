@@ -6,7 +6,6 @@ import {
   InboxSettings,
   ListInboxResponse,
   UpdateInboxItemRequest,
-  UpdateInboxSettingsRequest,
   type AccessContext,
   type InboxItem,
 } from "@opengeni/contracts";
@@ -65,7 +64,7 @@ async function readableWorkspaces(
 }
 
 function isNeedsYou(kind: InboxItem["kind"]): boolean {
-  return kind !== "notification";
+  return kind === "question" || kind === "approval" || kind === "goal_paused";
 }
 
 export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -151,7 +150,9 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
     const subjectId = requirePerson(context);
     const accountId = context.defaultAccountId ?? (await personAccounts(deps, context))[0];
     if (!accountId) {
-      return c.json(InboxSettings.parse({ tidyPolicy: "own_sessions", pausedGoals: false }));
+      return c.json(
+        InboxSettings.parse({ tidyPolicy: "own_sessions", pausedGoals: false, replies: false }),
+      );
     }
     return c.json(InboxSettings.parse(await getInboxSettings(deps.db, { accountId, subjectId })));
   });
@@ -159,16 +160,21 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.put("/v1/inbox/settings", async (c) => {
     const context = await requireAccessContext(c, deps);
     const subjectId = requirePerson(context);
-    const parsed = UpdateInboxSettingsRequest.safeParse(await c.req.json().catch(() => null));
+    const parsed = InboxSettings.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HTTPException(400, { message: "Invalid inbox settings" });
     // The setting is the person's own; apply it in every organization they belong to.
-    let settings: InboxSettings = { tidyPolicy: "own_sessions", pausedGoals: false };
+    let settings: InboxSettings = {
+      tidyPolicy: "own_sessions",
+      pausedGoals: false,
+      replies: false,
+    };
     for (const accountId of await personAccounts(deps, context)) {
       settings = await setInboxSettings(deps.db, {
         accountId,
         subjectId,
         tidyPolicy: parsed.data.tidyPolicy,
         pausedGoals: parsed.data.pausedGoals,
+        replies: parsed.data.replies,
       });
     }
     return c.json(InboxSettings.parse(settings));

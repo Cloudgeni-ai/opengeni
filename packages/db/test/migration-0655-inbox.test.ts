@@ -236,6 +236,7 @@ describe("0655 inbox", () => {
     expect(await getInboxSettings(db(), owner)).toEqual({
       tidyPolicy: "own_sessions",
       pausedGoals: false,
+      replies: false,
     });
     await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
       {
@@ -249,7 +250,79 @@ describe("0655 inbox", () => {
     expect(await setInboxSettings(db(), { ...owner, pausedGoals: true })).toEqual({
       tidyPolicy: "any_agent",
       pausedGoals: true,
+      replies: false,
     });
+  });
+
+  test("replies keep one item per session until cleared, only when turned on (0665)", async () => {
+    if (!client) return;
+    const person = await personWithSession("replies");
+    const owner = { accountId: person.scope.accountId, subjectId: person.subjectId };
+    let position = 0;
+    const reply = async (text: string | null) => {
+      const turnId = crypto.randomUUID();
+      position += 1;
+      await owned!.admin.begin(async (tx) => {
+        await tx`select set_config('opengeni.session_inference_claim', '1', true)`;
+        await tx`select set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
+        await tx`select set_config('opengeni.account_id', ${person.scope.accountId}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${person.scope.workspaceId}, true)`;
+        await tx`
+          insert into session_turns (
+            id, account_id, workspace_id, session_id, trigger_event_id,
+            temporal_workflow_id, status, source, position, prompt, model,
+            reasoning_effort, sandbox_backend, execution_generation,
+            initiator_kind, initiator_subject_id, initiator_context,
+            initiating_human_subject_id
+          ) values (
+            ${turnId}, ${person.scope.accountId}, ${person.scope.workspaceId},
+            ${person.session.id}, ${crypto.randomUUID()}, ${`inbox-reply-${turnId}`},
+            'queued', 'user', ${position}, 'work', 'test-model', 'medium', 'none', 1,
+            'subject', ${person.subjectId}, '{}'::jsonb, ${person.subjectId}
+          )`;
+      });
+      return await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+        ...(text === null
+          ? []
+          : [{ type: "agent.message.completed" as const, turnId, payload: { text } }]),
+        { type: "turn.completed", turnId, payload: {} },
+      ]);
+    };
+    await reply("Off by default");
+    expect(await inbox(person)).toHaveLength(0);
+    await setInboxSettings(db(), { ...owner, replies: true });
+    const [message] = await reply("## Deployed **2.4**\nAll services are green.");
+    let items = await inbox(person);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "reply",
+      title: "Deployed 2.4",
+      body: "All services are green.",
+      unread: true,
+      eventSequence: message!.sequence,
+    });
+    // Seen, it stays; a new reply updates the same item and is unread again.
+    await updateInboxItemAttention(db(), { itemId: items[0]!.id, ...owner, seen: true });
+    expect((await inbox(person))[0]).toMatchObject({ unread: false });
+    await reply("Second reply");
+    items = await inbox(person);
+    expect(items.map((item) => [item.kind, item.title, item.unread])).toEqual([
+      ["reply", "Second reply", true],
+    ]);
+    // Cleared, a later reply brings it back; turning replies off takes it away.
+    await updateInboxItemAttention(db(), { itemId: items[0]!.id, ...owner, dismissed: true });
+    expect(await inbox(person)).toHaveLength(0);
+    await reply("Third reply");
+    expect((await inbox(person)).map((item) => item.title)).toEqual(["Third reply"]);
+    // A turn without a reply of its own leaves the item as it was (0666).
+    const [seen] = await inbox(person);
+    await updateInboxItemAttention(db(), { itemId: seen!.id, ...owner, seen: true });
+    await reply(null);
+    expect((await inbox(person)).map((item) => [item.title, item.unread])).toEqual([
+      ["Third reply", false],
+    ]);
+    await setInboxSettings(db(), { ...owner, replies: false });
+    expect(await inbox(person)).toHaveLength(0);
   });
 
   test("an agent's pause waits on the person until the goal resumes", async () => {
@@ -306,6 +379,50 @@ describe("0655 inbox", () => {
     ]);
     const items = await inbox(person);
     expect(items.map((item) => [item.kind, item.sessionId])).toEqual([["question", child.id]]);
+  });
+
+  test("a notification carries its subtitle, message, facts and link; every item its moment (0664)", async () => {
+    if (!client) return;
+    const person = await personWithSession("notify-rich");
+    const [question] = await appendSessionEvents(
+      db(),
+      person.scope.workspaceId,
+      person.session.id,
+      [
+        {
+          type: "session.humanInput.requested",
+          payload: { request: { id: "rich-q", questions: [{ prompt: "Ship it?" }] } },
+        },
+      ],
+    );
+    const body = `Deployed **all** services:\n- api\n- web\n${"x".repeat(600)}`;
+    const [posted] = await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+      {
+        type: "session.notification.posted",
+        payload: {
+          key: "release",
+          title: "Release is out",
+          subtitle: "v2.4.0",
+          body,
+          facts: [{ label: "Tests", value: "412 passed" }],
+          link: { url: "https://example.com/pr/1", label: "Pull request" },
+          urgency: "time_sensitive",
+          replaced: false,
+        },
+      },
+    ]);
+    const items = await inbox(person);
+    const note = items.find((item) => item.kind === "notification");
+    expect(note).toMatchObject({
+      subtitle: "v2.4.0",
+      body,
+      facts: [{ label: "Tests", value: "412 passed" }],
+      link: { url: "https://example.com/pr/1", label: "Pull request" },
+      urgency: "time_sensitive",
+      eventSequence: posted!.sequence,
+    });
+    // Every item remembers the moment that raised it (0664).
+    expect(items.find((item) => item.kind === "question")?.eventSequence).toBe(question!.sequence);
   });
 
   test("notifications update in place, keep the person's dismissal, and can be withdrawn", async () => {

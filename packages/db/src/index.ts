@@ -39,6 +39,7 @@ export { lockTurnAttemptWriteFenceTx } from "./session-attempt-fence";
 import {
   CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY,
   ToolReviewContext,
+  WorkspaceModelCompactionThresholdsPatch,
 } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
@@ -3475,6 +3476,24 @@ export async function updateWorkspaceSettings(
     controlLockTimeoutMs?: number;
   } = {},
 ): Promise<Workspace> {
+  const { modelCompactionThresholds, ...ordinaryPatch } = patch;
+  const thresholds =
+    modelCompactionThresholds === undefined
+      ? undefined
+      : WorkspaceModelCompactionThresholdsPatch.parse(modelCompactionThresholds);
+  // Merge each exact-model key inside the SQL update, not a read/modify/write
+  // in the API: simultaneous edits to different models must both survive.
+  const settingsPatch = (
+    base: typeof schema.workspaces.settings | ReturnType<typeof sql>,
+    values: Record<string, unknown>,
+  ) => {
+    const merged = sql`${base} || ${JSON.stringify(values)}::jsonb`;
+    return thresholds === undefined
+      ? merged
+      : sql`jsonb_set((${merged}), '{modelCompactionThresholds}',
+      jsonb_strip_nulls((case when jsonb_typeof(${schema.workspaces.settings}->'modelCompactionThresholds') = 'object'
+        then ${schema.workspaces.settings}->'modelCompactionThresholds' else '{}'::jsonb end) || ${JSON.stringify(thresholds)}::jsonb))`;
+  };
   if (Object.prototype.hasOwnProperty.call(patch, "maxNestedAgentDepth")) {
     const requested = patch.maxNestedAgentDepth;
     if (
@@ -3488,7 +3507,7 @@ export async function updateWorkspaceSettings(
     ) {
       throw new Error("maxNestedAgentDepth must be null or a non-negative 32-bit integer");
     }
-    const nextPatch = { ...patch };
+    const nextPatch = { ...ordinaryPatch };
     if (requested === null) delete nextPatch.maxNestedAgentDepth;
     return await withWorkspaceRls(
       db,
@@ -3508,8 +3527,11 @@ export async function updateWorkspaceSettings(
             .set({
               settings:
                 requested === null
-                  ? sql`(${schema.workspaces.settings} - 'maxNestedAgentDepth') || ${JSON.stringify(nextPatch)}::jsonb`
-                  : sql`${schema.workspaces.settings} || ${JSON.stringify(nextPatch)}::jsonb`,
+                  ? settingsPatch(
+                      sql`(${schema.workspaces.settings} - 'maxNestedAgentDepth')`,
+                      nextPatch,
+                    )
+                  : settingsPatch(schema.workspaces.settings, nextPatch),
               updatedAt: new Date(),
             })
             .where(eq(schema.workspaces.id, workspaceId))
@@ -3526,7 +3548,7 @@ export async function updateWorkspaceSettings(
   const [row] = await db
     .update(schema.workspaces)
     .set({
-      settings: sql`${schema.workspaces.settings} || ${JSON.stringify(patch)}::jsonb`,
+      settings: settingsPatch(schema.workspaces.settings, ordinaryPatch),
       updatedAt: new Date(),
     })
     .where(eq(schema.workspaces.id, workspaceId))
@@ -45056,10 +45078,12 @@ export async function recordStartedContextCompaction(
     trigger: "auto" | "operator" | "proactive" | "overflow";
     implementation?: string;
     estimatedTokensBefore?: number;
+    /** One request-byte recovery per logical turn, including recovered attempts. */
+    requestSizeRecovery?: Record<string, number>;
   },
 ): Promise<
   | { recorded: true; events: SessionEvent[] }
-  | { recorded: false; reason: TurnAttemptFenceRejectReason }
+  | { recorded: false; reason: TurnAttemptFenceRejectReason | "request_size_recovery_exhausted" }
 > {
   return await withSessionActivityRlsContext(
     db,
@@ -45074,6 +45098,18 @@ export async function recordStartedContextCompaction(
           attemptId: input.expectedAttemptId,
         });
         if (!fence.allowed) return { recorded: false as const, reason: fence.reason };
+        if (input.requestSizeRecovery) {
+          if (fence.turn!.metadata.claudeRequestSizeRecoveryUsed === true)
+            return { recorded: false as const, reason: "request_size_recovery_exhausted" as const };
+          await tx
+            .update(schema.sessionTurns)
+            .set({
+              metadata: { ...fence.turn!.metadata, claudeRequestSizeRecoveryUsed: true },
+              version: fence.turn!.version + 1,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.sessionTurns.id, input.turnId));
+        }
         const inserted = await tx
           .insert(schema.sessionEvents)
           .values(
@@ -45090,6 +45126,7 @@ export async function recordStartedContextCompaction(
                 type: "session.context.compaction.started",
                 payload: {
                   trigger: input.trigger,
+                  ...(input.requestSizeRecovery ? { requestSize: input.requestSizeRecovery } : {}),
                   ...(input.implementation ? { implementation: input.implementation } : {}),
                   ...(typeof input.estimatedTokensBefore === "number"
                     ? { estimatedTokensBefore: input.estimatedTokensBefore }

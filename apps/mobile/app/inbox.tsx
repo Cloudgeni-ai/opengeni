@@ -48,7 +48,12 @@ function Inbox() {
 
   const open = (item: InboxItem) => {
     if (item.workspaceId !== workspaceId) setWorkspaceId(item.workspaceId);
-    router.push(`/session/${item.sessionId}`);
+    // Opens on the moment the item was raised.
+    router.push(
+      item.eventSequence
+        ? `/session/${item.sessionId}?at=${item.eventSequence}`
+        : `/session/${item.sessionId}`,
+    );
   };
 
   return (
@@ -80,6 +85,7 @@ function Inbox() {
           workspaceNames={workspaceNames}
           onOpenSession={open}
           onNotice={() => void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)}
+          onSwipeThreshold={() => void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)}
         />
       </ScrollView>
     </>

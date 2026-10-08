@@ -2511,6 +2511,9 @@ describe("release schema contract", () => {
       "0661_inbox_subagent_goals_and_schedules.sql",
       "0662_session_first_party_default_intent.sql",
       "0663_inbox_paused_goal_setting.sql",
+      "0664_inbox_rich_notifications.sql",
+      "0665_inbox_replies.sql",
+      "0666_inbox_reply_current_turn.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

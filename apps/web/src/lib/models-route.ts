@@ -31,6 +31,7 @@ export type ModelsView =
   | `connect:${ModelsProvider}`
   | `connect-org:${ModelsProvider}`
   | "allowed-models"
+  | "compaction"
   | "model-access";
 
 const PROVIDERS: readonly ModelsProvider[] = [
@@ -49,6 +50,7 @@ const VIEWS: ReadonlySet<string> = new Set<ModelsView>([
   ...PROVIDERS.map((provider) => `connect:${provider}` as const),
   ...PROVIDERS.map((provider) => `connect-org:${provider}` as const),
   "allowed-models",
+  "compaction",
   "model-access",
 ]);
 

@@ -2395,6 +2395,62 @@ export const WorkspaceDefaultSandboxImage = z
   .max(512)
   .regex(/^[^\s]+$/, "image reference must not contain whitespace");
 
+export const ModelCompactionTokenThreshold = z.number().int().min(16_000).max(2_147_483_647);
+/** Independent exact product-model patches. Null resets just that model. */
+export const WorkspaceModelCompactionThresholdsPatch = z
+  .unknown()
+  .refine(
+    (value) =>
+      !value ||
+      typeof value !== "object" ||
+      !Object.keys(value).some((key) => ["__proto__", "constructor", "prototype"].includes(key)),
+    "Invalid model ID",
+  )
+  .pipe(
+    z
+      .record(
+        z
+          .string()
+          .min(1)
+          .max(512)
+          .refine((key) => !["__proto__", "constructor", "prototype"].includes(key)),
+        ModelCompactionTokenThreshold.nullable(),
+      )
+      .refine(
+        (value) => Object.keys(value).length <= 256,
+        "At most 256 model preferences per patch",
+      ),
+  );
+
+export const ModelCompactionPolicy = z.object({
+  defaultTokens: z.number().int().nonnegative(),
+  overrideTokens: ModelCompactionTokenThreshold.nullable(),
+  effectiveTokens: z.number().int().nonnegative(),
+  minimumTokens: z.number().int().nonnegative(),
+  maximumTokens: z.number().int().nonnegative(),
+});
+export type ModelCompactionPolicy = z.infer<typeof ModelCompactionPolicy>;
+
+/** Read one preference leniently; bad/newer fields cannot reset unrelated settings. */
+export function workspaceModelCompactionThreshold(
+  settings: unknown,
+  modelId: string,
+): number | null {
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) return null;
+  const values = (settings as Record<string, unknown>).modelCompactionThresholds;
+  if (
+    !values ||
+    typeof values !== "object" ||
+    Array.isArray(values) ||
+    !Object.hasOwn(values, modelId)
+  )
+    return null;
+  const parsed = ModelCompactionTokenThreshold.safeParse(
+    (values as Record<string, unknown>)[modelId],
+  );
+  return parsed.success ? parsed.data : null;
+}
+
 export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
@@ -2414,6 +2470,8 @@ export const WorkspaceSettingsSchema = z
     // Default compaction strategy for NEW Codex sessions created in this
     // workspace. Absent ⇒ remote_v2. Non-Codex sessions always freeze portable.
     codexCompactionDefault: CodexCompactionMode.optional(),
+    // Read leniently; each exact-model preference is resolved independently.
+    modelCompactionThresholds: z.unknown().optional(),
     // Whether agents may expose and invoke the built-in structured human-input
     // tool. Absent preserves the historical enabled behavior.
     agentHumanInputEnabled: z.boolean().optional(),
@@ -2610,6 +2668,7 @@ export const UpdateWorkspaceSettingsRequest = z
     transcription: WorkspaceTranscriptionPolicy.optional(),
     maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
     codexCompactionDefault: CodexCompactionMode.optional(),
+    modelCompactionThresholds: WorkspaceModelCompactionThresholdsPatch.optional(),
     agentHumanInputEnabled: z.boolean().optional(),
     // null returns the workspace to the deployment default.
     codeSearchEnabled: z.boolean().nullable().optional(),
@@ -14340,7 +14399,13 @@ export function resolveSessionEventTypeFilters(input: ResolveSessionEventTypeFil
 
 export const NOTIFICATION_KEY_MAX_CHARS = 120;
 export const NOTIFICATION_TITLE_MAX_CHARS = 80;
-export const NOTIFICATION_BODY_MAX_CHARS = 240;
+export const NOTIFICATION_SUBTITLE_MAX_CHARS = 80;
+/** The message: short paragraphs and "- " bullets, with **bold**, `code` and [links](https://…). */
+export const NOTIFICATION_BODY_MAX_CHARS = 1000;
+export const NOTIFICATION_FACTS_MAX = 4;
+export const NOTIFICATION_FACT_LABEL_MAX_CHARS = 24;
+export const NOTIFICATION_FACT_VALUE_MAX_CHARS = 80;
+export const NOTIFICATION_LINK_LABEL_MAX_CHARS = 40;
 
 /** A stable key: posting the same key again updates the item in place. */
 export const NotificationKey = z
@@ -14354,11 +14419,37 @@ export const NotificationKey = z
 export const NotificationUrgency = z.enum(["normal", "time_sensitive"]);
 export type NotificationUrgency = z.infer<typeof NotificationUrgency>;
 
+/** A short label and value shown as a compact list under the message, e.g. "Tests" / "412 passed". */
+export const NotificationFact = z
+  .object({
+    label: z.string().trim().min(1).max(NOTIFICATION_FACT_LABEL_MAX_CHARS),
+    value: z.string().trim().min(1).max(NOTIFICATION_FACT_VALUE_MAX_CHARS),
+  })
+  .strict();
+export type NotificationFact = z.infer<typeof NotificationFact>;
+
+/** One place outside the session the notification points to, such as a pull request. */
+export const NotificationLink = z
+  .object({
+    url: z
+      .string()
+      .trim()
+      .url()
+      .max(2000)
+      .refine((value) => /^https:\/\//iu.test(value), "Use an https link"),
+    label: z.string().trim().min(1).max(NOTIFICATION_LINK_LABEL_MAX_CHARS),
+  })
+  .strict();
+export type NotificationLink = z.infer<typeof NotificationLink>;
+
 export const SessionNotificationPostedPayload = z
   .object({
     key: NotificationKey,
     title: z.string().trim().min(1).max(NOTIFICATION_TITLE_MAX_CHARS),
+    subtitle: z.string().trim().max(NOTIFICATION_SUBTITLE_MAX_CHARS).optional(),
     body: z.string().trim().max(NOTIFICATION_BODY_MAX_CHARS).default(""),
+    facts: z.array(NotificationFact).max(NOTIFICATION_FACTS_MAX).optional(),
+    link: NotificationLink.optional(),
     urgency: NotificationUrgency.default("normal"),
     /** True when this post replaced an earlier one with the same key (no new alert). */
     replaced: z.boolean().default(false),
@@ -14387,8 +14478,13 @@ export const InboxItemKind = z.enum([
   "goal_paused",
   /** An agent chose to notify the person. */
   "notification",
+  /** A session's latest finished reply, for people who keep replies in their inbox. */
+  "reply",
 ]);
 export type InboxItemKind = z.infer<typeof InboxItemKind>;
+
+/** Kinds that wait on the person: they lead the inbox and count toward "needs you". */
+export const INBOX_NEEDS_YOU_KINDS = ["question", "approval", "goal_paused"] as const;
 
 export const InboxItemStatus = z.enum(["open", "resolved", "withdrawn", "dismissed"]);
 export type InboxItemStatus = z.infer<typeof InboxItemStatus>;
@@ -14402,7 +14498,22 @@ export const InboxItem = z.object({
   /** The question or approval id, or the notification key. */
   sourceKey: z.string(),
   title: z.string(),
+  /** A notification's subtitle; empty otherwise. */
+  subtitle: z.string().default(""),
+  /** Plain text, or for a notification its message (paragraphs, "- " bullets, **bold**, `code`, links). */
   body: z.string(),
+  /** A notification's label/value facts; empty otherwise. */
+  facts: z
+    .array(z.object({ label: z.string(), value: z.string() }))
+    .max(4)
+    .default([]),
+  /** A notification's link outside the session, or null. */
+  link: z.object({ url: z.string(), label: z.string() }).nullable().default(null),
+  /**
+   * The session event that opened or last updated the item, so opening it can
+   * land on that point in the session's timeline. Null for older items.
+   */
+  eventSequence: z.number().int().positive().nullable().optional(),
   /** One-tap answers for a single short choice question; empty otherwise. */
   choices: z.array(z.object({ id: z.string(), label: z.string() })).max(4),
   urgency: NotificationUrgency,
@@ -14455,19 +14566,18 @@ export type InboxTidyPolicy = z.infer<typeof InboxTidyPolicy>;
 
 export const InboxSettings = z.object({
   tidyPolicy: InboxTidyPolicy,
-  /** Show goals an agent paused in the person's own sessions. Off by default. */
-  pausedGoals: z.boolean(),
+  /**
+   * Show goals an agent paused in the person's own sessions. Off by default.
+   * Always present in responses; a request that leaves it out keeps it as is.
+   */
+  pausedGoals: z.boolean().optional(),
+  /**
+   * Keep each session's latest reply in the inbox until the person clears it.
+   * Off by default. Always present in responses; leave it out to keep it.
+   */
+  replies: z.boolean().optional(),
 });
 export type InboxSettings = z.infer<typeof InboxSettings>;
-
-/** Change some inbox settings; omitted ones stay as they are. */
-export const UpdateInboxSettingsRequest = z
-  .object({ tidyPolicy: InboxTidyPolicy.optional(), pausedGoals: z.boolean().optional() })
-  .strict()
-  .refine((value) => value.tidyPolicy !== undefined || value.pausedGoals !== undefined, {
-    message: "Change at least one setting",
-  });
-export type UpdateInboxSettingsRequest = z.infer<typeof UpdateInboxSettingsRequest>;
 
 export const ToolAuthNeededPayload = z
   .object({
@@ -18522,6 +18632,8 @@ export const WorkspaceModelCatalogModel =
       creditFunding: z.enum(["promotional", "general", "unavailable"]).optional(),
       /** Exact workspace-policy verdict without exposing provider identity. */
       policyAllowed: z.boolean().optional(),
+      /** Workspace preference, separate from immutable model execution limits. */
+      compactionPolicy: ModelCompactionPolicy.optional(),
       availability: ModelAvailabilityV1,
     }),
   );

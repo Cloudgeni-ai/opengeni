@@ -25,9 +25,18 @@ import {
   readableWorkStatus,
   SESSION_STATUS_PRESENTATION,
   timelineGroupContainsPresentedImage,
+  timelineGroupIndexAtSequence,
   type TurnSummaryFacetConfiguration,
 } from "@opengeni/react/timeline-model";
-import { useCallback, useMemo, useRef, useState, type ComponentRef, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentRef,
+  type ReactNode,
+} from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -100,6 +109,12 @@ export interface NativeMessageTimelineProps extends NativeActivityOptions {
   hasOlder?: boolean | undefined;
   loadingOlder?: boolean | undefined;
   onLoadOlder?: (() => unknown) | undefined;
+  /**
+   * A durable event sequence to open on (an inbox item's or a notification's
+   * moment): the timeline loads older history until it holds that moment,
+   * then lands on its row, or the nearest row before it, once.
+   */
+  focusSequence?: number | null | undefined;
   contentInsetTop?: number | undefined;
   contentInsetBottom?: number | undefined;
   /** Height of host chrome floating over the timeline's bottom edge (a floating composer). */
@@ -117,7 +132,8 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   const groups = useMemo(() => groupTimeline(items, { readableTurns: true }), [items]);
   const foldMemory = useRef(new Map<string, "open" | "closed">()).current;
   const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
-  const following = useRef(true);
+  // Opening on a moment starts away from the tip; the landing decides where.
+  const following = useRef(!props.focusSequence);
   // Only reader gestures change follow intent; layout-driven scroll events
   // (content growing before the first scroll-to-end) must not unstick it.
   const readerScrolling = useRef(false);
@@ -251,6 +267,35 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
     },
     [requestOlder],
   );
+  // Landing on a moment: each group's offset, read as it lays out.
+  const groupTops = useRef(new Map<string, number>()).current;
+  const landed = useRef<number | null>(null);
+  const [layoutPass, setLayoutPass] = useState(0);
+  const focusSequence = props.focusSequence ?? null;
+  const focusIndex = useMemo(
+    () => (focusSequence ? timelineGroupIndexAtSequence(groups, focusSequence) : -1),
+    [focusSequence, groups],
+  );
+  useEffect(() => {
+    if (!focusSequence || landed.current === focusSequence) return;
+    following.current = false;
+    if (focusIndex < 0) {
+      // Older than the loaded window: fetch the window before it, else give up
+      // and show the latest.
+      if (history.current.hasOlder) requestOlder();
+      else if (!history.current.loading && groups.length > 0) {
+        landed.current = focusSequence;
+        following.current = true;
+        scrollRef.current?.scrollToEnd({ animated: false });
+      }
+      return;
+    }
+    const top = groupTops.get(groupKey(groups[focusIndex]!));
+    if (top === undefined) return;
+    landed.current = focusSequence;
+    scrollY.current = Math.max(0, top - 12);
+    scrollRef.current?.scrollTo({ y: scrollY.current, animated: false });
+  }, [focusSequence, focusIndex, groups, groupTops, layoutPass, requestOlder]);
   const activityOptions = useMemo<NativeActivityOptions>(
     () => ({
       toolRenderers: props.toolRenderers,
@@ -316,15 +361,21 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                   {props.header}
                 </View>
                 {groups.length === 0 && props.emptyState ? props.emptyState : null}
-                {groups.map((group) => {
+                {groups.map((group, index) => {
                   const key = groupKey(group);
                   const prompt = group.kind === "item" && group.item.kind === "user-message";
-                  return prompt ? (
+                  // The landing row keeps one wrapper for its life, so landing never remounts it.
+                  const landing = focusSequence !== null && index === focusIndex;
+                  return prompt || landing ? (
                     <View
                       key={key}
                       onLayout={(event) => {
                         const { y, height } = event.nativeEvent.layout;
-                        promptFrames.set(key, { top: y, bottom: y + height });
+                        if (prompt) promptFrames.set(key, { top: y, bottom: y + height });
+                        if (landing && landed.current !== focusSequence) {
+                          groupTops.set(key, y);
+                          setLayoutPass((pass) => pass + 1);
+                        }
                       }}
                     >
                       <TimelineGroupView group={group} context={context} />

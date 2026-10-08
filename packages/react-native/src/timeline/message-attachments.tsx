@@ -1,7 +1,8 @@
 import type { FileAsset, OpenGeniClient, ResourceRef } from "@opengeni/sdk";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Image, Linking, Pressable, Text, View } from "react-native";
 import { Icon } from "./icon";
+import { NativeImageViewer, type NativeViewerImage } from "./image-viewer";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 
 type AttachmentClient = Pick<OpenGeniClient, "getFile" | "createFileDownloadUrl">;
@@ -11,7 +12,8 @@ const PREVIEW_WIDTH = 200;
 
 /**
  * Files sent with a user message, above its bubble as on web: images as
- * signed previews (tap opens the full image), other files as named chips.
+ * signed previews (tap opens them full screen in the app, swiping between the
+ * message's images), other files as named chips.
  */
 export function NativeMessageAttachments(props: {
   client: AttachmentClient;
@@ -22,7 +24,26 @@ export function NativeMessageAttachments(props: {
   const files = props.resources.filter(
     (resource): resource is FileResource => resource.kind === "file",
   );
+  const [ready, setReady] = useState<Record<string, NativeViewerImage>>({});
+  const [viewing, setViewing] = useState<string | null>(null);
+  const onImageReady = useCallback((fileId: string, image: NativeViewerImage) => {
+    setReady((current) =>
+      current[fileId]?.url === image.url ? current : { ...current, [fileId]: image },
+    );
+  }, []);
+  const order = files.map((file) => file.fileId).join(",");
+  const gallery = useMemo(
+    () =>
+      order
+        .split(",")
+        .flatMap((fileId) => (ready[fileId] ? [{ fileId, image: ready[fileId]! }] : [])),
+    [order, ready],
+  );
   if (files.length === 0) return null;
+  const index = Math.max(
+    0,
+    gallery.findIndex((entry) => entry.fileId === viewing),
+  );
   return (
     <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "flex-end", gap: 6 }}>
       {files.map((resource) => (
@@ -32,8 +53,18 @@ export function NativeMessageAttachments(props: {
           workspaceId={props.workspaceId}
           sessionId={props.sessionId}
           resource={resource}
+          onImageReady={onImageReady}
+          onOpenImage={setViewing}
         />
       ))}
+      {gallery.length > 0 ? (
+        <NativeImageViewer
+          images={gallery.map((entry) => entry.image)}
+          index={index}
+          visible={viewing !== null}
+          onClose={() => setViewing(null)}
+        />
+      ) : null}
     </View>
   );
 }
@@ -43,6 +74,8 @@ function Attachment(props: {
   workspaceId: string;
   sessionId?: string | undefined;
   resource: FileResource;
+  onImageReady: (fileId: string, image: NativeViewerImage) => void;
+  onOpenImage: (fileId: string) => void;
 }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
@@ -89,13 +122,18 @@ function Attachment(props: {
   };
   const name = asset?.filename ?? "Attachment";
   const image = asset?.contentType.startsWith("image/") === true && !failed;
+  const { onImageReady } = props;
+  useEffect(() => {
+    if (image && url) onImageReady(fileId, { url, alt: name, filename: asset?.filename });
+  }, [asset?.filename, fileId, image, name, onImageReady, url]);
 
   if (image) {
     return (
       <Pressable
         accessibilityRole="imagebutton"
         accessibilityLabel={`Open ${name}`}
-        onPress={() => void open()}
+        disabled={!url}
+        onPress={() => props.onOpenImage(fileId)}
         style={{
           width: PREVIEW_WIDTH,
           height: Math.min(260, Math.max(90, PREVIEW_WIDTH / ratio)),
