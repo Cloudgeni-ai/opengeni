@@ -45,6 +45,15 @@ describe("pre-knowledge Memory storage compatibility", () => {
         await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       // The import migration extends the withheld 0499 attachment helper.
       await owner`INSERT INTO schema_migrations(name) VALUES('0560_archived_session_imports.sql')`;
+      // The session storage lifecycle extends the withheld 0560 import guards.
+      for (const name of [
+        "0649_session_content_archive.sql",
+        "0650_session_archive_activity.sql",
+        "0651_session_event_delta_folding.sql",
+        "0652_session_archive_guard_search_path.sql",
+        "0653_session_archive_tenancy_fence.sql",
+      ])
+        await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       await migrate(owned.ownerUrl);
     } finally {
       await owner.end();
