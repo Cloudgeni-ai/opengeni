@@ -519,7 +519,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
           ) : null}
           <SectionStack>
             {body}
-            <TidySetting />
+            {inboxEnabled ? <TidySetting /> : null}
           </SectionStack>
         </div>
       </div>

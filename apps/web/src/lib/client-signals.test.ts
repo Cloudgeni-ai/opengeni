@@ -109,6 +109,25 @@ describe("signal reporter", () => {
     ]);
   });
 
+  test("reports web vitals for inbox using the closed page label", () => {
+    const sent: unknown[] = [];
+    const reporter = createClientSignalReporter({
+      send: (body) => sent.push(JSON.parse(body)),
+      revision: "abc123",
+      routePattern: () => `/workspaces/${W}/inbox`,
+    });
+    expect(reporter.webVital("lcp", "inbox", 2.4)).toBe(true);
+    expect(sent).toEqual([
+      {
+        signal: "web_vital",
+        metric: "lcp",
+        page: "inbox",
+        value: 2.4,
+        revision: "abc123",
+      },
+    ]);
+  });
+
   test("the contract page list is exactly the journey page labels", () => {
     expect([...journeyPageLabels()].sort()).toEqual([...CLIENT_PAGES].sort());
   });
