@@ -1928,17 +1928,31 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
   // turn it steered. Their replies are never folded as mere progress.
   const answersPerson = new Set<string>();
   let personAwaitingTurn = false;
+  // A live turn a person's message may have steered. If it keeps working after
+  // the message, the steer was absorbed and no later turn inherits it; if it is
+  // superseded instead, the next turn answers the person.
+  let steeredTurn: string | undefined;
   let legacyTurn = "start";
   let currentTurn = legacyTurn;
   for (const item of items) {
     if (item.kind === "user-message") {
       legacyTurn = item.id;
       personAwaitingTurn = true;
+      steeredTurn = undefined;
       if (seenTurns.has(currentTurn) && !settlements.has(currentTurn)) {
         answersPerson.add(currentTurn);
+        steeredTurn = currentTurn;
       }
     }
     const key = ("turnId" in item && item.turnId) || legacyTurn;
+    if (
+      steeredTurn !== undefined &&
+      key === steeredTurn &&
+      (isActivityItem(item) || (item.kind === "agent-message" && item.text.trim()))
+    ) {
+      personAwaitingTurn = false;
+      steeredTurn = undefined;
+    }
     // Legacy work still establishes a boundary using its prompt key.
     // A human message alone does not: it may be steering the existing turn.
     if (
@@ -1955,6 +1969,7 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         currentTurn = key;
         if (personAwaitingTurn) answersPerson.add(key);
         personAwaitingTurn = false;
+        steeredTurn = undefined;
       }
       seenTurns.add(key);
     }
@@ -2716,6 +2731,7 @@ function turnAnswersPerson(groups: TimelineGroup[], startIndex: number): boolean
     if (
       group.item.kind !== "machine-input-batch" &&
       group.item.kind !== "session-status" &&
+      group.item.kind !== "context-compaction" &&
       !(group.item.kind === "notice" && group.item.tone === "input")
     ) {
       return false;

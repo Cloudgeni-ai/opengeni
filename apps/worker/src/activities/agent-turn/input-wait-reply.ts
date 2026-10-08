@@ -104,9 +104,12 @@ export async function latestDurableTurnMessageText(
 
 /** Tool error the model receives when it waits before answering a person. */
 export const INPUT_WAIT_REPLY_REFUSAL =
-  "wait_for_input was not registered: this turn answers a person's message and you have not written a visible reply yet. Your reasoning is not shown to them. Write your answer to their message as normal assistant text now, then call wait_for_input again with the time remaining on the existing deadline.";
+  "wait_for_input was not registered: this turn answers a person's message and you have not written a visible reply yet. Your reasoning is not shown to them. Write your answer to their message as normal assistant text now, then call wait_for_input again. If an earlier wait is still armed, pass the time remaining on its deadline rather than a fresh timeout.";
 
-/** Refusals per turn activity; after that the wait proceeds rather than looping. */
+/**
+ * Refusals per turn attempt (one worker activity); a resumed or retried
+ * attempt starts again. After that the wait proceeds rather than looping.
+ */
 export const MAX_INPUT_WAIT_REPLY_REFUSALS = 2;
 
 /**

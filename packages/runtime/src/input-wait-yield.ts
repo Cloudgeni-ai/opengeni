@@ -39,7 +39,13 @@ export class InputWaitYield {
    */
   async replyRefusal(): Promise<string | null> {
     if (!this.replyGuard || this.terminal || this.accepted) return null;
-    return await this.replyGuard();
+    try {
+      return await this.replyGuard();
+    } catch {
+      // The guard is a reply-quality check, never an availability gate: when
+      // it cannot decide (for example a failed read), the wait proceeds.
+      return null;
+    }
   }
 
   get requested(): boolean {

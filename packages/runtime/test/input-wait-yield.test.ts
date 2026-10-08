@@ -1167,6 +1167,33 @@ describe("trusted input wait runtime yield", () => {
     }
   });
 
+  test("a reply guard that cannot decide lets the wait proceed", async () => {
+    const f = await fixture({
+      inputWaitReplyGuard: async () => {
+        throw new Error("history read failed");
+      },
+    });
+    try {
+      const model = new ScriptedModel([
+        { output: [functionCall("opengeni__wait_for_input", {}, "wait")] },
+        { error: new Error("an accepted wait must never request another model step") },
+      ]);
+      const agent = buildOpenGeniAgent(f.settings, [], {
+        model,
+        mcpServers: f.prepared.mcpServers,
+        inputWaitYield: f.prepared.inputWaitYield,
+      });
+      const stream = await runAgentStream(agent, "Status?", f.settings);
+      await consumeStream(stream);
+      expect(stream.error).toBeNull();
+      expect(model.calls).toBe(1);
+      expect(f.calls).toEqual(["wait_for_input"]);
+      expect(f.prepared.inputWaitYield?.yielded).toBe(true);
+    } finally {
+      await f.prepared.close();
+    }
+  });
+
   test("unrelated trusted tool cannot yield by returning a wait-shaped result", async () => {
     const f = await fixture();
     try {
