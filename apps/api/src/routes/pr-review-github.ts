@@ -53,6 +53,11 @@ import {
 import { deleteCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { githubBrowserBaseUrl } from "../github-browser-flow";
+import {
+  prReviewInstallationChooserHtml,
+  prReviewSetupPendingHtml,
+  prReviewSetupSuccessHtml,
+} from "./github-browser-pages";
 import { acceptAutomationEvent, readAutomationWebhookBody } from "./automations";
 import {
   completeGitHubAppConnect,
@@ -283,7 +288,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
 
     assertManagedCompute(deps);
     const setupAction = c.req.query("setup_action");
-    if (setupAction === "request") return c.html(setupPendingHtml());
+    if (setupAction === "request") return c.html(prReviewSetupPendingHtml());
     if (setupAction !== "install" && setupAction !== "update") {
       throw new HTTPException(400, { message: "unsupported GitHub setup action" });
     }
@@ -379,7 +384,11 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
       }
       setStateCookie(c, deps, selectionState);
       return c.html(
-        installationChooserHtml(candidates, selectionState, grant.workspaceId, deps, c),
+        prReviewInstallationChooserHtml(
+          candidates,
+          selectionState,
+          `${openGeniBaseUrl(deps, c)}/v1/workspaces/${grant.workspaceId}/pr-review/github/installations/select`,
+        ),
       );
     }
 
@@ -483,7 +492,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     });
     deleteCookie(c, stateCookie, { path: "/v1" });
     return c.html(
-      setupSuccessHtml(
+      prReviewSetupSuccessHtml(
         proof.installation.accountLogin ?? `installation ${installationId}`,
         `${openGeniBaseUrl(deps, c)}/workspaces/${grant.workspaceId}/capabilities`,
       ),
@@ -846,36 +855,4 @@ function githubInstallationSettingsUrl(
 
 function openGeniBaseUrl(deps: ApiRouteDeps, c: Context): string {
   return githubBrowserBaseUrl(deps.settings, new URL(c.req.url).origin);
-}
-
-function escapeHtml(value: string): string {
-  return value.replace(
-    /[&<>"']/g,
-    (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!,
-  );
-}
-
-function installationChooserHtml(
-  candidates: GitHubInstallationBindingCandidate[],
-  state: string,
-  workspaceId: string,
-  deps: ApiRouteDeps,
-  c: Context,
-): string {
-  const action = `${openGeniBaseUrl(deps, c)}/v1/workspaces/${workspaceId}/pr-review/github/installations/select`;
-  const options = candidates
-    .map(
-      ({ installation, authorityKind }) =>
-        `<label class="option"><input type="radio" name="installation_id" value="${installation.installationId}" required><span><strong>${escapeHtml(installation.accountLogin!)}</strong><small>${authorityKind === "personal_owner" ? "Personal account" : "Organization owner"}</small></span></label>`,
-    )
-    .join("");
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Choose GitHub account</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:12px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px}p{color:#d4d4d8}.options{display:grid;gap:8px;margin-bottom:18px}.option{display:flex;gap:12px;border:1px solid #3f3f46;border-radius:8px;padding:12px}.option span{display:grid}.option small{color:#a1a1aa}button{min-height:38px;border-radius:7px;border:1px solid #3f3f46;padding:0 14px;font-weight:600}.secondary{margin-left:8px;background:transparent;color:#f4f4f5}</style></head><body><main><h1>Connect Opengeni Lens</h1><p>Choose an account where GitHub proved you are the owner.</p><form method="get" action="${escapeHtml(action)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><div class="options">${options}</div><button type="submit">Connect selected</button><button class="secondary" type="submit" name="installation_id" value="new" formnovalidate>Install on another account</button></form></main></body></html>`;
-}
-
-function setupSuccessHtml(account: string, returnUrl: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Opengeni Lens Connected</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:8px;padding:28px;background:#111114}p{color:#d4d4d8}.button{display:inline-flex;min-height:36px;align-items:center;border-radius:6px;padding:0 12px;background:#f4f4f5;color:#09090b;font-weight:600;text-decoration:none}</style></head><body><main><h1>Opengeni Lens connected</h1><p>${escapeHtml(account)} and its selected repositories are ready for pull-request review.</p><a class="button" href="${escapeHtml(returnUrl)}">Back to Opengeni</a></main></body></html>`;
-}
-
-function setupPendingHtml(): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Opengeni Lens Requested</title></head><body><main><h1>Installation requested</h1><p>A GitHub organization owner must approve Opengeni Lens. No repository was connected yet.</p></main></body></html>`;
 }
