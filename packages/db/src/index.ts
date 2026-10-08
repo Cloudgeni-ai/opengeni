@@ -62854,6 +62854,33 @@ export async function readSandboxRotationBacklog(db: Database): Promise<SandboxR
   };
 }
 
+export type SandboxCheckpointStaleness = {
+  /** Live Modal boxes holding a write their last checkpoint did not capture. */
+  dirty: number;
+  stale4h: number;
+  stale12h: number;
+  /** Age of the oldest such write (clamped to box creation), seconds. */
+  maxAgeSeconds: number;
+};
+
+/** Content-free fleet signal: how long live boxes have held unsaved changes. */
+export async function readSandboxCheckpointStaleness(
+  db: Database,
+): Promise<SandboxCheckpointStaleness> {
+  const [row] = await rawRows<{
+    dirty: number | string;
+    stale_4h: number | string;
+    stale_12h: number | string;
+    max_age_seconds: number | string;
+  }>(db, sql`select * from opengeni_private.sandbox_checkpoint_staleness()`);
+  return {
+    dirty: Number(row?.dirty ?? 0),
+    stale4h: Number(row?.stale_4h ?? 0),
+    stale12h: Number(row?.stale_12h ?? 0),
+    maxAgeSeconds: Number(row?.max_age_seconds ?? 0),
+  };
+}
+
 /** Content-free, cross-workspace operator signal reconstructed from committed
  * audit receipts. Unlike process-local counters, a worker crash after commit
  * cannot erase this short-lived warning window. */

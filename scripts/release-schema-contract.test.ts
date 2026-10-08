@@ -2542,6 +2542,7 @@ describe("release schema contract", () => {
       "0664_inbox_rich_notifications.sql",
       "0665_inbox_replies.sql",
       "0666_inbox_reply_current_turn.sql",
+      "0672_sandbox_checkpoint_staleness.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

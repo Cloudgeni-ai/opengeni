@@ -1245,6 +1245,7 @@ export const SANDBOX_INVENTORY_PROJECTION_DOMAINS = [
   "opensandbox_kubernetes",
   "modal_provider",
   "interaction_idle",
+  "checkpoint_staleness",
 ] as const;
 
 export type SandboxInventoryProjectionDomain =
@@ -1809,6 +1810,31 @@ export function recordSandboxAutomaticRecoverySelected(
     name: "opengeni_sandbox_checkpoint_fallback_total",
     help: "System-selected continuity after managed provider loss: verified checkpoint or empty workspace.",
     labels: { backend: safeBackend, outcome },
+  });
+}
+
+/** How long live boxes have held changes no checkpoint covers yet. */
+export function recordSandboxCheckpointStalenessGauges(
+  observability: Observability,
+  staleness: { dirty: number; stale4h: number; stale12h: number; maxAgeSeconds: number },
+): void {
+  const values = {
+    dirty: staleness.dirty,
+    stale_4h: staleness.stale4h,
+    stale_12h: staleness.stale12h,
+  } as const;
+  for (const [kind, value] of Object.entries(values)) {
+    observability.setGauge({
+      name: "opengeni_sandbox_checkpoint_staleness",
+      help: "Live Modal sandboxes holding a write their last checkpoint did not capture, by age of the first such write.",
+      labels: { kind },
+      value,
+    });
+  }
+  observability.setGauge({
+    name: "opengeni_sandbox_checkpoint_age_max_seconds",
+    help: "Age in seconds of the oldest write a live Modal sandbox's last checkpoint did not capture.",
+    value: Number.isFinite(staleness.maxAgeSeconds) ? Math.max(0, staleness.maxAgeSeconds) : 0,
   });
 }
 

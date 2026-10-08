@@ -285,6 +285,16 @@ describe("sandbox observability contract", () => {
         "rotation_backlog",
       ],
       [
+        "opengeni:sandbox_checkpoint_staleness:fresh_max",
+        "opengeni_sandbox_checkpoint_staleness",
+        "checkpoint_staleness",
+      ],
+      [
+        "opengeni:sandbox_checkpoint_age_max_seconds:fresh_max",
+        "opengeni_sandbox_checkpoint_age_max_seconds",
+        "checkpoint_staleness",
+      ],
+      [
         "opengeni:retained_processes_active:fresh_max",
         "opengeni_retained_processes_active",
         "retained_processes",
