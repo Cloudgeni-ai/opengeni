@@ -88,6 +88,7 @@
     "openai": "6.47.0",
     "postal-mime": "2.7.5",
     "protobufjs": "7.6.5",
+    "quickjs-emscripten": "0.31.0",
     "sharp": "0.34.5",
     "ws": "8.21.1",
     "zod": "4.4.3"

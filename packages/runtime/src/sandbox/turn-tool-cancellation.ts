@@ -16,6 +16,7 @@ import {
   renderRoutingMutationOutcomeUnknownToolResult,
   type RoutingCommandDispatchOptions,
 } from "./routing/routing-session";
+import { CodeExecRegistry, codeExecExperimentEnabled } from "./code-exec-tool";
 import { sendCommandInput } from "./command-input";
 import {
   withPendingCommandSupervision,
@@ -877,6 +878,7 @@ function wrapComputer<T extends object>(
 }
 
 class TurnToolCancellationControllerImpl implements TurnToolCancellationController {
+  private readonly codeExec = codeExecExperimentEnabled() ? new CodeExecRegistry() : null;
   private cancelled = false;
   private readonly observationCancellation = new AbortController();
   private reason: unknown;
@@ -1439,6 +1441,13 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             }
           }),
       });
+    }
+    if (this.codeExec) {
+      const functions = wrapped.filter((tool) => tool.type === "function") as unknown as FunctionTool[];
+      this.codeExec.register(functions);
+      const others = wrapped.filter((tool) => tool.type !== "function");
+      const ownsExec = functions.some((tool) => tool.name === "exec_command");
+      return [...others, ...(ownsExec ? [this.codeExec.tool()] : [])] as unknown as T[];
     }
     return wrapped as unknown as T[];
   }
