@@ -7,11 +7,11 @@ import {
   reorderChannels,
   deleteChannel,
   setSessionChannel,
-  enqueueNativePush,
 } from "@opengeni/db";
 import { createHash, randomUUID } from "node:crypto";
 import { assertGoalResumeAllowed } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
+import { registerNotificationTools } from "./notification-tools";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import {
   prepareWorkspaceArtifactUpload,
@@ -978,33 +978,20 @@ export function buildOpenGeniMcpServer(
       },
     );
   }
-  // notify_user pushes to the phones of the person who started this session
-  // (the native app's registered devices). Silent when they have none.
+  // Notifications reach the person who started this session: their inbox and,
+  // when new, their phones (see notification-tools.ts).
   if (sessionId !== null) {
-    server.registerTool(
-      "notify_user",
-      {
-        description:
-          "Send a push notification to the person who started this session, on the phones where they use the Opengeni app. Use it sparingly, for something they would want to know while away: a long task finished, a result is ready, or you are blocked on them. Questions and approvals already notify them; do not duplicate those. Keep the title short and the message to one sentence, with no secrets.",
-        inputSchema: {
-          title: z4.string().min(1).max(80),
-          message: z4.string().min(1).max(240),
-        },
-      },
-      async ({ title, message }) => {
+    registerNotificationTools({
+      server,
+      deps,
+      grant,
+      sessionId,
+      authorize: async () => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
-        const devices = await enqueueNativePush(deps.db, {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId,
-          rule: "agent",
-          dedupeKey: `agent:${randomUUID()}`,
-          title,
-          body: message,
-        });
-        return json({ ok: true, devices });
       },
-    );
+      attempt: () => exactAgentCommandContext(grant, sessionId),
+      json,
+    });
   }
   // PolicyMcpServer applies each tool's own permission contract. Register this
   // mixed group for every session so session-level wait_for_input remains

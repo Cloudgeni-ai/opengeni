@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { PrivacyPreferencesSection } from "./privacy-preferences";
 import { SettingsShell, settingsHomeLink } from "./settings-sidebar";
 import { parseReturnTo, returnToOf, returnToSearch } from "@/lib/return-to";
+import { usePersonalSecurityContext } from "@/lib/personal-security-context";
 
 /**
  * Personal settings: the settings rail's Your account section. Personal
@@ -13,6 +14,7 @@ import { parseReturnTo, returnToOf, returnToSearch } from "@/lib/return-to";
  * organization settings, its back link returns to the page it came from.
  */
 export function PersonalSettingsShell({ email, children }: { email: string; children: ReactNode }) {
+  const context = usePersonalSecurityContext();
   const search = useRouterState({
     select: (state) => state.location.search as Record<string, unknown>,
   });
@@ -51,7 +53,7 @@ export function PersonalSettingsShell({ email, children }: { email: string; chil
       page={null}
     >
       {children}
-      <PrivacyPreferencesSection />
+      <PrivacyPreferencesSection analytics={context?.clientConfig.analytics} />
     </SettingsShell>
   );
 }

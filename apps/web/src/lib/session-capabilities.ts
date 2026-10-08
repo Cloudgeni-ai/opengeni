@@ -112,6 +112,8 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
       tool === "set_session_title" ||
       tool === "set_other_session_title" ||
       tool === "notify_user" ||
+      tool === "notification_withdraw" ||
+      tool === "inbox_tidy" ||
       tool === "wait_for_input" ||
       tool.startsWith("goal_") ||
       tool.startsWith("project_") ||

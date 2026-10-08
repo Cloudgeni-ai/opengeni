@@ -47,6 +47,8 @@ const AGENT_PERMISSIONS: Permission[] = [
 const RUNTIME_TOOLS = [
   "command_read",
   "command_wait",
+  "inbox_tidy",
+  "notification_withdraw",
   "notify_user",
   "set_session_title",
   "wait_for_input",
