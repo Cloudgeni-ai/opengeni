@@ -5,13 +5,24 @@ import { DaytonaSandboxClient } from "@openai/agents-extensions/sandbox/daytona"
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import {
+  boundDaytonaCommandProcess,
+  withDaytonaCommandBinding,
+} from "../src/sandbox/providers/daytona-command-binding";
+import { DaytonaFramedCommand } from "../src/sandbox/providers/daytona-framed-command";
 
 // The pinned native service labels each line, appends a newline to a final
 // unterminated line and publishes exit before both labelers join. These native
 // Process regressions exercise that raw transport limitation, not a fabricated
 // trusted filesystem receipt. See upstream v0.162.0 pkg/session/execute.go.
-function fixture(waitForEof = true) {
+function fixture(
+  waitForEof = true,
+  purgeOnDelete = false,
+  loseStartReply = false,
+  onDelete?: () => Promise<void>,
+) {
   const sessionId = crypto.randomUUID();
+  let selectedSessionId = sessionId;
   const commandId = crypto.randomUUID();
   const logs: Buffer[] = [];
   const originals = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
@@ -20,6 +31,7 @@ function fixture(waitForEof = true) {
   let starts = 0;
   let deleted = 0;
   let readers: Promise<void> = Promise.resolve();
+  let present = true;
   const labelled = async (stream: "stdout" | "stderr", input: ReadableStream<Uint8Array>) => {
     const prefix = Buffer.alloc(3, stream === "stdout" ? 1 : 2);
     let pending = Buffer.alloc(0);
@@ -36,9 +48,8 @@ function fixture(waitForEof = true) {
     }
     if (pending.length) logs.push(Buffer.concat([prefix, pending, Buffer.from("\n")]));
   };
-  const original = (session: string, command?: string) => {
-    expect(session).toBe(sessionId);
-    if (command !== undefined) expect(command).toBe(commandId);
+  const exists = () => {
+    if (!present) throw Object.assign(new Error("Native session missing"), { statusCode: 404 });
   };
   const process = new NativeProcess(
     { basePath: "https://native.invalid" } as ConstructorParameters<typeof NativeProcess>[0],
@@ -46,11 +57,17 @@ function fixture(waitForEof = true) {
     {
       executeCommand: async () => ({ data: { exitCode: 0, result: "" } }),
       createSession: async ({ sessionId: session }: { sessionId: string }) => {
-        original(session);
+        if (starts) expect(session).toBe(selectedSessionId);
+        else selectedSessionId = session;
+        present = true;
         return { data: {} };
       },
-      sessionExecuteCommand: async (session: string, request: { command: string }) => {
-        original(session);
+      sessionExecuteCommand: async (
+        session: string,
+        request: { command: string; runAsync?: boolean },
+      ) => {
+        expect(session).toBe(selectedSessionId);
+        exists();
         source = request.command;
         starts++;
         const child = Bun.spawn(["/bin/sh", "-c", source], {
@@ -58,27 +75,48 @@ function fixture(waitForEof = true) {
           stdout: "pipe",
           stderr: "pipe",
         });
+        const exited = child.exited.then((code) => {
+          exitCode = code;
+        });
         readers = Promise.all([
           labelled("stdout", child.stdout),
           labelled("stderr", child.stderr),
+          exited,
         ]).then(() => {});
-        exitCode = await child.exited;
+        if (request.runAsync) {
+          if (loseStartReply) throw new Error("Original command Start reply lost");
+          return { data: { cmdId: commandId } };
+        }
+        await exited;
         if (waitForEof) await readers;
         return {
           data: { cmdId: commandId, exitCode, output: Buffer.concat(logs).toString("utf8") },
         };
       },
       getSessionCommand: async (session: string, command: string) => {
-        original(session, command);
+        expect(session).toBe(selectedSessionId);
+        expect(command).toBe(commandId);
+        exists();
         return { data: { id: commandId, command: source, exitCode } };
       },
+      getSession: async (session: string) => {
+        expect(session).toBe(selectedSessionId);
+        exists();
+        return {
+          data: { sessionId: session, commands: [{ id: commandId, command: source, exitCode }] },
+        };
+      },
       getSessionCommandLogs: async (session: string, command: string) => {
-        original(session, command);
+        expect(session).toBe(selectedSessionId);
+        expect(command).toBe(commandId);
+        exists();
         return { data: Buffer.concat(logs).toString("utf8") };
       },
       deleteSession: async (session: string) => {
-        original(session);
+        expect(session).toBe(selectedSessionId);
         deleted++;
+        await onDelete?.();
+        if (purgeOnDelete) present = false;
         return { data: {} };
       },
     } as unknown as ConstructorParameters<typeof NativeProcess>[2],
@@ -172,6 +210,146 @@ test("the pinned Agents Daytona create and exact resume discard native session A
   }
 });
 
+test("native framed cleanup shares a failed attempt and retries only after terminal output custody", async () => {
+  let reject!: (error: Error) => void;
+  let failed = false;
+  const gate = new Promise<void>((_resolve, rejectGate) => {
+    reject = rejectGate;
+  });
+  const native = fixture(true, false, false, async () => {
+    if (!failed) await gate;
+  });
+  const command = new DaytonaFramedCommand(
+    native.process,
+    "printf original; printf diagnostic >&2",
+    crypto.randomUUID(),
+  );
+  await command.start();
+  await native.eof();
+  expect(await command.read()).toEqual({ stdout: "original", stderr: "diagnostic", exitCode: 0 });
+  const first = command.cleanup();
+  const second = command.cleanup();
+  expect(native.deleted()).toBe(1);
+  const outcomes = Promise.allSettled([first, second]);
+  reject(new Error("cleanup response unavailable"));
+  expect((await outcomes).map(({ status }) => status)).toEqual(["rejected", "rejected"]);
+  expect(native.deleted()).toBe(1);
+  failed = true;
+  await command.cleanup();
+  await command.cleanup();
+  expect(native.deleted()).toBe(2);
+  expect(native.starts()).toBe(1);
+});
+
+test("runtime Daytona binding keeps the same native principal and exact sandbox through SDK create and patch-free exact resume", async () => {
+  const native = fixture();
+  const sandbox = {
+    id: "sb-bound-native",
+    target: "original-target",
+    process: native.process,
+    start: async () => {},
+    stop: async () => {},
+    delete: async () => {},
+    fs: {
+      createFolder: async () => {},
+      uploadFile: async () => {},
+      downloadFile: async () => Buffer.alloc(0),
+      deleteFile: async () => {},
+    },
+  };
+  const create = Object.getOwnPropertyDescriptor(NativeDaytona.prototype, "create")!;
+  const get = Object.getOwnPropertyDescriptor(NativeDaytona.prototype, "get")!;
+  const options = {
+    apiKey: "frozen-native-fixture",
+    apiUrl: "https://original-native.invalid",
+    target: "original-target",
+    pauseOnExit: true,
+  };
+  let creates = 0;
+  let gets = 0;
+  let ordinaryResumes = 0;
+  function principal(client: object) {
+    for (const field of ["apiKey", "apiUrl", "target"] as const)
+      expect(Object.getOwnPropertyDescriptor(client, field)?.value).toBe(options[field]);
+  }
+  Object.defineProperty(NativeDaytona.prototype, "create", {
+    ...create,
+    value: async function (this: object, args: { image: string }) {
+      principal(this);
+      expect(args.image).toBe("debian:12.9");
+      creates++;
+      return sandbox;
+    },
+  });
+  Object.defineProperty(NativeDaytona.prototype, "get", {
+    ...get,
+    value: async function (this: object, id: string) {
+      principal(this);
+      expect(id).toBe("sb-bound-native");
+      gets++;
+      return sandbox;
+    },
+  });
+  try {
+    const sdk = new DaytonaSandboxClient(options);
+    sdk.resume = async () => {
+      ordinaryResumes++;
+      throw new Error("no replacing resume");
+    };
+    Object.defineProperty(sdk, "resumeExact", {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    });
+    const client = withDaytonaCommandBinding(sdk, options);
+    const created = await client.create(new Manifest());
+    expect(gets).toBe(0);
+    const selected = await boundDaytonaCommandProcess(created);
+    expect(await boundDaytonaCommandProcess(created)).toBe(selected);
+    expect(gets).toBe(1);
+    await selected.createSession(native.sessionId);
+    const receipt = await selected.executeSessionCommand(native.sessionId, {
+      command: "printf original",
+    });
+    expect(receipt.cmdId).toBe(native.commandId);
+    expect(native.originals.stdout.toString()).toBe("original");
+    const resumed = await client.resumeExact(created.state);
+    expect(resumed.state.sandboxId).toBe(created.state.sandboxId);
+    expect(await boundDaytonaCommandProcess(resumed)).toBe(
+      await boundDaytonaCommandProcess(resumed),
+    );
+    expect(creates).toBe(1);
+    expect(gets).toBe(2);
+    expect(ordinaryResumes).toBe(0);
+    expect(native.starts()).toBe(1);
+    await created.close();
+    await resumed.close();
+    const selectedAgain = await client.create(new Manifest());
+    selectedAgain.state.apiUrl = "https://changed-native.invalid";
+    await expect(boundDaytonaCommandProcess(selectedAgain)).rejects.toThrow(
+      "changed exact Daytona",
+    );
+    expect(gets).toBe(2);
+    expect(native.starts()).toBe(1);
+    await selectedAgain.close();
+    const wrongTarget = await client.create(new Manifest());
+    sandbox.target = "different-target";
+    await expect(boundDaytonaCommandProcess(wrongTarget)).rejects.toThrow("different target");
+    expect(native.starts()).toBe(1);
+    sandbox.target = options.target;
+    const originalId = sandbox.id;
+    const wrongId = await client.create(new Manifest());
+    sandbox.id = "not-original";
+    await expect(boundDaytonaCommandProcess(wrongId)).rejects.toThrow("different sandbox");
+    sandbox.id = originalId;
+    await wrongTarget.close();
+    await wrongId.close();
+  } finally {
+    Object.defineProperty(NativeDaytona.prototype, "create", create);
+    Object.defineProperty(NativeDaytona.prototype, "get", get);
+  }
+});
+
 test("the pinned native Daytona session adds newline bytes absent from the original streams", async () => {
   const native = fixture();
   await native.process.createSession(native.sessionId);
@@ -216,6 +394,66 @@ test("the pinned native Daytona text projection replaces malformed original UTF8
   expect(result.exitCode).toBe(0);
   expect(native.starts()).toBe(1);
   await native.process.deleteSession(native.sessionId);
+});
+
+test.each([false, true])(
+  "native framed collection recovers the one original command across lost Start reply %s",
+  async (lostReply) => {
+    const native = fixture(true, false, lostReply);
+    const command = new DaytonaFramedCommand(
+      native.process,
+      "printf prefix; printf diagnostic >&2; exit 7",
+      crypto.randomUUID(),
+    );
+    await command.start();
+    await native.eof();
+    expect(await command.read()).toEqual({ stdout: "prefix", stderr: "diagnostic", exitCode: 7 });
+    expect(await command.read()).toEqual({ stdout: "prefix", stderr: "diagnostic", exitCode: 7 });
+    await expect(command.start()).rejects.toThrow("cannot be started again");
+    expect(native.starts()).toBe(1);
+    expect(native.deleted()).toBe(0);
+    await command.cleanup();
+    expect(native.deleted()).toBe(1);
+  },
+);
+
+test("native deletion success and a purged session cannot release framed output or original physical custody", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-purged-command-"));
+  const release = join(root, "release");
+  const native = fixture(false, true);
+  const command = new DaytonaFramedCommand(
+    native.process,
+    `printf prefix; (while [ ! -e '${release}' ]; do sleep 0.01; done; printf diagnostic >&2) & exit 7`,
+    crypto.randomUUID(),
+  );
+  let physicalComplete = false;
+  try {
+    await command.start();
+    const physical = native.eof().then(() => {
+      physicalComplete = true;
+    });
+    expect(await command.read()).toBeNull();
+    await expect(command.cleanup()).rejects.toThrow("remain unknown");
+    // Model the pinned daemon's suppressed termination error: deletion purges
+    // the namespace/log access but deliberately does NOT stop this real child.
+    await native.process.deleteSession(command.sessionId);
+    expect(native.deleted()).toBe(1);
+    expect(physicalComplete).toBe(false);
+    await expect(command.read()).rejects.toMatchObject({ statusCode: 404 });
+    await expect(command.cleanup()).rejects.toThrow("remain unknown");
+    expect(native.starts()).toBe(1);
+    await writeFile(release, "release");
+    await physical;
+    // Later actual exit still cannot recreate the purged original output.
+    await expect(command.read()).rejects.toMatchObject({ statusCode: 404 });
+    await expect(command.cleanup()).rejects.toThrow("remain unknown");
+    expect(native.deleted()).toBe(1);
+    expect(native.starts()).toBe(1);
+  } finally {
+    await writeFile(release, "release");
+    await native.eof();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("native Daytona exit and snapshot logs do not prove descendant stream EOF", async () => {

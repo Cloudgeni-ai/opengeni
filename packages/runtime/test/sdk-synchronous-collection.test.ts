@@ -637,7 +637,7 @@ async function localCommand(command: string, environment: Record<string, string>
   return { stdout, stderr, exitCode };
 }
 
-function daytonaSdk(corrupt?: (text: string) => string) {
+function daytonaSdk() {
   let starts = 0;
   let lastCommand = "";
   const manifest = new Manifest({ root: "/workspace" });
@@ -646,7 +646,7 @@ function daytonaSdk(corrupt?: (text: string) => string) {
     starts++;
     lastCommand = command;
     const result = await localCommand(command, env);
-    return { ...result, stdout: corrupt ? corrupt(result.stdout) : result.stdout };
+    return result;
   };
   const session = new DaytonaSandboxSession({
     state: { sandboxId: "sb-stream", manifest, pauseOnExit: false, environment },
@@ -679,41 +679,8 @@ function daytonaSdk(corrupt?: (text: string) => string) {
   return { session, starts: () => starts, command: () => lastCommand };
 }
 
-test.each([
-  [1, 0],
-  [10_000, 0],
-  [1, 7],
-  [10_000, 7],
-] as const)(
-  "the actual Daytona SDK proves complete multi-line streams at %s tokens and exit %s",
-  async (maxOutputTokens, exitCode) => {
-    const fixture = daytonaSdk();
-    const stdout = `original\n${"out\n".repeat(6_000)}`;
-    const stderr = `  err\n${"err\n".repeat(6_000)}`;
-    const command = `printf '%s\\n' "$CAPTURE_MODE"; i=0; while [ "$i" -lt 6000 ]; do printf 'out\\n'; i=$((i+1)); done; printf '  err\\n' >&2; i=0; while [ "$i" -lt 6000 ]; do printf 'err\\n' >&2; i=$((i+1)); done; exit ${exitCode}`;
-    try {
-      const result = await executeSynchronousCommand(fixture.session, {
-        cmd: command,
-        maxOutputTokens,
-      });
-      expect(result).toMatchObject({ stdout, stderr, exitCode });
-      expect(fixture.starts()).toBe(1);
-      expect(fixture.command()).toContain("__OPENGENI_FS_COMPLETION_");
-      const ordinary = await fixture.session.execCommand({
-        cmd: "printf ordinary; printf diagnostic >&2",
-        maxOutputTokens: 1,
-      });
-      expect(ordinary).not.toStartWith("Native output receipt:");
-      expect(fixture.command()).not.toContain("__OPENGENI_FS_COMPLETION_");
-      expect(fixture.starts()).toBe(2);
-    } finally {
-      await fixture.session.close();
-    }
-  },
-);
-
-test("the actual Daytona SDK rejects a byte-truncated completion without replay", async () => {
-  const fixture = daytonaSdk((text) => text.slice(0, -30));
+test("an unbound Daytona SDK session rejects collection before Start instead of fabricating stream proof", async () => {
+  const fixture = daytonaSdk();
   try {
     await expect(
       executeSynchronousCommand(fixture.session, {
@@ -721,7 +688,14 @@ test("the actual Daytona SDK rejects a byte-truncated completion without replay"
         maxOutputTokens: 1,
       }),
     ).rejects.toMatchObject({ name: "SynchronousCommandOutcomeUnknownError" });
+    expect(fixture.starts()).toBe(0);
+    const ordinary = await fixture.session.execCommand({
+      cmd: "printf ordinary; printf diagnostic >&2",
+      maxOutputTokens: 1,
+    });
+    expect(ordinary).not.toStartWith("Native output receipt:");
     expect(fixture.starts()).toBe(1);
+    expect(fixture.command()).toBe("printf ordinary; printf diagnostic >&2");
   } finally {
     await fixture.session.close();
   }

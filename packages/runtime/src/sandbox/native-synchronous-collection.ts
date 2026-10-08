@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { Transform } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
+import { setTimeout as yieldNativeRead } from "node:timers/promises";
 import { UnixLocalSandboxSession } from "@openai/agents/sandbox/local";
 import type { ModalSandboxSession } from "@openai/agents-extensions/sandbox/modal";
 import { E2BSandboxSession } from "@openai/agents-extensions/sandbox/e2b";
@@ -16,8 +17,9 @@ import {
   SynchronousCommandOutcomeUnknownError,
   type SynchronousCommandPage,
 } from "./synchronous-command";
-import { synchronousCommandEnvelope } from "./synchronous-command-envelope";
 import { collectCloudflareCommandOutput } from "./cloudflare-command-output";
+import { boundDaytonaCommandProcess } from "./providers/daytona-command-binding";
+import { DaytonaFramedCommand } from "./providers/daytona-framed-command";
 
 type Capture = {
   identity: string;
@@ -34,6 +36,7 @@ type Capture = {
   sessionId?: number;
   child?: ChildProcessWithoutNullStreams;
   receipts: Set<unknown>;
+  daytona?: DaytonaFramedCommand;
 };
 type Adapter = {
   captures: Map<number, Capture>;
@@ -49,6 +52,9 @@ const formattedStarts = new AsyncLocalStorage<{
   page?: SynchronousCommandPage;
   capture?: Capture;
 }>();
+// Retained admission IDs are PostgreSQL int32. The pinned SDK allocates PTY
+// IDs only in [1000, 100000), so this runtime range cannot alias its controls.
+let nextDaytonaHandle = 2 ** 30;
 const cloudflareRequest = Object.getOwnPropertyDescriptor(
   CloudflareSandboxSession.prototype,
   "fetch",
@@ -110,8 +116,17 @@ function createCapture(): Capture {
   };
 }
 
-function releaseCapture(adapter: Adapter, capture: Capture): void {
+async function releaseCapture(adapter: Adapter, capture: Capture): Promise<void> {
   if (!capture.terminalObserved || capture.unavailable) return;
+  try {
+    await capture.daytona?.cleanup();
+  } catch (error) {
+    throw new SynchronousCommandOutcomeUnknownError(
+      capture.sessionId ?? null,
+      { stdout: "", stderr: "" },
+      error,
+    );
+  }
   if (capture.sessionId !== undefined) adapter.captures.delete(capture.sessionId);
   for (const receipt of capture.receipts) adapter.pages.delete(receipt);
   capture.receipts.clear();
@@ -119,6 +134,26 @@ function releaseCapture(adapter: Adapter, capture: Capture): void {
   capture.stderr = [];
   delete capture.child;
   delete capture.completion;
+  delete capture.daytona;
+}
+
+async function daytonaReceipt(adapter: Adapter, capture: Capture): Promise<string> {
+  try {
+    if (!capture.closed) {
+      const result = await capture.daytona!.read();
+      capture.unavailable = false;
+      if (result && !capture.closed) captureRemoteResult(capture, result, true);
+    }
+  } catch {
+    // Preserve the exact native session/cmd and original receipt on malformed
+    // or lost reads. A later exact read can recover; no Start or delete follows.
+    capture.unavailable = true;
+  }
+  const terminal = capture.closed && capture.eof.stdout && capture.eof.stderr;
+  const raw = terminal
+    ? `Process exited with code ${capture.exitCode}\n\nOutput:\n`
+    : `Process running with session ID ${capture.sessionId}\n\nOutput:\n`;
+  return await formattedReceipt(adapter, capture, raw, capture.sessionId);
 }
 
 async function formattedReceipt(
@@ -418,12 +453,28 @@ function installRemoteCollection(session: RemoteCollectionSession): Adapter | un
         const capture = launches.getStore();
         if (!capture || scopes.getStore()?.adapter !== adapter)
           return await run(command, cwd, env, timeout);
-        const envelope = synchronousCommandEnvelope(command, crypto.randomUUID());
-        return await captureCall(
-          () => run(envelope.command, cwd, env, timeout),
-          async (result) =>
-            envelope.decode(result.artifacts?.stdout ?? result.result, result.exitCode),
-        );
+        if (capture.started)
+          throw new SynchronousCommandOutcomeUnknownError(capture.sessionId ?? null, {
+            stdout: "",
+            stderr: "",
+          });
+        let process;
+        try {
+          process = await boundDaytonaCommandProcess(session as DaytonaSandboxSession);
+        } catch (error) {
+          throw new SynchronousCommandOutcomeUnknownError(null, { stdout: "", stderr: "" }, error);
+        }
+        capture.daytona = new DaytonaFramedCommand(process, command, capture.identity, cwd, env);
+        if (nextDaytonaHandle > 2 ** 31 - 1)
+          throw new Error("Native command handle space exhausted");
+        capture.sessionId = nextDaytonaHandle++;
+        adapter.captures.set(capture.sessionId, capture);
+        capture.started = true;
+        await capture.daytona.start(timeout);
+        // SDK compilation supplied the original command/cwd/env exactly once.
+        // Its formatted result is deliberately NOT the native receipt. The
+        // enclosing filesystem scope returns our original-handle page instead.
+        return { exitCode: 0, result: "" };
       };
     }
     attached.add(native);
@@ -455,13 +506,36 @@ function installRemoteCollection(session: RemoteCollectionSession): Adapter | un
       throw new SynchronousCommandOutcomeUnknownError(null, { stdout: "", stderr: "" }, error);
     }
     if (!capture.started) capture.unavailable = true;
+    if (capture.daytona) return await daytonaReceipt(adapter, capture);
     return await formattedReceipt(adapter, capture, raw);
   };
+  if (session instanceof DaytonaSandboxSession) {
+    const write = session.writeStdin.bind(session);
+    session.writeStdin = async (args) => {
+      const capture = adapter.captures.get(args.sessionId);
+      if (!capture?.daytona) return await write(args);
+      if (args.chars)
+        throw new SynchronousCommandOutcomeUnknownError(args.sessionId, { stdout: "", stderr: "" });
+      if (!capture.closed)
+        await yieldNativeRead(Math.max(0, Math.min(args.yieldTimeMs ?? 250, 250)));
+      return await daytonaReceipt(adapter, capture);
+    };
+  }
   const close = session.close.bind(session);
   session.close = async () => {
     await close();
-    adapter.captures.clear();
-    adapter.pages.clear();
+    if (!(session instanceof DaytonaSandboxSession)) {
+      adapter.captures.clear();
+      adapter.pages.clear();
+      return;
+    }
+    for (const [handle, capture] of adapter.captures) {
+      if (capture.daytona) continue;
+      adapter.captures.delete(handle);
+      for (const receipt of capture.receipts) adapter.pages.delete(receipt);
+    }
+    // Native session deletion/instance shutdown is not output completion.
+    // Unconsumed native captures remain in custody until exact settlement.
   };
   (session as ChannelASession).getSynchronousCommandOutput = (result) =>
     adapter.pages.get(result) ?? null;
@@ -471,7 +545,10 @@ function installRemoteCollection(session: RemoteCollectionSession): Adapter | un
 
 /** A later control owner can finish custody after the original scope unwinds.
  * Call only after output capture and exact terminal settlement both succeed. */
-export function releaseNativeSynchronousCommandOutput(session: object, receipt: unknown): void {
+export async function releaseNativeSynchronousCommandOutput(
+  session: object,
+  receipt: unknown,
+): Promise<void> {
   const adapter = adapters.get(session);
   const page = adapter?.pages.get(receipt);
   if (
@@ -484,10 +561,16 @@ export function releaseNativeSynchronousCommandOutput(session: object, receipt: 
     return;
   for (const capture of adapter.captures.values()) {
     if (capture.receipts.has(receipt)) {
-      releaseCapture(adapter, capture);
+      await releaseCapture(adapter, capture);
       return;
     }
   }
+}
+
+/** Runtime-owned native session aliases are readonly, turn-owned locators,
+ * not SDK PTYs or durable cross-worker background command identities. */
+export function isNativeSynchronousCommandHandle(session: object, handle: number): boolean {
+  return adapters.get(session)?.captures.get(handle)?.daytona !== undefined;
 }
 
 /** Setup aliases change only SDK metadata, never the original native stream.
@@ -798,6 +881,12 @@ class NativeCollectionAccess extends UnixLocalSandboxSession {
   }
 }
 
+/** Existing exact control helpers are not a new filesystem execution. Keep
+ * their ordinary provider route even when cancellation runs inside a scope. */
+export function withoutNativeSynchronousCommandCollection<T>(run: () => T): T {
+  return scopes.exit(run);
+}
+
 /** Opt in before the one SDK Start. Worker synchronous runners use the same
  * scope; model/background/interactive commands outside it retain SDK semantics.
  * Unknown active captures stay bound for later exact-handle control reads. */
@@ -822,7 +911,7 @@ export async function withNativeSynchronousCommandCollection<T>(
   const scope: Scope = { adapter, captures: new Set() };
   return await scopes.run(scope, async () => {
     const result = await run();
-    for (const capture of scope.captures) releaseCapture(adapter, capture);
+    for (const capture of scope.captures) await releaseCapture(adapter, capture);
     return result;
   });
 }
