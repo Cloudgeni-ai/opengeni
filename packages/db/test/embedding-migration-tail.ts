@@ -117,4 +117,17 @@ export const embeddingMigrationTail = [
   "0653_session_archive_tenancy_fence.sql",
   "0657_session_archive_purge_retained_evidence.sql",
   "0660_session_archive_preference_snapshot_export.sql",
+  // The inbox person resolver compiles against scheduled_tasks.owner_subject_id
+  // from withheld 0478; replay after it.
+  "0661_inbox_subagent_goals_and_schedules.sql",
+  // Takes the session-tenancy fence inventory helpers from withheld 0345.
+  "0662_session_first_party_default_intent.sql",
+  // Replaces the inbox projection trigger from withheld 0661; replay after it
+  // so the replayed 0661 body does not overwrite the newer one.
+  "0663_inbox_paused_goal_setting.sql",
+  // Each rewrites the inbox projection trigger and reads inbox_settings.paused_goals
+  // from 0663; replay them after it, in order, so the newest trigger body wins.
+  "0664_inbox_rich_notifications.sql",
+  "0665_inbox_replies.sql",
+  "0666_inbox_reply_current_turn.sql",
 ];

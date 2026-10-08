@@ -27,7 +27,6 @@ import {
   Linking,
   Modal,
   Pressable,
-  ScrollView,
   Text,
   View,
   useWindowDimensions,

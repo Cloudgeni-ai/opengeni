@@ -619,6 +619,9 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
     if (url.pathname === "/v1/organization-invitations") {
       return json({ invitations: [], nextCursor: null });
     }
+    if (url.pathname === "/v1/inbox") {
+      return json({ items: [], needsYouCount: 0, unreadCount: 0 });
+    }
     if (url.pathname.endsWith("/sessions")) {
       return json({
         sessions: [],
