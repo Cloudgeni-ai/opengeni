@@ -64,7 +64,9 @@ import {
   nextDurableOpId,
   notifyRemoteOperationTransportSelected,
   notifyDurableOpOwnershipTransferStarted,
+  notifyDurableOpOwnershipTransferFailed,
   notifyDurableOpOwnershipTransferred,
+  notifyRemoteOperationNotDispatched,
   type RemoteOperationControl,
   type RemoteOperationObservation,
 } from "../op-correlation";
@@ -952,36 +954,47 @@ export class SelfhostedSession {
     args: SelfhostedExecArgs,
     allowBackground: boolean,
   ): Promise<SelfhostedExecResult> {
-    // Admission is the only mutable-policy read. Everything below retains this
-    // exact connection/capability/policy-revision snapshot through completion.
-    const admission = await this.admitCommand();
+    // Mint once before local preflight so a proven refusal can settle exactly
+    // this command's turn registration, including SDK-rendered error paths.
+    const opId = nextDurableOpId() ?? `anon_${crypto.randomUUID()}`;
+    let admission: Awaited<ReturnType<SelfhostedSession["admitCommand"]>>;
+    let execReq: ExecRequest;
+    let opStreamClient: OpStreamExecClient | undefined;
     // 0 deliberately means no process deadline. That contract is safe only over
     // op-stream: its liveness probes, replay, and cancellation do not depend on a
     // request/reply timer or a monolithic response.
     const executionTimeoutMs = this.effectiveExecDeadlineMs;
-    const requestedShell = args.shell?.trim();
-    const execReq: ExecRequest = {
-      // An explicit shell is encoded as direct argv so every agent version honors
-      // it. With no explicit shell, preserve the existing machine-owned default
-      // shell behavior byte-for-byte.
-      command: requestedShell
-        ? explicitShellArgv(requestedShell, args.cmd, args.login === true)
-        : [args.cmd],
-      shell: !requestedShell,
-      // Relative paths resolve from the exact host root, while absolute paths
-      // retain their literal machine meaning. In particular, "/workspace" is
-      // sent as the real absolute path "/workspace".
-      cwd: resolveConnectedMachinePath(this.workspaceRoot, args.workdir),
-      // The machine owns its ambient shell environment and ordinary credentials.
-      // Only attempt-local values explicitly supplied by the worker cross here;
-      // snapshot now so a later renewal cannot mutate an in-flight request.
-      env: { ...(this.transientExecEnvironment?.() ?? {}) },
-      stdin: new Uint8Array(0),
-      timeoutMs: executionTimeoutMs,
-    };
-    const opStreamClient = this.opStreamClientFor(admission);
-    if (!opStreamClient) {
-      throw execRequiresOpStream();
+    try {
+      // Admission is the only mutable-policy read. Everything below retains
+      // its exact connection/capability/policy snapshot through completion.
+      admission = await this.admitCommand();
+      const requestedShell = args.shell?.trim();
+      execReq = {
+        // An explicit shell is encoded as direct argv so every agent version honors
+        // it. With no explicit shell, preserve the existing machine-owned default
+        // shell behavior byte-for-byte.
+        command: requestedShell
+          ? explicitShellArgv(requestedShell, args.cmd, args.login === true)
+          : [args.cmd],
+        shell: !requestedShell,
+        // Relative paths resolve from the exact host root, while absolute paths
+        // retain their literal machine meaning. In particular, "/workspace" is
+        // sent as the real absolute path "/workspace".
+        cwd: resolveConnectedMachinePath(this.workspaceRoot, args.workdir),
+        // The machine owns its ambient shell environment and ordinary credentials.
+        // Only attempt-local values explicitly supplied by the worker cross here;
+        // snapshot now so a later renewal cannot mutate an in-flight request.
+        env: { ...(this.transientExecEnvironment?.() ?? {}) },
+        stdin: new Uint8Array(0),
+        timeoutMs: executionTimeoutMs,
+      };
+      opStreamClient = this.opStreamClientFor(admission);
+      if (!opStreamClient) throw execRequiresOpStream();
+    } catch (error) {
+      // This region has issued no command RPC and registered no live consumer.
+      // This local fact, not the error's code/shape, proves non-dispatch.
+      notifyRemoteOperationNotDispatched(opId);
+      throw error;
     }
     try {
       return await this.execViaOpStream(
@@ -996,6 +1009,7 @@ export class SelfhostedSession {
             )
           : 0,
         args.cmd,
+        opId,
       );
     } catch (error) {
       if (error instanceof OpStreamUnavailableError) {
@@ -1021,10 +1035,11 @@ export class SelfhostedSession {
     executionTimeoutMs: number,
     backgroundYieldMs: number,
     command: string,
+    opId: string,
   ): Promise<SelfhostedExecResult> {
     const startedAt = Date.now();
-    const opId = nextDurableOpId() ?? `anon_${crypto.randomUUID()}`;
     let adoptedCommandId: string | null = null;
+    let ownershipTransferPending = false;
     let terminalProof = false;
     const retainedOutput: {
       stdout: string[];
@@ -1062,6 +1077,7 @@ export class SelfhostedSession {
                   await this.captureBackgroundCommandOutput?.(adoptedCommandId, frames);
               },
               onYield: async () => {
+                ownershipTransferPending = true;
                 notifyDurableOpOwnershipTransferStarted(opId);
                 const adopted = await this.adoptBackgroundCommand!({
                   controlWorkspaceId: admission.controlWorkspaceId,
@@ -1111,6 +1127,7 @@ export class SelfhostedSession {
                       throw runnerFailureToControlError(terminal.outcome.failure);
                   }
                 });
+                ownershipTransferPending = false;
                 notifyDurableOpOwnershipTransferred(opId);
               },
             })
@@ -1217,6 +1234,12 @@ export class SelfhostedSession {
       retainedOutput.completed = { status: "completed", result: nativeResult };
       return nativeResult;
     } catch (error) {
+      if (ownershipTransferPending && !adoptedCommandId) {
+        // The live consumer's failed-adoption cleanup has also rejected. Its
+        // exact client remains retained below, so turn cleanup must rejoin it.
+        ownershipTransferPending = false;
+        notifyDurableOpOwnershipTransferFailed(opId);
+      }
       if (error instanceof OpStreamUnavailableError) throw error;
       const controlError =
         error instanceof SelfhostedControlError

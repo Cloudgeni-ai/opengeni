@@ -11,7 +11,10 @@ import {
   createTurnToolCancellationController,
   isBareInteractiveShellCommand,
 } from "../src/sandbox/turn-tool-cancellation";
-import { notifyDurableOpOwnershipTransferStarted } from "../src/sandbox/op-correlation";
+import {
+  notifyDurableOpOwnershipTransferStarted,
+  notifyDurableOpOwnershipTransferred,
+} from "../src/sandbox/op-correlation";
 import { parseExecResponseBanner } from "../src/sandbox/exec-banner";
 import {
   RoutingMutationOutcomeUnknownError,
@@ -1846,7 +1849,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(cancelledOpIds).toEqual(["call_2e_machine_2f_1:0"]);
   });
 
-  test("Steer cannot cancel a connected-machine op after durable adoption starts", async () => {
+  test("Steer joins a pending connected-machine adoption until durable commit without cancelling it", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
     let finishExec!: (output: string) => void;
@@ -1868,7 +1871,9 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const exec = functionTool("exec_command", async () => {
       notifyDurableOpOwnershipTransferStarted("call_2e_machine_2f_adopted:0");
       markTransferred();
-      return await output;
+      const result = await output;
+      notifyDurableOpOwnershipTransferred("call_2e_machine_2f_adopted:0");
+      return result;
     });
     const [wrapped] = controller.wrapTools([exec], session) as Array<
       Extract<Tool<unknown>, { type: "function" }>
@@ -1888,9 +1893,12 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     );
     await transferred;
     abort.abort(new Error("steered after adoption"));
+    const drain = controller.waitForQuiescence();
+    expect(await pendingAfterMicrotasks(drain)).toBe(true);
+    expect(cancelledOpIds).toEqual([]);
     finishExec("Command running in background");
     await invocation;
-    await controller.waitForQuiescence();
+    await drain;
 
     expect(cancelledOpIds).toEqual([]);
   });
