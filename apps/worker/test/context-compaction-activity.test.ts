@@ -31,6 +31,7 @@ import {
   requestSessionCompaction,
   saveRunState,
   submitHumanPromptInTransaction,
+  updateWorkspaceSettings,
   withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls,
   type Database,
@@ -1946,6 +1947,11 @@ describe("standalone context compaction execution", () => {
           : { outputText: "The accepted task is complete after checkpoint recovery." },
       ]);
       let summaryCalls = 0;
+      // The workspace preference must reach both the first run and the same-
+      // turn continuation without reusing the pre-checkpoint usage anchor.
+      await updateWorkspaceSettings(client.db, grant.workspaceId!, {
+        modelCompactionThresholds: { "scripted-model": 95_000 },
+      });
       const summarizerClient = {
         chat: {
           completions: {
@@ -2001,6 +2007,7 @@ describe("standalone context compaction execution", () => {
         }),
         runStream: async (agent, preparedInput, settings, options) => {
           runStreamCalls += 1;
+          expect(settings.contextAutoCompactThresholdTokens).toBe(95_000);
           if (runStreamCalls === 1 || continuation !== "empty") {
             return await productionRuntime.runStream(agent, preparedInput, settings, options);
           }

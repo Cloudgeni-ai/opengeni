@@ -4,7 +4,7 @@ import {
   deploymentRealtimeVoice,
   realtimeVoiceOfferProblem,
 } from "@opengeni/core";
-import { withDirectModelProviders } from "@opengeni/config";
+import { withDirectModelProviders, workspaceModelCompactionPolicy } from "@opengeni/config";
 import { listConnectionsMetadata } from "@opengeni/db";
 import {
   workspaceProviderApiKeyConnectionMetadataFromConnections,
@@ -665,6 +665,20 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceSettings,
       }),
     });
+    for (const model of catalog.models) {
+      model.compactionPolicy = workspaceModelCompactionPolicy(
+        workspaceCatalogSettings,
+        {
+          id: model.id,
+          contextWindowTokens:
+            model.executionLimits?.contextWindowTokens ?? model.contextWindowTokens,
+          effectiveContextWindowTokens:
+            model.executionLimits?.effectiveContextWindowTokens ?? undefined,
+          autoCompactTokenLimit: model.executionLimits?.autoCompactTokenLimit ?? undefined,
+        },
+        workspaceSettings,
+      );
+    }
     if (creditBalance) {
       for (const model of catalog.models) {
         if (model.cost !== "credits") continue;

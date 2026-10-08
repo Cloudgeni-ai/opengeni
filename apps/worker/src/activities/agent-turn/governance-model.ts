@@ -436,7 +436,7 @@ export async function prepareGovernanceAndModel(
   // catalog values and must reach pre-turn compaction, history guards, and
   // every model call together.
   eventing.modelRunSettings = resolvedModel
-    ? settingsWithResolvedModelContext(runSettings, resolvedModel.configured)
+    ? settingsWithResolvedModelContext(runSettings, resolvedModel.configured, workspace.settings)
     : runSettings;
   // WORKSPACE MODEL POLICY — the authoritative hard gate. Runs immediately
   // after resolution and BEFORE any model call (the compaction summarizer

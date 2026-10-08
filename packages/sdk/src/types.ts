@@ -3739,6 +3739,16 @@ export type ModelCredentialReadinessV1 = {
 };
 
 export type WorkspaceModelCatalogModel = ClientModel & {
+  /** Workspace preference, separate from immutable model execution limits. */
+  compactionPolicy?:
+    | {
+        defaultTokens: number;
+        overrideTokens: number | null;
+        effectiveTokens: number;
+        minimumTokens: number;
+        maximumTokens: number;
+      }
+    | undefined;
   credentialReadiness: ModelCredentialReadinessV1;
   creditFunding?: "promotional" | "general" | "unavailable" | undefined;
   /** Exact workspace-policy verdict without exposing provider identity. */
@@ -5088,6 +5098,8 @@ export type Workspace = {
 };
 
 export type WorkspaceSettings = {
+  /** Exact product-model preferences. Invalid/newer values are ignored per model. */
+  modelCompactionThresholds?: unknown;
   memoryEnabled?: boolean | undefined;
   /** Reversible Memory V1 prompt composition rollout. */
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
@@ -5183,6 +5195,8 @@ export type WorkspaceVoiceInputSettings = {
 };
 
 export type UpdateWorkspaceSettingsRequest = {
+  /** Independent model patches; null restores that model's default. */
+  modelCompactionThresholds?: Record<string, number | null>;
   memoryEnabled?: boolean | undefined;
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   sessionDefaults?: WorkspaceSessionDefaults | undefined;
