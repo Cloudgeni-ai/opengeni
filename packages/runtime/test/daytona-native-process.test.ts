@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { Process as NativeProcess } from "@daytonaio/sdk";
+import { Daytona as NativeDaytona, Process as NativeProcess } from "@daytonaio/sdk";
+import { Manifest } from "@openai/agents/sandbox";
+import { DaytonaSandboxClient } from "@openai/agents-extensions/sandbox/daytona";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -42,6 +44,7 @@ function fixture(waitForEof = true) {
     { basePath: "https://native.invalid" } as ConstructorParameters<typeof NativeProcess>[0],
     {} as ConstructorParameters<typeof NativeProcess>[1],
     {
+      executeCommand: async () => ({ data: { exitCode: 0, result: "" } }),
       createSession: async ({ sessionId: session }: { sessionId: string }) => {
         original(session);
         return { data: {} };
@@ -93,6 +96,81 @@ function fixture(waitForEof = true) {
     eof: () => readers,
   };
 }
+
+test("the pinned Agents Daytona create and exact resume discard native session API bindings", async () => {
+  const native = fixture();
+  const sandbox = {
+    id: "sb-native-binding",
+    process: native.process,
+    start: async () => {},
+    stop: async () => {},
+    delete: async () => {},
+    fs: {
+      createFolder: async () => {},
+      uploadFile: async () => {},
+      downloadFile: async () => Buffer.alloc(0),
+      deleteFile: async () => {},
+    },
+  };
+  const create = Object.getOwnPropertyDescriptor(NativeDaytona.prototype, "create")!;
+  const get = Object.getOwnPropertyDescriptor(NativeDaytona.prototype, "get")!;
+  let creates = 0;
+  let gets = 0;
+  Object.defineProperty(NativeDaytona.prototype, "create", {
+    ...create,
+    value: async (args: { image: string }) => {
+      expect(args.image).toBe("debian:12.9");
+      creates++;
+      return sandbox;
+    },
+  });
+  Object.defineProperty(NativeDaytona.prototype, "get", {
+    ...get,
+    value: async (id: string) => {
+      expect(id).toBe(sandbox.id);
+      gets++;
+      return sandbox;
+    },
+  });
+  try {
+    const client = new DaytonaSandboxClient({
+      apiKey: "native-fixture",
+      apiUrl: "https://native.invalid",
+      target: "fixture",
+      pauseOnExit: true,
+    });
+    const created = await client.create(new Manifest());
+    const resumed = await client.resumeExact(created.state);
+    for (const session of [created, resumed]) {
+      const retained = Object.getOwnPropertyDescriptor(session, "sandbox")?.value as {
+        process: Record<string, unknown>;
+      };
+      for (const method of [
+        "createSession",
+        "executeSessionCommand",
+        "getSessionCommand",
+        "getSessionCommandLogs",
+        "sendSessionCommandInput",
+        "deleteSession",
+      ] as const) {
+        expect(typeof native.process[method]).toBe("function");
+        expect(retained.process[method]).toBeUndefined();
+      }
+      expect(Object.keys(retained.process).sort()).toEqual([
+        "createPty",
+        "executeCommand",
+        "killPtySession",
+      ]);
+      await session.close();
+    }
+    expect(creates).toBe(1);
+    expect(gets).toBe(1);
+    expect(native.starts()).toBe(0);
+  } finally {
+    Object.defineProperty(NativeDaytona.prototype, "create", create);
+    Object.defineProperty(NativeDaytona.prototype, "get", get);
+  }
+});
 
 test("the pinned native Daytona session adds newline bytes absent from the original streams", async () => {
   const native = fixture();
