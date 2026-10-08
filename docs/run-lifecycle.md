@@ -134,9 +134,31 @@ retain their own lifetime and do not hold this turn-cleanup gate.
 Inference alone may resume on the same machine for a closed lease-lost attempt's
 legacy Modal home-route `execCommand` admission with unknown provider outcome
 and no retained locator. Exact actor, turn and execution generation must match.
-The admission, physical quiescence and capture/rotation fences remain unresolved;
-recovery tool results tell the model to inspect actual state before replay.
-Accepted Pause/Steer interruptions retain their independent receipt gate.
+The admission and physical quiescence remain unresolved; recovery tool results
+tell the model to inspect actual state before replay. Accepted Pause/Steer
+interruptions retain their independent receipt gate.
+
+**Requests a crashed worker left behind no longer pin the box (OPE-743).** A
+turn admission whose attempt closed `lease_lost_recoverable`, whose turn holder
+is gone (reaped as dead), that was never adopted as a retained process and whose
+provider outcome is still unknown (`crashedWorkerOrphanAdmissionSql`) has no
+owner that can finish it. Nothing will ever settle it, so it used to refuse
+every capture, idle drain, idle containment and provider-deadline containment
+of its box, and to hold its attempt's quiescence open, until the provider killed
+the box uncaptured (staging session 5040c525). Capture claims, drain
+publication, containment enrollment and the containment/deadline quiescence
+checks now treat such an orphan like a background command the drain will stop:
+a drain (which terminates the box next) captures around it, and so does a
+point-in-time (Modal native) warm capture, which then records the archive one
+generation behind the workspace like any capture that ran around commands;
+a tar-style warm capture still waits. The drain's cold commit rejects the
+exact orphan only after the box was terminated (or proven gone), which is when
+nothing it started can still be running, and wakes its owner so the ordinary
+quiescence receipt reconciliation can complete. A lease-lost attempt whose
+holder still exists, and an attempt closed by Pause, Steer or cancellation
+(which may drop its holder eagerly while it is still draining), keep their
+requests as writers. The physical quiescence receipt itself keeps the strict
+predicate.
 
 A resumed attempt may attach another atomic internal-update batch to the same
 logical turn after its resolved open suffix. Each delivered update retains its
