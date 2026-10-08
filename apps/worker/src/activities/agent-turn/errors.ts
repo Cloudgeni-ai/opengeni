@@ -46,6 +46,9 @@ import {
   SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
   AnthropicRequestError,
+  findAnthropicRequestSizeError,
+  AnthropicSizeRecoveryExhaustedError,
+  type AnthropicRequestSize,
 } from "@opengeni/runtime";
 import {
   mcpTransportRequestFailureDiagnostic,
@@ -1583,6 +1586,15 @@ function classifyAgentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
 ): ReturnType<typeof baseAgentRunFailurePayload> {
+  const sizeError = findAnthropicRequestSizeError(error);
+  if (sizeError)
+    return {
+      error: sizeError.message,
+      code: sizeError.code,
+      retryable: false,
+      requestSize: sizeError.requestSize,
+      ...(sizeError.request_id ? { requestId: sizeError.request_id } : {}),
+    };
   const graph = structuredRecoveryCauseGraph(error);
   const nodes = graph ? [...graph.keys()] : [];
   const outputRejected = nodes.find(isRoutingMutationOutputRejectedError);
@@ -1661,6 +1673,7 @@ function baseAgentRunFailurePayload(
   historyPersistenceStage?: MandatoryHistoryPersistenceStage;
   mcpTransportDiagnostic?: McpTransportRequestFailureDiagnostic;
   materializationDiagnostic?: MaterializationVerificationDiagnostic;
+  requestSize?: AnthropicRequestSize;
   quotaScope?: ProviderQuotaScope;
   /** Closed Codex plan key on `codex_plan_entitlement` / `codex_request_rejected`. */
   planType?: string | null;
@@ -1719,6 +1732,9 @@ function baseAgentRunFailurePayload(
     };
   }
   if (error instanceof ClaudeSubscriptionConnectionUnavailable) {
+    return { error: error.message, code: error.code, retryable: false };
+  }
+  if (error instanceof AnthropicSizeRecoveryExhaustedError) {
     return { error: error.message, code: error.code, retryable: false };
   }
   if (error instanceof AnthropicProviderRejection) {

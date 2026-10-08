@@ -1330,6 +1330,13 @@ record its control receipt, and request a capacity recheck atomically. Ordinary
 lease claim reads that same revised selection; no new turn or automatic model
 retry is created by the switch itself.
 
+Claude's exact serialized-byte preflight and a first pre-stream HTTP 413 use
+the same activity-local checkpoint boundary. One durable logical-turn allowance
+survives attempt replacement; a byte-fitted earlier prefix becomes a checkpoint
+and its complete latest suffix remains active. A second size rejection stops
+instead of replaying tools or looping. The checkpoint uses the ordinary Claude
+serializer too; see [Claude byte recovery](context-compaction.md#claude-request-bytes-and-image-heavy-recovery).
+
 Provider context-window overflow is also handled inside the activity, not by a
 Temporal retry. When an OpenAI/Azure context overflow is classified,
 `runAgentTurn` invokes compaction for the session's frozen mode: portable

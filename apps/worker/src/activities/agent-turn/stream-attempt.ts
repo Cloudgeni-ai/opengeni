@@ -39,6 +39,9 @@ import {
   interruptionKindForCallItem,
   releaseMcpResultCustomDataFromSdkEvent,
   findCompactionNeededError,
+  findAnthropicRequestSizeError,
+  type AnthropicRequestSizeError,
+  ANTHROPIC_REQUEST_MAX_BYTES,
   compactionProviderRejection,
   withRunCredentialsSession,
   runOwnedSandboxSetup,
@@ -562,6 +565,7 @@ export async function runTurnStreamAttempt(
   const forceContextCompaction = async (
     triggerLabel: "overflow" | "proactive" | "operator",
     recoverySignalTokens: number | null,
+    requestSizeError?: AnthropicRequestSizeError | null,
   ) => {
     const outcome = await waitForTurnOperation(
       maybeCompactContext(
@@ -586,6 +590,19 @@ export async function runTurnStreamAttempt(
           force: true,
           ...(triggerLabel === "operator" ? { clearRequestedCompaction: true } : {}),
           trigger: triggerLabel,
+          ...(requestSizeError
+            ? {
+                requestSizeRecovery: {
+                  // A proxy may reject below the documented API maximum. The
+                  // checkpoint uses at most half the rejected payload size.
+                  maxBytes: Math.min(
+                    ANTHROPIC_REQUEST_MAX_BYTES,
+                    Math.floor(requestSizeError.requestSize.requestBytes / 2),
+                  ),
+                  size: requestSizeError.requestSize,
+                },
+              }
+            : {}),
           materializeHistory: media.materializeScreenshotHistory,
           projectModelInput: compactionModelHistoryProjector,
           ...compactionModeOptions,
@@ -2162,13 +2179,14 @@ export async function runTurnStreamAttempt(
         }
         return result;
       } catch (attemptError) {
+        const requestSizeError = findAnthropicRequestSizeError(attemptError);
         const overflow = classifyContextWindowOverflowError(attemptError);
         const compactionNeeded = findCompactionNeededError(attemptError);
         const recoveryKind = compactionNeeded
           ? compactionNeeded.trigger === "operator"
             ? "operator"
             : "proactive"
-          : overflow
+          : overflow || requestSizeError
             ? "overflow"
             : null;
         if (!recoveryKind || !eventing.publish || !eventing.turnStartedPublished) {
@@ -2183,6 +2201,7 @@ export async function runTurnStreamAttempt(
           ...safeErrorDiagnostic(attemptError),
           signalTokens: compactionNeeded?.signalTokens,
           thresholdTokens: compactionNeeded?.thresholdTokens,
+          ...(requestSizeError ? { ...requestSizeError.requestSize } : {}),
         });
         let compacted = false;
         let compactionHandled = false;
@@ -2193,6 +2212,7 @@ export async function runTurnStreamAttempt(
           const outcome = await forceContextCompaction(
             recoveryKind,
             compactionNeeded?.signalTokens ?? null,
+            requestSizeError,
           );
           compacted = outcome.compacted;
           if (outcome.compacted) {
