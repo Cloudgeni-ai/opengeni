@@ -80,7 +80,7 @@ describe("preferredConnectedModelId", () => {
       ]),
     ).toBe("free");
   });
-  test("prefers a selectable connected subscription over OpenGeni credits", () => {
+  test("prefers a selectable connected subscription over Opengeni credits", () => {
     expect(
       preferredConnectedModelId([
         catalogModel({
@@ -616,13 +616,13 @@ describe("isPaymentRequiredError", () => {
             error: {
               status: 402,
               code: "payment_required",
-              message: "insufficient OpenGeni credits",
+              message: "insufficient Opengeni credits",
               retryable: false,
             },
           }),
         ),
       ),
     ).toBe(true);
-    expect(isPaymentRequiredError(new Error("insufficient OpenGeni credits"))).toBe(false);
+    expect(isPaymentRequiredError(new Error("insufficient Opengeni credits"))).toBe(false);
   });
 });

@@ -12,7 +12,7 @@ import type {
 
 export type OpenGeniPrReviewTransport = Pick<OpenGeniCoreClient, "requestJson" | "requestVoid">;
 
-/** Optional OpenGeni Review Bot API surface, isolated from the eager core client graph. */
+/** Optional Opengeni Review Bot API surface, isolated from the eager core client graph. */
 export class OpenGeniPrReviewClient {
   constructor(private readonly client: OpenGeniPrReviewTransport) {}
 

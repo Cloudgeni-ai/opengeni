@@ -14,7 +14,7 @@ import {
   type ChatResolve,
 } from "./http";
 import { handleChatCompletionsRequest, handleResponsesRequest } from "./openai";
-import type { OpenGeni } from "./opengeni";
+import type { Opengeni } from "./opengeni";
 import { OpenGeniChatError, type ChatChunk, type ChatRespondInput } from "./types";
 import { handleVercelChatRequest } from "./vercel";
 
@@ -27,7 +27,7 @@ export type ChatHandlerOptions = {
   resolve: ChatResolve;
   /** Default wire format; a request may override it with the format header. */
   format?: ChatHandlerFormat | undefined;
-  /** Vercel format only: also emit OpenGeni's own tool activity (see `UIMessageStreamOptions.toolParts`). */
+  /** Vercel format only: also emit Opengeni's own tool activity (see `UIMessageStreamOptions.toolParts`). */
   toolParts?: boolean | undefined;
 };
 
@@ -57,7 +57,7 @@ function methodNotAllowed(allow: string): Response {
  * `x-opengeni-conversation` header, else the wire format's own field.
  */
 export function createChatHandler(
-  og: OpenGeni,
+  og: Opengeni,
   options: ChatHandlerOptions,
 ): (request: Request) => Promise<Response> {
   return async (request) => {
@@ -92,7 +92,7 @@ export function createChatHandler(
 
 /** `POST { message }` -> native SSE of {@link ChatChunk} (`event: chunk`). */
 export async function handleNativeChatRequest(
-  og: OpenGeni,
+  og: Opengeni,
   request: Request,
   resolve: ChatResolve,
 ): Promise<Response> {
@@ -114,7 +114,7 @@ export async function handleNativeChatRequest(
  * (`messages` is empty and `created` false before the first message).
  */
 export async function handleNativeHistoryRequest(
-  og: OpenGeni,
+  og: Opengeni,
   request: Request,
   resolve: ChatResolve,
 ): Promise<Response> {
@@ -138,7 +138,7 @@ export async function handleNativeHistoryRequest(
 
 /** `POST .../respond { requestId, decision | answers | skip }` -> native SSE of the continuation. */
 export async function handleNativeRespondRequest(
-  og: OpenGeni,
+  og: Opengeni,
   request: Request,
   resolve: ChatResolve,
 ): Promise<Response> {

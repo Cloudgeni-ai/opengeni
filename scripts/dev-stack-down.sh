@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stop, and optionally remove, ONLY this checkout / git worktree's local OpenGeni
+# Stop, and optionally remove, ONLY this checkout / git worktree's local Opengeni
 # stack: the Docker Compose or native infrastructure project that `bun run dev`
 # created and, with --clean, that project's data plus generated runtime file.
 #
@@ -75,7 +75,7 @@ else
 fi
 export OPENGENI_DEV_BACKEND
 
-echo "OpenGeni worktree stack: project=${COMPOSE_PROJECT_NAME} backend=${OPENGENI_DEV_BACKEND} (${mode})"
+echo "Opengeni worktree stack: project=${COMPOSE_PROJECT_NAME} backend=${OPENGENI_DEV_BACKEND} (${mode})"
 
 if [ "$OPENGENI_DEV_BACKEND" = "native" ]; then
   if [ "$mode" = "clean" ]; then

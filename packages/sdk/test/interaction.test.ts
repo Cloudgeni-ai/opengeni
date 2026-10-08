@@ -422,7 +422,7 @@ describe("BrowserSession SDK", () => {
             targetGeneration: "target-1-generation",
             documentGeneration: "document-1",
             kind: "page",
-            title: "OpenGeni",
+            title: "Opengeni",
             url: "https://opengeni.ai/",
             selected: true,
             attached: true,

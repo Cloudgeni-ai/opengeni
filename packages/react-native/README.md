@@ -57,7 +57,31 @@ function AgentCall({ session }: { session: SessionInputs }) {
 
 ### iOS configuration
 
-Expo autolinking picks up this package's call module. Add to the app config:
+Expo autolinking picks up this package's call module. Add the config plugin to the app config; it sets the Info.plist keys calls need and generates a Siri/Shortcuts action for starting a call:
+
+```json
+{
+  "plugins": [
+    [
+      "@opengeni/react-native",
+      {
+        "call": {
+          "title": "Call your agent",
+          "phrases": ["Call {app}", "Talk to {app}"],
+          "alternativeAppNames": ["Agent"]
+        }
+      }
+    ]
+  ]
+}
+```
+
+- **Info.plist:** `UIBackgroundModes` gains `audio` and `voip` (CallKit refuses call requests from an app without `voip`, so the call would still talk but never appear as a system call), `NSUserActivityTypes` gains `INStartCallIntent` (redial from Phone recents), and `NSMicrophoneUsageDescription` is set unless the app already sets it.
+- **App Intent and App Shortcuts:** a generated Swift file in the app target declares a "start a call" intent and its Siri phrases. `{app}` stands for the app's name and must appear exactly once in each phrase (Siri requires it). Without any setup the action then works from Siri, Spotlight and the Shortcuts app, and can be assigned to the Action button. The intent opens the app and arrives as a `startRequested` event with no target, so the host chooses the session.
+- **`alternativeAppNames`:** extra names Siri accepts for the app (`INAlternativeAppNames`), for example the agent's own name, so "Call Agent" works in an app called something else.
+- Set `"appIntents": false` inside `call` to skip the generated intent.
+
+Without the plugin, set the keys yourself:
 
 ```json
 {

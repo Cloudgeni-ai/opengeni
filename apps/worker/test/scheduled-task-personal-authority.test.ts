@@ -177,7 +177,7 @@ async function slackBotConnectionFixture(workspace: Awaited<ReturnType<typeof wo
       slackTeamName: "Scheduled claim test",
       botUserId: `U-${suffix}`,
       botId: `B-${suffix}`,
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: "2026-08-16T20:00:00.000Z",
     },
   });

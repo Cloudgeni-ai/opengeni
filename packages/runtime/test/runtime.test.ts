@@ -4812,7 +4812,7 @@ describe("runtime event normalization", () => {
   // guidance, update this pin as the new canonical default rather than
   // weakening the absent-memory/per-session no-op assertions below.
   const HISTORICAL_DEFAULT_INSTRUCTIONS = [
-    "You are an OpenGeni workspace agent: a general assistant for questions, writing, research, analysis, and technical work.",
+    "You are an Opengeni workspace agent: a general assistant for questions, writing, research, analysis, and technical work.",
     "Follow the user's task and the applicable Skill instructions for the current role.",
     "When a task needs files or commands, work inside the sandbox workspace with the filesystem and shell tools.",
     "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
@@ -4840,7 +4840,7 @@ describe("runtime event normalization", () => {
     "The following entries are descriptors, not the Skill instructions. Use the id when names are ambiguous.",
     '- {"id":"native-tool:document-parsing","name":"document-parsing","description":"Extract readable Markdown from local Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and text-based PDF files using the preinstalled AnyDoc runtime."}',
     `- ${JSON.stringify(composeRuntimeSkills([]).index.find((entry) => entry.name === "opengeni-client"))}`,
-    '- {"id":"native-tool:opengeni-help","name":"opengeni-help","description":"Answer questions about OpenGeni setup, product integration, SDK/API behavior, billing, GitHub access, and development setup. Read the official product docs before making product-specific claims or replacing an application\'s AI provider. No installation is needed for this bundled guide."}',
+    '- {"id":"native-tool:opengeni-help","name":"opengeni-help","description":"Answer questions about Opengeni setup, product integration, SDK/API behavior, billing, GitHub access, and development setup. Read the official product docs before making product-specific claims or replacing an application\'s AI provider. No installation is needed for this bundled guide."}',
     '- {"id":"native-tool:opengeni-visualize","name":"opengeni-visualize","description":"Create visualizations and interactive tools directly in conversation. Use when the user asks to see how something works, explore \'what happens when\' or \'what changes\', compare or inspect, or wants a simulation, map, chart, graph, or mockup, or when a visual clearly explains better than text. Use standard tools for static scientific figures."}',
   ].join("\n");
   const staticInstructions = (instructions: unknown): string => {
@@ -8735,7 +8735,7 @@ describe("runtime event normalization", () => {
         mcpServers: [
           {
             id: "opengeni",
-            name: "OpenGeni",
+            name: "Opengeni",
             url: mcp.url,
             allowedTools: ["search_documents"],
             cacheToolsList: false,
@@ -8798,7 +8798,7 @@ describe("runtime event normalization", () => {
           mcpServers: [
             {
               id: "opengeni",
-              name: "OpenGeni",
+              name: "Opengeni",
               url: `${mcp.url}?ws={workspaceId}`,
               cacheToolsList: false,
             },
@@ -8864,7 +8864,7 @@ describe("runtime event normalization", () => {
         mcpServers: [
           {
             id: "opengeni",
-            name: "OpenGeni",
+            name: "Opengeni",
             url: `${mcp.url}?ws={workspaceId}`,
             cacheToolsList: false,
           },
@@ -8908,7 +8908,7 @@ describe("runtime event normalization", () => {
         mcpServers: [
           {
             id: "opengeni",
-            name: "OpenGeni",
+            name: "Opengeni",
             url: `${mcp.url}?ws={workspaceId}`,
             cacheToolsList: false,
           },
@@ -8950,7 +8950,7 @@ describe("runtime event normalization", () => {
             mcpServers: [
               {
                 id: "opengeni",
-                name: "OpenGeni",
+                name: "Opengeni",
                 url: `${mcp.url}?ws={workspaceId}`,
                 cacheToolsList: false,
               },
@@ -11506,7 +11506,7 @@ describe("runtime event normalization", () => {
             mcpServers: [
               {
                 id: "opengeni",
-                name: "OpenGeni",
+                name: "Opengeni",
                 url,
                 cacheToolsList: false,
               },

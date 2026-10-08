@@ -309,7 +309,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
 
   // of leaving it on a stale snapshot that could re-enable what was just disabled.
   // Every row opens its own page inside this route, addressed by `?open=`:
-  //   integration:<id>  an integration OpenGeni runs (Slack bot, GitHub, Drive)
+  //   integration:<id>  an integration Opengeni runs (Slack bot, GitHub, Drive)
   //   item:<id>         a catalog entry (connection, first-party API, skill)
   //   service:<id>      one provider with several ways to use it (Slack, Jira)
   // The catalog stays mounted underneath, so Back returns to the same tab,

@@ -1257,7 +1257,7 @@ export async function inspectMcpAuthentication(
           params: {
             protocolVersion: "2025-03-26",
             capabilities: {},
-            clientInfo: { name: "OpenGeni", version: "1.0" },
+            clientInfo: { name: "Opengeni", version: "1.0" },
           },
         }),
         signal,
@@ -1881,7 +1881,7 @@ async function dynamicClientRegistration(
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json" },
     body: JSON.stringify({
-      client_name: "OpenGeni",
+      client_name: "Opengeni",
       redirect_uris: [redirectUri],
       token_endpoint_auth_method: "none",
       grant_types: ["authorization_code", "refresh_token"],

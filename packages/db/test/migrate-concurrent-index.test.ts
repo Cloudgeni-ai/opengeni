@@ -48,6 +48,6 @@ describe("concurrent-index migration parsing", () => {
         "0105_new_index.sql",
         "-- deployment-mode: rolling\n-- opengeni:no-transaction\nSELECT 1;",
       ),
-    ).toThrow("Unsupported OpenGeni migration directive");
+    ).toThrow("Unsupported Opengeni migration directive");
   });
 });

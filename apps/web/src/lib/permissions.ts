@@ -156,9 +156,9 @@ export const defaultApiKeyPermissions = new Set<string>([
 ]);
 
 /**
- * Groups offered for a session's first-party MCP (OpenGeni tool) permission
+ * Groups offered for a session's first-party MCP (Opengeni tool) permission
  * scope — the same grouped idiom as the API key dialog. Account-level scopes
- * are excluded: a session's OpenGeni MCP only ever acts inside its workspace.
+ * are excluded: a session's Opengeni MCP only ever acts inside its workspace.
  */
 export function buildSessionMcpPermissionGroups(): PermissionGroup[] {
   const accountOnly = new Set<string>([

@@ -191,7 +191,7 @@ pub fn run(args: &UpdateArgs) -> Result<(), String> {
     let channel = resolve_channel(args.channel.as_deref(), &connections)?;
     // Staged rollout cohorting must be stable for the physical install, not tied
     // to an arbitrary workspace agent id. Every enrollment already shares this
-    // durable keypair, including across independent OpenGeni deployments.
+    // durable keypair, including across independent Opengeni deployments.
     let install_identity = InstallIdentity::load_or_generate(
         &config::config_dir().map_err(|e| format!("could not resolve config dir: {e}"))?,
     )

@@ -467,9 +467,9 @@ describe("organization billing StrictMode ownership", () => {
       await Promise.resolve();
     });
     expect(navigate).toHaveBeenCalledWith({
-      to: "/workspaces/$workspaceId/state",
+      to: "/workspaces/$workspaceId/settings",
       params: { workspaceId },
-      search: { page: "learning" },
+      search: { section: "learning" },
     });
     expect(updateCompanyProfileAgentPolicy).not.toHaveBeenCalled();
 

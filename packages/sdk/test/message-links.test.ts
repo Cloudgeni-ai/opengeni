@@ -6,7 +6,7 @@ const EDITABLE = "0123456789ABCDEF0123456789abcdef";
 const UUID = "22222222-2222-4222-8222-222222222222";
 
 describe("parseOpenGeniLink", () => {
-  test("classifies every agent-authored OpenGeni object link", () => {
+  test("classifies every agent-authored Opengeni object link", () => {
     expect(parseOpenGeniLink(`artifact:${UUID}`)).toEqual({
       kind: "file",
       fileId: UUID,

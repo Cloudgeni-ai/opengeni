@@ -15,39 +15,39 @@ import { LEGACY_PROMPT_CASES } from "./legacy-cases";
 const LOCKED: Record<string, { chars: number; sha256: string; layers: string }> = {
   default: {
     chars: 32811,
-    sha256: "49630a7d91e42db1e42109924d1343491cc25055c9367b04a1ef31c3746e7432",
+    sha256: "4c0176bf558a7c142fe007be86279c941447a0581c2ef6d8511475596a77c14b",
     layers: "operational_contract,persona_and_core",
   },
   environment_and_rig: {
     chars: 33685,
-    sha256: "fc077276c3e2e5a5309794df8cb3c4f76f4bf92f3c75547db981cd9aa3ed1f23",
+    sha256: "efee4201bf6be29a28447fc35787286b3fea473371727ed3e74d861ab7b4f088",
     layers: "operational_contract,persona_and_core",
   },
   custom_template_with_marker: {
     chars: 31401,
-    sha256: "1064719dd100153639e64164552e236a56c714a8717b066718e74df3439dd957",
+    sha256: "afa4a8663c501811d2dda2bc45b41be4e14d2fb9530f20312feb4a9b3bc17320",
     layers: "operational_contract,persona_and_core",
   },
   custom_template_without_marker: {
     chars: 31401,
-    sha256: "1064719dd100153639e64164552e236a56c714a8717b066718e74df3439dd957",
+    sha256: "afa4a8663c501811d2dda2bc45b41be4e14d2fb9530f20312feb4a9b3bc17320",
     layers: "operational_contract,persona_and_core",
   },
   extras_without_governance: {
     chars: 37528,
-    sha256: "b26170de12942ad98b78b9594f8fa38926bacf615c7984bd7acb4971e2e17ca5",
+    sha256: "ab8be3f32d90767770b46d2ad7e1756f51c1182c522aa58a9032ab1d8a23e498",
     layers:
       "operational_contract,persona_and_core,codemode,code_search,git_bindings,workspace_memory,skill_catalog,session_instructions",
   },
   extras_with_governance: {
     chars: 36627,
-    sha256: "f207c82e96827411b028810dc62ab752845058c3b78359233ff8cfd4faea1a3f",
+    sha256: "9f8654b39597a42e4a6651702b9548eb18f42d11bc3972d1a88d0c7e7767e7c8",
     layers:
       "operational_contract,persona_and_core,workspace_governance,session_instructions,codemode,code_search,workspace_memory",
   },
   selfhosted_with_bindings: {
     chars: 32811,
-    sha256: "49630a7d91e42db1e42109924d1343491cc25055c9367b04a1ef31c3746e7432",
+    sha256: "4c0176bf558a7c142fe007be86279c941447a0581c2ef6d8511475596a77c14b",
     layers: "operational_contract,persona_and_core",
   },
 };

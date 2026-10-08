@@ -1,23 +1,23 @@
-# OpenGeni Grafana dashboards
+# Opengeni Grafana dashboards
 
-Dashboards-as-code for the OpenGeni control plane. Seven boards, each answering a
+Dashboards-as-code for the Opengeni control plane. Seven boards, each answering a
 different "manage and fix problems as soon as they arise" question:
 
 | File | Board | Answers |
 | --- | --- | --- |
-| `streaming-health.json` | **OpenGeni · Streaming Health** | Is streaming sluggish, and *where* — the model, durable append, NATS publish, batching, or SSE connection/reconnect path? The absolute TTFT chart is an unalerted investigation view; the split panels separate OpenGeni pre-dispatch latency from provider TTFT (dispatch to first reasoning/answer delta) and show each provider's 30m p90 against its trailing 24h baseline, the inputs of `OpenGeniModelProviderTtftRegression`. |
-| `connected-machines.json` | **OpenGeni · Connected Machines** | Are Connected Machine control ops healthy — op outcomes, healed faults (the leading indicator), op latency, the fault taxonomy, and the payload wall? |
-| `worker-fleet.json` | **OpenGeni · Worker Fleet** | Is the fleet keeping up — turns inflight/queued, worker memory vs. limit, HPA replicas, sandbox leases, and whether compaction is firing against context pressure? |
-| `sandbox-health.json` | **OpenGeni · Sandbox Health** | Are provider operations, creates, lease recovery, checkpoint GC, deadline rotation, draining, and retained-process reconciliation healthy? |
-| `turn-startup.json` | **OpenGeni · Turn Startup** | Where does queue-to-first-byte time go — worker queue, sandbox/rig/repository/file/tool/model preparation, provider dispatch, or provider response? |
-| `google-drive-sync.json` | **OpenGeni · Google Drive Sync** | Are scheduled Drive runs succeeding within their persisted quotas, or failing on provider retry, reconnect, and explicit resource limits? |
-| `runtime-failures.json` | **OpenGeni · Runtime Failures** | Are alerts firing, scrape targets healthy, synthetic probes fresh, turn workers restarting, recovery exhausted, turns failing or recovering, MCP connections or tool calls broken or slow, sandboxes/providers failing, the API returning 5xx, or the durable write path saturated? |
+| `streaming-health.json` | **Opengeni · Streaming Health** | Is streaming sluggish, and *where* — the model, durable append, NATS publish, batching, or SSE connection/reconnect path? The absolute TTFT chart is an unalerted investigation view; the split panels separate Opengeni pre-dispatch latency from provider TTFT (dispatch to first reasoning/answer delta) and show each provider's 30m p90 against its trailing 24h baseline, the inputs of `OpenGeniModelProviderTtftRegression`. |
+| `connected-machines.json` | **Opengeni · Connected Machines** | Are Connected Machine control ops healthy — op outcomes, healed faults (the leading indicator), op latency, the fault taxonomy, and the payload wall? |
+| `worker-fleet.json` | **Opengeni · Worker Fleet** | Is the fleet keeping up — turns inflight/queued, worker memory vs. limit, HPA replicas, sandbox leases, and whether compaction is firing against context pressure? |
+| `sandbox-health.json` | **Opengeni · Sandbox Health** | Are provider operations, creates, lease recovery, checkpoint GC, deadline rotation, draining, and retained-process reconciliation healthy? |
+| `turn-startup.json` | **Opengeni · Turn Startup** | Where does queue-to-first-byte time go — worker queue, sandbox/rig/repository/file/tool/model preparation, provider dispatch, or provider response? |
+| `google-drive-sync.json` | **Opengeni · Google Drive Sync** | Are scheduled Drive runs succeeding within their persisted quotas, or failing on provider retry, reconnect, and explicit resource limits? |
+| `runtime-failures.json` | **Opengeni · Runtime Failures** | Are alerts firing, scrape targets healthy, synthetic probes fresh, turn workers restarting, recovery exhausted, turns failing or recovering, MCP connections or tool calls broken or slow, sandboxes/providers failing, the API returning 5xx, or the durable write path saturated? |
 
 All seven are theme-agnostic, tagged `opengeni` + `observability`, and carry a
 `$datasource` template variable — pick your Prometheus datasource on import; no UID
 is hardcoded. The Turn Startup dashboard additionally requires one exact
 `$namespace`, `$environment`, and `$release` selection so a shared Prometheus
-cannot combine separate OpenGeni deployments. Its first-byte latency quantiles
+cannot combine separate Opengeni deployments. Its first-byte latency quantiles
 contain successful samples only; the adjacent availability panel separately
 shows canonical durable logical turns that terminate failed without a first byte
 across generic and subscription transports.
@@ -46,7 +46,7 @@ providers:
       foldersFromFilesStructure: true
 ```
 
-**OpenGeni Kubernetes observability wrapper** — install the chart rooted at
+**Opengeni Kubernetes observability wrapper** — install the chart rooted at
 `deploy/observability`. It renders one deterministic ConfigMap per file directly
 from this directory, labels it for the Grafana sidecar, records the content hash
 and source revision, and installs the pinned Prometheus/Grafana stack. See
@@ -68,7 +68,7 @@ kubectl create configmap opengeni-streaming-health \
 
 ## Metric sources
 
-Most panels read **app-emitted** series scraped from OpenGeni's `/metrics` endpoints.
+Most panels read **app-emitted** series scraped from Opengeni's `/metrics` endpoints.
 
 Runtime Failures includes **Sandbox visibility-check failures**, separating an
 invisible destination, unsuccessful shell exit, still-running check, invalid

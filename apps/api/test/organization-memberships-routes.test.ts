@@ -36,7 +36,7 @@ let managedEmailOutcome: ManagedEmailDeliveryResult = {
 };
 let managedEmailSendHook: ((message: ManagedEmailMessage) => Promise<void>) | null = null;
 const managedEmailTransport = {
-  sender: "OpenGeni <auth@mail.opengeni.ai>",
+  sender: "Opengeni <auth@mail.opengeni.ai>",
   idempotency: {
     scope: "test-provider-v1:organization-memberships-routes",
     retentionSeconds: 86_400,

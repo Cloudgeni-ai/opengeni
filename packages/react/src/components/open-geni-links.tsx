@@ -4,7 +4,7 @@ import { createContext, useContext, useMemo, type ReactNode } from "react";
 export type { OpenGeniLinkTarget };
 
 /**
- * How the host opens one OpenGeni object an agent linked in chat Markdown.
+ * How the host opens one Opengeni object an agent linked in chat Markdown.
  *
  * - `{ href }` renders a real link (new tab) — use it for a host page URL.
  * - `{ open }` renders a button that runs the action (download, open a panel,
@@ -42,7 +42,7 @@ export function chainLinkResolvers(
 }
 
 /**
- * Resolve OpenGeni object links (`artifact:`, `sandbox:`, editable artifacts,
+ * Resolve Opengeni object links (`artifact:`, `sandbox:`, editable artifacts,
  * Sites) for every {@link Markdown} body below. An inner provider is asked
  * before an outer one, so a host can override a single kind and keep defaults.
  */
@@ -100,7 +100,7 @@ function base64Bytes(content: string): Uint8Array<ArrayBuffer> {
 }
 
 /**
- * Default resolver for a session conversation that talks to OpenGeni through
+ * Default resolver for a session conversation that talks to Opengeni through
  * the normal SDK client (for example behind `createSessionProxyHandler`):
  *
  * - `artifact:<file>` downloads the retained file through a short-lived URL.

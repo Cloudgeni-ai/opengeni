@@ -1,11 +1,11 @@
 # MCP operation outcome recovery
 
 An MCP caller timeout does not prove that the provider stopped or rolled back a
-mutation. OpenGeni can retain an operation locator before dispatch and recover
+mutation. Opengeni can retain an operation locator before dispatch and recover
 its eventual result through an explicitly configured, observation-only provider
 tool. It never repeats the original mutation to discover its outcome.
 
-This is an opt-in OpenGeni provider contract. Tool annotations do not enable it.
+This is an opt-in Opengeni provider contract. Tool annotations do not enable it.
 In particular, an idempotent write can still execute when the original request
 never arrived; replaying that write is not an observation.
 
@@ -51,7 +51,7 @@ must durably associate that reference with the exact authenticated operation,
 original tool, argument fingerprint and result. It must not infer identity from
 a model-supplied `operationId` or `sourceCallId` argument.
 
-The fingerprint is SHA-256 over OpenGeni's canonical JSON encoding of the exact
+The fingerprint is SHA-256 over Opengeni's canonical JSON encoding of the exact
 original arguments: recursively sorted object keys, preserved array order, and
 ordinary JSON string encoding, encoded as UTF-8. The implementation is
 `digestCanonicalJson` in `packages/tool-gateway/src/catalog.ts`.
@@ -142,7 +142,7 @@ enable this feature in a mixed old/new claimer pool. Current claimers take no
 organization-membership lock at all, so the ledger's membership -> session
 order cannot invert against a claim.
 Provider support must be implemented and verified separately before enabling
-its mapping; installing the OpenGeni code cannot make an unsupported provider
+its mapping; installing the Opengeni code cannot make an unsupported provider
 observation-only. Historical calls lacking a captured binding are not backfilled
 by guessing their arguments, authority or operation reference.
 

@@ -1962,10 +1962,10 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
       getStreamCapabilities: async () => fakeCapabilities(),
       getWorkspaceCapture: async () => captureAvailable(fakeManifest(1)),
       gitStatus: async () => {
-        throw new Error("OpenGeni API 503: Workspace files are temporarily unavailable");
+        throw new Error("Opengeni API 503: Workspace files are temporarily unavailable");
       },
       fsList: async () => {
-        throw new Error("OpenGeni API 503: Workspace files are temporarily unavailable");
+        throw new Error("Opengeni API 503: Workspace files are temporarily unavailable");
       },
     });
     const rendered = await renderComponent(

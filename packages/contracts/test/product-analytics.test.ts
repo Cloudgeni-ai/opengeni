@@ -58,7 +58,7 @@ describe("product analytics dimensions", () => {
     }
   });
 
-  test("first-party families come from OpenGeni's own fixed names only", () => {
+  test("first-party families come from Opengeni's own fixed names only", () => {
     expect(firstPartyToolFamily("goal_set")).toBe("goal_set");
     expect(firstPartyToolFamily("exec_command")).toBe("exec_command");
     expect(firstPartyToolFamily("skill_checkout")).toBe("skill_checkout");

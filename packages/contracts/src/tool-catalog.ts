@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { Permission } from "./permissions";
 
 export const ATTEMPT_TOOL_CATALOG_VERSION = 1 as const;
 export const TOOL_GATEWAY_CATALOG_VERSION = 1 as const;
@@ -182,6 +183,9 @@ export const AttemptToolCatalog = z
     generation: z.number().int().positive(),
     digest: sha256,
     createdAt: z.string().datetime({ offset: true }),
+    /** Native permission ceiling frozen by the worker with this catalog.
+     * Absence is legacy/unknown, not permission to derive a larger live set. */
+    firstPartyMcpPermissions: z.array(Permission).max(128).optional(),
     entries: z.array(AttemptToolCatalogEntry).max(ATTEMPT_TOOL_CATALOG_MAX_ENTRIES),
   })
   .strict()

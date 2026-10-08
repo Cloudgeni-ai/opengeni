@@ -9,7 +9,7 @@ import {
 const workspaceId = "0f9a4c1e-2b3d-4e5f-8a9b-0c1d2e3f4a5b";
 const sessionId = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
 
-describe("links to another OpenGeni deployment", () => {
+describe("links to another Opengeni deployment", () => {
   const production = "https://app.opengeni.ai";
 
   test("recognizes a sibling deployment under the same parent domain", () => {
@@ -30,7 +30,7 @@ describe("links to another OpenGeni deployment", () => {
     ]);
   });
 
-  test("leaves this deployment, unrelated sites and non-OpenGeni routes alone", () => {
+  test("leaves this deployment, unrelated sites and non-Opengeni routes alone", () => {
     expect(
       otherDeploymentLinks(
         [

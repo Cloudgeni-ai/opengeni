@@ -3839,7 +3839,7 @@ import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk
 
-window = Gtk.Window(title='OpenGeni AT-SPI Fixture')
+window = Gtk.Window(title='Opengeni AT-SPI Fixture')
 window.set_default_size(420, 180)
 box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
 window.add(box)
@@ -3863,7 +3863,7 @@ import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk
 
-window = Gtk.Window(title='OpenGeni X11 Occluder')
+window = Gtk.Window(title='Opengeni X11 Occluder')
 window.set_default_size(420, 180)
 window.set_decorated(False)
 window.move(0, 0)
@@ -3908,7 +3908,7 @@ Gtk.main()
                 .iter()
                 .find(|target| {
                     target.kind == NativeTargetKind::Window
-                        && target.title == "OpenGeni AT-SPI Fixture"
+                        && target.title == "Opengeni AT-SPI Fixture"
                 })
                 .cloned();
             let screen = targets

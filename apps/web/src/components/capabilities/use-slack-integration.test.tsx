@@ -122,7 +122,7 @@ function installedBot(): { bot: ConnectionMetadata; binding: SlackInstallationBi
       slackTeamName: "CloudGeni",
       botId: "B_CLOUDGENI_PREVIEW",
       botUserId: "U_CLOUDGENI_PREVIEW",
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       state: "active",
       quarantineReason: null,
       version: 1,

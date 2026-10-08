@@ -1,3 +1,4 @@
+import { NativeTimelineMessagesProvider, type NativeTimelineMessages } from "./messages";
 import {
   conversationTimeline,
   type AgentMessageItem,
@@ -12,7 +13,7 @@ import {
   type ComponentRef,
   type ReactNode,
 } from "react";
-import { ActivityIndicator, Pressable, Text, View, type TextInput } from "react-native";
+import { ActivityIndicator, Image, Pressable, Text, View, type TextInput } from "react-native";
 import {
   defaultChatComposerMessages,
   type ChatComposerMessages,
@@ -36,6 +37,7 @@ import { SessionCommandsList, SessionSignals } from "./session-signals";
 import type { ClientModel, OpenGeniClient, SessionBackgroundCommand } from "@opengeni/sdk";
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
+import { useNativeTimelineMessages } from "./messages";
 
 /* ----------------------------------------------------------------------------
    The web session page body at phone width: timeline (with the question card
@@ -81,6 +83,15 @@ export interface NativeSessionScreenProps extends Omit<
   client?: OpenGeniClient | undefined;
   /** Model catalog for the agents panel rows. */
   models?: readonly ClientModel[] | undefined;
+  /** Translations for the strings the native surfaces draw (merged over any provider above). */
+  timelineMessages?: Partial<NativeTimelineMessages> | undefined;
+  /**
+   * Draw the composer yourself. Receives exactly the props the shared
+   * `SessionComposer` would get (queue dock, approvals and attachment chips
+   * included), so a host can restyle it or render its own native composer.
+   * A floating composer must report its height through `onHeightChange`.
+   */
+  renderComposer?: ((props: SessionComposerProps) => ReactNode) | undefined;
 }
 
 export function NativeSessionScreen({
@@ -95,10 +106,51 @@ export function NativeSessionScreen({
   approvalMessages,
   client,
   models,
+  timelineMessages,
+  renderComposer,
   renderMessageActions: hostMessageActions,
   ...timelineProps
 }: NativeSessionScreenProps) {
+  return (
+    <NativeTimelineMessagesProvider messages={timelineMessages}>
+      <SessionScreenBody
+        controller={controller}
+        composer={composerSlots}
+        trailing={trailing}
+        topBar={topBar}
+        bottomInset={bottomInset}
+        keyboardBottomOffset={keyboardBottomOffset}
+        feedback={feedback}
+        humanInputMessages={humanInputMessages}
+        approvalMessages={approvalMessages}
+        client={client}
+        models={models}
+        renderComposer={renderComposer}
+        renderMessageActions={hostMessageActions}
+        {...timelineProps}
+      />
+    </NativeTimelineMessagesProvider>
+  );
+}
+
+function SessionScreenBody({
+  controller,
+  composer: composerSlots,
+  trailing,
+  topBar,
+  bottomInset,
+  keyboardBottomOffset,
+  feedback,
+  humanInputMessages,
+  approvalMessages,
+  client,
+  models,
+  renderComposer,
+  renderMessageActions: hostMessageActions,
+  ...timelineProps
+}: Omit<NativeSessionScreenProps, "timelineMessages">) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const { composer, queue, humanInput, approvals, control, attachments } = controller;
   const composerInput = useRef<ComponentRef<typeof TextInput>>(null);
   // The composer floats over the conversation; its occupied height insets the timeline.
@@ -168,7 +220,7 @@ export function NativeSessionScreen({
         emptyState={
           empty && failed ? (
             <LoadFailure
-              message={loadFailureMessage(controller.error)}
+              message={loadFailureMessage(controller.error, m.connectionFailed)}
               onRetry={() => void controller.refresh()}
             />
           ) : empty && controller.initialLoading ? (
@@ -196,44 +248,43 @@ export function NativeSessionScreen({
           </>
         }
       />
-      <SessionComposer
-        floating
-        onHeightChange={(height) => setComposerHeight(Math.round(height))}
-        onActionFeedback={composerSlots?.onActionFeedback}
-        value={composer.value}
-        onChangeText={composer.setValue}
-        onSend={() => void composer.send()}
-        canSend={composer.canSend && !busy}
-        sending={composer.sending}
-        running={controller.runActive}
-        paused={paused}
-        pauseBusy={composer.pausing || composer.resuming}
-        onPause={() => void composer.pause()}
-        onResume={() => void composer.resume()}
-        onAttach={composerSlots?.onAttach ?? (() => void attachments.pickImages())}
-        renderLeading={composerSlots?.renderLeading}
-        options={composerSlots?.options}
-        placeholder={composerSlots?.placeholder}
-        bottomInset={bottomInset}
-        keyboardBottomOffset={keyboardBottomOffset}
-        inputRef={composerInput}
-        messages={composerSlots?.messages}
-        voice={composerSlots?.voice}
-        below={
-          composer.draftConflict ? (
-            <DraftConflictStrip
-              messages={composerSlots?.messages}
-              onResolve={(choice) => void composer.resolveDraftConflict(choice)}
-            />
-          ) : null
-        }
-        header={
+      {(renderComposer ?? renderSharedComposer)({
+        floating: true,
+        onHeightChange: (height) => setComposerHeight(Math.round(height)),
+        onActionFeedback: composerSlots?.onActionFeedback,
+        value: composer.value,
+        onChangeText: composer.setValue,
+        onSend: () => void composer.send(),
+        canSend: composer.canSend && !busy,
+        sending: composer.sending,
+        running: controller.runActive,
+        paused: paused,
+        pauseBusy: composer.pausing || composer.resuming,
+        onPause: () => void composer.pause(),
+        onResume: () => void composer.resume(),
+        onAttach: composerSlots?.onAttach ?? (() => void attachments.pickImages()),
+        onPasteImages: (files) => void attachments.addFiles(files),
+        renderLeading: composerSlots?.renderLeading,
+        options: composerSlots?.options,
+        placeholder: composerSlots?.placeholder,
+        bottomInset: bottomInset,
+        keyboardBottomOffset: keyboardBottomOffset,
+        inputRef: composerInput,
+        messages: composerSlots?.messages,
+        voice: composerSlots?.voice,
+        below: composer.draftConflict ? (
+          <DraftConflictStrip
+            messages={composerSlots?.messages}
+            onResolve={(choice) => void composer.resolveDraftConflict(choice)}
+          />
+        ) : null,
+        header: (
           <>
             {composerSlots?.header}
             <AttachmentChips attachments={attachments} />
           </>
-        }
-        above={
+        ),
+        above: (
           <>
             <QueueDock
               queue={queue}
@@ -271,8 +322,8 @@ export function NativeSessionScreen({
               />
             ) : null}
           </>
-        }
-      />
+        ),
+      })}
     </View>
   );
 }
@@ -298,24 +349,25 @@ function useAutoRecover(failed: boolean, live: boolean, refresh: () => Promise<v
 }
 
 /** Transport failures read as a connection problem, never as a native stack. */
-function loadFailureMessage(error: Error | null): string | undefined {
+function loadFailureMessage(error: Error | null, connectionFailed: string): string | undefined {
   if (!error) return undefined;
   if (
     error.name === "TypeError" ||
     /fetch failed|network request failed|could not connect|offline|timed out/i.test(error.message)
   ) {
-    return "Couldn't connect. Check your connection; this retries automatically.";
+    return connectionFailed;
   }
   return error.message;
 }
 
 function LoadFailure({ message, onRetry }: { message?: string | undefined; onRetry: () => void }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   return (
     <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 10, padding: 24 }}>
       <Icon name="circle-alert" size={20} color={theme.colors["status-failed"]} />
       <Text style={{ ...fontStyle(theme, 500), fontSize: 15, color: theme.colors.fg }}>
-        Couldn't load this session
+        {m.loadFailedTitle}
       </Text>
       {message ? (
         <Text
@@ -330,7 +382,7 @@ function LoadFailure({ message, onRetry }: { message?: string | undefined; onRet
           {message}
         </Text>
       ) : null}
-      <Button label="Retry" onPress={onRetry} />
+      <Button label={m.retry} onPress={onRetry} />
     </View>
   );
 }
@@ -353,6 +405,77 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
       {attachments.attachments.map((item) => {
         const failed = item.status === "failed";
         const busy = item.status === "uploading" || item.status === "preparing";
+        if (item.kind === "image" && item.previewUri) {
+          // Photos show as photos, as on the web: a thumbnail with its state on top.
+          return (
+            <View key={item.id} style={{ width: 56, height: 56 }}>
+              <Pressable
+                accessibilityRole={failed ? "button" : "image"}
+                accessibilityLabel={failed ? `Retry ${item.name}` : item.name}
+                disabled={!failed}
+                onPress={() => void attachments.retry(item.id)}
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: theme.radius.md,
+                  overflow: "hidden",
+                  borderWidth: 1,
+                  borderColor: failed ? withAlpha(c["status-failed"], 0.6) : c.border,
+                  backgroundColor: c["surface-2"],
+                }}
+              >
+                <Image
+                  source={{ uri: item.previewUri }}
+                  style={{ width: "100%", height: "100%" }}
+                  resizeMode="cover"
+                />
+                {busy || failed ? (
+                  <View
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      alignItems: "center",
+                      justifyContent: "center",
+                      backgroundColor: failed
+                        ? withAlpha(c["status-failed"], 0.35)
+                        : "rgba(0,0,0,0.35)",
+                    }}
+                  >
+                    {busy ? (
+                      <ActivityIndicator size="small" color="#FFFFFF" />
+                    ) : (
+                      <Icon name="rotate-ccw" size={16} color="#FFFFFF" />
+                    )}
+                  </View>
+                ) : null}
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Remove ${item.name}`}
+                onPress={() => attachments.remove(item.id)}
+                hitSlop={8}
+                style={{
+                  position: "absolute",
+                  top: -6,
+                  right: -6,
+                  width: 20,
+                  height: 20,
+                  borderRadius: 10,
+                  alignItems: "center",
+                  justifyContent: "center",
+                  backgroundColor: c.fg,
+                  borderWidth: 1.5,
+                  borderColor: c["surface-1"],
+                }}
+              >
+                <Icon name="x" size={10} color={c.bg} />
+              </Pressable>
+            </View>
+          );
+        }
         return (
           <View
             key={item.id}
@@ -488,4 +611,8 @@ function NativeSessionCommands(props: {
     [client, load, sessionId, workspaceId],
   );
   return <SessionCommandsList commands={{ commands, loading, error, cancel }} />;
+}
+
+function renderSharedComposer(props: SessionComposerProps): ReactNode {
+  return <SessionComposer {...props} />;
 }

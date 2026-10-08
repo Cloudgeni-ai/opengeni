@@ -39,7 +39,7 @@ const repoResource = (): ResourceRef => ({
 const cloudSettings = () =>
   testSettings({
     sandboxBackend: "modal",
-    gitAuthorName: "OpenGeni Bot",
+    gitAuthorName: "Opengeni Bot",
     gitAuthorEmail: "bot@opengeni.dev",
   });
 
@@ -67,7 +67,7 @@ describe("change B — sandboxEnvironmentForRun transient delivery for a machine
     expect(env.OPENGENI_OGTOOL_PACKAGE_SPEC).toBeUndefined();
     // The stable base (git identity + HOME) is intact — the SAME object feeds the
     // box manifest + the agent, so env-parity holds.
-    expect(env.GIT_AUTHOR_NAME).toBe("OpenGeni Bot");
+    expect(env.GIT_AUTHOR_NAME).toBe("Opengeni Bot");
     expect(env.HOME).toBe("/workspace");
   });
 
@@ -114,7 +114,7 @@ describe("D1-lite — establishSelfhostedTurnSession binds the machine, no Modal
     testSettings({ sandboxSelfhostedEnabled: true, selfhostedRelayUrl: "wss://relay.example" });
 
   test("binds the SelfhostedSession directly (backendId selfhosted, agent id + env + cwd threaded) — no Modal client", async () => {
-    const env = { HOME: "/workspace", GIT_AUTHOR_NAME: "OpenGeni Bot", DEPLOY_TARGET: "vm1" };
+    const env = { HOME: "/workspace", GIT_AUTHOR_NAME: "Opengeni Bot", DEPLOY_TARGET: "vm1" };
     const established = await establishSelfhostedTurnSession(
       // db is never touched on this path (no lease here); bus undefined ⇒ the control
       // RPC is offline-until-bound, and resume() is a pure subject re-address (no NATS).

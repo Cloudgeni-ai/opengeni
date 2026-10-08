@@ -242,7 +242,7 @@ export const AGENT_INSTRUCTIONS_CORE_PLACEHOLDER = "{{core}}";
  * intentionally.
  */
 export const DEFAULT_AGENT_INSTRUCTIONS = [
-  "You are an OpenGeni workspace agent: a general assistant for questions, writing, research, analysis, and technical work.",
+  "You are an Opengeni workspace agent: a general assistant for questions, writing, research, analysis, and technical work.",
   "Follow the user's task and the applicable Skill instructions for the current role.",
   "When a task needs files or commands, work inside the sandbox workspace with the filesystem and shell tools.",
   "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
@@ -362,7 +362,7 @@ const SettingsSchema = z.object({
   supportEmail: z.string().trim().email().max(254).optional(),
   publicBaseUrl: z.string().url().optional(),
   // Product documentation the web console links from its Help menu. Absent
-  // means the public OpenGeni docs; `none` hides the link for deployments that
+  // means the public Opengeni docs; `none` hides the link for deployments that
   // publish no documentation of their own.
   documentationUrl: z.preprocess(
     (value) =>
@@ -480,7 +480,7 @@ const SettingsSchema = z.object({
   slackSigningSecret: z.string().optional(),
   // Unlisted apps share Slack’s restricted history/replies quota across all tokens.
   slackAccessMode: z.enum(["limited", "full"]).default("limited"),
-  slackBotDisplayName: OpenGeniSlackBotDisplayName.default("OpenGeni"),
+  slackBotDisplayName: OpenGeniSlackBotDisplayName.default("Opengeni"),
   slackCommand: z
     .string()
     .trim()
@@ -583,7 +583,7 @@ const SettingsSchema = z.object({
   agentMaxModelCallsPerTurn: z.coerce.number().int().positive().default(1_000_000),
   // Deployment fallback for models that do not declare their own window.
   // Built-in billed GPT-5.6 Sol/Terra/Luna pin Codex's 272k catalog instead.
-  // OpenGeni always performs one durable, portable plaintext compaction
+  // Opengeni always performs one durable, portable plaintext compaction
   // transition; there is no provider/server/off mode ladder.
   contextWindowTokens: z.coerce.number().int().positive().default(1_050_000),
   // Optional model-catalog effective input ceiling. Codex and billed GPT-5.6
@@ -675,7 +675,7 @@ const SettingsSchema = z.object({
     .default(20 * 1024 * 1024 * 1024),
   videoGenerationTempDirectory: z.string().trim().min(1).max(1_024).default("/tmp/opengeni-video"),
   videoGenerationFfprobePath: z.string().trim().min(1).max(1_024).default("ffprobe"),
-  // OpenGeni's customer price, not a claim about the provider's delayed cost report.
+  // Opengeni's customer price, not a claim about the provider's delayed cost report.
   // The durable operation freezes the exact resulting price before provider submit.
   videoGenerationCredit480pMicrosPerSecond: z.coerce
     .number()
@@ -722,6 +722,10 @@ const SettingsSchema = z.object({
     .positive()
     .max(25 * 1024 * 1024)
     .default(8 * 1024 * 1024),
+  /** Move idle sessions' bulky content to object storage (docs/session-storage-lifecycle.md). */
+  sessionArchiveEnabled: EnvBoolean.default(false),
+  /** Days without a new turn before a session becomes eligible for the archive. */
+  sessionArchiveIdleDays: z.coerce.number().int().min(1).max(3650).default(30),
   voiceInputResumableRetentionSeconds: z.coerce
     .number()
     .int()
@@ -901,7 +905,7 @@ const SettingsSchema = z.object({
   openaiReasoningEffort: ReasoningEffort.default("low"),
   openaiAllowedReasoningEfforts: z.string().default("low,medium,high,xhigh,max"),
   // Default for new chats and scheduled tasks when the workspace has an
-  // OpenGeni credit balance, no saved workspace default, and no usable
+  // Opengeni credit balance, no saved workspace default, and no usable
   // connected subscription, and the deployment default is not already a
   // credits-billed model. Selected only when this model is selectable in the
   // workspace catalog; otherwise the first selectable credits model is used.
@@ -1054,12 +1058,12 @@ const SettingsSchema = z.object({
   // CRITICAL (sandbox-file-persistence): when this is UNSET the Modal SDK sends
   // idleTimeoutSecs=undefined, so Modal applies its OWN short server-default idle
   // timeout (~minutes) — and a box between turns sits with NO active connection,
-  // so that idle clock runs and Modal idle-reaps the box LONG before OpenGeni's
+  // so that idle clock runs and Modal idle-reaps the box LONG before Opengeni's
   // own reaper waits out sandboxIdleGraceMs (15min) to resume+persist+terminate
   // it. The observed failure: every drain logs "drainable box already gone
   // (NotFound on resume)", persistWorkspace() never fires, /workspace is lost.
-  // Modal's idle-reap is a SECOND reaper racing OpenGeni's — and it wins. The fix:
-  // OpenGeni OWNS box lifecycle via its reaper + the hard modalTimeoutSeconds
+  // Modal's idle-reap is a SECOND reaper racing Opengeni's — and it wins. The fix:
+  // Opengeni OWNS box lifecycle via its reaper + the hard modalTimeoutSeconds
   // backstop, so the Modal idle-reap must NOT fire first. We default the effective
   // idle timeout to the hard lifetime (effectiveModalIdleTimeoutSeconds), making
   // the box survive its full warm window so the reaper can snapshot it. Set this
@@ -1168,7 +1172,7 @@ const SettingsSchema = z.object({
   // Release and preview profiles must provide an immutable OCI digest. The
   // adapter refuses tag-only references when this backend is active.
   openSandboxImage: z.string().min(1).optional(),
-  // Renewable provider TTL is a leak/backstop clock, not OpenGeni's idle
+  // Renewable provider TTL is a leak/backstop clock, not Opengeni's idle
   // policy. The pinned server accepts a one-minute minimum; ordinary
   // deployments default to one hour.
   openSandboxTtlSeconds: z.coerce.number().int().min(60).max(86_400).default(3_600),
@@ -1316,7 +1320,7 @@ const SettingsSchema = z.object({
   // box idle timeout (effectiveModalIdleTimeoutSeconds, which defaults to the hard
   // modalTimeoutSeconds). No keep-alive loop: between turns the box survives on its
   // idle timeout — which we pin high enough (via the idle-timeout default) that
-  // OpenGeni's reaper, not Modal's idle-reap, governs teardown so /workspace is
+  // Opengeni's reaper, not Modal's idle-reap, governs teardown so /workspace is
   // snapshotted before the box dies (sandbox-file-persistence).
   sandboxLeaseReaperPeriodMs: z.coerce.number().int().positive().default(30_000),
   sandboxViewerHolderTtlMs: z.coerce.number().int().positive().default(90_000),
@@ -1574,7 +1578,7 @@ const SettingsSchema = z.object({
   // proven sanitized.
   organizationUserSetupQueryEdgeSanitizationConfirmed: EnvBoolean.default(false),
   resendApiKey: z.string().optional(),
-  emailFrom: z.string().default("OpenGeni <auth@mail.opengeni.ai>"),
+  emailFrom: z.string().default("Opengeni <auth@mail.opengeni.ai>"),
   stripeSecretKey: z.string().optional(),
   stripePublishableKey: z.string().optional(),
   stripeWebhookSecret: z.string().optional(),
@@ -2416,9 +2420,9 @@ export type ModelUsageInput = {
 };
 
 export type ModelUsageCostBreakdown = {
-  /** Provider-rate cost basis for the exact usage, before OpenGeni margin. */
+  /** Provider-rate cost basis for the exact usage, before Opengeni margin. */
   providerCostMicros: number;
-  /** OpenGeni credit price after configured margin and latency-mode multiplier. */
+  /** Opengeni credit price after configured margin and latency-mode multiplier. */
   creditCostMicros: number;
 };
 
@@ -2677,7 +2681,7 @@ const ModelLogoUrlSchema = z
 
 const RegistryModelSchema = z
   .object({
-    id: z.string().min(1), // canonical OpenGeni product id
+    id: z.string().min(1), // canonical Opengeni product id
     upstreamModelId: z.string().min(1).optional(), // exact provider slug; defaults to id
     aliases: z.array(z.string().min(1)).optional(), // accepted input only; never sent upstream
     label: z.string().min(1).optional(), // display name; defaults to id
@@ -2693,7 +2697,7 @@ const RegistryModelSchema = z
     hostedWebSearch: z.boolean().optional(), // legacy compatibility input/projection
     capabilities: ModelCapabilitiesV1Schema.optional(),
     pricing: z.union([ModelPricingSchema, ModelPricingScheduleSchema]).optional(),
-    // Reserved normalized contracts are derived by OpenGeni in V1. Generic
+    // Reserved normalized contracts are derived by Opengeni in V1. Generic
     // registry JSON must not opt itself into workspace BYOK or reattribute cost.
     credentialSource: z.never().optional(),
     billing: z.never().optional(),
@@ -3162,7 +3166,7 @@ export const ModelCatalogDocument = z
         context.addIssue({
           code: "custom",
           path: ["registryProviders", providerIndex, "id"],
-          message: `provider id ${provider.id} is reserved for a reviewed OpenGeni provider`,
+          message: `provider id ${provider.id} is reserved for a reviewed Opengeni provider`,
         });
       }
       if (providerIds.has(provider.id)) {
@@ -3636,7 +3640,7 @@ function opperCapabilities(input: {
 }): ModelCapabilitiesV1 {
   return ModelCapabilitiesV1Schema.parse({
     reasoning: { ...input.reasoning, required: false },
-    // OpenGeni sends ordinary OpenAI-compatible Chat function tools.
+    // Opengeni sends ordinary OpenAI-compatible Chat function tools.
     functionCalling: { upstream: "supported", runnable: true },
     structuredOutput: {
       upstream: input.structuredOutput,
@@ -3765,7 +3769,7 @@ function isOpperGeminiFamilyModel(upstreamModelId: string): boolean {
  *   effort on every probed route and ignores one a route does not support;
  * - image input is on for the Claude and Gemini families, where every route
  *   in Opper's catalogue lists vision; other families stay text-only;
- * - typed file input stays off (OpenGeni sends documents to the sandbox).
+ * - typed file input stays off (Opengeni sends documents to the sandbox).
  */
 function opperCustomModelCapabilities(upstreamModelId: string): ModelCapabilitiesV1 {
   return opperCapabilities({
@@ -3928,7 +3932,7 @@ export function configuredOpperOrganizationProductModelIds(settings: Settings): 
 }
 
 /**
- * Built-in OpenGeni credit pricing schedules.
+ * Built-in Opengeni credit pricing schedules.
  *
  * Rates are provider list prices in USD micros per 1M tokens. Debit applies
  * `marginBps` (500 = +5%) on top. Long-context tiers follow OpenAI's
@@ -3936,7 +3940,7 @@ export function configuredOpperOrganizationProductModelIds(settings: Settings): 
  *
  * GPT-5.4 and older families are intentionally omitted — they are no longer
  * offered. Codex / connected-subscription turns use `metering: external`, so
- * this map never debits them, but it does provide their equivalent OpenGeni
+ * this map never debits them, but it does provide their equivalent Opengeni
  * credit price when a matching product model is configured.
  *
  * When adding or changing a billed model, run `bun run check:model-pricing`
@@ -4506,6 +4510,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     voiceInputResumableMaxChunkSizeBytes: optional(
       "OPENGENI_VOICE_INPUT_RESUMABLE_MAX_CHUNK_SIZE_BYTES",
     ),
+    sessionArchiveEnabled: optional("OPENGENI_SESSION_ARCHIVE_ENABLED"),
+    sessionArchiveIdleDays: optional("OPENGENI_SESSION_ARCHIVE_IDLE_DAYS"),
     voiceInputResumableRetentionSeconds: optional(
       "OPENGENI_VOICE_INPUT_RESUMABLE_RETENTION_SECONDS",
     ),
@@ -4991,7 +4997,7 @@ export function allowedFirstPartyMcpToolsForSession(
  * The Modal sandbox idle timeout (seconds) the provider actually passes as
  * idleTimeoutMs (sandbox-file-persistence). When the operator did not pin
  * OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS we DEFAULT it to the hard lifetime
- * (modalTimeoutSeconds): OpenGeni's reaper owns box lifecycle, so Modal's
+ * (modalTimeoutSeconds): Opengeni's reaper owns box lifecycle, so Modal's
  * built-in idle-reap (which would otherwise fire on its short server default and
  * kill the box BEFORE the reaper can snapshot /workspace) is pushed out to the
  * hard backstop. An explicit smaller value is honoured (the boot invariant keeps
@@ -5542,7 +5548,7 @@ function gatewayRegistryProvider(
       : organization
         ? ORGANIZATION_GATEWAY_PROVIDER_ID
         : OPENGENI_GATEWAY_PROVIDER_ID,
-    label: workspace ? "Your Gateway" : organization ? "Organization Gateway" : "OpenGeni",
+    label: workspace ? "Your Gateway" : organization ? "Organization Gateway" : "Opengeni",
     // Responses preserves vision, reasoning items, and provider-native usage.
     // Model-specific compatibility stays at the reviewed request fence rather
     // than downgrading the whole provider wire.
@@ -5635,7 +5641,7 @@ function openRouterRegistryProvider(
   }
   if (models.length === 0) return null;
   const defaultHeaders: Record<string, string> = {
-    "x-title": "OpenGeni",
+    "x-title": "Opengeni",
     ...(settings.publicBaseUrl ? { "http-referer": settings.publicBaseUrl } : {}),
   };
   return {
@@ -6270,7 +6276,7 @@ export function isDirectOpenAiApiBaseUrl(baseUrl: string | undefined): boolean {
 }
 
 /**
- * Map OpenGeni latency mode to the provider `service_tier` wire value.
+ * Map Opengeni latency mode to the provider `service_tier` wire value.
  * Azure, Codex ChatGPT, and xAI accept `priority`; OpenAI API accepts `fast`.
  * Standard omits the field.
  */
@@ -6401,7 +6407,7 @@ function registryBilling(provider: InternalRegistryProvider): BillingAttribution
     case "api-key":
     case "vercel-gateway-managed":
     // Paid deployment Opper routes settle through the deployment's Opper
-    // account and debit OpenGeni credits, like managed AI Gateway.
+    // account and debit Opengeni credits, like managed AI Gateway.
     case "opper-managed":
       return { upstreamPayer: "deployment", metering: "opengeni_credits" };
     default: {
@@ -8196,7 +8202,7 @@ function calculateUsageCostBreakdown(
 }
 
 /**
- * Convert AI Gateway's exact USD inference cost to OpenGeni credit micros and
+ * Convert AI Gateway's exact USD inference cost to Opengeni credit micros and
  * apply the configured model margin. Decimal arithmetic is integer-only so a
  * sub-micro provider charge cannot be lost to floating-point rounding.
  */
@@ -8236,7 +8242,7 @@ function parseGatewayReportedCostDecimal(inferenceCostUsd: string): GatewayRepor
   };
 }
 
-/** Exact provider-reported Gateway cost without requiring an OpenGeni price schedule. */
+/** Exact provider-reported Gateway cost without requiring an Opengeni price schedule. */
 export function calculateGatewayReportedProviderCostMicros(inferenceCostUsd: string): number {
   return parseGatewayReportedCostDecimal(inferenceCostUsd).providerCostMicros;
 }
@@ -8268,7 +8274,7 @@ export function calculateGatewayReportedCostBreakdown(
 }
 
 /**
- * Exact OpenGeni product price frozen before a managed video request starts.
+ * Exact Opengeni product price frozen before a managed video request starts.
  * Gateway reporting is delayed for asynchronous video, so this deliberately
  * does not masquerade as provider-reported cost.
  */
@@ -8396,7 +8402,7 @@ function decodeTemporalTlsMaterial(
 }
 
 /**
- * The connection `search_path` for OpenGeni's db handles + the managed-auth pool
+ * The connection `search_path` for Opengeni's db handles + the managed-auth pool
  * (Step I, §7.8 runtime half). Returns `undefined` when `dbSchema` is unset
  * (standalone) so no `search_path` startup parameter is sent and the server
  * default (`public`) applies — byte-for-byte today's behavior. When `dbSchema`
@@ -9027,7 +9033,7 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
   return [
     {
       id: "opengeni",
-      name: "OpenGeni",
+      name: "Opengeni",
       url: firstPartyMcpUrl,
       // The opengeni server's tools/list response is permission-scoped: it
       // varies by the calling session's delegated grant (e.g. a manager
@@ -9069,12 +9075,12 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
 }
 
 /**
- * The sandbox/external base URL of OpenGeni's first-party MCP endpoint, as a
+ * The sandbox/external base URL of Opengeni's first-party MCP endpoint, as a
  * `{workspaceId}` template. Codemode and remote placements use this route.
  *
  * BINDING CONTRACT (`opengeniMcpUrl`):
  *   - STANDALONE (unset): falls back to the loopback default.
- *   - EMBEDDED / MOUNTED (must set): when OpenGeni's API is mounted as a host
+ *   - EMBEDDED / MOUNTED (must set): when Opengeni's API is mounted as a host
  *     sub-app under a prefix (e.g. `https://host/og/v1/...`), the loopback
  *     default is WRONG — the worker runs in the host process and `127.0.0.1:
  *     ${apiPort}` is not where the mounted, sandbox-routable MCP lives. The host
@@ -9419,7 +9425,7 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
   if (settings.slackClientId) {
     if (!settings.publicBaseUrl) {
       throw new Error(
-        "OPENGENI_PUBLIC_BASE_URL is required when the OpenGeni Slack app is configured",
+        "OPENGENI_PUBLIC_BASE_URL is required when the Opengeni Slack app is configured",
       );
     }
     if (
@@ -9427,12 +9433,12 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       !["local", "test"].includes(settings.environment)
     ) {
       throw new Error(
-        "OPENGENI_PUBLIC_BASE_URL must use https when the OpenGeni Slack app is configured outside local/test",
+        "OPENGENI_PUBLIC_BASE_URL must use https when the Opengeni Slack app is configured outside local/test",
       );
     }
     if (!settings.integrationsStateSecret) {
       throw new Error(
-        "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the OpenGeni Slack app is configured",
+        "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the Opengeni Slack app is configured",
       );
     }
   }
@@ -9462,7 +9468,7 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     }
     if (settings.githubPersonalOauthClientId === settings.githubClientId) {
       throw new Error(
-        "personal GitHub OAuth must use a different OAuth App client from the OpenGeni GitHub App",
+        "personal GitHub OAuth must use a different OAuth App client from the Opengeni GitHub App",
       );
     }
     if (!personalGitHubOAuthCallbackUrl(settings.publicBaseUrl)) {
@@ -9955,12 +9961,12 @@ export function validateModelCatalogSettings(
       provider.kind === "xai-subscription"
     ) {
       throw new Error(
-        `OPENGENI_MODEL_PROVIDERS_JSON provider kind ${provider.kind} is reserved for a reviewed OpenGeni credential broker`,
+        `OPENGENI_MODEL_PROVIDERS_JSON provider kind ${provider.kind} is reserved for a reviewed Opengeni credential broker`,
       );
     }
     if (RESERVED_MODEL_PROVIDER_IDS.has(provider.id)) {
       throw new Error(
-        `OPENGENI_MODEL_PROVIDERS_JSON provider id ${provider.id} is reserved for a reviewed OpenGeni provider`,
+        `OPENGENI_MODEL_PROVIDERS_JSON provider id ${provider.id} is reserved for a reviewed Opengeni provider`,
       );
     }
     if (provider.id === builtinId) {

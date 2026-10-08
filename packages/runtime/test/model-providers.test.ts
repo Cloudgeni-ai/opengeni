@@ -468,7 +468,7 @@ describe("pinned Responses large-output boundary", () => {
     }
     expect(output.at(-1)).toEqual({
       type: "input_text",
-      text: expect.stringMatching(/^\[OpenGeni omitted \d+ structured array items\]$/),
+      text: expect.stringMatching(/^\[Opengeni omitted \d+ structured array items\]$/),
     });
   });
 
@@ -491,7 +491,7 @@ describe("pinned Responses large-output boundary", () => {
     expect(wire.output).toEqual([
       {
         type: "input_text",
-        text: expect.stringMatching(/^\[OpenGeni omitted file payload: \d+ bytes exceeded/),
+        text: expect.stringMatching(/^\[Opengeni omitted file payload: \d+ bytes exceeded/),
       },
     ]);
     expect(JSON.stringify(wire.output)).not.toContain("file_url");

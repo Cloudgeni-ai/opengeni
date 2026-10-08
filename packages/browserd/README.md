@@ -1,7 +1,7 @@
 # `@opengeni/browserd`
 
 Placement-resident browser controller. It hides the pinned native driver, owns
-target generations and operation receipts, and exposes only OpenGeni interaction
+target generations and operation receipts, and exposes only Opengeni interaction
 contracts. Raw driver sockets and CDP endpoints are not product APIs.
 
 The pinned `agent-browser` binary owns Chromium/profile lifecycle only. Browserd

@@ -1,5 +1,5 @@
 /* ----------------------------------------------------------------------------
-   Scripted mock OpenGeni client for the harness.
+   Scripted mock Opengeni client for the harness.
 
    Implements the `SessionClientLike` surface the hooks use, backed by an
    in-memory event bus, so the real hooks + components run against a
@@ -3455,7 +3455,7 @@ function fabricateComputerTarget(
     kind: "window",
     applicationId: "org.opengeni.demo",
     processId: 4_201,
-    title: "OpenGeni workspace",
+    title: "Opengeni workspace",
     bounds: { x: 92, y: 68, width: 1_096, height: 612 },
     focused: true,
     ...overrides,
@@ -3581,7 +3581,7 @@ function fabricateBrowserTarget(
     targetGeneration: "demo-target-1",
     documentGeneration: "demo-document-1",
     kind: "page",
-    title: "OpenGeni browser",
+    title: "Opengeni browser",
     url: "https://opengeni.ai/",
     selected: true,
     attached: true,
@@ -3629,7 +3629,7 @@ function fabricateBrowserObservation(target: BrowserTarget, downloadCount = 0): 
             {
               ref: "demo-link",
               role: "link",
-              name: "Explore OpenGeni",
+              name: "Explore Opengeni",
               states: [],
               actions: ["click"],
             },
@@ -3966,7 +3966,7 @@ const CLIENT_CONFIG: ClientConfig = {
   ],
   defaultReasoningEffort: "medium",
   allowedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
-  mcpServers: [{ id: "opengeni", name: "OpenGeni" }],
+  mcpServers: [{ id: "opengeni", name: "Opengeni" }],
   fileUploads: { enabled: true, maxSizeBytes: 25 * 1024 * 1024 },
   productAccessMode: "managed",
   auth: { mode: "none" },

@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/contracts",
   "version": "1.4.4",
-  "description": "Shared zod schemas and wire-contract types for the OpenGeni API.",
+  "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -18,6 +18,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./prepared-mcp-setup": {
+      "types": "./src/prepared-mcp-setup.ts",
+      "default": "./src/prepared-mcp-setup.ts"
+    },
     "./connection-account-label": {
       "types": "./src/connection-account-label.ts",
       "default": "./src/connection-account-label.ts"
@@ -165,6 +169,10 @@
     "./xai-provider-account-authority": {
       "types": "./src/xai-provider-account-authority.ts",
       "default": "./src/xai-provider-account-authority.ts"
+    },
+    "./subscription-personal-authority-v2": {
+      "types": "./src/subscription-personal-authority-v2.ts",
+      "default": "./src/subscription-personal-authority-v2.ts"
     },
     "./model-picker-order": {
       "types": "./src/model-picker-order.ts",

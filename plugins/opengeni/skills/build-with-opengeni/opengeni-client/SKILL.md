@@ -61,10 +61,10 @@ Server, one catch-all route at `/api/opengeni/*` (Next.js App Router shown):
 
 ```ts
 // app/api/opengeni/[...path]/route.ts
-import { OpenGeni } from "@opengeni/sdk/chat";
+import { Opengeni } from "@opengeni/sdk/chat";
 import { createSessionProxyRoute } from "@opengeni/sdk/next";
 
-const og = new OpenGeni({ apiKey: process.env.OPENGENI_API_KEY! });
+const og = new Opengeni({ apiKey: process.env.OPENGENI_API_KEY! });
 
 export const dynamic = "force-dynamic";
 export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {

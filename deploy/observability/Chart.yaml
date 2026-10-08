@@ -1,6 +1,6 @@
 apiVersion: v2
 name: opengeni-observability
-description: Optional self-hosted Prometheus and Grafana stack for OpenGeni.
+description: Optional self-hosted Prometheus and Grafana stack for Opengeni.
 type: application
 version: 0.1.9
 dependencies:

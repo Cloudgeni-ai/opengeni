@@ -10,6 +10,7 @@
 //   /workspaces/:id/variable-sets            → variable sets (?view=new)
 //   /workspaces/:id/variable-sets/:setId     → one variable set (?view=add|paste|edit)
 //   /workspaces/:id/rigs                     → rigs list + create
+//   /workspaces/:id/read-only-chats          → chats moved to long-term storage (read-only)
 //   /workspaces/:id/rigs/:rigId              → rig detail (overview/setup/versions/changes)
 
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
@@ -149,6 +150,10 @@ const LazyOnboardingPreviewRoute = lazyRouteComponent(
   "OnboardingPreviewRoute",
 );
 const LazyRigsRoute = lazyRouteComponent(() => import("@/routes/rigs"), "RigsRoute");
+const LazyReadOnlyChatsRoute = lazyRouteComponent(
+  () => import("@/routes/read-only-chats"),
+  "ReadOnlyChatsRoute",
+);
 const LazyRigDetailRoute = lazyRouteComponent(
   () => import("@/routes/rig-detail"),
   "RigDetailRoute",
@@ -435,6 +440,11 @@ const workspaceRigsRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): { view?: "new" } =>
     search.view === "new" ? { view: "new" } : {},
   component: Rigs,
+});
+const workspaceReadOnlyChatsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "read-only-chats",
+  component: ReadOnlyChats,
 });
 const workspaceRigDetailRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -776,6 +786,7 @@ const routeTree = rootRoute.addChildren([
     workspaceEnvironmentsRoute,
     workspaceRigsRoute,
     workspaceRigDetailRoute,
+    workspaceReadOnlyChatsRoute,
     workspaceMachinesRoute,
     workspaceInsightsRoute,
     workspaceCapabilitiesRoute,
@@ -911,6 +922,11 @@ function Rigs() {
   return <LazyRigsRoute workspaceId={workspaceId} view={view} />;
 }
 
+function ReadOnlyChats() {
+  const { workspaceId } = workspaceReadOnlyChatsRoute.useParams();
+  return <LazyReadOnlyChatsRoute workspaceId={workspaceId} />;
+}
+
 function RigDetail() {
   const { workspaceId, rigId } = workspaceRigDetailRoute.useParams();
   const { view } = workspaceRigDetailRoute.useSearch();
@@ -1043,17 +1059,6 @@ function WorkspaceSettings() {
           account,
           view: view as ModelsView | undefined,
         })}
-        replace
-      />
-    );
-  }
-  // Agent learning is the Learning page of Knowledge now.
-  if (section === "learning") {
-    return (
-      <Navigate
-        to="/workspaces/$workspaceId/state"
-        params={{ workspaceId }}
-        search={{ page: "learning" }}
         replace
       />
     );

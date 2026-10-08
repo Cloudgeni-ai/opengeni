@@ -84,9 +84,9 @@ function AgentChangesSection({ workspaceId }: { workspaceId: string }) {
             value={LEARNING_MODE_LABEL[IDENTITY_POLICY_MODE[policy.mode]]}
             onOpen={() =>
               void navigate({
-                to: "/workspaces/$workspaceId/state",
+                to: "/workspaces/$workspaceId/settings",
                 params: { workspaceId },
-                search: { page: "learning" },
+                search: { section: "learning" },
               })
             }
           />

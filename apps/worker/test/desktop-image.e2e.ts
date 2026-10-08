@@ -1,4 +1,4 @@
-// P4.1 — the canonical OpenGeni desktop image, productionized from the PROVEN
+// P4.1 — the canonical Opengeni desktop image, productionized from the PROVEN
 // spike. Two layers:
 //
 //  LOCAL (default; runs when Docker is available):

@@ -11,6 +11,9 @@ export function openOnWeb(baseUrl: string, path: string): void {
 export const webPaths = {
   /** The workspace's new-chat page, where every composer option lives. */
   workspace: (workspaceId: string) => `/workspaces/${encodeURIComponent(workspaceId)}`,
+  /** The same conversation in the web app. */
+  session: (workspaceId: string, sessionId: string) =>
+    `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}`,
   organizationSettings: (workspaceId: string) =>
     `/workspaces/${encodeURIComponent(workspaceId)}/organization`,
   workspaceSettings: (workspaceId: string) =>

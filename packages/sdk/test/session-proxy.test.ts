@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { OpenGeni } from "../src/chat";
+import { Opengeni } from "../src/chat";
 import { OpenGeniApiError } from "../src/errors";
 import {
   OpenGeniClient,
@@ -347,7 +347,7 @@ describe("createSessionProxyHandler", () => {
       );
     }
   });
-  test("returns the host's 401 and never calls OpenGeni without authentication", async () => {
+  test("returns the host's 401 and never calls Opengeni without authentication", async () => {
     const { upstream, browser } = setup({
       resolve: () => new Response("Unauthorized", { status: 401 }),
     });
@@ -395,9 +395,9 @@ describe("createSessionProxyHandler", () => {
   });
 
   test("a missing API key fails requests, not module load, and names the env var in the server log", async () => {
-    // `new OpenGeni({ apiKey: process.env.OPENGENI_API_KEY! })` runs at module
+    // `new Opengeni({ apiKey: process.env.OPENGENI_API_KEY! })` runs at module
     // scope in a Next.js route; `next build` imports it without runtime secrets.
-    const og = new OpenGeni({ apiKey: undefined as unknown as string, organizationId: "org" });
+    const og = new Opengeni({ apiKey: undefined as unknown as string, organizationId: "org" });
     const handler = createSessionProxyHandler(og, {
       resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
     });
@@ -1921,7 +1921,7 @@ describe("createSessionProxyHandler", () => {
       sourceSessionId: SESSION_ID,
     });
 
-    // An artifact OpenGeni does not list for this session is not served.
+    // An artifact Opengeni does not list for this session is not served.
     const other = await on.handler(
       new Request(item.replace(EDITABLE_ID, "fedcba9876543210fedcba9876543210"), {
         headers: scoped,

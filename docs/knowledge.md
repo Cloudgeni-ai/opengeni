@@ -157,7 +157,7 @@ cannot become accepted answers. An unavailable prepare tool falls back to
 ordinary search in both views and collection browsing, without widening the
 task's selected tools or permissions.
 
-A create omits `entryId` and passes `expectedVersion: 0`. OpenGeni derives the
+A create omits `entryId` and passes `expectedVersion: 0`. Opengeni derives the
 id from `operationId` (`knowledgeEntryIdForOperation` in
 `packages/db/src/knowledge-entries.ts`), so an exact retry replays the same
 receipt. A correction passes an existing `entryId` and its current version. The
@@ -239,7 +239,8 @@ open Capabilities → Skills. Old Memory and Documents links redirect to Knowled
 a Documents `?authority=` link, and `?scope=` on `/state`, open the Library
 filtered to that scope (Organization identity > Organization documents uses it).
 
-**Agent learning** (Knowledge ⋯ → Agent learning) holds the workspace defaults
+**Agent learning** (Settings → Workspace → Agent learning; Knowledge ⋯ → Agent
+learning opens the same page) holds the workspace defaults
 for shared chats and your private-chat defaults, each row Off / Review first /
 Automatic. Organization owners also see an **Organization identity** row there,
 in the same words, for the separate company-profile agent policy. One chat's own
@@ -288,8 +289,10 @@ All finding types share retrieval, review, permissions and revision history.
 
 ## Agent learning settings
 
-**Knowledge → Learning** groups three destinations together (the old
-Settings → Agent learning URL redirects there):
+**Settings → Agent learning** (`/settings?section=learning`) groups three
+destinations together. Knowledge's ⋯ menu, an empty Review and the chat Agent tab
+link to it, and old `/state?page=learning` links redirect there. The page also
+links to Knowledge → Review, where Review first changes wait:
 
 | Destination | New-workspace default | Storage authority |
 | --- | --- | --- |

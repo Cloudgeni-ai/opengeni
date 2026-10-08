@@ -174,7 +174,7 @@ async function dispatchMaintenanceSession(
     accountId: maintenance.accountId,
     workspaceId: maintenance.workspaceId,
     initialMessage: maintenancePrompt(maintenance),
-    // OpenGeni's own periodic check: no human or product surface entered it.
+    // Opengeni's own periodic check: no human or product surface entered it.
     surface: "system",
     metrics: service.observability,
     resources: [],
@@ -192,7 +192,7 @@ async function dispatchMaintenanceSession(
     createdBy: {
       kind: "service",
       subjectId: "site-auth-maintenance",
-      label: "OpenGeni authentication maintenance",
+      label: "Opengeni authentication maintenance",
     },
     createdByContext: {
       [SITE_AUTH_MAINTENANCE_CONNECTION_CONTEXT_KEY]: maintenance.siteAuthConnectionId,

@@ -12,6 +12,7 @@ import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { withRlsContext, withWorkspaceRls } from "./database";
 import * as schema from "./schema";
+import { hydrateStoredAttemptToolCatalog } from "./session-content-blobs";
 import { sameSitePublicationRequest, sitePublicationRequest } from "./site-publication-request";
 
 type ArtifactRow = typeof schema.workspaceArtifacts.$inferSelect;
@@ -639,7 +640,10 @@ async function assertArtifactRequestedToolsInAttemptCatalog(
     throw new WorkspaceArtifactOperationError("Artifact attempt provenance is incomplete");
   }
   const [row] = await scopedDb
-    .select({ catalog: schema.sessionAttemptToolCatalogs.catalog })
+    .select({
+      catalog: schema.sessionAttemptToolCatalogs.catalog,
+      contentRefs: schema.sessionAttemptToolCatalogs.contentRefs,
+    })
     .from(schema.sessionAttemptToolCatalogs)
     .where(
       and(
@@ -654,7 +658,9 @@ async function assertArtifactRequestedToolsInAttemptCatalog(
     .limit(1);
   let allowed: Set<string>;
   try {
-    const catalog = parseVerifiedAttemptToolCatalog(row?.catalog);
+    const catalog = parseVerifiedAttemptToolCatalog(
+      row ? await hydrateStoredAttemptToolCatalog(scopedDb, row) : undefined,
+    );
     allowed = new Set(catalog.entries.map((entry) => toolIdentityKey(entry.identity)));
   } catch {
     throw new WorkspaceArtifactOperationError(

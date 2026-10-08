@@ -38,7 +38,7 @@ Code wins over this doc. The canonical sources are:
   `sessions.compact_requested` column.
 
 This palette lives in the **shared** `@opengeni/react` `ChatComposer`, so both
-the OpenGeni web console and the Geni product app get it from one component.
+the Opengeni web console and the Geni product app get it from one component.
 
 ---
 
@@ -292,7 +292,7 @@ re-vendored `@opengeni/{sdk,react}` at `5762d58` via PR **#22** (merged at
 
 ## Residual gaps / honest caveats
 
-- **`/clear-view` is a no-op in the OpenGeni console.** The console surface wires
+- **`/clear-view` is a no-op in the Opengeni console.** The console surface wires
   no `onClearView`, so `/clear-view` returns the honest error
   "This view can't be cleared here (no local timeline to reset)." rather than a
   false success (`chat-composer.tsx:106-112`, `registry.ts:135-145`). This is the

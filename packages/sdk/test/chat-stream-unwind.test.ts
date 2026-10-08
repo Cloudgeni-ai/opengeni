@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { OpenGeni } from "../src/chat";
+import { Opengeni } from "../src/chat";
 import { BASE_URL, ORGANIZATION_ID, fakeServer } from "./chat-helpers";
 
 /**
@@ -45,7 +45,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | "timeout">
 describe("chat stream unwinding", () => {
   test("send() settles after done even when the SSE body never ends", async () => {
     const server = fakeServer();
-    const og = new OpenGeni({
+    const og = new Opengeni({
       apiKey: "og_key",
       organizationId: ORGANIZATION_ID,
       baseUrl: BASE_URL,
@@ -60,7 +60,7 @@ describe("chat stream unwinding", () => {
 
   test("breaking out of stream() after done returns promptly", async () => {
     const server = fakeServer();
-    const og = new OpenGeni({
+    const og = new Opengeni({
       apiKey: "og_key",
       organizationId: ORGANIZATION_ID,
       baseUrl: BASE_URL,

@@ -61,7 +61,7 @@ import {
 
 const stateCookie = "opengeni_pr_review_github_state";
 const bindingStateMaxAgeSeconds = 10 * 60;
-const appName = "OpenGeni Lens" as const;
+const appName = "Opengeni Lens" as const;
 
 export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/webhooks/pr-review/github", async (c) => {

@@ -1080,7 +1080,7 @@ const SITE_OPEN_CLASS =
 function SiteOpenLink({ receipt }: { receipt: PublishedSiteReceipt }) {
   const [pending, setPending] = useState(false);
   const [failed, setFailed] = useState(false);
-  // The console route only exists in the OpenGeni console; a host decides.
+  // The console route only exists in the Opengeni console; a host decides.
   const resolution = useOpenGeniLinkResolver()?.({
     kind: "site",
     artifactId: receipt.artifactId,

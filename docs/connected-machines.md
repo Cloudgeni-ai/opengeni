@@ -78,11 +78,11 @@ client. The matching UI ships in
 | Backend enum | `docker`/`modal`/`local`/…       | `selfhosted`                                       |
 
 The model that follows from this: a machine-bound session has **no phantom Modal
-"home box"**, **no OpenGeni Git token is distributed to the machine** (it uses
+"home box"**, **no Opengeni Git token is distributed to the machine** (it uses
 its own SSH / `gh` / credential helper), repos are **not cloned onto it**, and
 the agent runs under a **per-session working directory** (making its own
 worktrees under that path as it needs them). The authoritative runner Hello
-already reports its absolute launch root; OpenGeni persists it and resolves an
+already reports its absolute launch root; Opengeni persists it and resolves an
 optional relative session folder once against that root. The SDK manifest,
 exec cwd, filesystem calls, editor, and PTY all use that same host-native path.
 Relative operation paths resolve from it and absolute paths stay literal, so
@@ -100,7 +100,7 @@ from a different target. Provider-independent artifact receipts may still use
 their own portable identity where that receipt contract requires it.
 
 The exact model-visible tool catalog remains available through Codemode without
-installing a machine credential. OpenGeni sends no Codemode manifest pointer or
+installing a machine credential. Opengeni sends no Codemode manifest pointer or
 token file. Instead, the worker snapshots a renewable exact-attempt URL/bearer
 only into each new child exec. It is never written to disk or stable machine
 state. The installed binary exposes its absolute path to that authorized child,
@@ -190,7 +190,7 @@ with bounded backoff; late events from that port cannot invalidate a successor.
 
 Attached Chrome profiles are a separate physical placement. Inventory reports a
 `connectionGeneration` that becomes the BrowserSession/ComputerSession
-`placementInstanceId`. When that generation changes, OpenGeni marks the exact
+`placementInstanceId`. When that generation changes, Opengeni marks the exact
 device's still-live sessions `lost` with `controller_transition_expired` and
 never rebinds the old controller token. In-flight `/end` (`ending`) is left
 to finish physical teardown instead of being rewritten to `lost`. Heartbeats
@@ -540,7 +540,7 @@ affects future operations only. A connection blip detaches the stream without
 killing the command; replay or exact-instance reconciliation collects its
 terminal result after reconnect.
 The session shell capability also preserves an explicit `exec_command.shell`
-selection: OpenGeni sends that shell as direct argv, with the requested login or
+selection: Opengeni sends that shell as direct argv, with the requested login or
 non-login semantics, instead of silently substituting the machine service's
 ambient default shell. Calls that omit `shell` intentionally retain the
 machine-owned `$SHELL`/`ComSpec` default.
@@ -568,7 +568,7 @@ deadline by default), while preserving the active sandbox pointer and epoch.
 
 Connected Machine exec requires a runner that advertises the `op_stream`
 capability and serves the op-stream protocol with
-`OPENGENI_AGENT_OP_STREAM_ENABLED=true` (default on). OpenGeni refuses before
+`OPENGENI_AGENT_OP_STREAM_ENABLED=true` (default on). Opengeni refuses before
 starting a command when op-stream is unavailable or unsupported; it never
 downgrades exec to request/reply. Output streams as sequenced, credit-flowed
 frames the runner retains
@@ -689,7 +689,7 @@ comes back as `swapped: false` with a `reason` rather than throwing. The next
 turn runs on whatever the pointer resolves to.
 
 An agent turn that started on a Connected Machine does not pre-lease a managed
-group. If that turn explicitly swaps back to `"session"`/`"default"`, OpenGeni
+group. If that turn explicitly swaps back to `"session"`/`"default"`, Opengeni
 preserves the successful pointer change,
 checkpoints completed model/tool truth, and continues the same logical turn in a
 fresh home-primary attempt. The handoff requires no new user message, never
@@ -701,7 +701,7 @@ interrupted/outcome-unknown rather than replayed automatically.
 
 Enrollment turns a user's machine into a `selfhosted` sandbox in the workspace.
 The machine agent is multi-connection: installing it once and connecting another
-workspace—even on a different OpenGeni deployment—adds an independent link and
+workspace—even on a different Opengeni deployment—adds an independent link and
 preserves all existing links. There are two enrollment paths. Both require the
 caller to hold `enrollments:manage`.
 
@@ -824,7 +824,7 @@ const { token, expiresAt, expiresInSeconds } = await client.mintEnrollToken(
     allowScreenControl: false, // bake screen-control consent into the token
   },
 );
-// Run on the machine (the installer dials OpenGeni and exchanges the token for
+// Run on the machine (the installer dials Opengeni and exchanges the token for
 // its own long-lived agent credentials — the token exchange happens on the
 // machine, not through this client):
 //   OPENGENI_API_URL=https://… OPENGENI_ENROLL_TOKEN=<token> \

@@ -1907,7 +1907,7 @@ describe("turn sandbox-tool cancellation against a real local process", () => {
             `rm -rf '${repoPath}' '${pagerMarker}'`,
             `mkdir -p '${repoPath}'`,
             `git -C '${repoPath}' init -q`,
-            `git -C '${repoPath}' config user.name OpenGeni`,
+            `git -C '${repoPath}' config user.name Opengeni`,
             `git -C '${repoPath}' config user.email opengeni@example.invalid`,
             `printf first > '${repoPath}/file.txt'`,
             `git -C '${repoPath}' add file.txt`,

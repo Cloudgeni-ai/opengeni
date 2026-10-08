@@ -502,12 +502,20 @@ export async function isSubscriptionProviderCutoverEnabled(
   db: Database,
   input: { accountId: string; provider: ProviderId },
 ): Promise<boolean> {
+  return (await readSubscriptionProviderCutoverState(db, input)) === "enabled";
+}
+
+/** Distinguishes a pre-cutover absent row from a deliberately disabled cutover. */
+export async function readSubscriptionProviderCutoverState(
+  db: Database,
+  input: { accountId: string; provider: ProviderId },
+): Promise<"not_configured" | "disabled" | "enabled"> {
   const [row] = await rawRows<{ enabled: boolean }>(
     db,
     sql`select enabled from subscription_provider_cutovers
       where account_id = ${input.accountId}::uuid and provider = ${input.provider}`,
   );
-  return row?.enabled ?? false;
+  return row ? (row.enabled ? "enabled" : "disabled") : "not_configured";
 }
 
 /**

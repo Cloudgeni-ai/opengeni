@@ -155,7 +155,7 @@ test("missing Site hides Archive and Edit with Opengeni", async () => {
     expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(container.textContent).toContain("This Site isn't available");
     expect(container.textContent).toContain("Reference: corr-missing-site");
-    expect(container.textContent).not.toContain("OpenGeni API 404");
+    expect(container.textContent).not.toContain("Opengeni API 404");
   } finally {
     await act(async () => root.unmount());
     container.remove();

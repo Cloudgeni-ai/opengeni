@@ -87,10 +87,10 @@ In Cursor, use **Customize → From GitHub Repository** with this repository. Th
 
 ```ts
 // app/api/opengeni/[...path]/route.ts  (server only; the key stays here)
-import { OpenGeni } from "@opengeni/sdk/chat";
+import { Opengeni } from "@opengeni/sdk/chat";
 import { createSessionProxyRoute } from "@opengeni/sdk/next";
 
-const og = new OpenGeni({ apiKey: process.env.OPENGENI_API_KEY! });
+const og = new Opengeni({ apiKey: process.env.OPENGENI_API_KEY! });
 
 export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
   resolve: async (request) => {

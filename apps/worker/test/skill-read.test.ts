@@ -24,7 +24,7 @@ const scope = {
 };
 
 describe("skill_read gateway definition", () => {
-  test("worker host catalog coexists with exact repository reader for real OpenGeni skills", async () => {
+  test("worker host catalog coexists with exact repository reader for real Opengeni skills", async () => {
     const names = ["opengeni", "opengeni-client"];
     const markdown = new Map(
       await Promise.all(

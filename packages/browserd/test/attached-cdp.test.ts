@@ -18,7 +18,7 @@ class FakeBridge implements AttachedBrowserBridgeTransport {
           tabs: [
             {
               id: "7",
-              title: "OpenGeni",
+              title: "Opengeni",
               url: "https://opengeni.ai/",
               active: true,
               controllable: true,
@@ -99,7 +99,7 @@ describe("AttachedChromeCdpConnection", () => {
         expect.objectContaining({
           targetId: "7",
           type: "page",
-          title: "OpenGeni",
+          title: "Opengeni",
           url: "https://opengeni.ai/",
         }),
       ],

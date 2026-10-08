@@ -14,7 +14,7 @@ import { createCuaComputerDriver } from "../src/cua/factory";
 // Opt-in: creates only a disposable background AppKit window. Existing OS
 // permissions must already be granted to the launching host; no prompts here.
 test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1")(
-  "CUA drives a real window through OpenGeni receipts and viewer streaming",
+  "CUA drives a real window through Opengeni receipts and viewer streaming",
   async () => {
     const root = await mkdtemp(join(tmpdir(), "opengeni-cua-e2e-"));
     let fixturePid: number | undefined;
@@ -35,7 +35,7 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
       await mkdir(join(contents, "MacOS"), { recursive: true });
       await Bun.write(
         join(contents, "Info.plist"),
-        `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>ai.opengeni.cua-fixture</string><key>CFBundleExecutable</key><string>Fixture</string><key>CFBundleName</key><string>OpenGeni CUA Fixture</string><key>CFBundlePackageType</key><string>APPL</string><key>LSUIElement</key><true/></dict></plist>`,
+        `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>ai.opengeni.cua-fixture</string><key>CFBundleExecutable</key><string>Fixture</string><key>CFBundleName</key><string>Opengeni CUA Fixture</string><key>CFBundlePackageType</key><string>APPL</string><key>LSUIElement</key><true/></dict></plist>`,
       );
       const compiler = Bun.spawn(
         [

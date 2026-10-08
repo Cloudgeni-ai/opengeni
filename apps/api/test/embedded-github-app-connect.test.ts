@@ -267,7 +267,7 @@ for (const providerId of ["github-app", "github-lens"] as const)
       );
       expect(forged.status).toBe(400);
       expect(forged.headers.get("location")).toBeNull();
-      expect(await forged.text()).not.toContain("OpenGeni");
+      expect(await forged.text()).not.toContain("Opengeni");
       expect(await listGitHubInstallationAccessForWorkspace(client.db, workspaceId)).toHaveLength(
         providerId === "github-app" ? 1 : 0,
       );

@@ -450,7 +450,7 @@ export async function requireSessionAuthorizationListScope(
   if (!parsed.success) {
     throw new SessionAuthorizationUnavailableError({ cause: parsed.error });
   }
-  // A host never supplies the viewer: OpenGeni resolved it above from durable
+  // A host never supplies the viewer: Opengeni resolved it above from durable
   // state, so a host-returned value is dropped before the intersection.
   const hostScope: SessionAuthorizationListScope =
     parsed.data.kind === "all"

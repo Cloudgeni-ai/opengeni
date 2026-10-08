@@ -228,7 +228,7 @@ async function serve(): Promise<void> {
     server.listen({ host, port, exclusive: true }, resolve);
   });
   console.log(
-    `OpenGeni Docker sandbox route listening on ${host}:${port} for ${subnet} (Codemode, MCP, Git broker)`,
+    `Opengeni Docker sandbox route listening on ${host}:${port} for ${subnet} (Codemode, MCP, Git broker)`,
   );
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, () => server.close(() => process.exit(0)));

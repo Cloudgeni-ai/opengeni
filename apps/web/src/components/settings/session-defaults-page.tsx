@@ -4,7 +4,7 @@
  * A flush form page (DESIGN.md section 8): starting point, capabilities in
  * three groups, identity, Save. Running chats keep what they started with.
  *
- * Saved as `settings.sessionAgentDefaults`; OpenGeni's own defaults (every
+ * Saved as `settings.sessionAgentDefaults`; Opengeni's own defaults (every
  * capability, the default identity) are stored as no value at all.
  */
 import {
@@ -207,7 +207,7 @@ export function SessionDefaultsPage({
           {!personal ? (
             <p className="-mt-2 text-xs leading-4.5 text-fg-muted">
               These apply to shared chats. Only-me chats use{" "}
-              <InAppHelpLink href={`/workspaces/${workspaceId}/state?page=learning`}>
+              <InAppHelpLink href={`/workspaces/${workspaceId}/settings?section=learning`}>
                 your private chat settings
               </InAppHelpLink>
               .

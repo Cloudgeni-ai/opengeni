@@ -1,6 +1,6 @@
 # @opengeni/sdk
 
-Framework-agnostic TypeScript SDK for the OpenGeni public API: a typed client,
+Framework-agnostic TypeScript SDK for the Opengeni public API: a typed client,
 session lifecycle, and the streaming core — SSE event streaming with automatic
 reconnect, resume-by-sequence, gap backfill, and duplicate suppression — plus
 helpers for proxying the stream through your own API.
@@ -59,9 +59,9 @@ same-origin proxy that acts as your authenticated user:
 
 ```ts
 // lib/opengeni.ts (server only: the organization API key never reaches the browser)
-import { OpenGeni } from "@opengeni/sdk/chat";
+import { Opengeni } from "@opengeni/sdk/chat";
 
-export const og = new OpenGeni({ apiKey: process.env.OPENGENI_API_KEY! });
+export const og = new Opengeni({ apiKey: process.env.OPENGENI_API_KEY! });
 ```
 
 ```ts
@@ -106,7 +106,7 @@ What `resolve` returns decides the workspace:
   owner once, and Opengeni never admits anyone else to it.
 - `{ user, workspaceId }`: bring your own workspace id.
 
-Workspaces are created on first use and cached per `OpenGeni` instance.
+Workspaces are created on first use and cached per `Opengeni` instance.
 `og.workspaceId({ tenant })` and `og.workspaceId({ user })` return the same ids
 the proxy uses. There is no onboarding step: the first request a user makes
 adds them to a tenant (or your own) workspace with conversation permissions
@@ -180,9 +180,14 @@ the request when the client disconnects.
 The chat list (`SessionList` / `OpenGeniChat`) uses `listSessionPage`. By
 default (`sessionList: "mine"`) the proxy adds a creator filter for the
 resolved user server-side, so each user sees only the chats they started;
-`sessionList: "visible"` lists every chat OpenGeni lets the user read in the
+`sessionList: "visible"` lists every chat Opengeni lets the user read in the
 workspace, and `false` disables listing. Archive and restore go through
-`updateSessionArchive` unless `archive: false`. A "New chat" in `OpenGeniChat`
+`updateSessionArchive` unless `archive: false`. That personal archive only hides
+a chat from one member's list. The deployment's idle-session archive is separate:
+it makes long-idle sessions read-only and is reported on `session.retention`.
+Pass `keepLive: true` to `createSession`, or call
+`updateSessionRetention(workspaceId, sessionId, { keepLive: true })`, to keep a
+persistent agent's session out of it. A "New chat" in `OpenGeniChat`
 sends `{ initialMessage, idempotencyKey }` plus any attached file `resources`
 and, unless `modelSelection: false`, the user's explicit model choices, so it
 needs the `createSession` hook. The hook sees them as input; the proxy adds the
@@ -239,7 +244,7 @@ URLs plus the media the session produced (generated images and video,
 published files, and browser or computer screenshots). Workspace-level
 artifact reads (`artifacts/:id/content` with `Range`, `artifacts/:id/playback-source`)
 must name their session in `x-opengeni-session-id`; the proxy runs
-`authorizeSession` and forwards only an artifact OpenGeni proves that session
+`authorizeSession` and forwards only an artifact Opengeni proves that session
 produced. Every other route or method is a 404 (cancel and workspace Pause are
 refused); unknown query parameters on served reads pass through. Browser session creation is disabled
 unless you supply `createSession`; the browser may then send only
@@ -248,7 +253,7 @@ unless you supply `createSession`; the browser may then send only
 capped by `maxBodyBytes` (1 MiB), cannot rotate MCP credentials or attach
 anything but files, and `modelSelection: false` strips per-message model
 choices. `authorizeSession(sessionId, context)` adds a product-level session
-check on top of OpenGeni's own membership and visibility checks. Without
+check on top of Opengeni's own membership and visibility checks. Without
 `authorizeMutation`, only cross-site (`Sec-Fetch-Site`) mutations are refused,
 so cookie-authenticated hosts should pass their CSRF check.
 
@@ -345,7 +350,7 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
 ## Organization-backed product setup
 
 A multi-tenant product should hold one organization API key on its backend and
-idempotently map each product tenant to an OpenGeni organization workspace. The
+idempotently map each product tenant to an Opengeni organization workspace. The
 wire kind for an organization workspace is `"shared"`; Personal workspaces are
 excluded.
 
@@ -417,7 +422,7 @@ security boundary, and delivery checklist.
 Installed Skills can be workspace-managed or marked `session_selected`.
 Session-selected guidance is exposed to no agent
 until `createSession` names the reviewed immutable component in
-`installedSkillIds`. OpenGeni copies that exact artifact into the new session,
+`installedSkillIds`. Opengeni copies that exact artifact into the new session,
 so omitting the field from customer-facing creates is a real contamination
 boundary rather than a prompt convention.
 The ordered selection is part of keyed-create identity: reusing an
@@ -528,9 +533,9 @@ Tenants map to organization workspaces, conversations map to deterministic
 sessions, and the organization API key never leaves your server.
 
 ```ts
-import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
+import { Opengeni, createChatHandler } from "@opengeni/sdk/chat";
 
-const og = new OpenGeni({
+const og = new Opengeni({
   baseUrl: process.env.OPENGENI_API_BASE_URL!, // omitted = production https://app.opengeni.ai
   apiKey: process.env.OPENGENI_API_KEY!, // the organization id is derived from the key
   source: "acme-app", // labels your product's tenants and users (default "app")
@@ -585,7 +590,7 @@ A user is added to the workspace on their first request (see
 [External users](#external-users-asuser)). Without a `user`, the host must name the conversation
 from `resolve`. The Vercel and OpenAI adapters send only the latest user
 message; the earlier messages in that request are imported once, as context on
-the first message of a conversation, after which OpenGeni owns the history.
+the first message of a conversation, after which Opengeni owns the history.
 
 Pick the isolation per session with `agentAccess` (which other sessions the
 agent may reach) and `memory` (what it remembers), all inside one workspace that
@@ -623,7 +628,7 @@ export async function POST(request: Request) {
 }
 ```
 
-OpenGeni's own tool activity is omitted by default because those tools are not
+Opengeni's own tool activity is omitted by default because those tools are not
 in your typed tool set; pass `toolParts: true` (or `createChatHandler(og, {
 toolParts: true })`) to emit them as `dynamic`, provider-executed tool parts.
 Pending approvals are always emitted as dynamic tool parts with a
@@ -817,7 +822,7 @@ offer Send or Steer. Continuing an imported archive is unsupported in v1.
 The proxy does not expose import routes. Re-upload files through existing APIs
 and replace references before import; preserve additional source metadata and
 source/destination IDs in the host ledger. See
-[Migrating from embedded OpenGeni](../../docs/product-integration.md#migrating-from-embedded-opengeni).
+[Migrating from embedded Opengeni](../../docs/product-integration.md#migrating-from-embedded-opengeni).
 
 ## Connected accounts
 
@@ -893,7 +898,7 @@ Service-owned schedules retain service execution and do not acquire a human's
 personal accounts. Run history remains credential-free.
 
 A schedule freezes its connectors, accounts and (when an agent created it)
-OpenGeni tools. For the owner, `listScheduledTasks` and `getScheduledTask`
+Opengeni tools. For the owner, `listScheduledTasks` and `getScheduledTask`
 include a read-only `policyDrift` naming what is out of date, and
 `listScheduledTaskRuns` includes `accessFailures` for runs that could not use a
 connector. `listScheduledTaskAccessAttention` lists schedules whose latest run
@@ -901,7 +906,7 @@ failed that way, and schedules that cannot start because a chosen account can no
 longer be used (`unavailableAccounts`, with a null `runId`). A signed-in owner
 re-freezes with their current access through
 `refreshScheduledTaskAccess(workspaceId, taskId, { executionDigest, leaveOut })`,
-where the optional `leaveOut` keeps named default connectors or OpenGeni tools
+where the optional `leaveOut` keeps named default connectors or Opengeni tools
 off; API keys and agents cannot. See [`docs/scheduled-task-access.md`](../../docs/scheduled-task-access.md).
 
 Deleting a task is externally idempotent and immediately removes it from live
@@ -1023,7 +1028,7 @@ shown below; it owns no state or authority of its own.
 
 `OpenGeniClient.interaction` is the framework-free resource facade over the same
 public BrowserSession, ComputerSession, identity, auth, network-route, and human
-intervention APIs used by OpenGeni itself. It adds no second state or execution
+intervention APIs used by Opengeni itself. It adds no second state or execution
 path: facade methods call the ordinary typed transport, and every mutation still
 uses the canonical generation fences, operation receipt, permission check, and
 placement controller.
@@ -1170,7 +1175,7 @@ version and viewer's live authority. The requested set is a maximum allowlist,
 not an authority grant; ordinary gateway approval still applies. Archived Sites
 receive no tool bridge.
 
-Omit `firstPartyMcpTools` for the complete OpenGeni tool catalog. An explicit
+Omit `firstPartyMcpTools` for the complete Opengeni tool catalog. An explicit
 `[]` exposes no broad first-party tools; attached resources and separately
 selected `files`/`docs` MCP servers are unaffected.
 
@@ -1414,7 +1419,7 @@ receipt without a second write. Old receipt verification fails explicitly with
 Omitting `tools` when creating a top-level session selects the current
 workspace-default capability policy, including the built-in `files` server.
 Passing `tools`, including `[]`, is an intentional fixed narrowing and can
-therefore disable file-download access for that session. OpenGeni's own web UI
+therefore disable file-download access for that session. Opengeni's own web UI
 keeps `files` enabled as a hidden default, while API and embedded clients retain
 exact control over the explicit list. Supported Responses providers attach
 their native bounded web-search tool independently of this MCP policy.
@@ -1432,7 +1437,7 @@ const updated = await client.updateSessionToolPolicy(workspaceId, sessionId, {
 ```
 
 To keep a fixed allow-list, replace both connected MCP servers and individual
-OpenGeni tools atomically:
+Opengeni tools atomically:
 
 ```ts
 await client.updateSessionToolPolicy(workspaceId, sessionId, {
@@ -1473,7 +1478,7 @@ await client.rollbackGoalRevision(workspaceId, sessionId, appliedRevisionId, {
 call; the lower-level steps are exported for resumable/custom flows.
 
 Browser hosts need no storage credentials or per-application registration.
-OpenGeni authorizes the workspace request and returns a short-lived,
+Opengeni authorizes the workspace request and returns a short-lived,
 object-scoped signed URL; operators must configure the private object store to
 allow CORS from `*` so any product embedding the SDK can use that URL.
 
@@ -1607,7 +1612,7 @@ each deprecated route once through the `onDeprecation` option (default: one
 For the React conversation, use the packaged
 [`createSessionProxyHandler`](#embed-the-conversation-default). For a custom
 backend route, keep your organization API key on your server and re-emit the
-stream to your own browser clients. The re-emitted wire format is identical to OpenGeni's SSE
+stream to your own browser clients. The re-emitted wire format is identical to Opengeni's SSE
 stream, so the browser side can consume it with this same SDK (or a plain
 `EventSource`), including resume via `?after=` / `Last-Event-ID`:
 

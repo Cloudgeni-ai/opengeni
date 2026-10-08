@@ -2525,7 +2525,7 @@ export function validateIncidentTelemetryPreflightSelection(
   }
 
   const selectedMcpServerIds = new Set(agentConfig.tools.map((tool) => tool.id));
-  // Scheduled dispatch always attaches the first-party OpenGeni MCP server.
+  // Scheduled dispatch always attaches the first-party Opengeni MCP server.
   selectedMcpServerIds.add("opengeni");
   if (preflight.requiredMcpServerIds.some((id) => !selectedMcpServerIds.has(id))) {
     throw new HTTPException(422, {

@@ -863,7 +863,7 @@ describe("subject-owned capability connection references", () => {
       settings: {
         ...settings,
         mcpServers: [
-          { id: "opengeni", name: "OpenGeni", url: "http://localhost:8000/mcp" },
+          { id: "opengeni", name: "Opengeni", url: "http://localhost:8000/mcp" },
           { id: "files", name: "Files", url: "http://localhost:8000/mcp/files" },
           { id: "docs", name: "Document Search", url: "http://localhost:8000/mcp/docs" },
           {

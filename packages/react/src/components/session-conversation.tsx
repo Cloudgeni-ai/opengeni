@@ -85,7 +85,7 @@ export type SessionConversationProps = ClientOverride &
     /** Host-owned artifact links, previews and other message presentation. */
     renderMessageText?: MessageTimelineProps["renderMessageText"];
     /**
-     * Open OpenGeni object links in agent replies (`artifact:`, `sandbox:`,
+     * Open Opengeni object links in agent replies (`artifact:`, `sandbox:`,
      * editable artifacts, Sites). Asked first; by default retained files and
      * sandbox files download only when the proxy explicitly enables them, while
      * editable artifacts and Sites stay unavailable until the host resolves them.
@@ -111,7 +111,7 @@ export type SessionConversationProps = ClientOverride &
     resolveSessionTitle?: ((sessionId: string) => string | null | undefined) | undefined;
     /**
      * Inline previews for assistant `opengeni-site` / `opengeni-html` fences.
-     * Defaults to the OpenGeni preview. Behind a session proxy without its
+     * Defaults to the Opengeni preview. Behind a session proxy without its
      * `artifacts` option, Sites show as unavailable without a request; `false`
      * shows the fence as code.
      */

@@ -1,8 +1,8 @@
-# OpenGeni plugin for coding agents
+# Opengeni plugin for coding agents
 
 One plugin and marketplace, both named **`opengeni`**. The package at
 `./plugins/opengeni` holds three skills and one MCP server, `opengeni`, which
-connects the coding agent to the person's OpenGeni organization through the
+connects the coding agent to the person's Opengeni organization through the
 [organization MCP server](mcp-surfaces.md#organization-mcp-server)
 (`https://app.opengeni.ai/v1/mcp`). It has no hooks, plugin UI, or install-time
 settings. Installing it grants nothing: the first MCP use opens the server's
@@ -13,7 +13,7 @@ own OAuth sign-in, where the person chooses what the agent may access.
 | Public skill | Purpose |
 | --- | --- |
 | `build-with-opengeni` | Build a product or local demo, with the complete client guide as supporting reference material. |
-| `offload-to-opengeni` | Run work in an OpenGeni session through the `opengeni` MCP tools (find, describe, run an action). |
+| `offload-to-opengeni` | Run work in an Opengeni session through the `opengeni` MCP tools (find, describe, run an action). |
 | `opengeni-setup` | Browser-assisted SDK/REST setup. Uses the `opengeni` MCP tools when available; never required. |
 
 The nested `build-with-opengeni/opengeni-client` guide is not a fourth public
@@ -101,7 +101,7 @@ manifest, custom skills array, or competing identity.
 ## Cursor and ChatGPT
 
 In Cursor **Customize → From GitHub Repository**, import
-`https://github.com/Cloudgeni-ai/opengeni`, then install **OpenGeni**. The root
+`https://github.com/Cloudgeni-ai/opengeni`, then install **Opengeni**. The root
 `.cursor-plugin/marketplace.json` points to the same nested portable package;
 no Cursor-specific plugin overlay is needed. Repository `.agents/skills`
 discovery is separate and may expose maintainer guides when working in this repo.

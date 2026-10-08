@@ -32,8 +32,8 @@ test.skipIf(!enabled)(
     const firstId = "11111111-1111-4111-8111-111111111111";
     const secondId = "22222222-2222-4222-8222-222222222222";
     const fixtureTitles = new Map([
-      [firstId, "OpenGeni isolated fixture A"],
-      [secondId, "OpenGeni isolated fixture B"],
+      [firstId, "Opengeni isolated fixture A"],
+      [secondId, "Opengeni isolated fixture B"],
     ]);
     const runtimeDirectories = new Map<string, string>();
     const allocator = fixtureAllocator(fixtureTitles, runtimeDirectories);
@@ -309,7 +309,7 @@ test.skipIf(!enabled)(
       const nativeBefore = await waitForTargetContaining(
         computer,
         computerReference,
-        "OpenGeni linked Chromium proof",
+        "Opengeni linked Chromium proof",
       );
       expect(nativeBefore.kind).toBe("window");
       expect(nativeBefore.processId).not.toBeNull();
@@ -322,7 +322,7 @@ test.skipIf(!enabled)(
       const nativeAfter = await waitForTargetContaining(
         computer,
         computerReference,
-        "OpenGeni linked Chromium proof changed",
+        "Opengeni linked Chromium proof changed",
       );
       expect(nativeAfter.id).toBe(nativeBefore.id);
       const frameAfter = await computer.capture(computerReference, nativeAfter.id);
@@ -336,7 +336,7 @@ test.skipIf(!enabled)(
       ).toBe(false);
       expect(
         semanticNames(nativeObservation).some((name) =>
-          name.includes("OpenGeni linked Chromium proof changed"),
+          name.includes("Opengeni linked Chromium proof changed"),
         ),
       ).toBe(true);
       const nativePage = await waitForNativeNode(computer, computerReference, "Linked input");
@@ -519,8 +519,8 @@ async function waitForNativeNode(
 
 function browserFixture(): string {
   return `data:text/html,${encodeURIComponent(`<!doctype html>
-    <html><head><title>OpenGeni linked Chromium proof</title></head><body>
-      <button onclick="document.title='OpenGeni linked Chromium proof changed'; document.body.style.background='#36c'; this.textContent='Changed through BrowserSession'">Change page</button>
+    <html><head><title>Opengeni linked Chromium proof</title></head><body>
+      <button onclick="document.title='Opengeni linked Chromium proof changed'; document.body.style.background='#36c'; this.textContent='Changed through BrowserSession'">Change page</button>
       <label>Linked input <input aria-label="Linked input" /></label>
       <button aria-label="Native change" onclick="this.textContent='Changed through ComputerSession'; this.setAttribute('aria-label', 'Changed through ComputerSession')">Native change</button>
     </body></html>`)}`;

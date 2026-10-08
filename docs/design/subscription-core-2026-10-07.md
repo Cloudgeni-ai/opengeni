@@ -732,7 +732,7 @@ consumers.
 
 ### 6.1 Cache coldness (SUB-STICK-04)
 
-Claude: idle longer than the TTL OpenGeni sent. Codex and SuperGrok: a
+Claude: idle longer than the TTL Opengeni sent. Codex and SuperGrok: a
 per-provider cut-off measured from `model_call_facts`, which gains
 `connection_id` (also needed for SUB-ACCT-01). Until measured, the cut-off is
 60 minutes: erring towards "warm" avoids paying a cache miss for a switch

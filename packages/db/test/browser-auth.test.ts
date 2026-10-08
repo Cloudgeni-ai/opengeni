@@ -1613,7 +1613,7 @@ describe("browser auth and network resources", () => {
       createdBy: {
         kind: "service",
         subjectId: "site-auth-maintenance",
-        label: "OpenGeni authentication maintenance",
+        label: "Opengeni authentication maintenance",
       },
       createdByContext: {
         opengeniSiteAuthConnectionId: auth.connection.id,

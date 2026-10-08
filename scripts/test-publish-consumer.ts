@@ -692,7 +692,7 @@ try {
     ),
     writeFile(
       join(consumerRoot, "index.html"),
-      '<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenGeni consumer proof</title></head><body><div id="root"></div><script type="module" src="/browser.tsx"></script></body></html>\n',
+      '<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Opengeni consumer proof</title></head><body><div id="root"></div><script type="module" src="/browser.tsx"></script></body></html>\n',
     ),
     writeFile(
       join(consumerRoot, "browser.tsx"),
@@ -1356,7 +1356,7 @@ try {
   for (const forbidden of [
     "function OpenGeniProvider",
     "streamWorkspaceControlEvents",
-    "OpenGeni updated",
+    "Opengeni updated",
     "data-opengeni-api-contract-mismatch",
     "react/jsx-runtime",
     "@uiw/react-codemirror",
@@ -1420,7 +1420,7 @@ try {
     !compiledCss.includes("--og-color-bg") ||
     !compiledCss.includes(":where(.og-root).bg-og-surface-1")
   ) {
-    throw new Error("Vite output is missing OpenGeni tokens or scoped compiled utilities");
+    throw new Error("Vite output is missing Opengeni tokens or scoped compiled utilities");
   }
   for (const forbidden of ["@tailwind", "@theme", "@source", "@utility"]) {
     if (compiledCss.includes(forbidden)) {

@@ -36,6 +36,7 @@ import {
   ROW_MIN_HEIGHT,
 } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
+import { useNativeTimelineMessages } from "./messages";
 
 /* ----------------------------------------------------------------------------
    Native activity rows. Tool rows draw from the shared presentation model
@@ -413,6 +414,7 @@ function ToolCallRow({ item, compact }: { item: ToolCallItem; compact: boolean }
 
 function ReasoningRow({ item, compact }: { item: ReasoningItem; compact: boolean }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const options = useNativeActivityOptions();
   const plain = item.text
     .replace(/\*\*|__|`/g, "")
@@ -449,7 +451,7 @@ function ReasoningRow({ item, compact }: { item: ReasoningItem; compact: boolean
           </Text>
         )
       }
-      accessibilityLabel={item.streaming ? "Thinking" : "Thought"}
+      accessibilityLabel={item.streaming ? m.thinking : m.thought}
       preview={plain || undefined}
     >
       {options.renderMarkdown ? (
@@ -471,6 +473,7 @@ function ReasoningRow({ item, compact }: { item: ReasoningItem; compact: boolean
 }
 
 function SandboxRow({ item, compact }: { item: SandboxItem; compact: boolean }) {
+  const m = useNativeTimelineMessages();
   return (
     <ActivityDisclosure
       icon="square-terminal"
@@ -484,8 +487,8 @@ function SandboxRow({ item, compact }: { item: SandboxItem; compact: boolean }) 
       compact={compact}
       preview={item.command ?? undefined}
     >
-      {item.command ? <PayloadBlock label="Command" value={item.command} /> : null}
-      {item.output ? <PayloadBlock label="Output" value={item.output} /> : null}
+      {item.command ? <PayloadBlock label={m.command} value={item.command} /> : null}
+      {item.output ? <PayloadBlock label={m.output} value={item.output} /> : null}
     </ActivityDisclosure>
   );
 }
@@ -497,6 +500,7 @@ function StartupPhaseRow({
   item: Extract<ActivityItem, { kind: "startup-phase" }>;
   compact: boolean;
 }) {
+  const m = useNativeTimelineMessages();
   const failed = item.status === "failed";
   const running = item.status === "running";
   const duration = startupDuration(item.durationMs);
@@ -509,11 +513,7 @@ function StartupPhaseRow({
           ? STARTUP_WAIT_TITLES[item.blockedReason]
           : startupPhaseTitle(item.phase, item.status, item.outcome)
       }
-      preview={
-        item.phase === "model_preparation"
-          ? "Includes overlapping sandbox startup, custom environment setup, repository preparation, and runtime setup shown below."
-          : undefined
-      }
+      preview={item.phase === "model_preparation" ? m.startupDetail : undefined}
       running={running}
       failed={failed}
       cancelled={item.status === "cancelled"}
@@ -671,6 +671,7 @@ function ActivityNoteRow({ item }: { item: AgentMessageItem }) {
 
 /** Renders one activity item — the native `renderActivity`. */
 export function ActivityRow({ item, compact = false }: { item: ActivityItem; compact?: boolean }) {
+  const m = useNativeTimelineMessages();
   switch (item.kind) {
     case "tool-call":
       return <ToolCallRow item={item} compact={compact} />;
@@ -699,10 +700,10 @@ export function ActivityRow({ item, compact = false }: { item: ActivityItem; com
           iconTone={item.status === "failed" ? "failed" : "muted"}
           title={
             item.outcome === "pending"
-              ? "Proposed knowledge"
+              ? m.proposedKnowledge
               : item.outcome === "failed"
-                ? "Knowledge save failed"
-                : "Saved to knowledge"
+                ? m.knowledgeSaveFailed
+                : m.savedToKnowledge
           }
           preview={
             "filename" in item && typeof item.filename === "string" ? item.filename : undefined
@@ -715,7 +716,7 @@ export function ActivityRow({ item, compact = false }: { item: ActivityItem; com
       return (
         <ActivityDisclosure
           icon="brain-circuit"
-          title="Saved to memory"
+          title={m.savedToMemory}
           preview={"text" in item && typeof item.text === "string" ? item.text : undefined}
           expandable={false}
           compact={compact}
@@ -725,7 +726,7 @@ export function ActivityRow({ item, compact = false }: { item: ActivityItem; com
       return (
         <ActivityDisclosure
           icon="messages-square"
-          title="Worker decision"
+          title={m.workerDecision}
           expandable={false}
           compact={compact}
         />

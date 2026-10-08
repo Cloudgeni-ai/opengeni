@@ -50,6 +50,7 @@
     "catalog:vendor-logos": "bun scripts/vendor-catalog-logos.ts",
     "catalog:import": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/import-integrations-catalog.ts",
     "slack:manifest": "bun scripts/generate-slack-bot-manifest.ts",
+    "slack:icons": "bun scripts/generate-slack-bot-icons.ts",
     "typecheck": "bun scripts/typecheck.ts",
     "check:bun-version": "bun scripts/bun-version.ts",
     "lint": "oxlint --deny-warnings .",
@@ -210,6 +211,7 @@
     "oxlint": "1.73.0",
     "playwright": "^1.61.1",
     "postgres": "^3.4.9",
+    "sharp": "0.34.5",
     "typescript": "7.0.2",
     "yaml": "2.9.0",
     "zod": "^4.2.1"

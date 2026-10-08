@@ -914,7 +914,7 @@ describe("useSandboxFiles — capture source", () => {
       }),
       fsList: async () => {
         if (failLiveList) {
-          throw new Error("OpenGeni API 503: Workspace files are temporarily unavailable");
+          throw new Error("Opengeni API 503: Workspace files are temporarily unavailable");
         }
         return {
           root: treeDir("", "", [treeFile("app.py", "src/app.py", 13)]),
@@ -1936,7 +1936,7 @@ describe("useSandboxGit — capture source", () => {
   test("warm live-Git failure preserves the captured review diff", async () => {
     const client = fakeClient({
       gitStatus: async () => {
-        throw new Error("OpenGeni API 503: Workspace files are temporarily unavailable");
+        throw new Error("Opengeni API 503: Workspace files are temporarily unavailable");
       },
     });
     const hook = await renderHook(

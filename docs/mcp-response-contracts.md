@@ -1,15 +1,15 @@
 # First-party MCP response contracts
 
-Audience: integrators and maintainers of the built-in OpenGeni MCP servers.
+Audience: integrators and maintainers of the built-in Opengeni MCP servers.
 
-OpenGeni's first-party MCP mutation tools return a compact, versioned receipt
+Opengeni's first-party MCP mutation tools return a compact, versioned receipt
 instead of returning the full entity they just created or changed. The caller
 already has the mutation arguments in its tool-call history; returning prompts,
 instructions, commands, evidence, secret values, or other request fields again
 wastes model context and duplicates sensitive data across storage and transport
 surfaces.
 
-This contract applies to the built-in OpenGeni MCP and docs MCP. It does not
+This contract applies to the built-in Opengeni MCP and docs MCP. It does not
 change REST response bodies. Codemode-proxied tools retain the result contract
 of their selected first-party, capability, or per-session provider.
 

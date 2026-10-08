@@ -1709,7 +1709,7 @@ describe("durable active-goal wake", () => {
     const continuationModelInput = JSON.stringify(continuationHistory[0]?.item);
     expect(continuationModelInput).toContain(SESSION_GOAL_CONTEXT_LABEL);
     expect(continuationModelInput).toContain("continue Finish the durable wake proof (1)");
-    expect(continuationModelInput).not.toContain("[OpenGeni internal updates]");
+    expect(continuationModelInput).not.toContain("[Opengeni internal updates]");
     expect(
       continuationModelInput.match(/continue Finish the durable wake proof \(1\)/g) ?? [],
     ).toHaveLength(1);

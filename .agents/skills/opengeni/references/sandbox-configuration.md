@@ -89,7 +89,7 @@ OPENGENI_MODAL_TIMEOUT_SECONDS=900
 # OPENGENI_MODAL_IMAGE_REGISTRY_SECRET=my-registry-credentials
 ```
 
-When explaining Modal, say OpenGeni selects the Modal sandbox backend through the OpenAI Agents SDK extension. Do not imply that all Docker-only mounting or networking behavior is identical unless runtime code proves it.
+When explaining Modal, say Opengeni selects the Modal sandbox backend through the OpenAI Agents SDK extension. Do not imply that all Docker-only mounting or networking behavior is identical unless runtime code proves it.
 
 For materialization visibility failures, inspect `modal-materialization-verification.ts`
 and `modal-command-session.ts` under runtime sandbox providers. The fixed read-only
@@ -118,7 +118,7 @@ unaffected either way.
 
 ## Connected Machine (`selfhosted`)
 
-The `selfhosted` backend is a **Connected Machine**: a user's own machine, enrolled through the `agent/` Rust agent, that acts as a first-class *primary* compute target rather than a backend overlay on the managed sandbox. The machine itself is the box — OpenGeni cannot snapshot the user's disk, so the descriptor is `persistable:false` and there is no cold re-create; "resume" means the enrolled agent's live subject is reachable. The whole feature is gated by `OPENGENI_SANDBOX_SELFHOSTED_ENABLED` (`sandboxSelfhostedEnabled` in config, default off); with it off the machines/enrollment routes 404 and the enum value is effectively unreachable.
+The `selfhosted` backend is a **Connected Machine**: a user's own machine, enrolled through the `agent/` Rust agent, that acts as a first-class *primary* compute target rather than a backend overlay on the managed sandbox. The machine itself is the box — Opengeni cannot snapshot the user's disk, so the descriptor is `persistable:false` and there is no cold re-create; "resume" means the enrolled agent's live subject is reachable. The whole feature is gated by `OPENGENI_SANDBOX_SELFHOSTED_ENABLED` (`sandboxSelfhostedEnabled` in config, default off); with it off the machines/enrollment routes 404 and the enum value is effectively unreachable.
 
 A machine-targeted turn is materially different from a cloud turn. The effective compute backend is resolved once at turn start (`resolveActiveSandboxBackend`); when it is `selfhosted`, the `machinePrimary` branch in `apps/worker/src/activities/agent-turn/sandbox-establish.ts` takes over:
 
@@ -151,7 +151,7 @@ Always trace resource flow end to end:
 
 ## Object Storage For File Mounts
 
-OpenGeni uses object storage for uploaded bytes. The API and browser use the host-visible endpoint. Sandboxes often need a different endpoint because `127.0.0.1` inside a container points at the container, not the host. Local/self-contained modes usually use `s3-compatible` MinIO. Production modes should use `azure-blob`, `aws-s3`, or `gcs`.
+Opengeni uses object storage for uploaded bytes. The API and browser use the host-visible endpoint. Sandboxes often need a different endpoint because `127.0.0.1` inside a container points at the container, not the host. Local/self-contained modes usually use `s3-compatible` MinIO. Production modes should use `azure-blob`, `aws-s3`, or `gcs`.
 
 Typical local shape:
 
@@ -195,7 +195,7 @@ Current guidance:
 There are two GitHub credential paths:
 
 1. The `github` sandbox preparation profile may copy existing local `GH_TOKEN`/`GITHUB_TOKEN` and raw host git identity vars.
-2. GitHub App repository resources can cause the worker to mint short-lived installation tokens scoped to selected repositories. For repository resources that need the clone-hook path, OpenGeni keeps GitHub credentials out of the persisted sandbox manifest and runs a sandbox lifecycle hook that clones the selected repositories inside the sandbox before the agent starts. It may also inject git/gh-compatible env/config for that run when the sandbox itself needs to use GitHub. This entire GitHub-App path is SKIPPED when the turn's effective backend is a Connected Machine (`selfhosted`): `sandboxEnvironmentForRun` runs with `skipGitHubToken` (no installation token is minted, no git auth env is injected) and `repositoryUsesSandboxClone` returns false (no clone hook). The machine uses its own git credentials and already holds its own checkout — the platform must not clone onto or authenticate on the user's real disk (see the Connected Machine section).
+2. GitHub App repository resources can cause the worker to mint short-lived installation tokens scoped to selected repositories. For repository resources that need the clone-hook path, Opengeni keeps GitHub credentials out of the persisted sandbox manifest and runs a sandbox lifecycle hook that clones the selected repositories inside the sandbox before the agent starts. It may also inject git/gh-compatible env/config for that run when the sandbox itself needs to use GitHub. This entire GitHub-App path is SKIPPED when the turn's effective backend is a Connected Machine (`selfhosted`): `sandboxEnvironmentForRun` runs with `skipGitHubToken` (no installation token is minted, no git auth env is injected) and `repositoryUsesSandboxClone` returns false (no clone hook). The machine uses its own git credentials and already holds its own checkout — the platform must not clone onto or authenticate on the user's real disk (see the Connected Machine section).
 
 Explicit `OPENGENI_GIT_*` settings can set sandbox git author/committer identity independently of ambient host env. Raw host `GIT_AUTHOR_*` and `GIT_COMMITTER_*` values should only enter through the `github` preparation profile or `OPENGENI_SANDBOX_ENV_ALLOWLIST`.
 
@@ -204,7 +204,7 @@ When documenting GitHub access, distinguish:
 - GitHub App setup/listing/token minting in the API/packages.
 - Repository resource selection by session/turn/scheduled task.
 - Sandbox-side repository clone lifecycle hooks and Git config/askpass env injected into the sandbox.
-- Actual commits/branches/PRs performed by agent tools inside the sandbox, not by a first-class OpenGeni PR API unless current code adds one.
+- Actual commits/branches/PRs performed by agent tools inside the sandbox, not by a first-class Opengeni PR API unless current code adds one.
 
 ## Azure And Cloud Credentials
 
@@ -213,7 +213,7 @@ Current Azure behavior is service-principal oriented. If the `azure` preparation
 Important wording:
 
 - Say "pre-authenticates Azure CLI when the `azure` preparation profile is enabled and service-principal vars are present."
-- Do not say there is a custom OpenGeni Azure login helper.
+- Do not say there is a custom Opengeni Azure login helper.
 - Do not imply all cloud providers have equivalent lifecycle hooks unless current code shows it.
 
 ## Ports And Network Policy
@@ -224,7 +224,7 @@ Be conservative about network claims:
 
 - Exposed ports are not the same as a network security policy.
 - Do not claim egress allowlists, VPC controls, or policy enforcement unless current code/backend docs prove they are wired.
-- If a backend has its own network controls, label them as backend-provided and confirm OpenGeni exposes/configures them before claiming product support.
+- If a backend has its own network controls, label them as backend-provided and confirm Opengeni exposes/configures them before claiming product support.
 
 ## Adding A New Sandbox Backend
 
@@ -245,9 +245,9 @@ The durable integration work is larger than adding an enum. Checklist:
 
 - "All sandboxes support the same mounts, ports, resume, and network behavior."
 - "Model provider credentials are automatically available inside the sandbox."
-- "OpenGeni enforces sandbox egress/network policy."
+- "Opengeni enforces sandbox egress/network policy."
 - "Uploaded files can always be mounted mid-session."
 - "The sandbox writes result artifacts back automatically."
 - "Local mode is secure isolation."
-- "GitHub PR creation is an OpenGeni API feature."
+- "GitHub PR creation is an Opengeni API feature."
 - "A specific tool exists in the sandbox image" without checking the current Dockerfile or image.

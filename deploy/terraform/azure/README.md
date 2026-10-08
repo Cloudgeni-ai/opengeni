@@ -1,6 +1,6 @@
-# OpenGeni Azure Reference Deployment
+# Opengeni Azure Reference Deployment
 
-This Terraform root module is the Azure reference substrate for OpenGeni. It is intentionally focused on platform primitives and does not store application secrets in source control.
+This Terraform root module is the Azure reference substrate for Opengeni. It is intentionally focused on platform primitives and does not store application secrets in source control.
 
 ## What It Creates
 
@@ -56,7 +56,7 @@ object_storage = {
 }
 ```
 
-External mode means Terraform does not create that dependency. The Helm values or secret manager integration must still provide the runtime values expected by OpenGeni, such as `OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING` for Azure Blob.
+External mode means Terraform does not create that dependency. The Helm values or secret manager integration must still provide the runtime values expected by Opengeni, such as `OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING` for Azure Blob.
 
 ## AKS Capacity and staged rollout
 
@@ -422,7 +422,7 @@ tfvars.
   if the private ops workflow cannot set the configured app A record, the
   deployment is not ready.
 - Object storage defaults to managed Azure Blob for Azure reference deployments with private container access, nested public blob access disabled, blob versioning enabled, and seven-day blob/container delete retention. The sensitive connection string is exposed only as a sensitive Terraform output and should be written to Key Vault or a Kubernetes Secret, not source control.
-- Temporal can be `external` for Temporal Cloud/customer endpoints or `officialChart` for the stack-wrapper managed upstream Temporal chart. The chart still needs durable Postgres persistence prepared outside the OpenGeni app chart.
+- Temporal can be `external` for Temporal Cloud/customer endpoints or `officialChart` for the stack-wrapper managed upstream Temporal chart. The chart still needs durable Postgres persistence prepared outside the Opengeni app chart.
 - For temporary AKS/Flexible Server smoke tests, `postgres.allow_azure_services = true` can unblock Azure-internal access. Prefer private networking or tightly scoped `postgres.firewall_rules` for long-lived deployments.
 - If a failed Azure PostgreSQL create reserves a server name without leaving an importable resource, set `postgres.name` to a new cleanup-friendly name and rerun the private-state plan. Terraform ignores later `zone` changes on the managed server (Azure assigns a zone at create time and HA failover can move it), so `postgres.zone` only affects server creation.
 

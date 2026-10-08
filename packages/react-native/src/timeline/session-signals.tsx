@@ -1,13 +1,17 @@
 import type { ClientModel, LineageNode, SessionBackgroundCommand } from "@opengeni/sdk";
 import type { UseGoalResult } from "@opengeni/react/session";
 import { sessionAgentsSignal, sessionGoalStateLabel } from "@opengeni/react/session-agents-model";
-import { useState, type ReactNode } from "react";
+import { createContext, useContext, useState, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, View, type TextStyle } from "react-native";
 import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
 import { SessionRow } from "./session-list";
 import { BottomSheet } from "./sheet";
 import { fontStyle, useNativeTimelineTheme, type NativeTimelineTheme } from "./theme";
+import { useNativeTimelineMessages } from "./messages";
+
+/** True where the signals share their row (beside the queue): icon chips only. */
+export const CompactSignalsContext = createContext(false);
 
 /* ----------------------------------------------------------------------------
    The web session chrome's goal, agents and commands segments: one row of
@@ -32,6 +36,9 @@ export function SessionSignals(props: {
   models?: readonly ClientModel[] | undefined;
   readOnly?: boolean | undefined;
 }) {
+  const m = useNativeTimelineMessages();
+  // Beside the queue the row is shared: chips keep only their icon, count and dot.
+  const compact = useContext(CompactSignalsContext);
   const [open, setOpen] = useState<"goal" | "agents" | "commands" | null>(null);
   const goal = props.goal?.goal ?? null;
   const agents = sessionAgentsSignal(props.agents);
@@ -48,9 +55,10 @@ export function SessionSignals(props: {
         {goal ? (
           <Chip
             icon="target"
-            label="Goal"
+            label={m.goal}
             detail={sessionGoalStateLabel(goal)}
             tone={goal.status === "active" ? "running" : "neutral"}
+            compact={compact}
             onPress={() => setOpen("goal")}
           />
         ) : null}
@@ -58,8 +66,10 @@ export function SessionSignals(props: {
           <Chip
             icon="bot"
             label={`${agents.count} agent${agents.count === 1 ? "" : "s"}`}
+            count={agents.count}
             detail={agents.detail}
             tone={agents.tone}
+            compact={compact}
             onPress={() => setOpen("agents")}
           />
         ) : null}
@@ -67,18 +77,20 @@ export function SessionSignals(props: {
           <Chip
             icon="terminal"
             label={`${props.commandsCount} command${props.commandsCount === 1 ? "" : "s"}`}
-            detail="Running"
+            count={props.commandsCount}
+            detail={m.running}
             tone="running"
+            compact={compact}
             onPress={() => setOpen("commands")}
           />
         ) : null}
       </ScrollView>
 
-      <BottomSheet open={open === "goal"} onClose={close} accessibilityLabel="Goal">
+      <BottomSheet open={open === "goal"} onClose={close} accessibilityLabel={m.goal}>
         {goal && props.goal ? <GoalPanel goal={props.goal} readOnly={props.readOnly} /> : null}
       </BottomSheet>
-      <BottomSheet open={open === "agents"} onClose={close} accessibilityLabel="Agents">
-        <SheetTitle>Agents</SheetTitle>
+      <BottomSheet open={open === "agents"} onClose={close} accessibilityLabel={m.agents}>
+        <SheetTitle>{m.agents}</SheetTitle>
         <ScrollView style={{ paddingHorizontal: 12 }}>
           {props.agents.map((node) => (
             <View key={node.session.id}>
@@ -106,8 +118,8 @@ export function SessionSignals(props: {
           ))}
         </ScrollView>
       </BottomSheet>
-      <BottomSheet open={open === "commands"} onClose={close} accessibilityLabel="Commands">
-        <SheetTitle>Commands</SheetTitle>
+      <BottomSheet open={open === "commands"} onClose={close} accessibilityLabel={m.commands}>
+        <SheetTitle>{m.commands}</SheetTitle>
         {open === "commands" ? props.renderCommands(close) : null}
       </BottomSheet>
     </>
@@ -117,8 +129,10 @@ export function SessionSignals(props: {
 function Chip(props: {
   icon: NativeIconName;
   label: string;
+  count?: number | undefined;
   detail: string;
   tone: "running" | "waiting" | "neutral";
+  compact?: boolean | undefined;
   onPress: () => void;
 }) {
   const theme = useNativeTimelineTheme();
@@ -137,10 +151,19 @@ function Chip(props: {
       accessibilityLabel={`${props.label}, ${props.detail}`}
       onPress={props.onPress}
       hitSlop={{ top: 7, bottom: 7, left: 3, right: 3 }}
-      style={({ pressed }) => signalChipStyle(theme, pressed)}
+      style={({ pressed }) => [
+        signalChipStyle(theme, pressed),
+        props.compact ? { paddingHorizontal: 9, gap: 4 } : null,
+      ]}
     >
       <Icon name={props.icon} size={13} color={c["fg-muted"]} />
-      <Text style={signalChipText(theme)}>{props.label}</Text>
+      {props.compact ? (
+        props.count !== undefined ? (
+          <Text style={signalChipText(theme)}>{props.count}</Text>
+        ) : null
+      ) : (
+        <Text style={signalChipText(theme)}>{props.label}</Text>
+      )}
       <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: toneColor }} />
     </Pressable>
   );
@@ -166,6 +189,7 @@ function SheetTitle({ children }: { children: string }) {
 
 function GoalPanel({ goal, readOnly }: { goal: UseGoalResult; readOnly?: boolean | undefined }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const c = theme.colors;
   const record = goal.goal!;
   const body = { ...fontStyle(theme, 400), fontSize: 15, lineHeight: 22, color: c.fg };
@@ -173,7 +197,7 @@ function GoalPanel({ goal, readOnly }: { goal: UseGoalResult; readOnly?: boolean
   return (
     <ScrollView contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 12, gap: 14 }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-        <Text style={{ ...fontStyle(theme, 600), fontSize: 17, color: c.fg }}>Goal</Text>
+        <Text style={{ ...fontStyle(theme, 600), fontSize: 17, color: c.fg }}>{m.goal}</Text>
         <Text style={{ ...fontStyle(theme, 500), fontSize: 13, color: c["fg-muted"] }}>
           {sessionGoalStateLabel(record)}
         </Text>
@@ -208,14 +232,14 @@ function GoalPanel({ goal, readOnly }: { goal: UseGoalResult; readOnly?: boolean
         <View style={{ flexDirection: "row", gap: 8 }}>
           {record.status === "active" ? (
             <Button
-              label="Pause goal"
+              label={m.pauseGoal}
               icon="pause"
               busy={goal.updating}
               onPress={() => void goal.pause()}
             />
           ) : (
             <Button
-              label="Resume goal"
+              label={m.resumeGoal}
               icon="play"
               variant="primary"
               busy={goal.updating}
@@ -240,6 +264,7 @@ export function SessionCommandsList({
   readOnly?: boolean | undefined;
 }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const c = theme.colors;
   if (commands.loading && commands.commands.length === 0) {
     return <ActivityIndicator style={{ padding: 24 }} />;
@@ -275,12 +300,12 @@ export function SessionCommandsList({
               <Text
                 style={{ ...fontStyle(theme, 400), fontSize: 12, color: c["fg-muted"], flex: 1 }}
               >
-                {command.provider === "connected_machine" ? "On a machine" : "In the sandbox"} ·{" "}
-                {command.state === "stopping" ? "Stopping" : running ? "Running" : "Finished"}
+                {command.provider === "connected_machine" ? m.onMachine : m.inSandbox} ·{" "}
+                {command.state === "stopping" ? m.stopping : running ? m.running : m.finished}
               </Text>
               {running && !readOnly ? (
                 <Button
-                  label="Stop"
+                  label={m.stop}
                   icon="square"
                   size="sm"
                   onPress={() => void commands.cancel(command.id)}

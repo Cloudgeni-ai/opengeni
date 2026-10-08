@@ -4,7 +4,6 @@ import {
   recordCodexAccountUsageForFinalization,
   recordClaudeAccountUsage,
   releaseClaudeCredentialLease,
-  releaseCodexCredentialLease,
   releaseXaiCredentialLease,
   updateXaiQuotaMetadata,
   type SessionAttemptQuiescenceCommit,
@@ -503,14 +502,7 @@ async function finalizeTurnAttemptSteps(
       leases.codex.generation !== null
     ) {
       await waitForTurnFinalizerStep(
-        releaseCodexCredentialLease(
-          db,
-          input.accountId,
-          input.workspaceId,
-          attempt.turnId,
-          leases.codex.holderId,
-          leases.codex.generation,
-        ).catch(() => undefined),
+        leases.codex.releaseCurrent().catch(() => false),
         finalizerSignal,
       );
       leases.codex.held = false;

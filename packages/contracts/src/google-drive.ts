@@ -36,7 +36,7 @@ export type GoogleDriveOAuthScopeDecision = {
 };
 
 /**
- * Converts exact Google OAuth grants into the Drive capabilities OpenGeni may
+ * Converts exact Google OAuth grants into the Drive capabilities Opengeni may
  * rely on. Unknown or malformed grants add no authority. In particular,
  * drive.file covers only files explicitly opened or shared with the app and
  * never authorizes arbitrary recursive descendant discovery.

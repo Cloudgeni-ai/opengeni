@@ -300,7 +300,7 @@ export async function startAuthCalloutResponder(
       ...(deps.observability ? observabilityEventBusOptions(deps.observability) : {}),
     },
   );
-  deps.observability?.info?.("OpenGeni NATS auth-callout responder started", {
+  deps.observability?.info?.("Opengeni NATS auth-callout responder started", {
     subject: AUTH_CALLOUT_SUBJECT,
   });
   return connection;

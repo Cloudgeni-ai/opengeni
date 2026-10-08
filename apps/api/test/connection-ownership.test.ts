@@ -56,7 +56,7 @@ describe("personal Connection owner principal", () => {
         access({ authenticatedSubjectId: "dev", grant: { ...access().grant, subjectId: "dev" } }),
       ),
     ).toBe(true);
-    // `docs/embedding.md`: subjectId "remains opaque to OpenGeni" and hosts must
+    // `docs/embedding.md`: subjectId "remains opaque to Opengeni" and hosts must
     // not have the kind inferred from a prefix, so a trusted embedding host's
     // opaque human subject must still be able to own a personal Connection.
     expect(
@@ -116,13 +116,13 @@ describe("personal Connection owner principal", () => {
    * Why this test exists: the subject check has to be a reserved-namespace
    * deny-list rather than a `user:`/`dev` allow-list, because
    * `docs/embedding.md` makes the subject namespace host-owned and opaque to
-   * OpenGeni. A deny-list can go stale silently, so this test enumerates every
-   * machine subject OpenGeni itself mints and fails when one is unlisted. The
+   * Opengeni. A deny-list can go stale silently, so this test enumerates every
+   * machine subject Opengeni itself mints and fails when one is unlisted. The
    * decisive check is still `principalKind === "human_session"`; this is
    * defence-in-depth against a delegation-secret holder signing a human claim
-   * over an OpenGeni machine subject.
+   * over an Opengeni machine subject.
    */
-  test("rejects every machine subject OpenGeni mints", () => {
+  test("rejects every machine subject Opengeni mints", () => {
     const openGeniMintedMachineSubjects = [
       // packages/core/src/access/index.ts — `api_key:${apiKey.id}`
       `api_key:${id("9")}`,
@@ -144,7 +144,7 @@ describe("personal Connection owner principal", () => {
       // `withGrant` moves authenticatedSubjectId with the subject, so the
       // anti-substitution term passes and the namespace check is what refuses.
       const hint =
-        `"${subjectId}" is treated as a human-ownable subject. If OpenGeni now mints this ` +
+        `"${subjectId}" is treated as a human-ownable subject. If Opengeni now mints this ` +
         "subject for a machine, add its namespace to RESERVED_MACHINE_SUBJECT_NAMESPACES in " +
         "apps/api/src/connection-ownership.ts.";
       expect(isPersonalConnectionOwnerSubject(subjectId), hint).toBe(false);

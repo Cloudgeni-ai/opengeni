@@ -206,7 +206,7 @@ describe("video generation workspace routes", () => {
     }
   });
 
-  test("enables the same Seedance capability through OpenGeni credits without a workspace key", async () => {
+  test("enables the same Seedance capability through Opengeni credits without a workspace key", async () => {
     const workspace = await workspaceFixture();
     const managedApp = new Hono();
     registerVideoGenerationRoutes(managedApp, {

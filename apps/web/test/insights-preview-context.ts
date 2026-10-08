@@ -380,7 +380,7 @@ function organizationModelUsage() {
 }
 
 function failure(): Error {
-  return Object.assign(new Error("OpenGeni API 503: upstream timeout Reference: req_preview."), {
+  return Object.assign(new Error("Opengeni API 503: upstream timeout Reference: req_preview."), {
     status: 503,
   });
 }

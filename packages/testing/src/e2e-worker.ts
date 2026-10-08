@@ -54,7 +54,7 @@ const { worker, connection } = await createOpenGeniWorker({
 });
 
 console.log(
-  `OpenGeni ${role} test worker listening on ${settings.temporalTaskQueue} ` +
+  `Opengeni ${role} test worker listening on ${settings.temporalTaskQueue} ` +
     `(ownership=${settings.sandboxOwnershipEnabled} capture=${settings.workspaceCaptureEnabled} storage=${Boolean(settings.objectStorageEndpoint)})`,
 );
 try {
@@ -244,7 +244,7 @@ function workspaceCaptureShellStep(): ScriptedModelStep {
             "mkdir -p api web",
             "git -C api init -q",
             "git -C api config user.email e2e@opengeni.dev",
-            "git -C api config user.name 'OpenGeni E2E'",
+            "git -C api config user.name 'Opengeni E2E'",
             "printf 'base api\\n' > api/app.txt",
             "git -C api add app.txt",
             "git -C api commit -qm base",
@@ -252,7 +252,7 @@ function workspaceCaptureShellStep(): ScriptedModelStep {
             "printf 'untracked api\\n' > api/notes.txt",
             "git -C web init -q",
             "git -C web config user.email e2e@opengeni.dev",
-            "git -C web config user.name 'OpenGeni E2E'",
+            "git -C web config user.name 'Opengeni E2E'",
             "printf 'rename me\\n' > web/old.txt",
             "printf 'delete me\\n' > web/deleted.txt",
             "git -C web add -A",

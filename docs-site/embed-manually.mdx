@@ -22,15 +22,15 @@ Keep all `@opengeni` packages on the same version.
     OPENGENI_API_KEY=ogk_...   # server only
     ```
 
-    Self-hosting? Also pass `baseUrl` to `new OpenGeni(...)` below.
+    Self-hosting? Also pass `baseUrl` to `new Opengeni(...)` below.
 
   </Step>
   <Step title="Add the backend route">
     ```ts
     // lib/opengeni.ts (server only)
-    import { OpenGeni } from "@opengeni/sdk/chat";
+    import { Opengeni } from "@opengeni/sdk/chat";
 
-    export const og = new OpenGeni({ apiKey: process.env.OPENGENI_API_KEY! });
+    export const og = new Opengeni({ apiKey: process.env.OPENGENI_API_KEY! });
     ```
 
     ```ts

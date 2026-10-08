@@ -344,7 +344,7 @@ fn rollback_managed_unit(path: &Path, prior: &str, reload_args: &[&str]) {
 }
 
 /// Removes only the exact systemd control drop-ins produced by the old
-/// OpenGeni `set-property ... infinity` reset. Unknown names, comments plus extra
+/// Opengeni `set-property ... infinity` reset. Unknown names, comments plus extra
 /// directives, and ordinary operator drop-ins are preserved byte-for-byte.
 #[cfg(target_os = "linux")]
 fn remove_legacy_opengeni_control_dropins(install_scope: ServiceScope) -> Result<(), String> {

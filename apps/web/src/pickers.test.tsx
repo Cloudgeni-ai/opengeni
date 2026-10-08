@@ -110,7 +110,7 @@ describe("unified session tool picker", () => {
     }
   });
 
-  test("shows one durable selection for connected and OpenGeni tools", async () => {
+  test("shows one durable selection for connected and Opengeni tools", async () => {
     let latest: SessionToolSelection = {
       mcpServerIds: new Set(["linear"]),
       firstPartyToolIds: new Set(FIRST_PARTY.map((tool) => tool.id)),

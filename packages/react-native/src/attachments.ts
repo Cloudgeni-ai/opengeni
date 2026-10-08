@@ -118,7 +118,7 @@ export async function prepareNativeAttachmentUpload(input: {
     timeoutMs,
     "File verification timed out. Retry the upload.",
   );
-  // The OpenGeni SDK accepts either Uint8Array or ArrayBuffer, but its
+  // The Opengeni SDK accepts either Uint8Array or ArrayBuffer, but its
   // Uint8Array snapshot uses `new Blob([view])`. React Native's Blob rejects
   // ArrayBufferView inputs, so pass an exact ArrayBuffer and avoid that branch.
   const uploadBytes = Uint8Array.from(bytes);

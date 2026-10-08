@@ -1691,7 +1691,7 @@ export type CreateFirstPartyInteractionAttemptToolsInput = Omit<
 
 /**
  * Construct the canonical Browser/Computer attempt definitions against the
- * ordinary OpenGeni control plane. MCP/Codemode never receive controller keys,
+ * ordinary Opengeni control plane. MCP/Codemode never receive controller keys,
  * raw CDP, or provider credentials; every call re-signs exact attempt authority.
  */
 export function createFirstPartyInteractionAttemptToolDefinitions(
@@ -2312,7 +2312,7 @@ function firstPartyApiBaseUrl(settings: Settings, workspaceId: string): string {
   const url = new URL(firstPartyMcpInternalWorkspaceUrl(settings, workspaceId));
   const suffix = `/v1/workspaces/${workspaceId}/mcp`;
   if (!url.pathname.endsWith(suffix)) {
-    throw new Error("First-party MCP URL cannot be projected to the OpenGeni API base URL");
+    throw new Error("First-party MCP URL cannot be projected to the Opengeni API base URL");
   }
   url.pathname = url.pathname.slice(0, -suffix.length) || "/";
   url.search = "";

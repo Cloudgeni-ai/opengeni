@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { OpenGeni } from "@opengeni/sdk/chat";
+import { Opengeni } from "@opengeni/sdk/chat";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   acquireSharedTestDatabase,
@@ -86,7 +86,7 @@ async function fixture() {
   });
   registerWorkspaceRoutes(api, deps);
   registerSessionRoutes(api, deps);
-  const og = new OpenGeni({
+  const og = new Opengeni({
     // No organizationId: the facade derives it from the key.
     apiKey: token,
     baseUrl: "http://opengeni.test",

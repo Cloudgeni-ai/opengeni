@@ -3,7 +3,7 @@ name = "opengeni-artifact-kernel"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Deterministic, platform-neutral artifact model kernel for OpenGeni"
+description = "Deterministic, platform-neutral artifact model kernel for Opengeni"
 publish = false
 
 [lib]

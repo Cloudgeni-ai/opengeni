@@ -1,7 +1,7 @@
 /**
  * Public API surface inventory and compatibility diff.
  *
- * `docs/design/api-compatibility-policy.md` defines OpenGeni's public surface:
+ * `docs/design/api-compatibility-policy.md` defines Opengeni's public surface:
  * the `/v1` routes reachable through public `@opengeni/sdk` methods, the
  * documented session event envelope and event types, the exported names of
  * `@opengeni/sdk` and `@opengeni/react`, and the automation webhook ingress.
@@ -34,7 +34,7 @@ const HTTP_VERBS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 /**
  * Public ingress formats that no SDK method calls (third parties post to them).
  * Provider callbacks whose format the provider owns (Stripe, GitHub, Slack) are
- * not OpenGeni's surface and stay out.
+ * not Opengeni's surface and stay out.
  */
 export const PUBLIC_INGRESS_ROUTES: readonly string[] = [
   "POST /v1/webhooks/automations/:endpointId",

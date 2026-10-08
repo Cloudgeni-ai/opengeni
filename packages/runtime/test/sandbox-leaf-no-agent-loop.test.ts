@@ -25,7 +25,7 @@ const FORBIDDEN_AGENT_LOOP_SPECIFIERS = new Set([
   "@openai/agents-core",
 ]);
 
-// The OpenGeni agent-loop barrel markers (defined in packages/runtime/src/index.ts).
+// The Opengeni agent-loop barrel markers (defined in packages/runtime/src/index.ts).
 // If any of these strings appear in the LEAF's resolved bundle, the leaf is
 // transitively pulling the runtime agent code back in — a regression.
 const AGENT_BARREL_MARKERS = ["buildOpenGeniAgent", "prepareRunInput", "withSandboxLifecycleHooks"];

@@ -29,7 +29,7 @@ const VALID_TOOL_NAME = /^[a-zA-Z0-9_-]+$/;
 // length too — not just charset.
 const MAX_TOOL_NAME_LEN = 64;
 
-// CRITICAL: this sanitizer runs on the codex_apps tools/list wire BEFORE OpenGeni's
+// CRITICAL: this sanitizer runs on the codex_apps tools/list wire BEFORE Opengeni's
 // PrefixedMcpServer (packages/runtime) prepends `<serverId>__` to every tool name
 // (prefixedMcpToolName). The 64-char limit applies to that FINAL prefixed name the
 // model sees, so a name we cap at 64 here becomes 64 + 12 = 76 after prefixing and

@@ -125,7 +125,7 @@ export function localConnectedSlackPreview(
         slackTeamName: "CloudGeni",
         botId: "B_CLOUDGENI_PREVIEW",
         botUserId: "U_CLOUDGENI_PREVIEW",
-        botDisplayName: "OpenGeni",
+        botDisplayName: "Opengeni",
       },
     } satisfies ConnectionMetadata,
     personal: {
@@ -188,7 +188,7 @@ export const SLACK_PERSONAL_PERMISSION_SENTENCE =
 /**
  * Maps Slack onto the shared integration view-model. Anyone with connection
  * management permission (connections:write or workspace admin) sees the
- * OpenGeni bot (its installation, what it can see, and install/reconnect/
+ * Opengeni bot (its installation, what it can see, and install/reconnect/
  * disconnect; the options stay admin-gated); everyone else sees their own
  * personal Slack account. Nobody is offered both.
  */
@@ -267,6 +267,8 @@ export function useSlackIntegration({
   // allowlist, so saving from it actually enables the shortcut.
   const [reactionEnableIntent, setReactionEnableIntent] = useState(false);
   const [publicationOpen, setPublicationOpen] = useState(false);
+  // Opened by an attempt to turn publishing on: saving the dialog turns it on.
+  const [publicationEnableIntent, setPublicationEnableIntent] = useState(false);
   const [invitedChannels, setInvitedChannels] = useState<SlackReactionChannel[] | null>(null);
   const [channelRoutes, setChannelRoutes] = useState<SlackChannelRoute[] | null>(null);
   // Null until the read succeeds. With routing off the stored routes are inert,
@@ -283,7 +285,10 @@ export function useSlackIntegration({
   const preview = localConnectedSlackPreview(window.location.search, workspaceId);
   const readOnly = preview !== null;
   const loaded = connectionsLoaded || readOnly;
-  const botConnections = openGeniSlackBotConnections(connections ?? []);
+  const botConnections = useMemo(
+    () => openGeniSlackBotConnections(connections ?? []),
+    [connections],
+  );
   const botConnection = preview?.bot ?? preferredOpenGeniSlackBotConnection(botConnections);
   const botMetadata = botConnection ? openGeniSlackBotUiMetadata(botConnection) : null;
   const binding = botConnection
@@ -657,6 +662,7 @@ export function useSlackIntegration({
 
   async function togglePublication(enabled: boolean) {
     if (enabled && (!publication?.connectionId || !publication.slackChannelId)) {
+      setPublicationEnableIntent(true);
       setPublicationOpen(true);
       return;
     }
@@ -1283,8 +1289,12 @@ export function useSlackIntegration({
                 workspaceId={workspaceId}
                 connections={botConnections}
                 canManage={isAdmin && !readOnly}
+                enableOnSave={publicationEnableIntent}
                 open={publicationOpen}
-                onOpenChange={setPublicationOpen}
+                onOpenChange={(open) => {
+                  setPublicationOpen(open);
+                  if (!open) setPublicationEnableIntent(false);
+                }}
                 onSaved={setPublication}
               />
             </Suspense>

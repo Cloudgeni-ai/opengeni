@@ -156,3 +156,241 @@ test.each(["codex", "xai", "claude"] as const)(
     }
   },
 );
+
+test("core Codex lease heartbeats renew the canonical subscription lease", async () => {
+  let now = 0;
+  const clock = spyOn(performance, "now").mockImplementation(() => now);
+  const codex = spyOn(db, "heartbeatCodexCredentialLeaseUntil").mockResolvedValue(new Date());
+  const renew = spyOn(db, "renewSubscriptionTurnLease").mockResolvedValue(new Date());
+  const rls = spyOn(db, "withRlsContext").mockImplementation(
+    async (_db, _context, callback) => await callback({} as TurnCredentialLeaseDeps["db"]),
+  );
+  const deps = {
+    db: {} as TurnCredentialLeaseDeps["db"],
+    observability: {
+      incrementCounter() {},
+      warn() {},
+    } as unknown as TurnCredentialLeaseDeps["observability"],
+    accountId: "account-fixture",
+    workspaceId: "workspace-fixture",
+    codexWorkspaceKey: "fixture",
+    getTurnId: () => "turn-fixture",
+    getSessionId: () => "session-fixture",
+  };
+  const leases = createTurnCredentialLeases(deps);
+  Object.assign(leases.codex, {
+    held: true,
+    holderId: "holder-fixture",
+    generation: 7,
+    confirmedUntilMs: 300_000,
+  });
+  leases.codex.useSubscriptionCoreLease("connection-fixture");
+  try {
+    now = 60_000;
+    await leases.codex.renew("timer");
+    expect(codex).not.toHaveBeenCalled();
+    expect(rls).toHaveBeenCalledWith(
+      deps.db,
+      { accountId: deps.accountId, workspaceId: deps.workspaceId },
+      expect.any(Function),
+    );
+    expect(renew).toHaveBeenCalledWith(expect.anything(), {
+      accountId: deps.accountId,
+      workspaceId: deps.workspaceId,
+      sessionId: "session-fixture",
+      turnId: "turn-fixture",
+      provider: "codex",
+      connectionId: "connection-fixture",
+      holderId: "holder-fixture",
+      generation: 7,
+      ttlMs: db.CODEX_CREDENTIAL_LEASE_TTL_MS,
+    });
+    expect(leases.codex.confirmedUntilMs).toBe(360_000);
+  } finally {
+    leases.codex.stopHeartbeat();
+    codex.mockRestore();
+    renew.mockRestore();
+    rls.mockRestore();
+    clock.mockRestore();
+  }
+});
+
+test("core Codex lease is checked at the provider-dispatch boundary", async () => {
+  const core = spyOn(db, "assertSubscriptionTurnLeaseCurrent").mockResolvedValue(true);
+  const rls = spyOn(db, "withRlsContext").mockImplementation(
+    async (_db, _context, callback) => await callback({} as TurnCredentialLeaseDeps["db"]),
+  );
+  const deps = {
+    db: {} as TurnCredentialLeaseDeps["db"],
+    observability: {
+      incrementCounter() {},
+      warn() {},
+    } as unknown as TurnCredentialLeaseDeps["observability"],
+    accountId: "account-fixture",
+    workspaceId: "workspace-fixture",
+    codexWorkspaceKey: "fixture",
+    getTurnId: () => "turn-fixture",
+    getSessionId: () => "session-fixture",
+  };
+  const leases = createTurnCredentialLeases(deps);
+  Object.assign(leases.codex, {
+    held: true,
+    holderId: "holder-fixture",
+    generation: 9,
+    confirmedUntilMs: performance.now() + db.CODEX_CREDENTIAL_LEASE_TTL_MS,
+  });
+  leases.codex.useSubscriptionCoreLease("connection-fixture");
+  try {
+    await leases.codex.assertCurrentForDispatch();
+    expect(core).toHaveBeenCalledWith(expect.anything(), {
+      accountId: deps.accountId,
+      workspaceId: deps.workspaceId,
+      sessionId: "session-fixture",
+      turnId: "turn-fixture",
+      provider: "codex",
+      connectionId: "connection-fixture",
+      holderId: "holder-fixture",
+      generation: 9,
+    });
+    core.mockResolvedValueOnce(false);
+    await expect(leases.codex.assertCurrentForDispatch()).rejects.toThrow(
+      "Codex credential lease is not usable for provider dispatch",
+    );
+    expect(leases.codex.lossReason).toBe("not_found");
+  } finally {
+    leases.codex.stopHeartbeat();
+    core.mockRestore();
+    rls.mockRestore();
+  }
+});
+
+test("rejects a delayed positive core lease check after the local deadline", async () => {
+  let now = 0;
+  const clock = spyOn(performance, "now").mockImplementation(() => now);
+  let resolveCheck!: (current: boolean) => void;
+  const pendingCheck = new Promise<boolean>((resolve) => {
+    resolveCheck = resolve;
+  });
+  const core = spyOn(db, "assertSubscriptionTurnLeaseCurrent").mockReturnValue(pendingCheck);
+  const rls = spyOn(db, "withRlsContext").mockImplementation(
+    async (_db, _context, callback) => await callback({} as TurnCredentialLeaseDeps["db"]),
+  );
+  const deps = {
+    db: {} as TurnCredentialLeaseDeps["db"],
+    observability: {
+      incrementCounter() {},
+      warn() {},
+    } as unknown as TurnCredentialLeaseDeps["observability"],
+    accountId: "account-fixture",
+    workspaceId: "workspace-fixture",
+    codexWorkspaceKey: "fixture",
+    getTurnId: () => "turn-fixture",
+    getSessionId: () => "session-fixture",
+  };
+  const leases = createTurnCredentialLeases(deps);
+  Object.assign(leases.codex, {
+    held: true,
+    holderId: "holder-fixture",
+    generation: 10,
+    confirmedUntilMs: 100,
+  });
+  leases.codex.useSubscriptionCoreLease("connection-fixture");
+  try {
+    const dispatchCheck = leases.codex.assertCurrentForDispatch();
+    await Promise.resolve();
+    expect(core).toHaveBeenCalledTimes(1);
+    now = 101;
+    resolveCheck(true);
+    await expect(dispatchCheck).rejects.toThrow(
+      "Codex credential lease is not usable for provider dispatch",
+    );
+    expect(leases.codex.lost).toBe(true);
+  } finally {
+    leases.codex.stopHeartbeat();
+    core.mockRestore();
+    rls.mockRestore();
+    clock.mockRestore();
+  }
+});
+
+test("legacy Codex dispatch keeps its existing local lease fence", async () => {
+  const core = spyOn(db, "assertSubscriptionTurnLeaseCurrent").mockResolvedValue(true);
+  const deps = {
+    db: {} as TurnCredentialLeaseDeps["db"],
+    observability: {
+      incrementCounter() {},
+      warn() {},
+    } as unknown as TurnCredentialLeaseDeps["observability"],
+    accountId: "account-fixture",
+    workspaceId: "workspace-fixture",
+    codexWorkspaceKey: "fixture",
+    getTurnId: () => "turn-fixture",
+  };
+  const leases = createTurnCredentialLeases(deps);
+  Object.assign(leases.codex, {
+    held: true,
+    holderId: "holder-fixture",
+    generation: 3,
+    confirmedUntilMs: performance.now() + db.CODEX_CREDENTIAL_LEASE_TTL_MS,
+  });
+  try {
+    await leases.codex.assertCurrentForDispatch();
+    expect(core).not.toHaveBeenCalled();
+  } finally {
+    leases.codex.stopHeartbeat();
+    core.mockRestore();
+  }
+});
+
+test("Codex lease release follows the backend that acquired it", async () => {
+  const legacy = spyOn(db, "releaseCodexCredentialLease").mockResolvedValue(true);
+  const core = spyOn(db, "releaseSubscriptionTurnLease").mockResolvedValue(true);
+  const rls = spyOn(db, "withRlsContext").mockImplementation(
+    async (_db, _context, callback) => await callback({} as TurnCredentialLeaseDeps["db"]),
+  );
+  const deps = {
+    db: {} as TurnCredentialLeaseDeps["db"],
+    observability: {
+      incrementCounter() {},
+      warn() {},
+    } as unknown as TurnCredentialLeaseDeps["observability"],
+    accountId: "account-fixture",
+    workspaceId: "workspace-fixture",
+    codexWorkspaceKey: "fixture",
+    getTurnId: () => "turn-fixture",
+    getSessionId: () => "session-fixture",
+  };
+  const leases = createTurnCredentialLeases(deps);
+  Object.assign(leases.codex, { holderId: "holder-fixture", generation: 4 });
+  try {
+    leases.codex.useSubscriptionCoreLease("connection-fixture");
+    expect(await leases.codex.releaseCurrent()).toBe(true);
+    expect(core).toHaveBeenCalledWith(expect.anything(), {
+      accountId: deps.accountId,
+      workspaceId: deps.workspaceId,
+      sessionId: "session-fixture",
+      turnId: "turn-fixture",
+      provider: "codex",
+      connectionId: "connection-fixture",
+      holderId: "holder-fixture",
+      generation: 4,
+    });
+    expect(legacy).not.toHaveBeenCalled();
+
+    leases.codex.useLegacyCodexLease();
+    expect(await leases.codex.releaseCurrent()).toBe(true);
+    expect(legacy).toHaveBeenCalledWith(
+      deps.db,
+      deps.accountId,
+      deps.workspaceId,
+      "turn-fixture",
+      "holder-fixture",
+      4,
+    );
+  } finally {
+    leases.codex.stopHeartbeat();
+    legacy.mockRestore();
+    core.mockRestore();
+    rls.mockRestore();
+  }
+});

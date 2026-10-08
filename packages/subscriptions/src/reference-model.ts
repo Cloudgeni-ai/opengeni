@@ -91,7 +91,8 @@ export type Session = {
   id: string;
   workspaceId: string;
   visibility: "private" | "shared";
-  ownerId: string;
+  /** Null only for a deliberately ownerless service session; it can use shared pools only. */
+  ownerId: string | null;
   /** The model the session asked for. */
   preferredModelId: ModelId;
   reasoningLevel: string;
@@ -257,7 +258,7 @@ export function authorizationFailure(
     (scope.kind === "workspaces"
       ? scope.workspaceIds.includes(workspace.id) ||
         (workspace.kind === "personal" && scope.personalWorkspaces)
-      : scope.personIds.includes(session.ownerId));
+      : session.ownerId !== null && scope.personIds.includes(session.ownerId));
   return inScope ? null : failure("SUB-ELIG-01", "the account's scope excludes this work");
 }
 
@@ -577,6 +578,7 @@ export function earliestRunnableAt(
 }
 
 function personalFallbackFor(world: World, session: Session): boolean {
+  if (session.ownerId === null) return false;
   const settings = effectiveSettings(world.settings, session.workspaceId).values;
   return (
     settings.personalFallbackAllowed && !!byId(world.people, session.ownerId)?.personalFallbackOptIn
@@ -724,6 +726,7 @@ export function checkDecision(
   const fail = (requirement: string, message: string) => violations.push({ requirement, message });
 
   const personalFallback =
+    session.ownerId !== null &&
     settings.personalFallbackAllowed &&
     !!byId(world.people, session.ownerId)?.personalFallbackOptIn;
   const servableShared = (modelId: ModelId) =>

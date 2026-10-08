@@ -301,6 +301,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       workspaceId: input.workspaceId,
       codexWorkspaceKey,
       getTurnId: () => attempt.turnId,
+      getSessionId: () => input.sessionId,
     });
 
     const sandboxRuntime = createSandboxTurnRuntime({
@@ -701,8 +702,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     onUsageHeaders: (snapshot) => {
                       providerTurn.latestCodexUsage = snapshot;
                     }, // latest wins; flushed once in finally
-                    beforeProviderDispatch: () => {
-                      leases.codex.assertUsable();
+                    beforeProviderDispatch: async () => {
+                      await leases.codex.assertCurrentForDispatch();
                       observeProviderDispatch();
                     },
                     onRequestPreparationDiagnostic: (phase) => {
@@ -1205,7 +1206,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               recovered.instructionReceipts.length ||
               recovered.unavailable
             ) {
-              knowledgeRecoveryNote = `[OpenGeni legacy confirmation recovery]\n${JSON.stringify(recovered)}\nThese are publication receipts for the human's earlier answer. Do not call the retired remember tools or duplicate these entries. Unavailable confirmations were not published. Inspect the current Knowledge or instruction review before taking further action.`;
+              knowledgeRecoveryNote = `[Opengeni legacy confirmation recovery]\n${JSON.stringify(recovered)}\nThese are publication receipts for the human's earlier answer. Do not call the retired remember tools or duplicate these entries. Unavailable confirmations were not published. Inspect the current Knowledge or instruction review before taking further action.`;
               for (const receipt of recovered.instructionReceipts) {
                 await eventing.publish!(
                   [{ type: "instruction.confirmation.recovered", payload: { receipt } }],
@@ -1222,7 +1223,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           } catch {
             cancellationSignal?.throwIfAborted();
             knowledgeRecoveryNote =
-              "[OpenGeni confirmation recovery unavailable] Do not assume an earlier remember confirmation was published. Inspect the current Knowledge or instruction review.";
+              "[Opengeni confirmation recovery unavailable] Do not assume an earlier remember confirmation was published. Inspect the current Knowledge or instruction review.";
           }
           const knowledgeSourcePreparationNote = knowledgeRecoveryNote;
 

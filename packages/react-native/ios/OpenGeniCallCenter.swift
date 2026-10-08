@@ -49,6 +49,14 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
   // MARK: Requests from JavaScript
 
   func startCall(id: UUID, title: String, target: String?, completion: @escaping (Error?) -> Void) {
+    // The Simulator accepts a call, then ends it at once: CallKit does not run
+    // there. Refuse it, so the call continues in the app without the system UI.
+    guard Self.callKitRuns else {
+      return completion(
+        NSError(
+          domain: "OpenGeniCall", code: 1,
+          userInfo: [NSLocalizedDescriptionKey: "CallKit does not run in the Simulator."]))
+    }
     if provider == nil { configure(includeInRecents: true) }
     let handle = CXHandle(type: .generic, value: target ?? "opengeni")
     let action = CXStartCallAction(call: id, handle: handle)
@@ -165,6 +173,14 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
   }
 
   // MARK: Helpers
+
+  private static var callKitRuns: Bool {
+    #if targetEnvironment(simulator)
+      return false
+    #else
+      return true
+    #endif
+  }
 
   private func send(_ event: [String: Any]) {
     DispatchQueue.main.async { [weak self] in self?.emit?(event) }

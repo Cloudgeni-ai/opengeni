@@ -124,7 +124,7 @@ export type ComposerSubmitBlocker =
 /**
  * How the composer offers run control.
  * - `pause`: the workstream Pause control and paused-state strip (default; the
- *   OpenGeni console).
+ *   Opengeni console).
  * - `stop`: a Stop control only while a response runs. Stopping pauses this
  *   conversation; the next message continues it, so people never see a paused
  *   state they have to resume. Pauses applied elsewhere still show.
@@ -1702,6 +1702,49 @@ function AttachmentChips({
   const previewRequest = useRef<AbortController | null>(null);
   const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
   const [previewErrorId, setPreviewErrorId] = useState<string | null>(null);
+  // Thumbnails always show: an uploaded image without a live local preview (a
+  // restored draft, a revoked or broken object URL) loads its stored copy.
+  const [storedThumbs, setStoredThumbs] = useState<Record<string, string>>({});
+  const [brokenLocal, setBrokenLocal] = useState<ReadonlySet<string>>(() => new Set());
+  const thumbRequests = useRef<Map<string, AbortController>>(new Map());
+  const localPreview = (attachment: UseFileAttachmentsResult["attachments"][number]) =>
+    attachment.previewUrl && !brokenLocal.has(attachment.id) ? attachment.previewUrl : undefined;
+
+  useEffect(() => {
+    if (!onLoadPreview) return;
+    for (const attachment of attachments) {
+      const id = attachment.id;
+      if (
+        attachment.status !== "ready" ||
+        !attachment.file ||
+        !attachment.contentType.startsWith("image/") ||
+        (attachment.previewUrl && !brokenLocal.has(id)) ||
+        storedThumbs[id] ||
+        thumbRequests.current.has(id)
+      ) {
+        continue;
+      }
+      const controller = new AbortController();
+      thumbRequests.current.set(id, controller);
+      void onLoadPreview(id, controller.signal)
+        .then((url) => {
+          if (url && !controller.signal.aborted) {
+            setStoredThumbs((current) => ({ ...current, [id]: url }));
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (thumbRequests.current.get(id) === controller) thumbRequests.current.delete(id);
+        });
+    }
+  }, [attachments, brokenLocal, onLoadPreview, storedThumbs]);
+  useEffect(() => {
+    const requests = thumbRequests.current;
+    return () => {
+      for (const controller of requests.values()) controller.abort();
+      requests.clear();
+    };
+  }, []);
 
   useEffect(() => () => previewRequest.current?.abort(), [onLoadPreview]);
 
@@ -1712,9 +1755,12 @@ function AttachmentChips({
   ) {
     previewRequest.current?.abort();
     const attachmentId = attachment.id;
-    const releaseSource = onRetainPreview(attachmentId);
-    let src = attachment.previewUrl;
-    if (!releaseSource && canLoadPreview) {
+    const local = localPreview(attachment);
+    const releaseSource = local ? onRetainPreview(attachmentId) : undefined;
+    let src = local ?? storedThumbs[attachmentId];
+    // An unretained local URL may already be revoked: prefer the stored copy.
+    if (!releaseSource && canLoadPreview) src = storedThumbs[attachmentId];
+    if (!src && canLoadPreview) {
       const controller = new AbortController();
       previewRequest.current = controller;
       setPreviewLoadingId(attachmentId);
@@ -1756,6 +1802,15 @@ function AttachmentChips({
         const secureContextRequired = attachment.errorCode === "secure_context_required";
         const previewFailed = previewErrorId === attachment.id;
         const previewLoading = previewLoadingId === attachment.id;
+        const local = localPreview(attachment);
+        const thumb = local ?? storedThumbs[attachment.id];
+        // A local object URL that fails (revoked, unreadable) falls back to the stored copy.
+        const onThumbError = local
+          ? () =>
+              setBrokenLocal((current) =>
+                current.has(attachment.id) ? current : new Set(current).add(attachment.id),
+              )
+          : undefined;
         const canLoadPreview = Boolean(
           lightbox &&
           onLoadPreview &&
@@ -1785,12 +1840,12 @@ function AttachmentChips({
                 : "max-w-[240px] border-og-border bg-og-surface-2",
             )}
           >
-            {lightbox && (attachment.previewUrl || canLoadPreview) ? (
+            {lightbox && (thumb || canLoadPreview) ? (
               <button
                 type="button"
                 className={cn(
                   "size-8 shrink-0 overflow-hidden rounded outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent",
-                  !attachment.previewUrl && "flex items-center justify-center disabled:cursor-wait",
+                  !thumb && "flex items-center justify-center disabled:cursor-wait",
                 )}
                 aria-label={messages.previewAttachment(attachment.name)}
                 aria-busy={previewLoading || undefined}
@@ -1799,10 +1854,11 @@ function AttachmentChips({
                   void openPreview(attachment, event.currentTarget, canLoadPreview)
                 }
               >
-                {attachment.previewUrl ? (
+                {thumb ? (
                   <img
-                    src={attachment.previewUrl}
+                    src={thumb}
                     alt=""
+                    onError={onThumbError}
                     className="h-full w-full object-cover transition-opacity hover:opacity-80"
                   />
                 ) : previewLoading ? (
@@ -1811,10 +1867,11 @@ function AttachmentChips({
                   <ImageIcon className="size-4 text-og-fg-muted" />
                 )}
               </button>
-            ) : attachment.previewUrl ? (
+            ) : thumb ? (
               <img
-                src={attachment.previewUrl}
+                src={thumb}
                 alt=""
+                onError={onThumbError}
                 className="size-8 shrink-0 rounded object-cover"
               />
             ) : attachment.contentType.startsWith("image/") ? (

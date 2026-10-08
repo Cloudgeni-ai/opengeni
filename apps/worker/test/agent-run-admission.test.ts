@@ -87,7 +87,7 @@ describe("worker agent-run admission funding", () => {
     }
   });
 
-  test("admits SuperGrok subscription runs with zero OpenGeni credits", async () => {
+  test("admits SuperGrok subscription runs with zero Opengeni credits", async () => {
     const restoreBalance = mockZeroBalance();
     const restoreCodex = mockCodexBilled(false);
     try {

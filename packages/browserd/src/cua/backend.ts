@@ -28,7 +28,7 @@ type Operation = {
   args: Record<string, unknown>;
 };
 
-/** CUA owns OS delivery. OpenGeni owns authority, receipts and public media.
+/** CUA owns OS delivery. Opengeni owns authority, receipts and public media.
  * Every call is serialized, including preview captures and shutdown. */
 export class CuaComputerBackend implements ComputerBackend {
   readonly identity: { platform: "macos" | "windows"; adapterId: string };

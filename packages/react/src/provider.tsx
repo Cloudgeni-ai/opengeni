@@ -23,10 +23,10 @@ export type OpenGeniProviderProps = {
   onWorkspaceControlEvent?: ((event: WorkspaceControlEvent) => void) | undefined;
   onWorkspaceInteractionEvent?: ((event: WorkspaceInteractionRevisionEvent) => void) | undefined;
   /**
-   * Stale-tab protection for the stock OpenGeni web app: when the server's API
+   * Stale-tab protection for the stock Opengeni web app: when the server's API
    * contract revision differs from this bundle's, cover the page and reload it
    * once. Off by default, because an embedded product's page must never be
-   * blocked or reloaded when OpenGeni deploys; there a mismatch is ignored and
+   * blocked or reloaded when Opengeni deploys; there a mismatch is ignored and
    * the SDK's tolerant-reader compatibility applies.
    */
   reloadOnApiContractChange?: boolean | undefined;
@@ -36,7 +36,7 @@ export type OpenGeniProviderProps = {
 };
 
 /**
- * Supplies the OpenGeni client + workspace to all hooks below it. Hooks also
+ * Supplies the Opengeni client + workspace to all hooks below it. Hooks also
  * accept `{ client, workspaceId }` overrides per call for multi-workspace UIs.
  */
 export function OpenGeniProvider({

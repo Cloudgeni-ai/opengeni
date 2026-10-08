@@ -321,21 +321,21 @@ test("loading, empty, and error states stay explicit with a retry", async () => 
         {...props}
         loading={false}
         error={Object.assign(
-          new Error("OpenGeni API 503: upstream unavailable Reference: req_503."),
+          new Error("Opengeni API 503: upstream unavailable Reference: req_503."),
           { status: 503 },
         )}
       />
     ));
     expect(container.textContent).toContain("Couldn't load artifacts");
     expect(container.textContent).toContain("Try again in a moment.");
-    expect(container.textContent).not.toContain("OpenGeni API");
+    expect(container.textContent).not.toContain("Opengeni API");
     expect(container.textContent).not.toContain("req_503");
     await renderInRouter(root, () => (
       <ArtifactLibrary
         {...props}
         loading={false}
         error={Object.assign(
-          new Error("OpenGeni API 403: missing permission: artifacts:read Reference: req_403."),
+          new Error("Opengeni API 403: missing permission: artifacts:read Reference: req_403."),
           { status: 403 },
         )}
       />

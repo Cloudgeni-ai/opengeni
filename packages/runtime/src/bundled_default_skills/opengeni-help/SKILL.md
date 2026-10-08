@@ -1,11 +1,11 @@
 ---
 name: opengeni-help
-description: Answer questions about OpenGeni setup, product integration, SDK/API behavior, billing, GitHub access, and development setup. Read the official product docs before making product-specific claims or replacing an application's AI provider. No installation is needed for this bundled guide.
+description: Answer questions about Opengeni setup, product integration, SDK/API behavior, billing, GitHub access, and development setup. Read the official product docs before making product-specific claims or replacing an application's AI provider. No installation is needed for this bundled guide.
 ---
 
-# OpenGeni product help
+# Opengeni product help
 
-Use this guide when the user asks about OpenGeni itself. Answer their latest
+Use this guide when the user asks about Opengeni itself. Answer their latest
 question first, using the deployed service and installed SDK as contract evidence.
 This is product reference guidance, not the persona of a customer support bot.
 
@@ -23,7 +23,7 @@ Docs describe supported behavior; they do not prove that a particular deployment
 or installed package includes a feature. Check `/v1/config/client`, installed
 SDK exports/types, and authorized live configuration or probes. Report a failed
 documentation fetch explicitly and use another authoritative source. Do not
-ask the customer to supply OpenGeni's own API contract before trying these sources.
+ask the customer to supply Opengeni's own API contract before trying these sources.
 
 For implementation, read the bundled `opengeni-client` Skill with `skill_read`
 and follow its relevant references. It is available by default without a Pack,
@@ -32,15 +32,15 @@ that selection; the public product-integration guide remains reference material.
 
 ## Integration and account setup
 
-OpenGeni's service API owns workspaces, sessions, turns, and events. A compatible
+Opengeni's service API owns workspaces, sessions, turns, and events. A compatible
 `@opengeni/sdk/chat` package can provide a handler in the customer's backend for
 native, Vercel UI streams, or supported OpenAI-shaped chat formats. This does
-not make OpenGeni's service URL a universal OpenAI inference endpoint.
+not make Opengeni's service URL a universal OpenAI inference endpoint.
 
 Before replacing a provider, establish the customer's actual API usage:
 server-side generation/provider calls versus a frontend UI stream, streaming,
 tools, embeddings, authentication, history, and usage reporting. Generic client
-documentation cannot prove OpenGeni server compatibility. Do not invent SDK
+documentation cannot prove Opengeni server compatibility. Do not invent SDK
 methods or routes. Verify embedding support independently; chat-format support
 does not imply `/embeddings`. Preserve an existing embedding provider unless a
 supported replacement is established.
@@ -87,8 +87,8 @@ monetary cost field. Recheck that statement against the installed version.
 `getBillingUsage` is a separate permissioned accounting read. Its presence does
 not mean the current credential may use it, that its bounded result covers the
 whole conversation, or that it adds cost to an AI SDK response. Distinguish
-charged OpenGeni credits, estimated provider cost, and externally billed usage.
-Zero OpenGeni charge does not establish zero upstream expense. A turn can contain
+charged Opengeni credits, estimated provider cost, and externally billed usage.
+Zero Opengeni charge does not establish zero upstream expense. A turn can contain
 multiple model responses. When response fields cannot be verified, say exactly
 what is unknown rather than answering “probably.”
 
@@ -111,5 +111,5 @@ and publication. A diff/whitespace check does not validate execution.
 The host can pass `bundledSkillIds: []` to exclude all bundled guides, or list
 only supported capability guides. This includes opting out of this guide.
 Workspace Skills, inline Skills, tool permissions, and ordinary runtime rules
-remain separate. Do not copy OpenGeni product or implementation guidance into
+remain separate. Do not copy Opengeni product or implementation guidance into
 the embedded agent's persona. Follow the product's explicit selections.

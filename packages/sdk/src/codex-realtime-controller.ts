@@ -47,7 +47,7 @@ export type { SessionRealtimeLifecycleProjection } from "./codex-realtime-lifecy
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const OUTBOUND_SYNC_INTERVAL_MS = 1_000;
 export const CODEX_REALTIME_NEGOTIATION_TIMEOUT_MS = 20_000;
-// OpenGeni policy: rotate conservatively without asserting an upstream lifetime.
+// Opengeni policy: rotate conservatively without asserting an upstream lifetime.
 const DEFAULT_CONNECTION_ROTATION_INTERVAL_MS = 15 * 60_000;
 const DEFAULT_RECONNECT_BACKOFF_MS = [250, 1_000, 2_000, 5_000] as const;
 const MAX_BROWSER_TIMEOUT_MS = 2_147_483_647;
@@ -1371,11 +1371,22 @@ export function createCodexRealtimeController(
       if (state.status === "active" && state.realtimeId === lifecycle.realtimeId) return;
       const record = readOwnerRecord(storage, storageKey, options);
       if (!record || record.operationId !== lifecycle.operationId) {
-        closeBrowserResources();
-        owner = null;
         const leaseExpiresAt = Date.parse(lifecycle.leaseExpiresAt);
         const remainingLeaseMs = leaseExpiresAt - now().getTime();
-        if (Number.isFinite(remainingLeaseMs) && remainingLeaseMs <= 0) {
+        const leaseExpired = Number.isFinite(remainingLeaseMs) && remainingLeaseMs <= 0;
+        // An earlier call whose lease already ran out (its end not yet in the
+        // events) is not another owner: it must not fail the call this
+        // browser is starting.
+        if (
+          leaseExpired &&
+          lifecycle.realtimeId !== state.realtimeId &&
+          (connectionTask || state.status === "starting")
+        ) {
+          return;
+        }
+        closeBrowserResources();
+        owner = null;
+        if (leaseExpired) {
           transitionEnded("Realtime lease expired");
           return;
         }

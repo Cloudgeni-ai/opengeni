@@ -62,7 +62,7 @@ import { useViewerMenuDismiss } from "./use-viewer-menu-dismiss";
 export type ComputerViewerNotification = { kind: "error" | "info"; message: string };
 
 export type ComputerViewerProps = EmbeddedComputerInteractionClientOverride & {
-  /** Selected OpenGeni agent/session. Peer ComputerSessions remain visible. */
+  /** Selected Opengeni agent/session. Peer ComputerSessions remain visible. */
   sessionId: string;
   enabled?: boolean | undefined;
   className?: string | undefined;

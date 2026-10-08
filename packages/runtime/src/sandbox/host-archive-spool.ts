@@ -107,7 +107,29 @@ function fdPath(handle: FileHandle, name?: string) {
 /** Node has no openat API. Linux's descriptor namespace supplies the same pinned
  * parent resolution; O_NOFOLLOW applies to the child, never an untrusted ancestor.
  * Do not replace this with lstat(path) followed by open(path): that races. */
-async function openRoot(root: string, create = false): Promise<FileHandle> {
+export type HostWorkspaceRootIdentity = Readonly<{
+  dev: string;
+  ino: string;
+  uid: string;
+  gid: string;
+  mode: string;
+}>;
+
+function rootIdentity(stats: BigIntStats): HostWorkspaceRootIdentity {
+  return Object.freeze({
+    dev: String(stats.dev),
+    ino: String(stats.ino),
+    uid: String(stats.uid),
+    gid: String(stats.gid),
+    mode: String(stats.mode),
+  });
+}
+
+async function openRoot(
+  root: string,
+  create = false,
+  expected?: HostWorkspaceRootIdentity,
+): Promise<FileHandle> {
   if (process.platform !== "linux")
     invalid("host archive codec requires Linux descriptor-relative filesystem access");
   if (!isAbsolute(root)) invalid("host workspace root must be absolute");
@@ -127,10 +149,57 @@ async function openRoot(root: string, create = false): Promise<FileHandle> {
       await current.close();
       current = next;
     }
+    if (expected) {
+      const actual = rootIdentity(await current.stat({ bigint: true }));
+      if (
+        Object.keys(actual).some(
+          (key) =>
+            actual[key as keyof HostWorkspaceRootIdentity] !==
+            expected[key as keyof HostWorkspaceRootIdentity],
+        )
+      )
+        invalid("owned workspace root identity changed");
+    }
     return current;
   } catch (error) {
     await current.close();
     throw error;
+  }
+}
+
+/** Metadata only. Content readers repeat this identity comparison on their
+ * opened directory descriptor before inventory or file reads. */
+export async function readHostWorkspaceRootIdentity(
+  root: string,
+  expected?: HostWorkspaceRootIdentity,
+): Promise<HostWorkspaceRootIdentity> {
+  if (process.platform !== "linux") {
+    if (!isAbsolute(root) || resolve(root) !== root || (await realpath(root)) !== root)
+      invalid("owned workspace root is not canonical");
+    const handle = await open(root, READ_DIRECTORY);
+    try {
+      const stats = await handle.stat({ bigint: true });
+      if (!stats.isDirectory()) invalid("owned workspace root is not a directory");
+      const actual = rootIdentity(stats);
+      if (
+        expected &&
+        Object.keys(actual).some(
+          (key) =>
+            actual[key as keyof HostWorkspaceRootIdentity] !==
+            expected[key as keyof HostWorkspaceRootIdentity],
+        )
+      )
+        invalid("owned workspace root identity changed");
+      return actual;
+    } finally {
+      await handle.close();
+    }
+  }
+  const handle = await openRoot(root, false, expected);
+  try {
+    return rootIdentity(await handle.stat({ bigint: true }));
+  } finally {
+    await handle.close();
   }
 }
 
@@ -328,8 +397,9 @@ async function hashTree(rootPath: string, root: FileHandle, tree: TreeIndex) {
 export async function fingerprintHostWorkspace(
   root: string,
   excludedPaths: readonly string[],
+  expectedRoot?: HostWorkspaceRootIdentity,
 ): Promise<WorkspaceTreeFingerprint> {
-  const handle = await openRoot(root);
+  const handle = await openRoot(root, false, expectedRoot);
   try {
     return await hashTree(root, handle, await inventory(handle, excludedPaths));
   } catch (error) {
@@ -447,8 +517,9 @@ function ownedSpool(
 export async function captureHostWorkspaceArchive(
   root: string,
   excludedPaths: readonly string[],
+  expectedRoot?: HostWorkspaceRootIdentity,
 ): Promise<{ spool: WorkspaceArchiveSpool; workspace: WorkspaceTreeFingerprint }> {
-  const handle = await openRoot(root);
+  const handle = await openRoot(root, false, expectedRoot);
   let temporary: string | undefined;
   try {
     const tree = await inventory(handle, excludedPaths);

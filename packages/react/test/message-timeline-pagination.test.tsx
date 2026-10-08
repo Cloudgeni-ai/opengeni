@@ -218,7 +218,7 @@ test.each(["promise", "synchronous"])(
         const failure = new OpenGeniApiError(
           401,
           JSON.stringify({
-            error: { code: "unauthorized", message: "Sign in again to read this OpenGeni session" },
+            error: { code: "unauthorized", message: "Sign in again to read this Opengeni session" },
           }),
         );
         if (mode === "synchronous") throw failure;

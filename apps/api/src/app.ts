@@ -1,4 +1,5 @@
 import { registerClaudeSubscriptionAccountRoutes } from "./routes/claude-subscription-accounts";
+import { isPreparedMcpConnectPath } from "./prepared-mcp-permissions";
 import { registerWorkspaceModelProviderRoutes } from "./routes/workspace-model-providers";
 import { registerClaudeSubscriptionOAuthRoutes } from "./routes/claude-subscription-oauth";
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
@@ -612,7 +613,7 @@ export function createAppComposition(deps: AppDependencies): {
       });
       observability.incrementCounter({
         name: "opengeni_http_errors_total",
-        help: "Total OpenGeni HTTP request failures by bounded route, status, and stable code.",
+        help: "Total Opengeni HTTP request failures by bounded route, status, and stable code.",
         labels: { route, status: String(status), code },
       });
     } catch {
@@ -1409,6 +1410,15 @@ export function createAppComposition(deps: AppDependencies): {
         })),
         firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings),
         codeSearch: codeSearchDeploymentPolicy(deps.settings),
+        // Archiving needs object storage; without it the worker never archives.
+        ...(deps.settings.sessionArchiveEnabled && objectStorage
+          ? {
+              sessionArchive: {
+                enabled: true as const,
+                idleDays: deps.settings.sessionArchiveIdleDays,
+              },
+            }
+          : {}),
         agentConfig: clientAgentConfig(deps.settings),
         fileUploads: {
           enabled: objectStorage !== null,
@@ -2299,6 +2309,8 @@ export function assertConfiguredCodemodeSessionProxyPath(
       } else {
         allowed = families.subagents;
       }
+    } else if (surface === "connect") {
+      allowed = allows("custom_mcp_setup_request") && isPreparedMcpConnectPath(pathname, verb);
     } else if (surface === "files") {
       allowed = families.allowsMcpServer("files");
     } else if (surface === "skills") {
@@ -3668,7 +3680,7 @@ export function apiContractAdmission(
 }
 
 /**
- * State-changing OpenGeni HTTP calls must never cross an incompatible rollout
+ * State-changing Opengeni HTTP calls must never cross an incompatible rollout
  * boundary. Standard third-party protocols and externally initiated callbacks
  * are intentionally outside this product API contract.
  */

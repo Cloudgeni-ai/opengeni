@@ -2019,7 +2019,7 @@ describe("SessionChrome compact queue annotations", () => {
               state: "failed",
               retryable: false,
               outcomeUnknown: false,
-              error: "Insufficient OpenGeni credits. Add credits before sending again.",
+              error: "Insufficient Opengeni credits. Add credits before sending again.",
             },
           ],
           retryOptimisticMessage: () => {
@@ -2031,7 +2031,7 @@ describe("SessionChrome compact queue annotations", () => {
       />,
     );
     const row = mounted.container.querySelector("[data-optimistic-queue-message]")!;
-    expect(row.textContent).toContain("Insufficient OpenGeni credits. Add credits");
+    expect(row.textContent).toContain("Insufficient Opengeni credits. Add credits");
     expect(row.textContent).not.toContain("Not confirmed");
     expect(
       Array.from(row.querySelectorAll("button")).some((button) => button.textContent === "Retry"),

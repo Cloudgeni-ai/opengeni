@@ -2067,7 +2067,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     },
   );
 
-  // The only OpenGeni reset-credit mutation route: the person in the web app,
+  // The only Opengeni reset-credit mutation route: the person in the web app,
   // or an agent they signed in acting as them. Nothing redeems automatically
   // (no worker, scheduled, allocator or rotation path).
   app.post(

@@ -137,7 +137,7 @@ await page.route("**/api/**", async (route) => {
           status: 503,
           json: {
             code: "upstream_unavailable",
-            message: "OpenGeni diagnostic must not leak",
+            message: "Opengeni diagnostic must not leak",
             retryable: false,
             outcomeUnknown: true,
           },

@@ -78,7 +78,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       });
 
   // Channels a person may choose as a task's fixed Slack destination: active,
-  // non-shared channels the selected OpenGeni bot already belongs to.
+  // non-shared channels the selected Opengeni bot already belongs to.
   app.get("/v1/workspaces/:workspaceId/scheduled-task-slack-channels", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
@@ -273,7 +273,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
   });
 
   // The owner's explicit access refresh: re-freeze connectors, connector
-  // accounts and an agent-created task's OpenGeni tools with the calling
+  // accounts and an agent-created task's Opengeni tools with the calling
   // person's current authority. It changes neither the schedule nor its
   // status, so the Temporal schedule is untouched.
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/refresh-access", async (c) => {

@@ -79,7 +79,7 @@ function item(overrides: Partial<CapabilityCatalogItem> = {}): CapabilityCatalog
     kind: "mcp",
     source: "registry",
     name: "Gmail",
-    description: "Search and read Gmail through OpenGeni's reviewed Gmail bridge.",
+    description: "Search and read Gmail through Opengeni's reviewed Gmail bridge.",
     category: "communication",
     tags: ["mcp", "oauth2"],
     homepageUrl: "https://developers.google.com/gmail",

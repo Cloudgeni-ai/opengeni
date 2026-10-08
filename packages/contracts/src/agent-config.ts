@@ -1,5 +1,5 @@
 /**
- * Agent configuration: one `agent` object that describes what an OpenGeni
+ * Agent configuration: one `agent` object that describes what an Opengeni
  * agent is (identity), how it answers (renderer, instructions alias) and what
  * it can do (capabilities). Capabilities are product words; this module owns
  * the single registry that maps every first-party tool to exactly one of them
@@ -102,7 +102,7 @@ export const AgentIdentity = z.string().trim().min(1).max(AGENT_IDENTITY_MAX_CHA
 export const AgentConfigRequest = z
   .object({
     capabilities: AgentCapabilities.optional(),
-    /** Replaces only OpenGeni's identity lines; null selects the default identity. */
+    /** Replaces only Opengeni's identity lines; null selects the default identity. */
     identity: AgentIdentity.nullable().optional(),
     /** Alias of the session `instructions` field (same column, same bound). */
     instructions: z.string().trim().min(1).max(AGENT_INSTRUCTIONS_MAX_CHARACTERS).optional(),

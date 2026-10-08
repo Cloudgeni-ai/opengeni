@@ -1,6 +1,6 @@
 # `@opengeni/subscriptions`
 
-The pure policy layer of OpenGeni's shared subscription core. It decides which
+The pure policy layer of Opengeni's shared subscription core. It decides which
 subscription account (Codex, Claude, SuperGrok, or an API-key connection) a
 session's turn runs on, and why it waits otherwise. It has no database,
 provider SDK or network dependency, no clock and no randomness: every input
@@ -37,3 +37,8 @@ Conformance tests compare every decision with the reference model over
 generated reference worlds, generated production-only inputs (provider
 switches, personal authority, compaction locks, quota shapes) and scripted
 scenarios.
+
+An ownerless service session is represented with a null owner. It may use
+eligible shared connections, but never people-scoped connections or personal
+connections, and personal fallback is unavailable because there is no human
+owner whose authority could authorize it.

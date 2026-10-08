@@ -17,7 +17,7 @@ import { sessionAttachEnvironment } from "../src/sandbox/viewer";
 
 const settings = testSettings({
   sandboxBackend: "modal",
-  gitAuthorName: "OpenGeni Bot",
+  gitAuthorName: "Opengeni Bot",
   gitAuthorEmail: "bot@opengeni.dev",
   githubAppId: "12345",
   githubAppSlug: "opengeni-test",
@@ -86,7 +86,7 @@ describe("sessionAttachEnvironment — repo-attached git-pointer parity", () => 
     );
     expect(attachEnv).toEqual(expected);
     expect(attachEnv.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
-    expect(attachEnv.GIT_AUTHOR_NAME).toBe("OpenGeni Bot");
+    expect(attachEnv.GIT_AUTHOR_NAME).toBe("Opengeni Bot");
     expect(attachEnv.GIT_AUTHOR_EMAIL).toBe("bot@opengeni.dev");
   });
 

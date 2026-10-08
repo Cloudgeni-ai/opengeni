@@ -53,7 +53,7 @@ export type ChatInteractiveBlockProps = {
 
 /**
  * Inline preview for an assistant `opengeni-html` or `opengeni-site` fence, as
- * the OpenGeni console renders it. "Open Site" goes through the nearest
+ * the Opengeni console renders it. "Open Site" goes through the nearest
  * `resolveLink`, so a host decides where a Site opens.
  */
 export function ChatInteractiveBlock({ labels, ...props }: ChatInteractiveBlockProps) {

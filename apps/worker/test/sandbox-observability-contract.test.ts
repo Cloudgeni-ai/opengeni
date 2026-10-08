@@ -59,7 +59,7 @@ describe("sandbox observability contract", () => {
     ).toBe("2Gi");
     expect(stack.grafana.persistence).toMatchObject({ enabled: true, size: "2Gi" });
     expect(stack.grafana.sidecar.dashboards.provider.foldersFromFilesStructure).toBe(true);
-    expect(values.opengeni.dashboards.folder).toBe("/tmp/dashboards/OpenGeni");
+    expect(values.opengeni.dashboards.folder).toBe("/tmp/dashboards/Opengeni");
     const monitoringSelector = {
       [OPENGENI_OBSERVABILITY_DISTRIBUTION.monitoringNamespaceLabel]:
         OPENGENI_OBSERVABILITY_DISTRIBUTION.monitoringNamespaceLabelValue,

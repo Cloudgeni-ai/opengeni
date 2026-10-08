@@ -286,7 +286,7 @@ describe("non-materializing plain JSON length", () => {
 });
 
 describe("codex-parity constants and summary marker", () => {
-  test("buildSummaryItem preserves the OpenGeni marker for UI rendering", () => {
+  test("buildSummaryItem preserves the Opengeni marker for UI rendering", () => {
     const item = buildSummaryItem("handoff body");
     expect(isUserMessage(item)).toBe(true);
     expect(isCompactionSummary(item)).toBe(true);

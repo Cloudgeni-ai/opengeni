@@ -92,7 +92,7 @@ function model(
 const models = [
   model("codex/gpt-5.6-sol", "codex", "Codex"),
   model("supergrok/grok-4.6", "supergrok", "SuperGrok"),
-  model("managed/model", "opengeni", "OpenGeni"),
+  model("managed/model", "opengeni", "Opengeni"),
 ];
 
 function deferred<T>() {

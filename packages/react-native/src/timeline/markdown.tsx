@@ -1,7 +1,25 @@
-import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
-import { Pressable, ScrollView, Text, View, type TextStyle } from "react-native";
+import {
+  createContext,
+  useContext,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentRef,
+  type ReactNode,
+} from "react";
+import { Image, Pressable, ScrollView, Text, View, type TextStyle } from "react-native";
 import Markdown, { MarkdownIt, renderRules, type RenderRules } from "react-native-markdown-display";
-import { isReservedOpenGeniLink, parseOpenGeniLink, type OpenGeniLinkTarget } from "@opengeni/sdk";
+import Svg, { Defs, LinearGradient, Rect, Stop } from "react-native-svg";
+import {
+  isReservedOpenGeniLink,
+  parseOpenGeniLink,
+  parseRetainedFileReference,
+  type OpenGeniLinkTarget,
+} from "@opengeni/sdk";
+import {
+  interactivePreviewKind,
+  type InteractivePreviewKind,
+} from "@opengeni/react/native-previews";
 import { Icon } from "./icon";
 import { withAlpha as withAlphaColor } from "./primitives";
 import type { NativeMarkdownRenderer } from "./message-timeline";
@@ -12,6 +30,7 @@ import {
   useNativeTimelineTheme,
   type NativeTimelineTheme,
 } from "./theme";
+import { useNativeTimelineMessages } from "./messages";
 
 /**
  * One parser for every message, configured like the web's `remark-gfm`: no typographic
@@ -160,6 +179,7 @@ function CodeFence({
   onCopy?: ((text: string) => void) | undefined;
 }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const styles = webMarkdownStyles(theme, "body");
   const [copied, setCopied] = useState(false);
   // The code scrolls in the space left of the language label and copy button, which
@@ -221,7 +241,7 @@ function CodeFence({
         {onCopy ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Copy code"
+            accessibilityLabel={m.copyCode}
             hitSlop={8}
             onPress={() => {
               onCopy(content);
@@ -292,6 +312,11 @@ function columnWidths(columns: { width?: number; grow: number }[], available: nu
   );
 }
 
+/** A column's comfortable width when the table is wider than the screen. */
+function naturalColumnWidth(column: { width?: number; grow: number }): number {
+  return column.width ?? Math.min(280, Math.max(120, Math.ceil(column.grow * 7.6) + 20));
+}
+
 function MarkdownTable({
   node,
   children,
@@ -302,24 +327,73 @@ function MarkdownTable({
   onCopy?: ((text: string) => void) | undefined;
 }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const rows = useMemo(() => tableRows(node), [node]);
   const columns = useMemo(() => tableColumns(rows), [rows]);
+  const natural = useMemo(() => columns.map(naturalColumnWidth), [columns]);
+  const naturalWidth = natural.reduce((sum, width) => sum + width, 0);
   const [available, setAvailable] = useState(0);
+  // Web wraps tables in overflow-x-auto: a table that cannot fit keeps readable
+  // columns and scrolls sideways instead of crushing every cell.
+  const scrolls = available > 0 && naturalWidth > available;
   const widths = useMemo(
-    () => (available > 0 ? columnWidths(columns, available) : []),
-    [available, columns],
+    () => (available > 0 ? (scrolls ? natural : columnWidths(columns, available)) : []),
+    [available, columns, natural, scrolls],
   );
   const [copied, setCopied] = useState(false);
+  // A soft edge says "more columns this way" until the reader reaches the end.
+  const [atEnd, setAtEnd] = useState(false);
+  const scroller = useRef<ComponentRef<typeof ScrollView>>(null);
+  const body = (
+    <TableColumnsContext.Provider value={widths}>{children}</TableColumnsContext.Provider>
+  );
   return (
     <View
       style={{ marginTop: 12, marginBottom: 10 }}
       onLayout={(event) => setAvailable(Math.round(event.nativeEvent.layout.width))}
     >
-      <TableColumnsContext.Provider value={widths}>{children}</TableColumnsContext.Provider>
+      {scrolls ? (
+        <View>
+          <ScrollView
+            ref={scroller}
+            horizontal
+            nestedScrollEnabled
+            directionalLockEnabled
+            showsHorizontalScrollIndicator
+            scrollEventThrottle={32}
+            onLayout={() => scroller.current?.flashScrollIndicators()}
+            onScroll={(event) => {
+              const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+              setAtEnd(contentOffset.x + layoutMeasurement.width >= contentSize.width - 8);
+            }}
+            accessibilityHint={m.scrollTableHint}
+          >
+            <View style={{ width: naturalWidth }}>{body}</View>
+          </ScrollView>
+          {atEnd ? null : (
+            <Svg
+              pointerEvents="none"
+              width={36}
+              height="100%"
+              style={{ position: "absolute", top: 0, right: 0, bottom: 0 }}
+            >
+              <Defs>
+                <LinearGradient id="table-edge" x1="0" y1="0" x2="1" y2="0">
+                  <Stop offset="0" stopColor={theme.colors.bg} stopOpacity={0} />
+                  <Stop offset="1" stopColor={theme.colors.bg} stopOpacity={0.95} />
+                </LinearGradient>
+              </Defs>
+              <Rect x="0" y="0" width="36" height="100%" fill="url(#table-edge)" />
+            </Svg>
+          )}
+        </View>
+      ) : (
+        body
+      )}
       {onCopy ? (
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Copy table"
+          accessibilityLabel={m.copyTable}
           hitSlop={8}
           onPress={() => {
             onCopy(rows.map((row) => row.join("\t")).join("\n"));
@@ -334,6 +408,8 @@ function MarkdownTable({
             height: 28,
             alignItems: "center",
             justifyContent: "center",
+            borderRadius: 8,
+            backgroundColor: scrolls ? theme.colors.bg : "transparent",
           }}
         >
           <Icon name={copied ? "check" : "copy"} size={14} color={theme.colors["fg-subtle"]} />
@@ -388,6 +464,7 @@ function webRules(
   theme: NativeTimelineTheme,
   tone: "body" | "muted",
   onCopy?: (text: string) => void,
+  media: MarkdownMediaOptions = {},
 ): RenderRules {
   const line = tone === "muted" ? 24 : 28;
   return {
@@ -451,36 +528,168 @@ function webRules(
       const content = raw.endsWith("\n") ? raw.slice(0, -1) : raw;
       const info = (node as { sourceInfo?: unknown }).sourceInfo;
       const language = typeof info === "string" ? (info.trim().split(/\s+/)[0] ?? "") : "";
+      const kind = interactivePreviewKind(language);
+      if (kind && media.renderInteractiveBlock) {
+        return (
+          <InteractiveFence
+            key={node.key}
+            kind={kind}
+            content={content}
+            render={media.renderInteractiveBlock}
+          />
+        );
+      }
       return <CodeFence key={node.key} content={content} language={language} onCopy={onCopy} />;
     },
+    image: (node) => {
+      const attributes = (node as { attributes?: { src?: unknown; alt?: unknown } }).attributes;
+      const src = typeof attributes?.src === "string" ? attributes.src : "";
+      const alt = typeof attributes?.alt === "string" ? attributes.alt : "";
+      const custom = src ? media.renderImage?.({ src, alt }) : undefined;
+      return custom !== undefined && custom !== null ? (
+        <View key={node.key}>{custom}</View>
+      ) : (
+        <MarkdownImage key={node.key} src={src} alt={alt} />
+      );
+    },
   };
+}
+
+/** An assistant-authored interactive preview fence, as the host should draw it. */
+export type NativeInteractiveBlock = {
+  kind: InteractivePreviewKind;
+  /** The fence body (complete only when `state` is "complete"). */
+  content: string;
+  /**
+   * "streaming": still being written (show a loading surface, never the body);
+   * "incomplete": generation stopped before the fence closed; "complete".
+   */
+  state: "streaming" | "incomplete" | "complete";
+};
+
+export interface MarkdownMediaOptions {
+  /**
+   * Draw a Markdown image. Retained files arrive as `artifact:<id>` sources,
+   * which only the host can resolve; return null to use the built-in image.
+   */
+  renderImage?: ((image: { src: string; alt: string }) => ReactNode) | undefined;
+  /**
+   * Draw `opengeni-html` / `opengeni-site` fences (web `renderInteractiveBlock`).
+   * Without it they show as code, like the web without the host opt-in.
+   */
+  renderInteractiveBlock?: ((block: NativeInteractiveBlock) => ReactNode) | undefined;
+}
+
+/** Whether the message ends inside an unclosed fence, and that fence's body. */
+export function trailingOpenFence(text: string): string | null {
+  let open: { char: string; length: number; lines: string[] } | null = null;
+  for (const line of text.split("\n")) {
+    if (open) {
+      const close = /^ {0,3}([`~]{3,})\s*$/.exec(line);
+      if (close && close[1]![0] === open.char && close[1]!.length >= open.length) open = null;
+      else open.lines.push(line);
+      continue;
+    }
+    const start = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (start) open = { char: start[1]![0]!, length: start[1]!.length, lines: [] };
+  }
+  return open ? open.lines.join("\n") : null;
+}
+
+const FenceStateContext = createContext<{ openTail: string | null; streaming: boolean }>({
+  openTail: null,
+  streaming: false,
+});
+
+function InteractiveFence({
+  kind,
+  content,
+  render,
+}: {
+  kind: InteractivePreviewKind;
+  content: string;
+  render: (block: NativeInteractiveBlock) => ReactNode;
+}) {
+  const { openTail, streaming } = useContext(FenceStateContext);
+  const open = openTail !== null && openTail.trimEnd() === content.trimEnd();
+  const state = !open ? "complete" : streaming ? "streaming" : "incomplete";
+  return <>{render({ kind, content: state === "complete" ? content : "", state })}</>;
+}
+
+/** Plain image URLs load directly; retained files need the host's `renderImage`. */
+function MarkdownImage({ src, alt }: { src: string; alt: string }) {
+  const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
+  const [ratio, setRatio] = useState<number | null>(null);
+  const [failed, setFailed] = useState(false);
+  const remote = /^https?:\/\//i.test(src) && !parseRetainedFileReference(src);
+  if (!remote || failed) {
+    return (
+      <Text
+        style={{ ...fontStyle(theme), color: theme.colors["fg-muted"], fontSize: theme.size.sm }}
+      >
+        {m.previewUnavailable(alt || m.image)}
+      </Text>
+    );
+  }
+  return (
+    <Image
+      accessibilityLabel={alt || m.image}
+      source={{ uri: src }}
+      resizeMode="contain"
+      onLoad={(event) => {
+        const { width, height } = event.nativeEvent.source;
+        if (width > 0 && height > 0) setRatio(width / height);
+      }}
+      onError={() => setFailed(true)}
+      style={{
+        width: "100%",
+        aspectRatio: ratio ?? 4 / 3,
+        maxHeight: 420,
+        marginVertical: 8,
+        borderRadius: theme.radius.md,
+        backgroundColor: theme.colors["surface-2"],
+      }}
+    />
+  );
 }
 
 /** Trim the trailing paragraph margin (web `last:mb-0`). */
 function TrimmedMarkdown({
   text,
   tone,
+  streaming,
   onLinkPress,
   onCopy,
+  media,
 }: {
   text: string;
   tone: "body" | "muted";
+  streaming: boolean;
   onLinkPress?: ((url: string) => boolean) | undefined;
   onCopy?: ((text: string) => void) | undefined;
+  media: MarkdownMediaOptions;
 }) {
   const theme = useNativeTimelineTheme();
   const styles = useMemo(() => webMarkdownStyles(theme, tone), [theme, tone]);
-  const rules = useMemo(() => webRules(theme, tone, onCopy), [theme, tone, onCopy]);
+  const rules = useMemo(() => webRules(theme, tone, onCopy, media), [theme, tone, onCopy, media]);
+  const openTail = useMemo(
+    () => (media.renderInteractiveBlock ? trailingOpenFence(text) : null),
+    [media.renderInteractiveBlock, text],
+  );
+  const fenceState = useMemo(() => ({ openTail, streaming }), [openTail, streaming]);
   return (
     <View style={{ marginBottom: -10 }}>
-      <Markdown
-        markdownit={PARSER}
-        style={styles}
-        rules={rules}
-        {...(onLinkPress ? { onLinkPress } : {})}
-      >
-        {text}
-      </Markdown>
+      <FenceStateContext.Provider value={fenceState}>
+        <Markdown
+          markdownit={PARSER}
+          style={styles}
+          rules={rules}
+          {...(onLinkPress ? { onLinkPress } : {})}
+        >
+          {text}
+        </Markdown>
+      </FenceStateContext.Provider>
     </View>
   );
 }
@@ -489,9 +698,9 @@ export function createWebMarkdownRenderer(
   options: {
     onLinkPress?: (url: string) => boolean;
     onCopy?: (text: string) => void;
-    /** OpenGeni links (sandbox files, artifacts, Sites); never handed to the OS. */
+    /** Opengeni links (sandbox files, artifacts, Sites); never handed to the OS. */
     onOpenGeniLink?: (target: OpenGeniLinkTarget) => void;
-  } = {},
+  } & MarkdownMediaOptions = {},
 ): NativeMarkdownRenderer {
   const onLinkPress = (url: string): boolean => {
     const target = parseOpenGeniLink(url);
@@ -501,9 +710,21 @@ export function createWebMarkdownRenderer(
     }
     return options.onLinkPress ? options.onLinkPress(url) : true;
   };
-  return (text, { tone }): ReactNode =>
+  // One stable object, so the memoized rules survive every streaming delta.
+  const media: MarkdownMediaOptions = {
+    renderImage: options.renderImage,
+    renderInteractiveBlock: options.renderInteractiveBlock,
+  };
+  return (text, { tone, streaming }): ReactNode =>
     text.trim() ? (
-      <TrimmedMarkdown text={text} tone={tone} onLinkPress={onLinkPress} onCopy={options.onCopy} />
+      <TrimmedMarkdown
+        text={text}
+        tone={tone}
+        streaming={streaming === true}
+        onLinkPress={onLinkPress}
+        onCopy={options.onCopy}
+        media={media}
+      />
     ) : (
       <Text />
     );

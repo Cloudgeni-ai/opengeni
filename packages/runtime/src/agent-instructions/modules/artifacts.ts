@@ -3,7 +3,7 @@ import { blocks, bullets, sentences, toolAvailable, type AgentPromptModule } fro
 /**
  * Documents, published files, Sites, and inline visuals. With the markdown
  * renderer only the delivery rules remain: `artifact:` links, inline HTML, and
- * image embedding need OpenGeni's timeline. Clauses naming the goal report
+ * image embedding need Opengeni's timeline. Clauses naming the goal report
  * tools or `sandbox_file_publish` render unless the attempt proved them absent.
  */
 export const artifactsModule: AgentPromptModule = {
@@ -41,7 +41,7 @@ export const artifactsModule: AgentPromptModule = {
           filePublish
             ? "Display images with ![descriptive alt text](artifact:<artifactId>). Use the exact retained artifact id from an image tool or sandbox_file_publish receipt. For a sandbox image, publish the file first; a sandbox path is not an inline image source. Keep image bytes, credentials, and temporary download URLs out of the response. Ordinary public image URLs also work. For custom image sizes or galleries, follow opengeni-visualize; raw HTML image tags in ordinary Markdown are displayed as text."
             : "Display images with ![descriptive alt text](artifact:<artifactId>). Use the exact retained artifact id from an image tool receipt. A sandbox path is not an inline image source. Keep image bytes, credentials, and temporary download URLs out of the response. Ordinary public image URLs also work. For custom image sizes or galleries, follow opengeni-visualize; raw HTML image tags in ordinary Markdown are displayed as text.",
-          "For published files, [Open file](artifact:<artifactId>) opens the retained file in Artifacts. ![Preview](artifact:<artifactId>) displays images, video, audio, or PDFs inline in the OpenGeni console, with an Artifact link for other formats. Replace <artifactId> with the exact artifact.artifactId from the publication receipt and use a descriptive label.",
+          "For published files, [Open file](artifact:<artifactId>) opens the retained file in Artifacts. ![Preview](artifact:<artifactId>) displays images, video, audio, or PDFs inline in the Opengeni console, with an Artifact link for other formats. Replace <artifactId> with the exact artifact.artifactId from the publication receipt and use a descriptive label.",
         ),
     );
   },

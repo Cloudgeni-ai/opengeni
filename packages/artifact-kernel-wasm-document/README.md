@@ -1,6 +1,6 @@
 # `@opengeni/artifact-kernel-wasm-document`
 
-Exact, capability-scoped WebAssembly runtime for the OpenGeni document editor.
+Exact, capability-scoped WebAssembly runtime for the Opengeni document editor.
 It is generated from the safe Rust artifact kernel and loaded only in the SDK's
 dedicated module Worker. It performs no runtime download or version discovery.
 

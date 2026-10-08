@@ -128,7 +128,7 @@ describe("allowance timeline presentation", () => {
 
   test("ordinary insufficient credits retain their existing presentation", () => {
     const completed = event(1, "turn.completed", {
-      detail: "insufficient OpenGeni credits",
+      detail: "insufficient Opengeni credits",
       segmentLimit: "budget_exhausted",
     });
     expect(creditExhaustedFromEvents([completed])).toBe(true);

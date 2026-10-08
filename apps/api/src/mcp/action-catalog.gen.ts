@@ -6622,6 +6622,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateSessionRetention",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/retention",
+    "request": [
+      "UpdateSessionRetentionRequest"
+    ],
+    "response": [
+      "Session"
+    ]
+  },
+  {
     "id": "updateSessionToolPolicy",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/tool-policy",

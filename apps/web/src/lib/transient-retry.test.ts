@@ -35,7 +35,7 @@ describe("transient service failures", () => {
     expect(isTransientServiceFailure(apiError(422, { code: "validation_failed" }))).toBe(false);
     expect(isTransientServiceFailure(new TypeError("x is not a function"))).toBe(false);
     expect(isTransientServiceFailure(new DOMException("aborted", "AbortError"))).toBe(false);
-    expect(isTransientServiceFailure(new Error("OpenGeni API 500: boom"))).toBe(false);
+    expect(isTransientServiceFailure(new Error("Opengeni API 500: boom"))).toBe(false);
   });
 
   test("retries a read through a brief outage with the configured backoff", async () => {

@@ -2030,7 +2030,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
         `printf 'outside secret' > '${outside}'`,
         "git init -q",
         "git config user.email test@opengeni.local",
-        "git config user.name OpenGeni",
+        "git config user.name Opengeni",
         "git config commit.gpgsign false",
         `printf 'export const marker = "BASE";\\n' > server.ts`,
         `printf 'base\\n' > staged-and-unstaged.txt`,
@@ -2350,7 +2350,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
       const invalidPath = Buffer.concat([Buffer.from(`${root}/tracked-`), Buffer.from([0xff])]);
       runFixtureCommand(
         root,
-        "git init -q && git config user.email test@opengeni.local && git config user.name OpenGeni && git config commit.gpgsign false",
+        "git init -q && git config user.email test@opengeni.local && git config user.name Opengeni && git config commit.gpgsign false",
       );
       writeInvalidBytePath(invalidPath, "base\n");
       runFixtureCommand(root, "git add -A && git commit -q -m baseline");

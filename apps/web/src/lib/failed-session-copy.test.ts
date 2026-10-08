@@ -280,7 +280,7 @@ test("an exhausted provider quota is terminal copy that points at the model pick
   ).toBe(`${compactionError.slice(0, 157)}…`);
 });
 
-test("authored worker copy and OpenGeni credit failures keep their own wording", () => {
+test("authored worker copy and Opengeni credit failures keep their own wording", () => {
   const codex = "Your ChatGPT/Codex subscription usage limit has been reached. Access resets soon.";
   expect(
     failedSessionCopy({
@@ -290,7 +290,7 @@ test("authored worker copy and OpenGeni credit failures keep their own wording",
       failureCode: "codex_usage_limit_reached",
     }),
   ).toEqual({ reason: codex, unavailableModel: false });
-  const credits = "Insufficient OpenGeni credits for this turn";
+  const credits = "Insufficient Opengeni credits for this turn";
   expect(failedSessionCopy({ ...summary, reason: credits, recordedDetail: credits })).toEqual({
     reason: credits,
     unavailableModel: false,
@@ -331,7 +331,7 @@ test("Codex plan copy stays whole, keeps Retry, and keeps the recorded detail", 
   });
   const rejected =
     "The Codex backend rejected this request (HTTP 400) without an error message. " +
-    'The ChatGPT account "Work Pro" still reports the Pro plan, so OpenGeni did not switch accounts. ' +
+    'The ChatGPT account "Work Pro" still reports the Pro plan, so Opengeni did not switch accounts. ' +
     "Try again, or choose another model if it keeps failing.";
   expect(rejected.length).toBeGreaterThan(160);
   expect(

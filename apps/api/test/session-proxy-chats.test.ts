@@ -15,7 +15,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
-import { OpenGeni } from "../../../packages/sdk/src/chat";
+import { Opengeni } from "../../../packages/sdk/src/chat";
 import { uuidV5 } from "../../../packages/sdk/src/chat/ids";
 import { OpenGeniClient } from "../../../packages/sdk/src/client";
 import { OpenGeniEmbeddingClient } from "../../../packages/sdk/src/embedding-client";
@@ -188,7 +188,7 @@ async function fixture(privateSessionsEnabled: boolean) {
 
 test("isolated users can create, read and send with a host per-session MCP server, never administer", async () => {
   const f = await fixture(true);
-  const og = new OpenGeni(f.facadeOptions);
+  const og = new Opengeni(f.facadeOptions);
   const tenant = crypto.randomUUID();
   const workspaceId = await og.workspaceIdFor(
     { tenant, user: f.owner.externalId },
@@ -231,7 +231,7 @@ test("isolated users can create, read and send with a host per-session MCP serve
 
 test("custom isolated member permissions can deny MCP attachment without denying ordinary chat", async () => {
   const f = await fixture(true);
-  const og = new OpenGeni({
+  const og = new Opengeni({
     ...f.facadeOptions,
     memberPermissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
   });
@@ -303,10 +303,10 @@ test.each([
   async (_label, permissions) => {
     const f = await fixture(true);
     const target = { tenant: crypto.randomUUID(), user: f.owner.externalId };
-    const original = new OpenGeni({ ...f.facadeOptions, memberPermissions: permissions });
+    const original = new Opengeni({ ...f.facadeOptions, memberPermissions: permissions });
     const workspaceId = await original.workspaceIdFor(target, { isolation: "user" });
     const resolveAgain = () =>
-      new OpenGeni(f.facadeOptions).workspaceIdFor(target, { isolation: "user" });
+      new Opengeni(f.facadeOptions).workspaceIdFor(target, { isolation: "user" });
     expect(await resolveAgain()).toBe(workspaceId);
     const members = () => f.service.listWorkspaceMembers(workspaceId);
     expect((await members()).map((member) => member.permissions)).toEqual([
@@ -358,7 +358,7 @@ test("a persisted cancellation before the first isolated grant remains fenced af
     workspace.id,
     await uuidV5(JSON.stringify(["member", workspace.id, f.source, target.user]), namespace),
   );
-  const og = new OpenGeni(f.facadeOptions);
+  const og = new Opengeni(f.facadeOptions);
   expect(await og.workspaceIdFor(target, { isolation: "user" })).toBe(workspace.id);
   expect(await f.service.listWorkspaceMembers(workspace.id)).toEqual([]);
   await expect(
@@ -390,7 +390,7 @@ test("a key without members:manage never admits a user on first use", async () =
 
 test("a per-user workspace stays single-user: another user gets 403, never a membership", async () => {
   const f = await fixture(true);
-  const og = new OpenGeni(f.facadeOptions);
+  const og = new Opengeni(f.facadeOptions);
   const workspaceId = await og.workspaceId({ user: f.owner.externalId });
   expect(
     (await f.service.listWorkspaceMembers(workspaceId)).map((member) => member.subjectId),

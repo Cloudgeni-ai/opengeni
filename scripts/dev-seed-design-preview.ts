@@ -137,7 +137,7 @@ if (!credentials.OWNER_PASSWORD || !credentials.PEOPLE_PASSWORD) {
   writeFileSync(
     credentialsPath,
     [
-      "# OpenGeni design-preview stack (local fake data only).",
+      "# Opengeni design-preview stack (local fake data only).",
       `# Sign in at ${ORIGIN}`,
       `URL=${ORIGIN}`,
       `OWNER_EMAIL=${credentials.OWNER_EMAIL}`,

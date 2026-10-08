@@ -2651,7 +2651,7 @@ const STREAM_TTFT_BUCKETS = [
   0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1, 1.5, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 300,
 ];
 const STREAM_INTER_DELTA_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.35, 0.5, 1, 2, 5];
-// OpenGeni's own per-request work before the provider sees bytes: admission,
+// Opengeni's own per-request work before the provider sees bytes: admission,
 // durable history/audit checkpoints, request build. Normally milliseconds to a
 // second; tens of seconds means our database or consumer is the bottleneck.
 const MODEL_REQUEST_PRE_DISPATCH_BUCKETS = [
@@ -2718,7 +2718,7 @@ export class StreamTimingMetrics {
     if (this.modelEntryAt !== null) {
       this.observability.observeHistogram({
         name: "opengeni_model_request_pre_dispatch_seconds",
-        help: "Seconds of OpenGeni work from SDK model-request entry to literal provider dispatch.",
+        help: "Seconds of Opengeni work from SDK model-request entry to literal provider dispatch.",
         buckets: MODEL_REQUEST_PRE_DISPATCH_BUCKETS,
         labels: { provider: this.options.provider },
         value: Math.max(0, (at - this.modelEntryAt) / 1000),
@@ -2746,7 +2746,7 @@ export class StreamTimingMetrics {
     if (this.ttftArmed) {
       this.observability.observeHistogram({
         name: "opengeni_stream_ttft_seconds",
-        help: "Seconds from a stream start or structural boundary to the next streamed content delta (user-perceived; includes OpenGeni between-call work).",
+        help: "Seconds from a stream start or structural boundary to the next streamed content delta (user-perceived; includes Opengeni between-call work).",
         buckets: STREAM_TTFT_BUCKETS,
         labels: { provider: this.options.provider },
         value: Math.max(0, (at - this.ttftAnchor) / 1000),

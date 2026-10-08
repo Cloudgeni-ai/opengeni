@@ -28,7 +28,7 @@ const modelCatalog = {
       selectable: true,
       unavailableReason: null,
       provider: "opengeni",
-      providerLabel: "OpenGeni",
+      providerLabel: "Opengeni",
       catalog: { id: "gpt-5.6-sol", source: "opengeni" },
     },
     {
@@ -71,7 +71,7 @@ const registration: PrReviewAppRegistration = {
   sourceId: "44444444-4444-4444-8444-444444444444",
   accountId: "55555555-5555-4555-8555-555555555555",
   workspaceId,
-  name: "OpenGeni Lens · Cloudgeni-ai",
+  name: "Opengeni Lens · Cloudgeni-ai",
   provider: "github",
   providerBaseUrl: "https://github.com",
   appId: "4749390",
@@ -114,7 +114,7 @@ const repository: PrReviewRepositoryBinding = {
 const managedSetup: PrReviewManagedGitHubSetup = {
   configured: true,
   status: "connected",
-  appName: "OpenGeni Lens",
+  appName: "Opengeni Lens",
   connectUrl: "https://github.com/apps/opengeni-lens/installations/new",
   installations: [
     {
@@ -156,7 +156,7 @@ async function render(client: OpenGeniBrowserClient, canManage = true) {
   };
 }
 
-describe("OpenGeni Review Bot execution model", () => {
+describe("Opengeni Review Bot execution model", () => {
   test("managed GitHub repositories can select the connected Codex billing rail", async () => {
     const requests: Array<{ method: string; path: string; body: unknown }> = [];
     const client = {

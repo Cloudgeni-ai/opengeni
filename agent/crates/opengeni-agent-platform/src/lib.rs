@@ -1,4 +1,4 @@
-//! Per-OS platform abstraction for the OpenGeni self-hosted agent.
+//! Per-OS platform abstraction for the Opengeni self-hosted agent.
 //!
 //! This crate defines the [`Platform`] trait — the single seam between the
 //! agent's transport/dispatch layer and the host operating system. Channel-A

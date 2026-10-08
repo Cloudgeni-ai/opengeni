@@ -27,7 +27,7 @@ describe("attachment refs after compaction", () => {
   const current = { kind: "file" as const, fileId: "00000000-0000-4000-8000-000000000081" };
   const archived = { kind: "file" as const, fileId: "00000000-0000-4000-8000-000000000082" };
   const catalog = () => ({
-    ...user("[OpenGeni retained attachment references]"),
+    ...user("[Opengeni retained attachment references]"),
     [MODEL_ATTACHMENT_CATALOG_MARKER]: true,
     [MODEL_ATTACHMENT_REFS_FIELD]: [archived],
   });
@@ -448,7 +448,7 @@ describe("turnInput attachment projection", () => {
   test("accepts annotation-only user-message triggers backed by canonical history", async () => {
     const workspaceId = "00000000-0000-4000-8000-000000000040";
     const sessionId = "00000000-0000-4000-8000-000000000041";
-    const storedUser = user("[OpenGeni timeline annotations]\nAnnotation 1");
+    const storedUser = user("[Opengeni timeline annotations]\nAnnotation 1");
     let preparedInput: AgentSegmentInput | undefined;
     const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockResolvedValue([]);
     const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
@@ -719,7 +719,7 @@ describe("turnInput attachment projection", () => {
       expect(recoveryInput[0]).toEqual(storedUser);
       expect(recoveryInput[1]).toMatchObject({ type: "message", role: "system" });
       const recoverySystemContent = (recoveryInput[1] as { content: string }).content;
-      expect(recoverySystemContent).toContain("[OpenGeni inference recovery]");
+      expect(recoverySystemContent).toContain("[Opengeni inference recovery]");
       expect(modelInputs[1]).toEqual([storedUser]);
     } finally {
       listUpdates.mockRestore();

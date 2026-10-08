@@ -91,7 +91,11 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
         async deserializeSessionState(state: Record<string, unknown>) {
           return { ...state };
         },
-        async resume(state: Record<string, unknown>) {
+        async attachWorkspaceForDrain(
+          state: Record<string, unknown>,
+          assertCurrentCapture: () => Promise<unknown>,
+        ) {
+          await assertCurrentCapture();
           return {
             state,
             persistWorkspace: async () => {
@@ -143,6 +147,10 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
           "capture_required",
           undefined,
           true,
+          undefined,
+          undefined,
+          undefined,
+          async () => ({ archivePublished: !failPublication }),
         );
         if (failPublication)
           await expect(operation).rejects.toThrow("synthetic publication failure");
@@ -215,7 +223,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
     expect(persistCalls).toHaveLength(0);
   });
 
-  test("a claimed Docker drain restarts only the same live workspace, captures it, then removes it", async () => {
+  test("a claimed Docker drain attaches without replacement, captures it, then removes only its wrapper", async () => {
     const calls: string[] = [];
     const workspaceRootPath = mkdtempSync(join(tmpdir(), "opengeni-docker-reaper-continuity-"));
     writeFileSync(join(workspaceRootPath, "latest.txt"), "latest-docker-workspace");
@@ -240,13 +248,20 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
       async deserializeSessionState(state: Record<string, unknown>) {
         return { ...state };
       },
-      async resume(state: Record<string, unknown>) {
-        calls.push("restart-same-workspace");
+      async resume() {
+        throw new Error("ordinary Docker resume forbidden during drain");
+      },
+      async attachWorkspaceForDrain(
+        state: Record<string, unknown>,
+        assertCurrentCapture: () => Promise<unknown>,
+      ) {
+        await assertCurrentCapture();
+        calls.push("attach-same-workspace");
         return {
-          state: { ...state, containerId: "docker-new" },
+          state,
           exec: async () => ({ stdout: TEST_WORKSPACE_FINGERPRINT }),
           persistWorkspace: async () => new TextEncoder().encode(dockerArchive),
-          delete: async () => calls.push("delete-workspace-and-wrapper"),
+          delete: async () => calls.push("delete-exact-wrapper"),
         };
       },
     };
@@ -268,11 +283,20 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
         } as never,
         observability,
         async (archive) => {
-          expect(calls).not.toContain("delete-workspace-and-wrapper");
+          expect(calls).not.toContain("delete-exact-wrapper");
           archives.push(archive);
           return { wrote: true };
         },
         (() => client) as never,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        async () => ({ archivePublished: true }),
       );
 
       expect(outcome).toEqual({
@@ -281,7 +305,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
       });
       expect(archives).toHaveLength(1);
       expect(Buffer.from(archives[0]!, "base64").toString()).toBe(dockerArchive);
-      expect(calls).toEqual(["restart-same-workspace", "delete-workspace-and-wrapper"]);
+      expect(calls).toEqual(["attach-same-workspace", "delete-exact-wrapper"]);
     } finally {
       rmSync(workspaceRootPath, { recursive: true, force: true });
     }

@@ -75,7 +75,7 @@ function botConnection(): ConnectionMetadata {
       slackTeamName: "Example team",
       botId: "B0BOT01",
       botUserId: "U0BOT01",
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
     },
     createdBySubjectId: "user:admin",
     updatedBySubjectId: "user:admin",
@@ -148,7 +148,7 @@ async function openChannelMenu(container: HTMLElement): Promise<HTMLButtonElemen
 }
 
 describe("ScheduleSlackPosting", () => {
-  test("a bot shared from another OpenGeni workspace is selectable in this schedule", async () => {
+  test("a bot shared from another Opengeni workspace is selectable in this schedule", async () => {
     listConnections.mockImplementationOnce(async () => [
       { ...botConnection(), workspaceId: "installation-home" },
     ]);
@@ -218,7 +218,7 @@ describe("ScheduleSlackPosting", () => {
     );
     expect(container.querySelectorAll('[role="combobox"]')).toHaveLength(1);
     expect(container.textContent).toContain("Slack workspace");
-    expect(container.textContent).toContain("Example team · OpenGeni");
+    expect(container.textContent).toContain("Example team · Opengeni");
     expect(container.textContent).not.toContain("Second example team");
     await openChannelMenu(container);
     await act(async () => {

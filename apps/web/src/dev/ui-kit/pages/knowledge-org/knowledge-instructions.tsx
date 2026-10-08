@@ -28,7 +28,7 @@ import type { PagePicks } from "./picks";
 /* ----------------------------------------------------------------------------
    Instructions tab: what is always in the prompt. Organization identity
    (read-only here) and the workspace instructions, rendered as they read, with
-   Edit, Ask OpenGeni and History.
+   Edit, Ask Opengeni and History.
    -------------------------------------------------------------------------- */
 
 /** Headings, bullets and paragraphs, as they read. Enough for instructions. */

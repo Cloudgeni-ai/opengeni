@@ -11,6 +11,7 @@ import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
 import { BottomSheet } from "./sheet";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
+import { useNativeTimelineMessages } from "./messages";
 
 /* ----------------------------------------------------------------------------
    The web session header's Rename and Pin, behind one native overflow button:
@@ -58,6 +59,7 @@ export interface SessionAction {
 
 export function SessionActionsButton(props: SessionActionsProps) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const c = theme.colors;
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -97,7 +99,7 @@ export function SessionActionsButton(props: SessionActionsProps) {
   const actions: SessionAction[] = [
     {
       key: "rename",
-      label: "Rename",
+      label: m.rename,
       icon: "pencil",
       systemImage: "pencil",
       onPress: () => {
@@ -108,7 +110,7 @@ export function SessionActionsButton(props: SessionActionsProps) {
     },
     {
       key: "pin",
-      label: pinned ? "Unpin" : "Pin",
+      label: pinned ? m.unpin : m.pin,
       icon: pinned ? "pin-off" : "pin",
       systemImage: pinned ? "pin.slash" : "pin",
       onPress: () => {
@@ -165,7 +167,7 @@ export function SessionActionsButton(props: SessionActionsProps) {
             <View
               accessible
               accessibilityRole="button"
-              accessibilityLabel="Chat actions"
+              accessibilityLabel={m.chatActions}
               style={{ width: 36, height: 36, alignItems: "center", justifyContent: "center" }}
             >
               {icon}
@@ -180,7 +182,7 @@ export function SessionActionsButton(props: SessionActionsProps) {
     <>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Chat actions"
+        accessibilityLabel={m.chatActions}
         hitSlop={6}
         onPress={() => setMenuOpen(true)}
         style={({ pressed }) => ({
@@ -197,7 +199,7 @@ export function SessionActionsButton(props: SessionActionsProps) {
       <BottomSheet
         open={menuOpen}
         onClose={() => setMenuOpen(false)}
-        accessibilityLabel="Chat actions"
+        accessibilityLabel={m.chatActions}
       >
         <Text
           numberOfLines={1}
@@ -269,6 +271,7 @@ function RenameSheet(props: {
   onClose: () => void;
   onRenamed: (session: Session) => void;
 }) {
+  const m = useNativeTimelineMessages();
   // Each opening mounts a fresh form seeded before its first render, so the
   // focused field selects the whole seed and typing replaces it.
   const [generation, setGeneration] = useState(0);
@@ -276,7 +279,7 @@ function RenameSheet(props: {
     if (props.open) setGeneration((value) => value + 1);
   }, [props.open]);
   return (
-    <BottomSheet open={props.open} onClose={props.onClose} accessibilityLabel="Rename chat">
+    <BottomSheet open={props.open} onClose={props.onClose} accessibilityLabel={m.renameChat}>
       <RenameForm key={generation} {...props} />
     </BottomSheet>
   );
@@ -289,6 +292,7 @@ function RenameForm(props: {
   onRenamed: (session: Session) => void;
 }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const c = theme.colors;
   const [seed] = useState(() => sessionRenameSeed(props.session));
   const [draft, setDraft] = useState(seed);
@@ -314,9 +318,7 @@ function RenameForm(props: {
       );
       props.onRenamed(updated);
     } catch (caught) {
-      setError(
-        `Couldn't rename this chat. ${caught instanceof Error ? caught.message : "Try again."}`,
-      );
+      setError(m.renameFailed(caught instanceof Error ? caught.message : null));
     } finally {
       inFlight.current = false;
       setSaving(false);
@@ -331,7 +333,7 @@ function RenameForm(props: {
         Rename chat
       </Text>
       <TextInput
-        accessibilityLabel="Chat title"
+        accessibilityLabel={m.chatTitle}
         value={draft}
         onChangeText={setDraft}
         ref={inputRef}
@@ -365,9 +367,9 @@ function RenameForm(props: {
         </Text>
       ) : null}
       <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
-        <Button label="Cancel" variant="ghost" onPress={props.onClose} disabled={saving} />
+        <Button label={m.cancel} variant="ghost" onPress={props.onClose} disabled={saving} />
         <Button
-          label={saving ? "Saving…" : "Save"}
+          label={saving ? m.saving : m.save}
           variant="primary"
           onPress={() => void save()}
           disabled={saving}

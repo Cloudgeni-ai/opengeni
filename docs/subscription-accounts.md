@@ -192,7 +192,7 @@ for it until the matching requirement below is implemented:
   (exhausted, disconnected, revoked, out of scope, owner left) or when the
   cache is predictably cold. Verification: pending (cache-stickiness).
 - **SUB-STICK-04** Cache coldness is exact for Claude: the session has been
-  idle longer than the cache lifetime OpenGeni sent, which each cache read
+  idle longer than the cache lifetime Opengeni sent, which each cache read
   refreshes. For Codex and SuperGrok the cut-off comes from recorded cached
   token counts against idle time, with a conservative default until measured.
   Verification: pending (cache-stickiness).

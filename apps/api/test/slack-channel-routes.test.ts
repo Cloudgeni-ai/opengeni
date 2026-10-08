@@ -107,7 +107,7 @@ async function installation(label: string) {
       slackTeamName: `Slack ${label}`,
       botId: `B_${label}`,
       botUserId: `UB_${label}`,
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: new Date().toISOString(),
     },
   });

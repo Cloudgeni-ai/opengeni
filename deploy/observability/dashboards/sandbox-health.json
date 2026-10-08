@@ -1,6 +1,6 @@
 {
   "uid": "opengeni-sandbox-health",
-  "title": "OpenGeni · Sandbox Health",
+  "title": "Opengeni · Sandbox Health",
   "description": "Provider operations, sandbox lifecycle, durable recovery, and reconciliation. Database inventory panels admit only fresh projections and never sum replicated control-worker gauges.",
   "schemaVersion": 39,
   "version": 2,

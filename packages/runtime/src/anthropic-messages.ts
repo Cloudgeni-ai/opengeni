@@ -296,7 +296,7 @@ export function anthropicMessages(input: ModelRequest["input"]): Message[] {
         append("assistant", [
           {
             type: "text",
-            text: `[OpenGeni historical ${item.type} fact]\n${JSON.stringify(item)}`,
+            text: `[Opengeni historical ${item.type} fact]\n${JSON.stringify(item)}`,
           },
         ]);
     }
@@ -351,7 +351,7 @@ function placeConversationSystems(messages: Message[]): Message[] {
         content: [
           {
             type: "text",
-            text: "OpenGeni continuation (machine-origin input; no new human message).",
+            text: "Opengeni continuation (machine-origin input; no new human message).",
           },
         ],
       });

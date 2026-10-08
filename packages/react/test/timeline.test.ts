@@ -2954,6 +2954,34 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("prepared key cards retain exact scope and mappings across timeline reconstruction", () => {
+    reset();
+    const mcpSetup = {
+      name: "Records MCP",
+      endpointUrl: "https://mcp.example.test/mcp",
+      headers: [{ name: "X-API-Key", secret: "key" }],
+      secretFields: [{ id: "key", label: "API key" }],
+    };
+    const items = buildTimeline([
+      event("tool.auth_needed", {
+        serverId: "opengeni",
+        toolName: "custom_mcp_setup_request",
+        providerDomain: "mcp.example.test",
+        reason: "missing_connection",
+        setupRequest: {
+          kind: "mcp",
+          name: mcpSetup.name,
+          endpointUrl: mcpSetup.endpointUrl,
+          rationale: "Find records.",
+          ownership: "personal",
+          mcpSetup,
+        },
+      }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ setupRequest: { ownership: "personal", mcpSetup } });
+  });
+
   test("historical tool.auth_needed without a concrete tool call stays out of chat", () => {
     reset();
     const items = buildTimeline([
@@ -4259,7 +4287,7 @@ describe("credit exhaustion", () => {
       event("user.message", { text: "keep going" }),
       event("agent.message.delta", { text: "Working…" }),
       event("turn.completed", {
-        detail: "insufficient OpenGeni credits",
+        detail: "insufficient Opengeni credits",
         segmentLimit: "budget_exhausted",
       }),
     ]);
@@ -4284,7 +4312,7 @@ describe("credit exhaustion", () => {
   test("turn.completed with only the detail text (no segmentLimit) still projects as failed", () => {
     reset();
     const items = buildTimeline([
-      event("turn.completed", { detail: "insufficient OpenGeni credits" }),
+      event("turn.completed", { detail: "insufficient Opengeni credits" }),
     ]);
     expect(items[0]).toMatchObject({
       kind: "turn-end",
@@ -4308,7 +4336,7 @@ describe("credit exhaustion", () => {
   test("turn.failed with the credit error renders the canonical message", () => {
     reset();
     const items = buildTimeline([
-      event("turn.failed", { error: "Activity task failed: insufficient OpenGeni credits" }),
+      event("turn.failed", { error: "Activity task failed: insufficient Opengeni credits" }),
     ]);
     expect(items[0]).toMatchObject({
       kind: "turn-end",
@@ -4353,7 +4381,7 @@ describe("credit exhaustion", () => {
         }),
         event("agent.toolCall.output", { id: "c1", output: "ok" }),
         event("turn.completed", {
-          detail: "insufficient OpenGeni credits",
+          detail: "insufficient Opengeni credits",
           segmentLimit: "budget_exhausted",
         }),
       ]),
@@ -4372,7 +4400,7 @@ describe("creditExhaustedFromEvents", () => {
         event("turn.completed", {}, { turnId: "turn-1" }),
         event(
           "turn.completed",
-          { detail: "insufficient OpenGeni credits", segmentLimit: "budget_exhausted" },
+          { detail: "insufficient Opengeni credits", segmentLimit: "budget_exhausted" },
           { turnId: "turn-2" },
         ),
       ]),
@@ -4380,7 +4408,7 @@ describe("creditExhaustedFromEvents", () => {
     reset();
     expect(
       creditExhaustedFromEvents([
-        event("turn.failed", { error: "Activity task failed: insufficient OpenGeni credits" }),
+        event("turn.failed", { error: "Activity task failed: insufficient Opengeni credits" }),
       ]),
     ).toBe(true);
   });
@@ -4391,7 +4419,7 @@ describe("creditExhaustedFromEvents", () => {
       creditExhaustedFromEvents([
         event(
           "turn.completed",
-          { detail: "insufficient OpenGeni credits", segmentLimit: "budget_exhausted" },
+          { detail: "insufficient Opengeni credits", segmentLimit: "budget_exhausted" },
           { turnId: "turn-1" },
         ),
         event("turn.completed", {}, { turnId: "turn-2" }),

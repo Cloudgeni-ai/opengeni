@@ -1573,7 +1573,7 @@ function internalUpdatesFromModelRequest(input: unknown): unknown[] {
       item.role === "system" &&
       "content" in item &&
       typeof item.content === "string" &&
-      item.content.startsWith("[OpenGeni internal updates]\n"),
+      item.content.startsWith("[Opengeni internal updates]\n"),
   );
   if (message === undefined || !("content" in message) || typeof message.content !== "string") {
     throw new Error("internal update model input has no system update message");

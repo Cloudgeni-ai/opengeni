@@ -1190,7 +1190,7 @@ describe("API helpers", () => {
     expect(params.success_url).toContain("checkoutSession={CHECKOUT_SESSION_ID}");
   });
 
-  test("restricts Stripe Checkout return URLs to the public OpenGeni origin", () => {
+  test("restricts Stripe Checkout return URLs to the public Opengeni origin", () => {
     const params = stripeCheckoutSessionCreateParams({
       accountId: "00000000-0000-4000-8000-000000000001",
       customerId: "cus_test",
@@ -1854,7 +1854,7 @@ describe("curated skill catalog enablement", () => {
         version: "1.0.0",
         contentSha256: "bbc029412fd4893c35cf2a4df6e052efa5583d57d3c26e35d62869dcf4625699",
         sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
-        provenance: "Vendored from hashicorp/agent-skills; reviewed OpenGeni curated entry.",
+        provenance: "Vendored from hashicorp/agent-skills; reviewed Opengeni curated entry.",
       },
     });
 
@@ -1876,7 +1876,7 @@ describe("curated skill catalog enablement", () => {
           libraryVersion: "1.0.0",
           contentSha256: "bbc029412fd4893c35cf2a4df6e052efa5583d57d3c26e35d62869dcf4625699",
           sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
-          provenance: "Vendored from hashicorp/agent-skills; reviewed OpenGeni curated entry.",
+          provenance: "Vendored from hashicorp/agent-skills; reviewed Opengeni curated entry.",
         },
       },
       new Set(),

@@ -215,7 +215,7 @@ describe("error copy", () => {
         "fallback",
       ),
     ).toBe("Browser and computer isn't enabled on this server. Turn it off and save again.");
-    expect(agentConfigErrorText(new Error("OpenGeni API 500: boom"), "Couldn't save.")).toBe(
+    expect(agentConfigErrorText(new Error("Opengeni API 500: boom"), "Couldn't save.")).toBe(
       "Couldn't save.",
     );
   });

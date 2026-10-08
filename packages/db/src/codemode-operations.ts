@@ -20,6 +20,7 @@ import type { Database } from "./database";
 import { withRlsContext } from "./database";
 import { runIdempotentPersistenceTransaction } from "./persistence-errors";
 import * as schema from "./schema";
+import { hydrateStoredAttemptToolCatalog } from "./session-content-blobs";
 
 export class CodemodeOperationConflictError extends Error {
   readonly code = "codemode_operation_conflict";
@@ -141,7 +142,10 @@ export async function submitCodemodeOperation(
             }
 
             const [catalogRow] = await tx
-              .select({ catalog: schema.sessionAttemptToolCatalogs.catalog })
+              .select({
+                catalog: schema.sessionAttemptToolCatalogs.catalog,
+                contentRefs: schema.sessionAttemptToolCatalogs.contentRefs,
+              })
               .from(schema.sessionAttemptToolCatalogs)
               .where(
                 and(
@@ -151,7 +155,9 @@ export async function submitCodemodeOperation(
               )
               .limit(1);
             if (!catalogRow) throw new CodemodeOperationNotExecutableError();
-            const catalog = parseVerifiedAttemptToolCatalog(catalogRow.catalog);
+            const catalog = parseVerifiedAttemptToolCatalog(
+              await hydrateStoredAttemptToolCatalog(tx, catalogRow),
+            );
             if (
               catalog.accountId !== input.accountId ||
               catalog.workspaceId !== input.workspaceId ||

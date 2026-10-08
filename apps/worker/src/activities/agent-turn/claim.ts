@@ -476,7 +476,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   };
   turnLifecycleMetricsFor(observability).start({ attemptId: input.attemptId });
   // §7.5 P3 — pass the accepted billing attribution (externally funded turns
-  // bypass OpenGeni credit/token gates)
+  // bypass Opengeni credit/token gates)
   // AND the optional host `entitlements` port (when bound, its admitRun replaces
   // the local credit read). Unset port → today's local-ledger path.
   let allowanceRefusal: AllowanceRefusal | null = null;

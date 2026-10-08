@@ -1,6 +1,6 @@
 {
   "uid": "opengeni-worker-fleet",
-  "title": "OpenGeni · Worker Fleet",
+  "title": "Opengeni · Worker Fleet",
   "description": "Eligible turn backlog, hard-reserved slot saturation, continuous worker memory headroom, node pressure, HPA replicas, sandbox leases, and compaction pressure.",
   "schemaVersion": 39,
   "version": 1,
@@ -1171,7 +1171,7 @@
     {
       "type": "timeseries",
       "title": "Kubelet runtime errors and node readiness loss",
-      "description": "Runtime-operation errors and NotReady state on nodes hosting OpenGeni. Correlated service failures during pressure should be treated as one node incident.",
+      "description": "Runtime-operation errors and NotReady state on nodes hosting Opengeni. Correlated service failures during pressure should be treated as one node incident.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

@@ -20,6 +20,9 @@ import { Icon, type NativeIconName } from "./icon";
 import { withAlpha } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import type { NativeVoiceInput } from "../voice-input";
+import type { NativePickedFile } from "../adapters";
+import { useNativeTimelineMessages } from "./messages";
+import { useComposerImagePaste } from "./paste";
 
 /* ----------------------------------------------------------------------------
    The session composer, designed for each platform rather than copied from
@@ -79,6 +82,8 @@ export interface SessionComposerProps {
   onActionFeedback?: (() => void) | undefined;
   /** Dictation: a mic beside the leading actions, and the recording strip while it runs. */
   voice?: NativeVoiceInput | undefined;
+  /** Images pasted into the field (iOS), added as attachments. */
+  onPasteImages?: ((files: NativePickedFile[]) => void) | undefined;
 }
 
 /** Whether to draw Liquid Glass: iOS 26+, the native module present, transparency allowed. */
@@ -162,8 +167,10 @@ export function ComposerSurface({
 
 export function SessionComposer(props: SessionComposerProps) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const c = theme.colors;
   const ios = Platform.OS === "ios";
+  const pasteInputId = useComposerImagePaste(props.onPasteImages);
   const [height, setHeight] = useState(22);
   const empty = !props.value;
   useEffect(() => {
@@ -211,18 +218,19 @@ export function SessionComposer(props: SessionComposerProps) {
       <>
         {attach}
         {voice ? (
-          <ToolbarButton icon="mic" accessibilityLabel="Dictate" onPress={voice.start} />
+          <ToolbarButton icon="mic" accessibilityLabel={m.dictate} onPress={voice.start} />
         ) : null}
       </>
     ) : null;
   const field = (inline: boolean) => (
     <TextInput
       ref={props.inputRef}
+      testID={pasteInputId}
       accessibilityLabel={messages.inputLabel}
       value={props.value}
       onChangeText={props.onChangeText}
       placeholder={
-        props.placeholder ?? (props.paused ? messages.pausedPlaceholder : "Send a follow-up...")
+        props.placeholder ?? (props.paused ? messages.pausedPlaceholder : m.followUpPlaceholder)
       }
       placeholderTextColor={c["fg-subtle"]}
       multiline
@@ -394,6 +402,7 @@ function formatDictationTime(seconds: number): string {
  */
 function SavedRecordingStrip({ voice }: { voice: NativeVoiceInput }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const c = theme.colors;
   return (
     <View style={{ gap: 6, paddingHorizontal: 16, paddingTop: 10 }}>
@@ -403,12 +412,12 @@ function SavedRecordingStrip({ voice }: { voice: NativeVoiceInput }) {
           accessibilityLiveRegion="polite"
           style={{ ...fontStyle(theme), flex: 1, fontSize: 13, lineHeight: 18, color: c.fg }}
         >
-          {voice.error ?? "Your recording is saved."}
+          {voice.error ?? m.recordingSaved}
         </Text>
       </View>
       <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 6 }}>
-        <Button label="Discard" variant="ghost" onPress={voice.cancel} />
-        <Button label="Retry" variant="primary" onPress={voice.retry} />
+        <Button label={m.discard} variant="ghost" onPress={voice.cancel} />
+        <Button label={m.retry} variant="primary" onPress={voice.retry} />
       </View>
     </View>
   );
@@ -420,6 +429,7 @@ function SavedRecordingStrip({ voice }: { voice: NativeVoiceInput }) {
  */
 function VoiceStrip({ voice }: { voice: NativeVoiceInput }) {
   const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
   const c = theme.colors;
   const [levels, setLevels] = useState<number[]>(() => Array<number>(LEVEL_BARS).fill(0));
   const recording = voice.status === "recording";
@@ -445,7 +455,7 @@ function VoiceStrip({ voice }: { voice: NativeVoiceInput }) {
     >
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Cancel dictation"
+        accessibilityLabel={m.cancelDictation}
         onPress={voice.cancel}
         disabled={transcribing}
         hitSlop={4}
@@ -465,7 +475,7 @@ function VoiceStrip({ voice }: { voice: NativeVoiceInput }) {
         accessible
         accessibilityLiveRegion="polite"
         accessibilityLabel={
-          transcribing ? "Transcribing" : `Recording, ${formatDictationTime(voice.durationSeconds)}`
+          transcribing ? m.transcribing : m.recording(formatDictationTime(voice.durationSeconds))
         }
         style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 10, minWidth: 0 }}
       >
@@ -473,7 +483,7 @@ function VoiceStrip({ voice }: { voice: NativeVoiceInput }) {
           <>
             <ActivityIndicator size="small" color={c["fg-muted"]} />
             <Text style={{ ...fontStyle(theme), fontSize: 15, color: c["fg-muted"] }}>
-              Transcribing…
+              {m.transcribing}…
             </Text>
           </>
         ) : (

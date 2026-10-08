@@ -377,7 +377,7 @@ test("a refused or failed read says what to do, never the raw API error", async 
     await act(async () => root.render(<Page editing />));
     expect(container.textContent).toContain("You can't see what this account can serve.");
     expect(buttons()).not.toContain("Try again");
-    expect(container.textContent).not.toContain("OpenGeni API");
+    expect(container.textContent).not.toContain("Opengeni API");
     expect(container.textContent).not.toContain("corr-refused");
 
     // A failure says what happened and what to do; the reference sits in Technical details.
@@ -390,7 +390,7 @@ test("a refused or failed read says what to do, never the raw API error", async 
     expect(container.textContent).toContain("Try again in a moment.");
     expect(buttons()).toContain("Try again");
     expect(container.textContent).toContain("Technical details");
-    expect(container.textContent).not.toContain("OpenGeni API");
+    expect(container.textContent).not.toContain("Opengeni API");
   } finally {
     await act(async () => root.unmount());
     container.remove();

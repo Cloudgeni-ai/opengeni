@@ -494,7 +494,7 @@ for live authorization. No worker needs the original host API key. Drain the
 complete API/control-worker/turn-worker fleet for these maintenance migrations;
 deploy matching code and provision runtime privileges before enabling host renewal.
 
-OpenGeni deployment work is organized around a repo-owned deployment contract, deterministic artifacts, and conformance checks. Repository CI validates deployment artifacts; it does not deploy maintainer-owned preview infrastructure from pull requests.
+Opengeni deployment work is organized around a repo-owned deployment contract, deterministic artifacts, and conformance checks. Repository CI validates deployment artifacts; it does not deploy maintainer-owned preview infrastructure from pull requests.
 
 Managed deployments using organization recovery must first complete the
 provider-neutral browser-slot rollout and then follow the migration,
@@ -795,7 +795,7 @@ context rules. On an insecure self-hosted origin, the stock console keeps a
 persistent warning visible, and picker, drag-and-drop, and pasted-image
 attachments all fail before any upload request with the typed SDK code
 `secure_context_required` plus HTTPS setup guidance on the attachment card.
-OpenGeni deliberately does not provide a hashing fallback that would make only
+Opengeni deliberately does not provide a hashing fallback that would make only
 uploads appear healthy while the rest of the secure-browser feature contract
 remains broken.
 
@@ -923,7 +923,7 @@ helm upgrade opengeni deploy/helm/opengeni \
 ```
 
 Generated Kubernetes deployment plans default to one rolling `helm upgrade
---install`. Profiles whose durable dependencies live inside the OpenGeni chart
+--install`. Profiles whose durable dependencies live inside the Opengeni chart
 add the disabled-application revision only when the Helm release does not yet
 exist, so bootstrap can create Postgres/Temporal/NATS/object storage before the
 migration hook without turning every later release into an outage. A reviewed
@@ -1061,7 +1061,7 @@ posture checks accept only that exact creator-management edge when `SET=false`,
 role's privileges or activate them with `SET ROLE`; every outbound edge,
 privilege-bearing reverse edge, uncertain grantor, and PostgreSQL 15 edge is
 still rejected.
-When the provisioning principal is not a superuser, OpenGeni first proves
+When the provisioning principal is not a superuser, Opengeni first proves
 `SUPERUSER`, `BYPASSRLS`, `CREATEDB`, and `REPLICATION` are already false, then
 converges only the role attributes PostgreSQL permits a `CREATEROLE`
 administrator to alter. An unsafe protected attribute fails with an explicit
@@ -1085,7 +1085,7 @@ serving, or workflow polling begins. Their readiness endpoints repeat it instead
 of treating `select 1` as database readiness. `OPENGENI_RUNTIME_DATABASE_ROLE`
 defaults to and should remain `opengeni_app` for standalone deployments.
 
-The `scoped` strategy is an explicit embedding contract: OpenGeni checks only
+The `scoped` strategy is an explicit embedding contract: Opengeni checks only
 coherent connectivity/identity because the host owns the role and isolation
 boundary. It must not be used to bypass the standalone `force` posture.
 
@@ -1256,7 +1256,7 @@ Managed deployments may enable either provider independently with
 `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID` plus
 `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET`. A partial pair is rejected at
 startup. These credentials are separate from the Google Drive connector, the
-personal GitHub connector, and the OpenGeni GitHub App, although an operator may
+personal GitHub connector, and the Opengeni GitHub App, although an operator may
 deliberately use an existing provider application when its redirect and consent
 configuration is compatible.
 
@@ -1492,7 +1492,7 @@ Run live connectivity probes against the current shell variable set and Kubernet
 KUBECONFIG=/path/to/kubeconfig bun run deployment:preflight -- --profile azure-managed --live
 ```
 
-Run API-level deployment conformance against a reachable OpenGeni API:
+Run API-level deployment conformance against a reachable Opengeni API:
 
 ```bash
 bun run deployment:conformance -- --base-url https://opengeni.example.com
@@ -1509,7 +1509,7 @@ OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY="$OPENGENI_ACCESS_KEY" \
   bun run deployment:conformance -- --base-url https://opengeni.example.com
 ```
 
-For managed deployments, conformance should use an OpenGeni product API key for
+For managed deployments, conformance should use an Opengeni product API key for
 the test workspace:
 
 ```bash
@@ -1552,8 +1552,8 @@ bun run deployment:conformance -- \
 
 The object-storage check performs a browser-style `OPTIONS` preflight before
 the signed `PUT`. Managed and external buckets must allow direct upload CORS
-from `*` because the OpenGeni browser SDK is designed to run inside arbitrary
-customer products, whose origins are not known to the OpenGeni operator. CORS
+from `*` because the Opengeni browser SDK is designed to run inside arbitrary
+customer products, whose origins are not known to the Opengeni operator. CORS
 is transport policy, not upload authorization: the API first authenticates the
 workspace request, then returns a short-lived, object-scoped signed URL. The
 storage account/container remains private and browser PUTs carry no storage
@@ -1832,7 +1832,7 @@ file such as `/robots.txt` answers 404 instead of the SPA HTML.
 
 The console's account menu links to product documentation under Help. The API
 advertises the link in `/v1/config/client` as `documentationUrl`, defaulting to
-the public OpenGeni docs at `https://docs.opengeni.ai`. Set
+the public Opengeni docs at `https://docs.opengeni.ai`. Set
 `OPENGENI_DOCUMENTATION_URL` on the API to an absolute http(s) URL for your own
 documentation, or to `none` to hide the entry; any other value fails startup.
 
@@ -1841,7 +1841,7 @@ native build platform. The amd64 and arm64 web images copy those portable
 outputs into their respective Bun runtime images without executing target
 architecture build steps. Web image publication therefore does not need QEMU.
 
-Build local OpenGeni workload images:
+Build local Opengeni workload images:
 
 ```bash
 bun run image:build:api
@@ -1971,7 +1971,7 @@ will be used directly as a release source, dispatch
 number and exact base/head SHAs before merging. The base-owned workflow reruns
 the complete source-admission verifier, requires the existing successful
 exact-head admission check, then creates or verifies the tag idempotently. It
-also publishes a prerelease named `Retained OpenGeni release head <sha>` for
+also publishes a prerelease named `Retained Opengeni release head <sha>` for
 that exact tag. Repository-level immutable releases must be enabled: the
 provider response must identify the GitHub Actions bot as author and report the
 published prerelease as `immutable: true`, or sealing fails closed. GitHub then
@@ -2043,7 +2043,7 @@ object with the top-level keys sorted in ascending ASCII order:
   "draft": false,
   "id": 123,
   "immutable": true,
-  "name": "Retained OpenGeni release head <sha>",
+  "name": "Retained Opengeni release head <sha>",
   "prerelease": true,
   "publishedAt": "2026-07-27T02:00:00.000Z",
   "tagName": "opengeni-release-head-<sha>",
@@ -2167,7 +2167,7 @@ The workflow retains publication evidence; its legacy GHCR `sha-<source-sha>` an
 `canary-sha-<source-sha>` tags are best-effort mirrors in a separate bounded,
 error-tolerant job, not publication gates.
 Dispatch builds the selected ref's exact SHA; dispatch merged main deliberately.
-Publication does not update deployment pins or rotate existing sandboxes. OpenGeni defaults to
+Publication does not update deployment pins or rotate existing sandboxes. Opengeni defaults to
 a public, digest-pinned desktop image in both runtime config and Helm. Override
 Helm `desktop.imageRef` only with another compatible digest
 (`registry/opengeni-desktop@sha256:…`). The chart fails closed when
@@ -2221,7 +2221,7 @@ every later workflow verifies them against the same source-controlled prefix.
 Each official workload image is one OCI index containing both `linux/amd64`
 and `linux/arm64`; candidate creation builds both variants before freezing the
 index digest, so downstream hosts select their native architecture without
-building OpenGeni locally.
+building Opengeni locally.
 
 For the default GHCR location, the owning organization must allow public
 package creation and each existing `opengeni-*` container package must be made
@@ -2254,11 +2254,11 @@ receipt makes no hosted Workbench, staging, production, or canary claim.
 An application-only embedded release additionally supplies the exact source SHA
 and successful run ID of the canonical `publish-packages.yml` workflow whose
 owned, unexpired `package-publication-verified-*` artifact defines the package
-overlay. OpenGeni verifies that run and provider artifact digest, requires the
+overlay. Opengeni verifies that run and provider artifact digest, requires the
 run to have executed from `main`, retains the exact controller branch and SHA in
 the new provenance evidence, and proves that controller SHA remains an ancestor
 of current `main` before any release mutation. The package source SHA remains a
-separate identity. OpenGeni then requires the receipt to cover the exact
+separate identity. Opengeni then requires the receipt to cover the exact
 publishable package-name closure and re-reads every recorded version from npm to
 match its immutable `gitHead` and SHA-512 integrity before using the receipt's
 complete BOM. It publishes zero npm packages in this mode. This permits reviewed
@@ -2275,11 +2275,11 @@ tag as the candidate: the accepted source is checked out only as data, while
 the workflow graph, provenance verifiers, and bundle assembler are executed
 from the exact controller bytes. That environment pins the operator repository
 and canonical workflow path and holds a narrow artifact-read credential. A
-dispatcher supplies only the operator run ID: OpenGeni requires a successful
+dispatcher supplies only the operator run ID: Opengeni requires a successful
 `workflow_dispatch` run from the configured operator `main`, proves that run's
 head remains on `main`, resolves exactly one unexpired source-SHA-named artifact
 and its provider digest, and accepts only the two expected sanitized files.
-OpenGeni then replaces all operator-supplied candidate/public-producer authority
+Opengeni then replaces all operator-supplied candidate/public-producer authority
 with its independently verified candidate and current acceptance-run metadata
 before validating every schema-v2 row. A 72-hour production soak row is
 optional evidence, not a publish gate; when present it is still bound to the
@@ -2428,11 +2428,11 @@ or move stable tags. Consumers must separately select and verify immutable runti
 images and package compatibility. Use the returned chart version and digest;
 do not infer successful publication from the source merge or a workflow dispatch.
 
-Released OpenGeni charts are published as public OCI artifacts. The immutable
+Released Opengeni charts are published as public OCI artifacts. The immutable
 release BOM is authoritative for the chart reference and manifest digest. For
 release installs, use that `chart.reference` and pin the chart version
 explicitly; the release pipeline packages the chart with `appVersion` set to
-the same OpenGeni version, and the default image tags resolve to that
+the same Opengeni version, and the default image tags resolve to that
 appVersion:
 
 ```bash
@@ -2529,11 +2529,11 @@ Production self-hosted platform dependencies should use mature upstream projects
 - TLS: cert-manager, cloud load balancer certificate integration, or an existing ingress/TLS stack.
 - Observability: OpenTelemetry Collector/Operator plus Prometheus Operator-compatible resources, exported to a self-hosted LGTM-compatible stack or a managed cloud backend.
 
-The OpenGeni Helm chart owns OpenGeni API, web, worker, migrations, optional Terraform Registry MCP docs service, and integration resources such as `ServiceMonitor`, `PrometheusRule`, `ExternalSecret`, and workload NetworkPolicies. It must not become a replacement chart for NATS, Temporal, Postgres, cert-manager, or the observability platform.
+The Opengeni Helm chart owns Opengeni API, web, worker, migrations, optional Terraform Registry MCP docs service, and integration resources such as `ServiceMonitor`, `PrometheusRule`, `ExternalSecret`, and workload NetworkPolicies. It must not become a replacement chart for NATS, Temporal, Postgres, cert-manager, or the observability platform.
 
 The stack wrapper may install upstream charts as a convenience layer. That
 keeps lifecycle commands visible and reversible without making those charts
-OpenGeni chart dependencies.
+Opengeni chart dependencies.
 
 ### Shared Prometheus and Grafana distribution
 
@@ -2554,13 +2554,13 @@ bun run deployment:observability -- --profile single-node
 On a cluster that explicitly selects `sandbox.backend=opensandbox`, use
 `--opensandbox`. The additional values overlay enables kube-state-metrics for
 the pinned `Pool` CRD plus a `ServiceMonitor` for the controller metrics
-Service. The OpenGeni control worker separately projects BatchSandbox and
+Service. The Opengeni control worker separately projects BatchSandbox and
 workload-Pod state into fixed-label aggregate gauges through namespace-scoped,
 list-only Kubernetes RBAC. The base wrapper leaves this optional integration
 off, so clusters without OpenSandbox CRDs retain the prior monitoring behavior.
 
 The wrapper plan installs only the monitoring platform; it never reconciles
-OpenGeni workloads and never runs application hooks. After it is ready, include
+Opengeni workloads and never runs application hooks. After it is ready, include
 `deploy/observability/opengeni.values.example.yaml` in the next ordinary
 application release using that release's exact chart version and complete
 authoritative values. The application chart deliberately renders
@@ -2592,7 +2592,7 @@ bun run deployment:observability-verify -- \
 
 The receipt binds dashboard bytes to their hashes and source revision, checks
 the application monitoring resources, confirms required rules through the live
-Prometheus API, requires healthy discovered targets for every OpenGeni
+Prometheus API, requires healthy discovered targets for every Opengeni
 `ServiceMonitor`, and verifies Grafana health plus the dashboard provisioner
 files. Existing Kubernetes monitoring platforms can pass explicit Prometheus
 and Grafana URLs plus the Grafana pod selector, sidecar container, namespace,
@@ -2608,7 +2608,7 @@ For managed cloud profiles, the generated stack plan includes:
 - upstream Temporal from `https://go.temporal.io/helm-charts`, release
   `opengeni-temporal` in namespace `opengeni-platform`;
 - `deploy/stacks/opengeni-platform-networkpolicies.yaml`, which keeps those
-  ClusterIP services limited to OpenGeni API/worker pods when the cluster CNI
+  ClusterIP services limited to Opengeni API/worker pods when the cluster CNI
   enforces Kubernetes `NetworkPolicy`;
 - runtime endpoints wired as `nats://opengeni-nats.opengeni-platform.svc.cluster.local:4222`
   and `opengeni-temporal-frontend.opengeni-platform.svc.cluster.local:7233`.
@@ -2630,7 +2630,7 @@ Postgres admin user `opengeni` and asks the upstream Temporal schema jobs to
 create/manage the `temporal` and `temporal_visibility` databases. Create a
 Kubernetes Secret named `opengeni-temporal-postgres` in `opengeni-platform`
 with that user's password. Keep that database server and secret outside the
-OpenGeni app chart lifecycle.
+Opengeni app chart lifecycle.
 Use `TEMPORAL_POSTGRES_CONNECT_ADDR=host:port` instead of
 `TEMPORAL_POSTGRES_HOST` when the provider-specific connection endpoint already
 includes a port or needs a proxy-local address.
@@ -2646,7 +2646,7 @@ TEMPORAL_POSTGRES_TLS_CA_FILE=/etc/opengeni/postgres-ca/ca.pem
 TEMPORAL_POSTGRES_TLS_CA_CONFIG_MAP_NAME=opengeni-postgres-ca
 ```
 
-Use an encrypted OpenGeni application database URL for the same service, for
+Use an encrypted Opengeni application database URL for the same service, for
 example `OPENGENI_DATABASE_URL=postgres://.../opengeni?sslmode=require` for AWS
 RDS. If a different provider or customer database requires a custom CA, mount
 that CA through a private ConfigMap/Secret before running
@@ -2655,12 +2655,12 @@ separate from the OpenGeni-to-Temporal client settings below.
 
 After the upstream Temporal chart is running, the stack wrapper applies
 `deploy/stacks/official-temporal-namespace-job.yaml` to register the Temporal
-namespace used by OpenGeni (`default` by default). The OpenGeni worker cannot
+namespace used by Opengeni (`default` by default). The Opengeni worker cannot
 poll task queues until that Temporal namespace exists.
 
 Use this boundary when building a production cluster:
 
-| Capability    | Production source                                                                                                                 | OpenGeni wiring                                                                                            |
+| Capability    | Production source                                                                                                                 | Opengeni wiring                                                                                            |
 | --- | --- | --- |
 | NATS          | Existing endpoint or official NATS chart from `https://nats-io.github.io/k8s/helm/charts/`                                        | `nats.enabled=false` plus `nats.url` or `OPENGENI_NATS_URL`                                                |
 | Temporal      | Temporal Cloud, existing endpoint, or official Temporal chart from `https://go.temporal.io/helm-charts` with external persistence | `temporal.enabled=false` plus `OPENGENI_TEMPORAL_HOST`; add `OPENGENI_TEMPORAL_API_KEY` for Temporal Cloud |
@@ -2668,7 +2668,7 @@ Use this boundary when building a production cluster:
 | Secrets       | External Secrets Operator from `https://charts.external-secrets.io`, Vault, or cloud-native secret delivery                       | `externalSecret.enabled=true` or `secret.existingSecret`                                                   |
 | TLS           | cert-manager, cloud load balancer certificates, or an existing ingress/TLS stack                                                  | `ingress.tls` and SSE-safe ingress annotations                                                             |
 | Observability | `deploy/observability` pinned Prometheus/Grafana wrapper, an existing compatible platform, or a managed OTLP/Prometheus backend   | `/metrics`, OTLP env, `ServiceMonitor`, `PrometheusRule`, canonical dashboard labels                       |
-| OpenSandbox (optional) | Exact upstream source/chart pin recorded in `deploy/stacks/opensandbox-source.lock` | Select `sandbox.backend=opensandbox`; the stack wrapper installs a private API-key-authenticated lifecycle service outside the OpenGeni app chart |
+| OpenSandbox (optional) | Exact upstream source/chart pin recorded in `deploy/stacks/opensandbox-source.lock` | Select `sandbox.backend=opensandbox`; the stack wrapper installs a private API-key-authenticated lifecycle service outside the Opengeni app chart |
 
 The runtime secret must provide values such as:
 
@@ -2716,11 +2716,11 @@ The runtime secret must provide values such as:
   origins; Checkout and billing-portal return URLs may use that configured web
   origin or `OPENGENI_PUBLIC_BASE_URL`, and the default return uses the web
   origin. Unconfigured external origins remain rejected.
-  OpenGeni owns the generic redemption and credit-ledger contract. Operators
+  Opengeni owns the generic redemption and credit-ledger contract. Operators
   manage Stripe products, coupons, promotion codes, customer eligibility,
   redemption limits, and expiry in their own operations workflow; campaign
   creation and account-specific offers are not part of the source package.
-  A discount changes the checkout price while OpenGeni credits the selected
+  A discount changes the checkout price while Opengeni credits the selected
   package's full face value after the signed completion webhook, including a
   zero-dollar checkout. For coupons restricted to the credits product, configure
   `OPENGENI_STRIPE_CREDITS_PRODUCT_ID` to that Stripe Product ID. Refunds and
@@ -2767,9 +2767,9 @@ customer.updated
 Credits are granted only once Stripe reports the Checkout payment `paid`: at
 `checkout.session.completed` for immediate payment methods, or at
 `checkout.session.async_payment_succeeded` for delayed ones. Checkout Sessions
-without OpenGeni metadata (another product sharing the Stripe account) and
-OpenGeni sessions for an account this deployment does not hold (another
-OpenGeni deployment sharing the account) are acknowledged and ignored.
+without Opengeni metadata (another product sharing the Stripe account) and
+Opengeni sessions for an account this deployment does not hold (another
+Opengeni deployment sharing the account) are acknowledged and ignored.
 
 ### MCP OAuth and tool-gateway posture cutover (0404-0405)
 
@@ -3046,10 +3046,10 @@ OPENGENI_OPENSANDBOX_IMAGE=ghcr.io/your-org/opengeni-sandbox@sha256:...
 The platform plan supplies
 `OPENGENI_OPENSANDBOX_BASE_URL=http://opensandbox-server.opensandbox-system.svc.cluster.local`.
 `OPENGENI_OPENSANDBOX_TTL_SECONDS` defaults to 3,600 seconds and is renewed only
-while the matching authoritative OpenGeni lease remains warm. OpenGeni idle
+while the matching authoritative Opengeni lease remains warm. Opengeni idle
 reaping is primary; provider expiry is a leak backstop.
 
-OpenSandbox v1 uses exact ID-addressed attach and OpenGeni portable
+OpenSandbox v1 uses exact ID-addressed attach and Opengeni portable
 `/workspace` tar capture/hydration. Tar bytes live in object storage; the lease
 keeps the SHA-256 descriptor plus an object ref. Object storage is required when
 this backend is active: missing storage fails closed at boot and on capture rather
@@ -3066,7 +3066,7 @@ Bearer passthrough and WebSocket subprotocol preservation with
 lifecycle + ingress port-forwards. The script writes a redacted JSON artifact and
 must not log signatures or browserd tokens. The
 Agents SDK still does not expose `write_stdin` because OpenSandbox command TTY
-is unsupported; OpenGeni's internal finalizer can still poll and Ctrl-C an
+is unsupported; Opengeni's internal finalizer can still poll and Ctrl-C an
 exact retained provider command. `runAs` remains unavailable.
 
 Prepare/render the pinned upstream chart without cluster mutation. Helm 3
@@ -3092,7 +3092,7 @@ kubectl apply -f deploy/stacks/opensandbox-controller-metrics-service.yaml
 bun run deployment:observability -- --profile single-node --opensandbox
 ```
 
-The OpenGeni `PrometheusRule` then adds backend-fenced alerts for create and
+The Opengeni `PrometheusRule` then adds backend-fenced alerts for create and
 warming failures, Pool depletion, Pending and unschedulable workload Pods,
 immutable-image pull failures, controller reconcile/readiness/restarts,
 provider and controller Kubernetes-API 429s, TTL-renewal failures, stuck
@@ -3130,7 +3130,7 @@ Keep `OPENGENI_MIGRATIONS_DATABASE_URL` and
 `OPENGENI_APP_DATABASE_PASSWORD` out of the runtime Secret. Put them in a
 separate migration-only Secret referenced by `migrations.secret.existingSecret`.
 
-OpenGeni's storage package intentionally exposes a small provider-neutral boundary instead of calling provider SDKs directly from routes. The current shipped backends are `s3-compatible`, `azure-blob`, `aws-s3`, and `gcs`; sandbox file resources are emitted as native storage mounts when the sandbox backend supports them, or materialized through short-lived signed downloads when a backend cannot mount that provider directly. Additional providers should be added behind the same boundary, or bridged through a library such as `files-sdk` if that becomes the lowest-maintenance adapter layer.
+Opengeni's storage package intentionally exposes a small provider-neutral boundary instead of calling provider SDKs directly from routes. The current shipped backends are `s3-compatible`, `azure-blob`, `aws-s3`, and `gcs`; sandbox file resources are emitted as native storage mounts when the sandbox backend supports them, or materialized through short-lived signed downloads when a backend cannot mount that provider directly. Additional providers should be added behind the same boundary, or bridged through a library such as `files-sdk` if that becomes the lowest-maintenance adapter layer.
 
 Sandbox file mount support is also backend-specific:
 
@@ -3337,7 +3337,7 @@ with `CreateSessionRequest.targetSandboxId` (plus an optional `workingDir`).
 
 ## Security Boundary
 
-OpenGeni separates deployment edge access from product access. `OPENGENI_AUTH_REQUIRED=true` is an optional deployment shared-key boundary for smoke tests and simple self-hosting. It is not the tenant model and it does not create users, accounts, workspaces, or billing state. Set `OPENGENI_ACCESS_KEY` through a Kubernetes Secret, ExternalSecret, or provider secret manager; ordinary clients send it as `x-opengeni-access-key`. A valid first-party delegated bearer may enter the `/v1` product API without carrying that static key, but the normal access resolver and attempt fences still enforce its exact embedded authority. Deployment-only surfaces continue to require the static key.
+Opengeni separates deployment edge access from product access. `OPENGENI_AUTH_REQUIRED=true` is an optional deployment shared-key boundary for smoke tests and simple self-hosting. It is not the tenant model and it does not create users, accounts, workspaces, or billing state. Set `OPENGENI_ACCESS_KEY` through a Kubernetes Secret, ExternalSecret, or provider secret manager; ordinary clients send it as `x-opengeni-access-key`. A valid first-party delegated bearer may enter the `/v1` product API without carrying that static key, but the normal access resolver and attempt fences still enforce its exact embedded authority. Deployment-only surfaces continue to require the static key.
 
 Product access is controlled by `OPENGENI_PRODUCT_ACCESS_MODE`:
 
@@ -3385,7 +3385,7 @@ reported by Bun, and caller-supplied `X-Forwarded-For` and `X-Real-IP` are
 ignored, so a caller cannot choose its own bucket.
 
 Behind a fixed proxy chain, set `OPENGENI_API_TRUSTED_PROXY_HOPS=<count>`
-(0-16, default 0). OpenGeni then takes the client address from
+(0-16, default 0). Opengeni then takes the client address from
 `X-Forwarded-For`, walking that many entries from the server side, so values a
 caller prepends never replace the address the trusted edge observed. Each
 trusted proxy must append the address of the peer that connected to it, or
@@ -3507,7 +3507,7 @@ authority boundaries are in
 
 ## Observability
 
-OpenGeni emits Prometheus-native metrics. Scrape `/metrics` directly; do not route scraped metrics through OTLP. API and worker processes also emit structured JSON logs and optional OTLP/HTTP JSON traces.
+Opengeni emits Prometheus-native metrics. Scrape `/metrics` directly; do not route scraped metrics through OTLP. API and worker processes also emit structured JSON logs and optional OTLP/HTTP JSON traces.
 
 ### Out-of-band read-only health audit
 
@@ -3541,7 +3541,7 @@ deployment behind upstream is healthy. `--expected-revision` is declarative
 authority: a mismatch between that value and the API/workers is an incident.
 Raw command stderr is never copied into the JSON result.
 
-Use `--verify-observability` only from the exact deployed OpenGeni source tree.
+Use `--verify-observability` only from the exact deployed Opengeni source tree.
 It composes `scripts/verify-observability-stack.ts`, which compares canonical
 dashboard bytes and source annotations as well as live Prometheus/Grafana state.
 
@@ -3606,11 +3606,11 @@ or later: an older relay binary ignores `OPENGENI_RELAY_METRICS_BIND` and keeps
 relay image, set `relay.metricsPort: null` to keep the legacy layout. The managed
 example values files carry a commented `monitoring` block.
 
-`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover turns without durable progress (`opengeni_turn_oldest_no_progress_age_seconds > 900`), a model-aware automatic context-compaction start that remains durably pending for 15 minutes, traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog (a running session background command is session-owned and excluded; one asked to stop still counts), expired drains, stale/absent inventory projections, scraped target availability, release-owned turn-worker restarts and crash loops, durable worker-death recovery and exhausted recovery, turn-worker memory-guard target/drain/failure signals, Google Drive sync failure ratio, reconnect-required events, and explicit Drive sync limit hits, plus node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Compaction start/completion counters initialize at zero for rate diagnostics; a trigger-maintained exact-attempt pending projection and control-worker freshness gauge preserve alert truth across concurrent activities, terminal skips, and turn-worker restarts without exporting tenant identities. Worker-death recovery outcomes are emitted by the fenced control activity after the durable recovery transaction wins, because the process-local metrics registry of the dead turn worker no longer exists. Drive rules are fenced to the exact namespace, Helm release, configured environment, and `google_drive` provider. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current OpenGeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
+`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover turns without durable progress (`opengeni_turn_oldest_no_progress_age_seconds > 900`), a model-aware automatic context-compaction start that remains durably pending for 15 minutes, traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog (a running session background command is session-owned and excluded; one asked to stop still counts), expired drains, stale/absent inventory projections, scraped target availability, release-owned turn-worker restarts and crash loops, durable worker-death recovery and exhausted recovery, turn-worker memory-guard target/drain/failure signals, Google Drive sync failure ratio, reconnect-required events, and explicit Drive sync limit hits, plus node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Compaction start/completion counters initialize at zero for rate diagnostics; a trigger-maintained exact-attempt pending projection and control-worker freshness gauge preserve alert truth across concurrent activities, terminal skips, and turn-worker restarts without exporting tenant identities. Worker-death recovery outcomes are emitted by the fenced control activity after the durable recovery transaction wins, because the process-local metrics registry of the dead turn worker no longer exists. Drive rules are fenced to the exact namespace, Helm release, configured environment, and `google_drive` provider. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current Opengeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
 
 Every canonical alert also carries plain-language notification annotations for on-call receivers: `headline` (what is affected and what is wrong, no rule name or threshold), an optional `value` (the current measurement rendered from `$value`, omitted when the output sample is a boolean such as `absent()` or `up == 0`), `user_impact`, and `next_step`, beside `summary`, `description`, optional `action`, and `runbook_url` (required on every critical alert). Alertmanager receiver templates are owned by the deployment's ops values; they title a notification from `headline` and `value` and render the impact and next step as its body. Custom rules appended through `observability.prometheusRule.rules` should follow the same keys. `deploy/helm/opengeni/test/alert-notification-annotations.test.ts` pins the contract.
 
-When one Prometheus evaluates several OpenGeni releases, all canonical OpenGeni
+When one Prometheus evaluates several Opengeni releases, all canonical Opengeni
 metric selectors and recording-rule consumers select their exact namespace,
 Helm release and configured environment, including inventory `absent()` checks.
 Rule-group labels identify the output; they do not restrict an expression's
@@ -3624,7 +3624,7 @@ actual Pod instance label to prove release ownership (not a shared name prefix),
 and HPA signals select the release's exact worker names. The bundled
 kube-state-metrics label allowlist supplies that Pod instance label. External
 OpenSandbox controller/pool signals remain provider-namespace-wide: they do not
-carry OpenGeni release/environment labels. Custom rules appended through
+carry Opengeni release/environment labels. Custom rules appended through
 `observability.prometheusRule.rules` must fence their own inputs explicitly.
 
 The all-selector regression renders separate namespaces, same-namespace releases
@@ -3660,7 +3660,7 @@ Minimum production dashboards should cover:
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
 - Google Drive sync: run outcome and failure ratio, reconnect-required events, p95 terminal activity-batch duration, logical provider requests, physical provider attempts/retries, explicit limit hits, and bounded terminal failure reasons, scoped by namespace, environment, release, and provider where applicable.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, `opengeni_turn_oldest_inflight_age_seconds`, and `opengeni_turn_oldest_no_progress_age_seconds`. Durable recovery is a separate control-worker projection: `opengeni_session_recovery_backlog{state}` counts recovering sessions with no active attempt (including ones in recorded backoff), `opengeni_session_recovery_scheduled{state}` counts those still inside their recorded Retry-After/connectivity backoff, and `opengeni_session_recovery_oldest_overdue_seconds{state}` drives `OpenGeniSessionRecoveryBacklogStale`; see [`run-lifecycle.md`](run-lifecycle.md). In-flight and progress gauges are worker-local and exact-attempt-qualified: recoverable replacement attempts coexist without overwriting one another, and physical activity finalization always removes its own attempt even when durable outcome classification is unavailable.
-- Turn startup: the canonical `OpenGeni · Turn Startup` dashboard exposes 7-day and 30-day views of `opengeni_turn_worker_preparation_duration_seconds`, every bounded `opengeni_turn_startup_phase_duration_seconds` phase, and real cumulative `opengeni_turn_startup_milestone_duration_seconds{milestone="queue"|"provider_dispatch"|"first_byte"}` p50/p95/p99. Phase observations can overlap or nest: never sum them as elapsed critical-path time. `runtime_stream_initialization` replaces the misleading phase name `provider_dispatch`; the actual wire-dispatch milestone is unchanged. Nonblocking MCP preparation is recorded separately as `opengeni_tool_background_preparation_duration_seconds`, not as startup, even when it overlaps startup. The production observability example retains 30 days; environment overlays must preserve equivalent local or remote-write retention if they promise the 30-day view.
+- Turn startup: the canonical `Opengeni · Turn Startup` dashboard exposes 7-day and 30-day views of `opengeni_turn_worker_preparation_duration_seconds`, every bounded `opengeni_turn_startup_phase_duration_seconds` phase, and real cumulative `opengeni_turn_startup_milestone_duration_seconds{milestone="queue"|"provider_dispatch"|"first_byte"}` p50/p95/p99. Phase observations can overlap or nest: never sum them as elapsed critical-path time. `runtime_stream_initialization` replaces the misleading phase name `provider_dispatch`; the actual wire-dispatch milestone is unchanged. Nonblocking MCP preparation is recorded separately as `opengeni_tool_background_preparation_duration_seconds`, not as startup, even when it overlaps startup. The production observability example retains 30 days; environment overlays must preserve equivalent local or remote-write retention if they promise the 30-day view.
 - Model, MCP, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_context_compaction_starts_total{trigger}`, `opengeni_context_compactions_total{trigger}`, `opengeni_context_compaction_pending`, `opengeni_context_compaction_oldest_pending_age_seconds`, `opengeni_context_compaction_monitor_fresh`, `opengeni_mcp_tool_calls_total{outcome,tool}`, `opengeni_mcp_tool_call_duration_seconds{outcome,tool}` (`tool` is a first-party catalog name or `external`), `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, the shared subscription core shadow (`opengeni_subscription_core_shadow_comparisons_total{provider,parity,placement}`, `..._parity_failures_total{provider,reason}`, `..._violations_total{provider,requirement}`, `..._inputs_total{provider,input}`, `..._skips_total{provider,reason}`, `..._duration_seconds{provider}`; see [subscription-accounts.md](subscription-accounts.md#shadow-comparison)), `opengeni_sandbox_creates_total{backend,image_source,outcome}`, `opengeni_sandbox_create_duration_seconds{backend,image_source}`, logical `opengeni_sandbox_provisions_total{backend,stage,category,outcome,expected}` plus `opengeni_sandbox_provision_duration_seconds` and `opengeni_sandbox_provision_internal_attempts`, internal `opengeni_sandbox_provision_attempts_total{backend,stage,category,outcome}` plus its duration histogram, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total{backend,stage}`, `opengeni_sandbox_orphans_terminated_total`, and the Modal orphan sweep's provider inventory `opengeni_modal_sandbox_inventory{state=running|unleased|lease_missing_instance}` (inventory domain `modal_provider`, published only after a complete app listing). `opengeni_sandbox_leases_interaction_only{idle_bucket}` (inventory domain `interaction_idle`) counts warm leases held only by Browser/Computer sessions by time since their last interaction activity: interaction holders never expire by timestamp, so these boxes stay warm until the session ends or the provider deadline. Logical provision metrics deliberately classify expected lifecycle transitions separately from actual failures; correlation/provider/session identities and error text are not labels.
 - Product failures users hit (all labels are closed sets; no account, workspace, user, session, provider URL, or tool name is ever a label):
   - `opengeni_http_request_rejections_total{method,route,status,code,reason,component}` counts every API response with status >= 400. `code` is the public `ErrorEnvelope.code`; `reason` is `permission:<catalog permission>` when the refusal names a missing permission, else the typed `details.code`, else `control:<code>` for a Connected Machine control failure, else `unclassified`. The API `HTTP request completed` log line carries the same `rejectionCode`/`rejectionReason` plus a one-way `rejectionFingerprint` (`m_<10 hex>`) of the message with identifiers, quoted values, and numbers normalized away; `bun run scripts/resolve-rejection-fingerprint.ts m_...` maps it back to the source literal. Message text never reaches logs or metrics.
@@ -3759,7 +3759,7 @@ Minimum production alerts:
 - Turn stuck: a physical worker attempt has made no durable progress for more than 15 minutes for 5 minutes. Overlapping recovery attempts are counted and aged independently.
 - Turn admission: Temporal's oldest eligible `runAgentTurn` backlog is above 30 seconds for 5 minutes, or a pod remains above 90% of memory-safe slots while eligible work waits. Durable prompts behind a pause do not count.
 - Turn startup SLOs: cumulative queue p95 above 5 seconds, queue-to-provider-dispatch p95 above 20 seconds (warning; a paging critical tier above 60 seconds replaces it), or queue-to-first-byte p95 above 120 seconds for 15 minutes with at least five samples. The Helm values are configurable; use the phase dashboard before assigning the delay to the sandbox or provider.
-- Model-request latency split: OpenGeni's own per-request pre-dispatch work (`opengeni_model_request_pre_dispatch_seconds`: SDK model entry through admission, durable history/audit checkpoints and credit revalidation to the literal provider dispatch) warns when its p95 exceeds 2 seconds for 10 minutes with at least 20 requests. Provider time-to-first-token (`opengeni_model_provider_ttft_seconds{content="any"}`: literal dispatch to the first streamed reasoning-or-answer delta) never alerts on an absolute number; `OpenGeniModelProviderTtftRegression` warns only when a provider's 30-minute p90 exceeds 2x its own trailing 24-hour p90 (offset by 30 minutes), above a 5-second floor, with at least 30 recent and 200 baseline requests, and not while the pre-dispatch condition holds. A provider that is simply slower - reasoning models, subscription routes - stays quiet; the absolute `opengeni_stream_ttft_seconds` view remains on Streaming Health for investigation. Ratio, floor and sample gates are Helm values; a freshly deployed metric has no baseline and stays quiet until it accrues one.
+- Model-request latency split: Opengeni's own per-request pre-dispatch work (`opengeni_model_request_pre_dispatch_seconds`: SDK model entry through admission, durable history/audit checkpoints and credit revalidation to the literal provider dispatch) warns when its p95 exceeds 2 seconds for 10 minutes with at least 20 requests. Provider time-to-first-token (`opengeni_model_provider_ttft_seconds{content="any"}`: literal dispatch to the first streamed reasoning-or-answer delta) never alerts on an absolute number; `OpenGeniModelProviderTtftRegression` warns only when a provider's 30-minute p90 exceeds 2x its own trailing 24-hour p90 (offset by 30 minutes), above a 5-second floor, with at least 30 recent and 200 baseline requests, and not while the pre-dispatch condition holds. A provider that is simply slower - reasoning models, subscription routes - stays quiet; the absolute `opengeni_stream_ttft_seconds` view remains on Streaming Health for investigation. Ratio, floor and sample gates are Helm values; a freshly deployed metric has no baseline and stays quiet until it accrues one.
 - Context compaction: an exact active attempt's latest automatic compaction landmark remains durably `started` for 15 minutes. Terminal skips settle normally, and the control-worker projection survives turn-worker replacement while following each resolved model's actual threshold.
 - Sandbox create failures: sandbox create failure ratio is above 20% for 10 minutes.
 - Sandbox orphan growth: `increase(opengeni_sandbox_orphans_terminated_total[30m]) > 0`.
@@ -3780,7 +3780,7 @@ The Azure Terraform root lives at `deploy/terraform/azure`.
 
 It supports:
 
-- AKS for OpenGeni workloads.
+- AKS for Opengeni workloads.
 - ACR for images.
 - Key Vault for runtime secret storage.
 - Managed Azure PostgreSQL when `postgres.mode = "managed"`, with optional

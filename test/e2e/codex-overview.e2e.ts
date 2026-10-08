@@ -673,7 +673,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     const unsupported = await openCodexAccount(page, "Unsupported account");
     await unsupported.getByRole("heading", { name: "Usage", exact: true }).waitFor();
     expect(await unsupported.getByRole("heading", { name: /^Usage limit resets/ }).count()).toBe(0);
-    // A provider outage falls back to OpenGeni's saved reading, marked stale.
+    // A provider outage falls back to Opengeni's saved reading, marked stale.
     await backToModels(page);
     const cached = await openCodexAccount(page, "Cached account");
     await cached

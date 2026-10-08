@@ -59,7 +59,7 @@ type ArchiveClient = Partial<Pick<OpenGeniClient, "updateSessionArchive">>;
  * The workspace's root chats for the current user, newest activity first.
  * Through `createSessionProxyHandler` the list is limited to the chats the
  * resolved user created (or everything they may read, with `sessionList:
- * "visible"`); OpenGeni enforces visibility either way.
+ * "visible"`); Opengeni enforces visibility either way.
  */
 export function SessionList({
   client,

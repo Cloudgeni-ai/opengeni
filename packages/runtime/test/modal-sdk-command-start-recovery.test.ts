@@ -186,7 +186,7 @@ function sdkSession(url: string, sdkModule: typeof import("modal") = { Sandbox }
   const sandbox = new sdkModule.Sandbox(modal as never, "sb-resumed", { taskId: "task-setup" });
   installModalCommandStartContext(modal);
   // Same constructor/state used by SDK resume and the lease-owned creation
-  // receipt before its manifest is applied. No OpenGeni wrapper can intercept
+  // receipt before its manifest is applied. No Opengeni wrapper can intercept
   // the SDK's private direct sandbox.exec calls here.
   const session = new ModalSandboxSession({
     modal,

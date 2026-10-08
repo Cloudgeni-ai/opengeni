@@ -1674,7 +1674,7 @@ describe("generic lazy tool dispatch", () => {
     ]);
   });
 
-  test("history restoration is pure and removes only OpenGeni's internal marker", () => {
+  test("history restoration is pure and removes only Opengeni's internal marker", () => {
     const original = JSON.stringify({ name: WEATHER_TOOL, arguments: { city: "Rome" } });
     const input = [
       {

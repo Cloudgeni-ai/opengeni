@@ -1,7 +1,7 @@
 # Image generation
 
 Image generation is a provider-aware agent tool with one provider-neutral
-artifact contract. Providers create pixels; OpenGeni owns durable operation
+artifact contract. Providers create pixels; Opengeni owns durable operation
 admission, validation, storage, model-history projection, sandbox
 materialization, API retrieval, and timeline rendering.
 
@@ -64,10 +64,10 @@ contract. Current route availability is:
 | Connected SuperGrok/xAI subscription | Native hosted xAI image tool | Typed Responses image input |
 | Managed or workspace Gateway Responses | Workspace Gateway image adapter | Typed image input only for catalogued vision models (Kimi K3 yes; DeepSeek V4 Flash no) |
 | Other registry Responses providers | Workspace Gateway image adapter | Typed image input only when the model declares it |
-| Registry Chat providers | Workspace Gateway image adapter | Disabled until OpenGeni has a proven typed Chat image wire |
+| Registry Chat providers | Workspace Gateway image adapter | Disabled until Opengeni has a proven typed Chat image wire |
 
 “Workspace Gateway image adapter” requires that workspace's Gateway key; the
-managed OpenGeni text-model credential is not reused for separately billed
+managed Opengeni text-model credential is not reused for separately billed
 image generation. Text-only models can still create images through the adapter,
 but never receive pixel-bearing `view_image` or computer tools.
 
@@ -97,7 +97,7 @@ receipt. A ready receipt is immutable and retrieves through the existing
 workspace artifact/file authority.
 
 JSON/base64 provider responses are decoded incrementally into one bounded byte
-buffer. OpenGeni never retains the full JSON envelope or encoded image string,
+buffer. Opengeni never retains the full JSON envelope or encoded image string,
 and provider adapters never retry an outcome-ambiguous paid request.
 
 ## Conversation and prompt-cache invariants

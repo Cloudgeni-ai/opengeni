@@ -371,6 +371,7 @@ export async function finishConnectOperation(
       next.providerId !== current.providerId ||
       next.ownership !== current.ownership ||
       next.completionRequirement !== current.completionRequirement ||
+      stableJson(next.mcpSetup ?? null) !== stableJson(current.mcpSetup ?? null) ||
       stableJson(next.installationTarget ?? null) !==
         stableJson(current.installationTarget ?? null) ||
       (current.source !== undefined && stableJson(next.source) !== stableJson(current.source)) ||

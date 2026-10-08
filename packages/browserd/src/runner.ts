@@ -551,7 +551,7 @@ export class AgentBrowserJsonRunner {
   }
 }
 
-/** Reap only browser processes bound to an exact private OpenGeni profile.
+/** Reap only browser processes bound to an exact private Opengeni profile.
  * A controller restart never adopts an unfenced native process; active durable
  * sessions are rebuilt on their next causal request. */
 export async function reapManagedBrowserProcesses(
@@ -1239,7 +1239,7 @@ export function browserLaunchArguments(
     "--disable-renderer-backgrounding",
     // Component-update suppression does not stop Chromium's on-demand local
     // model downloads. Managed profiles must not each fetch gigabytes of AI
-    // weights; OpenGeni's model provider is independent of Chrome's local AI.
+    // weights; Opengeni's model provider is independent of Chrome's local AI.
     "--disable-features=OptimizationGuideOnDeviceModel",
     // Chromium's free-disk-derived default can retain gigabytes per actor.
     // Bound disposable HTTP caching without limiting cookies or site storage.

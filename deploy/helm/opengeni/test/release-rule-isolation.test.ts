@@ -116,14 +116,14 @@ describe("rendered Prometheus rule release isolation", () => {
   });
 
   for (const scope of deployments) {
-    test(`worker-scaler OpenGeni inputs also isolate ${scope.namespace}/${scope.release}`, async () => {
+    test(`worker-scaler Opengeni inputs also isolate ${scope.namespace}/${scope.release}`, async () => {
       const manifest = await render(scope, "none", true);
       let references = 0;
       for (const group of manifest.spec.groups)
         for (const rule of group.rules) {
           for (const selector of selectors(rule.expr)) {
             // The scaler also probes kube-state-metrics up targets via job/instance
-            // joins to its already-fenced Pod inventory, not OpenGeni scrape targets.
+            // joins to its already-fenced Pod inventory, not Opengeni scrape targets.
             if (selector.name === "up" && !selector.labels.includes("opengeni_workload_component"))
               continue;
             references += 1;

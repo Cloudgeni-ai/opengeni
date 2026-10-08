@@ -592,7 +592,7 @@ export type RepositoryResourceRef = {
   /** Exact immutable commit that repository materialization must produce. */
   expectedCommitSha?: string | undefined;
   /**
-   * Optional workspace-relative override. When omitted, OpenGeni persists
+   * Optional workspace-relative override. When omitted, Opengeni persists
    * `repos/<encoded-host>/<owner>/<repo>` so equal names on different Git
    * providers do not collide. Explicit paths are portable, traversal-free, and
    * collision-checked case-insensitively before sandbox execution.
@@ -1017,7 +1017,7 @@ export type VerifyPersonalGitHubRepositorySelectionsRequest = {
 };
 
 export type OpenGeniSlackBotInstallRequest = {
-  /** Existing OpenGeni Slack bot connection to reinstall in place. */
+  /** Existing Opengeni Slack bot connection to reinstall in place. */
   connectionId?: string | undefined;
 };
 
@@ -1066,7 +1066,7 @@ export type SlackInstallationBinding = {
   slackTeamName: string;
   botId: string;
   botUserId: string;
-  botDisplayName: "OpenGeni" | "OpenGeni Staging";
+  botDisplayName: "Opengeni" | "Opengeni Staging" | "OpenGeni" | "OpenGeni Staging";
   state: SlackInstallationBindingState;
   quarantineReason: string | null;
   version: number;
@@ -1409,7 +1409,7 @@ export type ServiceTurnInitiatorContext = TurnInitiatorContext;
 
 export type IntegrationClientMetadata = {
   client_id: string;
-  client_name: "OpenGeni";
+  client_name: "Opengeni" | "OpenGeni";
   redirect_uris: string[];
   token_endpoint_auth_method: "none";
   grant_types: Array<"authorization_code" | "refresh_token">;
@@ -1653,6 +1653,11 @@ export type Session = {
    * Never model-facing conversation history.
    */
   importedArchive?: { importId: string; importedAt: string; readOnly: true } | undefined;
+  /**
+   * Idle-session archive state and keep-live exemption, workspace-wide and
+   * independent of the personal `archived` flag. Absent on older servers.
+   */
+  retention?: SessionRetention | undefined;
   /** Optimistic archive-state revision. */
   archiveVersion?: number;
   /** Server-authoritative descendant counts populated by session-list reads. */
@@ -1727,6 +1732,7 @@ export type SessionListEntry = Pick<
   | "archived"
   | "archivedAt"
   | "importedArchive"
+  | "retention"
   | "archiveVersion"
   | "treeStats"
   | "requiresActionSince"
@@ -1763,6 +1769,8 @@ export type SessionListTotals = {
 export type SessionListResponse = {
   totals?: SessionListTotals;
   needsYouOnly?: true;
+  /** Receipt for the read-only (archived idle session) filter. */
+  contentArchivedOnly?: true;
   pinned: Session[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
@@ -1899,6 +1907,20 @@ export type UpdateSessionAttentionRequest = {
   acknowledgedThroughSequence?: number;
   activelyWorking?: boolean;
   expectedVersion?: number;
+};
+
+/**
+ * Idle-session archive state. `archive` is null while the session is live; an
+ * archived session keeps its readable timeline but is read-only.
+ */
+export type SessionRetention = {
+  /** Never archive this session, however long it stays idle. */
+  keepLive: boolean;
+  archive: { state: "archiving" | "archived"; archivedAt: string | null } | null;
+};
+
+export type UpdateSessionRetentionRequest = {
+  keepLive: boolean;
 };
 
 export type UpdateSessionArchiveRequest = {
@@ -2248,7 +2270,7 @@ export const SESSION_EVENT_TYPES = [
 export type KnownSessionEventType = (typeof SESSION_EVENT_TYPES)[number];
 
 /**
- * Event types the SDK knows about today, kept open so a newer OpenGeni server
+ * Event types the SDK knows about today, kept open so a newer Opengeni server
  * can introduce event types without breaking older SDK consumers.
  */
 export type SessionEventType = KnownSessionEventType | (string & {});
@@ -2438,6 +2460,8 @@ export type ToolAuthNeededPayload = {
   setupRequest?:
     | {
         kind: "mcp";
+        ownership?: "personal" | "workspace" | undefined;
+        mcpSetup?: import("@opengeni/contracts/prepared-mcp-setup").PreparedMcpSetup | undefined;
         name: string;
         endpointUrl: string;
         rationale: string;
@@ -2455,7 +2479,7 @@ export type AgentToolCallCreatedPayload = {
   arguments: unknown;
   raw?: unknown | undefined;
   /**
-   * Content-free analytics family: an OpenGeni first-party tool name,
+   * Content-free analytics family: an Opengeni first-party tool name,
    * `integration:<reviewed domain>`, or `custom`. Absent when unclassified.
    */
   toolFamily?: string | undefined;
@@ -3188,7 +3212,7 @@ export type ScheduledTaskAccessConnector = {
 };
 
 /**
- * What a scheduled task's frozen connectors, connector accounts and OpenGeni
+ * What a scheduled task's frozen connectors, connector accounts and Opengeni
  * tools lack compared with what its owner would get by saving it again now.
  */
 export type ScheduledTaskPolicyDrift = {
@@ -3196,7 +3220,7 @@ export type ScheduledTaskPolicyDrift = {
   missingConnectors: ScheduledTaskAccessConnector[];
   /** Connectors this schedule names that this workspace no longer sets up; refresh drops them. */
   unavailableConnectors: ScheduledTaskAccessConnector[];
-  /** Default OpenGeni tools missing from an agent-created task's frozen tools. */
+  /** Default Opengeni tools missing from an agent-created task's frozen tools. */
   missingOpenGeniTools: FirstPartyMcpToolName[];
   /** Connectors whose chosen account can no longer be used by this schedule. */
   unavailableAccounts: ScheduledTaskAccessConnector[];
@@ -3209,7 +3233,7 @@ export type ScheduledTaskPolicyDrift = {
 /** Re-freeze with the caller's current authority; `executionDigest` is the reviewed head. */
 export type RefreshScheduledTaskAccessRequest = {
   executionDigest: string;
-  /** Default connectors and OpenGeni tools to keep off; only narrows what the refresh adds. */
+  /** Default connectors and Opengeni tools to keep off; only narrows what the refresh adds. */
   leaveOut?:
     | {
         connectors?: string[] | undefined;
@@ -3223,11 +3247,13 @@ export type CreateSessionRequest = {
   bundledSkillIds?: BundledSkillId[] | undefined;
   excludedMcpServerIds?: string[] | undefined;
   // Optional UUID preallocated by an embedding host so it can durably link its
-  // projection before OpenGeni admits the initial turn. Replays must retain the
+  // projection before Opengeni admits the initial turn. Replays must retain the
   // same UUID and idempotency key.
   requestedSessionId?: string | undefined;
   visibility?: SessionVisibility | undefined;
   initialMessage?: string | undefined;
+  /** Exempt the new session from the idle-session archive, e.g. for a persistent agent. */
+  keepLive?: boolean | undefined;
   /** Create an idle session shell so realtime voice can be the first interaction. */
   startMode?: "realtime" | undefined;
   /** Model-visible application context attached to the initial user message; omitted by standard timeline rendering. */
@@ -3378,7 +3404,7 @@ export const KNOWN_PERMISSIONS = [
 export type KnownPermission = (typeof KNOWN_PERMISSIONS)[number];
 
 /**
- * Permissions the SDK knows about today, kept open so a newer OpenGeni server
+ * Permissions the SDK knows about today, kept open so a newer Opengeni server
  * can introduce permissions without breaking older SDK consumers.
  */
 export type Permission = KnownPermission | (string & {});
@@ -3731,7 +3757,7 @@ export type WorkspaceModelCatalogResponse = {
   defaultSelection?: DefaultModelSelection | undefined;
   /**
    * The default this workspace would use once its organization holds an
-   * OpenGeni credit balance. Null when the deployment does not bill credits.
+   * Opengeni credit balance. Null when the deployment does not bill credits.
    */
   creditsSelection?: DefaultModelSelection | null | undefined;
 };
@@ -4308,7 +4334,7 @@ export type ClientConfig = {
   allowedReasoningEfforts: ReasoningEffort[];
   defaultSandboxBackend?: SandboxBackend | undefined;
   mcpServers: { id: string; name: string }[];
-  /** Deployment defaults and hard maximum for built-in OpenGeni session tools. */
+  /** Deployment defaults and hard maximum for built-in Opengeni session tools. */
   firstPartyMcpTools?:
     | {
         default: FirstPartyMcpToolName[];
@@ -4320,7 +4346,7 @@ export type ClientConfig = {
    * `false` when a host's session proxy fixes the model policy
    * (`createSessionProxyHandler({ modelSelection: false })`), so UIs hide the
    * model picker; `true` when the host explicitly offers end users model
-   * choice (embedded stock UIs then show the picker). OpenGeni itself omits it.
+   * choice (embedded stock UIs then show the picker). Opengeni itself omits it.
    */
   modelSelection?: boolean | undefined;
   /** Session proxy sandbox-path download opt-in; absent on native deployments. */
@@ -4371,6 +4397,11 @@ export type ClientConfig = {
    * what workspaces without their own setting get (`split` = half of sessions).
    */
   codeSearch?: { available: boolean; workspaceDefault: "off" | "on" | "split" } | undefined;
+  /**
+   * Present only when this deployment archives idle sessions: after `idleDays`
+   * without activity a session (unless kept live) becomes read-only.
+   */
+  sessionArchive?: { enabled: true; idleDays: number } | undefined;
   /** Agent configuration rollout and per-capability availability. */
   agentConfig?: ClientAgentConfig | undefined;
   productAccessMode: ProductAccessMode;
@@ -5955,7 +5986,7 @@ export type SandboxRecoveryProjection = {
    * empty workspace because no usable checkpoint survived the sandbox loss. */
   automaticLane?: "checkpoint" | "fresh_workspace";
   /** For a timed recovery wait: the earliest time a Retry or a new message can
-   * let OpenGeni decide again. Nothing proceeds by itself before then. */
+   * let Opengeni decide again. Nothing proceeds by itself before then. */
   availableAt?: string;
 };
 export type SandboxRecoveryRequest = {
@@ -7348,7 +7379,7 @@ export type SkillArtifactDefinitionInput = Omit<SkillArtifactDefinition, "name" 
 };
 export type SessionSkillInput = Omit<SkillArtifactDefinitionInput, "activationMode">;
 
-// --- OpenGeni Review Bot ------------------------------------------------------------
+// --- Opengeni Review Bot ------------------------------------------------------------
 
 export type PrReviewProvider = GitCredentialProvider;
 export type PrReviewCredentialKind = "github_app" | "managed_github_app" | "provider_token";
@@ -7456,7 +7487,7 @@ export type PrReviewManagedGitHubInstallation = {
 export type PrReviewManagedGitHubSetup = {
   configured: boolean;
   status: "unavailable" | "not_connected" | "connected";
-  appName: "OpenGeni Lens";
+  appName: "Opengeni Lens" | "OpenGeni Lens";
   connectUrl: string | null;
   installations: PrReviewManagedGitHubInstallation[];
   missing: string[];
@@ -9222,7 +9253,7 @@ export type AgentRenderer = "opengeni" | "markdown";
 
 export type AgentConfigRequest = {
   capabilities?: AgentCapabilities | undefined;
-  /** Replaces only OpenGeni's identity lines (max 8,000 chars); null = default identity. */
+  /** Replaces only Opengeni's identity lines (max 8,000 chars); null = default identity. */
   identity?: string | null | undefined;
   /** Alias of the session `instructions` field. */
   instructions?: string | undefined;

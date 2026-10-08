@@ -476,6 +476,7 @@ import type {
   UpdateSessionChannelRequest,
   UpdateSessionAttentionRequest,
   UpdateSessionArchiveRequest,
+  UpdateSessionRetentionRequest,
   UpdateSessionPinRequest,
   UpdateSessionVisibilityRequest,
   UpdateSessionVisibilityResponse,
@@ -702,6 +703,8 @@ export type SessionListPageOptions = {
   includeTotals?: boolean;
   /** Filter attention rows before pagination. */
   needsYouOnly?: boolean;
+  /** Only read-only sessions moved to the idle-session archive. */
+  contentArchivedOnly?: boolean;
   /** Created through this Site. In a Site-bound client, "current" resolves to its own Site. */
   originSiteId?: string;
   limit?: number;
@@ -755,6 +758,7 @@ const SESSION_PAGE_STRING_QUERY_KEYS = [
 function hasSessionPageFilters(options: SessionListPageOptions): boolean {
   return (
     Boolean(options.needsYouOnly) ||
+    Boolean(options.contentArchivedOnly) ||
     SESSION_PAGE_FILTER_KEYS.some((key) => options[key] !== undefined)
   );
 }
@@ -792,9 +796,9 @@ export type WorkspaceControlEventPage = {
 };
 
 export type OpenGeniClientOptions = {
-  /** Base URL of the OpenGeni API, e.g. `https://api.example.com`. */
+  /** Base URL of the Opengeni API, e.g. `https://api.example.com`. */
   baseUrl: string;
-  /** OpenGeni API key, sent as `Authorization: Bearer <apiKey>`. */
+  /** Opengeni API key, sent as `Authorization: Bearer <apiKey>`. */
   apiKey?: string;
   /**
    * Receives a notice (once per route per client) when the API advertises a
@@ -984,7 +988,7 @@ function normalizeScheduledTaskMachineTarget<
 }
 
 /**
- * Typed client for the OpenGeni public API. Framework-agnostic: only needs
+ * Typed client for the Opengeni public API. Framework-agnostic: only needs
  * WHATWG `fetch` + streams, so it runs in Node 18+, Bun, Deno, browsers, and
  * edge runtimes.
  */
@@ -1737,6 +1741,7 @@ export class OpenGeniClient {
       if (options.pinsOnly) query.pinsOnly = "true";
       if (options.includeTotals) query.includeTotals = "true";
       if (options.needsYouOnly) query.needsYouOnly = "true";
+      if (options.contentArchivedOnly) query.contentArchivedOnly = "true";
       if (options.includePinned === false) query.includePinned = "false";
       if (options.archivedOnly) query.archivedOnly = "true";
       result = await this.requestJson<SessionListResponse | SessionListEntryResponse | Session[]>(
@@ -1796,6 +1801,8 @@ export class OpenGeniClient {
       throw unsupportedSessionPage("complete session totals");
     if (options.needsYouOnly && response.needsYouOnly !== true)
       throw unsupportedSessionPage("attention session filtering");
+    if (options.contentArchivedOnly && response.contentArchivedOnly !== true)
+      throw unsupportedSessionPage("read-only session filtering");
     if (filtered && response.filtersApplied !== true) {
       throw unsupportedSessionPage("filtered session lists");
     }
@@ -1891,6 +1898,22 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PUT",
       `${sessionPath(workspaceId, sessionId)}/archive`,
+      request,
+    );
+  }
+
+  /**
+   * Keep a session out of the idle-session archive (or allow archiving again).
+   * Fails with 409 SESSION_ARCHIVED_READ_ONLY once the session is archived.
+   */
+  async updateSessionRetention(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionRetentionRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `${sessionPath(workspaceId, sessionId)}/retention`,
       request,
     );
   }
@@ -2434,7 +2457,7 @@ export class OpenGeniClient {
 
   /**
    * Channels a person may choose as a scheduled task's fixed Slack destination:
-   * active, non-shared channels the selected OpenGeni bot already belongs to.
+   * active, non-shared channels the selected Opengeni bot already belongs to.
    */
   async listScheduledTaskSlackChannels(
     workspaceId: string,
@@ -5803,7 +5826,7 @@ export class OpenGeniClient {
   }
 
   /** Uses this client's fixed actor and standard contract/error/abort handling.
-   * Disconnect revokes OpenGeni connection access, not upstream provider consent. */
+   * Disconnect revokes Opengeni connection access, not upstream provider consent. */
 
   connectTransport(): import("@opengeni/connect").ConnectTransport {
     const root = (workspaceId: string) =>
@@ -5934,6 +5957,21 @@ export class OpenGeniClient {
   }
 
   /** Begin durable setup. Completion requirements are provider-specific. */
+  beginConnect(
+    workspaceId: string,
+    request: {
+      providerId: string;
+      ownership: "personal" | "workspace";
+      returnUrl: string;
+      idempotencyKey: string;
+      reconnectAccountId?: string;
+      installationTarget?: import("@opengeni/contracts/connect").ConnectInstallationTarget;
+    },
+  ): Promise<import("@opengeni/contracts/connect").ConnectAttempt>;
+  beginConnect(
+    workspaceId: string,
+    request: import("@opengeni/contracts/connect").BeginConnectRequest,
+  ): Promise<import("@opengeni/contracts/connect").ConnectAttempt>;
   async beginConnect(
     workspaceId: string,
     request: {
@@ -5943,6 +5981,7 @@ export class OpenGeniClient {
       idempotencyKey: string;
       reconnectAccountId?: string;
       installationTarget?: import("@opengeni/contracts/connect").ConnectInstallationTarget;
+      mcpSetup?: import("@opengeni/contracts/connect").PreparedMcpSetup;
     },
   ): Promise<import("@opengeni/contracts/connect").ConnectAttempt> {
     return this.requestJson("POST", `/v1/workspaces/${workspaceId}/connect/attempts`, request);
@@ -6585,7 +6624,7 @@ export class OpenGeniClient {
   }
 
   /**
-   * Re-freeze a task's connectors, connector accounts and OpenGeni tool policy
+   * Re-freeze a task's connectors, connector accounts and Opengeni tool policy
    * with the signed-in caller's current authority. Pass the `executionDigest`
    * of the task whose `policyDrift` was reviewed; a changed task returns 409.
    */
@@ -8448,7 +8487,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** List the secret-free Slack team -> OpenGeni tenant routing authority. */
+  /** List the secret-free Slack team -> Opengeni tenant routing authority. */
   async listSlackInstallationBindings(workspaceId: string): Promise<SlackInstallationBinding[]> {
     const response = await this.requestJson<ListSlackInstallationBindingsResponse>(
       "GET",
@@ -8526,7 +8565,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Start the public Slack installation flow for the workspace-shared OpenGeni bot. */
+  /** Start the public Slack installation flow for the workspace-shared Opengeni bot. */
   async startOpenGeniSlackBotInstall(
     workspaceId: string,
     request: OpenGeniSlackBotInstallRequest = {},

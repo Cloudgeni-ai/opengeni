@@ -11,7 +11,7 @@ It contains exactly two groups:
 - **What agents can find**: Documents/RAG evidence and Memory records.
 
 Workspace instructions and Skills are prompt-first. The user describes the
-desired behavior, then continues in a real OpenGeni session that asks only
+desired behavior, then continues in a real Opengeni session that asks only
 essential questions and proposes the destination-specific result before saving.
 The workspace-instruction prompt targets the shortest useful universal rule—
 normally 1–5 sentences and at most 120 words. A conditional procedure is routed

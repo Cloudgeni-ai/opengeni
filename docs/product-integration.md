@@ -1,17 +1,17 @@
 # Product integration
 
-Audience: product teams integrating a standalone OpenGeni deployment through
+Audience: product teams integrating a standalone Opengeni deployment through
 `@opengeni/sdk` or `@opengeni/react`.
 
-OpenGeni should normally remain a service behind the product backend. The
+Opengeni should normally remain a service behind the product backend. The
 product owns its users, tenant admission, business data, navigation, and Skill
-catalog. OpenGeni owns durable agent sessions, turns, events, approvals, files,
+catalog. Opengeni owns durable agent sessions, turns, events, approvals, files,
 tools, and execution.
 
 The canonical server-side integration uses:
 
 - one **organization API key** held only by the external backend;
-- one OpenGeni **organization workspace** for each smallest product group that
+- one Opengeni **organization workspace** for each smallest product group that
   may share workspace-scoped agent authority and resources;
 - workspace-scoped session and file APIs after the backend resolves that
   mapping; and
@@ -33,7 +33,7 @@ the selection conflicts instead of replaying a differently configured session.
 
 ## Default integration: the full conversation
 
-The default is OpenGeni's complete conversation experience inside the product:
+The default is Opengeni's complete conversation experience inside the product:
 `@opengeni/react`'s `SessionConversation` (plus `@opengeni/react/compiled.css`,
 branded with `--og-*` tokens), backed by the normal session SDK through
 `createSessionProxyHandler`, a tenant/user-scoped same-origin proxy on the
@@ -55,9 +55,9 @@ the API key.
 
 ```ts
 // lib/opengeni.ts. Server only: the organization API key never reaches the browser.
-import { OpenGeni } from "@opengeni/sdk/chat";
+import { Opengeni } from "@opengeni/sdk/chat";
 
-export const og = new OpenGeni({ apiKey: process.env.OPENGENI_API_KEY! });
+export const og = new Opengeni({ apiKey: process.env.OPENGENI_API_KEY! });
 ```
 
 ```ts
@@ -215,12 +215,12 @@ capability the deployment does not offer is reported off in `agent.unavailable`;
 requesting it returns 422 `agent_capability_unavailable`. Child sessions may
 only narrow their parent (`agent_config_widening`), and a goal needs `goals`.
 
-`identity` replaces only how OpenGeni introduces the agent. `instructions` is
-the session `instructions` field. The prompt order is identity, OpenGeni's
+`identity` replaces only how Opengeni introduces the agent. `instructions` is
+the session `instructions` field. The prompt order is identity, Opengeni's
 working style, organization identity, workspace instructions, session
-instructions; instructions take priority over OpenGeni's default working style,
+instructions; instructions take priority over Opengeni's default working style,
 never over its safety rules or how it runs tools. `renderer` is `"opengeni"`
-for OpenGeni's React components (`sandbox:`/`artifact:` links and inline
+for Opengeni's React components (`sandbox:`/`artifact:` links and inline
 visuals) or `"markdown"` for any other UI; the chat facade defaults to
 `"markdown"`.
 
@@ -250,7 +250,7 @@ without it the SDK throws `OpenGeniSetupError`, which names who can enable it
 workspace per user, return `{ user }` from `resolve` instead of a tenant: the
 SDK provisions the workspace and adds that user as its only member through
 `og.workspaceIdFor({ user }, { isolation: "user" })`, and the API never admits
-anyone else to it. Legacy `"isolated"` needs the `OpenGeni` facade as the proxy
+anyone else to it. Legacy `"isolated"` needs the `Opengeni` facade as the proxy
 target; with `{ tenant, user }` it does the same per tenant user (standalone:
 `createWorkspaceIdResolver` from `@opengeni/sdk/tenant-workspaces`).
 `memberPermissions` replaces that first owner grant's permissions; a
@@ -271,7 +271,7 @@ a session's own tree is always reachable, and peers are reachable when the
 caller's task scope and ordinary target authorization allow it. Personal
 Knowledge belongs to the verified user of the active turn, not an arbitrary
 product label. Use task notes for temporary conversation-tree coordination.
-Use the same OpenGeni session ID for collaborators; identity must not change the
+Use the same Opengeni session ID for collaborators; identity must not change the
 conversation address. See [Choose the credential boundary](#choose-the-credential-boundary).
 
 ### Chat facade fallback
@@ -285,9 +285,9 @@ projection: tool outputs are dropped (the Vercel adapter emits only
 no goals, queue, or steer UI, and reopening restores only a text snapshot.
 
 ```ts
-import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
+import { Opengeni, createChatHandler } from "@opengeni/sdk/chat";
 
-const og = new OpenGeni({
+const og = new Opengeni({
   baseUrl: process.env.OPENGENI_API_BASE_URL!, // omitted = production app.opengeni.ai
   apiKey: process.env.OPENGENI_API_KEY!, // the organization id is derived from the key
 });
@@ -315,7 +315,7 @@ reach and Knowledge off. `og.chat(...)` and `resolve` also take `agent`, and the
 facade's renderer defaults to `"markdown"`. The
 adapters send only the latest user message. Earlier messages from the app are
 imported only when the session is first created, as context on its first
-message; after that OpenGeni owns the history, and messages the app shows but
+message; after that Opengeni owns the history, and messages the app shows but
 never sends are not added. Reopen
 legacy user-namespaced conversations with `chatBySessionId`. `og.client`,
 `chat.workspaceId`, and `chat.sessionId` address the same session through the
@@ -323,7 +323,7 @@ full client, so `SessionConversation` can take over without a migration. The
 runnable [chat quickstart example](../examples/chat-quickstart) is one backend
 server file.
 
-## Migrating from embedded OpenGeni
+## Migrating from embedded Opengeni
 
 Use `@opengeni/sdk/session-history-import` for a backend migration from an
 in-process runtime to a standalone deployment. It creates read-only historical
@@ -410,7 +410,7 @@ The public walkthrough is in
 For included-usage plans, per-seat equal splits, administrator sliders, custom
 shares, top-ups, and monthly team budgets, see
 [Usage allowances](usage-allowances.md). Allowance amounts are integer USD
-micros and govern actual OpenGeni credit debits; they are soft post-call
+micros and govern actual Opengeni credit debits; they are soft post-call
 ceilings, not reservations or organization-credit purchases. Keep budget
 configuration/grants in organization-authorized backend flows and use the
 session proxy's own-usage route for a browser meter.
@@ -422,26 +422,26 @@ product browser / mobile client
              v
 external product backend
   - authenticates product users
-  - maps product tenant -> OpenGeni workspace id
+  - maps product tenant -> Opengeni workspace id
   - stores the organization API key
   - stores/version-controls product Skills
              |
              | @opengeni/sdk
              v
-standalone OpenGeni API
+standalone Opengeni API
   - organization workspaces
   - sessions, turns, events, files, tools, execution
 ```
 
 The browser should normally call same-origin product routes. The backend must
 authenticate the product user, resolve the allowed product tenant, load the
-corresponding OpenGeni workspace id, and reject caller-supplied workspace or
+corresponding Opengeni workspace id, and reject caller-supplied workspace or
 session ids that do not match that relationship.
 
 Do not expose the organization API key to browser bundles, mobile apps, MCP
 tool output, prompts, logs, or generated Skills. A short-lived signed storage
 URL returned by the upload flow is scoped file-transfer authority; it is not an
-OpenGeni API credential.
+Opengeni API credential.
 
 ## Choose the isolation unit first
 
@@ -449,7 +449,7 @@ The workspace is the unit that shares documents, workspace instructions,
 Connections, and integrations. Session isolation inside it is a per-session
 setting, so the default is one workspace per customer:
 
-| Product rule | Default OpenGeni mapping |
+| Product rule | Default Opengeni mapping |
 | --- | --- |
 | Everyone in one product tenant may collaborate across chats | One workspace per tenant, `agentAccess: "workspace"` |
 | Each user's chats must be private from other users | One workspace per tenant, `asUser()` and `visibility: "user_private"`; choose agent reach separately |
@@ -470,7 +470,7 @@ A top-level session created by an unscoped organization service key is
 `workspace_shared`. The owning-user `user_private` / **Only me** capability
 requires verified native-cookie or external `asUser` provenance, plus the
 existing platform/organization readiness policy. An unscoped service key cannot
-claim that provenance. External identity admission does not create an OpenGeni
+claim that provenance. External identity admission does not create an Opengeni
 login. Broader personal-resource and durable external execution guarantees must
 be verified separately from core private-session access.
 
@@ -732,11 +732,11 @@ existing workspace ID and presentation. Namespace `externalSource` to the produc
 to avoid collisions between products in the same organization.
 
 The organization API key identifies the organization boundary. Never accept an
-organization id, external mapping identity, or OpenGeni workspace id directly
+organization id, external mapping identity, or Opengeni workspace id directly
 from an unauthenticated browser request.
 
 The `externalId` identifies the product boundary; it does not create an
-OpenGeni human or membership. Provision lazily on first use, from the product's
+Opengeni human or membership. Provision lazily on first use, from the product's
 user/tenant lifecycle, through a bounded backfill, or a combination. Every path
 should call the same idempotent reconciler.
 
@@ -840,11 +840,11 @@ its exact workspace/session scope before returning short-lived `git` credentials
 for `gitlab.com` and an `expiresAt`. It must not treat the service name or context
 as authorization. Keep tokens out of the repository URI and prompt. Use managed
 compute for cloning; a Connected Machine owns its existing checkout and Git
-authentication, so OpenGeni does not clone repositories or inject Git tokens there.
+authentication, so Opengeni does not clone repositories or inject Git tokens there.
 
 ## Skills are external product data
 
-Ordinary OpenGeni sessions include `builtin:opengeni-client` for product
+Ordinary Opengeni sessions include `builtin:opengeni-client` for product
 integration and `builtin:opengeni-help` for general product questions. Both are
 readable with `skill_read` without a sandbox, installation, Pack, or repository
 attachment. The client guide helps discover/connect required resources and adapt
@@ -860,7 +860,7 @@ bundles, so managed, self-hosted and local deployments use the same guide withou
 fetching GitHub at runtime. Edit the canonical source, not the generated copy.
 The old `opengeni-product-integration` Pack is not needed or restored.
 
-Control OpenGeni's bundled guidance separately from your product Skills with
+Control Opengeni's bundled guidance separately from your product Skills with
 `CreateSessionRequest.bundledSkillIds`. Omit it for the default bundles; pass
 `[]` for none, or explicit IDs such as `"builtin:opengeni-documents"`. An agent
 that starts from `capabilities: "none"` has no default bundles: create freezes
@@ -935,7 +935,7 @@ Use each prompt surface for its actual lifetime:
 
 | Information | Contract | Lifetime |
 | --- | --- | --- |
-| Stable OpenGeni workspace persona | workspace `agentInstructions` | Every session in that workspace |
+| Stable Opengeni workspace persona | workspace `agentInstructions` | Every session in that workspace |
 | One agent/session role refinement | session `instructions` | One session |
 | Selected inline capabilities or procedures | session `skills` | Fixed onto one session |
 | Current product route/selection snapshot | `modelContext` | One accepted user message |
@@ -944,7 +944,7 @@ Use each prompt surface for its actual lifetime:
 `modelContext` and Skill content are not secrets. Full audit or session readers
 may return them. If the agent needs current product state or must mutate product
 records, expose a tenant-scoped tool surface instead of copying the product's
-database into OpenGeni or embedding long-lived credentials in a prompt.
+database into Opengeni or embedding long-lived credentials in a prompt.
 
 ### Your own tools as the signed-in user (Node)
 
@@ -957,7 +957,7 @@ official `@modelcontextprotocol/sdk` or `mcp-handler`), call
 createSessionProxyHandler(og, {
   resolve, createSession, // unchanged
   toolServer: {
-    url: "https://app.example.com/api/mcp", // public HTTPS, reachable by OpenGeni
+    url: "https://app.example.com/api/mcp", // public HTTPS, reachable by Opengeni
     approvals: { ask: ["rename_post"] }, // writes wait for the user's approval
   },
 });
@@ -983,11 +983,11 @@ reference: [`examples/tool-server`](../examples/tool-server/README.md).
 ### Existing APIs without MCP
 
 A customer that has suitable APIs does not need to build an MCP server first.
-OpenGeni can deterministically compile a focused OpenAPI 3.0/3.1 document or a
+Opengeni can deterministically compile a focused OpenAPI 3.0/3.1 document or a
 GraphQL endpoint into the same model-visible tool shape through the API
 Integration lifecycle:
 
-1. Host the provider endpoint where the OpenGeni control plane can reach it
+1. Host the provider endpoint where the Opengeni control plane can reach it
    under the deployment network policy. The API description can be hosted too,
    or sent inline as `source: { kind: "openapi_document", sourceKey, document,
    baseUrl? }` (JSON/YAML text up to 8 MiB; `sourceKey` is the stable
@@ -1045,7 +1045,7 @@ write-only credential headers or a non-secret `connectionRef`. Credential
 headers are encrypted at rest and omitted from session/event responses. A later
 accepted message can carry the supported MCP credential update for rotation.
 
-OpenGeni credential brokerage is not zero knowledge: the trusted control plane
+Opengeni credential brokerage is not zero knowledge: the trusted control plane
 can decrypt a stored credential to construct the authorized provider request.
 The model and sandbox receive the tool schema and bounded result, not the
 credential itself. The customer API must still enforce tenant/user scope on
@@ -1068,11 +1068,11 @@ and `model` / `reasoningEffort` on session or message requests for deliberate
 overrides. A session or scheduled task created without `model` gets the
 server-resolved default: the saved workspace default, then a usable connected
 subscription, then the configured credits model while the organization holds
-OpenGeni credits, then the deployment default. `GET
+Opengeni credits, then the deployment default. `GET
 /v1/workspaces/:workspaceId/model-catalog` reports it as `defaultSelection`. Workspace model access policy is the hard allowlist. Model ids and
 availability are live deployment facts; do not hard-code a remembered catalog.
 
-OpenGeni credits are held at the organization account. All of that
+Opengeni credits are held at the organization account. All of that
 organization's workspaces using the OpenGeni-credits model path draw from the
 same account balance; creating one workspace per user or chat does not create
 separate wallets. Connected subscriptions and workspace-owned provider
@@ -1092,14 +1092,14 @@ Inline Skills are sent once at `createSession` and stored with that session;
 they are not retransmitted on each turn. Existing sessions retain the exact
 selected content. Version the customer runtime profile and apply updates to new
 sessions, with an explicit migration decision if old sessions must change. Do
-not attach implementation guidance about integrating OpenGeni to the end-user
+not attach implementation guidance about integrating Opengeni to the end-user
 runtime agent.
 
 ### Links, files, artifacts, and Sites in replies
 
 Agents link the objects they produce directly in chat Markdown. None of these
 is a URL the host's browser can navigate: `artifact:` and `sandbox:` are
-application schemes, and the `/workspaces/...` forms are OpenGeni console
+application schemes, and the `/workspaces/...` forms are Opengeni console
 routes, which resolve against the product's own origin and 404 there.
 
 | Agent writes | Target | `SessionConversation` default |
@@ -1125,7 +1125,7 @@ render unavailable rather than offering a download that fails.
 #### Inline previews and the artifact viewer
 
 The conversation renders assistant `opengeni-site` and `opengeni-html` fences
-as the same inline preview the OpenGeni console shows (fixed height, reload,
+as the same inline preview the Opengeni console shows (fixed height, reload,
 full screen, version picker, "Open Site"). To open editable artifacts and
 Sites, mount `SessionArtifactViewer` from `@opengeni/react/artifacts` in any
 sized container (for example the product's main area beside an assistant
@@ -1176,7 +1176,7 @@ request (no cached authorization or bounded list scan): the artifact read and
 editor live ticket, and Site detail and HTML (served as a sandboxed download,
 never as a page on the product origin). Writes, exports, version changes, and
 Site tool calls are not proxied. The editor's live socket is ticket-authenticated
-and connects to the OpenGeni API directly (`artifacts.editableLiveUrl`
+and connects to the Opengeni API directly (`artifacts.editableLiveUrl`
 overrides the derived URL). Tickets minted through the proxy bind the source
 session, whose authority the API also revalidates while connected.
 Sockets bound this way have a 15-second lease from ticket issuance and reconnect
@@ -1202,7 +1202,7 @@ The proxy streams Site HTML with backpressure and cancellation and caps actual
 bytes at `SESSION_PROXY_SITE_HTML_MAX_BYTES` (25 MiB). An oversized stream fails
 with `SessionProxySiteHtmlTooLargeError` (`site_html_too_large`); once response
 headers have been sent, the body errors instead of replacing the HTTP status.
-The OpenGeni console's direct HTML delivery is unchanged. Temporary viewer
+The Opengeni console's direct HTML delivery is unchanged. Temporary viewer
 config failures show Retry; absence of the capability remains unavailable.
 
 For any other routing, `resolveLink` returns `{ href }` for a host page or
@@ -1266,7 +1266,7 @@ and your own authentication for production tenants.
 
 The product controls whether it renders final answers only, assistant progress,
 selected tool calls, or a full operational timeline. Presentation filtering
-does not remove the corresponding durable events from authorized OpenGeni
+does not remove the corresponding durable events from authorized Opengeni
 history. A minimal UI must still surface actionable approvals, human-input
 requests, failures, cancellation, reconnect state, and credit/policy denials.
 
@@ -1308,7 +1308,7 @@ Before calling a product integration complete, verify:
 
 1. The organization API key exists only in the product backend's secret store.
 2. Every product user request resolves an authorized product tenant before an
-   OpenGeni workspace or session id is used.
+   Opengeni workspace or session id is used.
 3. The chosen product sharing boundary maps to the expected distinct or shared
    `kind: "shared"` workspaces; Personal workspaces are rejected rather than
    used as a fallback.

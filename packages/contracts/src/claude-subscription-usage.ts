@@ -35,7 +35,7 @@ export const ClaudeUsageRequestStatus = z
   .strict();
 export type ClaudeUsageRequestStatus = z.infer<typeof ClaudeUsageRequestStatus>;
 
-/** Provider observations, never an estimate based on OpenGeni token counts. */
+/** Provider observations, never an estimate based on Opengeni token counts. */
 export const ClaudeSubscriptionUsage = z
   .object({
     connected: z.boolean(),

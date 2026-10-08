@@ -38,9 +38,9 @@ session for good.
 Keep it and point it at `createChatHandler` from `@opengeni/sdk/chat`:
 
 ```ts
-import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
+import { Opengeni, createChatHandler } from "@opengeni/sdk/chat";
 
-const og = new OpenGeni({ apiKey: process.env.OPENGENI_API_KEY! });
+const og = new Opengeni({ apiKey: process.env.OPENGENI_API_KEY! });
 export const handler = createChatHandler(og, {
   resolve: async (request) => {
     const user = await getSignedInUser(request);

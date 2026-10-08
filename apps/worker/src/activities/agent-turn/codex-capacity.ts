@@ -6,10 +6,12 @@ import {
   CodexCredentialLeaseAttemptFencedError,
   CodexCredentialFailoverExhaustedError,
   CODEX_CREDENTIAL_LEASE_TTL_MS,
+  readSubscriptionProviderCutoverState,
   recordSessionCodexSelectionForTurnAttempt,
   setSessionCodexPinInTransaction,
   settleCodexCredentialFailover,
   withSessionCodexCapacityMutation,
+  withRlsContext,
   type CodexCredentialLeaseResult,
   type CodexCredentialLeaseSessionState,
   type CodexCredentialLeaseSelectionContext,
@@ -167,7 +169,47 @@ export type CapacityPhaseDeps = {
 
 export type CapacityPhaseOutcome = { exit: RunAgentTurnResult } | { ok: true };
 
+export type CodexCutoverState = "not_configured" | "disabled" | "enabled";
+
+/** Legacy routing is permitted only before the provider's one-way cutover row exists. */
+export function codexCutoverDisposition(
+  state: CodexCutoverState,
+): "legacy" | "core" | "fail_closed" {
+  if (state === "not_configured") return "legacy";
+  return state === "enabled" ? "core" : "fail_closed";
+}
+
 export async function selectCodexTurnCapacity(
+  deps: CapacityPhaseDeps,
+): Promise<CapacityPhaseOutcome> {
+  // This phase is invoked for every turn. Only Codex-billed work may read or
+  // be blocked by Codex's one-way cutover state.
+  if (!deps.billingState.isCodexTurn) return { ok: true };
+
+  const cutover = await withRlsContext(
+    deps.db,
+    { accountId: deps.input.accountId, workspaceId: deps.input.workspaceId },
+    (scoped) =>
+      readSubscriptionProviderCutoverState(scoped, {
+        accountId: deps.input.accountId,
+        provider: "codex",
+      }),
+  );
+  const disposition = codexCutoverDisposition(cutover);
+  if (disposition !== "legacy") {
+    // Once the one-way migration has created a provider row, neither an
+    // explicitly disabled cutover nor an incomplete core implementation may
+    // silently route work back through the legacy Codex tables.
+    throw new Error(
+      disposition === "fail_closed"
+        ? "Codex subscription core cutover is disabled; refusing legacy routing"
+        : "Codex subscription core cutover is enabled but its authoritative selector is unavailable",
+    );
+  }
+  return await selectLegacyCodexTurnCapacity(deps);
+}
+
+async function selectLegacyCodexTurnCapacity(
   deps: CapacityPhaseDeps,
 ): Promise<CapacityPhaseOutcome> {
   const {

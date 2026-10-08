@@ -138,6 +138,8 @@ export const KNOWLEDGE_INDEXING_SCHEDULE_ID = "opengeni-knowledge-indexing";
 export const KNOWLEDGE_INDEXING_PERIOD_MS = 15_000;
 export const FILE_UPLOAD_REAPER_SCHEDULE_ID = "opengeni-file-upload-reaper";
 export const FILE_UPLOAD_REAPER_PERIOD_MS = 15 * 60 * 1_000;
+export const SESSION_STORAGE_MAINTENANCE_SCHEDULE_ID = "opengeni-session-storage-maintenance";
+export const SESSION_STORAGE_MAINTENANCE_PERIOD_MS = 5 * 60 * 1_000;
 export const SITE_AUTH_MAINTENANCE_SCHEDULE_ID = "opengeni-site-auth-maintenance";
 export const SITE_AUTH_MAINTENANCE_PERIOD_MS = 60 * 1_000;
 export type OpenGeniWorkerRole = "control" | "turn";
@@ -218,7 +220,7 @@ export function resolveOpenGeniWorkflowDefinition(
   const codePath = fileURLToPath(new URL("./workflow-bundle.js", moduleUrl));
   if (!existsSync(codePath)) {
     throw new Error(
-      `OpenGeni workflow bundle is missing at ${codePath}; rebuild or reinstall @opengeni/worker-bundle`,
+      `Opengeni workflow bundle is missing at ${codePath}; rebuild or reinstall @opengeni/worker-bundle`,
     );
   }
   return { workflowBundle: { codePath } };
@@ -769,6 +771,50 @@ export async function registerFileUploadReaperSchedule(
   }
 }
 
+/**
+ * Register the deployment-wide session storage maintenance Schedule. Always
+ * registered: legacy content compaction is lossless. Overlap is skipped so one
+ * pass never races another.
+ */
+export async function registerSessionStorageMaintenanceSchedule(
+  settings: Settings,
+  observability: Observability,
+): Promise<{ registered: boolean; close: () => Promise<void> }> {
+  const connection = await Connection.connect(temporalConnectionOptions(settings));
+  const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
+  try {
+    await temporal.schedule.create({
+      scheduleId: SESSION_STORAGE_MAINTENANCE_SCHEDULE_ID,
+      spec: { intervals: [{ every: SESSION_STORAGE_MAINTENANCE_PERIOD_MS }] },
+      action: {
+        type: "startWorkflow",
+        workflowType: "sessionStorageMaintenanceWorkflow",
+        taskQueue: settings.temporalTaskQueue,
+        args: [],
+      },
+      policies: {
+        overlap: ScheduleOverlapPolicy.SKIP,
+        catchupWindow: "1m",
+        pauseOnFailure: false,
+      },
+    });
+    observability.info("Registered the session storage maintenance Schedule", {
+      scheduleId: SESSION_STORAGE_MAINTENANCE_SCHEDULE_ID,
+      periodMs: SESSION_STORAGE_MAINTENANCE_PERIOD_MS,
+    });
+    return { registered: true, close: async () => connection.close() };
+  } catch (error) {
+    if (error instanceof ScheduleAlreadyRunning) {
+      observability.info("Session storage maintenance Schedule already registered", {
+        scheduleId: SESSION_STORAGE_MAINTENANCE_SCHEDULE_ID,
+      });
+      return { registered: false, close: async () => connection.close() };
+    }
+    await connection.close().catch(() => undefined);
+    throw error;
+  }
+}
+
 /** Register the deployment-wide maintained-auth dispatcher. Its one-minute
  * cadence matches the minimum public policy interval; DB claims own overlap,
  * crash recovery, and exact session idempotency. */
@@ -866,7 +912,7 @@ export type OpenGeniWorkerServiceOptions = Omit<WorkerOptions, "activityDependen
    */
   databasePosture?: RuntimeDatabasePostureOptions;
   /**
-   * `role-default` registers OpenGeni's internal maintenance schedules on a
+   * `role-default` registers Opengeni's internal maintenance schedules on a
    * control worker only. These are engine maintenance schedules, not a host's
    * product-level scheduled-agent jobs. Use `none` when another control worker
    * in the same deployment owns them.
@@ -934,7 +980,7 @@ export async function createOpenGeniWorkerService(
       () => resolveCatalogSettings(options.activityDependencies.db, settings),
       { ...retryOptions, onRetry },
     );
-    observability.info("OpenGeni model catalog resolved", {
+    observability.info("Opengeni model catalog resolved", {
       role: options.role,
       catalogSource: resolvedCatalog.source,
       catalogVersion: resolvedCatalog.version,
@@ -979,7 +1025,7 @@ export async function createOpenGeniWorkerService(
       !startSandboxReaperWorkflow ||
       !startVideoGenerationWorkflow
     ) {
-      throw new Error("OpenGeni worker lifecycle could not resolve its workflow signalers");
+      throw new Error("Opengeni worker lifecycle could not resolve its workflow signalers");
     }
     workerBundle = await createOpenGeniWorker({
       role: options.role,
@@ -1051,6 +1097,13 @@ export async function createOpenGeniWorkerService(
       );
       schedules.push(
         await retryStartupDependency(
+          "Temporal schedule (session storage maintenance)",
+          () => registerSessionStorageMaintenanceSchedule(settings, observability),
+          { ...retryOptions, onRetry },
+        ),
+      );
+      schedules.push(
+        await retryStartupDependency(
           "Temporal schedule (site auth maintenance)",
           () => registerSiteAuthMaintenanceSchedule(settings, observability),
           { ...retryOptions, onRetry },
@@ -1099,7 +1152,7 @@ export async function createOpenGeniWorkerService(
   const activeWorkerBundle = workerBundle;
   const activeSignaler = signaler;
   if (!activeWorkerBundle) {
-    throw new Error("OpenGeni worker service initialization did not complete");
+    throw new Error("Opengeni worker service initialization did not complete");
   }
 
   cleanupContainment = createWorkerCleanupContainment({
@@ -1133,7 +1186,7 @@ export async function createOpenGeniWorkerService(
       ]);
     },
     onReady: () => {
-      observability.info("OpenGeni worker listening", {
+      observability.info("Opengeni worker listening", {
         role: options.role,
         temporalTaskQueue:
           options.role === "control"

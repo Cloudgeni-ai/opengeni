@@ -58,7 +58,7 @@ describe("restored new-session attachment preview in Chromium", () => {
     await Promise.allSettled([page?.context().close(), browser?.close(), web?.stop()]);
   }, 30_000);
 
-  test("paste, route return, and click restore the expandable image without eager work", async () => {
+  test("paste, route return, and click restore the expandable image from one stored copy", async () => {
     await page.getByRole("textbox", { name: "Message the agent" }).evaluate((input) => {
       const transfer = new DataTransfer();
       transfer.items.add(
@@ -83,17 +83,24 @@ describe("restored new-session attachment preview in Chromium", () => {
     await freshPreview.waitFor();
     expect(await freshPreview.isVisible()).toBe(true);
     expect(await freshPreview.locator("img").count()).toBe(1);
+    expect(await page.getByTestId("preview-request-count").textContent()).toBe(
+      "Preview requests: 0",
+    );
 
     await page.getByRole("button", { name: "Other session" }).click();
     expect(await page.getByRole("heading", { name: "Other session" }).isVisible()).toBe(true);
     await page.getByRole("button", { name: "New session" }).click();
 
+    // A restored draft has no live local object URL, so its thumbnail loads the
+    // stored copy exactly once; expanding it reuses that URL instead of minting another.
     const restoredPreview = page.getByRole("button", { name: "Preview pasted-screenshot.svg" });
     await restoredPreview.waitFor();
     expect(await restoredPreview.isVisible()).toBe(true);
-    expect(await restoredPreview.locator("img").count()).toBe(0);
+    const restoredThumbnail = restoredPreview.locator("img");
+    await restoredThumbnail.waitFor();
+    expect(await restoredThumbnail.getAttribute("src")).toMatch(/^data:image\/svg\+xml,/);
     expect(await page.getByTestId("preview-request-count").textContent()).toBe(
-      "Preview requests: 0",
+      "Preview requests: 1",
     );
 
     await restoredPreview.click();

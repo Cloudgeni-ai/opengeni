@@ -38,7 +38,7 @@ type ProviderSession = {
 /**
  * Private lifecycle adapter used only when a provider-managed NetworkRoute
  * must be selected during remote browser creation. Page semantics and actions
- * still flow through the ordinary OpenGeni CDP driver; this runner exposes no
+ * still flow through the ordinary Opengeni CDP driver; this runner exposes no
  * provider command surface and never returns provider credentials or ids.
  */
 export class ExternalProviderCdpRunner implements BrowserCommandRunner {
