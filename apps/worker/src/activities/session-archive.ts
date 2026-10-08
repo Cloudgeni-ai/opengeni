@@ -54,7 +54,13 @@ export function sessionArchiveFailureCode(error: unknown): string {
 }
 
 export const SESSION_ARCHIVE_CANDIDATES_PER_PASS = 25;
-export const SESSION_ARCHIVE_TIME_BUDGET_MS = 40 * 60 * 1_000;
+/**
+ * Soft budget for one archive pass. It shares a workflow (and the Schedule's
+ * skip-overlap cadence) with content compaction and delta folding, so a long
+ * archive pass would starve them while a backlog drains. Matching the storage
+ * pass budget gives both an equal share; unfinished work resumes next pass.
+ */
+export const SESSION_ARCHIVE_TIME_BUDGET_MS = 10 * 60 * 1_000;
 export const SESSION_ARCHIVE_STALE_SECONDS = 2 * 60 * 60;
 export const SESSION_ARCHIVE_EXPORT_PAGE_ROWS = 200;
 export const SESSION_ARCHIVE_PURGE_BATCH_ROWS = 2_000;
