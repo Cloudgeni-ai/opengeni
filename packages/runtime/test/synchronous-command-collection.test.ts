@@ -226,6 +226,108 @@ test.each(["none", "capture", "settlement"] as const)(
   },
 );
 
+test.each(["capture", "settlement"] as const)(
+  "external native terminal recovery releases output custody only after successful %s retry",
+  async (failure) => {
+    const session = await new UnixLocalSandboxClient().create(new Manifest());
+    const backend = { session, sandboxId: null, kind: "local", activeEpoch: 0 };
+    const durable = new Map<string, { stream: "stdout" | "stderr"; chunk: string }>();
+    const receipts: string[] = [];
+    const stdout = "x".repeat(2_000);
+    const stderr = "y".repeat(2_000);
+    const exec = session.exec.bind(session);
+    let starts = 0;
+    let reads = 0;
+    let failures = 2;
+    let settlements = 0;
+    session.exec = async (args) => {
+      starts++;
+      return await exec(args);
+    };
+    const route = new RoutingSandboxSession({
+      defaultResolved: backend,
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => backend,
+      beforeMutation: async () => "admitted",
+      afterMutation: async () => {
+        const write = session.writeStdin.bind(session);
+        session.writeStdin = async (args) => {
+          reads++;
+          const receipt = await write(args);
+          receipts.push(receipt);
+          return receipt;
+        };
+      },
+      captureProcessOutput: async (page) => {
+        expect(page.streamFidelity).toBe("separate");
+        durable.set(page.chunkId, page);
+        if (failure === "capture" && failures > 0) {
+          failures--;
+          throw new Error("capture reply unavailable");
+        }
+      },
+      settleProcess: async () => {
+        if (failure === "settlement" && failures > 0) {
+          failures--;
+          throw new Error("settlement reply unavailable");
+        }
+        settlements++;
+      },
+    });
+    const output = session as typeof session & {
+      getSynchronousCommandOutput(
+        result: unknown,
+      ): ReturnType<typeof synchronousCommandPage> | null;
+    };
+    try {
+      await expect(
+        route.execSynchronous({
+          cmd: `sleep 0.08; printf %s '${stdout}'; printf %s '${stderr}' >&2`,
+          yieldTimeMs: 1,
+          maxOutputTokens: 1,
+          login: false,
+        }),
+      ).rejects.toMatchObject({ code: "synchronous_command_outcome_unknown", sessionId: 1 });
+      expect(route.hasRetainedProcess(1)).toBe(true);
+      expect(receipts).toHaveLength(1);
+      expect(output.getSynchronousCommandOutput(receipts[0])).toMatchObject({
+        stdout,
+        stderr,
+        exitCode: 0,
+      });
+      await expect(
+        route.writeStdinForProcessControl({ sessionId: 1, chars: "", maxOutputTokens: 1 }),
+      ).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+      expect(route.hasRetainedProcess(1)).toBe(true);
+      expect(output.getSynchronousCommandOutput(receipts[0])).not.toBeNull();
+      const recovered = await route.writeStdinForProcessControl({
+        sessionId: 1,
+        chars: "",
+        maxOutputTokens: 1,
+      });
+      expect(recovered).toBe(receipts[0]!);
+      expect(route.hasRetainedProcess(1)).toBe(false);
+      expect(output.getSynchronousCommandOutput(recovered)).toBeNull();
+      expect(starts).toBe(1);
+      expect(reads).toBe(1);
+      expect(settlements).toBe(1);
+      for (const stream of ["stdout", "stderr"] as const)
+        expect(
+          [...durable.values()]
+            .filter((page) => page.stream === stream)
+            .map((page) => page.chunk)
+            .join(""),
+        ).toBe(stream === "stdout" ? stdout : stderr);
+      const retired = await session.writeStdin({ sessionId: 1, chars: "", maxOutputTokens: 1 });
+      expect(retired).not.toStartWith("Native output receipt:");
+      expect(output.getSynchronousCommandOutput(retired)).toBeNull();
+      expect(starts).toBe(1);
+    } finally {
+      await session.close();
+    }
+  },
+);
+
 test("banner-only terminal output cannot masquerade as separated streams through routing", async () => {
   const backend = {
     session: { execCommand: async () => "Process exited with code 0\n\nOutput:\nmerged" },

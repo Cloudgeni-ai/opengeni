@@ -88,7 +88,10 @@ import {
   type SynchronousCommandResult,
   type SynchronousCommandPage,
 } from "../synchronous-command";
-import { withNativeSynchronousCommandCollection } from "../native-synchronous-collection";
+import {
+  withNativeSynchronousCommandCollection,
+  releaseNativeSynchronousCommandOutput,
+} from "../native-synchronous-collection";
 import { observeSynchronousCommand, synchronousCommandPage } from "../synchronous-command";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../exec-banner";
 import { withSandboxProviderOperation } from "../provider-operation-gate";
@@ -1306,6 +1309,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       });
       this.retainedProcesses.delete(record.process.providerSessionId);
       record.pendingTerminal = null;
+      releaseNativeSynchronousCommandOutput(record.backend.session, pending.result);
     })();
     try {
       await record.settlement;
@@ -1319,6 +1323,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         record.settlement = null;
         record.pendingTerminal = null;
         this.retainedProcesses.delete(record.process.providerSessionId);
+        releaseNativeSynchronousCommandOutput(record.backend.session, pending.result);
         return;
       }
       // A failed DB settlement is not permission to forget the physical process.
