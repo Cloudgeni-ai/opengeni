@@ -1587,8 +1587,8 @@ export function createInteractionAttemptToolDefinitions(
     for (const tool of CUA_DESKTOP_TOOLS) {
       const variants = cuaDesktopToolVariants(tool.name);
       const inputSchema = nativeCuaSchema(
-        variants.map(({ inputSchema }) => {
-          const properties = { ...(inputSchema.properties as Record<string, unknown>) };
+        variants.map(({ inputSchema: variantInputSchema }) => {
+          const properties = { ...(variantInputSchema.properties as Record<string, unknown>) };
           delete properties.session;
           properties.computerSessionId = {
             type: "string",
@@ -1596,10 +1596,10 @@ export function createInteractionAttemptToolDefinitions(
             description: "CUA ComputerSession from computer_open",
           };
           return {
-            ...inputSchema,
+            ...variantInputSchema,
             properties,
             required: [
-              ...((inputSchema.required as string[] | undefined) ?? []).filter(
+              ...((variantInputSchema.required as string[] | undefined) ?? []).filter(
                 (name) => name !== "session",
               ),
               "computerSessionId",
