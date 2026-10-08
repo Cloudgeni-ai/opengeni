@@ -10,7 +10,7 @@
       "bundleIdentifier": "ai.opengeni.app",
       "supportsTablet": true,
       "infoPlist": {
-        "UIBackgroundModes": ["audio"],
+        "UIBackgroundModes": ["audio", "voip"],
         "NSUserActivityTypes": ["INStartCallIntent"],
         "UIApplicationShortcutItems": [
           {

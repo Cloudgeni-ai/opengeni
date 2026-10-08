@@ -202,8 +202,10 @@ export function useNativeRealtimeCall(options: {
           systemCallRef.current = id;
           setSystemCall(true);
         }
-      } catch {
+      } catch (cause) {
         // The system refused the call; talk anyway, without the system call UI.
+        // Say why: a missing `voip` background mode fails silently otherwise.
+        console.warn("System call unavailable; continuing without it.", cause);
       }
     }
     if (callIdRef.current !== id) return;

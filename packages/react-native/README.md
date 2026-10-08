@@ -1,6 +1,6 @@
 # @opengeni/react-native
 
-OpenGeni agents in a React Native or Expo app: the session timeline and composer adapters, voice dictation, and realtime voice calls with your agent. Everything runs on the same `@opengeni/sdk` and `@opengeni/react` controllers as the web, so behavior matches the web app.
+Opengeni agents in a React Native or Expo app: the session timeline and composer adapters, voice dictation, and realtime voice calls with your agent. Everything runs on the same `@opengeni/sdk` and `@opengeni/react` controllers as the web, so behavior matches the web app.
 
 ```sh
 npx expo install @opengeni/react-native @opengeni/react @opengeni/sdk
@@ -63,12 +63,14 @@ Expo autolinking picks up this package's call module. Add to the app config:
 {
   "ios": {
     "infoPlist": {
-      "UIBackgroundModes": ["audio"],
+      "UIBackgroundModes": ["audio", "voip"],
       "NSUserActivityTypes": ["INStartCallIntent"],
       "NSMicrophoneUsageDescription": "Talk to your agent on voice calls."
     }
   }
 }
 ```
+
+CallKit refuses call requests from an app without the `voip` background mode, so without it the call still talks but never appears as a system call (lock screen, Dynamic Island, Phone recents, headset controls).
 
 In a monorepo where this package is linked rather than installed, add its folder to `expo.autolinking.searchPaths` in the app's `package.json`.
