@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { Manifest } from "@openai/agents/sandbox";
 import { UnixLocalSandboxClient } from "@openai/agents/sandbox/local";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-cancellation";
 import {
   RoutingSandboxSession,
@@ -389,46 +392,87 @@ test.each([1, 20_000])(
   },
 );
 
-test("the worker collects a real local SDK yielded command through the native collection scope", async () => {
-  const session = await new UnixLocalSandboxClient().create(new Manifest());
-  const controller = createTurnToolCancellationController();
-  const command = `sleep 0.15; printf %s '${"x".repeat(2_000)}'; printf %s '${"y".repeat(2_000)}' >&2`;
-  const exec = session.execCommand.bind(session);
-  const write = session.writeStdin.bind(session);
-  let starts = 0;
-  let reads = 0;
-  session.execCommand = async (args) => {
-    if (args.cmd.includes(command)) {
+test.concurrent.each([1, 2, 3])(
+  "the worker collects a real local SDK yielded command through the native collection scope after %s exact-handle reads",
+  async (minimumReads) => {
+    const root = await mkdtemp(join(tmpdir(), "native-worker-output-"));
+    const release = join(root, "release");
+    const session = await new UnixLocalSandboxClient().create(new Manifest());
+    const controller = createTurnToolCancellationController();
+    const command = `while [ ! -e '${release}' ]; do sleep 0.01; done; printf %s '${"x".repeat(2_000)}'; printf %s '${"y".repeat(2_000)}' >&2`;
+    const exec = session.exec.bind(session);
+    const write = session.writeStdin.bind(session);
+    let starts = 0;
+    let originalHandle: number | undefined;
+    const reads: number[] = [];
+    const pages: ReturnType<typeof synchronousCommandPage>[] = [];
+    session.exec = async (args) => {
+      expect(args.cmd).toContain(command);
       expect(args.tty).toBe(false);
       starts++;
+      const result = await exec(args);
+      // The real SDK's structured initial result owns this handle; neither a
+      // guessed ID nor an Output body supplies identity to later observations.
+      expect(Number.isSafeInteger(result.sessionId)).toBe(true);
+      expect(result.sessionId).toBeGreaterThan(0);
+      originalHandle = result.sessionId;
+      return result;
+    };
+    session.writeStdin = async (args) => {
+      expect(args.sessionId).toBe(originalHandle!);
+      reads.push(args.sessionId);
+      if (reads.length === minimumReads) await writeFile(release, "release");
+      return await write(args);
+    };
+    try {
+      const result = await withNativeSynchronousCommandCollection(session, () => {
+        const outputSession = session as typeof session & {
+          getSynchronousCommandOutput: NonNullable<
+            Parameters<typeof synchronousCommandPage>[0]["getSynchronousCommandOutput"]
+          >;
+        };
+        const getter = outputSession.getSynchronousCommandOutput;
+        outputSession.getSynchronousCommandOutput = (receipt) => {
+          const page = getter(receipt);
+          if (page) pages.push(structuredClone(page));
+          return page;
+        };
+        return controller.runSandboxCommandSynchronous(session, {
+          cmd: command,
+          yieldTimeMs: 1,
+          maxOutputTokens: 1,
+        });
+      });
+      expect(result).toMatchObject({
+        stdout: "x".repeat(2_000),
+        stderr: "y".repeat(2_000),
+        exitCode: 0,
+      });
+      expect(starts).toBe(1);
+      expect(reads.length).toBeGreaterThanOrEqual(minimumReads);
+      expect(reads.every((handle) => handle === originalHandle)).toBe(true);
+      expect(
+        pages.some((page) => page.sessionId === originalHandle && page.exitCode === null),
+      ).toBe(true);
+      expect(pages.at(-1)).toMatchObject({
+        exitCode: 0,
+        outputCursor: { next: { stdout: 2_000, stderr: 2_000 } },
+      });
+      expect(pages.at(-1)?.sessionId).toBeUndefined();
+      expect(pages[0]?.outputCursor?.identity).toBeDefined();
+      expect(
+        pages.every((page) => page.outputCursor?.identity === pages[0]?.outputCursor?.identity),
+      ).toBe(true);
+    } finally {
+      await writeFile(release, "release");
+      controller.cancel();
+      await controller.waitForQuiescence();
+      await session.close();
+      await rm(root, { recursive: true, force: true });
     }
-    return await exec(args);
-  };
-  session.writeStdin = async (args) => {
-    reads++;
-    return await write(args);
-  };
-  try {
-    const result = await withNativeSynchronousCommandCollection(session, () =>
-      controller.runSandboxCommandSynchronous(session, {
-        cmd: command,
-        yieldTimeMs: 1,
-        maxOutputTokens: 1,
-      }),
-    );
-    expect(result).toMatchObject({
-      stdout: "x".repeat(2_000),
-      stderr: "y".repeat(2_000),
-      exitCode: 0,
-    });
-    expect(starts).toBe(1);
-    expect(reads).toBe(1);
-  } finally {
-    controller.cancel();
-    await controller.waitForQuiescence();
-    await session.close();
-  }
-}, 30_000);
+  },
+  30_000,
+);
 
 test.each([1, 1_000])(
   "native stream capture preserves output beyond the SDK presentation buffer at yield %s",
