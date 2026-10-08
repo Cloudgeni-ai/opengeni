@@ -349,7 +349,15 @@ function media(): LabScenario {
   r.push("user.message", { text: "Compare the plans and show me the signup trend." }, t);
   r.push("turn.started", {}, t, 400);
   const text = [
-    "Here is the comparison across every plan:",
+    "Signups are up again. Here is the trend as a live chart:",
+    "",
+    "```opengeni-html",
+    PREVIEW_FENCE_BODY,
+    "```",
+    "",
+    "![Signup funnel](https://picsum.photos/id/1056/1200/675)",
+    "",
+    "And the comparison across every plan:",
     "",
     "| Plan | Monthly price | Seats included | Storage | Support | Uptime SLA | Overage per seat |",
     "| --- | --- | --- | --- | --- | --- | --- |",
@@ -357,14 +365,6 @@ function media(): LabScenario {
     "| Team | $49 | 10 | 100 GB | Email, next business day | 99.5% | $6 |",
     "| Business | $199 | 50 | 1 TB | Chat and email, 4 hours | 99.9% | $5 |",
     "| Enterprise | Custom | Unlimited | Custom | Dedicated manager | 99.99% | Negotiated |",
-    "",
-    "![Signup funnel](https://picsum.photos/id/1056/1200/675)",
-    "",
-    "And the trend as a live chart:",
-    "",
-    "```opengeni-html",
-    PREVIEW_FENCE_BODY,
-    "```",
     "",
     "Signups grew every week except week 3.",
   ].join("\n");

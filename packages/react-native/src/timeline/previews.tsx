@@ -227,8 +227,8 @@ function IncompletePreview({ labels }: { labels: NativePreviewLabels }) {
  * Reports the document's height to React Native and opens followed links in
  * the system browser. Runs before the page's own scripts.
  */
-const HEIGHT_REPORTER = `(()=>{let last=0;const report=()=>{const h=Math.ceil(Math.max(document.documentElement.scrollHeight,document.body?document.body.scrollHeight:0));if(h&&h!==last){last=h;window.ReactNativeWebView.postMessage(JSON.stringify({type:"height",height:h}));}};
-document.addEventListener("DOMContentLoaded",()=>{report();if(typeof ResizeObserver==="function")new ResizeObserver(report).observe(document.documentElement);});window.addEventListener("load",report);setTimeout(report,400);})();true;`;
+const HEIGHT_REPORTER = `(()=>{let last=0;const report=()=>{const body=document.body;if(!body)return;const style=getComputedStyle(body);const h=Math.ceil(body.getBoundingClientRect().height+parseFloat(style.marginTop||"0")+parseFloat(style.marginBottom||"0"));if(h&&h!==last){last=h;window.ReactNativeWebView.postMessage(JSON.stringify({type:"height",height:h}));}};
+document.addEventListener("DOMContentLoaded",()=>{report();if(typeof ResizeObserver==="function")new ResizeObserver(report).observe(document.body);});window.addEventListener("load",report);setTimeout(report,400);})();true;`;
 
 function themeScript(scheme: "light" | "dark"): string {
   return `window.postMessage({type:"opengeni.preview.theme",theme:${JSON.stringify(scheme)}},"*");true;`;
@@ -336,7 +336,7 @@ function PreviewFrame({
         backgroundColor: theme.colors.bg,
       }}
     >
-      {title || onOpen || onExpand ? (
+      {title !== undefined ? (
         <View
           style={{
             flexDirection: "row",
@@ -355,11 +355,11 @@ function PreviewFrame({
             style={{
               ...fontStyle(theme, 500),
               flex: 1,
-              color: title ? theme.colors.fg : theme.colors["fg-muted"],
+              color: theme.colors.fg,
               fontSize: theme.size.sm,
             }}
           >
-            {title ?? ""}
+            {title}
           </Text>
           {onOpen ? (
             <HeaderButton icon="external-link" label={labels.open} onPress={onOpen} theme={theme} />
@@ -381,6 +381,17 @@ function PreviewFrame({
           <>
             <Animated.View style={{ flex: 1, opacity: reveal }}>{children}</Animated.View>
             {loading ? <Skeleton /> : null}
+            {title === undefined && onExpand && !loading ? (
+              <View style={{ position: "absolute", top: 6, right: 6 }}>
+                <HeaderButton
+                  icon="maximize-2"
+                  label={labels.expand}
+                  onPress={onExpand}
+                  theme={theme}
+                  floating
+                />
+              </View>
+            ) : null}
           </>
         )}
       </View>
@@ -393,11 +404,13 @@ function HeaderButton({
   label,
   onPress,
   theme,
+  floating = false,
 }: {
   icon: "external-link" | "maximize-2";
   label: string;
   onPress: () => void;
   theme: NativeTimelineTheme;
+  floating?: boolean;
 }) {
   return (
     <Pressable
@@ -410,8 +423,15 @@ function HeaderButton({
         height: 36,
         alignItems: "center",
         justifyContent: "center",
-        borderRadius: 8,
-        backgroundColor: pressed ? theme.colors.hover : "transparent",
+        borderRadius: floating ? 18 : 8,
+        backgroundColor: floating
+          ? theme.scheme === "dark"
+            ? "rgba(0,0,0,0.45)"
+            : "rgba(255,255,255,0.8)"
+          : pressed
+            ? theme.colors.hover
+            : "transparent",
+        opacity: floating && pressed ? 0.7 : 1,
       })}
     >
       <Icon name={icon} size={15} color={theme.colors["fg-muted"]} />
