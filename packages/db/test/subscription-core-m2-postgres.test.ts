@@ -74,6 +74,10 @@ async function verifySubscriptionLifecycleRlsAsNonBypassOwner(connectionId: stri
       await tx.unsafe(
         `grant execute on function opengeni_private.subscription_organization_admin(uuid) to ${probeRole}`,
       );
+      // Every SELECT on the table evaluates the refresh-only read policy too.
+      await tx.unsafe(
+        `grant execute on function opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid) to ${probeRole}`,
+      );
       await tx.unsafe(`set local role ${probeRole}`);
       await tx.unsafe("set local search_path = pg_catalog, public, opengeni_private, pg_temp");
       const [attributes] = await tx<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
@@ -99,6 +103,9 @@ async function verifySubscriptionLifecycleRlsAsNonBypassOwner(connectionId: stri
       );
       await tx.unsafe(
         `revoke execute on function opengeni_private.subscription_organization_admin(uuid) from ${probeRole}`,
+      );
+      await tx.unsafe(
+        `revoke execute on function opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid) from ${probeRole}`,
       );
       await tx.unsafe(
         `alter function finalize_organization_retention_deletion(uuid,uuid,uuid,text) owner to ${owners!.function_owner}`,
