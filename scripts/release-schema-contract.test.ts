@@ -82,6 +82,19 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers stranded tool receipt tenancy quiescence as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) =>
+          migration.path === "0658_tenancy_quiescence_ignores_stranded_tool_receipts.sql",
+      ),
+    ).toMatchObject({
+      path: "0658_tenancy_quiescence_ignores_stranded_tool_receipts.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("checks complete ledger metadata against migration files", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     const sourceMigrationPaths = (
@@ -2472,6 +2485,8 @@ describe("release schema contract", () => {
       "0654_private_child_causal_initiator.sql",
       "0655_inbox.sql",
       "0656_inbox_owner_recipient.sql",
+      "0657_session_archive_purge_retained_evidence.sql",
+      "0658_tenancy_quiescence_ignores_stranded_tool_receipts.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
