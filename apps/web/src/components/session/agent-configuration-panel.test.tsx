@@ -34,7 +34,12 @@ const context = {
     accountGrants: [],
     workspaceGrants: [{ workspaceId, permissions: ["sessions:control"] }],
   },
-  clientConfig: { agentConfig: { enabled: true, defaultForNewSessions: true, capabilities: [] } },
+  clientConfig: {
+    agentConfig: { enabled: true, defaultForNewSessions: true, capabilities: [] },
+  } as {
+    agentConfig: { enabled: boolean; defaultForNewSessions: boolean; capabilities: never[] };
+    sessionArchive?: { enabled: true; idleDays: number };
+  },
   managedSelfContext: null,
   workspaceDefaultToolIds: [],
   toolMcpServers: [],

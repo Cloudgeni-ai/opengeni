@@ -3323,7 +3323,12 @@ function SessionChatPane(props: {
             </div>
           </div>
 
-          <div ref={composerRegionRef} className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
+          {/* A read-only chat can't continue: its notice offers a new chat instead. */}
+          <div
+            ref={composerRegionRef}
+            data-read-only-composer={readOnlyArchive ? "hidden" : undefined}
+            className={`shrink-0 px-4 pb-4 pt-1 sm:px-6${readOnlyArchive ? " hidden" : ""}`}
+          >
             <div className="mx-auto w-full max-w-3xl">
               <PersonalResourceAttachmentSurface
                 controller={personalAttachment}

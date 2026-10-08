@@ -7,6 +7,7 @@ import {
   getWorkspaceInteractionRevisionState,
   listSessionEventPage,
   listWorkspaceControlEvents,
+  readSessionEventStorageGapEnd,
   type Database,
 } from "@opengeni/db";
 import {
@@ -268,6 +269,32 @@ export function createLatestWinsDelivery<T extends { sequence: number }>(
   };
 }
 
+/**
+ * Durable coverage for each projected frame. Storage may omit sequences on
+ * purpose (an archived session keeps only its readable timeline), and clients
+ * treat an uncovered jump as a gap to backfill. Within a page the next stored
+ * row bounds the gap; after the last row, `gapEnd` (when given) reads the
+ * race-free bound from storage.
+ */
+export async function coverStorageGaps(
+  projection: { events: SessionEvent[]; coveredThroughBySequence: ReadonlyMap<number, number> },
+  gapEnd: ((through: number) => Promise<number>) | null,
+): Promise<Map<number, number>> {
+  const coverage = new Map<number, number>();
+  const events = projection.events;
+  for (const [index, event] of events.entries()) {
+    const own = projection.coveredThroughBySequence.get(event.sequence) ?? event.sequence;
+    const next = events[index + 1];
+    coverage.set(event.sequence, next ? Math.max(own, next.sequence - 1) : own);
+  }
+  const last = events.at(-1);
+  if (last && gapEnd) {
+    const own = coverage.get(last.sequence)!;
+    coverage.set(last.sequence, Math.max(own, await gapEnd(own)));
+  }
+  return coverage;
+}
+
 export async function sseSessionStream(
   db: Database,
   bus: EventBus,
@@ -285,12 +312,12 @@ export async function sseSessionStream(
     });
     await options.reauthorize?.();
     const compactProjection = coalesceSessionEventDeltasWithCoverage(events);
+    const coverage = await coverStorageGaps(compactProjection, async (through) =>
+      readSessionEventStorageGapEnd(db, workspaceId, sessionId, through),
+    );
     return finiteSseBatchResponse(
       compactProjection.events.map((event) =>
-        formatSessionEventSse(
-          event,
-          compactProjection.coveredThroughBySequence.get(event.sequence) ?? event.sequence,
-        ),
+        formatSessionEventSse(event, coverage.get(event.sequence) ?? event.sequence),
       ),
       options,
     );
@@ -376,9 +403,16 @@ export async function sseSessionStream(
       // a long answer cannot create thousands of React renders and starve
       // command acknowledgements behind its own token stream.
       const compactProjection = coalesceSessionEventDeltasWithCoverage(eligible);
+      // Live delivery stops exactly at a published sequence; replay pages also
+      // cover what storage intentionally omits after their last event.
+      const coverage = await coverStorageGaps(
+        compactProjection,
+        targetSequence === undefined
+          ? async (through) => readSessionEventStorageGapEnd(db, workspaceId, sessionId, through)
+          : null,
+      );
       for (const projected of compactProjection.events) {
-        const coveredThrough =
-          compactProjection.coveredThroughBySequence.get(projected.sequence) ?? projected.sequence;
+        const coveredThrough = coverage.get(projected.sequence) ?? projected.sequence;
         await writeFrame(formatSessionEventSse(projected, coveredThrough));
         lastSent = coveredThrough;
       }

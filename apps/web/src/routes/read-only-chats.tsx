@@ -243,6 +243,7 @@ export function ReadOnlyChatsRoute({ workspaceId }: { workspaceId: string }) {
               <SelectMenu
                 aria-label="Project"
                 size="md"
+                className="w-44"
                 value={project}
                 onValueChange={setProject}
                 options={projectOptions}
@@ -250,6 +251,7 @@ export function ReadOnlyChatsRoute({ workspaceId }: { workspaceId: string }) {
               <SelectMenu
                 aria-label="Sort by"
                 size="md"
+                className="w-40"
                 value={sortBy}
                 onValueChange={setSortBy}
                 options={SORT_OPTIONS}

@@ -41166,6 +41166,38 @@ type SessionEventProjectionSource = {
 };
 
 /**
+ * The last sequence a reader positioned after `after` may treat as covered
+ * because storage intentionally holds nothing there (an archived session's
+ * purged telemetry, for example). Sequences are allocated under the session
+ * row lock, so a committed later event or `last_sequence` proves every lower
+ * sequence already committed or was removed. One statement reads both in one
+ * snapshot: the next stored sequence minus one, or `last_sequence` when
+ * nothing is stored after `after`. Never less than `after`.
+ */
+export async function readSessionEventStorageGapEnd(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  after: number,
+): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await rawRows<{ next: number | null; last: number | null }>(
+      scopedDb,
+      sql`select
+          (select min(e.sequence) from session_events e
+            where e.workspace_id = ${workspaceId}::uuid
+              and e.session_id = ${sessionId}::uuid
+              and e.sequence > ${after}) as next,
+          (select s.last_sequence from sessions s
+            where s.workspace_id = ${workspaceId}::uuid and s.id = ${sessionId}::uuid) as last`,
+    );
+    const next = row?.next === null || row?.next === undefined ? null : Number(row.next);
+    const last = row?.last === null || row?.last === undefined ? after : Number(row.last);
+    return Math.max(after, next === null ? last : next - 1);
+  });
+}
+
+/**
  * Read one direction-aware session-event page. Full mode selects the canonical
  * row exactly, allowing one oversized event alone so its cursor can progress.
  * The byte budget bounds page selection, never retained payloads. Summary/none modes derive

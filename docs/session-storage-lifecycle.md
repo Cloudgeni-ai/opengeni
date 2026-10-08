@@ -134,6 +134,12 @@ session to continue the work. A late machine input for an archived session (a
 child result, schedule or media completion) is settled like input to a
 cancelled session.
 
+Purging leaves holes in an archived session's event sequence. Event streams
+report them as covered: each SSE frame's `id` (its covered-through sequence)
+extends to just before the next stored event, or to the session's last
+sequence, so stream clients never try to backfill an intentional hole. Raw
+event pages simply skip the missing sequences.
+
 ### Keep-live
 
 `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/retention` with

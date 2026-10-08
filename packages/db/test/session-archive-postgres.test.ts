@@ -21,6 +21,7 @@ import {
   purgeArchivedSessionContent,
   readSessionArchiveRows,
   readSessionArchiveTranscriptEvents,
+  readSessionEventStorageGapEnd,
   setSessionKeepLive,
   submitHumanPromptInTransaction,
   withWorkspaceSessionActivityRls,
@@ -236,6 +237,26 @@ describe("idle-session archive lifecycle", () => {
     expect(types).not.toContain("agent.message.delta");
     expect(types).not.toContain("agent.model.request");
     expect(await countRows("session_turns", scope)).toBeGreaterThanOrEqual(1);
+
+    // Readers learn which missing sequences storage omits on purpose.
+    const kept = (
+      await shared.admin`select sequence from session_events
+        where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}
+        order by sequence`
+    ).map((row) => Number(row.sequence));
+    const [lastSequence] = await shared.admin`select last_sequence from sessions
+      where id = ${scope.sessionId}`;
+    for (const [index, sequence] of kept.entries()) {
+      const next = kept[index + 1];
+      expect(
+        await readSessionEventStorageGapEnd(
+          client.db,
+          scope.workspaceId,
+          scope.sessionId,
+          sequence,
+        ),
+      ).toBe(next === undefined ? Number(lastSequence!.last_sequence) : next - 1);
+    }
 
     const session = await getSession(client.db, scope.workspaceId, scope.sessionId);
     expect(session?.retention?.archive?.state).toBe("archived");

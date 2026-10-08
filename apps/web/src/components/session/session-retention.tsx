@@ -8,7 +8,7 @@
  * - KeepActiveSetting: the per-chat exemption, a switch in the Agent tab.
  */
 import { ArchiveIcon, PlusIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -84,7 +84,12 @@ export function ReadOnlySessionNotice(props: {
  * example a long-running agent that is only woken by schedules or messages.
  * Saves at once. Shown only on deployments that archive idle chats.
  */
-export function KeepActiveSetting(props: { session: Session; idleDays: number }) {
+export function KeepActiveSetting(props: {
+  session: Session;
+  idleDays: number;
+  /** Re-reads the session after a save so every view shows the new value. */
+  onSaved?: () => Promise<void>;
+}) {
   const context = useAppContext();
   const { session } = props;
   const canEdit = hasWorkspacePermission(
@@ -94,8 +99,13 @@ export function KeepActiveSetting(props: { session: Session; idleDays: number })
   );
   const keepLive = session.retention?.keepLive === true;
   const [pending, setPending] = useState<boolean | null>(null);
+  // The saved value until the session the panel shows has caught up with it.
+  const [saved, setSaved] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const checked = pending ?? keepLive;
+  const checked = pending ?? (saved !== null && saved !== keepLive ? saved : keepLive);
+  useEffect(() => {
+    if (saved !== null && saved === keepLive) setSaved(null);
+  }, [keepLive, saved]);
 
   const save = async (next: boolean) => {
     setPending(next);
@@ -104,11 +114,13 @@ export function KeepActiveSetting(props: { session: Session; idleDays: number })
       const updated = await context.client.updateSessionRetention(session.workspaceId, session.id, {
         keepLive: next,
       });
+      setSaved(updated.retention?.keepLive === true);
       context.setSession((current) =>
         current?.id === updated.id && current.workspaceId === updated.workspaceId
           ? { ...current, retention: updated.retention }
           : current,
       );
+      void props.onSaved?.().catch(() => undefined);
       toast.success(next ? "This chat will stay active." : "This chat can become read-only.");
     } catch (caught) {
       const facts = apiErrorFacts(caught);
@@ -125,6 +137,8 @@ export function KeepActiveSetting(props: { session: Session; idleDays: number })
   return (
     <SettingRow
       data-keep-active-setting
+      // Sits directly under its section heading: drop the row's own top padding.
+      className="-mt-3"
       label="Keep this chat active"
       description={`Chats with no activity for ${idlePeriod(props.idleDays)} become read-only and move to long-term storage. Turn this on for a long-running agent you come back to.`}
       error={error}

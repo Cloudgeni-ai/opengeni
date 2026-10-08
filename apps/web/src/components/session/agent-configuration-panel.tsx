@@ -364,6 +364,7 @@ export function AgentConfigurationPanel(props: {
                   <KeepActiveSetting
                     session={session}
                     idleDays={context.clientConfig.sessionArchive.idleDays}
+                    onSaved={props.onReloadSession}
                   />
                 </PanelSection>
               ) : null}

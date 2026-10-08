@@ -2965,7 +2965,6 @@ export function SessionList() {
                     })
                   }
                 >
-                  <ArchiveIcon />
                   Read-only chats
                 </DropdownMenuItem>
               </>
