@@ -439,6 +439,12 @@ export function useRealtimeModelSelection(options: {
     workspaceId,
     source: initialCachedCatalog ? ("cache" as const) : ("fallback" as const),
   });
+  // Set when no real catalog will come (no loader, or loading failed): the
+  // fallback is then the catalog.
+  const [fallbackFinal, setFallbackFinal] = useState<{
+    client: unknown;
+    workspaceId: string;
+  } | null>(null);
   const [selectedModelId, setSelectedModelId] = useState<SessionRealtimeModel>(() => {
     const preferred = readRealtimeModelPreference(workspaceId) ?? CODEX_LIVE_MODEL.id;
     if (!initialCachedCatalog) return preferred;
@@ -472,13 +478,18 @@ export function useRealtimeModelSelection(options: {
       return;
     }
     const loading = loadRealtimeModelCatalog(client, workspaceId, requestAbort.signal);
-    if (!loading) return;
+    if (!loading) {
+      setFallbackFinal({ client, workspaceId });
+      return;
+    }
     void loading
       .then((models) => {
         if (disposed) return;
         applyCatalog(models);
       })
-      .catch(() => undefined);
+      .catch(() => {
+        if (!disposed) setFallbackFinal({ client, workspaceId });
+      });
     return () => {
       disposed = true;
       requestAbort.abort();
@@ -506,7 +517,14 @@ export function useRealtimeModelSelection(options: {
     [activeModel, catalog, workspaceId],
   );
 
-  return { models: catalog, selectedModel, selectModel };
+  // The fallback catalog is a placeholder: a caller that starts voice on its own
+  // (a call from outside the app) waits for the real one, or the selection
+  // would change under the starting connection.
+  const scope = catalogScopeRef.current;
+  const catalogReady =
+    (scope.source === "cache" && scope.client === client && scope.workspaceId === workspaceId) ||
+    (fallbackFinal?.client === client && fallbackFinal.workspaceId === workspaceId);
+  return { models: catalog, selectedModel, selectModel, catalogReady };
 }
 
 function toRealtimeModelOption(model: WorkspaceRealtimeModelCatalogItem): RealtimeModelOption {
