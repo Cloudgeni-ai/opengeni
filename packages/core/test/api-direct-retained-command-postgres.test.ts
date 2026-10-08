@@ -12,6 +12,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { SandboxChannelAService, type ChannelASession } from "@opengeni/runtime/sandbox";
+import { synchronousNativeOutputFixture } from "../../runtime/test/synchronous-output-fixture";
 import { wrapChannelABoxWithRouting } from "../src/sandbox/routing";
 
 let shared: SharedTestDatabase | null = null;
@@ -96,6 +97,32 @@ test("API-direct synchronous and nested commands retain exact custody without fa
 
   const importMarkers = new Map<number, string>();
   const stdinPolls = new Map<number, number>();
+  const commandOutputs = new Map<number, ReturnType<typeof synchronousNativeOutputFixture>>();
+  const outputReceipts = new Map<unknown, ReturnType<typeof synchronousNativeOutputFixture>>();
+  // The mock supplies trusted separate streams and status, not banner-derived
+  // output. Each execution retains its own identity/cursor through recovery.
+  const outputReceipt = (
+    stdout: string,
+    stderr: string,
+    exitCode: number | null,
+    providerSessionId?: number,
+  ): string => {
+    const output =
+      (providerSessionId === undefined ? undefined : commandOutputs.get(providerSessionId)) ??
+      synchronousNativeOutputFixture();
+    if (providerSessionId !== undefined) commandOutputs.set(providerSessionId, output);
+    if (exitCode === null && providerSessionId === undefined) {
+      throw new Error("running fixture command requires its exact provider session");
+    }
+    const raw = `Chunk ID: ${crypto.randomUUID()}\n${
+      exitCode === null
+        ? `Process running with session ID ${providerSessionId}\n\nOutput:\n${stdout}`
+        : terminal(exitCode, stdout)
+    }`;
+    output.record(raw, stdout, stderr, exitCode, exitCode === null ? providerSessionId : undefined);
+    outputReceipts.set(raw, output);
+    return raw;
+  };
   const providerSession: ChannelASession & {
     modal: {
       cpClient: { workspaceNameLookup: () => Promise<{ workspaceName: string }> };
@@ -114,22 +141,24 @@ test("API-direct synchronous and nested commands retain exact custody without fa
     supportsPty: () => false,
     writePlacementPrivate: async () => undefined,
     deletePlacementPrivate: async () => undefined,
+    getSynchronousCommandOutput: (raw) =>
+      outputReceipts.get(raw)?.getSynchronousCommandOutput(raw) ?? null,
     execCommand: async (args) => {
       const command = (args as { cmd?: string }).cmd ?? "";
       if (command === "ordinary foreground") {
-        return "Process running with session ID 82\n\nOutput:\nstarted";
+        return outputReceipt("started", "", null, 82);
       }
       const importMarker = command.match(/__OPENGENI_WORKSPACE_IMPORT_[a-f0-9]+_OK__/iu)?.[0];
       if (importMarker) {
         importMarkers.set(93, importMarker);
-        return "Process running with session ID 93\n\nOutput:\n";
+        return outputReceipt("", "", null, 93);
       }
       if (command.includes("base64 -d") && command.includes("inline.txt")) {
-        return "Process running with session ID 51\n\nOutput:\n";
+        return outputReceipt("", "", null, 51);
       }
       const confinementMarker = command.match(/__OPENGENI_FS_CONFINED_OK__/u)?.[0];
-      if (confinementMarker) return terminal(0, confinementMarker);
-      return terminal(0);
+      if (confinementMarker) return outputReceipt(confinementMarker, "", 0);
+      return outputReceipt("", "", 0);
     },
     writeStdin: async ({ sessionId: providerSessionId }) => {
       const poll = (stdinPolls.get(providerSessionId) ?? 0) + 1;
@@ -138,9 +167,9 @@ test("API-direct synchronous and nested commands retain exact custody without fa
         throw new Error("temporary provider observation failure");
       }
       if (providerSessionId === 93) {
-        return terminal(0, `${importMarkers.get(93)}\tcreated`);
+        return outputReceipt(`${importMarkers.get(93)}\tcreated`, "", 0, providerSessionId);
       }
-      return terminal(0, "completed");
+      return outputReceipt("completed", "", 0, providerSessionId);
     },
   };
 
