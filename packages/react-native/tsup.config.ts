@@ -26,6 +26,7 @@ export default defineConfig({
     "src/ui/index.ts",
     "src/timeline/index.ts",
     "src/timeline/markdown.tsx",
+    "src/timeline/previews.tsx",
   ],
   format: ["esm"],
   target: "es2022",
