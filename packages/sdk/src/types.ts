@@ -2131,6 +2131,8 @@ export const SESSION_EVENT_TYPES = [
   "session.realtime.ended",
   "session.requiresAction",
   "session.humanInput.requested",
+  "session.notification.posted",
+  "session.notification.withdrawn",
   "session.context.compaction.requested",
   "session.context.compaction.started",
   "session.context.compacted",
