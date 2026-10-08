@@ -2263,7 +2263,8 @@ describe("provider-neutral subscription runtime persistence", () => {
       );
       let releaseIsBlocked = false;
       try {
-        for (let attempt = 0; attempt < 30; attempt += 1) {
+        const lockWaitDeadline = Date.now() + 10_000;
+        while (Date.now() < lockWaitDeadline) {
           const [waiter] = await shared!.admin<{ blocked: boolean }[]>`
             select exists (
               select 1 from pg_stat_activity
@@ -2275,7 +2276,7 @@ describe("provider-neutral subscription runtime persistence", () => {
             releaseIsBlocked = true;
             break;
           }
-          await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+          await Bun.sleep(20);
         }
         expect(releaseIsBlocked).toBe(true);
       } finally {
