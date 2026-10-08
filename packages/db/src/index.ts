@@ -71,8 +71,30 @@ export {
 } from "./modal-native-live-origin";
 export { SubscriptionAccountChangedError } from "./subscription-account-conflict";
 export {
+  acquireSubscriptionOperationLease,
+  assertSubscriptionOperationLeaseCurrent,
+  claimSubscriptionCapacityWakeDeliveries,
   createSubscriptionConnection,
+  listSubscriptionConnectionAssignmentPolicies,
+  listDueSubscriptionCapacityWaiters,
+  markSubscriptionCapacityWakeDelivered,
+  observeSubscriptionCapacityWaiterWake,
   readSubscriptionEffectiveSettings,
+  readSubscriptionSessionBinding,
+  resolveSubscriptionConnectionId,
+  releaseSubscriptionOperationLease,
+  renewSubscriptionOperationLease,
+  upsertSubscriptionCapacityWaiter,
+  wakeSubscriptionCapacityWaiter,
+  writeSubscriptionSessionBinding,
+  type SubscriptionConnectionAssignmentPolicy,
+  type SubscriptionCapacityWaiter,
+  type SubscriptionCapacityWakeDelivery,
+  type DueSubscriptionCapacityWaiter,
+  type SubscriptionOperationKind,
+  type SubscriptionOperationLease,
+  type SubscriptionOperationLeaseIdentity,
+  type SubscriptionSessionBinding,
   type EffectiveSubscriptionSettingsRow,
 } from "./subscription-core-repository";
 export {

@@ -109,6 +109,40 @@ export const subscriptionConnectionWorkspaces = pgTable(
   }),
 );
 
+export const subscriptionConnectionAssignmentPolicies = pgTable(
+  "subscription_connection_assignment_policies",
+  {
+    accountId: uuid("account_id").notNull(),
+    connectionId: uuid("connection_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    inferencePool: text("inference_pool").notNull(),
+    allocatorEnabled: boolean("allocator_enabled").notNull().default(true),
+    allowedModelIds: text("allowed_model_ids").array(),
+    excludedModels: text("excluded_models").array().notNull().default([]),
+    managedByWorkspaceId: uuid("managed_by_workspace_id"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    identity: primaryKey({
+      name: "subscription_connection_assignment_policies_pk",
+      columns: [table.accountId, table.connectionId, table.workspaceId, table.inferencePool],
+    }),
+    pool: index("subscription_connection_assignment_policies_pool_idx").on(
+      table.accountId,
+      table.workspaceId,
+      table.inferencePool,
+      table.connectionId,
+    ),
+    manager: index("subscription_connection_assignment_policies_manager_idx")
+      .on(table.accountId, table.managedByWorkspaceId)
+      .where(sql`${table.managedByWorkspaceId} is not null`),
+    inferencePoolValid: check(
+      "subscription_connection_assignment_policies_pool_chk",
+      sql`${table.inferencePool} in ('workspace', 'organization')`,
+    ),
+  }),
+);
+
 export const subscriptionConnectionPeople = pgTable(
   "subscription_connection_people",
   {
@@ -249,9 +283,53 @@ export const subscriptionLeases = pgTable(
   }),
 );
 
+/** Operation leases are independent of chat-turn leases and may be sessionless. */
+export const subscriptionOperationLeases = pgTable(
+  "subscription_operation_leases",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    operationKind: text("operation_kind").notNull(),
+    sessionId: uuid("session_id"),
+    turnId: uuid("turn_id"),
+    provider: text("provider").notNull(),
+    connectionId: uuid("connection_id").notNull(),
+    holderId: text("holder_id").notNull(),
+    generation: bigint("generation", { mode: "number" }).notNull(),
+    leasedUntil: timestamp("leased_until", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    identity: primaryKey({
+      name: "subscription_operation_leases_pk",
+      columns: [table.accountId, table.operationId],
+    }),
+    connectionExpiry: index("subscription_operation_leases_connection_expiry_idx").on(
+      table.accountId,
+      table.connectionId,
+      table.leasedUntil,
+    ),
+    session: index("subscription_operation_leases_session_idx")
+      .on(table.accountId, table.workspaceId, table.sessionId, table.turnId)
+      .where(sql`${table.sessionId} is not null`),
+    operationKindValid: check(
+      "subscription_operation_leases_kind_chk",
+      sql`${table.operationKind} in ('image', 'realtime', 'transcription')`,
+    ),
+    referenceShape: check(
+      "subscription_operation_leases_reference_chk",
+      sql`(${table.turnId} is null or ${table.sessionId} is not null)
+        and (${table.sessionId} is not null or (${table.turnId} is null and ${table.operationKind} = 'transcription'))`,
+    ),
+  }),
+);
+
 export const subscriptionCapacityWaiters = pgTable(
   "subscription_capacity_waiters",
   {
+    waiterId: uuid("waiter_id").notNull().defaultRandom(),
     accountId: uuid("account_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
     sessionId: uuid("session_id").notNull(),
@@ -265,15 +343,52 @@ export const subscriptionCapacityWaiters = pgTable(
     earliestResetAt: timestamp("earliest_reset_at", { withTimezone: true }),
     generation: bigint("generation", { mode: "number" }).notNull().default(1),
     wakeRevision: bigint("wake_revision", { mode: "number" }).notNull().default(1),
+    observedWakeRevision: bigint("observed_wake_revision", { mode: "number" }).notNull().default(0),
+    nextCheckAt: timestamp("next_check_at", { withTimezone: true }),
+    blockedTurnGeneration: bigint("blocked_turn_generation", { mode: "number" }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
     identity: primaryKey({ columns: [table.workspaceId, table.sessionId] }),
+    stableWaiterId: uniqueIndex("subscription_capacity_waiters_account_waiter_id_uq").on(
+      table.accountId,
+      table.waiterId,
+    ),
     recovery: index("subscription_capacity_waiters_recovery_idx").on(
       table.provider,
       table.earliestResetAt,
       table.wakeRevision,
     ),
+  }),
+);
+
+export const subscriptionCapacityWakeOutbox = pgTable(
+  "subscription_capacity_wake_outbox",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    waiterId: uuid("waiter_id").notNull(),
+    generation: bigint("generation", { mode: "number" }).notNull(),
+    wakeRevision: bigint("wake_revision", { mode: "number" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    claimGeneration: bigint("claim_generation", { mode: "number" }).notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    lastError: text("last_error"),
+  },
+  (table) => ({
+    identity: uniqueIndex("subscription_capacity_wake_outbox_identity_uq").on(
+      table.accountId,
+      table.waiterId,
+      table.generation,
+      table.wakeRevision,
+    ),
+    due: index("subscription_capacity_wake_outbox_due_idx")
+      .on(table.nextAttemptAt, table.createdAt)
+      .where(sql`${table.deliveredAt} is null`),
   }),
 );
 

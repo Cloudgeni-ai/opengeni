@@ -58,6 +58,18 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers provider-neutral subscription runtime storage as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0645_subscription_core_runtime.sql",
+      ),
+    ).toMatchObject({
+      path: "0645_subscription_core_runtime.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("checks complete ledger metadata against migration files", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     const sourceMigrationPaths = (
@@ -2436,6 +2448,7 @@ describe("release schema contract", () => {
       "0638_allowance_unbilled_usage_metering.sql",
       "0639_native_app_push.sql",
       "0644_subscription_inference_source_settings.sql",
+      "0645_subscription_core_runtime.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
