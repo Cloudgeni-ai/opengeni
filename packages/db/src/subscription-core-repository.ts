@@ -564,35 +564,35 @@ export async function acquireSubscriptionTurnLease(
 }
 
 /**
- * Persist one successful Codex token refresh through the private, lease-fenced
- * database seam. Call inside withSubscriptionCoreCodexRefreshLock; SQL repeats
- * the accepted-turn, connection-visibility and live-generation checks so a
- * caller cannot turn the helper into a general credential update API.
+ * Persist one successful Codex token refresh through the private database
+ * seam. Call only inside withSubscriptionCoreCodexRefreshLock, immediately
+ * after the provider returns. SQL consumes the one-shot authorization that
+ * begin_subscription_codex_refresh minted in the same transaction and writes
+ * under the refresh lock and refresh-generation compare-and-swap, so a caller
+ * cannot turn the helper into a general credential update API, and a rotated
+ * token is not discarded because the lease or visibility changed meanwhile.
  */
 export async function persistSubscriptionCodexRefresh(
   db: Database,
-  input: SubscriptionTurnLeaseIdentity & {
-    sessionOwnerSubjectId: string | null;
-    initiatingHumanSubjectId: string | null;
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    connectionId: string;
     expectedRefreshGeneration: number;
     credentialEncrypted: string;
     expiresAt: Date | null;
     lastRefreshAt: Date;
   },
 ): Promise<boolean> {
-  assertPositiveGeneration(input.generation);
   assertPositiveGeneration(input.expectedRefreshGeneration);
-  if (!input.holderId.trim() || input.holderId.length > 256) {
-    throw new Error("Subscription lease holder id must contain 1-256 characters");
-  }
-  if (input.provider !== "codex") throw new Error("Codex refresh requires the Codex provider");
   const [row] = await rawRows<{ persisted: boolean }>(
     db,
     sql`select opengeni_private.persist_subscription_codex_refresh(
       ${input.accountId}::uuid, ${input.workspaceId}::uuid,
       ${input.sessionId}::uuid, ${input.turnId}::uuid,
-      ${input.sessionOwnerSubjectId}, ${input.initiatingHumanSubjectId}, ${input.connectionId}::uuid,
-      ${input.holderId}, ${input.generation}::bigint, ${input.expectedRefreshGeneration}::bigint,
+      ${input.connectionId}::uuid, ${input.expectedRefreshGeneration}::bigint,
       ${input.credentialEncrypted}, ${input.expiresAt?.toISOString() ?? null}::timestamptz,
       ${input.lastRefreshAt.toISOString()}::timestamptz
     ) as persisted`,

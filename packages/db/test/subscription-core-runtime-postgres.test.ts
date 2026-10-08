@@ -675,6 +675,69 @@ describe("provider-neutral subscription runtime persistence", () => {
           'personal', 'people', ${membership!.id}::uuid, ${state.subjectId}, ${authorityId}::uuid,
           'subscription_connection', 1
         )`;
+      // The owner's personal Claude connection shares the authority generation.
+      // Codex placement must not rewrite or remove an earlier Claude capability.
+      const claudeConnectionId = crypto.randomUUID();
+      const claudeAuthorityId = crypto.randomUUID();
+      await shared!.admin`
+        insert into organization_user_resource_authorities (
+          id, account_id, organization_membership_id, resource_kind, resource_id, generation, status
+        ) values (
+          ${claudeAuthorityId}::uuid, ${state.accountId}::uuid, ${membership!.id}::uuid,
+          'subscription_connection', ${claudeConnectionId}::uuid, 1, 'active'
+        )`;
+      await shared!.admin`
+        insert into subscription_connections (
+          id, account_id, provider, credential_encrypted, ownership, scope_kind,
+          owner_organization_membership_id, owner_subject_id, authority_id,
+          authority_resource_kind, authority_generation
+        ) values (
+          ${claudeConnectionId}::uuid, ${state.accountId}::uuid, 'claude', 'v1:personal-claude',
+          'personal', 'people', ${membership!.id}::uuid, ${state.subjectId}, ${claudeAuthorityId}::uuid,
+          'subscription_connection', 1
+        )`;
+      // Test-only probes that seed and read same-transaction capabilities the
+      // app role cannot touch directly.
+      const probeSuffix = crypto.randomUUID().replaceAll("-", "_");
+      const seedProbe = `opengeni_private.test_seed_capabilities_${probeSuffix}`;
+      const readProbe = `opengeni_private.test_read_capabilities_${probeSuffix}`;
+      await shared!.admin.unsafe(`
+        create function ${seedProbe}(
+          p_account uuid, p_workspace uuid, p_session uuid, p_turn uuid,
+          p_connection uuid, p_owner text, p_human text
+        ) returns void language sql security definer
+        set search_path = pg_catalog, opengeni_private, pg_temp as $probe$
+          insert into opengeni_private.subscription_runtime_capabilities (
+            backend_pid, transaction_id, capability_kind, account_id, workspace_id,
+            session_id, turn_id, connection_id, provider,
+            session_owner_subject_id, turn_human_subject_id
+          ) values (
+            pg_backend_pid(), pg_current_xact_id(), 'personal_access', p_account, p_workspace,
+            p_session, p_turn, p_connection, 'claude', p_owner, p_human
+          );
+          insert into opengeni_private.subscription_runtime_capabilities (
+            backend_pid, transaction_id, capability_kind, account_id
+          ) values (pg_backend_pid(), pg_current_xact_id(), 'lifecycle', p_account);
+        $probe$;
+        create function ${readProbe}(p_account uuid, p_connection uuid)
+        returns table (claude_provider text, lifecycle boolean) language sql security definer
+        set search_path = pg_catalog, opengeni_private, pg_temp as $probe$
+          select (
+            select capability.provider from opengeni_private.subscription_runtime_capabilities capability
+            where capability.backend_pid = pg_backend_pid()
+              and capability.transaction_id = pg_current_xact_id_if_assigned()
+              and capability.capability_kind = 'personal_access'
+              and capability.account_id = p_account and capability.connection_id = p_connection
+          ), exists (
+            select 1 from opengeni_private.subscription_runtime_capabilities capability
+            where capability.backend_pid = pg_backend_pid()
+              and capability.transaction_id = pg_current_xact_id_if_assigned()
+              and capability.capability_kind = 'lifecycle' and capability.account_id = p_account
+          );
+        $probe$;
+        grant execute on function ${seedProbe}(uuid, uuid, uuid, uuid, uuid, text, text) to opengeni_app;
+        grant execute on function ${readProbe}(uuid, uuid) to opengeni_app;
+      `);
       await shared!.admin`
         insert into subscription_settings (
           account_id, rotation, providers, cross_provider_failover, fallback_order,
@@ -781,9 +844,17 @@ describe("provider-neutral subscription runtime persistence", () => {
         workspaceId?: string;
         sessionId?: string;
         turnId?: string;
+        seedEarlierCapabilities?: boolean;
       }) => {
         let observed:
-          | { authorized: boolean; visible: boolean; owner: string | null; human: string | null }
+          | {
+              authorized: boolean;
+              visible: boolean;
+              owner: string | null;
+              human: string | null;
+              earlierClaudeProvider: string | null;
+              earlierLifecycle: boolean;
+            }
           | undefined;
         try {
           await client!.db.transaction(async (transaction) => {
@@ -833,6 +904,18 @@ describe("provider-neutral subscription runtime persistence", () => {
                               ${input.humanSubjectId ?? state.subjectId}
                             ) as authorized`,
                           );
+                          if (input.seedEarlierCapabilities) {
+                            await rawRows(
+                              db,
+                              sql`select ${sql.raw(seedProbe)}(
+                                ${state.accountId}::uuid,
+                                ${input.workspaceId ?? membership!.personal_workspace_id}::uuid,
+                                ${input.sessionId ?? personalSession.id}::uuid,
+                                ${input.turnId ?? personalTurn.id}::uuid,
+                                ${claudeConnectionId}::uuid, ${state.subjectId}, ${state.subjectId}
+                              )`,
+                            );
+                          }
                           const [authorization] = await rawRows<{ authorized: boolean }>(
                             db,
                             sql`select opengeni_private.authorize_subscription_personal_placement_access(
@@ -862,11 +945,22 @@ describe("provider-neutral subscription runtime persistence", () => {
                             sql`select nullif(current_setting('opengeni.session_owner_subject_id', true), '') as owner,
                               nullif(current_setting('opengeni.turn_human_subject_id', true), '') as human`,
                           );
+                          const [earlier] = await rawRows<{
+                            claude_provider: string | null;
+                            lifecycle: boolean;
+                          }>(
+                            db,
+                            sql`select * from ${sql.raw(readProbe)}(
+                              ${state.accountId}::uuid, ${claudeConnectionId}::uuid
+                            )`,
+                          );
                           observed = {
                             authorized: authorization?.authorized === true,
                             visible: visibility?.visible === true,
                             owner: context?.owner ?? null,
                             human: context?.human ?? null,
+                            earlierClaudeProvider: earlier?.claude_provider ?? null,
+                            earlierLifecycle: earlier?.lifecycle === true,
                           };
                         },
                       ),
@@ -895,7 +989,60 @@ describe("provider-neutral subscription runtime persistence", () => {
         visible: true,
         owner: state.subjectId,
         human: state.subjectId,
+        earlierClaudeProvider: null,
+        earlierLifecycle: false,
       });
+      // Earlier same-transaction capabilities survive both an allowed and a
+      // denied Codex placement unchanged.
+      expect(
+        await runAccessCase({ cutover: "enabled", seedEarlierCapabilities: true }),
+      ).toMatchObject({
+        authorized: true,
+        visible: true,
+        earlierClaudeProvider: "claude",
+        earlierLifecycle: true,
+      });
+      expect(
+        await runAccessCase({ cutover: "enabled", generation: 2, seedEarlierCapabilities: true }),
+      ).toMatchObject({
+        authorized: false,
+        visible: false,
+        earlierClaudeProvider: "claude",
+        earlierLifecycle: true,
+      });
+      expect(
+        await runAccessCase({
+          cutover: "enabled",
+          personalEnabled: false,
+          seedEarlierCapabilities: true,
+        }),
+      ).toMatchObject({
+        authorized: false,
+        earlierClaudeProvider: "claude",
+        earlierLifecycle: true,
+      });
+      // Accepted v2 snapshots store only canonical lowercase membership UUIDs.
+      let uppercaseAuthorityError: unknown;
+      try {
+        await shared!.admin`
+          update session_turns
+          set subscription_authority = ${shared!.admin.json({
+            version: 2,
+            personal: [
+              {
+                provider: "codex",
+                ownerMembershipId: membership!.id.toUpperCase(),
+                authorityGeneration: 1,
+              },
+            ],
+          })}::jsonb
+          where account_id = ${state.accountId}::uuid and id = ${personalTurn.id}::uuid`;
+      } catch (error) {
+        uppercaseAuthorityError = error;
+      }
+      expect(String(uppercaseAuthorityError)).toContain(
+        "session_turns_subscription_authority_v2_chk",
+      );
       expect(
         await runAccessCase({
           cutover: "enabled",
@@ -1714,11 +1861,15 @@ describe("provider-neutral subscription runtime persistence", () => {
       expect(lease).toMatchObject({ turnId: serviceTurn.id, generation: 1 });
 
       const result = await withSessionRlsActorContext(actor, () =>
-        withSubscriptionCoreCodexRefreshLock(client!.db, request, async (db) => {
+        withSubscriptionCoreCodexRefreshLock(client!.db, request, async (db, credential) => {
+          // The pre-call authorization is not a write capability.
+          const authorizedOnlyScopeWrite = await db.execute(sql`
+            update subscription_connections set scope_kind = 'workspaces'
+            where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid
+            returning id`);
           const persisted = await persistSubscriptionCodexRefresh(db, {
             ...request,
-            initiatingHumanSubjectId: null,
-            expectedRefreshGeneration: 1,
+            expectedRefreshGeneration: credential.refreshGeneration,
             credentialEncrypted: "v1:c2VydmljZS10b2tlbg==:c2VjcmV0",
             expiresAt: new Date(Date.now() + 60 * 60_000),
             lastRefreshAt: new Date(),
@@ -1727,12 +1878,17 @@ describe("provider-neutral subscription runtime persistence", () => {
             update subscription_connections set scope_kind = 'workspaces'
             where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid
             returning id`);
-          return { persisted, unauthorizedScopeWrite };
+          return { credential, authorizedOnlyScopeWrite, persisted, unauthorizedScopeWrite };
         }),
       );
       expect(result).toMatchObject({
         status: "completed",
-        value: { persisted: true, unauthorizedScopeWrite: [] },
+        value: {
+          credential: { refreshGeneration: 1, credentialEncrypted: "v1:test" },
+          authorizedOnlyScopeWrite: [],
+          persisted: true,
+          unauthorizedScopeWrite: [],
+        },
       });
     },
     180_000,
@@ -1781,20 +1937,28 @@ describe("provider-neutral subscription runtime persistence", () => {
             expiresAt: new Date(Date.now() + 60 * 60_000),
             lastRefreshAt: new Date(),
           });
-          const [capability] = await rawRows<{ allowed: boolean }>(
-            db,
-            sql`select opengeni_private.subscription_codex_refresh_write_allowed(
-              ${state.accountId}::uuid, ${state.workspaceId}::uuid,
-              ${state.connectionId}::uuid
-            ) as allowed`,
-          );
-          return { persisted, refreshCapability: capability?.allowed === true };
+          return { persisted };
         }),
       );
-      expect(result).toMatchObject({
-        status: "completed",
-        value: { persisted: false, refreshCapability: false },
-      });
+      // Authorization refuses an API-key connection before any provider call.
+      expect(result).toEqual({ status: "refused" });
+      const standalonePersist = await withSessionRlsActorContext(
+        { subjectId: "service:subscription-core", initiatingHumanSubjectId: state.subjectId },
+        () =>
+          withRlsContext(
+            client!.db,
+            { accountId: state.accountId, workspaceId: state.workspaceId },
+            (db) =>
+              persistSubscriptionCodexRefresh(db, {
+                ...request,
+                expectedRefreshGeneration: 1,
+                credentialEncrypted: "v1:dG9rZW4=:c2VjcmV0",
+                expiresAt: null,
+                lastRefreshAt: new Date(),
+              }),
+          ),
+      );
+      expect(standalonePersist).toBe(false);
       const [connection] = await shared!.admin<{ kind: string; credential_encrypted: string }[]>`
         select kind, credential_encrypted from subscription_connections
         where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid`;
@@ -1890,20 +2054,25 @@ describe("provider-neutral subscription runtime persistence", () => {
           connectionOwner: string;
           capabilityOwner: string;
           refreshPolicyOwner: string;
+          beginOwner: string;
           persistOwner: string;
         }[]
       >`
         select pg_get_userbyid(connection.relowner) as "connectionOwner",
           pg_get_userbyid(capability.relowner) as "capabilityOwner",
           pg_get_userbyid(refresh_policy.proowner) as "refreshPolicyOwner",
+          pg_get_userbyid(begin_refresh.proowner) as "beginOwner",
           pg_get_userbyid(persist.proowner) as "persistOwner"
         from pg_class connection
         join pg_namespace connection_schema on connection_schema.oid = connection.relnamespace
           and connection_schema.nspname = current_schema()
         join pg_class capability on capability.oid =
           'opengeni_private.subscription_runtime_capabilities'::regclass
+        join pg_proc begin_refresh on begin_refresh.oid = pg_catalog.to_regprocedure(
+          'opengeni_private.begin_subscription_codex_refresh(uuid,uuid,uuid,uuid,text,text,uuid,text,bigint)'
+        )
         join pg_proc persist on persist.oid = pg_catalog.to_regprocedure(
-          'opengeni_private.persist_subscription_codex_refresh(uuid,uuid,uuid,uuid,text,text,uuid,text,bigint,bigint,text,timestamptz,timestamptz)'
+          'opengeni_private.persist_subscription_codex_refresh(uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)'
         )
         join pg_proc refresh_policy on refresh_policy.oid = pg_catalog.to_regprocedure(
           'opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid)'
@@ -1922,26 +2091,38 @@ describe("provider-neutral subscription runtime persistence", () => {
           alter table opengeni_private.subscription_runtime_capabilities owner to ${probeRole};
           alter function opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid)
             owner to ${probeRole};
+          alter function opengeni_private.begin_subscription_codex_refresh(
+            uuid,uuid,uuid,uuid,text,text,uuid,text,bigint
+          ) owner to ${probeRole};
           alter function opengeni_private.persist_subscription_codex_refresh(
-            uuid,uuid,uuid,uuid,text,text,uuid,text,bigint,bigint,text,timestamptz,timestamptz
+            uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz
           ) owner to ${probeRole};
         `);
 
         refreshed = await withSubscriptionCoreCodexRefreshLock(client!.db, request, async (db) => {
           const persisted = await persistSubscriptionCodexRefresh(db, refreshInput);
+          // One begin authorizes exactly one write, even at the next generation.
+          const persistedAgain = await persistSubscriptionCodexRefresh(db, {
+            ...refreshInput,
+            expectedRefreshGeneration: 2,
+            credentialEncrypted: "v1:c2Vjb25k:c2VjcmV0",
+          });
           const unauthorizedScopeWrite = await db.execute(sql`
               update subscription_connections set scope_kind = 'workspaces'
               where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid
               returning id
             `);
-          return { persisted, unauthorizedScopeWrite };
+          return { persisted, persistedAgain, unauthorizedScopeWrite };
         });
       } finally {
         if (originalOwners) {
           await shared!.admin.unsafe(`
             alter function opengeni_private.persist_subscription_codex_refresh(
-              uuid,uuid,uuid,uuid,text,text,uuid,text,bigint,bigint,text,timestamptz,timestamptz
+              uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz
             ) owner to ${originalOwners.persistOwner};
+            alter function opengeni_private.begin_subscription_codex_refresh(
+              uuid,uuid,uuid,uuid,text,text,uuid,text,bigint
+            ) owner to ${originalOwners.beginOwner};
             alter function opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid)
               owner to ${originalOwners.refreshPolicyOwner};
             alter table opengeni_private.subscription_runtime_capabilities
@@ -1954,7 +2135,7 @@ describe("provider-neutral subscription runtime persistence", () => {
       }
       expect(refreshed).toMatchObject({
         status: "completed",
-        value: { persisted: true, unauthorizedScopeWrite: [] },
+        value: { persisted: true, persistedAgain: false, unauthorizedScopeWrite: [] },
       });
       const refreshRoutinePosture = await shared!.admin<
         {
@@ -1985,10 +2166,11 @@ describe("provider-neutral subscription runtime persistence", () => {
             'authorize_subscription_ownerless_session_access',
             'authorize_subscription_personal_placement_access',
             'subscription_codex_refresh_write_allowed',
+            'begin_subscription_codex_refresh',
             'persist_subscription_codex_refresh'
           )
         order by proc.proname`;
-      expect(refreshRoutinePosture).toHaveLength(4);
+      expect(refreshRoutinePosture).toHaveLength(5);
       for (const routine of refreshRoutinePosture) {
         expect(routine.owner).toBe(routine.table_owner);
         expect(routine.security_definer).toBe(true);
@@ -2012,64 +2194,67 @@ describe("provider-neutral subscription runtime persistence", () => {
         scope_kind: "organization",
       });
 
-      // A wrong turn, lease holder, or another organization's connection
-      // cannot reuse the refresh API, even while the caller has session access.
+      // A wrong turn, lease holder, expired lease, co-member, or another
+      // organization's connection cannot obtain refresh authorization at the
+      // SQL boundary, and persist without authorization in the same
+      // transaction is refused.
       const anotherOrganization = await fixture();
-      const wrongTurn = await withSessionRlsActorContext(actor, () =>
+      const coreActor = {
+        subjectId: "service:subscription-core",
+        initiatingHumanSubjectId: state.subjectId,
+      };
+      const beginDirect = (
+        overrides: Partial<typeof request> = {},
+        directActor: { subjectId: string; initiatingHumanSubjectId: string | null } = coreActor,
+      ) =>
+        withSessionRlsActorContext(directActor, () =>
+          withRlsContext(
+            client!.db,
+            { accountId: state.accountId, workspaceId: state.workspaceId },
+            async (db) => {
+              const attempt = { ...request, ...overrides };
+              const rows = await rawRows(
+                db,
+                sql`select * from opengeni_private.begin_subscription_codex_refresh(
+                  ${attempt.accountId}::uuid, ${attempt.workspaceId}::uuid,
+                  ${attempt.sessionId}::uuid, ${attempt.turnId}::uuid,
+                  ${attempt.sessionOwnerSubjectId}, ${attempt.initiatingHumanSubjectId},
+                  ${attempt.connectionId}::uuid, ${attempt.holderId}, ${attempt.generation}::bigint
+                )`,
+              );
+              const wrote = await persistSubscriptionCodexRefresh(db, {
+                ...refreshInput,
+                ...overrides,
+                expectedRefreshGeneration: 2,
+              });
+              return { authorized: rows.length === 1, persisted: wrote };
+            },
+          ),
+        );
+      const refused = { authorized: false, persisted: false };
+      expect(await beginDirect({ turnId: crypto.randomUUID() })).toEqual(refused);
+      expect(await beginDirect({ holderId: `foreign-${crypto.randomUUID()}` })).toEqual(refused);
+      expect(await beginDirect({ generation: 2 })).toEqual(refused);
+      expect(await beginDirect({ connectionId: anotherOrganization.connectionId })).toEqual(
+        refused,
+      );
+      const standalonePersist = await withSessionRlsActorContext(coreActor, () =>
         withRlsContext(
           client!.db,
           { accountId: state.accountId, workspaceId: state.workspaceId },
           (db) =>
-            persistSubscriptionCodexRefresh(db, {
-              ...refreshInput,
-              expectedRefreshGeneration: 2,
-              turnId: crypto.randomUUID(),
-            }),
+            persistSubscriptionCodexRefresh(db, { ...refreshInput, expectedRefreshGeneration: 2 }),
         ),
       );
-      expect(wrongTurn).toBe(false);
-      const foreignLease = await withSessionRlsActorContext(actor, () =>
-        withRlsContext(
-          client!.db,
-          { accountId: state.accountId, workspaceId: state.workspaceId },
-          (db) =>
-            persistSubscriptionCodexRefresh(db, {
-              ...refreshInput,
-              expectedRefreshGeneration: 2,
-              holderId: `foreign-${crypto.randomUUID()}`,
-            }),
-        ),
-      );
-      expect(foreignLease).toBe(false);
-      const otherOrganizationConnection = await withSessionRlsActorContext(actor, () =>
-        withRlsContext(
-          client!.db,
-          { accountId: state.accountId, workspaceId: state.workspaceId },
-          (db) =>
-            persistSubscriptionCodexRefresh(db, {
-              ...refreshInput,
-              expectedRefreshGeneration: 2,
-              connectionId: anotherOrganization.connectionId,
-            }),
-        ),
-      );
-      expect(otherOrganizationConnection).toBe(false);
+      expect(standalonePersist).toBe(false);
 
       await shared!.admin`
         update subscription_leases set leased_until = clock_timestamp() - interval '1 second'
         where account_id = ${state.accountId}::uuid and turn_id = ${state.turnId}::uuid`;
-      const expiredLease = await withSessionRlsActorContext(actor, () =>
-        withRlsContext(
-          client!.db,
-          { accountId: state.accountId, workspaceId: state.workspaceId },
-          (db) =>
-            persistSubscriptionCodexRefresh(db, {
-              ...refreshInput,
-              expectedRefreshGeneration: 2,
-            }),
-        ),
-      );
-      expect(expiredLease).toBe(false);
+      expect(await beginDirect()).toEqual(refused);
+      await shared!.admin`
+        update subscription_leases set leased_until = clock_timestamp() + interval '1 minute'
+        where account_id = ${state.accountId}::uuid and turn_id = ${state.turnId}::uuid`;
 
       // A workspace co-member cannot use another member's accepted turn.
       const coMemberSubject = `user:subscription-refresh-comember-${crypto.randomUUID()}`;
@@ -2086,20 +2271,21 @@ describe("provider-neutral subscription runtime persistence", () => {
       await shared!.admin`
         insert into workspace_memberships (account_id, workspace_id, subject_id, role)
         values (${state.accountId}::uuid, ${state.workspaceId}::uuid, ${coMemberSubject}, 'member')`;
-      const coMemberRefresh = await withSessionRlsActorContext(
-        { subjectId: coMemberSubject, initiatingHumanSubjectId: coMemberSubject },
-        () =>
-          withRlsContext(
-            client!.db,
-            { accountId: state.accountId, workspaceId: state.workspaceId },
-            (db) =>
-              persistSubscriptionCodexRefresh(db, {
-                ...refreshInput,
-                expectedRefreshGeneration: 2,
-              }),
-          ),
-      );
-      expect(coMemberRefresh).toBe(false);
+      expect(
+        await beginDirect(
+          {},
+          { subjectId: coMemberSubject, initiatingHumanSubjectId: coMemberSubject },
+        ),
+      ).toEqual(refused);
+      expect(
+        await beginDirect(
+          { initiatingHumanSubjectId: coMemberSubject },
+          { subjectId: "service:subscription-core", initiatingHumanSubjectId: coMemberSubject },
+        ),
+      ).toEqual(refused);
+      // The same request with the real owner is still authorized, proving the
+      // refusals above came from the identity checks rather than the fixture.
+      expect(await beginDirect()).toEqual({ authorized: true, persisted: true });
       const [unchanged] = await shared!.admin<
         { credential_encrypted: string; scope_kind: string }[]
       >`
@@ -2243,10 +2429,10 @@ describe("provider-neutral subscription runtime persistence", () => {
 
       expect(transactionResult).toMatchObject({
         ownedSessionAuthorized: true,
-        refresh: {
-          status: "completed",
-          value: { visible: true, persisted: false },
-        },
+        // Ownerless refresh is refused before the provider call even though an
+        // earlier owned-session capability in this transaction makes the
+        // people-scoped row visible.
+        refresh: { status: "refused" },
         context: { owner: "", human: "", refreshCapability: false },
       });
       const [unchanged] = await shared!.admin<
@@ -2263,7 +2449,7 @@ describe("provider-neutral subscription runtime persistence", () => {
   );
 
   test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
-    "holds the accepted lease row through refresh so concurrent release cannot race the write",
+    "stores a rotated token even when the lease is released and visibility is revoked during the provider call",
     async () => {
       const state = await fixture();
       const actor = {
@@ -2296,62 +2482,105 @@ describe("provider-neutral subscription runtime persistence", () => {
       );
       expect(lease).toMatchObject({ turnId: state.turnId, generation: 1 });
 
-      let signalPersisted!: () => void;
-      let releaseRefresh!: () => void;
-      const persistedSignal = new Promise<void>((resolveSignal) => {
-        signalPersisted = resolveSignal;
+      let signalAuthorized!: () => void;
+      let finishProviderCall!: () => void;
+      const authorizedSignal = new Promise<void>((resolveSignal) => {
+        signalAuthorized = resolveSignal;
       });
-      const holdRefresh = new Promise<void>((resolveHold) => {
-        releaseRefresh = resolveHold;
+      const providerCall = new Promise<void>((resolveCall) => {
+        finishProviderCall = resolveCall;
       });
+      const rotated = "v1:cm90YXRlZC10b2tlbg==:c2VjcmV0";
+      const scopeManagerSubject = `user:subscription-refresh-rotation-admin-${crypto.randomUUID()}`;
+      const [managerPersonalWorkspace] = await shared!.admin<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${state.accountId}::uuid, 'Subscription refresh rotation admin Personal')
+        returning id::text as id`;
+      await shared!.admin`
+        insert into organization_memberships (
+          account_id, subject_id, role, status, personal_workspace_id
+        ) values (
+          ${state.accountId}::uuid, ${scopeManagerSubject}, 'admin', 'active',
+          ${managerPersonalWorkspace!.id}::uuid
+        )`;
       const refreshPromise = withSubscriptionCoreCodexRefreshLock(
         client!.db,
         request,
-        async (db) => {
-          const persisted = await persistSubscriptionCodexRefresh(db, {
+        async (db, credential) => {
+          signalAuthorized();
+          // The provider has accepted the old refresh token and rotated it.
+          await providerCall;
+          return await persistSubscriptionCodexRefresh(db, {
             ...request,
-            expectedRefreshGeneration: 1,
-            credentialEncrypted: "v1:cmFjZS10b2tlbg==:c2VjcmV0",
+            expectedRefreshGeneration: credential.refreshGeneration,
+            credentialEncrypted: rotated,
             expiresAt: new Date(Date.now() + 60 * 60_000),
             lastRefreshAt: new Date(),
           });
-          signalPersisted();
-          await holdRefresh;
-          return persisted;
         },
       );
-      await persistedSignal;
-      const releasePromise = withSessionRlsActorContext(actor, () =>
-        withRlsContext(
-          client!.db,
-          { accountId: state.accountId, workspaceId: state.workspaceId },
-          (db) => releaseSubscriptionTurnLease(db, request),
-        ),
-      );
-      let releaseIsBlocked = false;
+      const withinFiveSeconds = <T>(work: Promise<T>, label: string) =>
+        Promise.race([
+          work,
+          Bun.sleep(5_000).then(() => {
+            throw new Error(`${label} waited on the in-flight refresh`);
+          }),
+        ]);
       try {
-        const lockWaitDeadline = Date.now() + 10_000;
-        while (Date.now() < lockWaitDeadline) {
-          const [waiter] = await shared!.admin<{ blocked: boolean }[]>`
-            select exists (
-              select 1 from pg_stat_activity
-              where datname = current_database() and state = 'active'
-                and wait_event_type = 'Lock'
-                and query ilike 'delete from subscription_leases%'
-            ) as blocked`;
-          if (waiter?.blocked) {
-            releaseIsBlocked = true;
-            break;
-          }
-          await Bun.sleep(20);
-        }
-        expect(releaseIsBlocked).toBe(true);
+        await authorizedSignal;
+        // No row lock is held across the provider call: lease release and an
+        // administrator revoking this workspace's access both complete.
+        const released = await withinFiveSeconds(
+          withSessionRlsActorContext(actor, () =>
+            withRlsContext(
+              client!.db,
+              { accountId: state.accountId, workspaceId: state.workspaceId },
+              (db) => releaseSubscriptionTurnLease(db, request),
+            ),
+          ),
+          "lease release",
+        );
+        expect(released).toBe(true);
+        const rescoped = await withinFiveSeconds(
+          withSessionRlsActorContext({ subjectId: scopeManagerSubject }, () =>
+            withRlsContext(
+              client!.db,
+              { accountId: state.accountId, workspaceId: state.workspaceId },
+              async (db) => {
+                const [row] = await rawRows<{ scope_kind: string }>(
+                  db,
+                  sql`update subscription_connections set scope_kind = 'people'
+                    where account_id = ${state.accountId}::uuid
+                      and id = ${state.connectionId}::uuid
+                    returning scope_kind`,
+                );
+                return row?.scope_kind;
+              },
+            ),
+          ),
+          "connection rescope",
+        );
+        expect(rescoped).toBe("people");
       } finally {
-        releaseRefresh();
+        finishProviderCall();
       }
-      const [refresh, released] = await Promise.all([refreshPromise, releasePromise]);
-      expect(refresh).toMatchObject({ status: "completed", value: true });
-      expect(released).toBe(true);
+      expect(await refreshPromise).toEqual({ status: "completed", value: true });
+      const [stored] = await shared!.admin<
+        { credential_encrypted: string; refresh_generation: string; scope_kind: string }[]
+      >`
+        select credential_encrypted, refresh_generation, scope_kind
+        from subscription_connections
+        where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid`;
+      expect(stored).toEqual({
+        credential_encrypted: rotated,
+        refresh_generation: "2",
+        scope_kind: "people",
+      });
+      // With the lease gone and access revoked, a new refresh is not authorized.
+      const reacquired = await withSubscriptionCoreCodexRefreshLock(client!.db, request, async () =>
+        Promise.resolve("must not run"),
+      );
+      expect(reacquired.status).not.toBe("completed");
     },
     180_000,
   );

@@ -1,6 +1,13 @@
 import { z } from "zod";
 
 const PositiveSafeInteger = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+/**
+ * Canonical lowercase UUID, matching PostgreSQL uuid::text and the
+ * session_turns CHECK, so an accepted snapshot can never silently mismatch.
+ */
+const CanonicalUuid = z
+  .string()
+  .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 
 /**
  * Immutable personal authority for accepted subscription work. Shared pool
@@ -14,7 +21,7 @@ export const SubscriptionPersonalAuthorityV2 = z
         z
           .object({
             provider: z.enum(["codex", "claude", "xai"]),
-            ownerMembershipId: z.string().uuid(),
+            ownerMembershipId: CanonicalUuid,
             authorityGeneration: PositiveSafeInteger,
           })
           .strict(),

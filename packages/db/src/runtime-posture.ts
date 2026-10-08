@@ -677,7 +677,8 @@ export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
   "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
   "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)",
-  "persist_subscription_codex_refresh(uuid, uuid, uuid, uuid, text, text, uuid, text, bigint, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "begin_subscription_codex_refresh(uuid, uuid, uuid, uuid, text, text, uuid, text, bigint)",
+  "persist_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
 ] as const;
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [
