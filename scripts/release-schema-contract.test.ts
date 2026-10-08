@@ -37,6 +37,51 @@ async function buildSchemaContract(directory?: string) {
 }
 
 describe("release schema contract", () => {
+  test("registers the shared subscription-core M2 rolling migration in the release contract", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0642_shared_subscription_core.sql",
+      ),
+    ).toMatchObject({ path: "0642_shared_subscription_core.sql", deploymentMode: "rolling" });
+  });
+
+  test("registers the subscription inference-source settings migration as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0644_subscription_inference_source_settings.sql",
+      ),
+    ).toMatchObject({
+      path: "0644_subscription_inference_source_settings.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers provider-neutral subscription runtime storage as maintenance-only", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0645_subscription_core_runtime.sql",
+      ),
+    ).toMatchObject({
+      path: "0645_subscription_core_runtime.sql",
+      deploymentMode: "maintenance",
+    });
+  });
+
+  test("registers the subscription people-assignment read policy fix as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0646_subscription_core_people_assignment_read.sql",
+      ),
+    ).toMatchObject({
+      path: "0646_subscription_core_people_assignment_read.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("checks complete ledger metadata against migration files", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     const sourceMigrationPaths = (
@@ -2074,6 +2119,9 @@ describe("release schema contract", () => {
     const appendedMigrationPaths = [
       // Exclusion membership is unordered; keep this addition away from the shared tail.
       "0640_knowledge_entry_created_since.sql",
+      "0641_subscription_authority_identity_index.sql",
+      "0642_shared_subscription_core.sql",
+      "0643_model_call_facts_subscription_connection_index.sql",
       "0463_host_mcp_resolver_registration.sql",
       "0461_unified_knowledge.sql",
       "0460_host_export_message_attribution.sql",
@@ -2411,6 +2459,9 @@ describe("release schema contract", () => {
       "0637_retained_process_background_owner_inventory.sql",
       "0638_allowance_unbilled_usage_metering.sql",
       "0639_native_app_push.sql",
+      "0644_subscription_inference_source_settings.sql",
+      "0645_subscription_core_runtime.sql",
+      "0646_subscription_core_people_assignment_read.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

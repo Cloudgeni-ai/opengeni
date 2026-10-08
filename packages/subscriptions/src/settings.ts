@@ -70,17 +70,21 @@ export function effectiveSettings(
       : (override[key] as Readonly<Record<string, unknown>> | undefined);
     const value: Record<string, unknown> = { ...base };
     const sources: Record<string, SettingSource> = {};
-    for (const entryKey of Object.keys(base)) sources[entryKey] = "organization";
+    for (const [entryKey, entry] of Object.entries(base)) {
+      if (key === "providers" && (entry as ProviderSwitches).inferenceSource !== undefined) {
+        value[entryKey] = resolveProviderSwitches(entry as ProviderSwitches);
+      }
+      sources[entryKey] = "organization";
+    }
     for (const [entryKey, entry] of Object.entries(entries ?? {})) {
       if (entry === undefined) continue;
       // A provider's switches override field by field (D-25).
       value[entryKey] =
         key === "providers"
-          ? {
-              ...DEFAULT_PROVIDER_SWITCHES,
-              ...(base[entryKey] as ProviderSwitches | undefined),
-              ...(entry as Partial<ProviderSwitches>),
-            }
+          ? mergeProviderSwitches(
+              base[entryKey] as ProviderSwitches | undefined,
+              entry as Partial<ProviderSwitches>,
+            )
           : entry;
       sources[entryKey] = "workspace";
     }
@@ -125,4 +129,48 @@ export function providerSwitchesFor(
   provider: ProviderId,
 ): ProviderSwitches {
   return settings.providers[provider] ?? DEFAULT_PROVIDER_SWITCHES;
+}
+
+/** Legacy boolean rows remain readable; all effective values expose one source. */
+export function resolveProviderSwitches(switches: ProviderSwitches): ProviderSwitches & {
+  inferenceSource: NonNullable<ProviderSwitches["inferenceSource"]>;
+} {
+  const inferenceSource =
+    switches.inferenceSource ?? (switches.useOrganizationAccounts ? "automatic" : "workspace");
+  return {
+    ...switches,
+    inferenceSource,
+    useOrganizationAccounts: inferenceSource !== "workspace",
+  };
+}
+
+export function inferenceSourceFor(
+  settings: SubscriptionSettingValues,
+  provider: ProviderId,
+): NonNullable<ProviderSwitches["inferenceSource"]> {
+  return resolveProviderSwitches(providerSwitchesFor(settings, provider)).inferenceSource;
+}
+
+function mergeProviderSwitches(
+  base: ProviderSwitches | undefined,
+  override: Partial<ProviderSwitches>,
+): ProviderSwitches {
+  const inherited = resolveProviderSwitches({ ...DEFAULT_PROVIDER_SWITCHES, ...base });
+  const inferenceSource =
+    override.inferenceSource ??
+    (override.useOrganizationAccounts === undefined
+      ? inherited.inferenceSource
+      : override.useOrganizationAccounts
+        ? "automatic"
+        : "workspace");
+  const hasAuthoritativeSource =
+    override.inferenceSource !== undefined || base?.inferenceSource !== undefined;
+  const { inferenceSource: _inheritedSource, ...inheritedValues } = inherited;
+  const { inferenceSource: _overrideSource, ...overrideValues } = override;
+  return {
+    ...inheritedValues,
+    ...overrideValues,
+    ...(hasAuthoritativeSource ? { inferenceSource } : {}),
+    useOrganizationAccounts: inferenceSource !== "workspace",
+  };
 }

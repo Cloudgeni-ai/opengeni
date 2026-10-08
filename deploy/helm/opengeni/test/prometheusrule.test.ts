@@ -15,7 +15,9 @@ describe("turn-capacity Prometheus alerts", () => {
     const end = template.indexOf("        - alert:", start + 1);
     expect(start).toBeGreaterThanOrEqual(0);
     const alert = template.slice(start, end);
-    expect(alert).toContain("opengeni_turn_oldest_no_progress_age_seconds > 900");
+    expect(alert).toContain(
+      `opengeni_turn_oldest_no_progress_age_seconds{${DEPLOYMENT_SCOPE}} > 900`,
+    );
     expect(alert).toContain("made no durable progress for over 15 minutes");
     expect(alert).toContain("tracks physical runAgentTurn attempts");
   });
@@ -156,7 +158,7 @@ describe("turn-capacity Prometheus alerts", () => {
       template.indexOf("        - alert: OpenGeniModalProviderMissingBeforeCapture\n"),
     );
     expect(alert).toContain(
-      'opengeni:sandbox_rotation_backlog:fresh_max{kind="process_blocked"} > 0',
+      `opengeni:sandbox_rotation_backlog:fresh_max{${DEPLOYMENT_SCOPE},kind="process_blocked"} > 0`,
     );
     expect(alert).toContain("for: 10m");
     expect(alert).toContain("severity: warning");
@@ -696,15 +698,19 @@ describe("turn-capacity Prometheus alerts", () => {
       ],
       [
         "OpenGeniOpenSandboxInventoryStale",
-        ['opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"}'],
+        [
+          `opengeni_sandbox_inventory_refresh_timestamp_seconds{${DEPLOYMENT_SCOPE},domain="opensandbox_kubernetes"}`,
+        ],
       ],
       [
         "OpenGeniOpenSandboxPodPending",
-        ['opengeni:opensandbox_workload_pods:fresh_max{condition="pending"}'],
+        [`opengeni:opensandbox_workload_pods:fresh_max{${DEPLOYMENT_SCOPE},condition="pending"}`],
       ],
       [
         "OpenGeniOpenSandboxImagePullFailed",
-        ['opengeni:opensandbox_workload_pods:fresh_max{condition="image_pull"}'],
+        [
+          `opengeni:opensandbox_workload_pods:fresh_max{${DEPLOYMENT_SCOPE},condition="image_pull"}`,
+        ],
       ],
       [
         "OpenGeniOpenSandboxControllerError",
@@ -716,7 +722,9 @@ describe("turn-capacity Prometheus alerts", () => {
       ],
       [
         "OpenGeniOpenSandboxCapacityExhausted",
-        ['opengeni:opensandbox_workload_pods:fresh_max{condition="unschedulable"}'],
+        [
+          `opengeni:opensandbox_workload_pods:fresh_max{${DEPLOYMENT_SCOPE},condition="unschedulable"}`,
+        ],
       ],
       ["OpenGeniOpenSandboxCleanupStuck", ["opengeni:opensandbox_cleanup_stuck:fresh_max"]],
       [
@@ -750,9 +758,9 @@ describe("Codex pool Prometheus alerts", () => {
     // Explicit missing fields must still alert even while other calls report;
     // absent usage must alert on active traffic but never on an idle provider.
     expect(expression.replace(/\s+/g, " ").trim()).toBe(
-      '(sum(rate(opengeni_model_cache_read_telemetry_total{provider="codex-subscription",status="missing"}[30m])) or vector(0)) > 0 ' +
-        'or ( sum(increase(opengeni_model_calls_total{provider="codex-subscription",outcome="completed"}[30m])) >= 20 ' +
-        'and on() (sum(rate(opengeni_model_cache_read_telemetry_total{provider="codex-subscription"}[30m])) or vector(0)) == 0 )',
+      `(sum(rate(opengeni_model_cache_read_telemetry_total{${DEPLOYMENT_SCOPE},provider="codex-subscription",status="missing"}[30m])) or vector(0)) > 0 ` +
+        `or ( sum(increase(opengeni_model_calls_total{${DEPLOYMENT_SCOPE},provider="codex-subscription",outcome="completed"}[30m])) >= 20 ` +
+        `and on() (sum(rate(opengeni_model_cache_read_telemetry_total{${DEPLOYMENT_SCOPE},provider="codex-subscription"}[30m])) or vector(0)) == 0 )`,
     );
   });
 

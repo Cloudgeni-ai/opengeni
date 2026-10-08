@@ -105,7 +105,8 @@ for it until the matching requirement below is implemented:
   ownership or authority. Verification: pending (data-model).
 - **SUB-OWN-08** One upstream provider account is one connection per owner,
   however many workspaces it serves, so its quota is counted once.
-  Verification: pending (data-model).
+  Verification: `packages/db/test/subscription-core-m2-postgres.test.ts`
+  (provider-account uniqueness per organization/provider/owner).
 
 ### Settings and overrides
 
@@ -119,7 +120,8 @@ for it until the matching requirement below is implemented:
 - **SUB-SET-03** Every setting resolves to one effective value with a source
   ("Organization default" or "Overridden in this workspace"), and selection
   uses only the effective value. Two settings can never both apply to the same
-  pool. Verification: pending (data-model).
+  pool. Verification: `packages/db/test/subscription-core-m2-postgres.test.ts`
+  (SQL/TypeScript settings parity and source resolution).
 - **SUB-SET-04** Every settings screen shows the effective value and its
   source, with a one-step reset to the organization default.
   Verification: pending (product-surface).
@@ -127,8 +129,9 @@ for it until the matching requirement below is implemented:
   settings and highlights overrides. Verification: pending (product-surface).
 - **SUB-SET-06** Per workspace and provider, effective settings can turn the
   provider off or stop using organization accounts, without changing any
-  connection's scope or the workspace model allowlist.
-  Verification: pending (data-model).
+  connection's scope or the workspace model allowlist. Verification:
+  `packages/db/test/subscription-core-m2-postgres.test.ts` (provider switch
+  overrides and SQL/TypeScript parity; M2 has no production selector).
 
 ### Eligibility
 
@@ -269,7 +272,10 @@ for it until the matching requirement below is implemented:
   message or Agent Steer takes the receiving session's pool, not the
   sender's, and non-human acceptance resolves the workspace or organization
   pool instead of assuming workspace scope.
-  Verification: pending (accepted-scope-propagation).
+  Verification: `packages/db/test/subscription-pool-receiver-authority.test.ts`,
+  `apps/worker/test/parent-wake-postgres.test.ts`,
+  `apps/worker/test/scheduled-task-personal-authority.test.ts`, and
+  `packages/db/test/codex-credential-leases.test.ts`.
 - **SUB-ACCESS-02** Pool authority is additive to session access. Using a
   shared pool never changes who can see a session.
   Verification: `packages/db/test/subscription-pool-private-session-access.test.ts`.

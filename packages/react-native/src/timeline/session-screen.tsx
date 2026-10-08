@@ -144,6 +144,9 @@ export function NativeSessionScreen({
       {topBar}
       <MessageTimeline
         {...timelineProps}
+        hasOlder={controller.hasOlder}
+        loadingOlder={controller.loadingOlder}
+        onLoadOlder={controller.loadOlder}
         contentInsetBottom={composerHeight + 20}
         overlayInsetBottom={composerHeight}
         renderMessageActions={feedback || hostMessageActions ? renderMessageActions : undefined}
@@ -301,7 +304,7 @@ function loadFailureMessage(error: Error | null): string | undefined {
     error.name === "TypeError" ||
     /fetch failed|network request failed|could not connect|offline|timed out/i.test(error.message)
   ) {
-    return "OpenGeni couldn't be reached. Check your connection; this retries automatically.";
+    return "Couldn't connect. Check your connection; this retries automatically.";
   }
   return error.message;
 }

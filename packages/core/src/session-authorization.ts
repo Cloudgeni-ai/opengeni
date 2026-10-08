@@ -14,6 +14,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import {
   currentSessionRlsActorIdentityKey,
   getSessionAuthorityProjection,
+  getSessionAuthorizationTargetProjection,
   getSession,
   getSessionTurnForAttempt,
   getSlackInteractionSessionAccessForSession,
@@ -193,7 +194,6 @@ export function agentAccessListScopeForViewer(
 
 type ResolvedSessionAuthorizationTarget = {
   target: SessionAuthorizationTarget;
-  parentSessionId: string | null;
 };
 
 /**
@@ -472,15 +472,14 @@ async function resolveSessionAuthorizationTarget(
   const session = await reusableAuthorizationRead(
     reads,
     db,
-    ["session", grant.workspaceId, sessionId],
-    () => getSession(db, grant.workspaceId, sessionId),
+    ["target-identity", grant.workspaceId, sessionId],
+    () => getSessionAuthorizationTargetProjection(db, grant.workspaceId, sessionId),
   );
   if (!session || session.accountId !== grant.accountId) {
     throw new SessionAuthorizationDeniedError("not_found");
   }
   return {
     target: { sessionId: session.id, rootSessionId: session.rootSessionId },
-    parentSessionId: session.parentSessionId,
   };
 }
 async function resolveSessionAuthorizationActor(

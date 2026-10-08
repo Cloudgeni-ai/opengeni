@@ -17,6 +17,13 @@ import { provisionRoles } from "../src/provision-roles";
 import { encryptEnvironmentValue, decryptEnvironmentValue } from "../src/environment-crypto";
 
 const migration = "0598_claude_subscription_account_pools.sql";
+const subscriptionCoreMigrations = [
+  "0642_shared_subscription_core.sql",
+  "0643_model_call_facts_subscription_connection_index.sql",
+  "0644_subscription_inference_source_settings.sql",
+  "0645_subscription_core_runtime.sql",
+  "0646_subscription_core_people_assignment_read.sql",
+] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {
   account: randomUUID(),
@@ -70,8 +77,9 @@ beforeAll(async () => {
   owner = postgres(owned.ownerUrl, { max: 1 });
   await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
   await owner`INSERT INTO schema_migrations(name) VALUES(${migration})`;
+  await owner`INSERT INTO schema_migrations(name) SELECT unnest(${subscriptionCoreMigrations}::text[])`;
   await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-  await owner`DELETE FROM schema_migrations WHERE name = ${migration}`;
+  await owner`DELETE FROM schema_migrations WHERE name = ${migration} OR name = ANY(${subscriptionCoreMigrations}::text[])`;
   await owned.admin`INSERT INTO managed_accounts(id, name) VALUES(${ids.account}, 'Subscription migration fixture')`;
   await owned.admin`INSERT INTO workspaces(id, account_id, name) VALUES(${ids.workspace}, ${ids.account}, 'Migration fixture')`;
   await owned.admin`INSERT INTO workspace_inference_controls(workspace_id, account_id) VALUES(${ids.workspace}, ${ids.account})`;

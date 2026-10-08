@@ -15,13 +15,18 @@ import {
 import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markdown";
 import * as Haptics from "expo-haptics";
 import { Stack, router, useLocalSearchParams } from "expo-router";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
 import { BrandMark } from "@/brand-mark";
 import { useAgentCall } from "@/call";
-import { pinCallSession, unpinCallSession, useOutsideCallPreferences } from "@/call-preferences";
+import {
+  pinCallSession,
+  rememberOpenedSession,
+  unpinCallSession,
+  useOutsideCallPreferences,
+} from "@/call-preferences";
 import { copyText } from "@/clipboard";
 import { useSessionComputeLabel } from "@/compute-label";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
@@ -59,6 +64,9 @@ function LiveSession(props: {
 }) {
   const theme = useNativeTimelineTheme();
   const insets = useSafeAreaInsets();
+  useEffect(() => {
+    rememberOpenedSession({ workspaceId: props.workspaceId, sessionId: props.sessionId });
+  }, [props.workspaceId, props.sessionId]);
   const controller = useOpenGeniNativeSession({
     client: props.client,
     sessionId: props.sessionId,

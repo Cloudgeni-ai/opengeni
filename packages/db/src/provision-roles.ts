@@ -2080,6 +2080,26 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
+    FOREACH routine_signature IN ARRAY ARRAY[
+      'subscription_connection_visible(uuid,uuid,uuid,text,text,uuid,text,text)',
+      'subscription_organization_admin(uuid)',
+      'subscription_people_assignment_visible(uuid,uuid,uuid,text,text)',
+      'subscription_person_preference_visible(uuid,uuid,text,text)',
+      'subscription_apps_designation_allowed(uuid,uuid,uuid)',
+      'subscription_apps_designation_manage_allowed(uuid,uuid,uuid)',
+      'guard_subscription_connection_scope()',
+      'guard_subscription_turn_session_reference()',
+      'guard_subscription_connection_reference()',
+      'authorize_subscription_service_session_access(uuid,uuid,uuid,uuid,text)'
+    ] LOOP
+      IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION opengeni_private.%s TO %I',
+          routine_signature,
+          ${literal(role)}
+        );
+      END IF;
+    END LOOP;
     -- This exact content-free repair inventory shares the existing global
     -- wake dispatcher's authority. Converge custom-role and migrate-then-
     -- provision installs without opening a generic owner/posture exception.
@@ -2399,6 +2419,12 @@ BEGIN
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION opengeni_private.authorize_editable_artifact_actor(uuid, uuid, text, text, text, text, text, text, integer, text, text, name) TO %I',
         ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(format('%I.subscription_effective_settings(uuid,uuid)', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.subscription_effective_settings(uuid,uuid) TO %I',
+        ${literal(schema)}, ${literal(role)}
       );
     END IF;
     FOREACH routine_signature IN ARRAY ARRAY[

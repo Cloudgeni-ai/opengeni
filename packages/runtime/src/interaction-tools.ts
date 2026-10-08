@@ -70,7 +70,13 @@ import type {
   AttemptToolExecutionContext,
   AttemptToolScope,
 } from "@opengeni/codemode";
-import { OpenGeniApiError, OpenGeniClient, type InteractionTransport } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  OpenGeniClient,
+  interactionControlFailureFromError,
+  type InteractionControlFailure,
+  type InteractionTransport,
+} from "@opengeni/sdk";
 import { z } from "zod";
 import { browserActionInputJsonSchema } from "./browser-action-json-schema";
 import { guardedMcpFetch } from "./mcp-network";
@@ -2093,6 +2099,8 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
       !error.outcomeUnknown &&
       (error.status < 500 || readOnly)
     ) {
+      const controlFailure = interactionToolErrorOutput(error);
+      if (controlFailure) return controlFailure;
       return interactionErrorResult(
         error.code ?? `http_${error.status}`,
         boundedErrorMessage(error.message),
@@ -2101,6 +2109,74 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
       );
     }
     throw error;
+  }
+}
+
+export type InteractionToolErrorResult = {
+  isError: true;
+  content: [{ type: "text"; text: string }];
+  structuredContent: {
+    error: {
+      code: string;
+      message: string;
+      retryable: boolean;
+      outcomeUnknown: boolean;
+      requestId?: string;
+      details?: {
+        interactionLayer: "connected_machine";
+        interactionSurface: "browser" | "computer";
+        controlFailureCode: InteractionControlFailure["code"];
+        controlRequestId?: string;
+      };
+      guidance: string;
+    };
+  };
+};
+
+/** Preserve the API's closed control-failure projection at the model seam.
+ * Uncertain execution still throws from the tool executor; rendering its error
+ * must not replace that uncertainty with a generic instruction to retry. */
+export function interactionToolErrorOutput(error: unknown): InteractionToolErrorResult | null {
+  try {
+    if (!(error instanceof OpenGeniApiError)) return null;
+    const failure = interactionControlFailureFromError(error);
+    if (!failure && !error.outcomeUnknown) return null;
+    const opaque = (value: unknown): string | undefined =>
+      typeof value === "string" && value.length <= 128 && /^[A-Za-z0-9._:-]+$/u.test(value)
+        ? value
+        : undefined;
+    const requestId = opaque(error.correlationId);
+    const details = failure
+      ? {
+          interactionLayer: failure.layer,
+          interactionSurface: failure.surface,
+          controlFailureCode: failure.code,
+          ...(failure.controlRequestId ? { controlRequestId: failure.controlRequestId } : {}),
+        }
+      : undefined;
+    const projected = {
+      code:
+        typeof error.code === "string" && /^[A-Za-z0-9_]{1,64}$/u.test(error.code)
+          ? error.code
+          : "interaction_request_failed",
+      message: boundedErrorMessage(error.message),
+      retryable: error.retryable,
+      outcomeUnknown: error.outcomeUnknown,
+      ...(requestId ? { requestId } : {}),
+      ...(details ? { details } : {}),
+      guidance: error.outcomeUnknown
+        ? "The request may have completed. Do not repeat actions automatically; inspect the existing session before continuing."
+        : error.retryable
+          ? "Check the existing session before retrying. Keep its identity and do not recreate it to bypass the failure."
+          : "Resolve the reported issue before calling again; this failure is not marked retryable.",
+    };
+    return {
+      isError: true,
+      content: [{ type: "text", text: JSON.stringify({ error: projected }) }],
+      structuredContent: { error: projected },
+    };
+  } catch {
+    return null;
   }
 }
 

@@ -132,8 +132,12 @@ function Settings() {
     })),
   });
   const callTargets: { id: OutsideCallTarget; title: string; subtitle: string }[] = [
+    {
+      id: "latest",
+      title: "Continue your last session",
+      subtitle: "The conversation you last had open",
+    },
     { id: "new", title: "Start a new session", subtitle: "A fresh conversation for each call" },
-    { id: "latest", title: "Continue the latest session", subtitle: "Pick up where you left off" },
     {
       id: "pinned",
       title: "Call a chosen session",

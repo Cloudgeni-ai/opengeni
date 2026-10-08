@@ -29,7 +29,13 @@ import {
 import { Alert, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
-import { getOutsideCallTarget, getPinnedCallSession, unpinCallSession } from "@/call-preferences";
+import {
+  forgetOpenedSession,
+  getLastOpenedSessionId,
+  getOutsideCallTarget,
+  getPinnedCallSession,
+  unpinCallSession,
+} from "@/call-preferences";
 import { AppThemeProvider } from "@/theme";
 
 type CallTarget = { workspaceId: string; sessionId: string };
@@ -99,18 +105,32 @@ export function CallProvider({ children }: { children: ReactNode }) {
       if (!workspaceId) return;
       if (requested) return callSession(requested);
       try {
+        const exists = (sessionId: string) =>
+          client.getSession(workspaceId, sessionId).then(
+            () => true,
+            (error: unknown) => {
+              if (error instanceof OpenGeniApiError && error.status === 404) return false;
+              throw error;
+            },
+          );
         const pinned = getPinnedCallSession();
         if (getOutsideCallTarget() === "pinned" && pinned?.workspaceId === workspaceId) {
-          const gone = await client.getSession(workspaceId, pinned.sessionId).then(
-            () => false,
-            (error: unknown) => error instanceof OpenGeniApiError && error.status === 404,
-          );
-          if (!gone) return callSession(pinned.sessionId);
+          if (await exists(pinned.sessionId)) return callSession(pinned.sessionId);
           // The chosen session is gone: forget it and start fresh rather than fail the call.
           unpinCallSession();
         }
         if (getOutsideCallTarget() === "latest") {
-          const [latest] = await client.listSessions(workspaceId, { limit: 1 });
+          // The session you last had open, like calling back whoever you were talking to.
+          const opened = getLastOpenedSessionId(workspaceId);
+          if (opened) {
+            if (await exists(opened)) return callSession(opened);
+            forgetOpenedSession({ workspaceId, sessionId: opened });
+          }
+          // Otherwise your most recent conversation; sub-agent sessions are not conversations.
+          const [latest] = await client.listSessions(workspaceId, {
+            limit: 1,
+            parentSessionId: null,
+          });
           if (latest) return callSession(latest.id);
         }
         // An idle session shell: voice is its first interaction, as on the web.

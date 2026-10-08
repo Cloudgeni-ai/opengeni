@@ -452,13 +452,20 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
   // database handles whose connection-level application_name is host-owned.
   // Standalone createDb connections also carry version receipts in their exact
   // application_name, while old OpenGeni binaries set neither current receipt.
+  //
+  // JIT is off for these short request transactions: row-level security
+  // functions inflate planner cost estimates past jit_above_cost, so PostgreSQL
+  // spent seconds compiling queries that execute in milliseconds (the session
+  // list's tree-stats query: 0.4 s of work behind 3.8 s of JIT). Transaction-local,
+  // so it is safe behind transaction poolers and never leaks to other work.
   await db.execute(sql`select
     set_config('opengeni.account_id', ${context.accountId}, true),
     set_config('opengeni.workspace_id', ${context.workspaceId ?? ""}, true),
     set_config('opengeni.lossless_content_writer', '1', true),
     set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
     set_config('opengeni.pending_tool_event_output_v1', '1', true),
-    set_config('opengeni.session_variable_set_attachments_v1', '1', true)`);
+    set_config('opengeni.session_variable_set_attachments_v1', '1', true),
+    set_config('jit', 'off', true)`);
   const sessionActor = sessionRlsActorContext.getStore();
   if (sessionActor) {
     await setSubjectRlsContext(db, sessionActor.subjectId);

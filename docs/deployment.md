@@ -3610,11 +3610,34 @@ example values files carry a commented `monitoring` block.
 
 Every canonical alert also carries plain-language notification annotations for on-call receivers: `headline` (what is affected and what is wrong, no rule name or threshold), an optional `value` (the current measurement rendered from `$value`, omitted when the output sample is a boolean such as `absent()` or `up == 0`), `user_impact`, and `next_step`, beside `summary`, `description`, optional `action`, and `runbook_url` (required on every critical alert). Alertmanager receiver templates are owned by the deployment's ops values; they title a notification from `headline` and `value` and render the impact and next step as its body. Custom rules appended through `observability.prometheusRule.rules` should follow the same keys. `deploy/helm/opengeni/test/alert-notification-annotations.test.ts` pins the contract.
 
-When one Prometheus evaluates several OpenGeni releases, node recording-rule
-consumers select their exact namespace, Helm release and environment. Rule-group
-labels identify the output; they do not restrict an expression's input series.
-Keep the deployment selectors on both node-map joins and workload-node filters:
-removing them causes duplicate joins or borrows another release's node alert.
+When one Prometheus evaluates several OpenGeni releases, all canonical OpenGeni
+metric selectors and recording-rule consumers select their exact namespace,
+Helm release and configured environment, including inventory `absent()` checks.
+Rule-group labels identify the output; they do not restrict an expression's
+input series. Keep these selectors on both the recording inputs and consumers:
+removing them borrows another release's failure or masks missing local inventory.
+Scrape-owned `up` selects namespace and release only; exporter default labels such
+as environment are not labels on `up`. The chart's `ServiceMonitor` supplies the
+namespace/release relabeling; custom or annotation-based scrape jobs must retain
+the equivalent target labels. Kubernetes memory/node signals use the
+actual Pod instance label to prove release ownership (not a shared name prefix),
+and HPA signals select the release's exact worker names. The bundled
+kube-state-metrics label allowlist supplies that Pod instance label. External
+OpenSandbox controller/pool signals remain provider-namespace-wide: they do not
+carry OpenGeni release/environment labels. Custom rules appended through
+`observability.prometheusRule.rules` must fence their own inputs explicitly.
+
+The all-selector regression renders separate namespaces, same-namespace releases
+with overlapping names, and every sandbox backend. It requires checksum-verified
+Prometheus 3.5.0 for native group-label evaluation, including firing, recovery and
+stale/absent-inventory isolation. Expression compatibility is also evaluated on
+2.55.1 with group labels materialized on individual fixture rules; this does not
+qualify the chart's pre-existing group-label format for that older engine:
+
+```bash
+bun test ./deploy/helm/opengeni/test/release-rule-isolation.test.ts
+```
+
 The chart regression test renders co-located releases and verifies firing,
 recovery and missing-workload isolation using real Prometheus rule evaluation:
 

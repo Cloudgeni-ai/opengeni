@@ -19,8 +19,14 @@ type Manifest = { metadata: { name: string }; spec: { groups: Group[] } };
 
 const deployments: Scope[] = [
   { namespace: "apps-shared", release: "alpha", environment: "development", node: "node-a" },
-  { namespace: "apps-shared", release: "beta", environment: "staging", node: "node-b" },
+  {
+    namespace: "apps-shared",
+    release: "alpha-opengeni-extra",
+    environment: "staging",
+    node: "node-a",
+  },
   { namespace: "apps-separate", release: "alpha", environment: "production", node: "node-a" },
+  { namespace: "apps-shared", release: "gamma", environment: "development", node: "node-b" },
 ];
 const nodeRecords = [
   "opengeni:workload_node:present",
@@ -100,6 +106,11 @@ describe("node recording-rule deployment isolation", () => {
       const group = nodeGroup(render(scope));
       expect(group.labels).toEqual(identity(scope));
       expect(group.rules).toHaveLength(nodeRecords.length + nodeAlerts.length);
+      expect(
+        group.rules.find((rule) => rule.record === "opengeni:workload_node:present")!.expr,
+      ).toContain(
+        `kube_pod_labels{namespace=${JSON.stringify(scope.namespace)},label_app_kubernetes_io_instance=${JSON.stringify(scope.release)}}`,
+      );
       let references = 0;
       for (const rule of group.rules) {
         for (const match of rule.expr.matchAll(/\b(opengeni:[a-z0-9_:]+)(\{[^}]*\})?/g)) {
@@ -178,8 +189,8 @@ test.skipIf(!promtool)(
           },
         ]),
       ];
-      const tests = [false, true].map((omitSeparateWorkload) => {
-        const selected = deployments.filter((_, index) => !omitSeparateWorkload || index !== 2);
+      const tests = [-1, 2, 0].map((omittedWorkload) => {
+        const selected = deployments.filter((_, index) => index !== omittedWorkload);
         const workloadSeries = selected.flatMap((scope) => {
           const index = deployments.indexOf(scope);
           const pod = `${manifests[index]!.metadata.name}-worker-turns-synthetic`;
@@ -200,12 +211,23 @@ test.skipIf(!promtool)(
               }),
               values: "1+0x13",
             },
+            {
+              series: series("kube_pod_labels", {
+                namespace: scope.namespace,
+                pod,
+                label_app_kubernetes_io_instance: scope.release,
+              }),
+              values: "1+0x13",
+            },
           ];
         });
         return {
-          name: omitSeparateWorkload
-            ? "no borrowed workload from another namespace"
-            : "shared nodes and namespaces",
+          name:
+            omittedWorkload === 2
+              ? "no borrowed workload from another namespace"
+              : omittedWorkload === 0
+                ? "no borrowed workload from an overlapping release name"
+                : "shared nodes and namespaces",
           interval: "1m",
           input_series: [...platformSeries, ...workloadSeries],
           promql_expr_test: deployments.flatMap((scope) =>
