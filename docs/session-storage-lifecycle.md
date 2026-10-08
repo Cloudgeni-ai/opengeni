@@ -108,8 +108,10 @@ all of these hold for the idle period:
    `content_archive_state = 'archiving'`, recording the planned object keys.
    From that moment the database refuses new turns, attempts, history, goals,
    workflow wakes and machine inputs for the session (`SESSION_ARCHIVED_READ_ONLY`),
-   and the API refuses sends and steers with 409. A message cannot race the
-   archive.
+   the API refuses sends and steers with 409, and the agent tools
+   `session_send_message` and `session_steer` return a non-retryable
+   `<tool>_session_read_only` error that says to start a new session. A
+   message cannot race the archive.
 2. The worker streams two zstd-compressed JSON-lines objects to a temporary
    file and uploads them through the bounded object-storage path, which reads
    every byte back before success. On object stores without read-after-write
