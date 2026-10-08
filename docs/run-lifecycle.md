@@ -2729,7 +2729,8 @@ provider promise is physically settled as `resolved` or `rejected`; a resolved
 result then passes the matching authority/lease/provider/route acceptance fences
 before its output is accepted. Only a turn admission can use authoritative
 `session_turn_attempts.quiesced_at` for its exact attempt; direct and process
-authority remain capture blockers until settled.
+authority remain capture blockers until settled. The one exception is a warm
+checkpoint around a running background command (below).
 
 A resolved exact admission whose transaction committed before output acceptance
 failed raises `SandboxWorkspaceMutationOutputRejectedError` with its immutable
@@ -3265,6 +3266,43 @@ or other durable owners leaves that history intact.
 Capture preflight and archive fold block on every unsettled admission and live
 direct/process holder in the closed write set. Publication is complete only when
 that set is proven closed and `archive_generation === workspace_generation`.
+
+**Warm checkpoints run around background commands.** A retained
+background command keeps its process holder and parent admission until exit or
+loss proof, which for a server or a long benchmark can be the box's whole
+provider lifetime. Treating those as in-flight writers refused every warm
+checkpoint for that long, so an uncaptured provider death (staging session
+5040c525 at the 24h Modal deadline) lost every change since the box started.
+When the provider capture is a point-in-time image of a paused box (Modal native
+filesystem or directory snapshots), a warm (turn heartbeat or turn-end) capture
+therefore excludes exactly the process holders and parent admissions of active,
+unsupervised retained processes on the same lease epoch and provider instance.
+Modal pauses the whole box while it snapshots, so such a command is frozen during
+the read, but a file it was in the middle of writing can be saved half-written;
+that trade-off is deliberate, because a possibly torn file beats losing everything
+since the last capture. Tar-style captures read files one by one from a running
+box and keep every command as a blocker. Every other holder (viewer, direct,
+sibling turn), every in-flight request (including a command's own stdin write),
+and supervised commands still block.
+
+A claim taken while such a command was running records itself in
+`archive_capture_concurrent_capture_id` (migration 0659). No new process or
+admission can appear while a claim is held, so this is exactly the condition under
+which the snapshot may miss later writes. Only the warm publication may publish
+such a claim, and it records the archive one generation behind the workspace
+(`archive_generation = workspace_generation - 1`): the checkpoint is a real
+recovery point but never complete, so periodic captures continue at the
+configured interval, and a restore after provider loss takes the ordinary
+checkpoint-continuity lane with its discontinuity warning instead of claiming the
+newest files. A draining publication refuses it (the claim is released and the
+drain recaptures the now-quiet box), a drain takeover requests a fresh provider
+snapshot instead of replaying it, and a provider loss never records it for late
+adoption. Drain capture is otherwise unchanged: it captures the final state and
+terminates the box, and only enrolled contained commands are excluded there.
+A warm checkpoint attempt that cannot start increments
+`opengeni_workspace_capture_skipped_total{backend,reason}` (once per blocked
+attempt, which is every heartbeat while it stays blocked); an attempt that is not
+due yet, or whose archive already covers the generation, is not counted.
 Admission, ordinary settlement, and yielded-process promotion acquire the
 canonical workspace/session/attempt-or-process prefix before the admission and
 lease rows. A provider-terminal settlement retries only its idempotent database

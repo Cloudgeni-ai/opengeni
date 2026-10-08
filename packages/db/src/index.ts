@@ -46457,6 +46457,7 @@ type LeaseRow = {
   /** Transaction-local PostgreSQL-clock projection used only by bounded waiters. */
   archive_capture_remaining_ms?: number | string | null;
   archive_capture_published_at: Date | string | null;
+  archive_capture_concurrent_capture_id?: string | null;
   reaper_hold_id: string | null;
   reaper_hold_until: Date | string | null;
   reaper_hold_reason: string | null;
@@ -56083,6 +56084,9 @@ export async function confirmDrainCold(
         const lateArchiveCapture =
           workspaceLost &&
           row.archive_capture_id !== null &&
+          // A warm claim that ran around commands may predate their writes; a
+          // late adoption would publish it as the complete workspace.
+          row.archive_capture_concurrent_capture_id !== row.archive_capture_id &&
           row.archive_capture_provider_request_id !== null &&
           row.archive_capture_generation !== null &&
           row.archive_capture_published_at === null &&
@@ -59424,6 +59428,64 @@ function noActiveSupervisedProcesses(leaseId: SQL): SQL {
   )`;
 }
 
+/** The exact active, unsupervised background command on one lease epoch and
+ * provider instance. Such a command may keep running across a warm checkpoint:
+ * Modal pauses the whole box while it snapshots, so the command is frozen rather
+ * than racing the read, but a file it was in the middle of writing can be saved
+ * half-written. That is deliberate. A long-running command used to
+ * refuse every checkpoint for the box's whole lifetime, so an uncaptured
+ * provider death lost everything since the last capture. Supervised commands
+ * keep their separate proof gate (`noActiveSupervisedProcesses`); every other
+ * holder and every in-flight request still blocks the capture. */
+function activeUnsupervisedLeaseProcess(
+  process: SQL,
+  lease: { id: SQL; epoch: SQL; instanceId: SQL },
+): SQL {
+  return sql`${process}.lease_id = ${lease.id}
+    and ${process}.lease_epoch = ${lease.epoch}
+    and ${process}.provider_instance_id = ${lease.instanceId}
+    and ${process}.state = 'active'
+    and not (coalesce(${process}.provider_command, '{}'::jsonb) ? 'supervision')`;
+}
+
+/** A process holder owned by a background command that may run through a warm
+ * checkpoint (see `activeUnsupervisedLeaseProcess`). */
+function concurrentCommandHolder(
+  holder: SQL,
+  lease: { id: SQL; epoch: SQL; instanceId: SQL },
+): SQL {
+  return sql`(${holder}.kind = 'process' and exists (
+    select 1 from sandbox_retained_processes concurrent_process
+    where concurrent_process.holder_id = ${holder}.holder_id
+      and ${activeUnsupervisedLeaseProcess(sql`concurrent_process`, lease)}
+  ))`;
+}
+
+/** The parent admission of a background command that may run through a warm
+ * checkpoint. It stays open for the command's lifetime; it is not an in-flight
+ * request, and treating it as one starved checkpoints for hours. */
+function concurrentCommandAdmission(
+  admission: SQL,
+  lease: { id: SQL; epoch: SQL; instanceId: SQL },
+): SQL {
+  return sql`exists (
+    select 1 from sandbox_retained_processes concurrent_process
+    where concurrent_process.parent_admission_id = ${admission}.id
+      and ${activeUnsupervisedLeaseProcess(sql`concurrent_process`, lease)}
+  )`;
+}
+
+/** True when this exact capture claim ran around active background commands
+ * (recorded at claim time, see `claimWorkspaceArchiveCapture`). Its snapshot is
+ * a real recovery point but may predate their later writes: the warm
+ * publication records it one generation behind the workspace, so later
+ * periodic captures continue and a loss restore carries the discontinuity
+ * warning; every other publication path must not present it as complete. */
+function captureRanAroundCommands(lease: SQL): SQL {
+  return sql`(${lease}.archive_capture_id is not null
+    and ${lease}.archive_capture_concurrent_capture_id is not distinct from ${lease}.archive_capture_id)`;
+}
+
 /** Read the exact generation a verified capture must later fold. This is a
  * preflight only: persistWarmSnapshot/persistDrainSnapshot repeat the full
  * epoch, provider, liveness, and generation CAS under the archive-fold lock. */
@@ -59825,6 +59887,11 @@ export async function claimWorkspaceArchiveCapture(
       attemptId: string;
       holderId: string;
     };
+    /** Warm only: the provider capture is a point-in-time image of a paused
+     * box (Modal native filesystem/directory snapshots), so it may run around
+     * active background commands. Tar-style captures read files one
+     * by one from a running box and keep every command as a blocker. */
+    pointInTimeCapture?: boolean;
   },
 ): Promise<ClaimWorkspaceArchiveCaptureResult> {
   if (
@@ -59977,6 +60044,15 @@ export async function claimWorkspaceArchiveCapture(
       if (input.minIntervalMs > 0 && row.periodic_capture_throttled) {
         return { status: "throttled" as const };
       }
+      const leaseIdentity = {
+        id: sql`${row.id}::uuid`,
+        epoch: sql`${Number(row.lease_epoch)}`,
+        instanceId: sql`${input.expectedInstanceId}`,
+      };
+      // Neither a new process nor a new admission can appear while this claim
+      // is held, so "a command was running at claim time" is exactly the
+      // condition under which the snapshot may miss later writes.
+      const aroundCommands = input.warmAttempt !== undefined && input.pointInTimeCapture === true;
       const holderCounts = input.warmAttempt
         ? await scopedDb.execute<{
             total: number;
@@ -59990,6 +60066,11 @@ export async function claimWorkspaceArchiveCapture(
               )::integer as exact
             from sandbox_lease_holders
             where lease_id = ${row.id}
+              ${
+                aroundCommands
+                  ? sql`and not ${concurrentCommandHolder(sql`sandbox_lease_holders`, leaseIdentity)}`
+                  : sql``
+              }
           `)
         : await scopedDb.execute<{
             total: number;
@@ -60015,6 +60096,10 @@ export async function claimWorkspaceArchiveCapture(
       // control-plane generation admission. Never delete a live viewer receipt
       // and snapshot behind that still-valid tunnel. A skipped turn-end capture
       // is recovered by the zero-holder drain capture after the viewer detaches.
+      // A running background command is the one exception (warm only): its
+      // holder and parent admission never release before it exits, and waiting
+      // for that starved checkpoints for the box's whole lifetime. See
+      // `activeUnsupervisedLeaseProcess` for the accepted trade-off.
       const expectedHolderCount = input.warmAttempt ? 1 : 0;
       if ((holderCounts[0]?.total ?? 0) !== expectedHolderCount) {
         return { status: "holder_in_progress" as const };
@@ -60040,12 +60125,25 @@ export async function claimWorkspaceArchiveCapture(
             and not exists(select 1 from sandbox_retained_processes process
               where process.id = any(${`{${(row.unobservable_command_drain_ids ?? []).join(",")}}`}::uuid[])
                 and process.parent_admission_id = admission.id and process.lease_id = ${row.id})
+            ${
+              aroundCommands
+                ? sql`and not ${concurrentCommandAdmission(sql`admission`, leaseIdentity)}`
+                : sql``
+            }
             and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
         ) as present
       `);
       if (unsettled[0]?.present) {
         return { status: "mutation_in_progress" as const };
       }
+      const [concurrentCommands] = aroundCommands
+        ? await scopedDb.execute<{ present: boolean }>(sql`
+            select exists (
+              select 1 from sandbox_retained_processes concurrent_process
+              where ${activeUnsupervisedLeaseProcess(sql`concurrent_process`, leaseIdentity)}
+            ) as present
+          `)
+        : [];
       const sessionState =
         row.resume_state?.sessionState && typeof row.resume_state.sessionState === "object"
           ? (row.resume_state.sessionState as Record<string, unknown>)
@@ -60085,6 +60183,9 @@ export async function claimWorkspaceArchiveCapture(
           archive_capture_deadline_at = now() +
             (${input.captureTimeoutMs}::bigint * interval '1 millisecond'),
           archive_capture_published_at = null,
+          archive_capture_concurrent_capture_id = ${
+            concurrentCommands?.present === true ? input.captureId : null
+          }::uuid,
           updated_at = now()
         where id = ${row.id}
           and archive_capture_id is null
@@ -60241,6 +60342,13 @@ export async function replaceWorkspaceArchiveCaptureAfterProof(
           archive_capture_id = ${input.captureId}::uuid,
           archive_capture_operation_id = ${input.operationId}::uuid,
           archive_capture_attempt = ${input.attempt},
+          -- A replayed provider request would return the warm-time snapshot of
+          -- a claim that ran around commands; request a fresh one.
+          archive_capture_provider_request_id = case
+            when ${captureRanAroundCommands(sql`lease`)} then ${randomUUID()}::uuid
+            else lease.archive_capture_provider_request_id
+          end,
+          archive_capture_concurrent_capture_id = null,
           archive_capture_generation = lease.workspace_generation,
           archive_capture_started_at = now(),
           archive_capture_deadline_at = now() +
@@ -61540,7 +61648,11 @@ async function foldWorkspaceArchiveOntoLease(
   const currentInstanceId = input.livenessGuard === "cold_late" ? null : input.expectedInstanceId;
   const livenessGuard =
     input.livenessGuard === "draining"
-      ? sql`lease.liveness = 'draining' and (lease.refcount = 0 or lease.unobservable_command_drain_ids is not null)`
+      ? // A warm claim that ran around commands may predate their last writes;
+        // it can never publish the final drain archive. Its release
+        // lets the drain recapture the now-quiet box.
+        sql`lease.liveness = 'draining' and (lease.refcount = 0 or lease.unobservable_command_drain_ids is not null)
+          and not ${captureRanAroundCommands(sql`lease`)}`
       : input.livenessGuard === "warm"
         ? sql`lease.liveness = 'warm'`
         : sql`lease.liveness = 'cold' and lease.refcount = 0 and lease.archive_capture_id is null`;
@@ -61647,6 +61759,11 @@ async function foldWorkspaceArchiveOntoLease(
     `);
     if (candidate.length !== 1) return false;
   }
+  const warmLeaseIdentity = {
+    id: sql`lease.id`,
+    epoch: sql`lease.lease_epoch`,
+    instanceId: sql`lease.instance_id`,
+  };
   const rows = await scopedDb.execute<{ id: string }>(sql`
     update sandbox_leases as lease set
       resume_state = ${foldedJson}::jsonb,
@@ -61656,6 +61773,12 @@ async function foldWorkspaceArchiveOntoLease(
       ${
         input.livenessGuard === "warm"
           ? sql`
+              workspace_generation = case
+                when ${captureRanAroundCommands(sql`lease`)}
+                  then lease.workspace_generation + 1
+                else lease.workspace_generation
+              end,
+              archive_capture_concurrent_capture_id = null,
               archive_capture_id = null,
               archive_capture_operation_id = null,
               archive_capture_provider_request_id = null,
@@ -61723,6 +61846,11 @@ async function foldWorkspaceArchiveOntoLease(
               and process.parent_admission_id = admission.id and process.lease_id = lease.id
               and process.lease_epoch = lease.lease_epoch
               and process.provider_instance_id = lease.instance_id)
+          ${
+            input.livenessGuard === "warm"
+              ? sql`and not ${concurrentCommandAdmission(sql`admission`, warmLeaseIdentity)}`
+              : sql``
+          }
           and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
       )
     returning lease.id
@@ -61971,6 +62099,14 @@ export async function persistWarmSnapshot(
               and admission.provider_instance_id = lease.instance_id
               and admission.workspace_generation <= ${input.expectedWorkspaceGeneration}
               and admission.settled_at is null
+              and not (
+                lease.liveness = 'warm'
+                and ${concurrentCommandAdmission(sql`admission`, {
+                  id: sql`lease.id`,
+                  epoch: sql`lease.lease_epoch`,
+                  instanceId: sql`lease.instance_id`,
+                })}
+              )
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         for update
