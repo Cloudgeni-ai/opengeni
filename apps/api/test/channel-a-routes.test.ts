@@ -13,6 +13,7 @@ import {
   ChannelAConflictError,
   ChannelAFileSystemRouteChangedError,
   ChannelAUnavailableError,
+  SynchronousCommandOutcomeUnknownError,
   ChannelAValidationError,
   BrowserControlTransportError,
   RoutingActiveRouteChangedError,
@@ -48,6 +49,34 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const sessionsRoute = readFileSync(resolve(here, "..", "src", "routes", "sessions.ts"), "utf8");
 const channelASeam = readFileSync(resolve(here, "..", "src", "sandbox", "channel-a.ts"), "utf8");
+
+test("pending synchronous commands preserve their original handle and never refresh/replay", async () => {
+  const pending = new SynchronousCommandOutcomeUnknownError(31, {
+    stdout: "already wrote",
+    stderr: "",
+  });
+  const mapped = mapChannelAError(pending);
+  expect(mapped).toBeInstanceOf(HTTPException);
+  expect((mapped as HTTPException).status).toBe(409);
+  expect((mapped as HTTPException).message).toContain("pending or unknown");
+  expect((mapped as HTTPException).message).not.toMatch(/retry|try again|already wrote/iu);
+  expect(shouldEvictChannelAHandleAfterError(pending, "read")).toBe(false);
+  let starts = 0;
+  let refreshed = 0;
+  await expect(
+    runChannelAReadWithFreshHandleRetry(
+      async () => {
+        starts++;
+        throw pending;
+      },
+      async () => {
+        refreshed++;
+      },
+    ),
+  ).rejects.toBe(pending);
+  expect(starts).toBe(1);
+  expect(refreshed).toBe(0);
+});
 
 type RouteSpec = {
   path: string;

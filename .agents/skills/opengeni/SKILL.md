@@ -73,7 +73,21 @@ Then open the smallest source files that answer the question:
   milestones for elapsed startup latency. Runtime stream initialization is not
   the provider wire-dispatch milestone. See `docs/run-lifecycle.md`.
 - Runtime/sandbox/tools: `packages/runtime/src/index.ts` is the public agent-loop facade;
-  retained Modal command observation uses the versioned task-router byte-offset
+  synchronous filesystem completion is owned by `sandbox/synchronous-command.ts`,
+  with pre-Start SDK stream capture in `sandbox/native-synchronous-collection.ts`.
+  Inspect provider-owned trusted pages, routing capture/settlement and
+  `sandbox/turn-tool-cancellation.ts` together; bounded shell presentation is not
+  lossless output, and observation failure is not physical quiescence.
+  OpenSandbox wire validation and invocation-local dispatch proof live in
+  `sandbox/providers/opensandbox-command-stream.ts`; its adapter's exact-ID
+  physical observer does not consume output. Missing first identity after an
+  attempted dispatch remains unknown and joined, never synthetic terminal proof.
+  Daytona's registered exact native binding and framed command collection live
+  in `sandbox/providers/daytona-command-{binding,frames}.ts` and
+  `daytona-framed-command.ts`; inspect routing's awaited output-release cleanup
+  separately from marker/PGID cancellation. Native session deletion is not exit
+  or stream-completion proof.
+  Retained Modal command observation uses the versioned task-router byte-offset
   boundary in `sandbox/providers/modal-command-control.ts`; output and cursor
   capture is atomic in `packages/db/src/retained-provider-commands.ts`. Never
   reinterpret a legacy batch locator or infer exit from missing output.
