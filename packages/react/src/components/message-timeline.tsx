@@ -3510,7 +3510,21 @@ const TimelineGroupView = memo(function TimelineGroupView({
                     </span>
                   ) : undefined,
                 }
-              : workStatus;
+              : group.work.cycles?.summary
+                ? {
+                    ...workStatus,
+                    // Folded quiet cycles say what the agent is waiting on.
+                    preview: (
+                      <p
+                        data-og-cycles-summary=""
+                        className="truncate text-og-sm text-og-fg-subtle"
+                        title={group.work.cycles.summary}
+                      >
+                        {group.work.cycles.summary}
+                      </p>
+                    ),
+                  }
+                : workStatus;
         return (
           // Marks this work row for the live-note fold (list keys can be carried
           // over from an earlier row, so they are not the work id).
@@ -3518,6 +3532,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
             <TurnSummary
               key="work"
               items={group.items}
+              bare={insideTurn || undefined}
               status={status}
               outcome={group.outcome}
               failureText={group.failureText}
