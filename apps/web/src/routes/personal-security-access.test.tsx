@@ -1,7 +1,15 @@
 import { afterAll, afterEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, type ReactNode } from "react";
+import { act } from "react";
 import { createRoot } from "react-dom/client";
+import {
+  Outlet,
+  RouterProvider,
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+} from "@tanstack/react-router";
 import {
   PersonalSecurityProvider,
   type PersonalSecurityContextValue,
@@ -9,9 +17,6 @@ import {
 
 if (!globalThis.document) GlobalRegistrator.register();
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-mock.module("@/components/settings/personal-settings-shell", () => ({
-  PersonalSettingsShell: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-}));
 mock.module("@/components/use-browser-account-popup", () => ({
   useBrowserAccountPopup: () => ({ open() {} }),
 }));
@@ -32,7 +37,7 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
-for (const mode of ["legacy", "broker"] as const) {
+for (const mode of ["legacy", "dual", "broker"] as const) {
   test(`direct personal Security needs no workspace context in ${mode} mode`, async () => {
     const calls: string[] = [];
     globalThis.fetch = (async (input) => {
@@ -58,6 +63,10 @@ for (const mode of ["legacy", "broker"] as const) {
       clientConfig: {
         auth: { mode: "managedSession", session: "cookie" },
         managedAuthSessionSetMode: mode,
+        analytics: {
+          consentRequired: true,
+          providers: { posthog: { projectKey: "phc_test", host: "https://us.i.posthog.com" } },
+        },
       } as PersonalSecurityContextValue["clientConfig"],
       authSession: {
         session: { id: "session", userId: "human", expiresAt: "2030-01-01T00:00:00Z" },
@@ -71,15 +80,28 @@ for (const mode of ["legacy", "broker"] as const) {
     document.body.append(host);
     root = createRoot(host);
     // Deliberately no AppContext, workspace grants, memberships or default workspace.
-    await act(async () =>
-      root.render(
+    const rootRoute = createRootRoute({
+      component: () => (
         <PersonalSecurityProvider value={value}>
-          <PersonalSecurityRoute />
-        </PersonalSecurityProvider>,
+          <Outlet />
+        </PersonalSecurityProvider>
       ),
-    );
+    });
+    const securityRoute = createRoute({
+      getParentRoute: () => rootRoute,
+      path: "/settings/security",
+      component: PersonalSecurityRoute,
+    });
+    const router = createRouter({
+      routeTree: rootRoute.addChildren([securityRoute]),
+      history: createMemoryHistory({ initialEntries: ["/settings/security"] }),
+    });
+    await router.load();
+    await act(async () => root.render(<RouterProvider router={router} />));
     expect(host.textContent).toContain("Security");
     expect(host.textContent).toContain("Change password");
+    expect(host.textContent).toContain("Analytics preferences");
+    expect(host.textContent).toContain("Manage");
     expect(calls).toEqual(["/v1/auth/sign-in-methods"]);
   });
 }
