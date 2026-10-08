@@ -35,13 +35,18 @@ for (const decorations of ["server", "client"]) {
               ],
               { env: seat.environment, stdout: "ignore", stderr: "inherit" },
             );
-            for (let i = 0; i < 100 && !(await Bun.file(statePath).exists()); i++)
+            // A cold GTK4 renderer can take longer to initialize on ARM runners.
+            // Wait only for fixture readiness; input dispatch is never retried.
+            const readyDeadline = Date.now() + 30_000;
+            while (!(await Bun.file(statePath).exists()) && Date.now() < readyDeadline) {
+              if (child.exitCode !== null) break;
               await Bun.sleep(100);
+            }
             if (!(await Bun.file(statePath).exists())) {
               child.kill();
               await child.exited;
               await seat.close();
-              throw new Error("GTK4 fixture did not open");
+              throw new Error(`GTK4 fixture did not open (exit ${child.exitCode})`);
             }
             return {
               ...seat,

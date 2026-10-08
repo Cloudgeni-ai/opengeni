@@ -6,7 +6,7 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "d8440a83a8dca5051059d6e7b593cf34c3aff38491e0dc6be138b111f72781ae"
+      "sha256": "bea50e46639855475722e8373538c381ee74546ba9adb1d19da3bfb215129fed"
     },
     {
       "path": ".github/workflows/agent-release.yml",
@@ -155,7 +155,7 @@
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "cua-linux",
       "step": "Install desktop and native build dependencies",
-      "sha256": "1bf8314b79958ba2d9804ada2802693c1a8a85c95f923a59ea2cc8d0ed833f2e"
+      "sha256": "722dff126e5b2546e8183fc78087791c1334aed807d48eabd8260b0177526ae0"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",
@@ -167,7 +167,7 @@
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "cua-linux",
       "step": "Verify isolated desktops and compiled packaging",
-      "sha256": "1ccae2fb841c97bc5358864e32b81737b69e92c3e30c997c7c90e5694076aac1"
+      "sha256": "053f0ca55c7ce235956a91a7a5cd606c4af45e4260645b4a1be853fdaea5cd9c"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",
