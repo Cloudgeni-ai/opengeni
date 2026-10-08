@@ -119,7 +119,6 @@ client.listSessionSummaryPage = async (workspace, options) => {
 };
 const context = {
   client,
-  clientConfig: {},
   session: null,
   accessContext: { subjectId: "rename-qa" },
   sessionChannelProjectionAuthority: new SessionChannelProjectionAuthority(),

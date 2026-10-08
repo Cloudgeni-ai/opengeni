@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`2e4736b3ebff61ef99e8c0c74270b5cd75894643`, including its non-invalidating preview
+`35e376ed509cb8eee49624279256a81da83df8cc`, including its non-invalidating preview
 capture and cursor support. `@trycua/cua-driver` 0.34.0 supplies the private-worker
 transport; the source-built executable performs desktop operations. The narrow
 Windows experiment still uses the published SDK in process. Native remains the
@@ -91,7 +91,9 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Upstream source](https://github.com/trycua/cua/tree/2e4736b3ebff61ef99e8c0c74270b5cd75894643/libs/cua-driver)
+[Upstream source](https://github.com/trycua/cua/tree/35e376ed509cb8eee49624279256a81da83df8cc/libs/cua-driver).
+The pin includes the focused X11 coordinate correction proposed in
+[CUA #4890](https://github.com/trycua/cua/pull/4890), on upstream `48cc491`.
 
 ## Native agent interface
 

@@ -312,7 +312,6 @@ client.listSessionSummaryPage = async (workspace, options) => {
 const invocation = { workspaceId };
 const context = {
   client,
-  clientConfig: {},
   session: null,
   accessContext: { subjectId },
   sessionChannelProjectionAuthority: new SessionChannelProjectionAuthority(),
