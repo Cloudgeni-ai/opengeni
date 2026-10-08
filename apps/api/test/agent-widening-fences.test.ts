@@ -402,9 +402,13 @@ describe("parentless tool policy: agents narrow, humans may widen (real PostgreS
     );
 
     // Adopting workspace defaults is a widen whenever it adds anything.
+    // Replacing this pinned built-in selection with future defaults is refused
+    // before the per-tool narrowing comparison runs.
     const defaults = await put(agent, { mode: "workspace_default", expectedVersion: 1 });
     expect(defaults.status).toBe(403);
-    expect(await defaults.text()).toContain("an agent may only narrow its session Opengeni tools");
+    expect(await defaults.text()).toContain(
+      "an agent may not replace a pinned built-in selection with future defaults",
+    );
 
     // Narrowing (here: to nothing) still works for the agent.
     const narrowed = await put(agent, {
@@ -553,6 +557,8 @@ describe("Codemode SDK proxy carries only what the selection can exercise (real 
         )`;
     });
     const attempt = { sessionId: session.id, turnId: turn!.id, attemptId, executionGeneration };
+    // The proxy exercises only built-ins that are both selected and frozen into
+    // this attempt's catalog, as the worker freezes them for a real turn.
     const unsigned: Omit<AttemptToolCatalog, "digest"> = {
       version: 1,
       accountId: grant.accountId,
@@ -560,7 +566,14 @@ describe("Codemode SDK proxy carries only what the selection can exercise (real 
       ...attempt,
       generation: 1,
       createdAt: new Date().toISOString(),
-      entries: [],
+      entries: firstPartyMcpTools.map((toolName) => ({
+        identity: { serverId: "opengeni", toolName },
+        modelName: `opengeni__${toolName}`,
+        codemodePath: ["opengeni", toolName],
+        inputSchema: { type: "object" },
+        source: "opengeni" as const,
+        approval: "none" as const,
+      })),
     };
     await persistAttemptToolCatalog(client.db, {
       ...unsigned,

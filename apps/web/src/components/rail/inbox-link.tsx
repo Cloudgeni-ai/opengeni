@@ -3,23 +3,22 @@ import { InboxIcon } from "lucide-react";
 
 import { useRail } from "@/components/rail/rail-context";
 import { useAppContext } from "@/context";
-import { canUsePersonalInbox, inboxAttentionCount, useInbox } from "@/lib/inbox";
+import { hasInbox, inboxAttentionCount, useInbox } from "@/lib/inbox";
 import { cn } from "@/lib/utils";
 
-/** The Inbox entry for an authenticated person, with how many things wait on them. */
+/** The Inbox entry: always visible to a signed-in person, with how many things wait on them. */
 export function InboxLink() {
-  const context = useAppContext();
+  const { accessContext } = useAppContext();
+  return hasInbox(accessContext) ? <PersonInboxLink /> : null;
+}
+
+function PersonInboxLink() {
   const rail = useRail();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const active = pathname === `/workspaces/${rail.workspaceId}/inbox`;
-  const inboxEnabled = canUsePersonalInbox(
-    context.clientConfig.auth.mode,
-    context.authSession !== null,
-  );
-  const { data } = useInbox({ enabled: inboxEnabled });
+  const { data } = useInbox();
   const count = inboxAttentionCount(data);
   const countLabel = count > 99 ? "99+" : String(count);
-  if (!inboxEnabled) return null;
   return (
     <Link
       to="/workspaces/$workspaceId/inbox"

@@ -15,13 +15,19 @@ type InboxState = {
 type InboxClient = Pick<OpenGeniClient, "listInbox">;
 
 const EMPTY: InboxState = { data: null, error: null, loading: true };
+const NO_INBOX: InboxState = { data: null, error: null, loading: false };
 
-/** Inbox access is person-bound; API-key and unauthenticated browser clients must not poll it. */
-export function canUsePersonalInbox(authMode: string, hasManagedSession: boolean): boolean {
-  return authMode === "managedSession" && hasManagedSession;
+/**
+ * Only a signed-in person has an inbox (the API refuses keys, services and
+ * development subjects), so nothing polls it for anyone else.
+ */
+export function hasInbox(
+  context: { subjectId: string; credential?: unknown } | null | undefined,
+): boolean {
+  return Boolean(context?.subjectId.startsWith("user:") && !context.credential);
 }
 
-class InboxStore {
+export class InboxStore {
   private state: InboxState = EMPTY;
   private listeners = new Set<() => void>();
   private inFlight: Promise<void> | null = null;
@@ -49,7 +55,14 @@ class InboxStore {
     this.inFlight = this.client
       .listInbox()
       .then((data) => {
-        if (request === this.generation) this.set({ data, error: null, loading: false });
+        if (request !== this.generation) return;
+        // A body without an item list is not an inbox (a proxy or stub answered);
+        // treat it like a failed load rather than let the rail badge crash the app.
+        if (!Array.isArray(data?.items)) {
+          this.set({ error: new Error("The inbox response had no items."), loading: false });
+          return;
+        }
+        this.set({ data, error: null, loading: false });
       })
       .catch((error: unknown) => {
         // Keep the last good list on a transient failure; the page says so.
@@ -93,9 +106,10 @@ function storeFor(client: InboxClient): InboxStore {
 
 /** The inbox, polled while mounted. `pollMs` is shortened while the Inbox page is open. */
 export function useInbox(options: { pollMs?: number; enabled?: boolean } = {}) {
-  const { client } = useAppContext();
+  const { client, accessContext } = useAppContext();
   const store = storeFor(client);
-  const enabled = options.enabled ?? true;
+  const person = hasInbox(accessContext);
+  const enabled = (options.enabled ?? true) && person;
   const pollMs = options.pollMs ?? 30_000;
   const state = useSyncExternalStore(
     store.subscribe,
@@ -124,7 +138,7 @@ export function useInbox(options: { pollMs?: number; enabled?: boolean } = {}) {
     (update: (items: InboxItem[]) => InboxItem[]) => store.patchItems(update),
     [store],
   );
-  return { ...state, refresh, patchItems };
+  return { ...(person ? state : NO_INBOX), refresh, patchItems };
 }
 
 /** Questions, approvals and paused goals wait on the person; notes and replies don't. */

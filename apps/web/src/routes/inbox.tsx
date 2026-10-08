@@ -64,7 +64,7 @@ import { Switch } from "@/components/ui/switch";
 import { Toolbar } from "@/components/ui/toolbar";
 import { useAppContext } from "@/context";
 import { apiErrorFacts, userErrorText } from "@/lib/api-error";
-import { canUsePersonalInbox, isNeedsYouKind, useInbox } from "@/lib/inbox";
+import { hasInbox, isNeedsYouKind, useInbox } from "@/lib/inbox";
 import { cn } from "@/lib/utils";
 
 const KIND_WORD: Record<InboxItem["kind"], string> = {
@@ -88,9 +88,12 @@ function KindIcon({ item }: { item: InboxItem }) {
 }
 
 function Spans({ spans }: { spans: NotificationSpan[] }) {
+  // Spans are the positional pieces of one parsed message and never reorder,
+  // so their index is their identity.
   return spans.map((span, index) => {
     if (span.kind === "bold") {
       return (
+        // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
         <strong key={index} className="font-medium text-fg">
           {span.text}
         </strong>
@@ -99,6 +102,7 @@ function Spans({ spans }: { spans: NotificationSpan[] }) {
     if (span.kind === "code") {
       return (
         <code
+          // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
           key={index}
           className="rounded-[4px] bg-surface-2 px-1 py-px font-mono text-[0.8125rem] text-fg"
         >
@@ -109,6 +113,7 @@ function Spans({ spans }: { spans: NotificationSpan[] }) {
     if (span.kind === "link") {
       return (
         <a
+          // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
           key={index}
           href={span.href}
           target="_blank"
@@ -119,6 +124,7 @@ function Spans({ spans }: { spans: NotificationSpan[] }) {
         </a>
       );
     }
+    // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
     return <span key={index}>{span.text}</span>;
   });
 }
@@ -136,12 +142,15 @@ function NotificationContent({ item }: { item: InboxItem }) {
         <div className="flex min-w-0 flex-col gap-1.5 text-sm leading-5 text-fg-muted break-words">
           {blocks.map((block, index) =>
             block.kind === "paragraph" ? (
+              // oxlint-disable-next-line react/no-array-index-key -- positional block of one message
               <p key={index} className="m-0 whitespace-pre-line">
                 <Spans spans={block.spans} />
               </p>
             ) : (
+              // oxlint-disable-next-line react/no-array-index-key -- positional block of one message
               <ul key={index} className="m-0 flex list-none flex-col gap-0.5 p-0">
                 {block.items.map((spans, bullet) => (
+                  // oxlint-disable-next-line react/no-array-index-key -- positional bullet of one list
                   <li key={bullet} className="relative pl-3.5">
                     <span
                       aria-hidden="true"
@@ -318,11 +327,7 @@ function InboxSkeleton() {
 export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
-  const inboxEnabled = canUsePersonalInbox(
-    context.clientConfig.auth.mode,
-    context.authSession !== null,
-  );
-  const inbox = useInbox({ pollMs: 10_000, enabled: inboxEnabled });
+  const inbox = useInbox({ pollMs: 10_000 });
   const [scope, setScope] = useState<"all" | "workspace">("all");
   const [busy, setBusy] = useState<Record<string, string>>({});
   const [answering, setAnswering] = useState<InboxItem | null>(null);
@@ -567,9 +572,17 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     );
   };
 
+  const personal = hasInbox(context.accessContext);
   let body: ReactNode;
-  if (!inboxEnabled) {
-    body = <Notice tone="info" title="Inbox requires a signed-in person." />;
+  if (!personal) {
+    body = (
+      <EmptyState
+        variant="page"
+        icon={<InboxIcon />}
+        title="Only people have an inbox"
+        description="Sign in as yourself to see what your agents are waiting on you for. API keys and services act through sessions instead."
+      />
+    );
   } else if (inbox.loading && !inbox.data) {
     body = <InboxSkeleton />;
   } else if (inbox.error && !inbox.data) {
@@ -656,7 +669,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
           ) : null}
           <SectionStack>
             {body}
-            {inboxEnabled ? <InboxSettingsSections /> : null}
+            {personal ? <InboxSettingsSections /> : null}
           </SectionStack>
         </div>
       </div>

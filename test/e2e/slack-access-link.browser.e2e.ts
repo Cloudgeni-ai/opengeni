@@ -619,8 +619,6 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
     if (url.pathname === "/v1/organization-invitations") {
       return json({ invitations: [], nextCursor: null });
     }
-    // The signed-in rail polls the person's Inbox; answer with its real
-    // empty shape rather than the generic `{}` fallback below.
     if (url.pathname === "/v1/inbox") {
       return json({ items: [], needsYouCount: 0, unreadCount: 0 });
     }

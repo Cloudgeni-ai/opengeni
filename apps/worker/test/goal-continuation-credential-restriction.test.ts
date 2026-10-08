@@ -77,6 +77,10 @@ async function continuationFixture(
       metadata: options.sessionMetadata ?? {},
     } as Awaited<ReturnType<typeof db.requireSession>>),
     spyOn(db, "getWorkspaceModelPolicy").mockResolvedValue(null),
+    // Goal continuation resolves first-party tool defaults from workspace settings.
+    spyOn(db, "requireWorkspace").mockResolvedValue({
+      settings: {},
+    } as Awaited<ReturnType<typeof db.requireWorkspace>>),
     spyOn(core, "resolveWorkspaceCatalogSettings").mockResolvedValue({ settings } as Awaited<
       ReturnType<typeof core.resolveWorkspaceCatalogSettings>
     >),
