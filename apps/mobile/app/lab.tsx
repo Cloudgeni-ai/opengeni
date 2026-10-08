@@ -4,6 +4,8 @@
 import { labScenarios, type LabScenarioId } from "@opengeni/react/testing";
 import { MessageTimeline, useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markdown";
+import { createNativePreviewRenderers } from "@opengeni/react-native/timeline/previews";
+import { useAccount } from "@/account";
 import { copyText } from "@/clipboard";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { StatusBar } from "expo-status-bar";
@@ -13,8 +15,6 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AppThemeProvider } from "@/theme";
 
 type Params = { scenario?: LabScenarioId; scheme?: "light" | "dark"; chrome?: string };
-
-const renderMarkdown = createWebMarkdownRenderer({ onCopy: (text) => void copyText(text) });
 
 export default function ReferenceLab() {
   const params = useLocalSearchParams<Params>();
@@ -30,6 +30,16 @@ function LabBody({ params, scheme }: { params: Params; scheme: "light" | "dark" 
   const theme = useNativeTimelineTheme();
   const insets = useSafeAreaInsets();
   const scenarios = useMemo(() => labScenarios(), []);
+  const { client, workspaceId } = useAccount();
+  // Fixture previews and plain image URLs need no workspace; retained files use the account's.
+  const renderMarkdown = useMemo(
+    () =>
+      createWebMarkdownRenderer({
+        onCopy: (text) => void copyText(text),
+        ...createNativePreviewRenderers({ client, workspaceId: workspaceId ?? "lab-workspace" }),
+      }),
+    [client, workspaceId],
+  );
   const scenarioId = params.scenario ?? "working";
   const scenario = scenarios.find((entry) => entry.id === scenarioId) ?? scenarios[0]!;
   const showChrome = params.chrome !== "0";

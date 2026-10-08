@@ -30125,6 +30125,19 @@
       "scopedBillingClassLabel": "value",
       "sortPickerRows": "value"
     },
+    "@opengeni/react/native-previews": {
+      "inlineHtmlDocument": "value",
+      "interactivePreviewKind": "value",
+      "InteractivePreviewKind": "type",
+      "loadSiteSnapshot": "value",
+      "paintPreviewLoading": "value",
+      "parseSiteFence": "value",
+      "PREVIEW_LOADING_COLORS": "value",
+      "PREVIEW_LOADING_PAINT_SCRIPT": "value",
+      "previewLoadingDocument": "value",
+      "SiteDisplayContent": "type",
+      "SiteSnapshotReadClient": "type"
+    },
     "@opengeni/react/new-session-draft": {
       "AcknowledgeConsumedNewSessionDraftResult": "type",
       "FlushedNewSessionDraft": "type",

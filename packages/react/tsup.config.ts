@@ -32,6 +32,7 @@ export default defineConfig({
     "src/session.ts",
     "src/connect.ts",
     "src/sites.ts",
+    "src/native-previews.ts",
     "src/session-ui.ts",
     "src/machines.ts",
     "src/usage.ts",

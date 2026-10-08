@@ -3,7 +3,15 @@
 // replays identical input through the official projection with no model calls.
 import type { SessionEvent } from "@opengeni/sdk";
 
-export type LabScenarioId = "answer" | "working" | "needs-you" | "history" | "failure" | "long";
+export type LabScenarioId =
+  | "answer"
+  | "working"
+  | "needs-you"
+  | "history"
+  | "failure"
+  | "long"
+  | "media"
+  | "previewing";
 
 export interface LabScenario {
   id: LabScenarioId;
@@ -321,6 +329,76 @@ function longContent(): LabScenario {
   return { id: "long", title: "Long content", events: r.events, running: false };
 }
 
+const PREVIEW_FENCE_BODY = [
+  '<div class="card" style="padding:16px">',
+  '  <h2 style="margin:0 0 8px">Weekly signups</h2>',
+  '  <p style="margin:0 0 12px;color:#777">Last 6 weeks, all channels</p>',
+  '  <div style="display:flex;gap:8px;align-items:flex-end;height:140px">',
+  ...[42, 58, 51, 73, 88, 96].map(
+    (value) =>
+      `    <div style="flex:1;height:${value}%;border-radius:6px;background:linear-gradient(#5fb8a3,#2f7d6d)"></div>`,
+  ),
+  "  </div>",
+  "</div>",
+].join("\n");
+
+/** Wide table, an image and a finished interactive preview. */
+function media(): LabScenario {
+  const r = recorder("lab-media");
+  const t = "turn-media";
+  r.push("user.message", { text: "Compare the plans and show me the signup trend." }, t);
+  r.push("turn.started", {}, t, 400);
+  const text = [
+    "Signups are up again. Here is the trend as a live chart:",
+    "",
+    "```opengeni-html",
+    PREVIEW_FENCE_BODY,
+    "```",
+    "",
+    "![Signup funnel](https://picsum.photos/id/1056/1200/675)",
+    "",
+    "And the comparison across every plan:",
+    "",
+    "| Plan | Monthly price | Seats included | Storage | Support | Uptime SLA | Overage per seat |",
+    "| --- | --- | --- | --- | --- | --- | --- |",
+    "| Starter | $0 | 3 | 5 GB | Community forum | None | Not available |",
+    "| Team | $49 | 10 | 100 GB | Email, next business day | 99.5% | $6 |",
+    "| Business | $199 | 50 | 1 TB | Chat and email, 4 hours | 99.9% | $5 |",
+    "| Enterprise | Custom | Unlimited | Custom | Dedicated manager | 99.99% | Negotiated |",
+    "",
+    "Signups grew every week except week 3.",
+  ].join("\n");
+  r.push("agent.message.delta", { text }, t, 2_500);
+  r.push("agent.message.completed", { text }, t, 300);
+  r.push("turn.completed", { output: text }, t, 200);
+  return { id: "media", title: "Tables & media", events: r.events, running: false };
+}
+
+/** The assistant is still writing an interactive preview. */
+function previewing(): LabScenario {
+  const r = recorder("lab-previewing");
+  const t = "turn-previewing";
+  r.push("user.message", { text: "Make me a quick chart of weekly signups." }, t);
+  r.push("turn.started", {}, t, 400);
+  const partial = PREVIEW_FENCE_BODY.split("\n").slice(0, 5).join("\n");
+  r.push(
+    "agent.message.delta",
+    { text: ["Here is the chart:", "", "```opengeni-html", partial].join("\n") },
+    t,
+    2_000,
+  );
+  return { id: "previewing", title: "Writing a preview", events: r.events, running: true };
+}
+
 export function labScenarios(): LabScenario[] {
-  return [answer(), working(), needsYou(), history(), failure(), longContent()];
+  return [
+    answer(),
+    working(),
+    needsYou(),
+    history(),
+    failure(),
+    longContent(),
+    media(),
+    previewing(),
+  ];
 }

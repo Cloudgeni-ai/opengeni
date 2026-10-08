@@ -46,6 +46,10 @@
       "types": "./src/timeline/markdown.tsx",
       "default": "./src/timeline/markdown.tsx"
     },
+    "./timeline/previews": {
+      "types": "./src/timeline/previews.tsx",
+      "default": "./src/timeline/previews.tsx"
+    },
     "./webrtc": {
       "types": "./src/webrtc.ts",
       "default": "./src/webrtc.ts"
@@ -74,6 +78,7 @@
     "react-native-markdown-display": "^7.0.2",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-webrtc": "124.0.8",
+    "react-native-webview": "13.16.1",
     "tsup": "^8.5.0"
   },
   "peerDependencies": {
@@ -91,13 +96,17 @@
     "react-native-reanimated": ">=4",
     "react-native-safe-area-context": ">=5",
     "react-native-svg": ">=15",
-    "react-native-webrtc": ">=124"
+    "react-native-webrtc": ">=124",
+    "react-native-webview": ">=13"
   },
   "peerDependenciesMeta": {
     "react-native-markdown-display": {
       "optional": true
     },
     "react-native-webrtc": {
+      "optional": true
+    },
+    "react-native-webview": {
       "optional": true
     }
   }
