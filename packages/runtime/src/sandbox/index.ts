@@ -862,6 +862,12 @@ function withDockerNetwork(client: SandboxClient, network: string | undefined): 
             await wrapSession(await exactResume.call(client, state)),
         }
       : {}),
+    ...("attachWorkspaceForDrain" in client && typeof client.attachWorkspaceForDrain === "function"
+      ? {
+          // A drain handle has no networking or normal execution capability.
+          attachWorkspaceForDrain: client.attachWorkspaceForDrain.bind(client),
+        }
+      : {}),
     ...(client.delete
       ? {
           delete: async (state: SandboxSessionState) => await client.delete!(state),

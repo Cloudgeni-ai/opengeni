@@ -18,6 +18,16 @@ provider archive protocols retain their existing compatibility paths; this is
 not a bounded-memory guarantee for those paths. Existing archive limits and
 capture/publication ownership fences remain authoritative and unchanged.
 
+Docker drain's protected SDK receipt binds the canonical host root to its
+native daemon and exact container/session/mount authority. Current scoped
+lease/epoch/capture checks grant the reaper its read; the receipt alone does not.
+The codec compares recorded device/inode/UID/GID/mode on the opened root
+directory before inventory or file reads, preserving descriptor-relative
+no-symlink access. A missing/stopped legacy container without sufficient custody,
+changed root ownership, unknown observation or failed capture stays unresolved.
+The drain attachment cannot execute commands or replace a container. Exact
+post-publication container teardown leaves the host workspace intact.
+
 The logical revision stays unchanged; physical locators append a random upload
 UUID before `.tar`. Application-owned unique keys isolate simultaneous attempts
 and malformed producers from existing checkpoints. This is not provider-enforced

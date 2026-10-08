@@ -130,7 +130,6 @@ import {
   resolveModalCheckpointProviderBindingForSession,
   querySelfhostedOp,
   resumeExactSandboxSession,
-  sandboxProviderContinuityForState,
   sandboxBackendForSdkBackendId,
   sandboxProviderInstanceIdFromEnvelope,
   sandboxCommandExitCode,
@@ -225,6 +224,10 @@ type DrainSandboxClient = {
   resume?: (state: unknown) => Promise<unknown>;
   deserializeSessionState?: (state: Record<string, unknown>) => Promise<unknown>;
   delete?: (state: unknown) => Promise<void>;
+  attachWorkspaceForDrain?: (
+    state: unknown,
+    assertCurrentCapture: () => Promise<{ archivePublished: boolean }>,
+  ) => Promise<PersistableSession>;
 };
 
 /**
@@ -282,6 +285,7 @@ export type TerminateBoxFn = (
   releaseFailedCapture?: () => Promise<void>,
   workspaceId?: string,
   beforeProviderStop?: () => Promise<void>,
+  beforeWorkspaceCapture?: () => Promise<{ archivePublished: boolean }>,
 ) => Promise<boolean | ProviderTerminationOutcome>;
 
 export type SweepModalOrphansFn = (
@@ -546,6 +550,7 @@ export function createSandboxLeaseActivities(
       releaseFailedCapture,
       workspaceId,
       beforeProviderStop,
+      beforeWorkspaceCapture,
     ) =>
       await terminateProviderBox(
         settings,
@@ -561,6 +566,7 @@ export function createSandboxLeaseActivities(
         releaseFailedCapture,
         workspaceId,
         beforeProviderStop,
+        beforeWorkspaceCapture,
       ));
   const sweepModalOrphans: SweepModalOrphansFn =
     options.sweepModalOrphans ?? sweepModalOrphansForConfiguredBackend;
@@ -3537,6 +3543,23 @@ async function terminateDrainableBox(
         },
         row.workspaceId,
         beforeProviderStop,
+        backend === "docker"
+          ? async () => {
+              if (!captureClaim || !lease.instanceId)
+                throw new Error("Docker drain has no current claimed capture");
+              return await verifyDockerDrainCaptureFence(db, {
+                accountId,
+                workspaceId: row.workspaceId,
+                sandboxGroupId: row.sandboxGroupId,
+                leaseId: lease.id,
+                leaseEpoch: row.leaseEpoch,
+                instanceId: lease.instanceId,
+                workspaceGeneration: captureClaim.workspaceGeneration,
+                captureId: captureClaim.id,
+                providerRequestId: captureClaim.providerRequestId,
+              });
+            }
+          : undefined,
       );
   const terminated = typeof termination === "boolean" ? termination : termination.terminated;
   if (!terminated) {
@@ -3721,6 +3744,56 @@ function providerDrainLogIdentity(
  * draining until its adapter can prove termination. A truly instance-less or
  * `none`-backed row is a no-op.
  */
+/** Internal server pre-read fence; not a grant to arbitrary callers. The
+ * owning drain already derived account/workspace/group authority and claimed
+ * capture through the canonical DB lifecycle. No claim is fabricated here. */
+export async function verifyDockerDrainCaptureFence(
+  db: ActivityServices["db"],
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    leaseId: string;
+    leaseEpoch: number;
+    instanceId: string;
+    workspaceGeneration: number;
+    captureId: string;
+    providerRequestId: string;
+  },
+  readers = { readLease, readWorkspaceArchiveCapturePreflight },
+): Promise<{ archivePublished: boolean }> {
+  const current = await readers.readLease(db, input.workspaceId, input.sandboxGroupId);
+  if (
+    !current ||
+    current.id !== input.leaseId ||
+    current.liveness !== "draining" ||
+    current.leaseEpoch !== input.leaseEpoch ||
+    current.instanceId !== input.instanceId ||
+    current.backend !== "docker" ||
+    current.workspaceGeneration !== input.workspaceGeneration ||
+    current.archiveCapture?.id !== input.captureId ||
+    current.archiveCapture.providerRequestId !== input.providerRequestId ||
+    current.archiveCapture.workspaceGeneration !== input.workspaceGeneration
+  )
+    throw new Error("Docker drain capture lease/epoch/claim changed");
+  const preflight = await readers.readWorkspaceArchiveCapturePreflight(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sandboxGroupId: input.sandboxGroupId,
+    expectedEpoch: input.leaseEpoch,
+    expectedInstanceId: input.instanceId,
+    liveness: "draining",
+  });
+  if (!preflight || preflight.workspaceGeneration !== input.workspaceGeneration)
+    throw new Error("Docker drain capture has an active writer or changed generation");
+  return {
+    archivePublished:
+      current.archiveCapture.publishedAt instanceof Date &&
+      Number.isFinite(current.archiveCapture.publishedAt.getTime()) &&
+      current.archiveComplete === true,
+  };
+}
+
 export async function terminateProviderBox(
   settings: ActivityServices["settings"],
   lease: NonNullable<Awaited<ReturnType<typeof readLease>>>,
@@ -3735,6 +3808,7 @@ export async function terminateProviderBox(
   releaseFailedCapture?: () => Promise<void>,
   workspaceId?: string,
   beforeProviderStop?: () => Promise<void>,
+  beforeWorkspaceCapture?: () => Promise<{ archivePublished: boolean }>,
 ): Promise<ProviderTerminationOutcome> {
   const durableBackendId = (lease.resumeBackendId ?? lease.backend) as string;
   const backend = sandboxBackendForSdkBackendId(durableBackendId) ?? durableBackendId;
@@ -3883,7 +3957,7 @@ export async function terminateProviderBox(
   let session: PersistableSession | undefined;
   let sessionState: Parameters<typeof terminateManagedSandboxSession>[1] | undefined;
   try {
-    if (!client.resume || !client.deserializeSessionState) {
+    if (!client.deserializeSessionState || (backend !== "docker" && !client.resume)) {
       // A cloud backend that cannot prove provider state is not safely
       // terminable: treating this as success would cold the lease while the
       // provider may still be live. Leave it draining for a later retry.
@@ -3910,16 +3984,25 @@ export async function terminateProviderBox(
     if (resumedState === undefined) {
       throw new Error(`sandbox backend ${backend} returned no resumable provider state`);
     }
-    const continuity = sandboxProviderContinuityForState(backend, resumedState, lease.instanceId);
-    const resumed = await resumeExactSandboxSession(
-      client,
-      backend,
-      resumedState,
-      lease.instanceId,
-      continuity ? { continuity } : undefined,
-    );
-    session = resumed.session as PersistableSession;
-    sessionState = resumed.sessionState;
+    if (backend === "docker") {
+      if (!client.attachWorkspaceForDrain || !beforeWorkspaceCapture) {
+        throw new Error(
+          "Docker drain requires a creation-free attachment and current capture fence",
+        );
+      }
+      await beforeWorkspaceCapture();
+      session = await client.attachWorkspaceForDrain(resumedState, beforeWorkspaceCapture);
+      sessionState = resumedState;
+    } else {
+      const resumed = await resumeExactSandboxSession(
+        client,
+        backend,
+        resumedState,
+        lease.instanceId,
+      );
+      session = resumed.session as PersistableSession;
+      sessionState = resumed.sessionState;
+    }
   } catch (error) {
     if (isProviderSandboxNotFoundError(client.backendId, error)) {
       observability.info("sandbox reaper: drainable box already gone before workspace capture", {

@@ -2618,7 +2618,25 @@ transaction; the transaction takes the session-event prefix (workspace control,
 workspace, session) before any blocker or lease row, and only when such a
 command exists; if a command was linked in the gap before the blockers were
 locked, it rolls back and retries (bounded) rather than lock a session late. Terminal processes and every
-other epoch/provider remain untouched. During idle drain, a resumable cloud box
+other epoch/provider remain untouched. During idle drain, Docker uses a capture-only attachment, not its ordinary
+SDK resume. Ordinary resume can restart a missing wrapper on a preserved host
+workspace; if capture fails before the new ID is published, repeating that
+resume would leak same-identity siblings. The reaper instead requires the current
+scoped lease/epoch/capture-claim and writer fence, plus protected SDK ownership
+evidence for the native daemon, exact container/session and mount fingerprint,
+and canonical root device/inode/UID/GID/mode. A verified exact-live SDK attachment
+may mint this evidence; a stopped/missing legacy envelope without it cannot.
+The evidence is protected provider state, never authority from a caller's JSON
+shape, a temporary path name, a sibling label or NotFound. The drain handle has
+no normal execution, viewer, resume, hydration or close surface. Its host reader
+compares the opened directory descriptor to that evidence before inventory.
+Capture/publication/observation errors remain failures; absence is not archive
+completion. Published-capture retries skip recapture only under the existing
+claim/CAS. Exact-container teardown preserves the host workspace and does not
+invoke SDK close's recursive workspace cleanup. Other providers and elected
+normal cold-continuity owners retain their existing rules.
+
+During idle drain, a resumable cloud box
 is deleted only after a verified workspace capture is durably folded onto the
 fenced lease. Definitive `NOT_FOUND` before capture preserves any existing
 archive or records typed unrecoverable truth when no durable revision exists.
