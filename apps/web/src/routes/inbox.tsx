@@ -10,9 +10,12 @@ import type {
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
 import { HumanInputForm } from "@opengeni/react/session-ui";
+import { parseNotificationText, type NotificationSpan } from "@opengeni/react/timeline-model";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  ArrowUpRightIcon,
   BellIcon,
+  BellRingIcon,
   CheckIcon,
   CirclePauseIcon,
   InboxIcon,
@@ -66,11 +69,97 @@ const KIND_WORD: Record<InboxItem["kind"], string> = {
   notification: "",
 };
 
-function KindIcon({ kind }: { kind: InboxItem["kind"] }) {
-  if (kind === "question") return <MessageCircleQuestionIcon />;
-  if (kind === "approval") return <ShieldCheckIcon />;
-  if (kind === "goal_paused") return <CirclePauseIcon />;
-  return <BellIcon />;
+function KindIcon({ item }: { item: InboxItem }) {
+  if (item.kind === "question") return <MessageCircleQuestionIcon />;
+  if (item.kind === "approval") return <ShieldCheckIcon />;
+  if (item.kind === "goal_paused") return <CirclePauseIcon />;
+  return item.urgency === "time_sensitive" ? (
+    <BellRingIcon className="text-status-waiting" />
+  ) : (
+    <BellIcon />
+  );
+}
+
+function Spans({ spans }: { spans: NotificationSpan[] }) {
+  return spans.map((span, index) => {
+    if (span.kind === "bold") {
+      return (
+        <strong key={index} className="font-medium text-fg">
+          {span.text}
+        </strong>
+      );
+    }
+    if (span.kind === "code") {
+      return (
+        <code
+          key={index}
+          className="rounded-[4px] bg-surface-2 px-1 py-px font-mono text-[0.8125rem] text-fg"
+        >
+          {span.text}
+        </code>
+      );
+    }
+    if (span.kind === "link") {
+      return (
+        <a
+          key={index}
+          href={span.href}
+          target="_blank"
+          rel="noreferrer"
+          className="pointer-events-auto relative z-10 text-fg underline decoration-border-strong underline-offset-2 hover:decoration-fg"
+        >
+          {span.text}
+        </a>
+      );
+    }
+    return <span key={index}>{span.text}</span>;
+  });
+}
+
+/**
+ * An agent's notification: its message (short paragraphs and bullets) and the
+ * facts it chose to show, as a quiet two-column list.
+ */
+function NotificationContent({ item }: { item: InboxItem }) {
+  const blocks = parseNotificationText(item.body);
+  if (blocks.length === 0 && item.facts.length === 0) return null;
+  return (
+    <div className="mt-0.5 flex min-w-0 flex-col gap-2">
+      {blocks.length > 0 ? (
+        <div className="flex min-w-0 flex-col gap-1.5 text-sm leading-5 text-fg-muted break-words">
+          {blocks.map((block, index) =>
+            block.kind === "paragraph" ? (
+              <p key={index} className="m-0 whitespace-pre-line">
+                <Spans spans={block.spans} />
+              </p>
+            ) : (
+              <ul key={index} className="m-0 flex list-none flex-col gap-0.5 p-0">
+                {block.items.map((spans, bullet) => (
+                  <li key={bullet} className="relative pl-3.5">
+                    <span
+                      aria-hidden="true"
+                      className="absolute left-0.5 top-[9px] size-1 rounded-full bg-fg-subtle"
+                    />
+                    <Spans spans={spans} />
+                  </li>
+                ))}
+              </ul>
+            ),
+          )}
+        </div>
+      ) : null}
+      {item.facts.length > 0 ? (
+        <dl className="m-0 grid min-w-0 grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-0.5 text-[0.8125rem] leading-5">
+          {item.facts.map((fact) => (
+            <div key={fact.label} className="contents">
+              <dt className="text-fg-subtle">{fact.label}</dt>
+              <dd className="m-0 min-w-0 truncate tabular-nums text-fg">{fact.value}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
+    </div>
+  );
 }
 
 function isSnoozed(item: InboxItem, now: number): boolean {
@@ -115,10 +204,13 @@ function InboxList({ label, children }: { label: string; children: ReactNode }) 
 }
 
 function InboxRow(props: {
-  kind: InboxItem["kind"];
+  item: InboxItem;
   unread: boolean;
   title: string;
+  subtitle?: string;
   body?: ReactNode;
+  /** Rich content shown in full (a notification's message and facts). */
+  content?: ReactNode;
   meta: string[];
   when: string;
   actions?: ReactNode;
@@ -141,7 +233,7 @@ function InboxRow(props: {
           onClick={props.onOpen}
         />
         <span className="pointer-events-none relative mt-0.5 inline-flex shrink-0 self-start">
-          <LogoTile icon={<KindIcon kind={props.kind} />} />
+          <LogoTile icon={<KindIcon item={props.item} />} />
           {props.unread ? (
             <span
               aria-label="Unread"
@@ -153,11 +245,17 @@ function InboxRow(props: {
           <p className="line-clamp-2 min-w-0 text-sm font-medium leading-5 text-fg break-words">
             {props.title}
           </p>
+          {props.subtitle ? (
+            <p className="line-clamp-1 min-w-0 text-[0.8125rem] leading-5 text-fg-subtle break-words">
+              {props.subtitle}
+            </p>
+          ) : null}
           {props.body ? (
             <div className="line-clamp-2 min-w-0 text-sm leading-5 text-fg-muted break-words">
               {props.body}
             </div>
           ) : null}
+          {props.content}
           <p className="mt-0.5 flex min-w-0 items-baseline text-xs leading-[18px] text-fg-subtle">
             <span className="min-w-0 truncate">{props.meta.join(" · ")}</span>
             <span aria-hidden="true" className="shrink-0 px-1">
@@ -254,10 +352,12 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     return () => window.clearTimeout(timer);
   }, [items, context.client, patchItems]);
 
+  // Opens on the moment the item was raised, not just the latest message.
   const openSession = (item: InboxItem) =>
     void navigate({
       to: "/workspaces/$workspaceId/sessions/$sessionId",
       params: { workspaceId: item.workspaceId, sessionId: item.sessionId },
+      search: item.eventSequence ? { at: item.eventSequence } : {},
     });
 
   const leave = (item: InboxItem) =>
@@ -340,13 +440,15 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
         </code>
       );
     }
-    if (item.kind === "notification") return item.body;
     return undefined;
   };
 
   // Where it comes from. The kind word is left out where the row already says it.
   const meta = (item: InboxItem): string[] => {
     const parts: string[] = [];
+    if (item.kind === "notification" && item.urgency === "time_sensitive") {
+      parts.push("Time-sensitive");
+    }
     if (item.kind === "goal_paused" || item.kind === "question") parts.push(KIND_WORD[item.kind]);
     if (item.kind === "approval" && !item.body) parts.push(KIND_WORD.approval);
     parts.push(item.sessionTitle ?? "Untitled session");
@@ -393,6 +495,16 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
         </RowButton>
       );
     }
+    if (item.kind === "notification" && item.link) {
+      return (
+        <RowButton asChild>
+          <a href={item.link.url} target="_blank" rel="noreferrer">
+            {item.link.label}
+            <ArrowUpRightIcon />
+          </a>
+        </RowButton>
+      );
+    }
     return null;
   };
 
@@ -401,10 +513,12 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     return (
       <InboxRow
         key={item.id}
-        kind={item.kind}
+        item={item}
         unread={item.kind === "notification" && unread}
         title={item.title}
+        subtitle={item.subtitle || undefined}
         body={description(item)}
+        content={item.kind === "notification" ? <NotificationContent item={item} /> : undefined}
         meta={meta(item)}
         when={item.updatedAt}
         actions={control(item)}

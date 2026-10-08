@@ -13,7 +13,11 @@ export type InboxItemRow = {
   kind: "question" | "approval" | "goal_paused" | "notification";
   sourceKey: string;
   title: string;
+  subtitle: string;
   body: string;
+  facts: Array<{ label: string; value: string }>;
+  link: { url: string; label: string } | null;
+  eventSequence: number | null;
   choices: Array<{ id: string; label: string }>;
   urgency: "normal" | "time_sensitive";
   status: "open" | "resolved" | "withdrawn" | "dismissed";
@@ -31,7 +35,11 @@ type InboxItemRecord = {
   kind: InboxItemRow["kind"];
   source_key: string;
   title: string;
+  subtitle: string;
   body: string;
+  facts: unknown;
+  link: unknown;
+  event_sequence: number | null;
   choices: unknown;
   urgency: InboxItemRow["urgency"];
   status: InboxItemRow["status"];
@@ -60,6 +68,31 @@ function choicesOf(value: unknown): Array<{ id: string; label: string }> {
   });
 }
 
+function jsonValue(value: unknown): unknown {
+  return typeof value === "string" ? (JSON.parse(value) as unknown) : value;
+}
+
+function factsOf(value: unknown): Array<{ label: string; value: string }> {
+  const parsed = jsonValue(value);
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .flatMap((fact: unknown) => {
+      if (typeof fact !== "object" || fact === null) return [];
+      const { label, value: text } = fact as { label?: unknown; value?: unknown };
+      return typeof label === "string" && typeof text === "string" ? [{ label, value: text }] : [];
+    })
+    .slice(0, 4);
+}
+
+function linkOf(value: unknown): { url: string; label: string } | null {
+  const parsed = jsonValue(value);
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const { url, label } = parsed as { url?: unknown; label?: unknown };
+  return typeof url === "string" && /^https:\/\//iu.test(url) && typeof label === "string"
+    ? { url, label }
+    : null;
+}
+
 /** The person's open items in one account, newest first. */
 export async function listInboxItems(
   db: Database,
@@ -67,7 +100,7 @@ export async function listInboxItems(
 ): Promise<InboxItemRow[]> {
   const rows = await rawRows<InboxItemRecord>(
     db,
-    sql`select * from opengeni_private.list_inbox_items_v1(
+    sql`select * from opengeni_private.list_inbox_items_v2(
       ${input.accountId}::uuid, ${input.subjectId}::text
     )`,
   );
@@ -78,7 +111,11 @@ export async function listInboxItems(
     kind: row.kind,
     sourceKey: row.source_key,
     title: row.title,
+    subtitle: row.subtitle ?? "",
     body: row.body,
+    facts: factsOf(row.facts),
+    link: linkOf(row.link),
+    eventSequence: row.event_sequence ?? null,
     choices: choicesOf(row.choices),
     urgency: row.urgency,
     status: row.status,

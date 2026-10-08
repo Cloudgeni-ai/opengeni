@@ -308,6 +308,50 @@ describe("0655 inbox", () => {
     expect(items.map((item) => [item.kind, item.sessionId])).toEqual([["question", child.id]]);
   });
 
+  test("a notification carries its subtitle, message, facts and link; every item its moment (0664)", async () => {
+    if (!client) return;
+    const person = await personWithSession("notify-rich");
+    const [question] = await appendSessionEvents(
+      db(),
+      person.scope.workspaceId,
+      person.session.id,
+      [
+        {
+          type: "session.humanInput.requested",
+          payload: { request: { id: "rich-q", questions: [{ prompt: "Ship it?" }] } },
+        },
+      ],
+    );
+    const body = `Deployed **all** services:\n- api\n- web\n${"x".repeat(600)}`;
+    const [posted] = await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+      {
+        type: "session.notification.posted",
+        payload: {
+          key: "release",
+          title: "Release is out",
+          subtitle: "v2.4.0",
+          body,
+          facts: [{ label: "Tests", value: "412 passed" }],
+          link: { url: "https://example.com/pr/1", label: "Pull request" },
+          urgency: "time_sensitive",
+          replaced: false,
+        },
+      },
+    ]);
+    const items = await inbox(person);
+    const note = items.find((item) => item.kind === "notification");
+    expect(note).toMatchObject({
+      subtitle: "v2.4.0",
+      body,
+      facts: [{ label: "Tests", value: "412 passed" }],
+      link: { url: "https://example.com/pr/1", label: "Pull request" },
+      urgency: "time_sensitive",
+      eventSequence: posted!.sequence,
+    });
+    // Every item remembers the moment that raised it (0664).
+    expect(items.find((item) => item.kind === "question")?.eventSequence).toBe(question!.sequence);
+  });
+
   test("notifications update in place, keep the person's dismissal, and can be withdrawn", async () => {
     if (!client) return;
     const person = await personWithSession("notify");
