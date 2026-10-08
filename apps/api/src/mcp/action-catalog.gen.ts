@@ -2409,6 +2409,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "browserOnly": "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user"
   },
   {
+    "id": "getInboxSettings",
+    "method": "GET",
+    "path": "/v1/inbox/settings",
+    "request": [],
+    "response": [
+      "InboxSettings"
+    ],
+    "browserOnly": "the person's inbox requires their own signed-in browser session"
+  },
+  {
     "id": "getInstalledPluginDetails",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/plugins/details",
@@ -3658,6 +3668,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ExternalIdentityLinkPage"
     ],
     "browserOnly": "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user"
+  },
+  {
+    "id": "listInbox",
+    "method": "GET",
+    "path": "/v1/inbox",
+    "request": [],
+    "response": [
+      "ListInboxResponse"
+    ],
+    "browserOnly": "the person's inbox requires their own signed-in browser session"
   },
   {
     "id": "listInstalledPlugins",
@@ -6350,6 +6370,28 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "SessionGoal"
     ]
+  },
+  {
+    "id": "updateInboxItem",
+    "method": "PATCH",
+    "path": "/v1/inbox/items/:itemId",
+    "request": [
+      "InboxItem"
+    ],
+    "response": [],
+    "browserOnly": "the person's inbox requires their own signed-in browser session"
+  },
+  {
+    "id": "updateInboxSettings",
+    "method": "PUT",
+    "path": "/v1/inbox/settings",
+    "request": [
+      "InboxSettings"
+    ],
+    "response": [
+      "InboxSettings"
+    ],
+    "browserOnly": "the person's inbox requires their own signed-in browser session"
   },
   {
     "id": "updateMachineAgent",
