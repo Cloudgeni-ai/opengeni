@@ -198,6 +198,36 @@ export async function setInboxTidyPolicy(
   return row?.policy ?? input.policy;
 }
 
+/**
+ * The person a session works for (its owner, else the person who started it)
+ * and its parent, or null for sessions no person owns. Matches the recipient
+ * the inbox projection uses (0656).
+ */
+export async function getSessionInboxRecipient(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ subjectId: string; parentSessionId: string | null } | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        owner: schema.sessions.ownerSubjectId,
+        creator: schema.sessions.createdBySubjectId,
+        parent: schema.sessions.parentSessionId,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!row) return null;
+    const subjectId = row.owner?.startsWith("user:")
+      ? row.owner
+      : row.creator.startsWith("user:")
+        ? row.creator
+        : null;
+    return subjectId ? { subjectId, parentSessionId: row.parent ?? null } : null;
+  });
+}
+
 /** Titles of sessions in one workspace, read under that workspace's context. */
 export async function getSessionTitles(
   db: Database,
