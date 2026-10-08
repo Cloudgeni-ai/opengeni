@@ -2467,6 +2467,7 @@ describe("release schema contract", () => {
       "0649_session_content_archive.sql",
       "0650_session_archive_activity.sql",
       "0651_session_event_delta_folding.sql",
+      "0652_session_archive_guard_search_path.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
