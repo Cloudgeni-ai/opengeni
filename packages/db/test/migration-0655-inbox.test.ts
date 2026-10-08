@@ -11,8 +11,10 @@ import {
   createSession,
   dismissInboxNotification,
   getInboxItem,
+  getInboxSettings,
   getInboxTidyPolicy,
   listInboxItems,
+  setInboxSettings,
   setInboxTidyPolicy,
   updateInboxItemAttention,
   type DbClient,
@@ -227,9 +229,37 @@ describe("0655 inbox", () => {
     expect(bySource.get("multi")).toEqual([]);
   });
 
+  test("paused goals stay out of the inbox until the person turns them on (0663)", async () => {
+    if (!client) return;
+    const person = await personWithSession("goal-off");
+    const owner = { accountId: person.scope.accountId, subjectId: person.subjectId };
+    expect(await getInboxSettings(db(), owner)).toEqual({
+      tidyPolicy: "own_sessions",
+      pausedGoals: false,
+    });
+    await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+      {
+        type: "goal.paused",
+        payload: { actor: "agent", reason: "agent", rationale: "Done for now" },
+      },
+    ]);
+    expect(await inbox(person)).toHaveLength(0);
+    // A partial change keeps the other setting.
+    await setInboxSettings(db(), { ...owner, tidyPolicy: "any_agent" });
+    expect(await setInboxSettings(db(), { ...owner, pausedGoals: true })).toEqual({
+      tidyPolicy: "any_agent",
+      pausedGoals: true,
+    });
+  });
+
   test("an agent's pause waits on the person until the goal resumes", async () => {
     if (!client) return;
     const person = await personWithSession("goal");
+    await setInboxSettings(db(), {
+      accountId: person.scope.accountId,
+      subjectId: person.subjectId,
+      pausedGoals: true,
+    });
     await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
       { type: "goal.paused", payload: { actor: "user", reason: "user" } },
     ]);
@@ -246,6 +276,36 @@ describe("0655 inbox", () => {
       { type: "goal.resumed", payload: { actor: "user" } },
     ]);
     expect(await inbox(person)).toHaveLength(0);
+  });
+
+  test("a sub-agent's paused goal waits on its parent, but its questions reach the person (0661)", async () => {
+    if (!client) return;
+    const person = await personWithSession("sub-agent");
+    const child = await createSession(db(), {
+      ...person.scope,
+      initialMessage: "child",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+      parentSessionId: person.session.id,
+      createdBy: { kind: "subject", subjectId: person.subjectId, label: "User sub-agent" },
+      createdByContext: { label: "User sub-agent" },
+    });
+    await appendSessionEvents(db(), person.scope.workspaceId, child.id, [
+      {
+        type: "goal.paused",
+        payload: { actor: "agent", reason: "agent", rationale: "Waiting for the parent" },
+      },
+      {
+        type: "session.humanInput.requested",
+        payload: { request: { id: "child-question", questions: [{ prompt: "Which region?" }] } },
+      },
+    ]);
+    const items = await inbox(person);
+    expect(items.map((item) => [item.kind, item.sessionId])).toEqual([["question", child.id]]);
   });
 
   test("notifications update in place, keep the person's dismissal, and can be withdrawn", async () => {

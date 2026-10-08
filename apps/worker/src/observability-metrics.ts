@@ -35,6 +35,7 @@ import {
 import {
   MCP_TOOL_METRIC_EXTERNAL_LABEL,
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
+  WORKSPACE_CAPTURE_SKIP_REASONS,
   isMcpToolMetricLabel,
   modelUsageTokenCountOrNull,
   type RuntimeMetricsHooks,
@@ -244,6 +245,17 @@ export function runtimeMetricsHooksForObservability(
         help: "Physical warm workspace capture and publication duration, including late settlement after caller timeout.",
         labels: { backend: safeBackend, outcome },
         value: durationSeconds,
+      });
+    },
+    onWorkspaceCaptureSkipped: ({ backend, reason }) => {
+      const safeBackend = SandboxBackend.safeParse(backend).success ? backend : "unknown";
+      const safeReason = (WORKSPACE_CAPTURE_SKIP_REASONS as readonly string[]).includes(reason)
+        ? reason
+        : "unknown";
+      observability.incrementCounter({
+        name: "opengeni_workspace_capture_skipped_total",
+        help: "Due warm workspace checkpoints that could not start, by backend and fixed reason. Not-yet-due (throttled) and already-complete checkpoints are excluded.",
+        labels: { backend: safeBackend, reason: safeReason },
       });
     },
     onWorkspaceArchiveObject: ({ outcome, backend }) => {

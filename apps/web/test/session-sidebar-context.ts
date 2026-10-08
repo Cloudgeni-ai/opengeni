@@ -316,8 +316,6 @@ const context = {
   session: null,
   accessContext: { subjectId },
   sessionChannelProjectionAuthority: new SessionChannelProjectionAuthority(),
-  // SessionList reads deployment features (Read-only chats) from client config.
-  clientConfig: {},
   captureWorkspaceInvocation: () => invocation,
   ownsWorkspaceInvocation: (_workspace: string, accepted: unknown) => accepted === invocation,
   setSession: () => {},

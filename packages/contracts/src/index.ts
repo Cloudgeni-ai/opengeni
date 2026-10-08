@@ -6124,6 +6124,9 @@ export const SessionToolPolicy = z.object({
   mode: z.enum(["workspace_default", "explicit", "inherited"]),
   inheritedFromSessionId: z.string().uuid().nullable(),
   excludedMcpServerIds: SessionExcludedMcpServerIds.optional(),
+  // Independent of connector selection. Absence preserves an ambiguous legacy
+  // snapshot; only an explicit default intent follows future built-in tools.
+  firstPartyMode: z.enum(["workspace_default", "explicit"]).optional(),
 });
 export type SessionToolPolicy = z.infer<typeof SessionToolPolicy>;
 
@@ -10411,6 +10414,9 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
         sandboxBackend: SandboxBackend,
         sandboxOs: SandboxOs,
         firstPartyMcpTools: z.array(FirstPartyMcpToolName),
+        // Keep the stored list above for the admission CAS. This independent
+        // effective snapshot follows defaults once, never during recovery.
+        effectiveFirstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
         firstPartyMcpPermissions: z.array(Permission).nullable(),
         toolPolicy: SessionToolPolicy,
         mcpServerIds: z.array(z.string().min(1).max(256)).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
@@ -14447,8 +14453,21 @@ export const InboxTidyPolicy = z.enum([
 ]);
 export type InboxTidyPolicy = z.infer<typeof InboxTidyPolicy>;
 
-export const InboxSettings = z.object({ tidyPolicy: InboxTidyPolicy });
+export const InboxSettings = z.object({
+  tidyPolicy: InboxTidyPolicy,
+  /** Show goals an agent paused in the person's own sessions. Off by default. */
+  pausedGoals: z.boolean(),
+});
 export type InboxSettings = z.infer<typeof InboxSettings>;
+
+/** Change some inbox settings; omitted ones stay as they are. */
+export const UpdateInboxSettingsRequest = z
+  .object({ tidyPolicy: InboxTidyPolicy.optional(), pausedGoals: z.boolean().optional() })
+  .strict()
+  .refine((value) => value.tidyPolicy !== undefined || value.pausedGoals !== undefined, {
+    message: "Change at least one setting",
+  });
+export type UpdateInboxSettingsRequest = z.infer<typeof UpdateInboxSettingsRequest>;
 
 export const ToolAuthNeededPayload = z
   .object({

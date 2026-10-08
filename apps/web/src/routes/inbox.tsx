@@ -4,6 +4,7 @@
 // withdrawn or dismissed, and it always stays in its session's timeline.
 import type {
   InboxItem,
+  InboxSettings,
   InboxTidyPolicy,
   SessionHumanInputRequest,
   SubmitHumanInputResponseRequest,
@@ -49,7 +50,9 @@ import { PageHeader } from "@/components/ui/page-header";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
+import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import { Toolbar } from "@/components/ui/toolbar";
 import { useAppContext } from "@/context";
 import { apiErrorFacts, userErrorText } from "@/lib/api-error";
@@ -519,7 +522,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
           ) : null}
           <SectionStack>
             {body}
-            {inboxEnabled ? <TidySetting /> : null}
+            {inboxEnabled ? <InboxSettingsSections /> : null}
           </SectionStack>
         </div>
       </div>
@@ -536,37 +539,38 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
 }
 
 /**
- * Who may clear things out of the person's inbox. An agent can always update or
- * withdraw what it posted; this decides whether other agents may tidy too.
- * Answering and approving stay with the person either way.
+ * The person's inbox settings. Paused goals are off by default: a goal the
+ * agent paused usually reads like its reply, and the reply is already in the
+ * session. The tidy policy decides which agents may remove items; answering
+ * and approving stay with the person either way.
  */
-function TidySetting() {
+function InboxSettingsSections() {
   const context = useAppContext();
-  const [policy, setPolicy] = useState<InboxTidyPolicy | null>(null);
+  const [settings, setSettings] = useState<InboxSettings | null>(null);
   const [saving, setSaving] = useState(false);
   useEffect(() => {
     let current = true;
     void context.client
       .getInboxSettings()
-      .then((settings) => {
-        if (current) setPolicy(settings.tidyPolicy);
+      .then((loaded) => {
+        if (current) setSettings(loaded);
       })
       .catch(() => {
-        if (current) setPolicy("own_sessions");
+        if (current) setSettings({ tidyPolicy: "own_sessions", pausedGoals: false });
       });
     return () => {
       current = false;
     };
   }, [context.client]);
 
-  const change = async (next: InboxTidyPolicy) => {
-    const previous = policy;
-    setPolicy(next);
+  const change = async (next: Partial<InboxSettings>) => {
+    const previous = settings;
+    if (previous) setSettings({ ...previous, ...next });
     setSaving(true);
     try {
-      await context.client.updateInboxSettings({ tidyPolicy: next });
+      setSettings(await context.client.updateInboxSettings(next));
     } catch (error) {
-      setPolicy(previous);
+      setSettings(previous);
       toast.error(userErrorText(error, "Couldn't save that. Try again."));
     } finally {
       setSaving(false);
@@ -574,36 +578,59 @@ function TidySetting() {
   };
 
   return (
-    <Section
-      title="Who can tidy your inbox"
-      description="Agents never answer or approve for you. This only decides who may remove items."
-    >
-      {policy === null ? (
-        <div className="grid gap-3 pt-1" aria-busy="true">
-          <Skeleton className="h-5 w-1/2" />
-          <Skeleton className="h-5 w-1/2" />
-        </div>
-      ) : (
-        <ChoiceCards
-          variant="list"
-          aria-label="Who can tidy your inbox"
-          value={policy}
-          disabled={saving}
-          onValueChange={(value) => void change(value as InboxTidyPolicy)}
-        >
-          <ChoiceCard
-            value="own_sessions"
-            title="The agent that posted it"
-            description="Or the sessions that started that agent."
-          />
-          <ChoiceCard
-            value="any_agent"
-            title="Any agent working for you"
-            description="Lets one agent look after your inbox and clear what's done."
-          />
-        </ChoiceCards>
-      )}
-    </Section>
+    <>
+      <Section title="What reaches your inbox">
+        {settings === null ? (
+          <div className="grid gap-3 pt-1" aria-busy="true">
+            <Skeleton className="h-5 w-1/2" />
+          </div>
+        ) : (
+          <SettingRowGroup>
+            <SettingRow
+              label="Paused goals"
+              description="When an agent pauses a goal it's working on for you. Off keeps them in their sessions only."
+              control={
+                <Switch
+                  checked={settings.pausedGoals}
+                  pending={saving}
+                  onCheckedChange={(checked) => void change({ pausedGoals: checked })}
+                />
+              }
+            />
+          </SettingRowGroup>
+        )}
+      </Section>
+      <Section
+        title="Who can tidy your inbox"
+        description="Agents never answer or approve for you. This only decides who may remove items."
+      >
+        {settings === null ? (
+          <div className="grid gap-3 pt-1" aria-busy="true">
+            <Skeleton className="h-5 w-1/2" />
+            <Skeleton className="h-5 w-1/2" />
+          </div>
+        ) : (
+          <ChoiceCards
+            variant="list"
+            aria-label="Who can tidy your inbox"
+            value={settings.tidyPolicy}
+            disabled={saving}
+            onValueChange={(value) => void change({ tidyPolicy: value as InboxTidyPolicy })}
+          >
+            <ChoiceCard
+              value="own_sessions"
+              title="The agent that posted it"
+              description="Or the sessions that started that agent."
+            />
+            <ChoiceCard
+              value="any_agent"
+              title="Any agent working for you"
+              description="Lets one agent look after your inbox and clear what's done."
+            />
+          </ChoiceCards>
+        )}
+      </Section>
+    </>
   );
 }
 

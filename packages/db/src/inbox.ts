@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
 import * as schema from "./schema";
 
@@ -198,6 +198,48 @@ export async function setInboxTidyPolicy(
   return row?.policy ?? input.policy;
 }
 
+export type InboxSettingsValue = { tidyPolicy: InboxTidyPolicyValue; pausedGoals: boolean };
+
+/** The person's inbox settings in one account (0663). */
+export async function getInboxSettings(
+  db: Database,
+  input: { accountId: string; subjectId: string },
+): Promise<InboxSettingsValue> {
+  const [row] = await rawRows<{ tidy_policy: InboxTidyPolicyValue; paused_goals: boolean }>(
+    db,
+    sql`select * from opengeni_private.inbox_settings_v2(
+      ${input.accountId}::uuid, ${input.subjectId}::text
+    )`,
+  );
+  return {
+    tidyPolicy: row?.tidy_policy ?? "own_sessions",
+    pausedGoals: row?.paused_goals ?? false,
+  };
+}
+
+/** Change some of the person's inbox settings; omitted ones stay as they are. */
+export async function setInboxSettings(
+  db: Database,
+  input: {
+    accountId: string;
+    subjectId: string;
+    tidyPolicy?: InboxTidyPolicyValue | undefined;
+    pausedGoals?: boolean | undefined;
+  },
+): Promise<InboxSettingsValue> {
+  const [row] = await rawRows<{ tidy_policy: InboxTidyPolicyValue; paused_goals: boolean }>(
+    db,
+    sql`select * from opengeni_private.set_inbox_settings_v2(
+      ${input.accountId}::uuid, ${input.subjectId}::text,
+      ${input.tidyPolicy ?? null}::text, ${input.pausedGoals ?? null}::boolean
+    )`,
+  );
+  return {
+    tidyPolicy: row?.tidy_policy ?? input.tidyPolicy ?? "own_sessions",
+    pausedGoals: row?.paused_goals ?? input.pausedGoals ?? false,
+  };
+}
+
 /**
  * The person a session works for (its owner, else the person who started it)
  * and its parent, or null for sessions no person owns. Matches the recipient
@@ -219,11 +261,30 @@ export async function getSessionInboxRecipient(
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .limit(1);
     if (!row) return null;
-    const subjectId = row.owner?.startsWith("user:")
+    let subjectId = row.owner?.startsWith("user:")
       ? row.owner
       : row.creator.startsWith("user:")
         ? row.creator
         : null;
+    if (!subjectId) {
+      // A scheduled run works for the schedule's owner (0661).
+      const [run] = await scopedDb
+        .select({ owner: schema.scheduledTasks.ownerSubjectId })
+        .from(schema.scheduledTaskRuns)
+        .innerJoin(
+          schema.scheduledTasks,
+          eq(schema.scheduledTasks.id, schema.scheduledTaskRuns.taskId),
+        )
+        .where(
+          and(
+            eq(schema.scheduledTaskRuns.workspaceId, workspaceId),
+            eq(schema.scheduledTaskRuns.sessionId, sessionId),
+          ),
+        )
+        .orderBy(desc(schema.scheduledTaskRuns.createdAt))
+        .limit(1);
+      subjectId = run?.owner?.startsWith("user:") ? run.owner : null;
+    }
     return subjectId ? { subjectId, parentSessionId: row.parent ?? null } : null;
   });
 }

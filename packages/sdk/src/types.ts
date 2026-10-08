@@ -5482,7 +5482,14 @@ export type UpdateInboxItemInput = {
 /** Which agents may withdraw or dismiss the person's notifications. */
 export type InboxTidyPolicy = "own_sessions" | "any_agent";
 
-export type InboxSettings = { tidyPolicy: InboxTidyPolicy };
+export type InboxSettings = {
+  tidyPolicy: InboxTidyPolicy;
+  /** Goals an agent paused in the person's own sessions reach the inbox. Off by default. */
+  pausedGoals: boolean;
+};
+
+/** Change some inbox settings; omitted ones stay as they are. */
+export type UpdateInboxSettingsInput = Partial<InboxSettings>;
 
 // --- Native app sign-in (authorization code + PKCE over the app's scheme) ----------------------
 

@@ -326,6 +326,7 @@ import type {
   NativeAppToken,
   InboxItem,
   InboxSettings,
+  UpdateInboxSettingsInput,
   ListInboxResponse,
   UpdateInboxItemInput,
   NativePushDevice,
@@ -8975,7 +8976,7 @@ export class OpenGeniClient {
     return await this.requestJson<InboxSettings>("GET", "/v1/inbox/settings");
   }
 
-  async updateInboxSettings(input: InboxSettings): Promise<InboxSettings> {
+  async updateInboxSettings(input: UpdateInboxSettingsInput): Promise<InboxSettings> {
     return await this.requestJson<InboxSettings>("PUT", "/v1/inbox/settings", input);
   }
 

@@ -95,6 +95,18 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers proven built-in default intent as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0662_session_first_party_default_intent.sql",
+      ),
+    ).toMatchObject({
+      path: "0662_session_first_party_default_intent.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("checks complete ledger metadata against migration files", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     const sourceMigrationPaths = (
@@ -2494,6 +2506,11 @@ describe("release schema contract", () => {
       "0656_inbox_owner_recipient.sql",
       "0657_session_archive_purge_retained_evidence.sql",
       "0658_tenancy_quiescence_ignores_stranded_tool_receipts.sql",
+      "0659_sandbox_capture_concurrent_commands.sql",
+      "0660_session_archive_preference_snapshot_export.sql",
+      "0661_inbox_subagent_goals_and_schedules.sql",
+      "0662_session_first_party_default_intent.sql",
+      "0663_inbox_paused_goal_setting.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

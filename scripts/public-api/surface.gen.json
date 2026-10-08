@@ -22241,6 +22241,7 @@
         "$": "object",
         "$.excludedMcpServerIds": "array?",
         "$.excludedMcpServerIds[]": "string",
+        "$.firstPartyMode": "enum?=[\"\\\"explicit\\\"\",\"\\\"workspace_default\\\"\"]",
         "$.inheritedFromSessionId": "string! null",
         "$.mode": "enum!=[\"\\\"explicit\\\"\",\"\\\"inherited\\\"\",\"\\\"workspace_default\\\"\"]"
       }

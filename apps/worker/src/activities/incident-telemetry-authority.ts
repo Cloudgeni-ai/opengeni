@@ -16,10 +16,11 @@ import {
   listInstalledApiIntegrationServerIdsForDelegations,
   markScheduledTaskRunAuthorityRejectedInTransaction,
   requireSession,
+  requireWorkspace,
   type Database,
 } from "@opengeni/db";
 import {
-  allowedFirstPartyMcpToolsForSession,
+  resolveSessionFirstPartyMcpTools,
   resolveFirstPartyMcpToolPolicy,
   type Settings,
 } from "@opengeni/config";
@@ -172,7 +173,11 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
     firstPartyMcpTools: input.executionPolicy
       ? input.executionPolicy.firstPartyMcpTools
       : input.session
-        ? allowedFirstPartyMcpToolsForSession(input.settings, input.session.firstPartyMcpTools)
+        ? resolveSessionFirstPartyMcpTools(
+            input.settings,
+            input.session,
+            (await requireWorkspace(input.db, input.task.workspaceId)).settings,
+          )
         : resolveFirstPartyMcpToolPolicy(input.settings).default,
     firstPartyMcpPermissions: input.executionPolicy
       ? (input.executionPolicy.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)
@@ -287,7 +292,9 @@ export async function validateIncidentTelemetrySystemUpdateAuthority(input: {
     executionPolicy: acceptedExecution.targetSessionExecution
       ? {
           tools: acceptedExecution.targetSessionExecution.tools,
-          firstPartyMcpTools: acceptedExecution.targetSessionExecution.firstPartyMcpTools,
+          firstPartyMcpTools:
+            acceptedExecution.targetSessionExecution.effectiveFirstPartyMcpTools ??
+            acceptedExecution.targetSessionExecution.firstPartyMcpTools,
           firstPartyMcpPermissions:
             acceptedExecution.targetSessionExecution.firstPartyMcpPermissions,
           variableSetIds: acceptedExecution.targetSessionExecution.variableSets.map(

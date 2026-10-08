@@ -328,7 +328,22 @@ agent access uses its hosted MCP connector. Explicit `[]` means
 no tools from the broad server. Unknown names fail validation. This field does
 not grant authority: every catalog entry also has an explicit registration-time
 permission predicate, and target-scoped authorization still runs on calls.
-Child omission inherits the parent's exact effective selection.
+Omitting the field on a new top-level session follows the workspace's current
+built-in defaults (or the deployment defaults when no workspace override exists).
+`toolPolicy.firstPartyMode: "workspace_default"` records this intent independently
+of connector selection. New defaults are resolved when preparing the next attempt,
+under the deployment allowlist, configured capability families, and permissions.
+An already prepared catalog or signed delegation does not gain tools mid-attempt.
+Child omission inherits both the parent's effective selection and its default or
+pinned intent; an explicit child list can only narrow that selection.
+
+An explicit list, including `[]`, remains pinned. The existing **Reset to workspace
+defaults** action opts an older session into following defaults; editing connector
+exclusions alone preserves its built-in intent. Legacy sessions without that
+intent remain pinned unless their latest retained tool-policy event proves a full
+reset and still matches the stored selection. Migration does not infer intent from
+connector mode or similarity to today's defaults. Scheduled accepted selections
+remain exact snapshots; they are never re-resolved during recovery.
 
 GitHub App installation credentials are deliberately absent from this catalog.
 Repository discovery and browser connect status remain model-visible, but token
