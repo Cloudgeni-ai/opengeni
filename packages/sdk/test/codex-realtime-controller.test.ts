@@ -2127,6 +2127,60 @@ describe("Codex realtime browser controller", () => {
     await controller.stop();
   });
 
+  test("an earlier call whose lease ran out does not fail a call that is starting", async () => {
+    let current = mode();
+    let micRequested = false;
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      now: () => new Date("2026-07-29T07:05:00.000Z"),
+      randomUUID: uuidSource(),
+      ...timerFixture(),
+      getUserMedia: async () => {
+        micRequested = true;
+        return await new Promise<MediaStream>(() => undefined);
+      },
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        negotiateCodexRealtimeWebrtc: async () => {
+          throw new Error("provider negotiation must not start without a microphone");
+        },
+        activateCodexRealtimeConnection: async () => {
+          throw new Error("activation must not start without a microphone");
+        },
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+        endSessionRealtime: async () => {
+          current = mode({ ...current, state: "ended", version: current.version + 1 });
+          return { mode: current, replay: false };
+        },
+      },
+    });
+
+    void controller.start().catch(() => undefined);
+    await eventually(() => micRequested, "microphone was not requested");
+    // The session's events still project an earlier call as active: it was
+    // abandoned, and its lease ran out before the server recorded its end.
+    await controller.observeLifecycle({
+      state: "active",
+      realtimeId: "abababab-abab-4bab-8bab-abababababab",
+      operationId: "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd",
+      model: "gpt-live-1-boulder-alpha",
+      version: 1,
+      connectionEpoch: 1,
+      leaseExpiresAt: "2026-07-29T07:00:30.000Z",
+    });
+    expect(controller.snapshot()).toMatchObject({ status: "starting", error: null });
+    await controller.stop();
+  });
+
   test("ends a call when microphone permission is denied before it connects", async () => {
     let current = mode();
     const ends: string[] = [];
