@@ -2756,6 +2756,26 @@ describe("provider-neutral subscription runtime persistence", () => {
       expect(String((rewindError as { cause?: unknown } | undefined)?.cause)).toContain(
         "refresh generation cannot move backwards",
       );
+      const adminWriteError = async (statement: ReturnType<typeof sql>) => {
+        try {
+          await asAdmin((adminDb) => rawRows(adminDb, statement));
+          return null;
+        } catch (error) {
+          return String((error as { cause?: unknown }).cause ?? error);
+        }
+      };
+      // A credential change may not skip generations, and the generation stays
+      // a JavaScript-safe integer so callers' compare-and-swap never rounds.
+      expect(
+        await adminWriteError(sql`update subscription_connections
+          set credential_encrypted = 'v1:c2tpcA==:c2VjcmV0', refresh_generation = 4
+          where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid`),
+      ).toContain("advances refresh generation by exactly one");
+      expect(
+        await adminWriteError(sql`update subscription_connections
+          set refresh_generation = 9007199254740992
+          where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid`),
+      ).toContain("subscription_connections_refresh_generation_safe_chk");
       const [stored] = await shared!.admin<
         { credential_encrypted: string; refresh_generation: string; version: number }[]
       >`

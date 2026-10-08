@@ -757,11 +757,15 @@ BEGIN
         RAISE EXCEPTION 'subscription connection refresh generation cannot move backwards'
           USING ERRCODE = '23514';
       END IF;
-      IF (NEW.credential_encrypted IS DISTINCT FROM OLD.credential_encrypted
-          OR NEW.credential_format IS DISTINCT FROM OLD.credential_format)
-        AND NEW.refresh_generation = OLD.refresh_generation
+      IF NEW.credential_encrypted IS DISTINCT FROM OLD.credential_encrypted
+        OR NEW.credential_format IS DISTINCT FROM OLD.credential_format
       THEN
-        NEW.refresh_generation := OLD.refresh_generation + 1;
+        IF NEW.refresh_generation = OLD.refresh_generation THEN
+          NEW.refresh_generation := OLD.refresh_generation + 1;
+        ELSIF NEW.refresh_generation <> OLD.refresh_generation + 1 THEN
+          RAISE EXCEPTION 'a credential change advances refresh generation by exactly one'
+            USING ERRCODE = '23514';
+        END IF;
       END IF;
       RETURN NEW;
     END;
@@ -779,6 +783,13 @@ BEGIN
   $ddl$, data_schema);
 END
 $refresh_generation_monotonic$;
+
+-- Callers carry refresh_generation as a JavaScript number; keep it a safe
+-- integer so a compare-and-swap can never round. The table is still inert, so
+-- validating the bound scans nothing of note.
+ALTER TABLE subscription_connections
+  ADD CONSTRAINT subscription_connections_refresh_generation_safe_chk
+  CHECK (refresh_generation <= 9007199254740991);
 
 -- Codex refresh is two calls in one transaction around the provider request.
 --
