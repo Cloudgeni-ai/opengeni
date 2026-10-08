@@ -487,7 +487,10 @@ export function useInboxSettingsSection(): SettingsSection | null {
     },
     [client, settings],
   );
-  if (status !== "ready" || !settings) return null;
+  // A server that doesn't know these settings yet leaves them out: show only what it keeps.
+  const supportsReplies = typeof settings?.replies === "boolean";
+  const supportsPausedGoals = typeof settings?.pausedGoals === "boolean";
+  if (status !== "ready" || !settings || (!supportsReplies && !supportsPausedGoals)) return null;
   return {
     id: "inbox",
     title: "Inbox",
@@ -495,22 +498,30 @@ export function useInboxSettingsSection(): SettingsSection | null {
       problem ??
       "Questions, approvals and agents' notes always reach your inbox. Replies stay until you swipe them away.",
     rows: [
-      {
-        kind: "toggle",
-        id: "replies",
-        title: "Replies",
-        subtitle: "Each session's latest reply",
-        value: settings.replies ?? false,
-        onChange: (on: boolean) => void change({ replies: on }),
-      },
-      {
-        kind: "toggle",
-        id: "paused-goals",
-        title: "Paused goals",
-        subtitle: "When an agent pauses a goal",
-        value: settings.pausedGoals ?? false,
-        onChange: (on: boolean) => void change({ pausedGoals: on }),
-      },
+      ...(supportsReplies
+        ? [
+            {
+              kind: "toggle" as const,
+              id: "replies",
+              title: "Replies",
+              subtitle: "Each session's latest reply",
+              value: settings.replies ?? false,
+              onChange: (on: boolean) => void change({ replies: on }),
+            },
+          ]
+        : []),
+      ...(supportsPausedGoals
+        ? [
+            {
+              kind: "toggle" as const,
+              id: "paused-goals",
+              title: "Paused goals",
+              subtitle: "When an agent pauses a goal",
+              value: settings.pausedGoals ?? false,
+              onChange: (on: boolean) => void change({ pausedGoals: on }),
+            },
+          ]
+        : []),
     ],
   };
 }
