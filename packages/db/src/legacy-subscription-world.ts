@@ -369,7 +369,10 @@ export async function loadLegacySubscriptionPlacementWorld(
       if (!session) return { status: "skipped", reason: "session_not_visible" } as const;
 
       const provider = request.provider;
-      const sessionOwner = session.owner_subject_id ?? "unowned:" + request.sessionId;
+      // Ownerless service sessions have no human authority to substitute.
+      // Keep that fact explicit so people-scoped and personal connections stay
+      // ineligible in both production placement and the shadow reference.
+      const sessionOwner = session.owner_subject_id;
       const workspaceKind = session.workspace_kind === "personal" ? "personal" : "shared";
       // A Personal workspace has exactly one member, its owner, who owns its
       // sessions. A session without a recorded owner leaves the owner unknown:
@@ -709,16 +712,22 @@ export async function loadLegacySubscriptionPlacementWorld(
       // provider, and the Personal-workspace owner's own work, whose accounts
       // become their personal connections with fallback on (D-18).
       const personalAuthority: PersonalAuthority[] = [];
-      if (human && (request.authorityScope === "user" || personalWorkspaceOwner === human)) {
+      if (
+        sessionOwner !== null &&
+        human &&
+        (request.authorityScope === "user" || personalWorkspaceOwner === human)
+      ) {
         personalAuthority.push({ provider, ownerMembershipId: human });
       }
-      const people: PlacementPerson[] = [
-        {
-          membershipId: sessionOwner,
-          active: true,
-          personalFallbackOptIn: personalWorkspaceOwner === sessionOwner && hasLocalAccounts,
-        },
-      ];
+      const people: PlacementPerson[] = sessionOwner
+        ? [
+            {
+              membershipId: sessionOwner,
+              active: true,
+              personalFallbackOptIn: personalWorkspaceOwner === sessionOwner && hasLocalAccounts,
+            },
+          ]
+        : [];
       if (human && human !== sessionOwner) {
         people.push({ membershipId: human, active: true, personalFallbackOptIn: false });
       }

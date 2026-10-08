@@ -58,6 +58,7 @@ export default defineConfig({
     "src/presentation-artifact-commands.ts",
     "src/presentation-artifact-query.ts",
     "src/codex-provider-account-authority.ts",
+    "src/subscription-personal-authority-v2.ts",
     "src/video-generation.ts",
     "src/xai-provider-account-authority.ts",
   ],

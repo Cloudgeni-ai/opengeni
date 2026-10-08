@@ -317,6 +317,36 @@ describe("legacy subscription world", () => {
   );
 
   realTest(
+    "keeps a service-created ownerless session on shared scope even when a human starts the turn",
+    async () => {
+      const setup = await fixture();
+      const workspaceId = setup.teamWorkspaceId;
+      const organizationConnection = await codexCredential({
+        accountId: setup.accountId,
+        workspaceId: null,
+        scope: "organization",
+      });
+      const { sessionId, turnId } = await session(workspaceId, setup.accountId);
+
+      const loaded = await asTurn(setup.owner, () =>
+        loadLegacySubscriptionPlacementWorld(
+          client!.db,
+          request({ accountId: setup.accountId, workspaceId, sessionId, turnId }),
+        ),
+      );
+      if (loaded.status !== "loaded") throw new Error("expected a loaded world: " + loaded.reason);
+      expect(loaded.input.session.ownerMembershipId).toBeNull();
+      expect(loaded.input.session.personalAuthority).toEqual([]);
+      expect(loaded.input.people.some((person) => person.membershipId === setup.owner)).toBe(true);
+      expect(decidePlacement(loaded.input)).toMatchObject({
+        kind: "run",
+        connectionId: organizationConnection,
+        personal: false,
+      });
+    },
+  );
+
+  realTest(
     "a private session is read only with its owner as the initiating human, never without an actor",
     async () => {
       const setup = await fixture();

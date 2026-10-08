@@ -18652,6 +18652,7 @@ export function evaluateWorkspaceModelPolicy(
 export * from "./codex-fleet-policy";
 export * from "./xai-provider-account-authority";
 export * from "./claude-provider-account-authority";
+export * from "./subscription-personal-authority-v2";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";
 export * from "./company-brain";

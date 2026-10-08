@@ -84,6 +84,7 @@ export {
   markSubscriptionCapacityWakeDelivered,
   observeSubscriptionCapacityWaiterWake,
   readSubscriptionEffectiveSettings,
+  readSubscriptionProviderCutoverState,
   readSubscriptionSessionBinding,
   resolveSubscriptionConnectionId,
   releaseSubscriptionOperationLease,
@@ -111,6 +112,17 @@ export {
   withSubscriptionPoolSessionAccess,
   type SubscriptionPoolProvider,
 } from "./subscription-session-access";
+export {
+  assertSubscriptionCoreAcceptedTurn,
+  withSubscriptionCoreAcceptedTurn,
+  withSubscriptionCoreCodexRefreshLock,
+  withSubscriptionCorePlacementWorld,
+  type SubscriptionCoreAcceptedTurnAccessResult,
+  type SubscriptionCoreAcceptedTurnIdentity,
+  type SubscriptionCoreCodexRefreshResult,
+  type SubscriptionCorePlacementWorldRequest,
+  type SubscriptionCorePlacementWorldResult,
+} from "./subscription-core-placement-world";
 import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import {
   claudeSubscriptionAccountRepository,

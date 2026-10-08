@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { decidePlacement } from "@opengeni/subscriptions";
 import { sql } from "drizzle-orm";
 import {
   acquireSubscriptionTurnLease,
@@ -14,6 +15,7 @@ import {
   listSubscriptionConnectionAssignmentPolicies,
   listSubscriptionConnectionsForPlacement,
   isSubscriptionProviderCutoverEnabled,
+  readSubscriptionProviderCutoverState,
   markSubscriptionCapacityWakeDelivered,
   observeSubscriptionCapacityWaiterWake,
   readSubscriptionSessionBinding,
@@ -22,6 +24,7 @@ import {
   releaseSubscriptionTurnLease,
   renewSubscriptionOperationLease,
   renewSubscriptionTurnLease,
+  withSubscriptionCorePlacementWorld,
   upsertSubscriptionCapacityWaiter,
   wakeSubscriptionCapacityWaiter,
   withRlsContext,
@@ -106,6 +109,84 @@ async function fixture() {
 
 describe("provider-neutral subscription runtime persistence", () => {
   test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
+    "placement world reads owner preferences without direct membership-table access",
+    async () => {
+      const state = await fixture();
+      const [membership] = await shared!.admin<{ id: string }[]>`
+        select id::text as id from organization_memberships
+        where account_id = ${state.accountId}::uuid and subject_id = ${state.subjectId}
+          and status = 'active' and revoked_at is null
+        limit 1`;
+      expect(membership?.id).toBeDefined();
+      await shared!.admin`
+        insert into subscription_settings (
+          account_id, rotation, providers, cross_provider_failover, fallback_order,
+          personal_connections_allowed, personal_fallback_allowed
+        ) values (
+          ${state.accountId}::uuid, ${shared!.admin.json({ codex: { mode: "spread" } })}::jsonb,
+          '{}'::jsonb, false, ${shared!.admin.json({ "codex/a": ["codex/b"] })}::jsonb,
+          true, true
+        )`;
+      await shared!.admin`
+        insert into workspace_model_policies (account_id, workspace_id, allowed_providers, allowed_models)
+        values (
+          ${state.accountId}::uuid, ${state.workspaceId}::uuid,
+          ARRAY['codex-subscription']::text[], ARRAY['codex/b']::text[]
+        )`;
+      await shared!.admin`
+        insert into subscription_connection_assignment_policies (
+          account_id, connection_id, workspace_id, inference_pool
+        ) values (
+          ${state.accountId}::uuid, ${state.connectionId}::uuid,
+          ${state.workspaceId}::uuid, 'organization'
+        )`;
+      await shared!.admin`
+        insert into subscription_person_preferences (
+          account_id, organization_membership_id, personal_fallback_opt_in
+        ) values (${state.accountId}::uuid, ${membership!.id}::uuid, true)`;
+
+      const result = await withSubscriptionCorePlacementWorld(
+        client!.db,
+        {
+          accountId: state.accountId,
+          workspaceId: state.workspaceId,
+          sessionId: state.sessionId,
+          turnId: state.turnId,
+          sessionOwnerSubjectId: state.subjectId,
+          sessionOwnerMembershipId: membership!.id,
+          initiatingHumanSubjectId: state.subjectId,
+          acceptedAuthorityV2: { version: 2, personal: [] },
+          preferredModelId: "codex/a",
+          reasoningLevel: "medium",
+          models: [
+            { id: "codex/a", provider: "codex", reasoningLevels: ["medium"] },
+            { id: "codex/b", provider: "codex", reasoningLevels: ["medium"] },
+          ],
+          reselectionPoints: [],
+          now: new Date(),
+        },
+        async (_tx, input) => ({
+          people: input.people,
+          models: input.models,
+          allowedModelIds: input.workspace.allowedModelIds,
+          decision: decidePlacement(input),
+        }),
+      );
+
+      expect(result.status).toBe("completed");
+      if (result.status === "completed") {
+        expect(result.value.people).toEqual([
+          { membershipId: membership!.id, active: true, personalFallbackOptIn: true },
+        ]);
+        expect(result.value.models).toHaveLength(2);
+        expect(result.value.allowedModelIds).toEqual(["codex/b"]);
+        expect(result.value.decision).toMatchObject({ kind: "run", modelId: "codex/b" });
+      }
+    },
+    180_000,
+  );
+
+  test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
     "chat-turn leases are generation-fenced and provider cutovers fail closed by default",
     async () => {
       const state = await fixture();
@@ -136,9 +217,22 @@ describe("provider-neutral subscription runtime persistence", () => {
           ),
         ),
       ).toBe(false);
+      expect(
+        await withSessionRlsActorContext(actor, () =>
+          withRlsContext(
+            client!.db,
+            { accountId: state.accountId, workspaceId: state.workspaceId },
+            (db) =>
+              readSubscriptionProviderCutoverState(db, {
+                accountId: state.accountId,
+                provider: "codex",
+              }),
+          ),
+        ),
+      ).toBe("not_configured");
       await shared!.admin`
         insert into subscription_provider_cutovers (account_id, provider, enabled)
-        values (${state.accountId}::uuid, 'codex', true)`;
+        values (${state.accountId}::uuid, 'codex', false)`;
 
       await withSessionRlsActorContext(actor, () =>
         withRlsContext(
@@ -146,11 +240,26 @@ describe("provider-neutral subscription runtime persistence", () => {
           { accountId: state.accountId, workspaceId: state.workspaceId },
           async (db) => {
             expect(
+              await readSubscriptionProviderCutoverState(db, {
+                accountId: state.accountId,
+                provider: "codex",
+              }),
+            ).toBe("disabled");
+            expect(
               await isSubscriptionProviderCutoverEnabled(db, {
                 accountId: state.accountId,
                 provider: "codex",
               }),
-            ).toBe(true);
+            ).toBe(false);
+            await shared!.admin`
+              update subscription_provider_cutovers set enabled = true
+              where account_id = ${state.accountId}::uuid and provider = 'codex'`;
+            expect(
+              await readSubscriptionProviderCutoverState(db, {
+                accountId: state.accountId,
+                provider: "codex",
+              }),
+            ).toBe("enabled");
             expect(
               await acquireSubscriptionTurnLease(db, { ...first, ttlMs: 60_000 }),
             ).toMatchObject({ generation: 1, turnId: state.turnId });

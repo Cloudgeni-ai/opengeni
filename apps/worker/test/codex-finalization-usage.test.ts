@@ -13,10 +13,6 @@ test("finalization flushes scraped usage with its exact cleanup authority before
     order.push("usage");
     return { result: true, wakeTargets: [] };
   });
-  const release = spyOn(db, "releaseCodexCredentialLease").mockImplementation(async () => {
-    order.push("release");
-    return true;
-  });
   const settings = { workspaceCaptureEnabled: false } as Settings;
   const context = createTurnContext({ settings, cancellationRequestedAt: null });
   context.control.activityStatus = "idle";
@@ -55,7 +51,16 @@ test("finalization flushes scraped usage with its exact cleanup authority before
       recordWorkerActivity() {},
     },
     leases: {
-      codex: { held: true, holderId: "holder-1", generation: 2, stopHeartbeat() {} },
+      codex: {
+        held: true,
+        holderId: "holder-1",
+        generation: 2,
+        releaseCurrent: async () => {
+          order.push("release");
+          return true;
+        },
+        stopHeartbeat() {},
+      },
       xai: { held: false, stopHeartbeat() {} },
     },
     machineOpObserver: { drainEvents: () => [] },
@@ -83,6 +88,5 @@ test("finalization flushes scraped usage with its exact cleanup authority before
     expect(order).toEqual(["usage", "release"]);
   } finally {
     write.mockRestore();
-    release.mockRestore();
   }
 });

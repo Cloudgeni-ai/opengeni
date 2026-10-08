@@ -166,6 +166,10 @@
       "types": "./src/xai-provider-account-authority.ts",
       "default": "./src/xai-provider-account-authority.ts"
     },
+    "./subscription-personal-authority-v2": {
+      "types": "./src/subscription-personal-authority-v2.ts",
+      "default": "./src/subscription-personal-authority-v2.ts"
+    },
     "./model-picker-order": {
       "types": "./src/model-picker-order.ts",
       "default": "./src/model-picker-order.ts"
