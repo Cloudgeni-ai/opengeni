@@ -5207,7 +5207,7 @@ describe("worker activities integration", () => {
       expect(session?.createdBy).toEqual({
         kind: "service",
         subjectId: "scheduler",
-        label: "Opengeni scheduler",
+        label: "OpenGeni scheduler",
       });
       const events = await listSessionEvents(
         dbClient.db,
@@ -5243,7 +5243,7 @@ describe("worker activities integration", () => {
       const expectedInitiator = createdBy ?? {
         kind: "service",
         subjectId: "scheduler",
-        label: "Opengeni scheduler",
+        label: "OpenGeni scheduler",
       };
       expect(scheduledTurn?.initiator).toEqual(expectedInitiator);
       if (createdBy) {

@@ -204,7 +204,7 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
     );
     expect(catalog.status).toBe(200);
     const models = ((await catalog.json()) as { models: Array<Record<string, unknown>> }).models;
-    const hosted = models.filter((model) => model.provider === "Opengeni");
+    const hosted = models.filter((model) => model.provider === "OpenGeni");
     expect(hosted.map((model) => model.id)).toEqual([AZURE_MODEL]);
     expect(hosted[0]).toMatchObject({
       available: false,
@@ -233,7 +233,7 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
       { headers: value.headers },
     );
     const models = ((await catalog.json()) as { models: Array<Record<string, unknown>> }).models;
-    expect(models.find((model) => model.provider === "Opengeni")).toMatchObject({
+    expect(models.find((model) => model.provider === "OpenGeni")).toMatchObject({
       available: false,
       unavailableCode: "insufficient_credits",
       unavailableReason: "Promotional credits don't cover live voice. Add credits to use it.",
@@ -259,7 +259,7 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
       { headers: value.headers },
     );
     const models = ((await catalog.json()) as { models: Array<Record<string, unknown>> }).models;
-    expect(models.find((model) => model.provider === "Opengeni")).toMatchObject({
+    expect(models.find((model) => model.provider === "OpenGeni")).toMatchObject({
       id: AZURE_MODEL,
       available: true,
       unavailableReason: null,
@@ -315,9 +315,9 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
     const models = ((await catalog.json()) as { models: Array<Record<string, unknown>> }).models;
     // Azure is unpriced, so the priced managed Gateway model is offered instead.
     expect(
-      models.filter((model) => model.provider === "Opengeni").map((model) => model.id),
+      models.filter((model) => model.provider === "OpenGeni").map((model) => model.id),
     ).toEqual(["opengeni-gateway/openai/gpt-realtime-2.1"]);
-    expect(models.find((model) => model.provider === "Opengeni")).toMatchObject({
+    expect(models.find((model) => model.provider === "OpenGeni")).toMatchObject({
       available: true,
     });
   });

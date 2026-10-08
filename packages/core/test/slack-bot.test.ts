@@ -71,7 +71,7 @@ function scheduledSession(
   overrides: Partial<Pick<Session, "createdBy" | "createdByContext" | "metadata">> = {},
 ): Pick<Session, "createdBy" | "createdByContext" | "metadata"> {
   return {
-    createdBy: { kind: "service", subjectId: "scheduler", label: "Opengeni scheduler" },
+    createdBy: { kind: "service", subjectId: "scheduler", label: "OpenGeni scheduler" },
     createdByContext: { scheduledTaskId: taskId, scheduledTaskRunId: runId },
     metadata: {
       scheduledTaskId: taskId,

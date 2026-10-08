@@ -311,7 +311,7 @@ describe("immutable session turn initiators", () => {
     expect(claim.turn.initiator).toEqual({
       kind: "service",
       subjectId: "scheduler",
-      label: "Opengeni scheduler",
+      label: "OpenGeni scheduler",
     });
     expect(claim.turn.initiatingHumanSubjectId).toBeNull();
     expect(claim.turn.initiatorContext).toMatchObject({ scheduledRunIds: [scheduled.runId] });
@@ -1138,7 +1138,7 @@ describe("immutable session turn initiators", () => {
     expect(scheduledClaim.turn.initiator).toEqual({
       kind: "service",
       subjectId: "scheduler",
-      label: "Opengeni scheduler",
+      label: "OpenGeni scheduler",
     });
     expect(scheduledClaim.turn.initiatingHumanSubjectId).toBeNull();
     expect(scheduledClaim.turn.scheduledTaskRunId).toBe(scheduledRunId);
