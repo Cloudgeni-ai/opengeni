@@ -2108,6 +2108,23 @@ Shared terminal reads and custody retries preserve the trusted page until
 capture and settlement succeed. A status query may prove physical quiescence
 after stream loss, but must not turn incomplete output into filesystem success.
 
+OpenSandbox validates original SSE/NDJSON framing, UTF-8, error data and execution
+identity in `sandbox/providers/opensandbox-command-stream.ts` before the SDK can
+project or discard events. The adapter retains the first execution ID and launch
+transport. Its control-only observer accepts matching terminal status and caches
+that physical proof across native alias retirement, without consuming output,
+advancing cursors, acknowledging pages or releasing routed output custody.
+Malformed output can therefore reject filesystem completion while independent
+physical cleanup still reconciles the exact command.
+
+An attempted command transport that loses its first execution ID remains
+outcome-unknown, including response-header loss and ambiguous HTTP failures.
+It cannot manufacture exit 1, replay Start or invent a control target; physical
+cleanup remains joined when exact recovery authority is unavailable. Local
+non-dispatch proof is restricted to the unchanged default SDK command binding
+failing before its command transport is invoked. A custom factory's absent
+fetch, remote error classification or missing init is not that proof.
+
 Remote cancellation joins survive observation loss and transfer-start. Only
 exact terminal proof or committed durable adoption releases the join; failed
 adoption restores cleanup through the original launch client. Locally proven

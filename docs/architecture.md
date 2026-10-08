@@ -191,6 +191,16 @@ authorize a successful filesystem result. Channel A and routing
 keep this separate from interactive/background shell execution; the worker
 reuses its turn cancellation registration for Skill filesystem commands.
 
+OpenSandbox's `sandbox/providers/opensandbox-command-stream.ts` validates the
+original SSE/NDJSON frames before SDK projection and records invocation-local
+dispatch evidence at the bound transport. The adapter pins the first execution
+identity and launch client. Its control-only observer can reconcile physical
+exit after output loss without reading or acknowledging retained output.
+Attempted dispatch without an authenticated execution identity remains unknown
+and joined; absent headers, ambiguous HTTP errors or a missing ID cannot create
+terminal proof. Only a genuinely bound, unchanged default SDK command path that
+failed before command transport grants local non-dispatch proof.
+
 `wait_for_input` retains its turn/deadline until input/timeout; acknowledgment
 cannot strand eligible input/due waits. `Session.inputWait` drives working/recheck
 UI, not unread. `session_wait`/`command_wait` read in-turn; child results carry
