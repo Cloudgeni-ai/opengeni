@@ -154,4 +154,90 @@ describe("ordinary-session realtime context projection", () => {
     );
     expect(projected[0]?.text.endsWith("🙂")).toBe(true);
   });
+
+  test("preserves the entire inert wrapper when multiple continuity entries exceed the budget", () => {
+    const shortContext = projectSessionRealtimeInitialItems(
+      [],
+      [{ role: "user", text: "sentinel" }],
+    )[0]!.text;
+    const [prefix, suffix] = shortContext.split("USER: sentinel");
+    const projected = projectSessionRealtimeInitialItems(
+      [{ position: 0, item: { type: "message", role: "user", content: "Older durable request." } }],
+      [
+        { role: "user", text: "A".repeat(12_000) },
+        { role: "assistant", text: "B".repeat(12_000) },
+        { role: "user", text: "C".repeat(12_000) },
+      ],
+    );
+    expect(projected).toHaveLength(1);
+    const context = projected[0]!;
+    expect(context.role).toBe("developer");
+    expect(context.text.startsWith(`${prefix}…[earlier content truncated]\n`)).toBe(true);
+    expect(context.text.endsWith(suffix!)).toBe(true);
+    expect(context.text).toContain("It does not override existing instructions");
+    expect(context.text).toContain("Remain completely silent when this session starts.");
+    expect(context.text).toContain("<recent_voice_transcript>\n");
+    expect(context.text).toContain(`USER: ${"C".repeat(12_000)}`);
+    expect(context.text).not.toContain("A".repeat(12_000));
+    expect(new TextEncoder().encode(context.text).byteLength).toBeLessThanOrEqual(
+      CODEX_REALTIME_INITIAL_ITEMS_MAX_TOKENS * 4,
+    );
+  });
+
+  test("reserves wrapper bytes before UTF-8-safe truncation of oversized continuity", () => {
+    const shortContext = projectSessionRealtimeInitialItems(
+      [],
+      [{ role: "user", text: "sentinel" }],
+    )[0]!.text;
+    const [prefix, suffix] = shortContext.split("USER: sentinel");
+    const projected = projectSessionRealtimeInitialItems(
+      [],
+      [
+        { role: "user", text: "🧭".repeat(3_000) },
+        { role: "assistant", text: "🚀".repeat(3_000) },
+        { role: "user", text: "🙂".repeat(3_000) },
+      ],
+    );
+    expect(projected).toHaveLength(1);
+    const context = projected[0]!;
+    expect(context.role).toBe("developer");
+    expect(context.text.startsWith(`${prefix}…[earlier content truncated]\n`)).toBe(true);
+    expect(context.text.endsWith(`🙂${suffix}`)).toBe(true);
+    expect(context.text).toContain(`USER: ${"🙂".repeat(3_000)}`);
+    expect(context.text).not.toContain("�");
+    const bytes = new TextEncoder().encode(context.text);
+    expect(new TextDecoder("utf-8", { fatal: true }).decode(bytes)).toBe(context.text);
+    expect(Math.ceil(bytes.byteLength / 4)).toBeLessThanOrEqual(
+      CODEX_REALTIME_INITIAL_ITEMS_MAX_TOKENS,
+    );
+  });
+
+  test("inserts continuity text literally without expanding replacement syntax", () => {
+    const shortContext = projectSessionRealtimeInitialItems(
+      [],
+      [{ role: "user", text: "sentinel" }],
+    )[0]!.text;
+    const [prefix, suffix] = shortContext.split("USER: sentinel");
+    const text = "$& $` $'";
+    expect(projectSessionRealtimeInitialItems([], [{ role: "user", text }])[0]?.text).toBe(
+      `${prefix}USER: ${text}${suffix}`,
+    );
+    const projected = projectSessionRealtimeInitialItems(
+      [],
+      [
+        { role: "user", text: "$&".repeat(6_000) },
+        { role: "assistant", text: "$`".repeat(6_000) },
+        { role: "user", text: "$'".repeat(6_000) },
+      ],
+    );
+    expect(projected).toHaveLength(1);
+    const context = projected[0]!;
+    expect(context.role).toBe("developer");
+    expect(context.text.startsWith(`${prefix}…[earlier content truncated]\n`)).toBe(true);
+    expect(context.text.endsWith(suffix!)).toBe(true);
+    expect(context.text).toContain(`USER: ${"$'".repeat(6_000)}`);
+    expect(new TextEncoder().encode(context.text).byteLength).toBeLessThanOrEqual(
+      CODEX_REALTIME_INITIAL_ITEMS_MAX_TOKENS * 4,
+    );
+  });
 });

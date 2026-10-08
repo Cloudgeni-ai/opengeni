@@ -50,9 +50,22 @@ export function projectSessionRealtimeInitialItems(
     // Developer, not user: a voice provider treats user items as speech it may
     // act on (Codex Live delegates them to the agent), so a user-role prompt
     // was replayed into the chat as if the user had said it.
+    // Reserve the trusted wrapper before trimming conversational text. The
+    // generic newest-message truncation must never remove its inert/silence
+    // instructions or either transcript delimiter from a developer item.
+    const wrapperBytes = utf8ByteLength(
+      REALTIME_CONTINUITY_PROMPT.replace("{{ recent_voice_transcript }}", ""),
+    );
+    const boundedTranscript = truncateTextTail(
+      transcript,
+      CODEX_REALTIME_INITIAL_ITEMS_MAX_TOKENS * BYTES_PER_ESTIMATED_TOKEN - wrapperBytes,
+    );
     messages.push({
       role: "developer",
-      text: REALTIME_CONTINUITY_PROMPT.replace("{{ recent_voice_transcript }}", transcript),
+      text: REALTIME_CONTINUITY_PROMPT.replace(
+        "{{ recent_voice_transcript }}",
+        () => boundedTranscript,
+      ),
     });
   }
   const selected: CodexRealtimeInitialItem[] = [];
