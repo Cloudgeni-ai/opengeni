@@ -2472,6 +2472,7 @@ describe("release schema contract", () => {
       "0654_private_child_causal_initiator.sql",
       "0655_inbox.sql",
       "0656_inbox_owner_recipient.sql",
+      "0657_session_archive_purge_retained_evidence.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
