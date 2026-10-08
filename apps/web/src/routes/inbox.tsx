@@ -64,7 +64,7 @@ import { Switch } from "@/components/ui/switch";
 import { Toolbar } from "@/components/ui/toolbar";
 import { useAppContext } from "@/context";
 import { apiErrorFacts, userErrorText } from "@/lib/api-error";
-import { isNeedsYouKind, useInbox } from "@/lib/inbox";
+import { hasInbox, isNeedsYouKind, useInbox } from "@/lib/inbox";
 import { cn } from "@/lib/utils";
 
 const KIND_WORD: Record<InboxItem["kind"], string> = {
@@ -563,8 +563,18 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     );
   };
 
+  const personal = hasInbox(context.accessContext);
   let body: ReactNode;
-  if (inbox.loading && !inbox.data) {
+  if (!personal) {
+    body = (
+      <EmptyState
+        variant="page"
+        icon={<InboxIcon />}
+        title="Only people have an inbox"
+        description="Sign in as yourself to see what your agents are waiting on you for. API keys and services act through sessions instead."
+      />
+    );
+  } else if (inbox.loading && !inbox.data) {
     body = <InboxSkeleton />;
   } else if (inbox.error && !inbox.data) {
     body = (
@@ -650,7 +660,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
           ) : null}
           <SectionStack>
             {body}
-            <InboxSettingsSections />
+            {personal ? <InboxSettingsSections /> : null}
           </SectionStack>
         </div>
       </div>
