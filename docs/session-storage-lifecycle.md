@@ -141,7 +141,9 @@ What stays in PostgreSQL: the session row, turns, attempts, goals and every
 readable timeline event, so the web app, `session_events` and the SDK read an
 archived session exactly as before, and every durable reference (task notes,
 artifact versions, Knowledge lifecycle, usage, billing and audit facts) is
-unchanged. Small per-turn audit snapshots also stay.
+unchanged. Small per-turn audit snapshots also stay, as do a scheduled run's
+delivered occurrence updates (immutable schedule evidence) and the history
+items they delivered.
 
 Archiving is one-way: there is no restore to an executable state. Start a new
 session to continue the work. A late machine input for an archived session (a
