@@ -160,6 +160,19 @@ function addControlTarget(project, { bundleIdentifier, control, developmentTeam 
   project.addBuildPhase([CONTROL_SWIFT_FILE], "PBXSourcesBuildPhase", "Sources", target.uuid);
   project.addBuildPhase([], "PBXResourcesBuildPhase", "Resources", target.uuid);
   project.addBuildPhase([], "PBXFrameworksBuildPhase", "Frameworks", target.uuid);
+  // The xcode library leaves unset attributes as `undefined`, which it would
+  // write out literally (for example `explicitFileType = undefined`).
+  const createdRefs = [
+    target.pbxNativeTarget.productReference,
+    ...group.pbxGroup.children.map((child) => child.value),
+  ];
+  for (const key of createdRefs) {
+    const reference = objects.PBXFileReference[key];
+    if (!reference) continue;
+    for (const [attribute, value] of Object.entries(reference)) {
+      if (value === undefined || value === "undefined") delete reference[attribute];
+    }
+  }
 
   // Embed the extension under the name Xcode itself uses.
   for (const [key, phase] of Object.entries(objects.PBXCopyFilesBuildPhase)) {
