@@ -74785,6 +74785,7 @@ export async function claimSessionWorkForAttempt(
               ? "agent"
               : sessionTurnSurfaceOrNull(latestStarted?.surface);
           let scheduledEffectiveMcpServerIds: string[] | null = null;
+          let scheduledFirstPartyMcpTools: FirstPartyMcpToolName[] | null = null;
           let sandboxOs = latestStarted?.sandboxOs ?? session.sandboxOs;
           if (scheduledTaskRunId) {
             const [scheduledRun] = await tx
@@ -74828,6 +74829,8 @@ export async function claimSessionWorkForAttempt(
             const targetPolicy = accepted.targetSessionExecution;
             if (targetPolicy) {
               scheduledEffectiveMcpServerIds = targetPolicy.effectiveMcpServerIds;
+              scheduledFirstPartyMcpTools =
+                targetPolicy.effectiveFirstPartyMcpTools ?? targetPolicy.firstPartyMcpTools;
               const targetMcpServers = await tx
                 .select({ id: schema.sessionMcpServers.serverId })
                 .from(schema.sessionMcpServers)
@@ -75086,6 +75089,7 @@ export async function claimSessionWorkForAttempt(
                   internalUpdateCount: delivered.count,
                   ...(routingGoalUpdate ? { goalId: routingGoalUpdate.payload.goalId } : {}),
                   ...(scheduledEffectiveMcpServerIds ? { scheduledEffectiveMcpServerIds } : {}),
+                  ...(scheduledFirstPartyMcpTools ? { scheduledFirstPartyMcpTools } : {}),
                 },
                 frozenTurnExecutionPolicy,
               )
@@ -75093,6 +75097,7 @@ export async function claimSessionWorkForAttempt(
                 internalUpdateCount: delivered.count,
                 ...(routingGoalUpdate ? { goalId: routingGoalUpdate.payload.goalId } : {}),
                 ...(scheduledEffectiveMcpServerIds ? { scheduledEffectiveMcpServerIds } : {}),
+                ...(scheduledFirstPartyMcpTools ? { scheduledFirstPartyMcpTools } : {}),
               };
           const continuationCodexPolicy = routingGoalUpdate
             ? readCodexCredentialPolicySnapshotV1(routingGoalUpdate.lineage)

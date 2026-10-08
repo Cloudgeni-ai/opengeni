@@ -1,5 +1,5 @@
 import {
-  allowedFirstPartyMcpToolsForSession,
+  resolveSessionFirstPartyMcpTools,
   resolveTurnExecutionPolicyV1,
   type Settings,
 } from "@opengeni/config";
@@ -15,6 +15,7 @@ import {
   getSessionTurn,
   materializeGoalContinuation,
   requireSession,
+  requireWorkspace,
 } from "@opengeni/db";
 import type {
   ControlActivityServices,
@@ -69,6 +70,7 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     if (session.status === "failed" || session.status === "cancelled") {
       return { action: "none" };
     }
+    const workspace = await requireWorkspace(db, input.workspaceId);
     const modelDecision = await resolveGoalModelAdmission(db, catalogSourceSettings, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -162,9 +164,10 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       // signs into the delegated token and the API uses to register tools), so
       // a pre-existing narrowed selection is never told to call a missing tool.
       prompt: (goal, autoContinuation, cap) => {
-        const effectiveFirstPartyTools = allowedFirstPartyMcpToolsForSession(
+        const effectiveFirstPartyTools = resolveSessionFirstPartyMcpTools(
           settings,
-          session.firstPartyMcpTools,
+          session,
+          workspace.settings,
         );
         return goalContinuationPrompt(goal, autoContinuation, cap, {
           inputWaitAvailable: effectiveFirstPartyTools.includes("wait_for_input"),

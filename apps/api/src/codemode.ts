@@ -24,9 +24,10 @@ import {
   submitCodemodeOperation,
   type SessionTurnForExecution,
 } from "@opengeni/db";
-import { getSession } from "@opengeni/db";
+import { getSession, requireWorkspace } from "@opengeni/db";
 import {
   allowedFirstPartyMcpToolsForSession,
+  resolveSessionFirstPartyMcpTools,
   resolveFirstPartyDelegationSecret,
   type FirstPartyMcpToolPolicySettings,
 } from "@opengeni/config";
@@ -90,9 +91,18 @@ export async function codemodeSessionRequest(
   const session = await getSession(deps.db, authority.workspaceId, authority.sessionId);
   const secret = resolveFirstPartyDelegationSecret(deps.settings);
   if (!session || !secret) throw new CodemodeAuthorityError("invalid_grant");
-  const permissions = codemodeSessionProxyPermissions(
+  const selection = resolveSessionFirstPartyMcpTools(
     resolveProxySettings?.(session) ?? deps.settings,
     session,
+    (await requireWorkspace(deps.db, authority.workspaceId)).settings,
+  ).filter((name) =>
+    catalog.entries.some(
+      (entry) => entry.identity.serverId === "opengeni" && entry.identity.toolName === name,
+    ),
+  );
+  const permissions = codemodeSessionProxyPermissions(
+    resolveProxySettings?.(session) ?? deps.settings,
+    { ...session, firstPartyMcpTools: selection },
   );
   if (
     isPreparedMcpConnectPath(
@@ -100,10 +110,6 @@ export async function codemodeSessionRequest(
       request.method,
     )
   ) {
-    const selection = allowedFirstPartyMcpToolsForSession(
-      resolveProxySettings?.(session) ?? deps.settings,
-      session.firstPartyMcpTools,
-    );
     if (selection.includes("custom_mcp_setup_request"))
       permissions.push(
         ...preparedMcpProxyPermissions(

@@ -1,5 +1,5 @@
 import {
-  allowedFirstPartyMcpToolsForSession,
+  resolveSessionFirstPartyMcpTools,
   codeSearchDeploymentPolicy,
   resolveModelProviderForTurn,
   resolveFirstPartyDelegationSecret,
@@ -12,7 +12,7 @@ import {
   bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   FIRST_PARTY_IN_PROCESS_TOOL_NAMES,
-  type FirstPartyMcpToolName,
+  FirstPartyMcpToolName,
   SESSION_EFFECTIVE_TOOL_POLICY_ID_LIMIT,
   SESSION_EFFECTIVE_TOOL_POLICY_ID_MAX_LENGTH,
   mergeToolRefs,
@@ -204,6 +204,15 @@ export function scheduledTurnMcpServerIds(turn: Pick<SessionTurn, "metadata">): 
   return Array.isArray(value) && value.every((id) => typeof id === "string")
     ? sortedIds(value)
     : null;
+}
+
+/** The accepted scheduled built-in selection, including an explicit empty list. */
+export function scheduledTurnFirstPartyMcpTools(
+  turn: Pick<SessionTurn, "metadata">,
+): FirstPartyMcpToolName[] | null {
+  const value = turn.metadata?.scheduledFirstPartyMcpTools;
+  if (value === undefined) return null; // Older accepted snapshots use the stored list.
+  return FirstPartyMcpToolName.array().parse(value);
 }
 
 /**
@@ -410,7 +419,7 @@ function sessionHasSkills(session: Session, context: SessionEffectiveToolsContex
   if (bundledSkillIds === undefined) return true;
   const tools = new Set(
     resolveAgentToolFamilies(session.agent).firstPartyTools(
-      allowedFirstPartyMcpToolsForSession(context.settings, session.firstPartyMcpTools),
+      resolveSessionFirstPartyMcpTools(context.settings, session, context.workspaceSettings),
     ),
   );
   return bundledSkillIds.some((id) => {
@@ -498,12 +507,13 @@ export function sessionEffectiveToolProjectionInput(
   const needsTitle =
     session.titleSource !== "user" &&
     (!session.title?.trim() || session.title.trim() === AUTOMATIC_SESSION_TITLE_FALLBACK);
+  const selectedFirstPartyMcpTools = context
+    ? resolveSessionFirstPartyMcpTools(context.settings, session, context.workspaceSettings)
+    : [];
   const firstPartyMcpTools =
     context && toolRefs.some((ref) => ref.id === "opengeni")
       ? resolveAgentToolFamilies(session.agent, { sandboxAttached: sandboxAvailable })
-          .firstPartyTools(
-            allowedFirstPartyMcpToolsForSession(context.settings, session.firstPartyMcpTools),
-          )
+          .firstPartyTools(selectedFirstPartyMcpTools)
           .filter((name) => name !== "set_session_title" || !needsTitle)
       : [];
   const interactionNames = new Set<string>(FIRST_PARTY_IN_PROCESS_TOOL_NAMES);
@@ -536,7 +546,7 @@ export function sessionEffectiveToolProjectionInput(
           resolveAgentToolFamilies(session.agent, {
             sandboxAttached: sandboxAvailable,
           }).allowsFirstPartyTool(name) &&
-          session.firstPartyMcpTools.includes(name)
+          selectedFirstPartyMcpTools.includes(name)
         )
           firstPartyMcpTools.push(name);
       }

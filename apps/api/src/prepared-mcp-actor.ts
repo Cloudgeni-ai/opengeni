@@ -9,6 +9,7 @@ import {
   getActiveSessionTurnForExecution,
   getAttemptToolCatalog,
   getSession,
+  requireWorkspace,
   lockTurnAttemptWriteFenceTx,
   resolveInitiatingHuman,
   type Database,
@@ -29,7 +30,7 @@ import {
 } from "./connection-ownership";
 import { codemodeAuthorityForGrant, requireMatchingCodemodeCatalog } from "./codemode";
 import { PREPARED_MCP_PERMISSIONS, preparedMcpProxyPermissions } from "./prepared-mcp-permissions";
-import { allowedFirstPartyMcpToolsForSession } from "@opengeni/config";
+import { resolveSessionFirstPartyMcpTools } from "@opengeni/config";
 import { HTTPException } from "hono/http-exception";
 
 /** The normal browser and the exact agent attempt share Connect storage and
@@ -114,7 +115,12 @@ export async function connectRequestActor(
       await getAttemptToolCatalog(tx, authority),
     );
     const selected =
-      session && allowedFirstPartyMcpToolsForSession(deps.settings, session.firstPartyMcpTools);
+      session &&
+      resolveSessionFirstPartyMcpTools(
+        deps.settings,
+        session,
+        (await requireWorkspace(tx, authority.workspaceId)).settings,
+      );
     const admitted =
       session &&
       preparedMcpProxyPermissions(

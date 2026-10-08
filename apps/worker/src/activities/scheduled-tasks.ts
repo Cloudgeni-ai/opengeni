@@ -96,6 +96,7 @@ import {
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   allowedFirstPartyMcpToolsForSession,
+  resolveSessionFirstPartyMcpTools,
   resolveFirstPartyMcpToolPolicy,
   resolveTurnExecutionPolicyV1,
   TurnExecutionPolicyModelUnavailableError,
@@ -634,6 +635,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         acceptedTargetSessionId && targetSessionExecutionBase
           ? await requireSession(db, task.workspaceId, acceptedTargetSessionId)
           : null;
+      const toolWorkspaceSettings = (await requireWorkspace(db, task.workspaceId)).settings;
       const connectionTools = await scheduledConnectionTools(
         db,
         task.workspaceId,
@@ -662,6 +664,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             firstPartyMcpTools,
             firstPartyMcpPermissions,
           },
+          toolWorkspaceSettings,
         ),
       }).catch((error: unknown) => {
         if (error instanceof ConnectionAccountSelectionError) return error;
@@ -802,6 +805,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             });
             return {
               ...targetSessionExecutionBase,
+              effectiveFirstPartyMcpTools: resolveSessionFirstPartyMcpTools(
+                settings,
+                {
+                  ...targetSessionExecutionBase,
+                  ...(connectionTarget ? { agent: connectionTarget.agent } : {}),
+                },
+                toolWorkspaceSettings,
+              ),
               effectiveMcpServerIds: [
                 ...new Set(
                   effective.toolRefs.flatMap((tool) => (tool.kind === "mcp" ? [tool.id] : [])),
@@ -906,7 +917,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           executionPolicy: targetSessionExecution
             ? {
                 tools: targetSessionExecution.tools,
-                firstPartyMcpTools: targetSessionExecution.firstPartyMcpTools,
+                firstPartyMcpTools:
+                  targetSessionExecution.effectiveFirstPartyMcpTools ??
+                  targetSessionExecution.firstPartyMcpTools,
                 firstPartyMcpPermissions: targetSessionExecution.firstPartyMcpPermissions,
                 variableSetIds: targetSessionExecution.variableSets.map(
                   (variableSet) => variableSet.id,
@@ -2186,7 +2199,9 @@ async function prepareIncidentTelemetrySource(input: {
     executionPolicy: input.acceptedExecution.targetSessionExecution
       ? {
           tools: input.acceptedExecution.targetSessionExecution.tools,
-          firstPartyMcpTools: input.acceptedExecution.targetSessionExecution.firstPartyMcpTools,
+          firstPartyMcpTools:
+            input.acceptedExecution.targetSessionExecution.effectiveFirstPartyMcpTools ??
+            input.acceptedExecution.targetSessionExecution.firstPartyMcpTools,
           firstPartyMcpPermissions:
             input.acceptedExecution.targetSessionExecution.firstPartyMcpPermissions,
           variableSetIds: input.acceptedExecution.targetSessionExecution.variableSets.map(
