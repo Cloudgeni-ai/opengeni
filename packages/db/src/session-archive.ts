@@ -301,6 +301,19 @@ export async function readSessionArchiveRows(
   spec: SessionArchiveExportTable,
   input: { after: string[] | null; limit: number },
 ): Promise<{ rows: string[]; last: string[] | null }> {
+  if (spec.table === "preference_registry_snapshots") {
+    // Visible only to each snapshot's initiating human under RLS; read through
+    // the archive-only definer instead of the workspace context.
+    const rows = await rawRows<{ id: string; row_json: string }>(
+      db,
+      sql`select id::text as id, row_json
+        from opengeni_private.session_archive_preference_snapshot_rows(
+          ${scope.workspaceId}::uuid, ${scope.sessionId}::uuid,
+          ${input.after?.[0] ?? null}::uuid, ${input.limit})`,
+    );
+    const lastRow = rows.at(-1);
+    return { rows: rows.map((row) => row.row_json), last: lastRow ? [lastRow.id] : null };
+  }
   const keyColumns = spec.keys.map((key) => sql`t.${sql.identifier(key.column)}`);
   const order = sql.join(keyColumns, sql`, `);
   const keyText = sql.join(
