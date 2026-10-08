@@ -10,7 +10,7 @@ import { appendSessionEvents, createDb, createSession, type DbClient } from "../
 import { migrate } from "../src/migrate";
 
 const migrationUrl = new URL(
-  "../drizzle/0661_session_first_party_default_intent.sql",
+  "../drizzle/0662_session_first_party_default_intent.sql",
   import.meta.url,
 );
 let fixture: OwnerMigratedTestDatabase | null = null;

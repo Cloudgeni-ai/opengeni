@@ -85,6 +85,7 @@ import {
   withoutSandboxProviderIdentity,
   type EstablishedSandboxSession,
   type RuntimeMetricsHooks,
+  type WorkspaceCaptureSkipReason,
   type SandboxReadinessReplacementOutcome,
   type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime";
@@ -857,6 +858,16 @@ async function persistWarmWorkspaceSnapshot(
       // Diagnostics cannot change provider settlement or capture-gate cleanup.
     }
   };
+  const reportSkipped = (backend: unknown, reason: WorkspaceCaptureSkipReason): void => {
+    try {
+      services.sandboxMetrics?.onWorkspaceCaptureSkipped?.({
+        backend: typeof backend === "string" ? backend : "unknown",
+        reason,
+      });
+    } catch {
+      // Telemetry never changes whether a checkpoint is attempted.
+    }
+  };
   const intervalMs = settings.sandboxSnapshotIntervalMs;
   if (intervalMs <= 0 && !force) {
     return false;
@@ -877,6 +888,7 @@ async function persistWarmWorkspaceSnapshot(
     console.error("mid-session workspace snapshot skipped (no persist primitive)", {
       backendId: typeof persistable.backendId === "string" ? persistable.backendId : null,
     });
+    reportSkipped(persistable.backendId, "no_persist_primitive");
     return false;
   }
   // Filesystem and directory snapshots create retained Images without
@@ -910,6 +922,7 @@ async function persistWarmWorkspaceSnapshot(
         leaseEpoch: lease?.leaseEpoch ?? null,
         hasInstance: lease?.instanceId !== null && lease?.instanceId !== undefined,
       });
+      reportSkipped(lease?.backend ?? persistable.backendId, "lease_not_warm");
       return false;
     }
     // A checkpoint of this exact mutation generation already protects every
@@ -930,6 +943,7 @@ async function persistWarmWorkspaceSnapshot(
         backend: lease.backend,
         liveInstance: capturePolicy?.liveInstance ?? null,
       });
+      reportSkipped(lease.backend, "capture_policy");
       return false;
     }
     const nativeModalPersistence =
@@ -954,6 +968,9 @@ async function persistWarmWorkspaceSnapshot(
       minIntervalMs: force ? 0 : intervalMs,
       providerReplaySafe: capturePolicy.takeover === "same_request",
       takeoverSafe: capturePolicy.takeover !== "exclusive",
+      // Modal pauses the box for a native snapshot, so the image is one
+      // instant even while background commands run.
+      pointInTimeCapture: nativeModalPersistence,
       ...(captureLiveness === "warm"
         ? {
             warmAttempt: {
@@ -973,6 +990,7 @@ async function persistWarmWorkspaceSnapshot(
         sandboxGroupId: ids.sandboxGroupId,
         status: claimed.status,
       });
+      reportSkipped(lease.backend, claimed.status);
       return false;
     }
 

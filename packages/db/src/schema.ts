@@ -9903,6 +9903,9 @@ export const sandboxLeases = pgTable(
     archiveCapturePublishedAt: timestamp("archive_capture_published_at", {
       withTimezone: true,
     }),
+    // The exact warm capture claim that ran around active background commands
+    // (migration 0659). Equal to archive_capture_id only for that claim.
+    archiveCaptureConcurrentCaptureId: uuid("archive_capture_concurrent_capture_id"),
     // Bounded operator preservation gate. Unlike rotation/capture, this blocks
     // only reaper teardown: a user may still re-arm a resumable draining lease.
     // The exact id makes renewal/release ownership explicit and race-safe.

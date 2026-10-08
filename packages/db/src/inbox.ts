@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
 import * as schema from "./schema";
 
@@ -219,11 +219,30 @@ export async function getSessionInboxRecipient(
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .limit(1);
     if (!row) return null;
-    const subjectId = row.owner?.startsWith("user:")
+    let subjectId = row.owner?.startsWith("user:")
       ? row.owner
       : row.creator.startsWith("user:")
         ? row.creator
         : null;
+    if (!subjectId) {
+      // A scheduled run works for the schedule's owner (0661).
+      const [run] = await scopedDb
+        .select({ owner: schema.scheduledTasks.ownerSubjectId })
+        .from(schema.scheduledTaskRuns)
+        .innerJoin(
+          schema.scheduledTasks,
+          eq(schema.scheduledTasks.id, schema.scheduledTaskRuns.taskId),
+        )
+        .where(
+          and(
+            eq(schema.scheduledTaskRuns.workspaceId, workspaceId),
+            eq(schema.scheduledTaskRuns.sessionId, sessionId),
+          ),
+        )
+        .orderBy(desc(schema.scheduledTaskRuns.createdAt))
+        .limit(1);
+      subjectId = run?.owner?.startsWith("user:") ? run.owner : null;
+    }
     return subjectId ? { subjectId, parentSessionId: row.parent ?? null } : null;
   });
 }

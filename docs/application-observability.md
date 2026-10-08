@@ -107,10 +107,21 @@ duration as the unlabeled
 physical histogram name, because one metric name has exactly one label set in a
 process registry.
 
+`opengeni_workspace_capture_skipped_total{backend,reason}` counts warm
+checkpoint attempts that could not start, by a closed reason (the capture-claim
+refusal such as `holder_in_progress` or `mutation_in_progress`, `lease_not_warm`,
+`capture_policy`, `no_persist_primitive`). A blocked checkpoint is retried on
+every turn heartbeat, so a sustained blocker increments it repeatedly. An attempt
+that is not due yet or whose archive already covers the current generation is not
+counted.
+
 Consistent workspace capture intentionally fences new writing operations; a
 shell command is conservatively a potential writer even when its text looks
 read-only. Capture waits must not be removed by bypassing that fence or by
-disabling recovery snapshots. Compare gate wait and physical capture duration
+disabling recovery snapshots. The one deliberate exception is an already-running
+retained background command under a point-in-time (Modal native) capture: warm
+checkpoints run around it and record the archive one generation behind the
+workspace (see `docs/run-lifecycle.md`). Compare gate wait and physical capture duration
 before changing capture strategy; filesystem and directory-only persistence
 have different recovery semantics.
 

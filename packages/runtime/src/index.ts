@@ -522,6 +522,7 @@ export {
   MCP_TOOL_CALL_OUTCOMES,
   MCP_TOOL_METRIC_EXTERNAL_LABEL,
   SANDBOX_READINESS_REPLACEMENT_OUTCOMES,
+  WORKSPACE_CAPTURE_SKIP_REASONS,
   isMcpToolMetricLabel,
   mcpToolMetricLabel,
   type McpLifecycleOutcome,
@@ -530,6 +531,7 @@ export {
   type McpToolCallOutcome,
   type RuntimeMetricsHooks,
   type SandboxReadinessReplacementOutcome,
+  type WorkspaceCaptureSkipReason,
 } from "./metrics";
 export type {
   ModelPreparationMeasurement,
