@@ -430,9 +430,15 @@ describe("provider-neutral subscription runtime persistence", () => {
         insert into subscription_connections (
           account_id, provider, credential_encrypted, ownership, scope_kind, managed_by_workspace_id
         ) values (
-          ${state.accountId}::uuid, 'codex', 'v1:delegated-policy', 'shared', 'organization',
+          ${state.accountId}::uuid, 'codex', 'v1:delegated-policy', 'shared', 'people',
           ${state.workspaceId}::uuid
         ) returning id::text as id`;
+      await shared!.admin`
+        insert into subscription_connection_people (account_id, connection_id, organization_membership_id)
+        select ${state.accountId}::uuid, ${delegated!.id}::uuid, membership.id
+        from organization_memberships membership
+        where membership.account_id = ${state.accountId}::uuid
+          and membership.subject_id = ${managerSubject}`;
       await shared!.admin`
         insert into subscription_connection_assignment_policies (
           account_id, connection_id, workspace_id, inference_pool, managed_by_workspace_id

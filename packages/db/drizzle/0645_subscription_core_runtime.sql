@@ -229,12 +229,8 @@ CREATE POLICY subscription_connection_assignment_policy_manage
     opengeni_private.subscription_organization_admin(account_id)
     OR (workspace_id = nullif(current_setting('opengeni.workspace_id', true), '')::uuid
       AND managed_by_workspace_id = workspace_id
-      AND EXISTS (
-        SELECT 1 FROM subscription_connections connection
-        WHERE connection.account_id = subscription_connection_assignment_policies.account_id
-          AND connection.id = subscription_connection_assignment_policies.connection_id
-          AND connection.ownership = 'shared'
-          AND connection.managed_by_workspace_id = subscription_connection_assignment_policies.workspace_id
+      AND opengeni_private.subscription_apps_designation_manage_allowed(
+        account_id, workspace_id, connection_id
       )
       AND EXISTS (
         SELECT 1 FROM workspace_memberships manager
@@ -248,12 +244,8 @@ CREATE POLICY subscription_connection_assignment_policy_manage
     opengeni_private.subscription_organization_admin(account_id)
     OR (workspace_id = nullif(current_setting('opengeni.workspace_id', true), '')::uuid
       AND managed_by_workspace_id = workspace_id
-      AND EXISTS (
-        SELECT 1 FROM subscription_connections connection
-        WHERE connection.account_id = subscription_connection_assignment_policies.account_id
-          AND connection.id = subscription_connection_assignment_policies.connection_id
-          AND connection.ownership = 'shared'
-          AND connection.managed_by_workspace_id = subscription_connection_assignment_policies.workspace_id
+      AND opengeni_private.subscription_apps_designation_manage_allowed(
+        account_id, workspace_id, connection_id
       )
       AND EXISTS (
         SELECT 1 FROM workspace_memberships manager
