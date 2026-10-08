@@ -4,6 +4,7 @@ import {
   CODEX_CLIENT_VERSION,
   CodexRealtimeError,
   CodexReloginRequired,
+  codexPlanKey,
   createCodexRealtimeCall,
   fetchCodexRealtimeProviderConfig,
   selectCodexCredentialId,
@@ -59,6 +60,13 @@ export type CodexRealtimeBrokerDependencies = {
     pinnedCredentialId: string | null;
     activeCredentialId: string | null;
     connectedCredentialIds: ReadonlySet<string>;
+    /**
+     * Connected credentials on a ChatGPT plan without voice (Free): the
+     * provider answers their realtime calls with 404.
+     */
+    voicelessCredentialIds?: ReadonlySet<string>;
+    /** Connected credentials open to new allocations whose plan has voice, in pool order. */
+    voiceCredentialIds?: readonly string[];
   }>;
   loadInitialItems(): Promise<CodexRealtimeInitialItem[]>;
   tokenResolver(credentialId: string): CodexTokenResolver;
@@ -189,11 +197,17 @@ export async function brokerSessionCodexRealtime(
     );
   }
   const selection = await deps.loadSelection();
-  const credentialId = selectCodexCredentialId({
+  const selected = selectCodexCredentialId({
     sessionPinnedCredentialId: selection.pinnedCredentialId,
     activeCredentialId: selection.activeCredentialId,
     connectedIds: selection.connectedCredentialIds,
   });
+  // A turn may run on a plan without voice; a call then takes another
+  // connected subscription that has it, when there is one.
+  const credentialId =
+    selected && selection.voicelessCredentialIds?.has(selected)
+      ? (selection.voiceCredentialIds?.[0] ?? selected)
+      : selected;
   if (!credentialId) {
     throw new CodexRealtimeBrokerError(
       "credential_unavailable",
@@ -253,6 +267,11 @@ export async function brokerSessionCodexRealtime(
   }
 }
 
+/** ChatGPT Free has no voice: its realtime calls are refused. */
+function hasVoice(account: { planType: string | null }): boolean {
+  return codexPlanKey(account.planType) !== "free";
+}
+
 /** Bind the pure broker to Opengeni's encrypted DB credential lifecycle. */
 export function buildSessionCodexRealtimeBroker(
   db: Database,
@@ -277,14 +296,17 @@ export function buildSessionCodexRealtimeBroker(
               "Session is unavailable for Codex realtime",
             );
           }
+          const connected = accounts.filter((account) => account.status === "active");
           return {
             pinnedCredentialId: sessionState.pinnedCredentialId,
             activeCredentialId: status?.credentialId ?? null,
-            connectedCredentialIds: new Set(
-              accounts
-                .filter((account) => account.status === "active")
-                .map((account) => account.id),
+            connectedCredentialIds: new Set(connected.map((account) => account.id)),
+            voicelessCredentialIds: new Set(
+              connected.filter((account) => !hasVoice(account)).map((account) => account.id),
             ),
+            voiceCredentialIds: connected
+              .filter((account) => account.allocatorEnabled && hasVoice(account))
+              .map((account) => account.id),
           };
         },
         loadInitialItems: async () => {

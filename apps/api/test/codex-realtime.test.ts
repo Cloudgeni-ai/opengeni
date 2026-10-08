@@ -121,6 +121,35 @@ describe("session Codex realtime broker", () => {
     expect(selected).toBe("credential-active");
   });
 
+  test("calls on a connected plan with voice when the session's plan has none", async () => {
+    const selectedFor = async (connected: string[], voiceless: string[]) => {
+      let selected: string | null = null;
+      await brokerSessionCodexRealtime(
+        dependencies({
+          loadSelection: async () => ({
+            pinnedCredentialId: null,
+            activeCredentialId: "credential-free",
+            connectedCredentialIds: new Set(connected),
+            voicelessCredentialIds: new Set(voiceless),
+            voiceCredentialIds: connected.filter((id) => !voiceless.includes(id)),
+          }),
+          tokenResolver: (credentialId) => {
+            selected = credentialId;
+            return dependencies().tokenResolver(credentialId);
+          },
+        }),
+        { sessionId: "session-one", request },
+      );
+      return selected;
+    };
+    expect(await selectedFor(["credential-free", "credential-pro"], ["credential-free"])).toBe(
+      "credential-pro",
+    );
+    // Without another subscription, the provider decides.
+    expect(await selectedFor(["credential-free"], ["credential-free"])).toBe("credential-free");
+    expect(await selectedFor(["credential-free", "credential-pro"], [])).toBe("credential-free");
+  });
+
   test("adds server-projected history and reuses the exact snapshot on an auth retry", async () => {
     const history = [
       { role: "user" as const, text: "prior request" },
