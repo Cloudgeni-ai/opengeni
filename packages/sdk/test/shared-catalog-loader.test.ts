@@ -86,6 +86,27 @@ describe("shared catalog loader", () => {
     expect((await kept).digest).toBe("d1");
   });
 
+  test("an abandoned load that settles late despite its abort never replaces newer state", async () => {
+    const requests: Array<ReturnType<typeof deferred<Catalog>>> = [];
+    // A custom transport that ignores the abort signal.
+    const loader = createSharedCatalogLoader(() => {
+      const request = deferred<Catalog>();
+      requests.push(request);
+      return request.promise;
+    });
+    const controller = new AbortController();
+    const abandoned = loader.load({ signal: controller.signal });
+    controller.abort();
+    await expect(abandoned).rejects.toMatchObject({ name: "AbortError" });
+    const current = loader.load();
+    expect(requests).toHaveLength(2);
+    requests[1]!.resolve({ digest: "new" });
+    expect((await current).digest).toBe("new");
+    requests[0]!.resolve({ digest: "old" });
+    await Bun.sleep(0);
+    expect((await loader.load()).digest).toBe("new");
+  });
+
   test("an abandoned stale reload is cancelled and a later rejection reloads again", async () => {
     const fetcher = controlledFetcher();
     const loader = createSharedCatalogLoader(fetcher.fetch);

@@ -43,7 +43,8 @@ export type WorkspaceToolGatewayCatalogAttestationOptions = {
 export const WORKSPACE_TOOL_GATEWAY_ATTESTATION_TTL_MS = 10 * 60_000;
 const DEFAULT_MAX_SCOPES = 512;
 const DEFAULT_MAX_CATALOGS_PER_SCOPE = 4;
-// About 250k * ~150 bytes: a few tens of MiB per API process at most.
+// About 250k entries * a few hundred bytes: on the order of 100 MiB per API
+// process in the worst case, typically far less.
 const DEFAULT_MAX_ENTRIES = 250_000;
 
 type AttestedCatalog = { expiresAt: number; entries: ReadonlyMap<string, string> };

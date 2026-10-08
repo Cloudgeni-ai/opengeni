@@ -3,8 +3,9 @@
  *
  * - Concurrent cold callers share one request instead of each fetching.
  * - A waiter's AbortSignal cancels only its own wait. The shared request is
- *   cancelled only when every waiter has aborted; the next caller then starts
- *   a new request, so one hung request never captures later callers.
+ *   cancelled once every waiter has aborted, and the next caller then starts
+ *   a new request. A waiter without a signal keeps the shared request alive
+ *   for every joiner until it settles (bounded by transport/server timeouts).
  * - A failed load is never cached; the next caller starts a new request.
  * - An explicit refresh, or a stale rejection, always obtains a catalog from a
  *   request started after that refresh/rejection. Callers rejected on the same
@@ -57,7 +58,9 @@ export function createSharedCatalogLoader<T extends { digest: string }>(
     load.promise = (async () => {
       try {
         const next = await fetchCatalog(refresh, load.controller.signal);
-        if (load.epoch === epoch) {
+        // An abandoned load (every waiter aborted) never writes shared state,
+        // even when its transport ignored the abort and settled late.
+        if (load.epoch === epoch && !load.controller.signal.aborted) {
           snapshot = next;
           refreshPending = false;
         }
