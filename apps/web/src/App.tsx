@@ -11,6 +11,7 @@
 //   /workspaces/:id/variable-sets/:setId     → one variable set (?view=add|paste|edit)
 //   /workspaces/:id/rigs                     → rigs list + create
 //   /workspaces/:id/read-only-chats          → chats moved to long-term storage (read-only)
+//   /workspaces/:id/inbox                    → things that need you, from agents (temporary inbox)
 //   /workspaces/:id/rigs/:rigId              → rig detail (overview/setup/versions/changes)
 
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
@@ -154,6 +155,7 @@ const LazyReadOnlyChatsRoute = lazyRouteComponent(
   () => import("@/routes/read-only-chats"),
   "ReadOnlyChatsRoute",
 );
+const LazyInboxRoute = lazyRouteComponent(() => import("@/routes/inbox"), "InboxRoute");
 const LazyRigDetailRoute = lazyRouteComponent(
   () => import("@/routes/rig-detail"),
   "RigDetailRoute",
@@ -445,6 +447,11 @@ const workspaceReadOnlyChatsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "read-only-chats",
   component: ReadOnlyChats,
+});
+const workspaceInboxRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "inbox",
+  component: Inbox,
 });
 const workspaceRigDetailRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -787,6 +794,7 @@ const routeTree = rootRoute.addChildren([
     workspaceRigsRoute,
     workspaceRigDetailRoute,
     workspaceReadOnlyChatsRoute,
+    workspaceInboxRoute,
     workspaceMachinesRoute,
     workspaceInsightsRoute,
     workspaceCapabilitiesRoute,
@@ -925,6 +933,11 @@ function Rigs() {
 function ReadOnlyChats() {
   const { workspaceId } = workspaceReadOnlyChatsRoute.useParams();
   return <LazyReadOnlyChatsRoute workspaceId={workspaceId} />;
+}
+
+function Inbox() {
+  const { workspaceId } = workspaceInboxRoute.useParams();
+  return <LazyInboxRoute workspaceId={workspaceId} />;
 }
 
 function RigDetail() {

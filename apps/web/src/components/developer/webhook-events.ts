@@ -53,6 +53,16 @@ export const WEBHOOK_EVENT_GROUPS: readonly WebhookEventGroup[] = [
         label: "Question for the user",
         description: "The agent asked a question and waits for the answer.",
       },
+      {
+        type: "session.notification.posted",
+        label: "Notification posted",
+        description: "An agent posted or updated a notification for the user's inbox.",
+      },
+      {
+        type: "session.notification.withdrawn",
+        label: "Notification withdrawn",
+        description: "An agent took back a notification it had posted.",
+      },
     ],
   },
   {
