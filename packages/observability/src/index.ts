@@ -119,7 +119,7 @@ export function turnExecutionTelemetryKey(
 }
 
 /**
- * Stable selectors shared by OpenGeni's runtime metrics and optional
+ * Stable selectors shared by Opengeni's runtime metrics and optional
  * Prometheus/Grafana distribution. Operators can use these values for custom
  * namespaces and dashboard ConfigMaps without duplicating chart internals.
  */
@@ -349,7 +349,7 @@ const PUBLIC_STARTUP_DEPENDENCIES = new Set([
 
 /**
  * External logs and OTLP are public/third-party projections, not canonical
- * OpenGeni storage. Only this reviewed closed set of operational fields may
+ * Opengeni storage. Only this reviewed closed set of operational fields may
  * cross that boundary. Unknown keys are omitted regardless of their value, so
  * a new diagnostic, identifier, command, response, or provider field cannot
  * become public by accident. This is schema projection, never value inspection
@@ -697,7 +697,7 @@ export class Observability {
       collectDefaultMetrics({ register: this.registry, prefix: "opengeni_" });
       this.setGauge({
         name: "opengeni_build_info",
-        help: "OpenGeni build information.",
+        help: "Opengeni build information.",
         labels: {
           version: buildVersion(),
           revision: settings.deploymentRevision ?? "dev",
@@ -898,7 +898,7 @@ export class Observability {
   }): void {
     this.incrementCounter({
       name: "opengeni_http_requests_total",
-      help: "Total HTTP requests handled by OpenGeni.",
+      help: "Total HTTP requests handled by Opengeni.",
       labels: {
         method: input.method,
         route: input.route,
@@ -1863,7 +1863,7 @@ type TelemetrySpanError = {
 
 /**
  * External OTLP projection. It intentionally exports only error class/status
- * metadata and never mutates canonical OpenGeni errors, events, or history.
+ * metadata and never mutates canonical Opengeni errors, events, or history.
  */
 function projectSpanErrorForTelemetry(error: unknown): TelemetrySpanError {
   const statusCode = errorStatusCode(error);

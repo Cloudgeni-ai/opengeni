@@ -102,7 +102,7 @@ fn home_dir() -> Option<PathBuf> {
 const CREDENTIALS_FILE: &str = "credentials.json";
 
 /// Directory containing one independently replaceable credential document per
-/// OpenGeni deployment/workspace connection. Separate files avoid a global
+/// Opengeni deployment/workspace connection. Separate files avoid a global
 /// read-modify-write race when two `connect` commands run concurrently and let
 /// the running agent notice additions/removals without restarting.
 const CONNECTIONS_DIR: &str = "connections";
@@ -114,7 +114,7 @@ const CONNECTION_SCHEMA_VERSION: u32 = 1;
 /// processes are already separated by pid.
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// One local connection to one workspace on one OpenGeni deployment.
+/// One local connection to one workspace on one Opengeni deployment.
 ///
 /// `api_url` is part of the identity because two independent deployments may
 /// legitimately contain the same workspace UUID. The runtime credentials stay
@@ -327,7 +327,7 @@ pub fn save_credentials(creds: &StoredCredentials) -> Result<PathBuf, ConfigErro
     Ok(path)
 }
 
-/// Loads every configured OpenGeni connection, ordered by local connection id.
+/// Loads every configured Opengeni connection, ordered by local connection id.
 ///
 /// A pre-multi-connection `credentials.json` is migrated exactly once into the
 /// new per-connection directory using `legacy_api_url` as its deployment origin.

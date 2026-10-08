@@ -44,7 +44,7 @@ answers a pending decision. Replace the spoofable demo identity header with
 real server-side authentication before exposing this server to other users;
 it listens on 127.0.0.1 only.
 
-Conversation ids are not namespaced per user: OpenGeni authorization decides
+Conversation ids are not namespaced per user: Opengeni authorization decides
 who may open a conversation, so a real product also checks that the
 authenticated user may use the conversation id the page sends.
 

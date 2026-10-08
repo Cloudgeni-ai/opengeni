@@ -202,7 +202,7 @@ export enum StreamKind {
   STREAM_KIND_DESKTOP = 2,
   /**
    * STREAM_KIND_BROWSER - Browser-native encoded frames from one BrowserSession target. The payload is
-   * the canonical OpenGeni browser-frame message, not a desktop capture.
+   * the canonical Opengeni browser-frame message, not a desktop capture.
    */
   STREAM_KIND_BROWSER = 3,
   /**
@@ -1381,7 +1381,7 @@ export interface PtyOpenRequest {
    * Stable caller-owned identity for an idempotent terminal. Repeating pty_open
    * with the same non-empty scope_id returns the existing live PTY/channel rather
    * than spawning another shell. Empty preserves the explicit "open a new PTY"
-   * behavior. The control plane uses the durable OpenGeni session id here so
+   * behavior. The control plane uses the durable Opengeni session id here so
    * capability/token refreshes reattach the same terminal while separate sessions
    * on one machine remain isolated.
    */

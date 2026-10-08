@@ -142,7 +142,7 @@ export function classifyProviderFailure(
     "Claude credentials expired or were revoked. Replace the key or setup token in Models."
   )
     return CREDENTIALS;
-  // OpenGeni's own credit exhaustion has a dedicated billing remedy upstream.
+  // Opengeni's own credit exhaustion has a dedicated billing remedy upstream.
   if (text.includes("opengeni credits")) return null;
   // Provider SDKs prefix the HTTP status ("401 Incorrect API key ..."). A
   // status alone classifies only 401/402/403/429; other statuses do not prove

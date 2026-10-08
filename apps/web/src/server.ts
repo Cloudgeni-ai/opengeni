@@ -213,7 +213,7 @@ async function proxyDemoApi(
   if (suffix !== "/healthz" && !suffix.startsWith("/v1/")) {
     return new Response("Not Found", { status: 404 });
   }
-  // OpenGeni API route segments never require percent encoding. Reject it so
+  // Opengeni API route segments never require percent encoding. Reject it so
   // a second URL parser cannot turn a double-encoded dot segment into a path
   // outside the admitted /v1 or /healthz surface.
   if (suffix.includes("%")) {
@@ -407,5 +407,5 @@ if (import.meta.main) {
       publicOrigin: publicWebOriginFromEnvironment(),
     }),
   });
-  console.log(`OpenGeni web listening on http://${hostname}:${port}`);
+  console.log(`Opengeni web listening on http://${hostname}:${port}`);
 }

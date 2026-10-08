@@ -829,7 +829,7 @@ describe("API component integration", () => {
         mcpServers: [
           {
             id: "opengeni",
-            name: "OpenGeni",
+            name: "Opengeni",
             url: "http://127.0.0.1:65530/v1/workspaces/{workspaceId}/mcp",
             cacheToolsList: true,
           },
@@ -1750,7 +1750,7 @@ describe("API component integration", () => {
           mcpServers: [
             {
               id: "opengeni",
-              name: "OpenGeni",
+              name: "Opengeni",
               url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
               timeoutMs: undefined,
               cacheToolsList: false,
@@ -2854,8 +2854,8 @@ describe("API component integration", () => {
     ).toEqual({ received: true });
     expect(await balance()).toBe(0);
 
-    // A paid OpenGeni checkout for an account this deployment does not hold,
-    // such as another OpenGeni deployment sharing the Stripe account: retrying
+    // A paid Opengeni checkout for an account this deployment does not hold,
+    // such as another Opengeni deployment sharing the Stripe account: retrying
     // cannot succeed, so it is acknowledged rather than failed for days.
     const absentAccountId = crypto.randomUUID();
     expect(
@@ -5910,7 +5910,7 @@ describe("API component integration", () => {
 
     const authorityCheckedAt = new Date();
     const authorityExpiresAt = new Date(authorityCheckedAt.getTime() + 10 * 60_000);
-    // One GitHub installation can be deliberately delegated into two OpenGeni
+    // One GitHub installation can be deliberately delegated into two Opengeni
     // workspaces, but each workspace owns an independent exact allowlist and
     // an independent consumed owner-authority proof.
     await Promise.all([
@@ -6095,7 +6095,7 @@ describe("API component integration", () => {
     );
   });
 
-  test("configured-token browser handoff preserves OpenGeni grant but still requires GitHub owner proof", async () => {
+  test("configured-token browser handoff preserves Opengeni grant but still requires GitHub owner proof", async () => {
     const stateSecret = "github-owner-authority-state";
     const delegationSecret = "test-delegation-secret";
     const installationId = 438826628;
@@ -7652,7 +7652,7 @@ describe("API component integration", () => {
 
     // A worker-signed parent claim makes this a child create. Omitting the
     // override must inherit the manager's effective grant instead of widening
-    // the child to OpenGeni's full standalone worker defaults.
+    // the child to Opengeni's full standalone worker defaults.
     const childMcp = buildOpenGeniMcpServer(mcpDeps, {
       ...managerGrant,
       // Delegated permission arrays are semantically sets. Inheritance stores
@@ -7703,7 +7703,7 @@ describe("API component integration", () => {
         mcpServers: [
           {
             id: "opengeni",
-            name: "OpenGeni",
+            name: "Opengeni",
             url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
             timeoutMs: undefined,
             cacheToolsList: false,

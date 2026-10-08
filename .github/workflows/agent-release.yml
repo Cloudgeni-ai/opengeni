@@ -425,8 +425,8 @@ jobs:
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-              <key>CFBundleName</key><string>OpenGeni Agent</string>
-              <key>CFBundleDisplayName</key><string>OpenGeni Agent</string>
+              <key>CFBundleName</key><string>Opengeni Agent</string>
+              <key>CFBundleDisplayName</key><string>Opengeni Agent</string>
               <key>CFBundleIdentifier</key><string>ai.opengeni.agent</string>
               <key>CFBundleExecutable</key><string>opengeni-agent</string>
               <key>CFBundleIconFile</key><string>OpenGeni-Agent.icns</string>

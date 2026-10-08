@@ -162,7 +162,7 @@ describe("Variable sets", () => {
   test("turns API errors into a sentence and keeps the reference apart", () => {
     const parts = errorParts(
       Object.assign(
-        new Error("OpenGeni API 409: variable set remains attached. Reference: req_123."),
+        new Error("Opengeni API 409: variable set remains attached. Reference: req_123."),
         { status: 409 },
       ),
     );
@@ -176,7 +176,7 @@ describe("Variable sets", () => {
   test("a form error says what to do, never the raw API string", () => {
     const error = userFacingError(
       Object.assign(
-        new Error("OpenGeni API 403: missing permission: variable_sets:manage Reference: req_403."),
+        new Error("Opengeni API 403: missing permission: variable_sets:manage Reference: req_403."),
         { status: 403 },
       ),
     );

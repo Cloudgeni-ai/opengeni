@@ -47,7 +47,7 @@ export type { SessionRealtimeLifecycleProjection } from "./codex-realtime-lifecy
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const OUTBOUND_SYNC_INTERVAL_MS = 1_000;
 export const CODEX_REALTIME_NEGOTIATION_TIMEOUT_MS = 20_000;
-// OpenGeni policy: rotate conservatively without asserting an upstream lifetime.
+// Opengeni policy: rotate conservatively without asserting an upstream lifetime.
 const DEFAULT_CONNECTION_ROTATION_INTERVAL_MS = 15 * 60_000;
 const DEFAULT_RECONNECT_BACKOFF_MS = [250, 1_000, 2_000, 5_000] as const;
 const MAX_BROWSER_TIMEOUT_MS = 2_147_483_647;

@@ -16,9 +16,9 @@ ingress fail setup with an actionable error, never by accepting a different
 catalog digest, installing `latest`, or replacing a warm sandbox. Catalog and
 operation requests still use the same attempt bearer and public journal.
 
-`ogtool` is the bundled command-line wrapper for one exact OpenGeni execution attempt's Codemode
+`ogtool` is the bundled command-line wrapper for one exact Opengeni execution attempt's Codemode
 surface. It uses the same `@opengeni/codemode` client and frozen tool catalog as Bun programs;
-it does not rediscover or proxy MCP servers. Stock OpenGeni sandbox images include this exact
+it does not rediscover or proxy MCP servers. Stock Opengeni sandbox images include this exact
 package CLI. Custom rigs can run the same release-coherent artifact with Bun.
 
 ```sh

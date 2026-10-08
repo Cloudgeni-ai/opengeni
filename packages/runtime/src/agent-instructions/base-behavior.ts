@@ -1,7 +1,7 @@
 import { blocks, bullets, sentences, toolAvailable, type AgentPromptContext } from "./types";
 
 /**
- * The one rule the legacy contract lacked: embedder text wins over OpenGeni's
+ * The one rule the legacy contract lacked: embedder text wins over Opengeni's
  * behavior defaults, never over the runtime or safety rules.
  */
 export const INSTRUCTION_PRECEDENCE =
@@ -74,7 +74,7 @@ const RULES_FOR_WORK = `# Rules for getting work done
 
 function autonomy(context: AgentPromptContext): string {
   const nativeCheck = context.capabilities.artifacts
-    ? "First check whether OpenGeni already provides the capability natively (for example, a Site reaches the model and workspace tools through the host bridge and needs no server of its own)."
+    ? "First check whether Opengeni already provides the capability natively (for example, a Site reaches the model and workspace tools through the host bridge and needs no server of its own)."
     : "First check whether an available tool already provides the capability natively.";
   return blocks(
     `## Autonomy and persistence

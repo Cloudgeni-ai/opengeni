@@ -1584,7 +1584,7 @@ describe("timeline renderer isolation", () => {
             delivery: {
               state: "failed",
               error:
-                "Your organization has no OpenGeni credits left. Add credits before sending again.",
+                "Your organization has no Opengeni credits left. Add credits before sending again.",
               onEdit: () => {
                 edits += 1;
               },
@@ -1595,7 +1595,7 @@ describe("timeline renderer isolation", () => {
     );
     await flush();
     expect(r.container.querySelector('[role="status"]')?.textContent).toContain(
-      "no OpenGeni credits left",
+      "no Opengeni credits left",
     );
     const buttons = [...r.container.querySelectorAll("button")];
     expect(buttons.find((button) => button.textContent === "Retry")).toBeUndefined();

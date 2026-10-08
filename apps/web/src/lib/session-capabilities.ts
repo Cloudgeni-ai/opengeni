@@ -28,7 +28,7 @@ const BUILT_IN_MCP_CAPABILITIES: Record<BuiltInMcpCapability["id"], BuiltInMcpCa
   },
 };
 
-/** MCP transports that are native OpenGeni capabilities, not connected apps. */
+/** MCP transports that are native Opengeni capabilities, not connected apps. */
 export function builtInMcpCapability(
   server: Readonly<{ id: string }>,
 ): BuiltInMcpCapability | null {
@@ -153,7 +153,7 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
 /**
  * Convert the exact first-party catalog into a small, truthful product model.
  * Every visible tool remains represented. Unknown future tools fall into one
- * final OpenGeni group instead of silently disappearing from the picker.
+ * final Opengeni group instead of silently disappearing from the picker.
  */
 export function sessionCapabilityGroupsFor(
   tools: ReadonlyArray<{ id: FirstPartyMcpToolName }>,

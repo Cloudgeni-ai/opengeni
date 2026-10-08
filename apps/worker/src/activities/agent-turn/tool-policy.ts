@@ -163,10 +163,10 @@ export function reasoningSummaryForTurn(
 }
 
 /**
- * Progressive tool disclosure is universal for supported OpenGeni turns; only
+ * Progressive tool disclosure is universal for supported Opengeni turns; only
  * its contained transport differs. Codex keeps its native path, built-in direct
  * OpenAI/Azure Responses use native client tool search, and every other ordinary
- * function-calling provider uses OpenGeni's stable search/invoke dispatcher.
+ * function-calling provider uses Opengeni's stable search/invoke dispatcher.
  */
 export function lazyToolTransportForTurn(
   resolvedModel: {

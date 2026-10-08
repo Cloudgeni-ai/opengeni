@@ -17,7 +17,7 @@ import type { ModelEnv } from "./env";
  * - throwaway Postgres + NATS (+ S3-compatible object storage) via
  *   `startTestServices` (Docker), migrated exactly like integration tests;
  * - the real Hono API in-process (session create, events, human input, and the
- *   first-party OpenGeni MCP endpoint the worker's tools call back into);
+ *   first-party Opengeni MCP endpoint the worker's tools call back into);
  * - the real worker activity graph (`runAgentTurn`, `maybeContinueGoal`) with the
  *   production runtime and the configured model provider.
  *

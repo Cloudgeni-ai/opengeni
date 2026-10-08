@@ -199,7 +199,7 @@ export type SessionClientLike = SessionClientMethods &
  * Tenant-safe client surface required by the session-only React entry.
  *
  * A host proxy can implement only these session-scoped operations instead of
- * stubbing OpenGeni's workbench, billing, rig, file-system, and workspace
+ * stubbing Opengeni's workbench, billing, rig, file-system, and workspace
  * administration APIs. Workspace-level resume is deliberately optional: a
  * host that does not expose that authority still supports every session-local
  * composer/control path.

@@ -9,7 +9,7 @@ const ACCOUNT = "acct-1";
 const WORKSPACE = "ws-1";
 
 // Live config that reproduces the bug: billingMode=stripe + usageLimitsMode=managed,
-// codex feature enabled, account has 0 OpenGeni credits.
+// codex feature enabled, account has 0 Opengeni credits.
 function billedSettings(overrides: Partial<Settings> = {}): Settings {
   return testSettings({
     billingMode: "stripe",
@@ -103,7 +103,7 @@ describe("API edge credit gate — codex bypass", () => {
     }
   });
 
-  test("a SuperGrok subscription model bypasses OpenGeni credits through its synthetic catalog", async () => {
+  test("a SuperGrok subscription model bypasses Opengeni credits through its synthetic catalog", async () => {
     const restoreBal = mockZeroBalance();
     const restoreCred = mockCodexBilled(false);
     try {

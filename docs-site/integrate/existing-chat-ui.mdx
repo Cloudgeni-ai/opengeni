@@ -14,9 +14,9 @@ If your product already has a chat UI that speaks the Vercel AI SDK `useChat` pr
 ## Serve your chat routes
 
 ```ts
-import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
+import { Opengeni, createChatHandler } from "@opengeni/sdk/chat";
 
-const og = new OpenGeni({ apiKey: process.env.OPENGENI_API_KEY! });
+const og = new Opengeni({ apiKey: process.env.OPENGENI_API_KEY! });
 
 export const handleChat = createChatHandler(og, {
   resolve: async (request) => {

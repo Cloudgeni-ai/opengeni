@@ -6,7 +6,7 @@ import {
   mcpSerializedSizeBytes,
 } from "./mcp-network";
 
-/** The prefix OpenGeni's PrefixedMcpServer stamps on codex_apps connector tools. */
+/** The prefix Opengeni's PrefixedMcpServer stamps on codex_apps connector tools. */
 export const CODEX_APPS_TOOL_PREFIX = "codex_apps__";
 const DEFAULT_SEARCH_LIMIT = 8;
 const MAX_SEARCH_LIMIT = 20;

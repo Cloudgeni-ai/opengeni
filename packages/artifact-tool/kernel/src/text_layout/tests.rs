@@ -843,7 +843,7 @@ fn failed_layout_is_atomic_and_deterministic_work_is_bounded() {
 
 #[test]
 fn large_layout_has_linear_retained_memory_and_cache_reuse() {
-    let text = "OpenGeni layout 漢字 العربية 👩‍🚀 ".repeat(1_000);
+    let text = "Opengeni layout 漢字 العربية 👩‍🚀 ".repeat(1_000);
     let limits = LayoutLimits::default();
     let mut registry = FontRegistry::new(limits);
     registry

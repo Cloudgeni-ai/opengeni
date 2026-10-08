@@ -175,7 +175,7 @@ export function isAuthenticatedPersonAuthorization(
 }
 
 /**
- * A scheduled task may post as the OpenGeni workspace bot only to the one
+ * A scheduled task may post as the Opengeni workspace bot only to the one
  * Slack channel a person chose on the task. Choosing or changing that channel
  * therefore needs a signed-in person with `connections:write`, and the bot's
  * membership is verified at that moment. Keeping or clearing the existing

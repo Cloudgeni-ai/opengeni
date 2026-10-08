@@ -77,7 +77,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("OpenGeni Lens GitHub installation routes", () => {
+describe("Opengeni Lens GitHub installation routes", () => {
   test("owner-proves one installation, consumes OAuth state once, and routes its signed webhook", async () => {
     if (!client || !workspaceId || !accountId || !subjectId) return;
     const app = new Hono();

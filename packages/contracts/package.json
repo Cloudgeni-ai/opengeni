@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/contracts",
   "version": "1.4.4",
-  "description": "Shared zod schemas and wire-contract types for the OpenGeni API.",
+  "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

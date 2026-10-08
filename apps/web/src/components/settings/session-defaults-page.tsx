@@ -4,7 +4,7 @@
  * A flush form page (DESIGN.md section 8): starting point, capabilities in
  * three groups, identity, Save. Running chats keep what they started with.
  *
- * Saved as `settings.sessionAgentDefaults`; OpenGeni's own defaults (every
+ * Saved as `settings.sessionAgentDefaults`; Opengeni's own defaults (every
  * capability, the default identity) are stored as no value at all.
  */
 import {

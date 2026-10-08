@@ -95,7 +95,7 @@ describe("company-profile API authority", () => {
     const body = {
       operationId: crypto.randomUUID(),
       profile: {
-        identity: "CloudGeni builds OpenGeni.",
+        identity: "CloudGeni builds Opengeni.",
         mission: "Make durable autonomous work dependable.",
         products: [],
         customers: [],
@@ -133,7 +133,7 @@ describe("company-profile API authority", () => {
     expect(accountAdmin.status).toBe(200);
     const created = (await accountAdmin.json()) as Record<string, any>;
     expect(created).toMatchObject({
-      revision: { profile: { identity: "CloudGeni builds OpenGeni." } },
+      revision: { profile: { identity: "CloudGeni builds Opengeni." } },
       head: { revisionId: created.revision.id, activationVersion: 1 },
       event: { type: "activate" },
     });

@@ -1,4 +1,4 @@
-// Metro for the OpenGeni native app.
+// Metro for the Opengeni native app.
 //
 // `@opengeni/*` packages are resolved from this repository's workspace sources, so the app
 // always runs the checked-out SDK, hooks and native kit: the native kit is resolved directly

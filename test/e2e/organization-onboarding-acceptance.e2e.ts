@@ -54,7 +54,7 @@ const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 type ScriptedOutcome = Exclude<ManagedEmailDeliveryResult, { status: "sent" }>;
 
 class ScriptableManagedEmailTransport implements ManagedEmailTransport {
-  readonly sender = "OpenGeni Acceptance <acceptance@example.test>";
+  readonly sender = "Opengeni Acceptance <acceptance@example.test>";
   readonly idempotency = {
     scope: "opengeni-onboarding-acceptance-v1",
     retentionSeconds: 86_400,

@@ -247,7 +247,7 @@ function previewIncludedModel() {
   return null;
 }
 
-/** `?credits=trial` previews the step when the organization already holds OpenGeni credits. */
+/** `?credits=trial` previews the step when the organization already holds Opengeni credits. */
 function previewStartingCredits() {
   if (new URLSearchParams(window.location.search).get("credits") !== "trial") return null;
   return {

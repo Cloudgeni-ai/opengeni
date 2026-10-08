@@ -3762,7 +3762,7 @@ describe("connections routes", () => {
       );
       expect(as.registrations).toHaveLength(1);
       expect(as.registrations[0]).toMatchObject({
-        client_name: "OpenGeni",
+        client_name: "Opengeni",
         redirect_uris: ["https://api.opengeni.test/v1/integrations/oauth/callback"],
         token_endpoint_auth_method: "none",
         scope: "documents:read",
@@ -3874,7 +3874,7 @@ describe("connections routes", () => {
           method: "POST",
           contentType: "application/json",
           body: expect.objectContaining({
-            client_name: "OpenGeni",
+            client_name: "Opengeni",
             redirect_uris: ["https://api.opengeni.test/v1/integrations/oauth/callback"],
           }),
         },
@@ -4690,7 +4690,7 @@ describe("connections routes", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
       client_id: "https://api.opengeni.test/v1/integrations/oauth/client-metadata.json",
-      client_name: "OpenGeni",
+      client_name: "Opengeni",
       redirect_uris: ["https://api.opengeni.test/v1/integrations/oauth/callback"],
       token_endpoint_auth_method: "none",
       grant_types: ["authorization_code", "refresh_token"],

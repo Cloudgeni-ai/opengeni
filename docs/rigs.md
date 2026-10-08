@@ -75,7 +75,7 @@ The workspace default is the one way to give every new session a Variable Set: i
 
 ### Changing setup after a session starts
 
-OpenGeni does not hot-swap a Sandbox Environment on a live session or mutate the current box in place. The web inspector's **Restart with setup** action uses `POST /v1/workspaces/:workspaceId/sessions/:sessionId/forks` with optional `rigId` and ordered `variableSetIds`. The operation requires the ordinary tenancy-fork permissions plus `rigs:use` when a Sandbox Environment is selected and both Variable Set attachment permissions for every selected/default set.
+Opengeni does not hot-swap a Sandbox Environment on a live session or mutate the current box in place. The web inspector's **Restart with setup** action uses `POST /v1/workspaces/:workspaceId/sessions/:sessionId/forks` with optional `rigId` and ordered `variableSetIds`. The operation requires the ordinary tenancy-fork permissions plus `rigs:use` when a Sandbox Environment is selected and both Variable Set attachment permissions for every selected/default set.
 
 The database creates the history fork and configures its runtime in one transaction. The destination receives a fresh root/sandbox-group identity, freezes the selected Sandbox Environment's then-active version, stores the ordered explicit Variable Sets, emits `session.created` and `session.runtime.configured`, and starts with no active sandbox. Any validation or configuration failure rolls back the fork and its idempotency receipt. Exact retries recover both committed events without consulting mutable source-session visibility or the Sandbox Environment's newly active version. The source session and any source sandbox remain unchanged.
 

@@ -225,7 +225,7 @@ export type MessageTimelineProps = {
    * record in the host's memory pane. Opt-in, exactly like `onReconnect`: the
    * library draws no "View in memory" affordance without a handler — the memory
    * row is then non-interactive rich content. This is the switch that makes the
-   * deep-link a first-party OpenGeni capability without other SDK consumers
+   * deep-link a first-party Opengeni capability without other SDK consumers
    * opting into it. The app supplies it (it owns routing to the memory pane).
    */
   onMemoryClick?: ((memoryId: string) => void) | undefined;
@@ -269,7 +269,7 @@ export type MessageTimelineProps = {
    */
   toolRegistry?: ToolRegistry | undefined;
   /**
-   * Open OpenGeni object links the agent writes in replies and progress notes:
+   * Open Opengeni object links the agent writes in replies and progress notes:
    * `artifact:<file>`, `sandbox:<path>`, editable artifacts, and Sites. Return
    * a host URL (`{ href }`) or action (`{ open }`); unhandled targets render as
    * unavailable text instead of a console link that 404s inside the host.

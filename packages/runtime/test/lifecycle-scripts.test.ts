@@ -262,7 +262,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           output = failure.stdout ?? "";
         }
         expect({ name, status }).toEqual({ name, status: 78 });
-        expect(output).toContain("Refusing to provision OpenGeni Git credentials");
+        expect(output).toContain("Refusing to provision Opengeni Git credentials");
         expect(readFileSync(join(home, ".gitconfig"), "utf8")).toBe(gitconfig);
         expect(readFileSync(join(home, ".config", "git", "config"), "utf8")).toBe(xdgConfig);
         expect(existsSync(join(home, ".opengeni"))).toBe(false);
@@ -330,7 +330,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       ]) {
         const refused = await bareSession.exec({ cmd: command });
         expect(refused.exitCode).toBe(78);
-        expect(refused.stderr).toContain("Refusing to provision OpenGeni Git credentials");
+        expect(refused.stderr).toContain("Refusing to provision Opengeni Git credentials");
       }
       expect(readdirSync(bareHome)).toEqual([]);
       expect(existsSync(join(workspace, "repos"))).toBe(false);

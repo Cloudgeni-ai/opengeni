@@ -174,7 +174,7 @@ export async function publishArtifactRuntime(options: {
       release = (await api.post("releases", {
         tag_name: tagName,
         target_commitish: sourceSha,
-        name: `OpenGeni native artifact runtime ${sourceSha}`,
+        name: `Opengeni native artifact runtime ${sourceSha}`,
         body: "Exact-source native runtime inputs verified from successful canonical main CI. Not a product release.",
         draft: true,
         prerelease: true,

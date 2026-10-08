@@ -326,11 +326,11 @@ function previewItems(): AtlassianBrowseItem[] {
     {
       id: "jira_project:preview-cloud:10000",
       cloudId: "preview-cloud",
-      siteName: "OpenGeni Integration Lab",
+      siteName: "Opengeni Integration Lab",
       siteUrl: "https://opengeni-lab.atlassian.net",
       resourceId: "10000",
       key: "KAN",
-      name: "OpenGeni Product Lab",
+      name: "Opengeni Product Lab",
       kind: "jira_project",
       description: null,
       webUrl: "https://opengeni-lab.atlassian.net/jira/software/c/projects/KAN",
@@ -338,7 +338,7 @@ function previewItems(): AtlassianBrowseItem[] {
     {
       id: "confluence_space:preview-cloud:20000",
       cloudId: "preview-cloud",
-      siteName: "OpenGeni Integration Lab",
+      siteName: "Opengeni Integration Lab",
       siteUrl: "https://opengeni-lab.atlassian.net",
       resourceId: "20000",
       key: "SD",
@@ -350,7 +350,7 @@ function previewItems(): AtlassianBrowseItem[] {
     {
       id: "confluence_space:preview-cloud:20001",
       cloudId: "preview-cloud",
-      siteName: "OpenGeni Integration Lab",
+      siteName: "Opengeni Integration Lab",
       siteUrl: "https://opengeni-lab.atlassian.net",
       resourceId: "20001",
       key: "CA",

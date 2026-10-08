@@ -567,8 +567,8 @@ function importWorkbook(
 
 async function exportWorkbook(workbook: Workbook): Promise<ExcelJS.Workbook> {
   const output = await createExcelWorkbook();
-  output.creator = "OpenGeni";
-  output.lastModifiedBy = "OpenGeni";
+  output.creator = "Opengeni";
+  output.lastModifiedBy = "Opengeni";
   output.created = new Date(0);
   output.modified = new Date(0);
   output.calcProperties.fullCalcOnLoad = true;
@@ -2377,7 +2377,10 @@ function inspectXml(
       const value = activeMetadata.text.trim();
       if (
         value.length > 0 &&
-        !(["creator", "lastModifiedBy"].includes(activeMetadata.name) && value === "OpenGeni")
+        !(
+          ["creator", "lastModifiedBy"].includes(activeMetadata.name) &&
+          (value === "Opengeni" || value === "OpenGeni")
+        )
       ) {
         features.add("workbook-properties");
       }

@@ -74,7 +74,7 @@ describe("model-policy", () => {
       first: "Models",
     },
     {
-      name: "no selectable OpenGeni",
+      name: "no selectable Opengeni",
       paid: false,
       codex: true,
       free: false,
@@ -127,7 +127,7 @@ describe("model-policy", () => {
     ]);
   });
 
-  test("credit notices follow cost policy rather than the OpenGeni group", () => {
+  test("credit notices follow cost policy rather than the Opengeni group", () => {
     for (const cost of ["free", "credits", "workspace", "organization", "subscription"] as const) {
       const model = catalogModel({
         id: "model",
@@ -312,7 +312,7 @@ describe("model-policy", () => {
     expect(billingClassForModel(deploymentModel)).toBe("opengeni_credits");
   });
 
-  test("groups an anonymous deployment route under OpenGeni without assuming free access", () => {
+  test("groups an anonymous deployment route under Opengeni without assuming free access", () => {
     const model = catalogModel({
       id: "opencode/x-preview-f-free",
       label: "OpenCode Ox Alpha",

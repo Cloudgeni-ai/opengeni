@@ -518,7 +518,7 @@ function collectGoogleMethods(
       operationId: stringValue(rawMethod.id) ?? fallbackId,
       // Discovery descriptions are often full documentation paragraphs. Keep
       // them as descriptions and use the stable method identity for the short
-      // OpenGeni tool display name.
+      // Opengeni tool display name.
       summary: stringValue(rawMethod.id) ?? fallbackId,
       description: stringValue(rawMethod.description),
       parameters,

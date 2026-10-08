@@ -588,7 +588,7 @@ function ReviewModelSelect(props: {
   );
 }
 
-/** What failed, then what to do: never the raw "OpenGeni API 4xx ... Reference" string. */
+/** What failed, then what to do: never the raw "Opengeni API 4xx ... Reference" string. */
 function messageForError(what: string, reason: unknown): string {
   return `${what}. ${userErrorText(reason)}`;
 }

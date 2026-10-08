@@ -1006,7 +1006,7 @@ export const STREAM_SCENARIOS: StreamScenario[] = [
         tools: (ctx) => [
           ...marathonTools(ctx, 6),
           applyPatch(ctx.id("z-patch"), "src/routes/login.tsx", 9),
-          webSearch(ctx.id("z-search"), "OpenGeni session chrome"),
+          webSearch(ctx.id("z-search"), "Opengeni session chrome"),
           computerScreenshot(ctx.id("z-shot")),
           mcpIssue(ctx.id("z-issue"), "Polish stream settle fold"),
         ],

@@ -115,7 +115,7 @@ describe("browser e2e", () => {
     } catch (error) {
       browserObservation.stop();
       throw new Error(
-        `OpenGeni home did not become interactive: ${String(error)}\n${await pageDiagnostics(pageA, browserObservation.diagnostics)}\n[web]\n${web.logs()}\n[api]\n${api.logs()}\n[workers]\n${worker.logs()}`,
+        `Opengeni home did not become interactive: ${String(error)}\n${await pageDiagnostics(pageA, browserObservation.diagnostics)}\n[web]\n${web.logs()}\n[api]\n${api.logs()}\n[workers]\n${worker.logs()}`,
         { cause: error },
       );
     }

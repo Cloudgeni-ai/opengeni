@@ -311,7 +311,7 @@ export function KnowledgePagePreview() {
         revisions: [
           {
             id: `${entry.id}-r${entry.revisions.length + 1}`,
-            author: "OpenGeni",
+            author: "Opengeni",
             createdAt: now,
             summary: `Approved from chat ${item.origin.name}`,
             content: text,
@@ -323,7 +323,7 @@ export function KnowledgePagePreview() {
       setInstructions((current) => [
         {
           id: `rev-${current.length + 1}`,
-          author: "OpenGeni",
+          author: "Opengeni",
           createdAt: now,
           summary: `Approved from schedule ${item.origin.name}`,
           content: text,

@@ -73,7 +73,7 @@ describe("sandbox AnyDoc runtime", () => {
     expect(sources).toContain(
       `https://github.com/firecrawl/anydoc/blob/${upstreamCommit}/skills/convert-documents-to-markdown/SKILL.md`,
     );
-    expect(sources).toContain("Modified by OpenGeni");
+    expect(sources).toContain("Modified by Opengeni");
     // The hash-pinned curated copy is the same adapted text; the package notice
     // covers both copies without changing the reviewed library artifact.
     expect(curated).toBe(skill);

@@ -72,7 +72,7 @@ export const localProvider: ProviderRegistration = {
   // UnixLocalSandboxClient runs in-process — no credentials, no options.
   validateCredentials() {},
   build() {
-    // The durable OpenGeni archive ledger owns restoration. A process-local SDK
+    // The durable Opengeni archive ledger owns restoration. A process-local SDK
     // snapshot is neither portable nor independently governed and can be older
     // than the still-live workspace path.
     return new OpenGeniUnixLocalSandboxClient({ snapshot: new NoopSnapshotSpec() });

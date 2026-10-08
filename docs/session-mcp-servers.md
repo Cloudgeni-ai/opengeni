@@ -1,6 +1,6 @@
 # Per-session MCP servers
 
-OpenGeni supports third-party MCP servers attached to a single session. This is
+Opengeni supports third-party MCP servers attached to a single session. This is
 for embedding hosts that need per-session tool endpoints and per-session bearer
 credentials, without making those servers deployment-global.
 
@@ -21,7 +21,7 @@ credentials, without making those servers deployment-global.
   2,048 names, 256 KiB total UTF-8, and 1 KiB UTF-8 per name.
 - `headers`: configured credential headers, authenticated-encrypted at rest.
 - `connectionRef`: optional non-secret opaque connection pointer. Standalone
-  deployments resolve it through OpenGeni's connection store; embedded hosts
+  deployments resolve it through Opengeni's connection store; embedded hosts
   can resolve the same pointer through `ConnectionCredentialsPort.mcpCredentials`.
 
 ### Tool selection
@@ -138,7 +138,7 @@ otherwise create/rotation requests fail with 503.
 `connection_ref` is non-secret JSON and does not require the encryption key by
 itself. This lets an embedding host attach its existing GitHub, GitLab, Azure
 DevOps, or other provider connection without copying a token or creating an
-OpenGeni connection row. Opaque host ids are accepted; standalone connection
+Opengeni connection row. Opaque host ids are accepted; standalone connection
 lookups still use their ordinary UUID ids. A session server may use static
 headers, a connection ref, or neither.
 
@@ -397,7 +397,7 @@ connection pointer.
 Each durable session tool ref may set `eager: true`. Eagerness is not inferred
 from mandatory/strict selection: on a fresh progressive-disclosure turn, only
 those exact servers join the first-provider-request barrier. Every other MCP,
-including strict first-party OpenGeni, begins connection/listing concurrently.
+including strict first-party Opengeni, begins connection/listing concurrently.
 Ordinary text may settle without waiting; `tool_search`, deferred invocation,
 Codemode activation, and catalog-dependent work join the same attempt promise.
 Generic deferred invocation then renames a valid `tool_invoke` to the exact

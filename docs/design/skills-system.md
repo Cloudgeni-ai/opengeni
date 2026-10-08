@@ -73,7 +73,7 @@ not a safety assessment or proof that a file is useful guidance. Decide the
 precise NUL/control-byte policy before shipping; encoding checks alone do not
 perfectly classify text.
 
-This deliberately limits what OpenGeni can import. It is not a claim that every
+This deliberately limits what Opengeni can import. It is not a claim that every
 external Skill must be text-only. Keep the existing limits initially unless
 compatibility testing gives a reason to change them.
 

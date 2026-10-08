@@ -1,6 +1,6 @@
 name: Release embedded distribution
 
-# Publish an exact OpenGeni SDK/runtime distribution for self-hosted embedding
+# Publish an exact Opengeni SDK/runtime distribution for self-hosted embedding
 # consumers. This path deliberately does not claim hosted Workbench acceptance:
 # it promotes only bytes already built by release-candidate.yml after exact-head
 # package CI, and it never updates the hosted deployment's `latest` image tags.
@@ -926,7 +926,7 @@ jobs:
               ".release/opengeni-artifact-runtime-${SOURCE_SHA}.tgz" \
               ".release/opengeni-artifact-runtime-${SOURCE_SHA}.tgz.sha256" \
               --target "$SOURCE_SHA" \
-              --title "OpenGeni embedded distribution ${RELEASE_VERSION} (${SOURCE_SHA::12})" \
+              --title "Opengeni embedded distribution ${RELEASE_VERSION} (${SOURCE_SHA::12})" \
               --notes "Source-bound npm packages, Helm chart, images, native runtime build inputs, and BOM for embedded consumers." \
               --latest=false
           else

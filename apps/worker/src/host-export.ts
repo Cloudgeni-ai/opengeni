@@ -2,7 +2,7 @@
  * Lightweight host-export entrypoint for embedded API processes.
  *
  * Importing the worker package root initializes Temporal's native worker
- * dependency graph. Host applications that only project durable OpenGeni
+ * dependency graph. Host applications that only project durable Opengeni
  * events or usage must not need that native runtime (or its libc contract).
  */
 export {

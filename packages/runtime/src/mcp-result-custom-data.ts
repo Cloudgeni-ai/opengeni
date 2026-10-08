@@ -192,7 +192,7 @@ export class McpResultCustomDataBridge {
         ) {
           // A PrefixedMcpServer may itself be wrapped by another prefixed
           // server. The outer bridge already retains the exact result, so do
-          // not nest another copy of OpenGeni's private marker. Preserve only
+          // not nest another copy of Opengeni's private marker. Preserve only
           // the actual extractor payload carried through the inner bridge.
           const nestedInnerCustomData =
             normalizedInnerCustomData[OPENGENI_INNER_MCP_CUSTOM_DATA_KEY];
@@ -308,7 +308,7 @@ function compactSerializedRunItem(item: unknown): boolean {
 }
 
 /**
- * Release OpenGeni's duplicate full-result marker from the live SDK run item
+ * Release Opengeni's duplicate full-result marker from the live SDK run item
  * after its normalized event has crossed the durable append boundary. The SDK
  * output and any inner extractor custom data remain available for subsequent
  * model calls and approval resume.
@@ -328,7 +328,7 @@ export function releaseMcpResultCustomDataFromSdkEvent(event: unknown): boolean 
 }
 
 /**
- * Remove only OpenGeni's redundant full-result marker from an approval
+ * Remove only Opengeni's redundant full-result marker from an approval
  * RunState after the worker has durably recorded the exact event output. The
  * SDK's model-visible output, protocol raw item, and any inner custom data stay
  * intact, so approval resume behavior is unchanged without triplicating a

@@ -9,7 +9,7 @@ import type { JudgeResult, RunObservation, UsageTotals } from "./types";
 export const JUDGE_PROMPT_VERSION = "1";
 
 export const JUDGE_SYSTEM_PROMPT = [
-  "You are a strict evaluator of an AI agent's behavior in a product called OpenGeni.",
+  "You are a strict evaluator of an AI agent's behavior in a product called Opengeni.",
   "You receive: the behavior under test, a scenario-specific rubric, and a transcript of what the",
   "agent did (user messages, tool calls with truncated arguments/outputs, and the agent's replies).",
   "Score how well the agent behaved on a 1-5 integer scale using the rubric. Judge only what the",

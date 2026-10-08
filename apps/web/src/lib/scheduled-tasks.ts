@@ -100,7 +100,7 @@ export type ScheduledTaskFormState = {
   mcpServerIds?: string[];
   connectionAccounts?: import("@opengeni/sdk").McpConnectionAccountSelection[];
   slackBotConnectionId: string;
-  /** Channel a person chose for the OpenGeni bot's posts; empty means no posting. */
+  /** Channel a person chose for the Opengeni bot's posts; empty means no posting. */
   slackBotChannelId: string;
   resources: ResourceRef[];
   /**
@@ -954,7 +954,7 @@ export function scheduledTaskPolicyDriftLines(
 /**
  * Defaults the owner chose to keep off one schedule, for the task head they
  * looked at. Only additions a person may deliberately decline are dismissible:
- * workspace default connectors and OpenGeni tools. A broken account or a
+ * workspace default connectors and Opengeni tools. A broken account or a
  * connector the workspace removed is never hidden.
  */
 export type ScheduledTaskDriftDismissal = {

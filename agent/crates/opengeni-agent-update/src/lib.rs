@@ -1,4 +1,4 @@
-//! Self-update for the OpenGeni self-hosted agent (M11b).
+//! Self-update for the Opengeni self-hosted agent (M11b).
 //!
 //! The updater is **symmetric with the install scripts**: ONE pinned minisign key
 //! ([`verify::PINNED_MINISIGN_PUBKEY`], the same base64 the scripts embed and

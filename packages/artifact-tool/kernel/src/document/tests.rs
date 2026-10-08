@@ -27,7 +27,7 @@ fn full_typescript_fixture() -> Document {
                 variant: StoryVariant::Default,
             },
             id: id(DocumentIdKind::Paragraph, 8),
-            runs: vec![TextRun::plain("OpenGeni brief")],
+            runs: vec![TextRun::plain("Opengeni brief")],
             style: ParagraphStyle::default(),
         },
     );

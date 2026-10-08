@@ -155,7 +155,7 @@ export interface ResolvedActiveBackend {
 }
 
 /** Durable identity assigned to a provider exec that yielded instead of
- * exiting. The UUID is OpenGeni authority; the numeric provider session id is
+ * exiting. The UUID is Opengeni authority; the numeric provider session id is
  * only a locator within the exact copied backend route. */
 export type RoutingRetainedProcess = {
   id: string;
@@ -2393,7 +2393,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     );
   }
 
-  /** Return only OpenGeni's durable UUID + provider locator. Backend/session
+  /** Return only Opengeni's durable UUID + provider locator. Backend/session
    * objects remain private so a caller cannot forge route authority from this
    * diagnostic handoff. */
   retainedProcessIdentity(providerSessionId: number): RoutingRetainedProcess | null {
@@ -2629,7 +2629,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     });
   }
 
-  /** Delete only an OpenGeni placement-private staging file. This narrow
+  /** Delete only an Opengeni placement-private staging file. This narrow
    * control operation cannot be repurposed into a generic mutation bypass. */
   async deletePlacementPrivate(path: string, runAs?: string): Promise<void> {
     const privatePath = placementPrivatePath(path);

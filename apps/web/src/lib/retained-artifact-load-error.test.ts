@@ -12,7 +12,7 @@ const unavailableCopy = {
 
 function assertNoRawApiPhrasing(presentation: { title: string; description: string }) {
   const serialized = JSON.stringify(presentation);
-  expect(serialized).not.toContain("OpenGeni API");
+  expect(serialized).not.toContain("Opengeni API");
   expect(serialized).not.toContain("API 404");
   expect(serialized).not.toContain("artifact not found");
 }

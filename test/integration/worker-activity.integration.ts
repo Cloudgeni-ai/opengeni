@@ -987,7 +987,7 @@ describe("worker activities integration", () => {
         mcpServers: [
           {
             id: "opengeni",
-            name: "OpenGeni",
+            name: "Opengeni",
             url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
             timeoutMs: undefined,
             cacheToolsList: false,
@@ -1093,7 +1093,7 @@ describe("worker activities integration", () => {
       // context validation and the worker's MCP runtime see the same server.
       apiSettings.mcpServers.push({
         id: "opengeni",
-        name: "OpenGeni",
+        name: "Opengeni",
         url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
         timeoutMs: undefined,
         cacheToolsList: false,
@@ -3341,7 +3341,7 @@ describe("worker activities integration", () => {
       filename: "no-credit-doc.txt",
       safeFilename: "no-credit-doc.txt",
       contentType: "text/plain",
-      sizeBytes: new TextEncoder().encode("OpenGeni managed document credit test.").byteLength,
+      sizeBytes: new TextEncoder().encode("Opengeni managed document credit test.").byteLength,
       bucket: "test",
       objectKey: `workspaces/${grant.workspaceId}/files/no-credit-doc.txt`,
       expiresAt: new Date(Date.now() + 60_000),
@@ -3374,7 +3374,7 @@ describe("worker activities integration", () => {
       }),
       db: dbClient.db,
       bus,
-      objectStorage: fakeObjectStorage("OpenGeni managed document credit test."),
+      objectStorage: fakeObjectStorage("Opengeni managed document credit test."),
       documentServices: {
         parser: {
           name: "test-text",
@@ -5207,7 +5207,7 @@ describe("worker activities integration", () => {
       expect(session?.createdBy).toEqual({
         kind: "service",
         subjectId: "scheduler",
-        label: "OpenGeni scheduler",
+        label: "Opengeni scheduler",
       });
       const events = await listSessionEvents(
         dbClient.db,
@@ -5243,7 +5243,7 @@ describe("worker activities integration", () => {
       const expectedInitiator = createdBy ?? {
         kind: "service",
         subjectId: "scheduler",
-        label: "OpenGeni scheduler",
+        label: "Opengeni scheduler",
       };
       expect(scheduledTurn?.initiator).toEqual(expectedInitiator);
       if (createdBy) {

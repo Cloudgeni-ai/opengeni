@@ -7,10 +7,10 @@ const skill = readFileSync(
 );
 
 describe("Sites skill host-bridge rule", () => {
-  test("states up front that a Site never needs its own server for OpenGeni AI", () => {
+  test("states up front that a Site never needs its own server for Opengeni AI", () => {
     const rule = skill.indexOf("## Sites have no server; AI comes from the host");
     const durable = skill.indexOf("## Start from the durable Site");
-    const bridge = skill.indexOf("## Prefer OpenGeni's UI and typed client");
+    const bridge = skill.indexOf("## Prefer Opengeni's UI and typed client");
     expect(rule).toBeGreaterThan(-1);
     expect(rule).toBeLessThan(durable);
     expect(durable).toBeLessThan(bridge);
@@ -33,8 +33,8 @@ describe("Sites skill host-bridge rule", () => {
     expect(section).toContain("say which designs are possible and ask before building");
   });
 
-  test("keeps the backend escape hatch scoped to non-OpenGeni compute and asks first", () => {
-    expect(skill).toContain("OpenGeni AI and tool access are\n  never such a backend (see above)");
+  test("keeps the backend escape hatch scoped to non-Opengeni compute and asks first", () => {
+    expect(skill).toContain("Opengeni AI and tool access are\n  never such a backend (see above)");
     expect(skill).toContain(
       "explain that constraint and ask how the user\n  wants to proceed instead of dropping functionality or choosing a host",
     );

@@ -82,7 +82,7 @@ export type ChatOptions = ChatTarget & {
   user?: string | undefined;
   /** Stable conversation id; the session id is derived from it deterministically. */
   conversation: string;
-  /** Prefer the actual OpenGeni session ID for shared or existing conversations.
+  /** Prefer the actual Opengeni session ID for shared or existing conversations.
    * The acting user is independent of the conversation's identity. */
   sessionId?: string | undefined;
   /**
@@ -183,7 +183,7 @@ export type ChatSendOptions = {
    * this send creates the session: they become the first message's
    * `modelContext` (skipped when `create.modelContext` was supplied), trimmed
    * from the oldest end to 30,000 characters. Never resent on later turns:
-   * after the first message OpenGeni owns the history.
+   * after the first message Opengeni owns the history.
    */
   importedHistory?: ChatImportedMessage[] | undefined;
   /** Model for this message's turn; omitted keeps the session's current policy. */

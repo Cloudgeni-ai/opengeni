@@ -1981,7 +1981,7 @@ describe("OpenGeniClient", () => {
     expect((error as OpenGeniApiError).body).toBe("");
     expect((error as OpenGeniApiError).code).toBeUndefined();
     expect((error as OpenGeniApiError).message).toMatch(
-      /^OpenGeni API 404: Request failed\. Reference: [0-9a-f-]{36}\.$/,
+      /^Opengeni API 404: Request failed\. Reference: [0-9a-f-]{36}\.$/,
     );
   });
 
@@ -2005,7 +2005,7 @@ describe("OpenGeniClient", () => {
       body,
     });
     expect((error as Error).message).toMatch(
-      /^OpenGeni API 422: Invalid session create request: initialMessage failed schema validation Reference: [0-9a-f-]{36}\.$/,
+      /^Opengeni API 422: Invalid session create request: initialMessage failed schema validation Reference: [0-9a-f-]{36}\.$/,
     );
   });
 
@@ -2040,7 +2040,7 @@ describe("OpenGeniClient", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "OpenGeni could not confirm the controller mutation.",
+        message: "Opengeni could not confirm the controller mutation.",
         retryable: true,
         outcomeUnknown: true,
         requestId: "controller-mutation-503",
@@ -2706,8 +2706,8 @@ describe("OpenGeniClient", () => {
       fundingOptions: [
         {
           source: "opengeni_credits" as const,
-          label: "OpenGeni",
-          description: "Uses OpenGeni credits.",
+          label: "Opengeni",
+          description: "Uses Opengeni credits.",
           available: true,
           unavailableReason: null,
         },

@@ -26,7 +26,7 @@ function catalogModel(
     id,
     label: id === "gpt-5.5" ? "GPT-5.5" : id === "codex/gpt-5.6-luna" ? "GPT-5.6 Luna" : id,
     provider: source,
-    providerLabel: source === "codex" ? "Codex" : source === "supergrok" ? "SuperGrok" : "OpenGeni",
+    providerLabel: source === "codex" ? "Codex" : source === "supergrok" ? "SuperGrok" : "Opengeni",
     source,
     api: "responses",
     ...(overrides.cost ? { cost: overrides.cost } : {}),

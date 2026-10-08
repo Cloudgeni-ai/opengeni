@@ -127,7 +127,7 @@ for (const kind of ["document", "spreadsheet", "presentation"]) {
           }
           if (loadState === "error" && !embedded) {
             expect(container.textContent).toContain("Try again");
-            expect(container.textContent).not.toMatch(/OpenGeni API/i);
+            expect(container.textContent).not.toMatch(/Opengeni API/i);
             expect(container.textContent).not.toContain("Fixture unavailable");
           }
         } finally {
@@ -174,7 +174,7 @@ for (const [status, title, retry] of [
       });
       expect(container.textContent).toContain(title);
       expect(container.textContent?.includes("Try again")).toBe(retry);
-      expect(container.textContent).not.toMatch(/OpenGeni API/i);
+      expect(container.textContent).not.toMatch(/Opengeni API/i);
       expect(container.textContent).not.toContain(String(status));
       if (status === 503) expect(container.textContent).toContain("Reference: req_edit-1");
       // A permission refusal explains the missing access instead of "may have been removed".

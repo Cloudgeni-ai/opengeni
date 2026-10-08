@@ -2117,6 +2117,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0647_slack_bot_branding.sql",
       // Exclusion membership is unordered; keep this addition away from the shared tail.
       "0640_knowledge_entry_created_since.sql",
       "0641_subscription_authority_identity_index.sql",

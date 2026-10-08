@@ -24,7 +24,7 @@ export type NativeCallEvent =
 export type NativeCallAudioRoute = "receiver" | "speaker" | "bluetooth" | "headphones" | "other";
 
 /**
- * The platform call service seam. The OpenGeni Expo module implements it with
+ * The platform call service seam. The Opengeni Expo module implements it with
  * CallKit; hosts on other platforms can implement it or omit it, in which case
  * the realtime session runs without a system call.
  */

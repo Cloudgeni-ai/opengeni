@@ -157,7 +157,7 @@ cannot become accepted answers. An unavailable prepare tool falls back to
 ordinary search in both views and collection browsing, without widening the
 task's selected tools or permissions.
 
-A create omits `entryId` and passes `expectedVersion: 0`. OpenGeni derives the
+A create omits `entryId` and passes `expectedVersion: 0`. Opengeni derives the
 id from `operationId` (`knowledgeEntryIdForOperation` in
 `packages/db/src/knowledge-entries.ts`), so an exact retry replays the same
 receipt. A correction passes an existing `entryId` and its current version. The

@@ -47,7 +47,7 @@ async function git(cwd: string, ...args: string[]) {
 }
 
 /**
- * A miniature repository shaped like OpenGeni: a `main` ledger, then a branch
+ * A miniature repository shaped like Opengeni: a `main` ledger, then a branch
  * that adds a migration whose ordinal main has meanwhile taken. Returns the
  * branch worktree path.
  */

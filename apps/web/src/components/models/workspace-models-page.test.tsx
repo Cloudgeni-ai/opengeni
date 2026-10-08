@@ -1068,7 +1068,7 @@ describe("Connect Codex", () => {
   }
 });
 
-describe("OpenGeni credits", () => {
+describe("Opengeni credits", () => {
   const noAccounts = () => {
     accounts = { ...accounts, accounts: [], activeAccountId: null };
   };

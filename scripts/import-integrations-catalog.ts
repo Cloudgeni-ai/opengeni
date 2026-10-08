@@ -73,7 +73,7 @@ export const deadDemoDomains = new Set([
 export const suspiciousSurfaceUrls = new Map([
   [
     "figma.com\nhttps://mcp.figma.com/mcp",
-    "Figma requires an approved MCP client; OpenGeni remote access must be approved before stock setup is offered",
+    "Figma requires an approved MCP client; Opengeni remote access must be approved before stock setup is offered",
   ],
   [
     "activepieces.com\nhttps://www.activepieces.com/.well-known/mcp/server-card.json",

@@ -379,7 +379,7 @@ describe("contracts", () => {
         error: {
           status: 402,
           code: "payment_required",
-          message: "insufficient OpenGeni credits",
+          message: "insufficient Opengeni credits",
           retryable: false,
         },
       }),
@@ -387,7 +387,7 @@ describe("contracts", () => {
       error: {
         status: 402,
         code: "payment_required",
-        message: "insufficient OpenGeni credits",
+        message: "insufficient Opengeni credits",
         retryable: false,
       },
     });
@@ -1217,7 +1217,7 @@ describe("contracts", () => {
     ).toBe("https://dev.azure.com/acme/project/_git/repo.git");
   });
 
-  test("keeps uploaded files in the private OpenGeni workspace directory by default", () => {
+  test("keeps uploaded files in the private Opengeni workspace directory by default", () => {
     expect(resourceMountPath({ kind: "file", fileId: "file-1" })).toBe(".opengeni/files/file-1");
     expect(
       resourceMountPath({
@@ -1712,7 +1712,7 @@ describe("contracts", () => {
     const internal = sessionSystemUpdateBatchHistoryItem([update], goalSnapshot);
     expect(internal.role).toBe("system");
     expect(internal.content).toStartWith(`${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}`);
-    expect(internal.content).toContain("[OpenGeni internal updates]");
+    expect(internal.content).toContain("[Opengeni internal updates]");
   });
 
   test("renders scheduled occurrences as fresh user-role task boundaries", () => {
@@ -1752,7 +1752,7 @@ describe("contracts", () => {
     ];
     const attached = sessionSystemUpdateBatchHistoryItem(updates, completedGoal);
     expect(attached.role).toBe("system");
-    expect(attached.content).toContain("[OpenGeni internal updates]");
+    expect(attached.content).toContain("[Opengeni internal updates]");
 
     const scheduled = sessionSystemUpdateBatchHistoryItem(updates, completedGoal, {
       promoteScheduledOccurrenceToUser: true,
@@ -1773,7 +1773,7 @@ describe("contracts", () => {
     );
     expect(scheduled.content).toContain("Earlier completed goals");
     expect(scheduled.content).toContain("query that state during this occurrence");
-    expect(scheduled.content).not.toContain("[OpenGeni internal updates]");
+    expect(scheduled.content).not.toContain("[Opengeni internal updates]");
     expect(scheduled.content).not.toContain("They are not human prompts");
   });
 
@@ -1830,7 +1830,7 @@ describe("contracts", () => {
       deliveredAt: new Date("2026-09-26T07:51:00Z"),
     });
     expect(content.split("\n").slice(0, 3)).toEqual([
-      "[OpenGeni internal updates]",
+      "[Opengeni internal updates]",
       "These platform updates were delivered together for this inference.",
       "Delivered: Saturday 2026-09-26 07:51 UTC",
     ]);
@@ -1902,7 +1902,7 @@ describe("contracts", () => {
     ]);
 
     expect(scheduled.role).toBe("system");
-    expect(scheduled.content).toContain("[OpenGeni internal updates]");
+    expect(scheduled.content).toContain("[Opengeni internal updates]");
   });
 
   test("accepts client config payloads", () => {
@@ -1913,7 +1913,7 @@ describe("contracts", () => {
       allowedModels: ["gpt-5.6-sol"],
       defaultReasoningEffort: "high",
       allowedReasoningEfforts: ["low", "medium", "high"],
-      mcpServers: [{ id: "opengeni", name: "OpenGeni" }],
+      mcpServers: [{ id: "opengeni", name: "Opengeni" }],
       fileUploads: { enabled: true, maxSizeBytes: 5_000_000_000 },
       productAccessMode: "managed",
       auth: { mode: "managedSession", session: "cookie" },
@@ -2071,7 +2071,7 @@ describe("contracts", () => {
       label: "DeepSeek V4 Flash 0731",
       shortLabel: "V4 Flash",
       provider: "opengeni-gateway",
-      providerLabel: "OpenGeni Gateway",
+      providerLabel: "Opengeni Gateway",
       api: "responses",
     });
     expect(withShort.shortLabel).toBe("V4 Flash");
@@ -2508,7 +2508,7 @@ describe("contracts", () => {
     const numbered = numberTimelineAnnotations([submitted]);
     expect(renderTimelineAnnotationsForModel("", numbered)).toBe(
       [
-        "[OpenGeni timeline annotations]",
+        "[Opengeni timeline annotations]",
         "Annotation 1",
         `Source: ${JSON.stringify(submitted.source)}`,
         'Exact quote: "beta"',

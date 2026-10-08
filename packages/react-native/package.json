@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/react-native",
   "version": "1.4.4",
-  "description": "React Native and Expo kit for OpenGeni agents: the native session timeline, composer adapters, voice dictation, and realtime voice calls (CallKit) on the same SDK controllers as the web.",
+  "description": "React Native and Expo kit for Opengeni agents: the native session timeline, composer adapters, voice dictation, and realtime voice calls (CallKit) on the same SDK controllers as the web.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

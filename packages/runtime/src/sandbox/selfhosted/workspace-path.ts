@@ -1,7 +1,7 @@
 /**
  * Host-native Connected Machine workspace paths.
  *
- * The connected agent reports its launch root in Hello. OpenGeni persists that
+ * The connected agent reports its launch root in Hello. Opengeni persists that
  * value and uses it as the manifest/session root; there is no virtual alias and
  * no command rewriting. Relative paths resolve lexically from that root while
  * absolute paths retain their host meaning.

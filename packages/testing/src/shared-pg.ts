@@ -180,7 +180,7 @@ export type BlankTestDatabase = {
 export type OwnerMigratedTestDatabase = {
   /**
    * URL of the NOSUPERUSER NOBYPASSRLS role that OWNS this database. Drive
-   * `migrate()` through this URL to reproduce OpenGeni's production migration
+   * `migrate()` through this URL to reproduce Opengeni's production migration
    * principal, for whom `FORCE ROW LEVEL SECURITY` genuinely engages.
    */
   ownerUrl: string;
@@ -829,7 +829,7 @@ export async function acquireBlankTestDatabase(label = "blank"): Promise<BlankTe
 
 /**
  * Acquire a fresh, pristine database whose OWNER is a dedicated
- * `NOSUPERUSER NOBYPASSRLS` login role - OpenGeni's documented production
+ * `NOSUPERUSER NOBYPASSRLS` login role - Opengeni's documented production
  * migration principal (`docs/deployment.md`).
  *
  * Why this exists: `acquireSharedTestDatabase` and

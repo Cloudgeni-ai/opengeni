@@ -140,7 +140,7 @@ type WorkspaceSession = {
   }) => Promise<unknown>;
   persistWorkspace?: (options?: WorkspaceArchiveCaptureOptions) => Promise<Uint8Array | undefined>;
   /** Agents Extensions remote sessions expose this protected-at-type-level
-   * primitive on the concrete JS instance. OpenGeni uses it only through an
+   * primitive on the concrete JS instance. Opengeni uses it only through an
    * explicit provider policy to bypass replacing/unledgered native capture. */
   persistWorkspaceTar?: () => Promise<Uint8Array | undefined>;
   state?: {

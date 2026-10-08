@@ -1,12 +1,12 @@
 # Conversation context compaction
 
-OpenGeni freezes a per-session compaction mode at create time
+Opengeni freezes a per-session compaction mode at create time
 (`sessions.codex_compaction_mode`):
 
 | Mode | When | Mechanism |
 | --- | --- | --- |
 | `portable` | All non-Codex sessions; existing sessions (backfill); new Codex sessions when the workspace sets `codexCompactionDefault: "portable"` | Durable plaintext checkpoint (Codex CLI local path). Free mid-session provider switching. |
-| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The compact request **must** reuse the ordinary turn prompt-cache prefix: model-visible tool schemas + the exact agent `instructions` + active history + `compaction_trigger` (CLI `base_instructions` / `model_visible_specs` parity). Empty instructions are rejected. Operator `/compact` goes through normal sandbox and lazy-tool request preparation, stopping before ordinary inference. Retained cleartext keeps recent user/system/developer messages **including images** within the 64k budget. The Agents SDK rejects a bare trigger item, so OpenGeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. Session is **Codex-only** for its lifetime (HTTP + worker admission). |
+| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The compact request **must** reuse the ordinary turn prompt-cache prefix: model-visible tool schemas + the exact agent `instructions` + active history + `compaction_trigger` (CLI `base_instructions` / `model_visible_specs` parity). Empty instructions are rejected. Operator `/compact` goes through normal sandbox and lazy-tool request preparation, stopping before ordinary inference. Retained cleartext keeps recent user/system/developer messages **including images** within the 64k budget. The Agents SDK rejects a bare trigger item, so Opengeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. Session is **Codex-only** for its lifetime (HTTP + worker admission). |
 
 There is no off switch, compatibility ladder, ordinary-turn history trim, or
 deterministic non-model fallback. A `remote_v2` session never silently falls
@@ -44,7 +44,7 @@ Each resolved model can declare three distinct values:
 | effective input window | provider-safe input ceiling |
 | automatic compaction limit | proactive checkpoint trigger |
 
-If a model has no explicit automatic limit, OpenGeni uses
+If a model has no explicit automatic limit, Opengeni uses
 `floor(rawWindow * contextCompactionThresholdRatio)`. The ratio defaults to
 0.9 and is clamped to 0.3–0.9. An explicit limit is capped at 90% of the raw
 window, matching Codex core.
@@ -60,7 +60,7 @@ triple instead of the 1.05M deployment fallback:
 | automatic compaction limit (90%) | 244,800 |
 
 Automatic compaction is provider-accounted. Before a provider response exists,
-no local whole-request estimate may force compaction: OpenGeni sends the request,
+no local whole-request estimate may force compaction: Opengeni sends the request,
 then either records the provider's usage or handles the provider's typed context
 overflow through the same compaction recovery. After a response, the per-call
 guard anchors to that exact response's provider-reported **total** tokens and
@@ -100,7 +100,7 @@ content is still text and receives ordinary text accounting.
 ## Model-facing tool output
 
 Every resolved model carries a textual tool-output policy. The Codex catalog's
-10,000-token policy is the default; OpenGeni applies Codex's exact 1.2x JSON
+10,000-token policy is the default; Opengeni applies Codex's exact 1.2x JSON
 serialization allowance, UTF-8-safe head/tail truncation, and explicit
 `…N tokens truncated…` marker. Structured textual parts share one sequential
 budget while images, files, and encrypted content remain structured.
@@ -179,17 +179,17 @@ assistant content survive; no system moves across an assistant, and canonical
 history is never rewritten. Already-compacted sessions use this projection on
 their next ordinary turn without clearing context or rerunning completed tools.
 
-Before the provider call, OpenGeni estimates the history and checkpoint prompt. It
+Before the provider call, Opengeni estimates the history and checkpoint prompt. It
 replaces aggregate oversized tool results oldest-first only in the temporary
 copy, preserving recent detail. If that remains too large, it removes whole
 oldest user-delimited work units and re-sanitizes the suffix so no tool result,
 call, or reasoning fragment is orphaned. The temporary history copy is kept
 beneath the effective input ceiling and raw window minus requested summary.
-For a prepared Responses call, OpenGeni reserves the estimated instruction and
+For a prepared Responses call, Opengeni reserves the estimated instruction and
 tool-schema tokens before fitting history. If the provider still reports context
 overflow, it refits history to 40% of the remaining target and sends one final
 request. The provider may still count differently; on another overflow, active
-history stays intact. If only the checkpoint instruction fits, OpenGeni stops
+history stays intact. If only the checkpoint instruction fits, Opengeni stops
 without asking the model to summarize unseen history. It never issues one
 failing call per history item.
 
@@ -211,7 +211,7 @@ terminal SSE `response.failed` and `response.error` events that arrive on HTTP
 type/code/message/parameter and response identity; arbitrary nested diagnostics
 are omitted and truncation is explicit. They are never misclassified as an
 empty summary. A genuinely successful but empty response is a distinct typed
-compaction failure with bounded, content-free response diagnostics. OpenGeni
+compaction failure with bounded, content-free response diagnostics. Opengeni
 never installs a manufactured placeholder as conversation truth.
 
 ## Durable replacement
@@ -303,7 +303,7 @@ The successful summarizer response reports usage through the same durable,
 idempotency-keyed `agent.model.usage` and billing-ledger path as an ordinary
 model call, owned by the current execution attempt. Codex subscription
 allowance headers use the same per-account request context and remain separate
-from OpenGeni token billing.
+from Opengeni token billing.
 
 Both paths compact inside the same activity, turn, attempt, and sandbox.
 Compaction never creates a prompt-queue row, a recovery message, a new logical
@@ -316,7 +316,7 @@ landmark is durable, the ordinary turn settles `superseded` before another
 model request and the Steer runs next. Pause and Cancel are not deferred.
 
 If summarization produces an authoritative terminal failure, the turn ends
-with an honest `context_compaction_failed` result. OpenGeni does not continue
+with an honest `context_compaction_failed` result. Opengeni does not continue
 with silently trimmed input and does not install a mechanical fallback summary.
 Retryable provider failures instead recover the same accepted turn through the
 ordinary provider/capacity path; they do not create another goal continuation,

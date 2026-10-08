@@ -204,7 +204,7 @@ describe("session Codex realtime broker", () => {
     expect(captured?.instructions).toContain(
       "An answered or skipped response came through the structured session UI and is already routed",
     );
-    expect(captured?.instructions).not.toContain("OpenGeni");
+    expect(captured?.instructions).not.toContain("Opengeni");
     expect(captured?.instructions).not.toContain("client delegation");
     expect(captured?.instructions).not.toContain("Steer with");
   });

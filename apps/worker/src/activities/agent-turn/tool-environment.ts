@@ -821,7 +821,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     backend: activeSandboxBackend ?? groupBoxBackend,
     machineWorkspaceRoot: sandboxState.machinePrimarySession?.workspaceRoot ?? null,
     observability,
-    // OpenGeni's Jev key pays for these calls whatever model billing the
+    // Opengeni's Jev key pays for these calls whatever model billing the
     // workspace uses; record them per workspace so the cost stays visible.
     recordUsage: async (usage) => {
       const shared = {
@@ -969,7 +969,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       ...(effectiveFirstPartyPermissions ? { permissions: effectiveFirstPartyPermissions } : {}),
       selectedTools: selectedFirstPartyMcpTools,
       subjectId: "worker:first-party-mcp",
-      subjectLabel: "OpenGeni worker",
+      subjectLabel: "Opengeni worker",
       ...(interactionInterventionResume
         ? { interventionResume: interactionInterventionResume }
         : {}),
@@ -1068,7 +1068,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         attemptId: input.attemptId,
         executionGeneration: attempt.executionGeneration,
         subjectId: "worker:first-party-mcp",
-        subjectLabel: "OpenGeni worker",
+        subjectLabel: "Opengeni worker",
         ...(credentialSubjectId ? { credentialSubjectId } : {}),
         initiatingHumanSubjectId: turn.initiatingHumanSubjectId ?? null,
         initiatingHumanExternalIdentity: initiatingHuman?.externalIdentity ?? null,

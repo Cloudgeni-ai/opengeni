@@ -95,7 +95,7 @@ pub struct RelayHub {
     ptys: Arc<Mutex<HashMap<String, PtyControlTx>>>,
     /// Idempotent terminal scopes → their live PTY/channel. The value is removed
     /// when the PTY pump exits. A scope is supplied by the control plane's durable
-    /// OpenGeni session identity; explicit unscoped `pty_open` remains create-new.
+    /// Opengeni session identity; explicit unscoped `pty_open` remains create-new.
     pty_scopes: Arc<Mutex<HashMap<String, PtyOpenResponse>>>,
     /// Per-scope singleflight locks. Weak values make the lock table self-pruning:
     /// it does not retain one allocation for every historical session forever.

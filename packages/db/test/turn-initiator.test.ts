@@ -311,7 +311,7 @@ describe("immutable session turn initiators", () => {
     expect(claim.turn.initiator).toEqual({
       kind: "service",
       subjectId: "scheduler",
-      label: "OpenGeni scheduler",
+      label: "Opengeni scheduler",
     });
     expect(claim.turn.initiatingHumanSubjectId).toBeNull();
     expect(claim.turn.initiatorContext).toMatchObject({ scheduledRunIds: [scheduled.runId] });
@@ -1094,7 +1094,7 @@ describe("immutable session turn initiators", () => {
     expect(malformedClaim.turn.initiator).toEqual({
       kind: "service",
       subjectId: "internal-update",
-      label: "OpenGeni internal update",
+      label: "Opengeni internal update",
     });
     expect(malformedClaim.turn.initiatorContext.provenanceError).toBe(
       "agent_steer_lineage_incomplete",
@@ -1138,7 +1138,7 @@ describe("immutable session turn initiators", () => {
     expect(scheduledClaim.turn.initiator).toEqual({
       kind: "service",
       subjectId: "scheduler",
-      label: "OpenGeni scheduler",
+      label: "Opengeni scheduler",
     });
     expect(scheduledClaim.turn.initiatingHumanSubjectId).toBeNull();
     expect(scheduledClaim.turn.scheduledTaskRunId).toBe(scheduledRunId);
@@ -1157,7 +1157,7 @@ describe("immutable session turn initiators", () => {
     if (typeof scheduledHistoryContent !== "string") {
       throw new Error("Scheduled occurrence history item has no text content");
     }
-    expect(scheduledHistoryContent).toContain("[OpenGeni scheduled task occurrence]");
+    expect(scheduledHistoryContent).toContain("[Opengeni scheduled task occurrence]");
     expect(scheduledHistoryContent).toContain(`Scheduled task ID: ${scheduledTaskId}`);
     expect(scheduledHistoryContent).toContain(`Scheduled task run ID: ${scheduledRunId}`);
     expect(scheduledHistoryContent).toContain("Instructions:\nScheduled work");
@@ -1274,7 +1274,7 @@ describe("immutable session turn initiators", () => {
     expect(mixedClaim.turn.initiator).toEqual({
       kind: "service",
       subjectId: "goal-continuation",
-      label: "OpenGeni goal continuation",
+      label: "Opengeni goal continuation",
     });
     // An old message without caller lineage must not borrow the goal's human.
     expect(

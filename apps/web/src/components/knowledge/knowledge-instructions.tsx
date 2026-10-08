@@ -532,7 +532,7 @@ function AgentIdentityRow({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-/** "Ask OpenGeni…": starts a chat that proposes the change, on the workspace's model. */
+/** "Ask Opengeni…": starts a chat that proposes the change, on the workspace's model. */
 function AskOpenGeniDialog({
   open,
   onOpenChange,

@@ -1030,7 +1030,7 @@ describe("deterministic bounded execution", () => {
     expect(usesBrowserRunner("test/e2e/sandbox.e2e.ts")).toBe(false);
   });
 
-  test("test environments scrub ambient OpenGeni state and preserve only fail-closed DB intent", () => {
+  test("test environments scrub ambient Opengeni state and preserve only fail-closed DB intent", () => {
     expect(
       sanitizedTestEnvironment({
         PATH: "/bin",

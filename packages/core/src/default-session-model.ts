@@ -106,7 +106,7 @@ export type DefaultSessionModelInput = {
   selections: readonly WorkspaceModelSelection[];
   workspaceDefaults: WorkspaceSessionDefaults | null;
   /**
-   * True while the organization holds a positive OpenGeni credit balance from
+   * True while the organization holds a positive Opengeni credit balance from
    * any source, the verified-signup trial grant included (see
    * `organizationHoldsCredits`).
    */
@@ -175,7 +175,7 @@ function creditsCandidate(
  *    (ChatGPT/Codex, then SuperGrok) in operator catalog order. The
  *    deployment default wins inside this step when it is itself a selectable
  *    subscription model.
- * 3. `credits`: while the organization holds a positive OpenGeni credit
+ * 3. `credits`: while the organization holds a positive Opengeni credit
  *    balance (a purchase, a grant, or the verified-signup trial grant), the
  *    configured credits default (`OPENGENI_CREDITS_DEFAULT_MODEL`, effort
  *    clamped to what the model supports), or the first selectable
@@ -245,7 +245,7 @@ export function selectDefaultSessionModel(input: DefaultSessionModelInput): Defa
 
 /**
  * The default this workspace would use while its organization holds a
- * positive OpenGeni credit balance. Null when the deployment does not bill
+ * positive Opengeni credit balance. Null when the deployment does not bill
  * credits.
  */
 export function creditsDefaultSessionModel(input: {

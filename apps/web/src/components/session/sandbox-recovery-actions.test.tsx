@@ -200,7 +200,7 @@ for (const reason of ["restore_retry_backoff", "provider_lifetime_unexpired"] as
         timeStyle: "short",
       })}.`,
     );
-    expect(container.textContent).not.toContain("OpenGeni will");
+    expect(container.textContent).not.toContain("Opengeni will");
     expect(container.textContent).not.toContain("check back");
   });
 }

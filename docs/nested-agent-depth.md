@@ -1,6 +1,6 @@
 # Nested-agent depth policy
 
-OpenGeni enforces an inclusive maximum depth for session trees at the
+Opengeni enforces an inclusive maximum depth for session trees at the
 PostgreSQL session-creation boundary. The policy limits new descendants without
 changing the lifecycle or control state of sessions that already exist.
 

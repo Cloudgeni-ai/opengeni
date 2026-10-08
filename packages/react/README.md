@@ -1,6 +1,6 @@
 # @opengeni/react
 
-React hooks and styled components for OpenGeni, built on
+React hooks and styled components for Opengeni, built on
 [`@opengeni/sdk`](../sdk): live session streaming, a chat composer, a message
 timeline that renders streaming deltas / tool calls / spawned-worker status,
 session status badges, and fleet tiles for workspace overviews. Two opt-in
@@ -59,7 +59,7 @@ provider warnings are not hidden during migration.
 `PluginDiscovery` accepts `defaultProvider="openai"` or `"anthropic"` to choose
 the initial registry. Omitting it starts with All. Users can still switch among
 All, OpenAI, and Anthropic; changing the search preserves their selection. The
-OpenGeni Plugins page starts with OpenAI.
+Opengeni Plugins page starts with OpenAI.
 
 ```tsx
 import { ConnectPanel } from "@opengeni/react/connect";
@@ -76,7 +76,7 @@ The host owns synchronous popup/full-redirect navigation and pending-attempt
 recovery. Backend state, not a popup message or URL query, proves completion.
 Operation installation uses explicit selection; OAuth success alone is not
 installation. Account disconnect requires an observed version and confirmation,
-revokes local OpenGeni access only, and never silently retries an unknown outcome.
+revokes local Opengeni access only, and never silently retries an unknown outcome.
 Provider readiness is deployment-dependent; use the server catalog rather than
 assuming every OAuth application or operator-managed provider is configured.
 
@@ -204,8 +204,8 @@ enablePierreDiffs();
 
 Without it, diffs and file views render as plain text.
 
-`OpenGeniProvider` never blocks or reloads the host page when OpenGeni deploys
-a new API contract revision. The stock OpenGeni console opts into that
+`OpenGeniProvider` never blocks or reloads the host page when Opengeni deploys
+a new API contract revision. The stock Opengeni console opts into that
 stale-tab protection with `reloadOnApiContractChange`; embedded products
 should leave it off.
 
@@ -375,7 +375,7 @@ or permissive fallback.
 
 `DocumentProjectionEditor`, `PresentationProjectionEditor`, and
 `SpreadsheetProjectionGrid` expose the same host-owned projection/async-command
-boundary without requiring the OpenGeni sync session. Pending, failure, retry,
+boundary without requiring the Opengeni sync session. Pending, failure, retry,
 read-only, focus, and reconciliation behavior stays inside the components.
 
 Projection editors use browser-safe structural views and do not load
@@ -447,7 +447,7 @@ derived defaults use scoped effective values so changing a base accent, radius,
 motion, or surface token updates its dependents at runtime.
 
 The original Tailwind v4 bridge remains available for hosts that intentionally
-want OpenGeni utilities compiled into their own Tailwind entry:
+want Opengeni utilities compiled into their own Tailwind entry:
 
 ```css
 @import "tailwindcss";
@@ -588,7 +588,7 @@ export function App() {
 
 ## Realtime composer controls (`@opengeni/react/realtime`)
 
-The realtime subpath is the exact OpenGeni composer experience: model catalog
+The realtime subpath is the exact Opengeni composer experience: model catalog
 and selection, split-button motion, start/stop/retry states, microphone and
 audio mute controls, diagnostics, recovery, and the same copy, ARIA, classes,
 and styling used by the web console. It is deliberately separate from the root
@@ -654,7 +654,7 @@ The reference consumer is `demo/realtime.html`. Run `bun run demo` from
 `packages/react`, then open `http://localhost:3100/realtime.html?mode=mock` for
 deterministic selection/start/mute/stop/reconnect/error testing. Use
 `?mode=live&workspaceId=…&sessionId=…` against the web server's same-origin
-`/demo-api` proxy for a real local OpenGeni environment. Configure
+`/demo-api` proxy for a real local Opengeni environment. Configure
 `OPENGENI_DEMO_API_URL` and, only on the server, optional demo API/access
 credentials; the browser receives neither credential. Prefer the deployment's
 normal browser authentication. If the proxy needs a server credential, create a
@@ -679,7 +679,7 @@ through published package APIs only.
 ## Browser and computer surfaces (`@opengeni/react/interaction`)
 
 The interaction subpath renders the same browser-native and semantic computer
-surfaces used by the OpenGeni web app. It consumes only the public SDK client:
+surfaces used by the Opengeni web app. It consumes only the public SDK client:
 workspace discovery, peer switching, tabs/windows, live frames, human input,
 identity versions, interventions, diagnostics, reconnect, and lifecycle state do
 not require app-private controller glue.
@@ -1028,7 +1028,7 @@ intentional changes should regenerate those snapshots and review the diff.
 - `FleetTile` — one session in a fleet grid: title, status, model, recency.
 - `ModelPicker` — a compact model dropdown for a composer slot, grouping the
   host-exposed models by provider.
-- `ModelPolicyPicker` — the full model policy control used by the OpenGeni web
+- `ModelPolicyPicker` — the full model policy control used by the Opengeni web
   app: provider/billing rails, model availability, reasoning effort, and
   runnable latency modes such as Fast. It accepts either `ClientModel[]` or
   catalog-backed `PickerModelRow[]`, and supports host-supplied labels.

@@ -150,7 +150,7 @@ export function SessionHeader({
   const displayEffort: IntelligenceEffort = lastStartedReasoningEffort ?? session.reasoningEffort;
   const displayLatency: LatencyMode = lastStartedLatencyMode ?? session.latencyMode;
   // Codex → clickable account chip. Other rails → static provider icon only
-  // (never invent a text "OpenGeni"/"BYOK" word). Don't key off `codexSlot != null`.
+  // (never invent a text "Opengeni"/"BYOK" word). Don't key off `codexSlot != null`.
   const isCodexRail = resolvedBilling === "codex_subscription";
   const policyBits = [
     resolvedModel,

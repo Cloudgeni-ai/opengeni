@@ -1005,7 +1005,7 @@ describe("organization tenancy isolation evidence", () => {
 
   test("FORCE row security binds a non-superuser SECURITY DEFINER owner", async () => {
     if (!shared || !app || !fixture) return;
-    // OpenGeni's capability seams are SECURITY DEFINER routines owned by the
+    // Opengeni's capability seams are SECURITY DEFINER routines owned by the
     // migration owner, which in production is NOT a superuser. This proves the
     // property those seams depend on: a definer that is neither superuser nor
     // BYPASSRLS remains subject to FORCE row-level security, so a seam cannot

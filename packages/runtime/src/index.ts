@@ -2147,7 +2147,7 @@ export type BuildAgentOptions = {
   //   hosted-capable — but route it to the ChatGPT/Codex backend, which REJECTS
   //   the hosted `apply_patch` type ("Unsupported tool type: apply_patch",
   //   verified live). Gateway routes also use ordinary function tools. When
-  //   false, OpenGeni keeps function `apply_patch` and converts successful
+  //   false, Opengeni keeps function `apply_patch` and converts successful
   //   `view_image` data URLs back into typed input_image content when the
   //   selected model has a proven image-input wire.
   hostedWebSearch?: boolean;
@@ -2189,7 +2189,7 @@ export type BuildAgentOptions = {
   // Whether this turn's resolved model accepts image input. This is derived
   // from ConfiguredModel.capabilities.inputModalities at the worker boundary.
   // False removes image-only sandbox tools and projects images out of each
-  // provider request without mutating OpenGeni's durable history. Omitted keeps
+  // provider request without mutating Opengeni's durable history. Omitted keeps
   // the legacy built-in path image-capable.
   supportsImageInput?: boolean;
   /** Exact typed `input_file` MIME allow-list; omitted preserves legacy behavior. */
@@ -2286,7 +2286,7 @@ export type BuildAgentOptions = {
   // manifest/env delta and is written into the sandbox filesystem by a lifecycle
   // hook before the agent starts.
   codemodeTokenSeed?: string;
-  // Durable OpenGeni session identity used only to derive the off-manifest,
+  // Durable Opengeni session identity used only to derive the off-manifest,
   // per-session token file. Required together with codemodeTokenSeed so two
   // sessions sharing one box never overwrite the same pointer.
   codemodeTokenSessionId?: string;
@@ -3045,7 +3045,7 @@ export function buildOpenGeniAgent(
   if (embeddedSkillReadTool) agentTools.push(embeddedSkillReadTool);
   const instructionInspection = inspectPersistentAgentInstructions(settings, instructionOptions);
   const baseConfig = {
-    name: "OpenGeni Agent",
+    name: "Opengeni Agent",
     model: options.model ?? settings.openaiModel,
     // White-label persona composition. The effective template is the per-call
     // override (options.instructionsTemplate, resolved by the caller as
@@ -3081,7 +3081,7 @@ export function buildOpenGeniAgent(
       // of thought survive without provider-side response storage (which is
       // what stripped provider item ids opt us out of — see
       // stripProviderItemIds). providerData.include replaces any
-      // tool-derived include entries; OpenGeni's tools are MCP/sandbox
+      // tool-derived include entries; Opengeni's tools are MCP/sandbox
       // function tools, which contribute none. Gated on the resolved
       // encryptedReasoning flag: the chat wire API has no encrypted_content
       // field, so registry "chat" providers turn it off.
@@ -3892,7 +3892,7 @@ function neutralizeStructuredToolTransport(capability: ReturnType<typeof filesys
 
 /**
  * Build the SandboxAgent capability set explicitly. The SDK default includes
- * its inline provider compaction capability; OpenGeni deliberately omits it
+ * its inline provider compaction capability; Opengeni deliberately omits it
  * because durable portable compaction owns the full history transition.
  */
 /**
@@ -4522,7 +4522,7 @@ export async function connectMcpServersInBatches(
             ...(options.connectTimeoutMs === undefined
               ? {}
               : { connectTimeoutMs: options.connectTimeoutMs }),
-            // OpenGeni already bounds lifecycle work in batches. The Agents SDK
+            // Opengeni already bounds lifecycle work in batches. The Agents SDK
             // parallel path additionally starts a detached `void drain()` task;
             // a best-effort server rejection can escape that task as a process-
             // level unhandled rejection even though the session records and
@@ -4727,7 +4727,7 @@ export async function prepareAgentTools(
   const localRegistry = localMcpServerRegistry(options.localMcpServers ?? [], registry);
   // An explicit empty permission ceiling is valid zero authority, not a
   // request for the default grant. There is no delegated bearer to mint and
-  // no OpenGeni MCP capability to prepare. Host/local adapters and independent
+  // no Opengeni MCP capability to prepare. Host/local adapters and independent
   // connection credentials do not use that bearer and keep their own authority.
   const unavailableFirstPartyServers = new Map<string, Settings["mcpServers"][number]>();
   const refs = tools.filter((tool) => {
@@ -5803,7 +5803,7 @@ async function prepareWorkspaceToolGatewayEnvironment(
 }
 
 /**
- * Identity OpenGeni advertises to MCP servers as `_meta.opengeni` on every
+ * Identity Opengeni advertises to MCP servers as `_meta.opengeni` on every
  * tools/call, so a server can correlate the call with a workspace, session,
  * turn, and causal human. It is trusted worker scope, set after caller
  * transport metadata so a caller cannot replace it, and it is informational:
@@ -6635,7 +6635,7 @@ function parseWwwAuthenticate(header: string | null): {
 // before a provider tool result exists. PrefixedMcpServer converts the thrown
 // McpError into an MCP-shaped `{ isError: true }` output for the model.
 const MCP_AUTH_NEEDED_ERROR = {
-  // OpenGeni application-defined JSON-RPC code. Keep this positive so it cannot
+  // Opengeni application-defined JSON-RPC code. Keep this positive so it cannot
   // collide with MCP SDK transport errors such as RequestTimeout (-32001).
   code: 40_101,
   message: "Authentication required - a connection link was posted to the session.",
@@ -6644,7 +6644,7 @@ const MCP_AUTH_NEEDED_ERROR = {
 const MCP_TOOL_OUTCOME_UNCERTAIN_ERROR = {
   code: 40_102,
   message:
-    "Tool outcome uncertain after provider submission. OpenGeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
+    "Tool outcome uncertain after provider submission. Opengeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
 } as const;
 
 function mcpToolAuthNeededResponse(request: McpRequestReplayInfo): Response {
@@ -6754,7 +6754,7 @@ function mcpToolOutcomeUncertainContent(error: unknown): Array<{ type: "text"; t
 // Preserve the exact source diagnostic as one independent content item when it
 // is safely readable. Hostile getters/proxies receive a fixed content-free
 // fallback so best-effort isolation cannot be turned into a new thrown error.
-// The second item is OpenGeni guidance and never mutates the source failure.
+// The second item is Opengeni guidance and never mutates the source failure.
 function mcpToolUnavailableContent(error: unknown): Array<{ type: "text"; text: string }> {
   return [
     { type: "text", text: exactErrorMessage(error) },
@@ -7210,7 +7210,7 @@ async function mcpServerRequestInit(
   }
   // Third-party MCP servers get their configured credential headers (for
   // example workspace-enabled capability MCP credentials) and nothing else —
-  // never OpenGeni's own access key or delegated tokens.
+  // never Opengeni's own access key or delegated tokens.
   if (config.headers && Object.keys(config.headers).length > 0) {
     return { requestInit: { headers: { ...config.headers } } };
   }
@@ -7430,7 +7430,7 @@ async function publishCodexAppsAuthNeeded(
 // capabilities. (A finer-grained capability model comes later.)
 // codex_apps is third-party-by-trust (the external ChatGPT connectors backend)
 // but needs DYNAMIC auth, so it is its own category — deliberately NOT folded
-// into the first-party allowlist, which would wrongly sign an OpenGeni delegated
+// into the first-party allowlist, which would wrongly sign an Opengeni delegated
 // token to chatgpt.com.
 function isCodexAppsMcpServer(config: Settings["mcpServers"][number]): boolean {
   if (config.id !== CODEX_APPS_MCP_SERVER_ID) return false;
@@ -9238,7 +9238,7 @@ async function runAgentStreamInternal(
   // provider-id stripping, output bounds), then any per-turn filter, the model's
   // modality projection, and finally context accounting over the exact payload
   // that can reach the provider. External ownership gives the SDK a borrowed,
-  // immutable history view; every filter below is copy-on-write. OpenGeni does not
+  // immutable history view; every filter below is copy-on-write. Opengeni does not
   // pass an SDK session and reconciles durable truth from the untouched input.
   const callModelInputFilter = composeCallModelInputFilters(
     [
@@ -11339,7 +11339,7 @@ const SANDBOX_GIT_PROVISIONING_TARGET_ASSIGNMENT = "OPENGENI_GIT_PROVISIONING_TA
 function sandboxGitProvisioningGuardLines(): string[] {
   return [
     'if [ "${OPENGENI_GIT_PROVISIONING_TARGET:-}" != sandbox ]; then',
-    '  echo "Refusing to provision OpenGeni Git credentials into HOME=${HOME:-unset} and its global Git config: this script only runs as an OpenGeni sandbox lifecycle command (OPENGENI_GIT_PROVISIONING_TARGET=sandbox)." >&2',
+    '  echo "Refusing to provision Opengeni Git credentials into HOME=${HOME:-unset} and its global Git config: this script only runs as an Opengeni sandbox lifecycle command (OPENGENI_GIT_PROVISIONING_TARGET=sandbox)." >&2',
     "  exit 78",
     "fi",
   ];
@@ -12076,7 +12076,7 @@ export function repositoryCloneCommand(
     '  clone_repository "$@" &',
     '  clone_pids="$clone_pids $!"',
     "}",
-    // A repository OpenGeni attached on the person's behalf is best effort: its
+    // A repository Opengeni attached on the person's behalf is best effort: its
     // clone runs in its own errexit subshell exactly like a required one, and a
     // failure is reported as a warning while the job itself succeeds, so one
     // empty, deleted or unreachable repository never fails the whole setup.

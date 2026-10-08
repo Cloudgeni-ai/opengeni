@@ -50,14 +50,14 @@ is not falsely added to `unavailable`.
 
 ## Why
 
-An embedder today configures an OpenGeni agent through about fifteen independent
+An embedder today configures an Opengeni agent through about fifteen independent
 knobs spread over the session request, workspace settings, and deployment env:
 `tools`, `excludedMcpServerIds`, `mcpServers`, `firstPartyMcpTools`,
 `firstPartyMcpPermissions`, `bundledSkillIds`, `skills`, `sandboxBackend`,
 `instructions`, workspace `agentInstructions`, `visibility`, `agentAccess`,
 `memoryScope`, `agentLearning`, `sessionToolDefaults`, `agentHumanInputEnabled`,
 `codeSearchEnabled`, plus eight `OPENGENI_*` tool flags. Coding-agent integration
-evals (Sonnet in Umami, the Vercel chatbot, and linkding; Luna in OpenGeni staging)
+evals (Sonnet in Umami, the Vercel chatbot, and linkding; Luna in Opengeni staging)
 showed the consequences:
 
 - No request field yields an exact tool set. Skill writers (`skill_save`,
@@ -89,7 +89,7 @@ An agent is one object; everything else is derived.
 ```ts
 type AgentConfigRequest = {
   capabilities?: "all" | "none" | ({ from: "all" | "none" } & Partial<Toggles>);
-  identity?: string | null; // who the agent is; null = workspace default, then OpenGeni's
+  identity?: string | null; // who the agent is; null = workspace default, then Opengeni's
   instructions?: string;    // alias of the session `instructions` field
   renderer?: "opengeni" | "markdown";
 };
@@ -228,7 +228,7 @@ Read in full, it falls into four buckets:
 
 | Bucket | Today's text | End state |
 | --- | --- | --- |
-| **Identity** | opening line ("You are an agent for the current workspace…"), `# Personality`, the template's first sentence ("You are an OpenGeni workspace agent…"); ~0.6k | Replaceable. The only part an embedder rewrites: name, product, domain, voice. |
+| **Identity** | opening line ("You are an agent for the current workspace…"), `# Personality`, the template's first sentence ("You are an Opengeni workspace agent…"); ~0.6k | Replaceable. The only part an embedder rewrites: name, product, domain, voice. |
 | **Base behavior** | writing style (outcome first, minimal formatting, CommonMark); match effort; progress updates (short commentary, skipped under ~20 s; the runtime already separates commentary from the final answer); final-answer rules; autonomy by request type (answer, diagnose, change, monitor), no inferred authorization, stated assumptions, stop for new authority; no unsolicited disclaimers; verification matched to scope | Always on, no knobs. Tuned through instructions, which take explicit precedence (below). |
 | **Runtime mechanics** | `wait_for_input` semantics, new messages arriving mid-turn (steer/queue), continuing after compaction, command yields | Always on: every agent on the durable runtime needs them. Moved out of "working with the user" into their own section. |
 | **Capability modules** | everything below | Included only when the capability or resource is present. |
@@ -246,7 +246,7 @@ Capability modules (current size in characters):
 - **attachments** (files attached): `.opengeni/files/<file-id>/` mounts and
   read-only copies.
 - **machines** (Connected Machine target): host-native paths and link examples.
-- **artifacts** (artifacts capability and an OpenGeni renderer): document artifact
+- **artifacts** (artifacts capability and an Opengeni renderer): document artifact
   delivery via `opengeni-documents`, `artifact:` links and previews, publication,
   Sites and inline visuals (`opengeni-visualize`, `opengeni-sites`), goal
   deliverable evidence (~3.5k).
@@ -268,7 +268,7 @@ Two additions the legacy text lacked, both shipped in the modular composer
 1. **Precedence.** One explicit rule: product, workspace, and session
    instructions override base-behavior defaults (for example "answer in one
    sentence"), never runtime mechanics or safety.
-2. **Renderer.** `sandbox:` and `artifact:` links only render in OpenGeni's React
+2. **Renderer.** `sandbox:` and `artifact:` links only render in Opengeni's React
    timeline. The session declares its client renderer (`opengeni` or `markdown`);
    with `markdown`, link-syntax rules and inline visuals are omitted and the agent
    uses ordinary Markdown links. This is the only behavior option. The chat
@@ -278,8 +278,8 @@ Resulting tiers:
 
 | Tier | Controlled by |
 | --- | --- |
-| Identity | OpenGeni default, then deployment, workspace, session (each replaces) |
-| Base behavior and runtime mechanics | OpenGeni, always on |
+| Identity | Opengeni default, then deployment, workspace, session (each replaces) |
+| Base behavior and runtime mechanics | Opengeni, always on |
 | Capability modules | derived from resolved capabilities and attached resources |
 | Instructions and context | session `instructions` (append, with precedence over base behavior), `modelContext`, goal snapshot, date |
 

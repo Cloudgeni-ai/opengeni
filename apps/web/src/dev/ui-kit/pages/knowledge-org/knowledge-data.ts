@@ -120,7 +120,7 @@ const extraEntries: LibraryEntry[] = [
     content: "Agents can write to the staging database to create test fixtures.",
     updatedAt: "2026-09-10T09:05:00Z",
     updatedLabel: "2 weeks ago",
-    author: "OpenGeni",
+    author: "Opengeni",
     status: "rejected",
     revisions: [],
   },

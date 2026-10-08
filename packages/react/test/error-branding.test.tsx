@@ -37,7 +37,7 @@ function errors() {
       JSON.stringify({
         error: {
           code: "permission_denied",
-          message: "OpenGeni denied this action",
+          message: "Opengeni denied this action",
           requestId: "acme-403",
           details: { missingPermission: "sessions:create" },
         },
@@ -50,7 +50,7 @@ function errors() {
       JSON.stringify({
         error: {
           code: "allowance_exhausted",
-          message: "OpenGeni usage reached",
+          message: "Opengeni usage reached",
           details: { scope: "member", resetsAt: "2026-10-03T00:00:00Z" },
         },
       }),
@@ -60,9 +60,9 @@ function errors() {
       retryable: true,
       outcomeUnknown: true,
       correlationId: "acme-unknown",
-      displayMessage: "OpenGeni could not confirm delivery",
+      displayMessage: "Opengeni could not confirm delivery",
     }),
-    new TypeError("OpenGeni transport private diagnostic"),
+    new TypeError("Opengeni transport private diagnostic"),
   ];
 }
 
@@ -103,7 +103,7 @@ describe("native branded-host error paths", () => {
     const failure = {
       code: "host_error",
       details: { action: "steer" },
-      message: "OpenGeni diagnostic",
+      message: "Opengeni diagnostic",
     };
     sdk.steerMessage = async () => {
       throw failure;
@@ -157,7 +157,7 @@ describe("native branded-host error paths", () => {
     const failure = {
       code: "host_error",
       details: { action: "list" },
-      message: "OpenGeni diagnostic",
+      message: "Opengeni diagnostic",
     };
     sdk.listSessionPage = async () => {
       throw failure;
@@ -325,8 +325,8 @@ describe("native branded-host error paths", () => {
   });
 
   for (const failure of [
-    { code: "host_error", details: { private: true }, message: "OpenGeni diagnostic" },
-    "OpenGeni transport diagnostic",
+    { code: "host_error", details: { private: true }, message: "Opengeni diagnostic" },
+    "Opengeni transport diagnostic",
   ]) {
     test(`composer preserves the original ${typeof failure} rejection for host copy`, async () => {
       const sdk = client();
@@ -396,7 +396,7 @@ describe("native branded-host error paths", () => {
         id: "skill",
         revisionId: "revision",
         scope: "workspace",
-        files: [{ path: "SKILL.md", content: "Verified OpenGeni source content." }],
+        files: [{ path: "SKILL.md", content: "Verified Opengeni source content." }],
       } as never;
     };
     const render = (label: string) => (
@@ -453,7 +453,7 @@ describe("native branded-host error paths", () => {
       const video = view.container.querySelector("video");
       const preview = view.container.querySelector("pre");
       expect(video).not.toBeNull();
-      expect(preview?.textContent).toBe("Verified OpenGeni source content.");
+      expect(preview?.textContent).toBe("Verified Opengeni source content.");
       await view.rerender(render("New host label"));
       await flush(20);
       expect(videoReads).toBe(1);
@@ -469,7 +469,7 @@ describe("native branded-host error paths", () => {
   });
 
   test("the host formatter receives non-Error rejections unchanged", async () => {
-    const failure = { code: "host_error", message: "OpenGeni diagnostic" };
+    const failure = { code: "host_error", message: "Opengeni diagnostic" };
     let received: unknown;
     const view = await renderComponent(
       <OpenGeniProvider
@@ -504,7 +504,7 @@ describe("native branded-host error paths", () => {
     let command!: UseSlashCommandsResult;
     sdk.compactSessionContext = async () => {
       if (++calls === 1) throw error;
-      return { status: "completed", message: "The OpenGeni source was compacted." };
+      return { status: "completed", message: "The Opengeni source was compacted." };
     };
     const received: unknown[] = [];
     function Harness() {
@@ -550,7 +550,7 @@ describe("native branded-host error paths", () => {
       expect(received).toContain(error);
       await actRun(() => command.runHighlighted());
       expect(view.container.querySelector("[role='status']")!.textContent).toBe(
-        "The OpenGeni source was compacted.",
+        "The Opengeni source was compacted.",
       );
     } finally {
       await view.unmount();
@@ -619,7 +619,7 @@ describe("native branded-host error paths", () => {
         outcomeUnknown: false,
         details: { missingPermission: "sessions:create" },
       });
-      expect(error.message).toContain("OpenGeni denied this action");
+      expect(error.message).toContain("Opengeni denied this action");
     } finally {
       await view.unmount();
     }
@@ -732,7 +732,7 @@ describe("native branded-host error paths", () => {
         text: "A private question",
       });
       expect(deliveredError).toBe(error);
-      expect(deliveredError?.message).toContain("OpenGeni could not confirm delivery");
+      expect(deliveredError?.message).toContain("Opengeni could not confirm delivery");
     } finally {
       await view.unmount();
     }
@@ -745,7 +745,7 @@ describe("native branded-host error paths", () => {
           {
             kind: "user-message",
             id: "user",
-            text: "My source mentions OpenGeni.",
+            text: "My source mentions Opengeni.",
             tools: [],
             resources: [],
             occurredAt: "2026-10-02T07:00:00Z",
@@ -754,7 +754,7 @@ describe("native branded-host error paths", () => {
             kind: "agent-message",
             id: "agent",
             turnId: null,
-            text: "The quoted source says OpenGeni.",
+            text: "The quoted source says Opengeni.",
             streaming: false,
             occurredAt: "2026-10-02T07:00:01Z",
           },
@@ -762,8 +762,8 @@ describe("native branded-host error paths", () => {
       />,
     );
     try {
-      expect(view.container.textContent).toContain("My source mentions OpenGeni.");
-      expect(view.container.textContent).toContain("The quoted source says OpenGeni.");
+      expect(view.container.textContent).toContain("My source mentions Opengeni.");
+      expect(view.container.textContent).toContain("The quoted source says Opengeni.");
     } finally {
       await view.unmount();
     }
@@ -844,7 +844,7 @@ describe("native branded-host error paths", () => {
             {
               id: "q",
               kind: "text",
-              prompt: "The source says OpenGeni. Continue?",
+              prompt: "The source says Opengeni. Continue?",
               options: [],
               required: false,
               allowOther: false,
@@ -863,7 +863,7 @@ describe("native branded-host error paths", () => {
         "Check its status before retrying",
       );
       expect(view.container.querySelector("[role='alert']")!.textContent).not.toMatch(/opengeni/i);
-      expect(view.container.textContent).toContain("The source says OpenGeni. Continue?");
+      expect(view.container.textContent).toContain("The source says Opengeni. Continue?");
       expect(view.container.querySelector("button[type='submit']")).not.toBeNull();
     } finally {
       await view.unmount();
@@ -882,7 +882,7 @@ describe("native branded-host error paths", () => {
             {
               id: "skill",
               kind: "single_select",
-              prompt: "Save the OpenGeni integration Skill?",
+              prompt: "Save the Opengeni integration Skill?",
               options: [{ id: "save", label: "Save" }],
               required: true,
               allowOther: false,
@@ -915,7 +915,7 @@ describe("native branded-host error paths", () => {
       expect(view.container.textContent).toContain(
         "Ask your administrator for a review-capable client",
       );
-      expect(view.container.textContent).toContain("Save the OpenGeni integration Skill?");
+      expect(view.container.textContent).toContain("Save the Opengeni integration Skill?");
     } finally {
       await view.unmount();
     }

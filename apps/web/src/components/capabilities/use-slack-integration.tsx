@@ -125,7 +125,7 @@ export function localConnectedSlackPreview(
         slackTeamName: "CloudGeni",
         botId: "B_CLOUDGENI_PREVIEW",
         botUserId: "U_CLOUDGENI_PREVIEW",
-        botDisplayName: "OpenGeni",
+        botDisplayName: "Opengeni",
       },
     } satisfies ConnectionMetadata,
     personal: {
@@ -188,7 +188,7 @@ export const SLACK_PERSONAL_PERMISSION_SENTENCE =
 /**
  * Maps Slack onto the shared integration view-model. Anyone with connection
  * management permission (connections:write or workspace admin) sees the
- * OpenGeni bot (its installation, what it can see, and install/reconnect/
+ * Opengeni bot (its installation, what it can see, and install/reconnect/
  * disconnect; the options stay admin-gated); everyone else sees their own
  * personal Slack account. Nobody is offered both.
  */

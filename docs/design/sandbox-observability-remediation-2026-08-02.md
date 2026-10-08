@@ -1,15 +1,15 @@
 # Sandbox observability remediation
 
 Status: accepted design
-Owner: OpenGeni infrastructure
+Owner: Opengeni infrastructure
 Date: 2026-08-02
 
 ## Decision
 
 Ship sandbox observability as one versioned product contract split across the public
-OpenGeni repository and the private deployment controller:
+Opengeni repository and the private deployment controller:
 
-1. OpenGeni owns metric names, bounded labels, aggregation semantics, alert rules,
+1. Opengeni owns metric names, bounded labels, aggregation semantics, alert rules,
    and canonical Grafana dashboards.
 2. `opengeni-ops` installs those exact public artifacts from the immutable release
    checkout, adds cluster/synthetic signals, and proves the installed objects match
@@ -53,7 +53,7 @@ work.
 - Make every database-projection family export a last-success timestamp and refresh
   failure counter. Queries admit only fresh replicas, so a worker that stops winning
   the reaper activity cannot pin a stale high value through `max`.
-- Add a dedicated canonical `OpenGeni · Sandbox Health` dashboard covering:
+- Add a dedicated canonical `Opengeni · Sandbox Health` dashboard covering:
   - authoritative lease inventory, with cold history visually separated;
   - create attempts, failures, backend mix, and p50/p95/p99 latency;
   - warming timeouts and orphan termination sweeps;
@@ -271,7 +271,7 @@ plus the maximum probe runtime.
 - Record content hashes for the dashboard, rules, probe ConfigMap, and CronJob in the
   bootstrap evidence manifest.
 - Assert Grafana sidecar discovery labels/folder metadata, reject public/private alert
-  name collisions, and prune only ConfigMaps carrying the exact OpenGeni management
+  name collisions, and prune only ConfigMaps carrying the exact Opengeni management
   label. Reject a generated dashboard before apply if it exceeds the Kubernetes
   ConfigMap size budget.
 - Poll the live Prometheus rules API until every required rule is loaded and healthy,
@@ -299,7 +299,7 @@ reproducible receipts. The production rollout remains a separately serialized ac
 
 ## Rollout and rollback
 
-Rollout is maintenance-less but ordered. First promote the ordinary OpenGeni release
+Rollout is maintenance-less but ordered. First promote the ordinary Opengeni release
 containing the new projection-freshness and routed-operation emitters, verify the live
 deployment revision and metrics, and only then apply the additive dashboard ConfigMaps,
 Prometheus rules, and current synthetic CronJob. No database migration is required.

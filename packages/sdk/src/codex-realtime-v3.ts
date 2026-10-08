@@ -316,7 +316,7 @@ export function createCodexRealtimeV3Bridge(
       if (closed || fatal) break;
 
       for (const entry of result.outbound) {
-        // This is OpenGeni's durable browser-delivery acknowledgment. The
+        // This is Opengeni's durable browser-delivery acknowledgment. The
         // provider send below remains at-least-once because pinned V3 exposes
         // no provider receipt and providerAckSequences is never populated.
         if (entry.clientAckedAt === null && !clientReceivedSequences.has(entry.sequence)) {

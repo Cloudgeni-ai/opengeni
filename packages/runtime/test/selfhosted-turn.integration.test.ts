@@ -38,7 +38,7 @@ const CONNECTION_INSTANCE = "connection-turn";
 // The stable run environment the turn declares (git identity + HOME); the proxy
 // default (group) backend and the selfhosted backend BOTH carry it, so the SDK's
 // per-turn manifest-env delta is empty.
-const ENV = { GIT_AUTHOR_NAME: "OpenGeni Bot", HOME: "/workspace" };
+const ENV = { GIT_AUTHOR_NAME: "Opengeni Bot", HOME: "/workspace" };
 
 const liveSessions: Array<{ close?: () => Promise<void> }> = [];
 
@@ -60,7 +60,7 @@ async function runPinnedToVmTurn(
   const settings = testSettings({
     sandboxBackend: "local",
     webSearchEnabled: false,
-    gitAuthorName: "OpenGeni Bot",
+    gitAuthorName: "Opengeni Bot",
   });
   // A real local session seeds the proxy DEFAULT (group) backend (createEditor /
   // viewImage bearing), but its manifest is forced to the empty-entries shape the
@@ -240,7 +240,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
         OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
         OPENGENI_OGTOOL_PACKAGE_SPEC: "@opengeni/ogtool@0.1.0",
         HOME: "/workspace",
-        GIT_AUTHOR_NAME: "OpenGeni Bot",
+        GIT_AUTHOR_NAME: "Opengeni Bot",
       },
     });
     await self.exec({ cmd: "ogtool list" });

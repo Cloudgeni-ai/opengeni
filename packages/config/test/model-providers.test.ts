@@ -2321,7 +2321,7 @@ describe("configuredModelPricing", () => {
     });
   });
 
-  test("keeps gateway provider cost separate from OpenGeni credit markup", () => {
+  test("keeps gateway provider cost separate from Opengeni credit markup", () => {
     const settings = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
     expect(
       calculateGatewayReportedCostBreakdown(
@@ -2451,7 +2451,7 @@ describe("validateSettings registry checks", () => {
         },
         () => getSettings(),
       ),
-    ).toThrow("reserved for a reviewed OpenGeni provider");
+    ).toThrow("reserved for a reviewed Opengeni provider");
   });
 
   test("rejects duplicate registry provider ids", () => {

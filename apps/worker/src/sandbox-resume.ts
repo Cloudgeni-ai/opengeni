@@ -882,7 +882,7 @@ async function persistWarmWorkspaceSnapshot(
   // Filesystem and directory snapshots create retained Images without
   // terminating the source Sandbox. (Modal's termination warning applies to
   // memory snapshots.) They are therefore the preferred warm-checkpoint path:
-  // the durable capture gate pauses OpenGeni commands while the provider reads
+  // the durable capture gate pauses Opengeni commands while the provider reads
   // the filesystem, then the same live instance continues serving the turn.
   const workspacePersistence =
     persistable.state?.workspacePersistence ??
@@ -2137,7 +2137,7 @@ async function resumeBoxForTurnOnce(
       });
       throwIfReleasedOrCancelled();
       // A durable `warm` row is an ownership assertion, not provider liveness.
-      // A provider may have ended the exact box while OpenGeni was idle. Prove
+      // A provider may have ended the exact box while Opengeni was idle. Prove
       // the command router before handing the session to the
       // agent so terminal evidence enters the atomic warm->cold recovery path
       // below instead of surfacing inside a model-visible tool call.

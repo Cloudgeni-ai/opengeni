@@ -680,7 +680,7 @@ function fullPlan(
       // another file is a real conflict; catch it while the fix is one command.
       "migration-ordinals",
       // A migration-time backfill over a FORCE-RLS table silently matches zero
-      // rows for the non-superuser owner OpenGeni migrates as.
+      // rows for the non-superuser owner Opengeni migrates as.
       "migration-rls-backfills",
       // A migration missing from the release-schema forward list is framed by
       // the governed checkpoint input, so the pinned aggregate only breaks after

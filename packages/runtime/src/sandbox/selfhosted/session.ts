@@ -1683,7 +1683,7 @@ export class SelfhostedSession {
     return Number(result.fsWrite.bytesWritten);
   }
 
-  /** Idempotently remove only an OpenGeni placement-private authority file.
+  /** Idempotently remove only an Opengeni placement-private authority file.
    * This uses the filesystem control op rather than exec, so cleanup still
    * runs when the consuming command fails before a child process starts. */
   async deletePlacementPrivate(path: string, _runAs?: string): Promise<void> {
@@ -1965,7 +1965,7 @@ export class SelfhostedSandboxClient {
     /** Exact live daemon process. Optional only for the inert registry client;
      *  any live create()/resume() fails closed until one is bound. */
     connectionInstanceId?: string;
-    /** Stable terminal identity (normally the durable OpenGeni session id). */
+    /** Stable terminal identity (normally the durable Opengeni session id). */
     terminalScopeId?: string;
     epoch?: number;
     /** The control-op timeout threaded into every bound session. */
@@ -2148,7 +2148,7 @@ export interface SelfhostedSessionBuild {
   connectionInstanceId: string;
   /** The relay-URL shape for stream endpoints. */
   relay: SelfhostedRelayConfig;
-  /** Stable terminal identity; normally the durable OpenGeni session id. */
+  /** Stable terminal identity; normally the durable Opengeni session id. */
   terminalScopeId?: string;
   /** Lazily build the live ControlRpc (the request-scoped NATS connection). */
   controlRpcFactory: () => ControlRpc;

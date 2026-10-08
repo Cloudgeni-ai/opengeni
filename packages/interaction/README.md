@@ -8,7 +8,7 @@ implementation. It owns the causal mutation boundary shared by agents and humans
 - operation-id deduplication and honest `failed` versus `outcome_unknown` receipts;
 - attempt authority checked immediately before dispatch;
 - driver interfaces that keep Chromium, connected Chrome, Linux, macOS, and later
-  external providers behind the same OpenGeni contract.
+  external providers behind the same Opengeni contract.
 
 The package does not own HTTP, Postgres, sandbox placement, credentials, or UI.
 Those layers provide placement and attempt authority, persist low-volume resource

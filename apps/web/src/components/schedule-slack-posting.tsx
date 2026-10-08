@@ -18,7 +18,7 @@ const MAX_CHANNEL_PAGES = 5;
 const DONT_POST = "__dont_post__";
 
 /**
- * The one Slack channel a scheduled task's runs may post to as the OpenGeni
+ * The one Slack channel a scheduled task's runs may post to as the Opengeni
  * workspace bot. A person chooses it here; the agent cannot post anywhere
  * else. Changing it needs permission to manage connections.
  *

@@ -157,7 +157,7 @@ test("failed inventory blocks sending and retry recovers without forgetting excl
   const client = clientFor(async () => {
     if (fail) {
       throw Object.assign(
-        new Error("OpenGeni API 500: accounts store down Reference: req-accounts."),
+        new Error("Opengeni API 500: accounts store down Reference: req-accounts."),
         {
           status: 500,
         },

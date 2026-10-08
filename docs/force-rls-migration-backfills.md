@@ -16,7 +16,7 @@ up. Daily rollup backfill remains a separate migration with its own owner
 posture/convergence gate.
 
 `FORCE ROW LEVEL SECURITY` binds the **table owner**, not merely ordinary roles.
-Only a genuine `SUPERUSER` (or a role with `BYPASSRLS`) is exempt. OpenGeni's
+Only a genuine `SUPERUSER` (or a role with `BYPASSRLS`) is exempt. Opengeni's
 documented deployment posture ([`deployment.md`](deployment.md)) runs migrations
 as `OPENGENI_MIGRATIONS_DATABASE_URL`'s identity - the schema **owner**, which on
 every managed Postgres (Azure Flexible Server, AWS RDS, Cloud SQL) is a

@@ -696,7 +696,7 @@ jobs:
               evidence/release-chart.sha256 \
               ".release/charts/opengeni-${RELEASE_VERSION}.tgz" \
               --target "$SOURCE_SHA" \
-              --title "OpenGeni release candidate ${RELEASE_VERSION} (${SOURCE_SHA::12})" \
+              --title "Opengeni release candidate ${RELEASE_VERSION} (${SOURCE_SHA::12})" \
               --notes "Immutable image candidate receipt for source ${SOURCE_SHA}. Deploy every role by the recorded digest." \
               --latest=false
           fi

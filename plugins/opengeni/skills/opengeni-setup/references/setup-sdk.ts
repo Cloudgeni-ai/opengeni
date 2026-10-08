@@ -10,7 +10,7 @@ import type {
 } from "@opengeni/sdk";
 import { OpenGeniClient } from "@opengeni/sdk";
 import { OpenGeniAutomationsClient } from "@opengeni/sdk/automations";
-import type { OpenGeni } from "@opengeni/sdk/chat";
+import type { Opengeni } from "@opengeni/sdk/chat";
 import {
   getWorkspaceAllowance,
   getWorkspaceAllowanceState,
@@ -53,7 +53,7 @@ export async function createSetupKey(admin: OpenGeniClient, organizationId: stri
 
 // The workspace the embedding proxy uses for this tenant (`resolve` returning
 // { user, tenant }), created on first use. Use it for workspace-level setup.
-export async function tenantWorkspaceId(og: OpenGeni, tenant: string) {
+export async function tenantWorkspaceId(og: Opengeni, tenant: string) {
   return await og.workspaceId({ tenant });
 }
 

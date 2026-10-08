@@ -438,7 +438,7 @@ describe("embedded worker lifecycle contract", () => {
     await rm(join(dist, "workflow-bundle.js"));
     expect(() =>
       resolveOpenGeniWorkflowDefinition(pathToFileURL(join(dist, "index.js")).href),
-    ).toThrow("OpenGeni workflow bundle is missing");
+    ).toThrow("Opengeni workflow bundle is missing");
   });
 
   test("worker database readiness enforces supplied posture and retains the embedded probe", async () => {

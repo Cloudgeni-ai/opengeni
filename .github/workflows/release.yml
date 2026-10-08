@@ -999,7 +999,7 @@ jobs:
               evidence/release-bom.json \
               evidence/release-bom.sha256 \
               --target "$SOURCE_SHA" \
-              --title "OpenGeni release BOM ${RELEASE_VERSION} (${SOURCE_SHA::12})" \
+              --title "Opengeni release BOM ${RELEASE_VERSION} (${SOURCE_SHA::12})" \
               --notes "Immutable machine-readable package and image BOM for source ${SOURCE_SHA}." \
               --latest=false
           fi

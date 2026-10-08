@@ -1,6 +1,6 @@
 # `@opengeni/subscriptions`
 
-The pure policy layer of OpenGeni's shared subscription core. It decides which
+The pure policy layer of Opengeni's shared subscription core. It decides which
 subscription account (Codex, Claude, SuperGrok, or an API-key connection) a
 session's turn runs on, and why it waits otherwise. It has no database,
 provider SDK or network dependency, no clock and no randomness: every input

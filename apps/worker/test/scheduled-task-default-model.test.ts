@@ -60,7 +60,7 @@ afterAll(async () => {
   await shared?.release();
 });
 
-// Hosted-like deployment: free OpenRouter default, OpenGeni credits billing,
+// Hosted-like deployment: free OpenRouter default, Opengeni credits billing,
 // and the ChatGPT/Codex subscription rail enabled.
 function settings(overrides: Partial<Settings> = {}): Settings {
   return testSettings({

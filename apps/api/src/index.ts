@@ -372,7 +372,7 @@ export async function startApi(
       () => resolveCatalogSettings(dbClient.db, settings),
       { ...retryOptions, onRetry },
     );
-    observability.info("OpenGeni model catalog resolved", {
+    observability.info("Opengeni model catalog resolved", {
       catalogSource: resolvedCatalog.source,
       catalogVersion: resolvedCatalog.version,
     });
@@ -405,7 +405,7 @@ export async function startApi(
   }
   if (!bus || !workflowClient) {
     await dbClient.close();
-    throw new Error("OpenGeni API startup dependencies were not initialized");
+    throw new Error("Opengeni API startup dependencies were not initialized");
   }
   const objectStorage = createObjectStorage(settings);
   let editableArtifactComposition: StandaloneEditableArtifactApplication | undefined;
@@ -536,7 +536,7 @@ export async function startApi(
       bus,
       observability,
     });
-    observability.info("OpenGeni machine-metrics + hello ingestion consumers started", {});
+    observability.info("Opengeni machine-metrics + hello ingestion consumers started", {});
 
     const callout = resolveNatsCalloutConfig(settings);
     if (callout) {
@@ -548,7 +548,7 @@ export async function startApi(
       } catch {
         // A responder start failure must not crash the API (other planes work); log
         // loudly — selfhosted agents will fail to connect until it is up.
-        observability.error("OpenGeni NATS auth-callout responder failed to start", {
+        observability.error("Opengeni NATS auth-callout responder failed to start", {
           errorClass: "NatsAuthCalloutOperationError",
           errorCode: "nats_auth_callout_start_failed",
           origin: "api",
@@ -556,12 +556,12 @@ export async function startApi(
       }
     } else {
       observability.warn(
-        "OpenGeni selfhosted enabled but the NATS auth-callout plane is not configured; selfhosted agents cannot connect",
+        "Opengeni selfhosted enabled but the NATS auth-callout plane is not configured; selfhosted agents cannot connect",
         {},
       );
     }
   }
-  observability.info("OpenGeni API listening", {
+  observability.info("Opengeni API listening", {
     host: settings.apiHost,
     port: settings.apiPort,
     ...(metricsServer ? { metricsPort: settings.apiMetricsPort } : {}),
@@ -669,7 +669,7 @@ function temporalIntervalSpec(
   // Temporal interval schedules match Epoch + (n * every) + offset. Its
   // top-level startAt only filters matching times before that boundary, so it
   // does not itself anchor the cadence. Derive the phase from startAt to make
-  // the stored OpenGeni timestamp the first interval boundary rather than the
+  // the stored Opengeni timestamp the first interval boundary rather than the
   // next epoch-aligned match.
   const everyMilliseconds = BigInt(schedule.everySeconds) * 1_000n;
   const startMilliseconds = BigInt(new Date(schedule.startAt).getTime());

@@ -379,7 +379,7 @@ function assertPinnedModalSdk(session: MutableModalSandboxSession): void {
   const actualVersion = session.modal?.version?.();
   if (actualVersion !== OPENGENI_MODAL_SDK_VERSION) {
     throw new Error(
-      `OpenGeni Modal snapshot compatibility requires modal@${OPENGENI_MODAL_SDK_VERSION}; ` +
+      `Opengeni Modal snapshot compatibility requires modal@${OPENGENI_MODAL_SDK_VERSION}; ` +
         `the active session reported ${actualVersion ?? "no version"}`,
     );
   }
@@ -435,7 +435,7 @@ function installModalNativeSnapshotRetention(session: MutableModalSandboxSession
     // Agents Extensions 0.13.x still invokes the Modal 0.7 positional timeout
     // signature. Modal 0.9 moved timeout into an options object and changed the
     // default Image retention from indefinite to 30 days. Translate at the
-    // provider boundary and retain the Image until OpenGeni's artifact ledger
+    // provider boundary and retain the Image until Opengeni's artifact ledger
     // proves it unreferenced and garbage-collects its exact provider id.
     sandbox.snapshotFilesystem = async (legacyParams?: unknown) => {
       if (legacyParams !== undefined && typeof legacyParams !== "number") {
@@ -826,21 +826,21 @@ export const modalProvider: ProviderRegistration = {
       sandboxCreateTimeoutS: Math.ceil(settings.sandboxWarmingTimeoutMs / 1000),
       // The Agents Extensions session persists this value in its provider
       // state and passes it to persistWorkspace(). Keep it aligned with the
-      // same current setting that bounds OpenGeni's outer capture operation.
+      // same current setting that bounds Opengeni's outer capture operation.
       snapshotFilesystemTimeoutMs: settings.sandboxSnapshotTimeoutMs,
       exposedPorts,
       env: environment,
       // A registry image's own CMD is not a sandbox keepalive contract (for
       // example, python:3.12-slim can exit immediately). Keep the provider's
       // control process alive so exec/resume remains available; Modal's hard
-      // timeout and explicit OpenGeni teardown still own the box lifetime.
+      // timeout and explicit Opengeni teardown still own the box lifetime.
       useSleepCmd: true,
     };
     // gap-fill (module 03 §4.1): these SDK options were previously unmapped.
     // ALWAYS pin idleTimeoutMs (sandbox-file-persistence): an UNSET idle timeout
     // lets the SDK send idleTimeoutSecs=undefined, so Modal applies its short
     // server-default idle-reap and kills an idle (between-turns) box LONG before
-    // OpenGeni's reaper can resume+snapshot it. effectiveModalIdleTimeoutSeconds
+    // Opengeni's reaper can resume+snapshot it. effectiveModalIdleTimeoutSeconds
     // defaults this to the hard lifetime so the box survives its full warm window
     // and the reaper — not Modal's idle-reap — governs teardown (and snapshots
     // /workspace first).
@@ -879,7 +879,7 @@ type ModalClientLike = InstanceType<ModalModule["ModalClient"]>;
 // OPENGENI_MODAL_IMAGE_ID is the preferred immutable provider-native path. The
 // Agents extension resolves it with ModalImageSelector.fromId and serializes the
 // actual imageId into the session state, while modalImageRef remains the logical
-// digest persisted on the OpenGeni lease.
+// digest persisted on the Opengeni lease.
 //
 // The Agents-extension Modal backend resolves `modalImageRef` via
 // `Image.fromRegistry(tag)` with NO secret, so it can only pull PUBLIC images. To run
@@ -937,7 +937,7 @@ export async function ensureModalRegistryImage(
       // NOT the static `modal.Secret.fromName`, which resolves against
       // `getDefaultClient()` — i.e. the standard MODAL_TOKEN_ID/MODAL_TOKEN_SECRET env
       // or ~/.modal.toml — and so would throw "Profile is missing token_id" in any host
-      // that supplies the token only through OpenGeni settings (OPENGENI_MODAL_TOKEN_ID).
+      // that supplies the token only through Opengeni settings (OPENGENI_MODAL_TOKEN_ID).
       const secret = await client.secrets.fromName(
         settings.modalImageRegistrySecret!,
         settings.modalEnvironment ? { environment: settings.modalEnvironment } : undefined,
@@ -1058,7 +1058,7 @@ async function modalCheckpointProviderBindingForClient(
     version: 1,
     serverUrl: modal.profile.serverUrl,
     workspaceName,
-    // Resolve through the authenticated client, not the optional OpenGeni
+    // Resolve through the authenticated client, not the optional Opengeni
     // override alone. When the override is absent Modal may select a profile
     // environment; persisting "" would fail to fence a later profile change.
     environment: modal.environmentName(settings.modalEnvironment),

@@ -70,7 +70,7 @@ export function isTimelineUserQuestion(event: SessionEvent): boolean {
    memoized, unit-tested, and re-run incrementally as new events stream in.
    -------------------------------------------------------------------------- */
 
-/** Tool leaves on the first-party OpenGeni MCP server that operate on sessions. */
+/** Tool leaves on the first-party Opengeni MCP server that operate on sessions. */
 const WORKER_SPAWN_TOOL = "session_create";
 const WORKER_MESSAGE_TOOL = "session_send_message";
 const WORKER_FAILURE_CODE_MAX_LENGTH = 128;
@@ -1286,7 +1286,7 @@ export function buildTimeline(
           break;
         }
         // Credit exhaustion arrives as a NOMINALLY completed turn (`detail:
-        // "insufficient OpenGeni credits"`, `segmentLimit: "budget_exhausted"`)
+        // "insufficient Opengeni credits"`, `segmentLimit: "budget_exhausted"`)
         // — the engine ended the segment early, it did not finish the work.
         // Rendering it as a clean "complete" turn is a lie that leaves the
         // session looking healthy while every future turn silently dies, so it

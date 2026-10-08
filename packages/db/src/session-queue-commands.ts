@@ -2497,7 +2497,7 @@ export async function submitHumanPromptInTransaction(
         delivery: effectiveDelivery,
         routing,
         acceptedEventId,
-        instruction: "OpenGeni accepted and routed this user input; do not delegate it again.",
+        instruction: "Opengeni accepted and routed this user input; do not delegate it again.",
       },
       now,
     });

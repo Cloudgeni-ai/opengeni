@@ -30,7 +30,7 @@ const catalog: OpenGeniSiteToolCatalog = {
   ],
 };
 
-describe("OpenGeni Site client", () => {
+describe("Opengeni Site client", () => {
   test("strips host-only approval and Site transport authority", () => {
     expect(
       sanitizeOpenGeniSiteToolCallRequest({

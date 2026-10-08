@@ -1,6 +1,6 @@
 {
   "uid": "opengeni-connected-machines",
-  "title": "OpenGeni \u00b7 Connected Machines",
+  "title": "Opengeni \u00b7 Connected Machines",
   "description": "Connected Machine control-op outcomes, healed faults (leading indicator), op latency, fault taxonomy, and the payload wall.",
   "schemaVersion": 39,
   "version": 1,

@@ -74,7 +74,7 @@ describe("reply recorded when a turn ends waiting for input", () => {
 
   test("a worker-created session's first turn records nothing although its source is user", async () => {
     for (const initiator of [
-      { kind: "service" as const, subjectId: "scheduler", label: "OpenGeni scheduler" },
+      { kind: "service" as const, subjectId: "scheduler", label: "Opengeni scheduler" },
       { kind: "service" as const, subjectId: "automation:44444444-4444-4444-8444-444444444444" },
       { kind: "service" as const, subjectId: "site-auth-maintenance" },
     ]) {

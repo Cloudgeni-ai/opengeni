@@ -192,7 +192,7 @@ export type SessionBinding = {
   /** Completion time of the latest model call on this binding. */
   lastModelCallAt: number;
   /**
-   * The exact prompt-cache lifetime OpenGeni sent with the latest request on
+   * The exact prompt-cache lifetime Opengeni sent with the latest request on
    * this binding (Claude: 5 minutes or 1 hour). Overrides the provider's cache
    * facts when set (SUB-STICK-04).
    */
@@ -226,7 +226,7 @@ export type PlacementSession = {
 
 /** How the provider prompt cache expires (SUB-STICK-04, design 6.1). */
 export type CacheFacts =
-  /** Exact lifetime OpenGeni sent with the request (Claude). */
+  /** Exact lifetime Opengeni sent with the request (Claude). */
   | { kind: "exact_ttl"; ttlMs: number }
   /** Idle cut-off measured from model-call facts; null until measured. */
   | { kind: "measured_idle_cutoff"; cutoffMs: number | null };

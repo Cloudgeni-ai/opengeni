@@ -579,7 +579,7 @@ the local exception.
 ### Pre-registration invitations and signup convergence (0314)
 
 Migration `0314_unregistered_organization_invitations.sql` lets an owner or
-administrator record an invitation before its target has an OpenGeni login.
+administrator record an invitation before its target has an Opengeni login.
 The durable row keeps the normalized email, optional display name, role, and a
 bounded set of initial shared-workspace ids, while `target_subject_id` stays
 null. The public response never reveals whether that email is registered, and
@@ -636,7 +636,7 @@ unsolicited link. Before auto sign-in the victim met a sign-in wall and had to
 reset the password, which revokes sessions and locks the other party out; now
 the victim is signed in and may start using an account whose password someone
 else holds. Every verification email therefore says to ignore it if the
-recipient did not create an OpenGeni account. Signing in only when the link is
+recipient did not create an Opengeni account. Signing in only when the link is
 opened in the browser that signed up would close that edge and remains a
 possible follow-up.
 
@@ -683,7 +683,7 @@ because granting owner there would be a privilege event rather than a repair.
 No migration-time backfill over a FORCE-RLS table is needed.
 
 The stock web console may then show a skippable product step to connect a
-model or buy OpenGeni credits. When the deployment bills credits and the new
+model or buy Opengeni credits. When the deployment bills credits and the new
 Personal workspace's model catalog reports a server-resolved default
 (`defaultSelection`) that is a selectable credits-billed model, the step reads
 the organization's balance (`GET /v1/billing`) and, while it is positive (for
@@ -1157,7 +1157,7 @@ workspace-admin lifecycle.
 
 An external product integrates through the organization boundary documented in
 [`product-integration.md`](product-integration.md): its backend holds an
-**organization API key**, maps each product tenant to one OpenGeni
+**organization API key**, maps each product tenant to one Opengeni
 **organization workspace**, and then uses ordinary workspace-scoped operational
 routes for sessions, files, events, and tools.
 
@@ -1203,7 +1203,7 @@ accounts; only an organization administrator can make one an admin.
   keys that were already revoked get a deleted one.
 
 The external backend also remains the source of truth for product Skills. It
-stores and versions them outside OpenGeni and passes the selected definitions
+stores and versions them outside Opengeni and passes the selected definitions
 inline in `CreateSessionRequest.skills` for each product-created session. There
 is no organization-wide Skill registry or Skill inheritance in this product
 integration contract, and workspace tenancy must not be widened by treating an
@@ -1560,7 +1560,7 @@ depends on, so an `account_id = current_account_id()` predicate over them is
 circular for the first two and type-incoherent for the third — `auth_identities`
 holds Better Auth's provider subject string in `account_id`, not a tenant id,
 and Better Auth queries it over its own connection pool that never carries an
-OpenGeni GUC. Consequently a query that reached the database layer without going
+Opengeni GUC. Consequently a query that reached the database layer without going
 through the access layer can read another organization's workspace and
 membership _metadata_, though never its content: every content table remains
 FORCE RLS and genuinely isolated.
@@ -2133,7 +2133,7 @@ keys for an apply. Earlier unresolved receipts remain immutable evidence; a
 later recheck records current truth rather than rewriting history. The 0347
 inspector uses its own target-schema-local, invocation-exact, SELECT-only
 FORCE-RLS capability. It cannot inherit 0340's connection update capability or
-collide with a second OpenGeni schema in the same database.
+collide with a second Opengeni schema in the same database.
 
 Migration 0340 also closes both ways this compatibility population could reopen.
 For an organization holding a `session_tenancy_activations` receipt (written
@@ -2150,7 +2150,7 @@ compatibility lane exactly as before, so no stored authority becomes invisible.
 Both of those paths depend on one seam,
 `opengeni_private.bind_connection_owner_authority`, and it exists because
 `organization_memberships` and `organization_user_resource_authorities` are
-`FORCE ROW LEVEL SECURITY` and OpenGeni runs its SECURITY DEFINER routines as a
+`FORCE ROW LEVEL SECURITY` and Opengeni runs its SECURITY DEFINER routines as a
 NON-superuser owner without `BYPASSRLS`. Migration 0256's inline
 `SELECT ... FOR SHARE` plus authority `INSERT` therefore matched nothing on
 every real deployment: a personal connection whose subject _did_ hold a live
@@ -2445,7 +2445,7 @@ The closed lane set is `TENANCY_COMPATIBILITY_LANES` in
 `packages/observability/src/index.ts`; an unreviewed name is ignored rather
 than minting a series. Every lane is published at zero on process start, so an
 operator can tell "this lane is dead" from "this lane was never wired up". The
-lane name is the only label OpenGeni adds - never an organization, workspace,
+lane name is the only label Opengeni adds - never an organization, workspace,
 session, subject, connection, resource, provider, or server identity - and a
 registry failure is swallowed at the telemetry boundary, so counting can never
 change an authorization or credential outcome.

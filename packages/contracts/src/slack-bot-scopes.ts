@@ -121,10 +121,10 @@ export function buildOpenGeniSlackBotManifest(
   options: OpenGeniSlackBotManifestOptions = {},
 ) {
   const baseUrl = normalizedSlackManifestBaseUrl(publicBaseUrl);
-  const appName = normalizedSlackManifestText(options.appName, "OpenGeni", "app name", 35);
+  const appName = normalizedSlackManifestText(options.appName, "Opengeni", "app name", 35);
   const botDisplayName = normalizedSlackManifestText(
     options.botDisplayName,
-    "OpenGeni",
+    "Opengeni",
     "bot display name",
     80,
   );

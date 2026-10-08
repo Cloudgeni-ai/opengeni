@@ -188,7 +188,7 @@ describe("scheduled task connector accounts", () => {
   });
 });
 
-describe("agent-created task OpenGeni tools (migration 0428 creator policy)", () => {
+describe("agent-created task Opengeni tools (migration 0428 creator policy)", () => {
   const settings = testSettings({
     defaultFirstPartyMcpTools: ["sessions_list", "rig_list", "browser_read"],
   });

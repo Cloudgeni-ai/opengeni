@@ -148,7 +148,7 @@ describe("AccessList", () => {
 
   test("an API error as the cause becomes advice, never its raw string", () => {
     const cause = Object.assign(
-      new Error("OpenGeni API 503: upstream unavailable Reference: req_access_1."),
+      new Error("Opengeni API 503: upstream unavailable Reference: req_access_1."),
       { status: 503 },
     );
     const html = render({
@@ -157,7 +157,7 @@ describe("AccessList", () => {
     expect(html).toContain("Opengeni couldn&#x27;t finish the request. Try again in a moment.");
     expect(html).toContain("Technical details");
     expect(html).toContain("req_access_1");
-    expect(html).not.toContain("OpenGeni API 503");
+    expect(html).not.toContain("Opengeni API 503");
   });
 
   test("the matrix shows one role per workspace, with no access spelled out", () => {

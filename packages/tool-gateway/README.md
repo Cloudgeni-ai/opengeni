@@ -1,6 +1,6 @@
 # `@opengeni/tool-gateway`
 
-Protocol-neutral catalog validation, authorization, and execution for OpenGeni
+Protocol-neutral catalog validation, authorization, and execution for Opengeni
 tools. Runtime composition supplies already-admitted first-party and integration
 definitions; this package gives model MCP, Codemode, HTTP/SDK, external MCP, and
 Site adapters one canonical identity and execution path.

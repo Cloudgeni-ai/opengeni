@@ -1571,7 +1571,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       IntegrationClientMetadata.parse({
         client_id: metadataUrl,
-        client_name: "OpenGeni",
+        client_name: "Opengeni",
         redirect_uris: [`${baseUrl}/v1/integrations/oauth/callback`],
         token_endpoint_auth_method: "none",
         grant_types: ["authorization_code", "refresh_token"],

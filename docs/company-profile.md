@@ -272,7 +272,7 @@ receipts and public `AUTHORITY_WRITE_FAILED` translation.
 
 The first-party `company_profile_propose` and `company_profile_confirm` tools
 (`apps/api/src/mcp/company-profile-agent-admin.ts`) are the agent-facing path the
-Organization settings → Organization identity "Create with OpenGeni" prompt directs a session to. They register
+Organization settings → Organization identity "Create with Opengeni" prompt directs a session to. They register
 only for exact worker-signed agent attempts with `workspace:read` plus
 `sessions:control`. Proposal input contains only identity and mission; the
 canonical compatibility lists are written empty before the exact profile is

@@ -502,7 +502,7 @@ describe("managed organization onboarding", () => {
       bus: new MemoryEventBus(),
       workflowClient: {} as never,
       managedEmailTransport: {
-        sender: "OpenGeni <auth@mail.opengeni.ai>",
+        sender: "Opengeni <auth@mail.opengeni.ai>",
         idempotency: { scope: "test-provider-v1:verify-sign-in", retentionSeconds: 86_400 },
         send: async (message) => {
           sent.push({ kind: message.kind, to: message.to, text: message.text });
@@ -575,7 +575,7 @@ describe("managed organization onboarding", () => {
     // be told not to use it.
     const sent: Array<{ kind: string; to: string; text: string; html?: string }> = [];
     const auth = createManagedAuth(settings, {} as never, {
-      sender: "OpenGeni <auth@mail.opengeni.ai>",
+      sender: "Opengeni <auth@mail.opengeni.ai>",
       idempotency: { scope: "test-provider-v1:verify-ignore", retentionSeconds: 86_400 },
       send: async (message) => {
         sent.push(message);

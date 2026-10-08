@@ -447,7 +447,7 @@ export class BrowserControlUnsupportedError extends Error {
 function browserControllerCompatibilityError(feature: string): BrowserControlRequestError {
   return new BrowserControlRequestError(409, {
     code: "unsupported",
-    message: `browser controller does not support ${feature}; update the placement's controller image to match this OpenGeni release`,
+    message: `browser controller does not support ${feature}; update the placement's controller image to match this Opengeni release`,
     retryable: false,
   });
 }

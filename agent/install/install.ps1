@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  OpenGeni self-hosted agent installer — Windows (PowerShell 5.1+ / 7+).
+  Opengeni self-hosted agent installer — Windows (PowerShell 5.1+ / 7+).
 
 .DESCRIPTION
   irm https://get.opengeni.ai/install.ps1 | iex
@@ -24,7 +24,7 @@
   OPENGENI_AGENT_VERSION     Pin a version (default "latest").
   OPENGENI_ALLOW_DOWNGRADE   "1" explicitly allows an older verified agent to
                              replace a newer installed one. Default: preserve newer.
-  OPENGENI_INSTALL_DIR       Install dir (default %LOCALAPPDATA%\OpenGeni\bin).
+  OPENGENI_INSTALL_DIR       Install dir (default %LOCALAPPDATA%\Opengeni\bin).
   OPENGENI_ENROLL_TOKEN      Non-interactive connection token (CI/automation);
                              adds or refreshes only its deployment/workspace.
   OPENGENI_NO_SERVICE        "1" => save the connection without installing a service.
@@ -251,7 +251,7 @@ function Install-VerifiedInteractionRuntime($agentAsset, $tmp, $installDir) {
 }
 
 function Get-InstallDir {
-  $d = Get-EnvOr 'OPENGENI_INSTALL_DIR' (Join-Path $env:LOCALAPPDATA 'OpenGeni\bin')
+  $d = Get-EnvOr 'OPENGENI_INSTALL_DIR' (Join-Path $env:LOCALAPPDATA 'Opengeni\bin')
   return $d
 }
 
@@ -342,7 +342,7 @@ function Complete-Install($bin) {
   if (-not [string]::IsNullOrEmpty($enrollToken)) {
     Log "non-interactive connection (OPENGENI_ENROLL_TOKEN set)"
     # This upserts only the token's deployment/workspace connection; unrelated
-    # OpenGeni connections remain configured and online.
+    # Opengeni connections remain configured and online.
     & $bin --api-url $script:ApiUrl connect --token $enrollToken --non-interactive
     if ($LASTEXITCODE -ne 0) { Fail 7 "machine connection failed; background service was not changed" }
     Start-BackgroundAgent $bin

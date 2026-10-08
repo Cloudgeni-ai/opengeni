@@ -1,4 +1,4 @@
-/** Optional OpenGeni Review Bot API client; import this entry only where the capability is used. */
+/** Optional Opengeni Review Bot API client; import this entry only where the capability is used. */
 export { OpenGeniPrReviewClient } from "./pr-review-client";
 export type { OpenGeniPrReviewTransport } from "./pr-review-client";
 export type {

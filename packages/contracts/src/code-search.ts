@@ -3,7 +3,7 @@
 
 /**
  * Directories holding platform credential material that `code_search` never
- * searches or reads, as path segments matched at any depth: OpenGeni's
+ * searches or reads, as path segments matched at any depth: Opengeni's
  * sandbox state (`.opengeni/`: Codemode bearer tokens, Git credential files
  * and bindings), the Azure CLI login cache (`.azure/`, from the sandbox's
  * service-principal login with HOME=/workspace) and a Connected Machine

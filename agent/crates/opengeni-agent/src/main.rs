@@ -1,7 +1,7 @@
-//! The OpenGeni self-hosted agent binary.
+//! The Opengeni self-hosted agent binary.
 //!
-//! Run your own machine as a first-class OpenGeni sandbox. After a one-time
-//! device-flow enrollment the agent dials the OpenGeni control plane over NATS,
+//! Run your own machine as a first-class Opengeni sandbox. After a one-time
+//! device-flow enrollment the agent dials the Opengeni control plane over NATS,
 //! claims one process generation and subscribes to its exact authority subject
 //! (`agent.<ws>.<id>.connection.<instance>.rpc`), then answers control RPCs
 //! (exec / filesystem / git today; terminal + desktop
@@ -219,10 +219,10 @@ fn string_err(message: String) -> anyhow_lite::BoxError {
 fn list_connections(api_url: &str) -> anyhow_lite::Result {
     let connections = config::load_connections(api_url).map_err(to_boxed)?;
     if connections.is_empty() {
-        println!("No OpenGeni connections configured. Run `opengeni-agent connect`.");
+        println!("No Opengeni connections configured. Run `opengeni-agent connect`.");
         return Ok(());
     }
-    println!("Configured OpenGeni connections ({}):", connections.len());
+    println!("Configured Opengeni connections ({}):", connections.len());
     for connection in connections {
         let origin_note = if connection.legacy_origin {
             " (legacy origin unverified; reconnect once to confirm)"
@@ -342,7 +342,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         let connections = existing_connections;
         info!(
             count = connections.len(),
-            "loaded configured OpenGeni connections"
+            "loaded configured Opengeni connections"
         );
         connections
     };
@@ -428,12 +428,12 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
                     if updates_tx.send(next_links).is_err() {
                         return;
                     }
-                    info!(count = next.len(), "reconciled local OpenGeni connections");
+                    info!(count = next.len(), "reconciled local Opengeni connections");
                     current = next;
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    error!(%error, "could not reload OpenGeni connections; keeping active links");
+                    error!(%error, "could not reload Opengeni connections; keeping active links");
                 }
             }
         }
@@ -638,7 +638,7 @@ fn ensure_macos_desktop_grants() {
             screen_recording = grants.screen_recording,
             accessibility = grants.accessibility,
             input_monitoring = grants.input_monitoring,
-            "this Mac needs OS permission to expose its display to OpenGeni — requesting \
+            "this Mac needs OS permission to expose its display to Opengeni — requesting \
              Screen Recording + Accessibility + Input Monitoring. Approve the system prompt(s), \
              or open System Settings > Privacy & Security and enable all three for \
              opengeni-agent, then let it reconnect. Capture and input capabilities appear as \
@@ -774,7 +774,7 @@ async fn enroll_command(
         "connection complete; credentials persisted"
     );
     println!(
-        "Connected to {} (connection {}). Existing OpenGeni connections were kept.",
+        "Connected to {} (connection {}). Existing Opengeni connections were kept.",
         stored.api_url, stored.connection_id
     );
     println!("A running agent notices this connection automatically within a few seconds.");
@@ -841,7 +841,7 @@ async fn enroll_with_token(
         "connection complete; credentials persisted"
     );
     println!(
-        "Connected to {} (connection {}). Existing OpenGeni connections were kept.",
+        "Connected to {} (connection {}). Existing Opengeni connections were kept.",
         stored.api_url, stored.connection_id
     );
     println!("A running agent notices this connection automatically within a few seconds.");

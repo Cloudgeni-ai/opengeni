@@ -1285,7 +1285,7 @@ function AgentScheduleForm({
 
 /**
  * Server errors read as what happened and what to do inside the form, never
- * "OpenGeni API 422: …". A short validation sentence from the server is kept.
+ * "Opengeni API 422: …". A short validation sentence from the server is kept.
  */
 async function withFriendlyError<T>(lead: string, request: Promise<T>): Promise<T> {
   try {

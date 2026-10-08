@@ -2,25 +2,25 @@
 name: opengeni
 audience: repo-maintainer-agent
 description: >-
-  Use when editing, operating, extending, documenting, or debugging the OpenGeni
+  Use when editing, operating, extending, documenting, or debugging the Opengeni
   source repository or deployment: architecture, sessions/events, worker
   orchestration, sandbox backends, files/storage, tools/MCP, scheduling,
   configuration, and deployment. For a customer product that consumes a
-  standalone OpenGeni deployment through the SDK or React packages, use the
+  standalone Opengeni deployment through the SDK or React packages, use the
   separate opengeni-client skill instead.
 ---
 
-# OpenGeni
+# Opengeni
 
-This skill is for repo-maintainer agents working in, operating, or changing the OpenGeni repository.
+This skill is for repo-maintainer agents working in, operating, or changing the Opengeni repository.
 
 ## Overview
 
-Use this skill as an orientation layer, not as frozen API documentation. OpenGeni evolves through the codebase, so code wins over this skill whenever they differ.
+Use this skill as an orientation layer, not as frozen API documentation. Opengeni evolves through the codebase, so code wins over this skill whenever they differ.
 
-OpenGeni is a workspace-scoped agent control plane. Public clients talk to an API. The API resolves every protected request to an access grant, persists sessions and events, accepts user/control events, exposes replay/SSE streams, handles uploads, and talks to Temporal. A worker runs OpenAI Agents SDK turns inside a configured sandbox backend. Postgres is durable state, NATS is live fanout, object storage holds uploaded file bytes, Temporal coordinates work and schedules, and MCP servers provide pluggable tools.
+Opengeni is a workspace-scoped agent control plane. Public clients talk to an API. The API resolves every protected request to an access grant, persists sessions and events, accepts user/control events, exposes replay/SSE streams, handles uploads, and talks to Temporal. A worker runs OpenAI Agents SDK turns inside a configured sandbox backend. Postgres is durable state, NATS is live fanout, object storage holds uploaded file bytes, Temporal coordinates work and schedules, and MCP servers provide pluggable tools.
 
-Canonical source repo: `https://github.com/Cloudgeni-ai/opengeni`. This skill may be installed outside that repo, which is normal. If the current workspace is not OpenGeni, first determine whether the user wants client integration against a deployed OpenGeni service, source-level changes, deployment help, or conceptual explanation. For source-level exactness, inspect or fetch the repo; for client integration, ask for or infer the deployed API base URL and inspect the running API/client config where possible.
+Canonical source repo: `https://github.com/Cloudgeni-ai/opengeni`. This skill may be installed outside that repo, which is normal. If the current workspace is not Opengeni, first determine whether the user wants client integration against a deployed Opengeni service, source-level changes, deployment help, or conceptual explanation. For source-level exactness, inspect or fetch the repo; for client integration, ask for or infer the deployed API base URL and inspect the running API/client config where possible.
 
 ## Start With Repository Discovery
 
@@ -91,7 +91,7 @@ Then open the smallest source files that answer the question:
   new Slack sessions. The worker renders those modes and the Knowledge destination
   in governance; source text and feedback cannot widen policy or access. Older
   Slack sessions can retain their stored explicit-save restriction.
-- GitHub integration: `apps/api/src/routes/github.ts`, shared workspace filtering in `apps/api/src/github-access.ts`, `packages/github/src/index.ts`, and the binding/allowlist helpers plus tables in `packages/db/src/index.ts` / `schema.ts`. The separately configured OpenGeni Lens GitHub App reuses the same owner-proof primitives through `apps/api/src/routes/pr-review-github.ts`; its shared webhook still enters the generic PR-review automation source.
+- GitHub integration: `apps/api/src/routes/github.ts`, shared workspace filtering in `apps/api/src/github-access.ts`, `packages/github/src/index.ts`, and the binding/allowlist helpers plus tables in `packages/db/src/index.ts` / `schema.ts`. The separately configured Opengeni Lens GitHub App reuses the same owner-proof primitives through `apps/api/src/routes/pr-review-github.ts`; its shared webhook still enters the generic PR-review automation source.
 - Connected Machine (bring-your-own-compute / the `selfhosted` backend): API routes `apps/api/src/routes/machines.ts` and `apps/api/src/routes/enrollments.ts`; services `apps/api/src/sandbox/machines.ts` and `apps/api/src/sandbox/enrollment.ts`; the machine-primary turn branch in `apps/worker/src/activities/agent-turn/sandbox-establish.ts` and the clone-guard in `packages/runtime/src/index.ts`; the runtime session at `packages/runtime/src/sandbox/selfhosted/`; the on-machine agent + relay in the `agent/` Rust crate; public behavior in `docs/connected-machines.md`; opt-in UI at the `@opengeni/react/machines` subpath.
 - Web usage examples: `apps/web/src/api.ts`, `apps/web/src/types.ts`, relevant UI components.
 - TypeScript SDK: `packages/sdk/src/` (typed client, SSE streaming core with reconnect/replay-by-sequence, proxy re-streaming helpers) and `packages/sdk/README.md`.
@@ -108,7 +108,7 @@ rg -n "CreateSessionRequest|ClientSessionEvent|sessionWorkflow|runAgentTurn|crea
 
 ## Client Integration
 
-For external clients, SaaS integrations, SDK wrappers, customer-side coding agents, or UIs on top of OpenGeni, prefer the separate `opengeni-client` skill when available. For TypeScript clients, `@opengeni/sdk` (`packages/sdk`) is the first-party client: typed session/event API, the SSE streaming core (reconnect + replay-by-sequence + dedup), and proxy-through-your-own-API re-streaming helpers. When staying inside this source-level skill, read `references/client-integration.md`. Treat OpenGeni as a service boundary: the client discovers or chooses a workspace, creates sessions under `/v1/workspaces/:workspaceId/...`, streams/replays events, sends follow-up/control events, uploads files, selects resources/tools, and displays approvals/status. Do not require the client to know worker, Temporal, NATS, or sandbox internals except as concepts for status and product behavior.
+For external clients, SaaS integrations, SDK wrappers, customer-side coding agents, or UIs on top of Opengeni, prefer the separate `opengeni-client` skill when available. For TypeScript clients, `@opengeni/sdk` (`packages/sdk`) is the first-party client: typed session/event API, the SSE streaming core (reconnect + replay-by-sequence + dedup), and proxy-through-your-own-API re-streaming helpers. When staying inside this source-level skill, read `references/client-integration.md`. Treat Opengeni as a service boundary: the client discovers or chooses a workspace, creates sessions under `/v1/workspaces/:workspaceId/...`, streams/replays events, sends follow-up/control events, uploads files, selects resources/tools, and displays approvals/status. Do not require the client to know worker, Temporal, NATS, or sandbox internals except as concepts for status and product behavior.
 
 For the canonical external-product shape, the product backend holds an
 organization API key and calls `ensureWorkspace` /
@@ -143,7 +143,7 @@ Keep these boundaries explicit:
   authentication, and last-usable-method protection across every login route;
   do not expose raw provider mutation routes or use `trustedProviders` to bypass
   email verification. Login methods are distinct from integration permissions.
-- OpenGeni organization API keys are owned by OpenGeni and use the
+- Opengeni organization API keys are owned by Opengeni and use the
   `Authorization` header. The optional deployment shared key uses
   `x-opengeni-access-key`.
 - Billing, Stripe, prepaid credits, entitlements, usage, and limits belong in billing/access modules. Core route/domain code should check local providers/interfaces, not call Stripe directly.
@@ -157,7 +157,7 @@ Keep these concepts straight while working:
 
 - **Account**: managed billing/ownership container for members, workspaces, credits, and billing mirrors.
 - **Workspace**: operational data boundary for sessions, events, files, documents, schedules, GitHub installation bindings, usage, and first-party MCP.
-- **GitHub installation binding**: a workspace-local reference to a GitHub App installation plus its repository allowlist. One GitHub installation may be linked to many OpenGeni workspaces; unlinking one workspace must not mutate another workspace or uninstall the App from GitHub. New binding is currently fail-closed: setup callback parameters are spoofable, and user-installation visibility, repository administrator permission, and an installation request do not prove that the current human may install or configure the App for the target account. Existing trusted bindings are rechecked before platform token mint / GitHub-authenticated run startup. Connected Machines are exempt because they use their own git auth.
+- **GitHub installation binding**: a workspace-local reference to a GitHub App installation plus its repository allowlist. One GitHub installation may be linked to many Opengeni workspaces; unlinking one workspace must not mutate another workspace or uninstall the App from GitHub. New binding is currently fail-closed: setup callback parameters are spoofable, and user-installation visibility, repository administrator permission, and an installation request do not prove that the current human may install or configure the App for the target account. Existing trusted bindings are rechecked before platform token mint / GitHub-authenticated run startup. Connected Machines are exempt because they use their own git auth.
 - **Access grant**: resolved subject plus permissions for one workspace. Route code should depend on grants and permissions, not on the caller's auth mechanism.
 - **Session**: durable user-facing work container. It owns status, resources, selected tools, model/sandbox settings, event cursor, and active turn. Normal idle closes without a grace timer after durable rechecks and transactional parent-result settlement; late input can start another workflow run of the same session. Keep the legacy timer replay patch and unrelated lifecycle waits intact; see `docs/run-lifecycle.md`.
 - **Turn**: one queued/running unit of agent work inside a session, run as one non-retryable Temporal activity (`runAgentTurn`). Follow-ups, goal continuations, and scheduled task firings become turns. Inside a turn the SDK makes as many model/tool calls as the work needs; run length is bounded by symptoms (no-progress, budget), not by counts or clocks. A graceful worker shutdown preempts an in-flight turn (checkpoint, requeue, resume on a healthy worker) instead of failing the session. See `docs/run-lifecycle.md`.
@@ -178,7 +178,7 @@ Keep these concepts straight while working:
 - **SSE/NATS split**: Postgres is replay/source of truth. NATS is live fanout. If live events are missed, API should backfill from Postgres by sequence.
 - **Temporal**: orchestration, signals, timers, schedules, and worker dispatch. Token streams/tool output should not be pushed through workflow history unless the code intentionally changes that design.
 - **Worker activity**: side-effect boundary where the OpenAI Agents SDK actually runs. Treat model/tool/sandbox/cloud calls as side-effectful.
-- **Sandbox**: pluggable execution environment behind the OpenAI Agents SDK sandbox interface. OpenGeni should describe the contract and selected backend, not pretend the backend is hard-coded. The shipped `SandboxBackend` enum is broad (currently twelve members), so never claim it is only Docker/Modal/local/none.
+- **Sandbox**: pluggable execution environment behind the OpenAI Agents SDK sandbox interface. Opengeni should describe the contract and selected backend, not pretend the backend is hard-coded. The shipped `SandboxBackend` enum is broad (currently twelve members), so never claim it is only Docker/Modal/local/none.
 - **Connected Machine**: a user's own machine (enrolled through the `agent/` Rust agent) that acts as a first-class *primary* compute target, co-equal with the managed cloud sandbox — a sibling compute target, not a backend overlay bolted onto Modal. Its enum value is `selfhosted`. A machine-targeted turn establishes a `SelfhostedSession` directly and does NOT create, lease, or bill a cloud (Modal) box; the platform mints no GitHub token for it and never clones repos onto it (the machine uses its own git auth and already owns its filesystem). Runs execute at a per-session `workingDir` (default = the agent's launch dir), not a fixed `/workspace`. The whole feature is gated by `OPENGENI_SANDBOX_SELFHOSTED_ENABLED` (default off). See `docs/connected-machines.md` and `references/sandbox-configuration.md`.
 - **Resources**: external context mounted or made available to a run, commonly repositories and uploaded files.
 - **Tools**: currently MCP-first. Tool refs select configured MCP servers. Built-ins are defaults, not limits.
@@ -278,7 +278,7 @@ For infrastructure and deployment work, read `references/deployment-infrastructu
 
 Do not claim a deployment is operational from static validation, rendered artifacts, deterministic smoke responses, or a sandbox-disabled profile alone. Real deployment confidence requires the selected profile's live dependencies, model provider, sandbox backend, object storage, auth boundary, and conformance checks to match the behavior being claimed.
 
-For production Kubernetes, use official upstream charts/operators or managed services for platform dependencies. OpenGeni's chart should own OpenGeni workloads and integration resources; built-in Postgres, Temporal, NATS, or MinIO templates are disposable conformance fixtures only and must not be described as the production path.
+For production Kubernetes, use official upstream charts/operators or managed services for platform dependencies. Opengeni's chart should own Opengeni workloads and integration resources; built-in Postgres, Temporal, NATS, or MinIO templates are disposable conformance fixtures only and must not be described as the production path.
 
 ## File Upload And Sandbox Discovery
 
@@ -335,7 +335,7 @@ For sandbox pluggability or adding a backend:
 6. Find environment/secret injection and any sandbox lifecycle hook logic.
 7. Check tests for backend expectations.
 
-Describe the backend contract in terms of the OpenAI Agents SDK sandbox client/session capabilities used by OpenGeni. Add a new backend by extending contracts/config, wiring a compatible SDK sandbox client, supporting manifests/resources/resume as needed, and adding tests.
+Describe the backend contract in terms of the OpenAI Agents SDK sandbox client/session capabilities used by Opengeni. Add a new backend by extending contracts/config, wiring a compatible SDK sandbox client, supporting manifests/resources/resume as needed, and adding tests.
 
 For sandbox configuration work, read `references/sandbox-configuration.md`. Use it when configuring any sandbox backend (Docker, Modal, local, none, the cloud backends, or a Connected Machine / `selfhosted`), deciding which environment variables enter the sandbox, debugging resource mounts, explaining sandbox preparation profiles and lifecycle hooks, adding a sandbox backend, or checking what claims are safe for docs/marketing.
 
@@ -362,7 +362,7 @@ For tools and MCP work, distinguish:
 
 - MCP tool providers selected by session/turn/scheduled-task config.
 - First-party MCP servers exposed by the API.
-- Built-in SDK sandbox capabilities for shell/files, and OpenGeni's separate Skill catalog and reader.
+- Built-in SDK sandbox capabilities for shell/files, and Opengeni's separate Skill catalog and reader.
 - Tools available inside the sandbox image, such as CLIs.
 
 Configured agents receive capability-gated prompt modules under
@@ -379,7 +379,7 @@ content-addressed clients during setup; per-exec PATH and
 `OPENGENI_CODEMODE_CLIENT_MODULE` select the release without changing the manifest.
 Do not repair stale clients by weakening catalog integrity or choosing npm latest.
 
-Find current MCP behavior in config parsing, tool validation, runtime `prepareTools`, and API MCP server builders. Account-qualified identity projection is shared by worker and current-caller gateways in `packages/core/src/domain/mcp-account-routes.ts`; compare exact catalog identities when debugging Site or OAuth tool availability. Treat first-party document/file/scheduled-task tools as swappable defaults. If a user wants enterprise search, repo tools, web tools, or custom systems, point OpenGeni at a different MCP server if current config supports it.
+Find current MCP behavior in config parsing, tool validation, runtime `prepareTools`, and API MCP server builders. Account-qualified identity projection is shared by worker and current-caller gateways in `packages/core/src/domain/mcp-account-routes.ts`; compare exact catalog identities when debugging Site or OAuth tool availability. Treat first-party document/file/scheduled-task tools as swappable defaults. If a user wants enterprise search, repo tools, web tools, or custom systems, point Opengeni at a different MCP server if current config supports it.
 
 ## Scheduling Discovery
 
@@ -401,7 +401,7 @@ Prefer precise language: "DB-backed per-session queued turns" is different from 
 
 Use careful wording:
 
-- "OpenGeni is self-hostable" if the repo still includes local/deployable API, worker, DB, NATS, Temporal, and object storage config.
+- "Opengeni is self-hostable" if the repo still includes local/deployable API, worker, DB, NATS, Temporal, and object storage config.
 - "Session-based public API" if routes/contracts still expose sessions/events/turns.
 - "Durable replayable event log" if session events are still stored and replayed by sequence.
 - "Temporal coordinates work" if workflows/activities remain present.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Full local OpenGeni stack for one checkout / git worktree.
+# Full local Opengeni stack for one checkout / git worktree.
 # Isolates the infrastructure project + host ports so parallel worktrees do not
 # share Postgres/NATS/Temporal/object storage or race on :8000/:3000.
 set -euo pipefail
@@ -89,7 +89,7 @@ export OPENGENI_SANDBOX_OWNERSHIP_ENABLED
 export OPENGENI_SANDBOX_LAZY_PROVISION
 
 # The Modal SDK natively supports MODAL_TOKEN_* and ~/.modal.toml, while the
-# deployment-facing OpenGeni config intentionally requires explicit credentials.
+# deployment-facing Opengeni config intentionally requires explicit credentials.
 # Bridge those standard local sources for this dev process only; never persist
 # the imported token in .env or .env.runtime.
 if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "modal" ] &&
@@ -623,7 +623,7 @@ dev_processes_running() {
       if [ "$failed_process_status" -eq 0 ]; then
         failed_process_status=1
       fi
-      echo "OpenGeni dev process exited: ${label} (status ${status}). Stopping the stack." >&2
+      echo "Opengeni dev process exited: ${label} (status ${status}). Stopping the stack." >&2
       return 1
     fi
   done
@@ -646,13 +646,13 @@ wait_for_stack_readiness() {
       return 1
     fi
     if [ "$SECONDS" -ge "$deadline" ]; then
-      echo "OpenGeni dev stack did not become ready within 60 seconds. Stopping all processes." >&2
+      echo "Opengeni dev stack did not become ready within 60 seconds. Stopping all processes." >&2
       failed_process_status=1
       return 1
     fi
     sleep 0.1
   done
-  echo "OpenGeni dev stack ready: API, workers, artifact services, and web are reachable."
+  echo "Opengeni dev stack ready: API, workers, artifact services, and web are reachable."
 }
 
 monitor_dev_stack() {
@@ -663,7 +663,7 @@ monitor_dev_stack() {
     else
       unhealthy_checks=$((unhealthy_checks + 1))
       if [ "$unhealthy_checks" -ge 2 ]; then
-        echo "OpenGeni dev stack lost aggregate readiness. Stopping instead of leaving a partial stack running." >&2
+        echo "Opengeni dev stack lost aggregate readiness. Stopping instead of leaving a partial stack running." >&2
         failed_process_status=1
         return 1
       fi
@@ -1012,7 +1012,7 @@ fi
 
 # A clean checkout must establish the canonical workspace package links before
 # the generated facade is verified. The facade never searches alternate roots.
-echo "OpenGeni setup: installing pinned JavaScript dependencies."
+echo "Opengeni setup: installing pinned JavaScript dependencies."
 bun install --frozen-lockfile
 
 # Connected Machines use the real NATS auth-callout boundary in local development,
@@ -1107,7 +1107,7 @@ if [ -n "${OPENGENI_DEV_CARGO_TARGET_DIR:-}" ]; then
   artifact_kernel_cargo_env=("CARGO_TARGET_DIR=${OPENGENI_DEV_CARGO_TARGET_DIR}/artifact-kernel")
   relay_cargo_env=("CARGO_TARGET_DIR=${OPENGENI_DEV_CARGO_TARGET_DIR}/agent")
 fi
-echo "OpenGeni setup: preparing the source-matched artifact runtime."
+echo "Opengeni setup: preparing the source-matched artifact runtime."
 env "${artifact_kernel_cargo_env[@]+"${artifact_kernel_cargo_env[@]}"}" \
   bun scripts/prepare-development-artifact-runtime.ts \
   --repository-root "$(pwd)" \
@@ -1126,7 +1126,7 @@ export OPENGENI_ARTIFACT_MATERIALIZER_HTTP_HOST=127.0.0.1
 # Finish an explicitly enabled relay's cold build before readiness monitoring.
 # Compiling beside the API/workers can otherwise exhaust a small fresh host.
 if [ "$start_local_relay" = "1" ]; then
-  echo "OpenGeni setup: preparing the optional Connected Machines relay."
+  echo "Opengeni setup: preparing the optional Connected Machines relay."
   (cd agent && env "${relay_cargo_env[@]+"${relay_cargo_env[@]}"}" cargo build --locked -p opengeni-relay)
 fi
 
@@ -1262,7 +1262,7 @@ fi
   printf 'VITE_API_BASE_URL=%s\n' "${VITE_API_BASE_URL}"
 } >.env.runtime
 
-echo "OpenGeni worktree stack: project=${COMPOSE_PROJECT_NAME} backend=${OPENGENI_DEV_BACKEND} sandbox=${OPENGENI_SANDBOX_BACKEND}"
+echo "Opengeni worktree stack: project=${COMPOSE_PROJECT_NAME} backend=${OPENGENI_DEV_BACKEND} sandbox=${OPENGENI_SANDBOX_BACKEND}"
 echo "  api=${VITE_API_BASE_URL}  web=http://127.0.0.1:${OPENGENI_WEB_PORT}  bind=${OPENGENI_DEV_BIND_HOST}"
 echo "  postgres=127.0.0.1:${OPENGENI_POSTGRES_HOST_PORT}  nats=${OPENGENI_NATS_URL}"
 echo "  temporal=${OPENGENI_TEMPORAL_HOST}  object-storage=${OPENGENI_OBJECT_STORAGE_ENDPOINT} (${OPENGENI_OBJECT_STORAGE_FIXTURE})"
@@ -1272,7 +1272,7 @@ fi
 echo "  artifact-materializer=http://127.0.0.1:${OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT}  artifact-outbox=http://127.0.0.1:${OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT}"
 echo "  Wrote .env.runtime (source it in sibling shells)."
 
-echo "OpenGeni setup: starting ${OPENGENI_DEV_BACKEND} infrastructure (${OPENGENI_OBJECT_STORAGE_FIXTURE})."
+echo "Opengeni setup: starting ${OPENGENI_DEV_BACKEND} infrastructure (${OPENGENI_OBJECT_STORAGE_FIXTURE})."
 if [ "$OPENGENI_DEV_BACKEND" = "native" ]; then
   bash scripts/dev-native-infra.sh start
 elif [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "minio" ]; then
@@ -1319,7 +1319,7 @@ if [ "$sandbox_bridge_mode" != "none" ]; then
     echo "No Docker sandbox route was published. Docker Desktop sandboxes still use host.docker.internal; with rootless Docker, set OPENGENI_MCP_URL to a sandbox-reachable API address for Codemode and the Git broker." >&2
   fi
 fi
-echo "OpenGeni setup: applying database migrations and runtime roles."
+echo "Opengeni setup: applying database migrations and runtime roles."
 (cd packages/db && bun run migrate)
 (cd packages/db && bun run provision-roles)
 # Diagnose schema/role incompatibilities before expensive builds and before the
@@ -1358,7 +1358,7 @@ else
   echo "Skipping local Docker sandbox image build (backend=${OPENGENI_SANDBOX_BACKEND:-docker})."
 fi
 
-echo "OpenGeni setup: starting application services."
+echo "Opengeni setup: starting application services."
 if [ "$start_local_relay" = "1" ]; then
   env "${relay_cargo_env[@]+"${relay_cargo_env[@]}"}" \
     bash scripts/run-development-relay.sh &
@@ -1394,7 +1394,7 @@ register_process "$!" "web"
 bun scripts/watch-development-schema.ts "$(pwd)" &
 register_process "$!" "database schema guard"
 
-echo "OpenGeni setup: waiting for aggregate application readiness."
+echo "Opengeni setup: waiting for aggregate application readiness."
 if ! wait_for_stack_readiness; then
   exit "$failed_process_status"
 fi

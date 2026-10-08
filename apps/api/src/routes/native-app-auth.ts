@@ -180,7 +180,7 @@ export function registerNativeAppAuthRoutes(app: Hono, deps: ApiRouteDeps): void
     const platform = grant.platform === "ios" ? "iOS" : "Android";
     const session = await runManagedAuthProvider(grant.providerId, () =>
       authContext.internalAdapter.createSession(grant.userId, false, {
-        userAgent: `OpenGeni app (${platform}${grant.deviceName ? `; ${grant.deviceName}` : ""})`,
+        userAgent: `Opengeni app (${platform}${grant.deviceName ? `; ${grant.deviceName}` : ""})`,
       }),
     );
     if (!session?.token || new Date(session.expiresAt).getTime() <= Date.now()) {

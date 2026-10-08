@@ -154,7 +154,7 @@ function fakeProvider(options: { xAccessTokenSeq?: string[] } = {}) {
       });
     }
     if (url === "https://api.x.com/2/users/me") {
-      return json({ data: { id: "u-777", username: "opengeni_ai", name: "OpenGeni" } });
+      return json({ data: { id: "u-777", username: "opengeni_ai", name: "Opengeni" } });
     }
     if (url === "https://oauth.reddit.com/api/v1/me") {
       return json({ id: "r-42", name: "opengeni_bot" });
@@ -447,7 +447,7 @@ describe("social connector end-to-end flow", () => {
 
     const published = await socialPostReply(deps, ref, {
       inReplyToId: "1801",
-      text: "OpenGeni is self-hostable and does exactly this.",
+      text: "Opengeni is self-hostable and does exactly this.",
     });
     expect(published.postedId).toBe("1999");
     expect(published.url).toBe("https://x.com/opengeni_ai/status/1999");
@@ -530,7 +530,7 @@ describe("social connector end-to-end flow", () => {
 
     const published = await socialPostReply(deps, ref, {
       inReplyToId: "t3_abc",
-      text: "OpenGeni runs scheduled agents and is self-hostable.",
+      text: "Opengeni runs scheduled agents and is self-hostable.",
     });
     expect(published.postedId).toBe("t1_new");
     expect(published.url).toBe("https://www.reddit.com/r/selfhosted/comments/abc/_/t1_new/");

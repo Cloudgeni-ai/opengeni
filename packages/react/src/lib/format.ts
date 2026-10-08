@@ -166,7 +166,7 @@ export function isModelUnavailableSubmissionError(error: Error): boolean {
   }
   return (
     error.message === COMPOSER_MODEL_UNAVAILABLE_MESSAGE ||
-    /^OpenGeni API 422: model is not available: /.test(error.message)
+    /^(?:Opengeni|OpenGeni) API 422: model is not available: /.test(error.message)
   );
 }
 
@@ -220,8 +220,8 @@ function isComposerCreditRefusal(error: Error): boolean {
 
 /**
  * Does this failure/completion payload (or raw error string) mean the
- * workspace ran out of OpenGeni credits? Matches the engine's
- * "insufficient OpenGeni credits" text (case-insensitive, substring — it
+ * workspace ran out of Opengeni credits? Matches the engine's
+ * "insufficient Opengeni credits" text (case-insensitive, substring — it
  * arrives both bare and wrapped in "Activity task failed: …") and the
  * budget-exhausted segment limit the engine stamps on a turn it ended early.
  */

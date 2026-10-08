@@ -2206,7 +2206,7 @@ export const connectionUseOnceConsumptionReceipts = pgTable(
 
 // One durable routing authority per installed Slack team. The active partial
 // unique index is the database fence that prevents a team from being routed to
-// two OpenGeni workspaces. Legacy ambiguous rows are retained as quarantined
+// two Opengeni workspaces. Legacy ambiguous rows are retained as quarantined
 // evidence instead of deleting credentials or guessing a winner.
 export const slackInstallationBindings = pgTable(
   "slack_installation_bindings",
@@ -2264,7 +2264,7 @@ export const slackInstallationBindings = pgTable(
         and octet_length(${table.slackTeamName}) between 1 and 256
         and octet_length(${table.botId}) between 1 and 64
         and octet_length(${table.botUserId}) between 1 and 64
-        and ${table.botDisplayName} in ('OpenGeni', 'OpenGeni Staging')`,
+        and ${table.botDisplayName} in ('Opengeni', 'Opengeni Staging', 'OpenGeni', 'OpenGeni Staging')`,
     ),
     versionPositive: check("slack_installation_bindings_version_check", sql`${table.version} > 0`),
   }),
@@ -3249,7 +3249,7 @@ export const slackInteractionProgressDeliveries = pgTable(
   }),
 );
 
-// Durable provider-operation identity for OpenGeni Slack bot posts. The
+// Durable provider-operation identity for Opengeni Slack bot posts. The
 // server-owned durable operation UUID is also Slack's client_msg_id. `pending` is
 // safe to send, `provider_started` and `outcome_unknown` require provider read
 // reconciliation, and only `completed` may expose the provider result.
@@ -3684,7 +3684,7 @@ export const memorySlackPublicationReceipts = pgTable(
   }),
 );
 
-// Durable provider-operation identity for OpenGeni Slack bot deletions. Slack
+// Durable provider-operation identity for Opengeni Slack bot deletions. Slack
 // has no client-supplied idempotency key for chat.delete, so an expired
 // provider_started claim becomes outcome_unknown and must be reconciled before
 // another mutation is admitted.
@@ -9413,7 +9413,7 @@ export const sessionHumanInputRequests = pgTable(
 
 // Conversation truth: ordered, verbatim SDK input items (issue #35). The
 // model-facing memory store — exact and replay-ready. session_events is also
-// exact canonical OpenGeni data; transport projections must not rewrite it.
+// exact canonical Opengeni data; transport projections must not rewrite it.
 export const sessionHistoryItems = pgTable(
   "session_history_items",
   {

@@ -32,7 +32,7 @@ const PERSONAL_GITHUB_SERVER_ID = "github:personal";
 
 /**
  * Build the standalone personal-GitHub credential consumer. It returns only an
- * OpenGeni broker bearer: the broad provider OAuth token remains encrypted in
+ * Opengeni broker bearer: the broad provider OAuth token remains encrypted in
  * the API/database process and never crosses into a sandbox or worker result.
  */
 export function buildPersonalGitHubGitCredentials(

@@ -177,7 +177,7 @@ async function slackBotConnectionFixture(workspace: Awaited<ReturnType<typeof wo
       slackTeamName: "Scheduled claim test",
       botUserId: `U-${suffix}`,
       botId: `B-${suffix}`,
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: "2026-08-16T20:00:00.000Z",
     },
   });
@@ -1961,7 +1961,7 @@ describe("scheduled task personal MCP authority", () => {
       createdBy: {
         kind: "service",
         subjectId: "scheduler",
-        label: "OpenGeni scheduler",
+        label: "Opengeni scheduler",
       },
       createdByContext: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
       createIdempotencyKey: `scheduled-task-run:${run.id}`,
@@ -2114,7 +2114,7 @@ describe("scheduled task personal MCP authority", () => {
       createdBy: {
         kind: "service",
         subjectId: "scheduler",
-        label: "OpenGeni scheduler",
+        label: "Opengeni scheduler",
       },
       createdByContext: { scheduledTaskId: task.id, scheduledTaskRunId: runId },
       model: settings.openaiModel,

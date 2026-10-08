@@ -10,6 +10,7 @@ export {
   DEFAULT_OPENGENI_BASE_URL,
   IMPORTED_HISTORY_MAX_CHARS,
   OpenGeni,
+  Opengeni,
   formatImportedHistory,
 } from "./opengeni";
 export {

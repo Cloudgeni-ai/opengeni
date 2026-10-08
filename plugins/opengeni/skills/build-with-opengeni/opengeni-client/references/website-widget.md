@@ -8,10 +8,10 @@ are anonymous: a marketing site, docs, or a landing page.
 Mount the text chat handler before any body parser:
 
 ```js
-import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
+import { Opengeni, createChatHandler } from "@opengeni/sdk/chat";
 import { toNodeMiddleware } from "@opengeni/sdk/express";
 
-const og = new OpenGeni({ apiKey: process.env.OPENGENI_API_KEY });
+const og = new Opengeni({ apiKey: process.env.OPENGENI_API_KEY });
 
 const chat = createChatHandler(og, {
   format: "native",

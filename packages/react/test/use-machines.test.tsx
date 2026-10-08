@@ -417,7 +417,7 @@ describe("useMachines", () => {
         listMachines: async () => {
           lists += 1;
           if (refuse) {
-            throw Object.assign(new Error(`OpenGeni API ${status}`), { status });
+            throw Object.assign(new Error(`Opengeni API ${status}`), { status });
           }
           return response;
         },
@@ -436,7 +436,7 @@ describe("useMachines", () => {
       );
       await flush();
       expect(lists).toBe(1);
-      expect(hook.result.current.error?.message).toBe(`OpenGeni API ${status}`);
+      expect(hook.result.current.error?.message).toBe(`Opengeni API ${status}`);
 
       // Successful reads resume polling. Control the clock so a legitimate
       // 5 ms poll cannot race the immediate re-enable assertion on a busy host.
@@ -464,7 +464,7 @@ describe("useMachines", () => {
         refuse = true;
         await actRun(() => jest.advanceTimersByTime(5));
         expect(lists).toBe(4);
-        expect(hook.result.current.error?.message).toBe(`OpenGeni API ${status}`);
+        expect(hook.result.current.error?.message).toBe(`Opengeni API ${status}`);
         await actRun(() => jest.advanceTimersByTime(40));
         expect(lists).toBe(4);
       } finally {
@@ -483,7 +483,7 @@ describe("useMachines", () => {
     const machinesClient: MachinesClientLike = {
       listMachines: async () => {
         lists += 1;
-        throw Object.assign(new Error("OpenGeni API 503"), { status: 503 });
+        throw Object.assign(new Error("Opengeni API 503"), { status: 503 });
       },
     };
     const hook = await renderHook(
@@ -508,7 +508,7 @@ describe("useMachines", () => {
     const machinesClient: MachinesClientLike = {
       listMachines: async () => {
         lists += 1;
-        throw Object.assign(new Error("OpenGeni API 403"), { status: 403 });
+        throw Object.assign(new Error("Opengeni API 403"), { status: 403 });
       },
     };
     const hook = await renderHook(

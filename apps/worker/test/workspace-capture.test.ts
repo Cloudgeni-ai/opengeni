@@ -344,7 +344,7 @@ describe("workspace-capture — durable change fingerprint", () => {
     try {
       git("init", "-q");
       git("config", "user.email", "test@opengeni.dev");
-      git("config", "user.name", "OpenGeni Test");
+      git("config", "user.name", "Opengeni Test");
       git("config", "commit.gpgsign", "false");
       writeFileSync(join(root, "same.txt"), "same tree\n");
       git("add", "same.txt");

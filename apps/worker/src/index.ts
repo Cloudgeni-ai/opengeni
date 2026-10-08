@@ -218,7 +218,7 @@ export function resolveOpenGeniWorkflowDefinition(
   const codePath = fileURLToPath(new URL("./workflow-bundle.js", moduleUrl));
   if (!existsSync(codePath)) {
     throw new Error(
-      `OpenGeni workflow bundle is missing at ${codePath}; rebuild or reinstall @opengeni/worker-bundle`,
+      `Opengeni workflow bundle is missing at ${codePath}; rebuild or reinstall @opengeni/worker-bundle`,
     );
   }
   return { workflowBundle: { codePath } };
@@ -866,7 +866,7 @@ export type OpenGeniWorkerServiceOptions = Omit<WorkerOptions, "activityDependen
    */
   databasePosture?: RuntimeDatabasePostureOptions;
   /**
-   * `role-default` registers OpenGeni's internal maintenance schedules on a
+   * `role-default` registers Opengeni's internal maintenance schedules on a
    * control worker only. These are engine maintenance schedules, not a host's
    * product-level scheduled-agent jobs. Use `none` when another control worker
    * in the same deployment owns them.
@@ -934,7 +934,7 @@ export async function createOpenGeniWorkerService(
       () => resolveCatalogSettings(options.activityDependencies.db, settings),
       { ...retryOptions, onRetry },
     );
-    observability.info("OpenGeni model catalog resolved", {
+    observability.info("Opengeni model catalog resolved", {
       role: options.role,
       catalogSource: resolvedCatalog.source,
       catalogVersion: resolvedCatalog.version,
@@ -979,7 +979,7 @@ export async function createOpenGeniWorkerService(
       !startSandboxReaperWorkflow ||
       !startVideoGenerationWorkflow
     ) {
-      throw new Error("OpenGeni worker lifecycle could not resolve its workflow signalers");
+      throw new Error("Opengeni worker lifecycle could not resolve its workflow signalers");
     }
     workerBundle = await createOpenGeniWorker({
       role: options.role,
@@ -1099,7 +1099,7 @@ export async function createOpenGeniWorkerService(
   const activeWorkerBundle = workerBundle;
   const activeSignaler = signaler;
   if (!activeWorkerBundle) {
-    throw new Error("OpenGeni worker service initialization did not complete");
+    throw new Error("Opengeni worker service initialization did not complete");
   }
 
   cleanupContainment = createWorkerCleanupContainment({
@@ -1133,7 +1133,7 @@ export async function createOpenGeniWorkerService(
       ]);
     },
     onReady: () => {
-      observability.info("OpenGeni worker listening", {
+      observability.info("Opengeni worker listening", {
         role: options.role,
         temporalTaskQueue:
           options.role === "control"

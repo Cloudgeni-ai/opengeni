@@ -5,7 +5,7 @@ for deployment or replacing the native backend.** The native backend remains the
 default. Browsers, attached Chrome, browser profiles and browser input are unchanged.
 
 `ComputerBackend` owns desktop operations. `ComputerDriver` adapts those operations
-to the existing OpenGeni controller, operation receipts and frame stream. The CUA
+to the existing Opengeni controller, operation receipts and frame stream. The CUA
 adapter translates desktop calls only. It does not add an authorization system or
 another operation journal. Machine/session access remains enforced above it.
 
@@ -58,7 +58,7 @@ can replace it. The macOS native CI leg runs that test and stages both architect
   guessed replacement element references.
 - **Mac background drag:** the released SDK explicitly rejects it before posting
   input. The adapter reports unsupported. Foreground delivery needs integration
-  with OpenGeni's explicit desktop focus/control behavior and independent testing.
+  with Opengeni's explicit desktop focus/control behavior and independent testing.
 - **Compiled releases:** the SDK's platform-library resolver cannot find its
   native package inside Bun's compiled virtual filesystem. `stage-cua-runtime.ts`
   bundles its unmodified JavaScript and stages the pinned native package with its

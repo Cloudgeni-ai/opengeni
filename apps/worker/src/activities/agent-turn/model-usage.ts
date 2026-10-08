@@ -685,9 +685,9 @@ export type ModelUsageBillingRecord = {
   billingPath: "opengeni_credits" | "external";
   /** Same quantity written to usage_events.model.cost when present; else 0. */
   pricedCostMicros: number;
-  /** Hypothetical provider-rate USD micros; never an OpenGeni charge. */
+  /** Hypothetical provider-rate USD micros; never an Opengeni charge. */
   estimatedProviderCostMicros: number | null;
-  /** Hypothetical OpenGeni credit price at the captured rate; never a debit. */
+  /** Hypothetical Opengeni credit price at the captured rate; never a debit. */
   equivalentCreditCostMicros: number | null;
   pricingSource: "configured_list_price" | "gateway_reported" | null;
   /** Forward-only provider list class snapshot; older facts/events stay unknown. */
@@ -835,7 +835,7 @@ export async function recordModelUsageAndDebitCredits(
       ? ("configured_list_price" as const)
       : null;
   // Provider settlement and workspace-facing cost are separate. Externally
-  // metered subscription/workspace turns remain exempt from the OpenGeni token
+  // metered subscription/workspace turns remain exempt from the Opengeni token
   // cap, while a deployment-funded free model still records model.tokens. Every
   // non-credit path records a zero-cost marker and never consults pricing for a
   // debit.

@@ -208,7 +208,7 @@ export function captureAnalyticsEvent(
         ...facts,
         page_location: window.location.origin,
         page_referrer: "",
-        page_title: "OpenGeni",
+        page_title: "Opengeni",
       });
   };
   if (providersReady && analyticsCollectionAllowed()) {
@@ -283,7 +283,7 @@ function dispatchPageView(pathname: string): void {
     window.gtag?.("event", "page_view", {
       page_location: `${window.location.origin}${pathname}`,
       page_referrer: "",
-      page_title: "OpenGeni",
+      page_title: "Opengeni",
       send_to: ga4MeasurementId,
     });
   }
@@ -308,7 +308,7 @@ async function initializeReo(clientId: string): Promise<void> {
   window.Reo.init({
     clientID: clientId,
     // Reo's beacon otherwise observes clipboard/code-copy and supported AI-widget
-    // interactions. OpenGeni deliberately permits page intent only.
+    // interactions. Opengeni deliberately permits page intent only.
     dnt: ["copy", "ai"],
   });
 }
@@ -581,7 +581,7 @@ async function initializeGa4(measurementId: string): Promise<void> {
     allow_google_signals: false,
     page_location: window.location.origin,
     page_referrer: "",
-    page_title: "OpenGeni",
+    page_title: "Opengeni",
     send_page_view: false,
   });
 

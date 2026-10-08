@@ -67,7 +67,7 @@ Connection attribution is audit metadata, not ownership authority. There is no
 per-use consent flow, implicit personal-account selection, or fallback to the
 session creator/current browser user/another member.
 
-At each acceptance boundary OpenGeni freezes an identifier-free
+At each acceptance boundary Opengeni freezes an identifier-free
 `XaiProviderAccountAuthoritySnapshotV1` on the logical turn or scheduled task.
 Workspace scope records only `{version:1, scope:"workspace"}`; organization
 scope records `{version:1, scope:"organization"}`. New acceptance prefers an
@@ -244,7 +244,7 @@ without exposing their session content to the administrator.
 The workspace-scoped REST surface supports device-flow start/poll, metadata
 list/status, active-account selection, rotation enablement, allocator OCC,
 rename, and disconnect. `@opengeni/sdk` exposes matching typed methods;
-`@opengeni/react` exposes `useSuperGrokAccounts`; the OpenGeni web workspace
+`@opengeni/react` exposes `useSuperGrokAccounts`; the Opengeni web workspace
 settings page provides the complete account controls. Workspace is the default
 scope in every client. Private scope must be selected explicitly and succeeds
 only through the managed-browser human boundary above.

@@ -17,7 +17,7 @@ function Fixture() {
     <main className="mx-auto max-w-5xl p-6 sm:p-12">
       <h1 className="mb-2 text-xl font-semibold">Capabilities</h1>
       <p className="mb-8 text-sm text-fg-muted">
-        Connect your favorite tools and extend OpenGeni’s capabilities.
+        Connect your favorite tools and extend Opengeni’s capabilities.
       </p>
       <ConnectionCatalog
         services={[
@@ -113,7 +113,7 @@ function Fixture() {
             disclosures: [
               {
                 id: "access",
-                text: "OpenGeni requests read-only Google Drive access to browse folders and Shared Drives. Source sync only imports supported files within the boundaries you select. Publishing is optional and requests separate consent.",
+                text: "Opengeni requests read-only Google Drive access to browse folders and Shared Drives. Source sync only imports supported files within the boundaries you select. Publishing is optional and requests separate consent.",
               },
             ],
             footer: { kind: "connected", onReconnect: () => {}, onDisconnect: () => {} },

@@ -10,11 +10,11 @@ export * from "./domain/knowledge-search";
 export * from "./domain/voice-input-billing";
 export * from "./domain/web-search-billing";
 export * from "./domain/realtime-voice-billing";
-// @opengeni/core — the framework-agnostic OpenGeni core.
+// @opengeni/core — the framework-agnostic Opengeni core.
 //
-// WHAT THIS PACKAGE IS: the OpenGeni domain, access, and billing layers carved
+// WHAT THIS PACKAGE IS: the Opengeni domain, access, and billing layers carved
 // out of `apps/api` into an importable library, so a host (e.g. cloudgeni) can
-// call the OpenGeni core DIRECTLY, off-HTTP — e.g. `createSessionForRequest(
+// call the Opengeni core DIRECTLY, off-HTTP — e.g. `createSessionForRequest(
 // deps, grant, workspaceId, input)` — without standing up the Hono router.
 // `apps/api` (@opengeni/api-router) and `apps/worker` (@opengeni/worker-bundle)
 // remain the STANDALONE RUNNERS that consume this library; nothing about the

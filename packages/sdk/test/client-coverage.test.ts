@@ -2817,7 +2817,7 @@ describe("OpenGeniClient connections", () => {
       slackTeamName: "Example Slack",
       botId: "B_EXAMPLE",
       botUserId: "U_EXAMPLE",
-      botDisplayName: "OpenGeni" as const,
+      botDisplayName: "Opengeni" as const,
       state: "active" as const,
       quarantineReason: null,
       version: 2,

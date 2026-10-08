@@ -304,7 +304,7 @@ The locked decision applies these rules:
    next evaluation as ordinary input. The API projects the pacing delay as
    `scheduled` / `backoff_pending` with `nextAttemptAt` at the deadline.
 5. Budget/admission policy can pause the goal visibly with reason `limits`.
-   OpenGeni does not infer progress or blockage from tool/event shape; the
+   Opengeni does not infer progress or blockage from tool/event shape; the
    model explicitly completes or pauses the goal under the continuation
    instructions, and a user can control it directly.
 6. Goals are NOT capped by continuation count by default - runs legitimately
@@ -409,7 +409,7 @@ previous-continuation pointers are cleared together. A worker can re-dispatch a
 recovering logical goal turn under a new fenced attempt after death; that is
 recovery of the same turn, not creation or charging of another continuation.
 An embedding host's funding refusal uses `usage_policy`: its private meter can
-deny for reasons other than credits, so OpenGeni does not invent a balance diagnosis.
+deny for reasons other than credits, so Opengeni does not invent a balance diagnosis.
 
 ## Pauses and failures
 

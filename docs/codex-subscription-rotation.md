@@ -22,7 +22,7 @@ The **effective credential pool is the complete scheduling boundary**.
   the target workspace. Schema guards accept an organization credential only
   for that workspace's current organization source or the exact turn's accepted
   organization source. A turn never borrows another turn's source authority.
-- Workspace-local duplicate connections remain independent. OpenGeni does not
+- Workspace-local duplicate connections remain independent. Opengeni does not
   correlate a ChatGPT account connected separately in multiple workspace pools
   or across managed organizations.
 - Organization rows are visible at management time only to active organization

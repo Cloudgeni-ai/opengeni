@@ -581,7 +581,7 @@ rm -rf api web web-linked nested
 mkdir -p api web nested/deep/repo
 git -C api init -q
 git -C api config user.email canary@opengeni.dev
-git -C api config user.name "OpenGeni Acceptance"
+git -C api config user.name "Opengeni Acceptance"
 git -C api config commit.gpgsign false
 printf 'node_modules/\ndist/\n' > api/.gitignore
 printf 'export const marker = "BASE";\nexport const status = 200;\n' > api/server.ts
@@ -611,7 +611,7 @@ printf 'ignored build residue\n' > api/dist/ignored.js
 
 git -C web init -q
 git -C web config user.email canary@opengeni.dev
-git -C web config user.name "OpenGeni Acceptance"
+git -C web config user.name "Opengeni Acceptance"
 git -C web config commit.gpgsign false
 printf 'console.log("base");\n' > web/app.js
 printf 'rename me\n' > web/old-name.txt
@@ -628,7 +628,7 @@ printf 'console.log("staged and unstaged ${marker}");\n' > web/app.js
 
 git -C nested/deep/repo init -q
 git -C nested/deep/repo config user.email canary@opengeni.dev
-git -C nested/deep/repo config user.name "OpenGeni Acceptance"
+git -C nested/deep/repo config user.name "Opengeni Acceptance"
 git -C nested/deep/repo config commit.gpgsign false
 printf 'deep base\n' > nested/deep/repo/deep.txt
 git -C nested/deep/repo add -A
@@ -2084,7 +2084,7 @@ export async function runCaptureApiRegionalProbe(
 
 /**
  * Mask exact values already known to this public CI/release evidence sink.
- * This intentionally does not scan arbitrary OpenGeni content for patterns.
+ * This intentionally does not scan arbitrary Opengeni content for patterns.
  */
 export function maskKnownPublicEvidenceValues(
   value: string,

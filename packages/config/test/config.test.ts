@@ -412,7 +412,7 @@ describe("browser analytics configuration", () => {
 });
 
 describe("console documentation link configuration", () => {
-  test("defaults to the public OpenGeni docs", () => {
+  test("defaults to the public Opengeni docs", () => {
     expect(withEnv({}, () => getSettings()).documentationUrl).toBe("https://docs.opengeni.ai");
   });
 
@@ -955,14 +955,14 @@ describe("personal GitHub OAuth settings", () => {
   });
 });
 
-describe("OpenGeni Slack interaction settings", () => {
+describe("Opengeni Slack interaction settings", () => {
   const slackEnv = {
     OPENGENI_ENVIRONMENT: "local",
     OPENGENI_PUBLIC_BASE_URL: "http://127.0.0.1:8000",
     OPENGENI_INTEGRATIONS_STATE_SECRET: "state-secret",
     OPENGENI_SLACK_CLIENT_ID: "slack-client-id",
     OPENGENI_SLACK_CLIENT_SECRET: "slack-client-secret",
-    OPENGENI_SLACK_BOT_DISPLAY_NAME: "OpenGeni Staging",
+    OPENGENI_SLACK_BOT_DISPLAY_NAME: "Opengeni Staging",
     OPENGENI_SLACK_COMMAND: "/opengeni-staging",
   };
 
@@ -971,7 +971,7 @@ describe("OpenGeni Slack interaction settings", () => {
     expect(settings.slackClientId).toBe("slack-client-id");
     expect(settings.slackClientSecret).toBe("slack-client-secret");
     expect(settings.slackSigningSecret).toBeUndefined();
-    expect(settings.slackBotDisplayName).toBe("OpenGeni Staging");
+    expect(settings.slackBotDisplayName).toBe("Opengeni Staging");
     expect(settings.slackCommand).toBe("/opengeni-staging");
   });
 
@@ -984,12 +984,12 @@ describe("OpenGeni Slack interaction settings", () => {
   });
 
   test("defaults and validates the signed Slack slash command", () => {
-    expect(withEnv({}, () => getSettings()).slackBotDisplayName).toBe("OpenGeni");
+    expect(withEnv({}, () => getSettings()).slackBotDisplayName).toBe("Opengeni");
     expect(withEnv({}, () => getSettings()).slackCommand).toBe("/opengeni");
     expect(() =>
-      withEnv({ OPENGENI_SLACK_BOT_DISPLAY_NAME: "OpenGeni Preview" }, () => getSettings()),
+      withEnv({ OPENGENI_SLACK_BOT_DISPLAY_NAME: "Opengeni Preview" }, () => getSettings()),
     ).toThrow();
-    expect(() => withEnv({ OPENGENI_SLACK_COMMAND: "/OpenGeni" }, () => getSettings())).toThrow();
+    expect(() => withEnv({ OPENGENI_SLACK_COMMAND: "/Opengeni" }, () => getSettings())).toThrow();
   });
 });
 
@@ -1293,7 +1293,7 @@ describe("sandbox preparation profiles", () => {
   test("defaults managed transactional email to the verified mail subdomain sender", () => {
     const settings = withEnv({}, () => getSettings());
 
-    expect(settings.emailFrom).toBe("OpenGeni <auth@mail.opengeni.ai>");
+    expect(settings.emailFrom).toBe("Opengeni <auth@mail.opengeni.ai>");
   });
 
   test("parses startup dependency retry settings", () => {
@@ -1542,15 +1542,15 @@ describe("sandbox preparation profiles", () => {
   test("collects git identity settings for sandbox pass-through", () => {
     const settings = withEnv(
       {
-        OPENGENI_GIT_AUTHOR_NAME: "OpenGeni Agent",
+        OPENGENI_GIT_AUTHOR_NAME: "Opengeni Agent",
         OPENGENI_GIT_AUTHOR_EMAIL: "infra@example.com",
       },
       () => getSettings(),
     );
     expect(collectGitIdentityEnvironment(settings)).toEqual({
-      GIT_AUTHOR_NAME: "OpenGeni Agent",
+      GIT_AUTHOR_NAME: "Opengeni Agent",
       GIT_AUTHOR_EMAIL: "infra@example.com",
-      GIT_COMMITTER_NAME: "OpenGeni Agent",
+      GIT_COMMITTER_NAME: "Opengeni Agent",
       GIT_COMMITTER_EMAIL: "infra@example.com",
     });
   });
@@ -1644,7 +1644,7 @@ describe("sandbox preparation profiles", () => {
   test("registers built-in MCP profiles by default", () => {
     const settings = withEnv({}, () => getSettings());
     expect(settings.mcpServers.find((server) => server.id === "opengeni")).toMatchObject({
-      name: "OpenGeni",
+      name: "Opengeni",
       url: `http://127.0.0.1:${settings.apiPort}/v1/workspaces/{workspaceId}/mcp`,
       // The opengeni server's tools/list is permission-scoped (varies by the
       // caller's delegated grant). The Agents SDK caches tools/list in a
@@ -1887,7 +1887,7 @@ describe("sandbox preparation profiles", () => {
     );
   });
 
-  test("ignores pre-OpenGeni environment variable names", () => {
+  test("ignores pre-Opengeni environment variable names", () => {
     withEnv(
       {
         INFRA_AGENT_SERVICE_NAME: "legacy-service",

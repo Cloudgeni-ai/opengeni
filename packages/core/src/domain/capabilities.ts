@@ -1201,7 +1201,7 @@ async function requireCatalogItem(
 function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] {
   return (
     settings.mcpServers
-      // OpenGeni, Files, and Document Search are native runtime surfaces. They
+      // Opengeni, Files, and Document Search are native runtime surfaces. They
       // remain available to sessions through configuration, but are not things a
       // user installs, connects, or enables in the Capabilities control center.
       .filter(
@@ -1817,7 +1817,7 @@ function installationConnectionRef(
   if (authoritySource === "host") {
     // The internal installation/runtime ref retains the exact host binding.
     // Public capability catalogs use the existing null representation for an
-    // enabled capability without a native OpenGeni connection, so indefinitely
+    // enabled capability without a native Opengeni connection, so indefinitely
     // open old browser bundles cannot treat a host UUID as native OAuth state.
     return null;
   }

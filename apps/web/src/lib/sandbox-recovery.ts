@@ -69,7 +69,7 @@ function nextMinute(iso: string): string {
 }
 
 /** Public blocker codes are stable; UI copy must not expose persistence jargon.
- * A timed wait never implies OpenGeni proceeds by itself: only Retry or a new
+ * A timed wait never implies Opengeni proceeds by itself: only Retry or a new
  * message decides again, so the copy names when that becomes possible. */
 export function sandboxRecoveryBlocker(reason: string, availableAt?: string | null): string {
   const message = sandboxRecoveryBlockerMessage(reason);
