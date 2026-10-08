@@ -312,21 +312,29 @@ describe("provider-neutral subscription runtime persistence", () => {
           (db) => markSubscriptionCapacityWakeDelivered(db, delivery),
         ),
       ).toBe(true);
+      const takeoverRequest = {
+        ...waiter,
+        waiterId: crypto.randomUUID(),
+        generation: 3,
+        wakeRevision: 1,
+        observedWakeRevision: 0,
+      };
       const nextGeneration = await withSessionRlsActorContext(actor, () =>
         withRlsContext(
           client!.db,
           { accountId: state.accountId, workspaceId: state.workspaceId },
-          (db) =>
-            upsertSubscriptionCapacityWaiter(db, {
-              ...waiter,
-              waiterId: crypto.randomUUID(),
-              generation: 3,
-              wakeRevision: 1,
-              observedWakeRevision: 0,
-            }),
+          (db) => upsertSubscriptionCapacityWaiter(db, takeoverRequest),
         ),
       );
       expect(nextGeneration).toMatchObject({ waiterId: waiter.waiterId, generation: 3 });
+      const takeoverReplay = await withSessionRlsActorContext(actor, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: state.accountId, workspaceId: state.workspaceId },
+          (db) => upsertSubscriptionCapacityWaiter(db, takeoverRequest),
+        ),
+      );
+      expect(takeoverReplay).toMatchObject({ waiterId: waiter.waiterId, generation: 3 });
     },
     180_000,
   );

@@ -474,7 +474,6 @@ export async function upsertSubscriptionCapacityWaiter(
       where subscription_capacity_waiters.account_id = excluded.account_id
         and (subscription_capacity_waiters.generation < excluded.generation
           or (subscription_capacity_waiters.generation = excluded.generation
-            and subscription_capacity_waiters.waiter_id = excluded.waiter_id
             and subscription_capacity_waiters.turn_id = excluded.turn_id))
     returning waiter_id::text as waiter_id, provider, wait_reason, policy_hash, reset_kind,
       refresh_attempt, resumed_update_id::text as resumed_update_id, earliest_reset_at,
