@@ -60,6 +60,7 @@ import { posix } from "node:path";
 import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
 import {
   nextDurableOpId,
+  notifyRemoteOperationNotDispatched,
   notifyRemoteOperationTransportSelected,
   type RemoteOperationObservation,
 } from "../op-correlation";
@@ -71,6 +72,8 @@ import {
 } from "../synchronous-command";
 import {
   OpenSandboxCommandStreamError,
+  OpenSandboxCommandDispatchError,
+  withOpenSandboxCommandDispatchProof,
   withOpenSandboxCommandStreamProof,
 } from "./opensandbox-command-stream";
 
@@ -158,6 +161,7 @@ type RetainedProcess = {
   /** Physical terminal proof survives native alias retirement. It neither
    * consumes output nor proves that the event stream was complete. */
   physicalOutcome: { exitCode: number; error?: unknown } | null;
+  failureCause?: unknown;
   startedAt: number;
   events: ProcessEvent[];
   cursor: number;
@@ -538,6 +542,7 @@ export class OpenSandboxSession {
   private readonly processesBySession = new Map<number, RetainedProcess>();
   private readonly processesByOpId = new Map<string, RetainedProcess>();
   private readonly synchronousResults = new WeakMap<object, SynchronousCommandPage>();
+  private readonly commandFailureCauses = new WeakMap<object, unknown>();
   private readonly synchronousBanners = new Map<string, SynchronousCommandPage>();
 
   constructor(args: {
@@ -691,6 +696,7 @@ export class OpenSandboxSession {
     consumed: ReturnType<typeof consumeProcessOutput>,
     result: SandboxExecResult,
   ): SandboxExecResult {
+    if ("failureCause" in process) this.commandFailureCauses.set(result, process.failureCause);
     this.synchronousResults.set(result, {
       stdout: consumed.commandStdout,
       stderr: consumed.commandStderr,
@@ -750,6 +756,7 @@ export class OpenSandboxSession {
       outputUnavailable: false,
       outputCursor: { stdout: 0, stderr: 0 },
     };
+    let commandInvoked = false;
     this.processesByOpId.set(opId, process);
     // Joined turn cleanup outlives provider/routing alias retirement. Capture
     // this exact process and its launch transport, not a mutable map lookup.
@@ -767,32 +774,35 @@ export class OpenSandboxSession {
       .then(async () => {
         const provider = await this.ensureStarted();
         process.provider = provider;
-        const execution = await provider.commands.run(
-          commandForArgs(args),
-          {
-            workingDirectory: args.workdir ? workspacePath(args.workdir) : WORKSPACE_ROOT,
-            envs: this.state.environment,
-          },
-          {
-            onInit: (init) => {
-              this.bindExecutionIdentity(process, init.id);
+        commandInvoked = true;
+        const execution = await withOpenSandboxCommandDispatchProof(provider.commands, () =>
+          provider.commands.run(
+            commandForArgs(args),
+            {
+              workingDirectory: args.workdir ? workspacePath(args.workdir) : WORKSPACE_ROOT,
+              envs: this.state.environment,
             },
-            onEvent: (event) => {
-              if (!event || typeof event !== "object") return;
-              const fields = event as Record<string, unknown>;
-              if (fields.type === "init") this.bindExecutionIdentity(process, fields.text);
-              for (const field of ["id", "execution_id", "executionId"] as const) {
-                if (fields[field] !== undefined && fields[field] !== process.executionId)
-                  throw new SandboxProviderError("OpenSandbox command event identity mismatch");
-              }
+            {
+              onInit: (init) => {
+                this.bindExecutionIdentity(process, init.id);
+              },
+              onEvent: (event) => {
+                if (!event || typeof event !== "object") return;
+                const fields = event as Record<string, unknown>;
+                if (fields.type === "init") this.bindExecutionIdentity(process, fields.text);
+                for (const field of ["id", "execution_id", "executionId"] as const) {
+                  if (fields[field] !== undefined && fields[field] !== process.executionId)
+                    throw new SandboxProviderError("OpenSandbox command event identity mismatch");
+                }
+              },
+              onStdout: (message) => {
+                process.events.push({ stream: "stdout", text: message.text });
+              },
+              onStderr: (message) => {
+                process.events.push({ stream: "stderr", text: message.text });
+              },
             },
-            onStdout: (message) => {
-              process.events.push({ stream: "stdout", text: message.text });
-            },
-            onStderr: (message) => {
-              process.events.push({ stream: "stderr", text: message.text });
-            },
-          },
+          ),
         );
         this.bindExecutionIdentity(process, execution.id);
         const exitCode = execution.exitCode;
@@ -811,19 +821,30 @@ export class OpenSandboxSession {
         return outcome;
       })
       .catch((error) => {
+        const notDispatched =
+          error instanceof OpenSandboxCommandDispatchError && error.notDispatched;
+        const cause = error instanceof OpenSandboxCommandDispatchError ? error.cause : error;
+        process.failureCause = cause;
         process.events.push({
           stream: "stderr",
-          text: `${error instanceof Error ? error.message : String(error)}\n`,
+          text: `${cause instanceof Error ? cause.message : String(cause)}\n`,
           commandOutput: false,
         });
-        if (process.executionId || error instanceof OpenSandboxCommandStreamError) {
+        if (
+          process.executionId ||
+          cause instanceof OpenSandboxCommandStreamError ||
+          (commandInvoked && !notDispatched)
+        ) {
           process.transportUncertain = true;
           process.outputUnavailable = true;
           process.resolveExecutionId(process.executionId);
-          return { exitCode: null, error, uncertain: true };
+          // Keep the genuine original transport/SDK cause with the retained
+          // invocation. No first authenticated ID means control stays unknown.
+          return { exitCode: null, error: cause, uncertain: true };
         }
+        if (notDispatched) notifyRemoteOperationNotDispatched(opId);
         process.resolveExecutionId(null);
-        return { exitCode: 1, error };
+        return { exitCode: 1, error: cause };
       })
       .finally(() => {
         if (!process.transportUncertain) {
@@ -1186,7 +1207,12 @@ export class OpenSandboxSession {
       result.sessionId === undefined && result.exitCode === 0
         ? parseConfinedFileRead(result.stdout, maxBytes)
         : null;
-    if (!bytes) throw new SandboxProviderError("OpenSandbox confined file read unavailable");
+    if (!bytes) {
+      // Preserve the native cause without treating it as terminal/no-dispatch
+      // proof. The original uncertain command and output remain retained.
+      if (this.commandFailureCauses.has(result)) throw this.commandFailureCauses.get(result);
+      throw new SandboxProviderError("OpenSandbox confined file read unavailable");
+    }
     return bytes;
   }
 
