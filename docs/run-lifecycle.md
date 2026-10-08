@@ -1518,7 +1518,11 @@ trigger, including a result already consumed before worker loss. Capacity waits,
 recoverable pause/maintenance, provider failover, graceful shutdown, and worker
 death all follow that rule. Terminal failure/cancellation and superseding Steer
 close the entire turn ledger. Recovery never reconstructs this authority from
-history or `agent_run_states`.
+history or `agent_run_states`. Successful completion consumes every receipt
+of the turn whose attempt has settled (closed, and quiesced or never
+interrupted), deleting only ledger rows without new history or events: a
+completed turn owns no live tool call. Rolling migration 0673 removed
+receipts that earlier releases left on completed turns with settled attempts.
 
 For MCP, the runtime reads the complete provider `CallToolResult` through the
 SDK's `callToolResult` seam and carries a private duplicate only until the exact

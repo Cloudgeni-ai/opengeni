@@ -799,6 +799,7 @@ import {
 } from "./capability-components";
 import {
   closePendingSessionToolCallsInTransaction,
+  consumeSettledPendingToolCallsForCompletedTurnInTransaction,
   settleInterruptedCodemodeCallsInTransaction,
   historyCallId,
   historyItemType,
@@ -82814,6 +82815,14 @@ export async function applySessionTurnSettlement(
           reason: "turn_completed",
           now,
         });
+        await consumeSettledPendingToolCallsForCompletedTurnInTransaction(
+          tx as unknown as Database,
+          {
+            workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+          },
+        );
       }
       const terminalHumanInputRows = ["completed", "failed", "cancelled", "superseded"].includes(
         input.turnStatus,
