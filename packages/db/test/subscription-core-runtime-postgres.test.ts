@@ -202,6 +202,64 @@ describe("provider-neutral subscription runtime persistence", () => {
   );
 
   test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
+    "accepted v2 authority is immutable to the application role but writable by the table owner",
+    async () => {
+      const state = await fixture();
+      const authority = {
+        version: 2,
+        personal: [],
+      };
+
+      // The table owner is the migration/backfill authority for the later
+      // drained cutover and can populate the nullable precursor column.
+      await shared!.admin`
+        update session_turns
+        set subscription_authority = ${shared!.admin.json(authority)}::jsonb
+        where account_id = ${state.accountId}::uuid and id = ${state.turnId}::uuid`;
+
+      const context = () =>
+        withSessionRlsActorContext({ subjectId: state.subjectId }, () =>
+          withRlsContext(
+            client!.db,
+            { accountId: state.accountId, workspaceId: state.workspaceId },
+            async (db) => {
+              const visible = await rawRows<{ id: string }>(
+                db,
+                sql`select id::text as id from session_turns
+                  where account_id = ${state.accountId}::uuid and id = ${state.turnId}::uuid`,
+              );
+              expect(visible).toHaveLength(1);
+              return db.execute(sql`
+                update session_turns set subscription_authority = null
+                where account_id = ${state.accountId}::uuid and id = ${state.turnId}::uuid
+                returning id
+              `);
+            },
+          ),
+        );
+
+      let mutationError: unknown;
+      try {
+        await context();
+      } catch (error) {
+        mutationError = error;
+      }
+      expect(mutationError).toBeDefined();
+      const errorText =
+        mutationError instanceof Error
+          ? `${mutationError.message} ${String(mutationError.cause ?? "")}`
+          : String(mutationError);
+      expect(errorText).toContain("session turn subscription authority is immutable");
+
+      const [persisted] = await shared!.admin<{ authority: unknown }[]>`
+        select subscription_authority as authority from session_turns
+        where account_id = ${state.accountId}::uuid and id = ${state.turnId}::uuid`;
+      expect(persisted?.authority).toEqual(authority);
+    },
+    180_000,
+  );
+
+  test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
     "every private PostgreSQL function referenced by DB source exists after migrations",
     async () => {
       const references = sourcePrivateFunctionReferences();

@@ -54,6 +54,49 @@ ALTER TABLE session_turns
 COMMENT ON COLUMN session_turns.subscription_authority IS
   'Nullable M3 v2 accepted-authority slot. The v1 Codex snapshot remains authoritative until drained cutover.';
 
+-- The accepted v2 snapshot is immutable for application callers, like the v1
+-- provider snapshots. The table owner remains able to populate it during the
+-- later drained maintenance backfill; SECURITY DEFINER callers do not inherit
+-- that exception because the check uses session_user.
+DO $subscription_authority_immutability$
+DECLARE data_schema text := current_schema();
+BEGIN
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION %1$I.prevent_subscription_authority_v2_mutation()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog
+    AS $body$
+    DECLARE table_owner name;
+    BEGIN
+      IF NEW.subscription_authority IS DISTINCT FROM OLD.subscription_authority THEN
+        SELECT pg_catalog.pg_get_userbyid(relation.relowner) INTO table_owner
+        FROM pg_catalog.pg_class relation
+        WHERE relation.oid = TG_RELID;
+        IF session_user IS DISTINCT FROM table_owner THEN
+          RAISE EXCEPTION 'session turn subscription authority is immutable'
+            USING ERRCODE = '23514';
+        END IF;
+      END IF;
+      RETURN NEW;
+    END;
+    $body$;
+  $ddl$, data_schema);
+
+  EXECUTE format(
+    'REVOKE ALL ON FUNCTION %I.prevent_subscription_authority_v2_mutation() FROM PUBLIC',
+    data_schema
+  );
+
+  EXECUTE format($ddl$
+    CREATE TRIGGER session_turns_subscription_authority_immutable_trg
+    BEFORE UPDATE OF subscription_authority ON %1$I.session_turns
+    FOR EACH ROW
+    EXECUTE FUNCTION %1$I.prevent_subscription_authority_v2_mutation()
+  $ddl$, data_schema);
+END
+$subscription_authority_immutability$;
+
 ALTER TABLE opengeni_private.subscription_runtime_capabilities
   DROP CONSTRAINT subscription_runtime_capabilities_kind_chk,
   ADD CONSTRAINT subscription_runtime_capabilities_kind_chk

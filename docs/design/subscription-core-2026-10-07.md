@@ -368,6 +368,13 @@ human-initiated turns, personal connections, people-scoped connections, and
 ownerless session bindings remain rejected. This is a database authorization
 fix, not a v2 authority writer or an early selector activation.
 
+The nullable v2 accepted-authority slot is immutable to application sessions
+after acceptance, matching the existing v1 snapshot contract. Only the
+`session_turns` table owner can populate it during the later drained backfill;
+ordinary app-role writes, including writes nested under `SECURITY DEFINER`,
+cannot rewrite accepted authority. The precursor itself does not write v2
+snapshots.
+
 #### Runtime and consumer entry points
 
 Every Codex entry point in the inventory is assigned to the shared core. The
