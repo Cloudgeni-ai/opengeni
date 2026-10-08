@@ -14,10 +14,12 @@ import {
   BillingMode,
   CAPABILITY_DESCRIPTORS,
   agentConfigDeploymentLimitsFromAllowlist,
+  agentConfigFirstPartyMcpTools,
   type AgentConfigDeploymentLimits,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   DEFAULT_OPENGENI_DOCUMENTATION_URL,
   currentAgentLearningToolSelection,
+  resolveWorkspaceSessionToolDefaults,
   Entitlements,
   EntitlementsMode,
   KnowledgeSourceSyncLimits,
@@ -40,6 +42,7 @@ import {
   type TurnExecutionReasoningSourceV1,
   type VideoGenerationResolution,
   type FirstPartyMcpToolName as FirstPartyMcpToolNameType,
+  type Session,
 } from "@opengeni/contracts";
 import type { CodeSearchDeploymentPolicy } from "@opengeni/contracts/code-search";
 import { CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS } from "@opengeni/codex";
@@ -4991,6 +4994,20 @@ export function allowedFirstPartyMcpToolsForSession(
   // Existing sessions with pause authority also receive its resume counterpart.
   if (tools.has("goal_pause")) tools.add("goal_resume");
   return [...tools].filter((tool) => allowed.has(tool));
+}
+
+/** Resolve durable selection intent before freezing a new attempt's catalog. */
+export function resolveSessionFirstPartyMcpTools(
+  settings: FirstPartyMcpToolPolicySettings,
+  session: Pick<Session, "firstPartyMcpTools" | "toolPolicy"> & Partial<Pick<Session, "agent">>,
+  workspaceSettings: unknown,
+): FirstPartyMcpToolNameType[] {
+  const selected =
+    session.toolPolicy.firstPartyMode === "workspace_default"
+      ? resolveWorkspaceSessionToolDefaults(workspaceSettings)?.firstPartyMcpTools
+      : session.firstPartyMcpTools;
+  const allowed = allowedFirstPartyMcpToolsForSession(settings, selected);
+  return session.agent ? agentConfigFirstPartyMcpTools(session.agent, allowed) : allowed;
 }
 
 /**

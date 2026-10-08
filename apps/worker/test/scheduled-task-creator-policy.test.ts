@@ -190,6 +190,56 @@ async function dispatchGeneratedSession(
 }
 
 describe("scheduled-task creator policy inheritance (real PostgreSQL)", () => {
+  test("existing targets freeze effective built-ins separately from their admission proof", async () => {
+    if (!available) return;
+    const grant = await workspaceGrant();
+    const { settings } = activities();
+    const target = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "Follow built-in defaults",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: settings.openaiModel,
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      firstPartyMcpTools: ["set_session_title"],
+      toolPolicy: {
+        mode: "workspace_default",
+        inheritedFromSessionId: null,
+        firstPartyMode: "workspace_default",
+      },
+    });
+    await shared!
+      .admin`update workspaces set settings = settings || '{"sessionToolDefaults":{"firstPartyMcpTools":["session_get"]}}'::jsonb where id = ${grant.workspaceId}`;
+    const task = await generatedTask(grant, null, {
+      runMode: "existing_session",
+      targetSessionId: target.id,
+    });
+    const { session, accepted, result } = await dispatchGeneratedSession(grant, task.id);
+    expect(accepted!.targetSessionExecution!.firstPartyMcpTools).toEqual(["set_session_title"]);
+    expect(accepted!.targetSessionExecution!.effectiveFirstPartyMcpTools).toEqual(["session_get"]);
+    expect(accepted!.targetSessionExecution!.toolPolicy).toEqual(target.toolPolicy);
+    // Later defaults must not change a previously accepted scheduled occurrence.
+    await shared!
+      .admin`update workspaces set settings = settings || '{"sessionToolDefaults":{"firstPartyMcpTools":[]}}'::jsonb where id = ${grant.workspaceId}`;
+    const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: session.id,
+      workflowId: result.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`unexpected claim: ${claimed.action}`);
+    expect(claimed.turn.metadata.scheduledFirstPartyMcpTools).toEqual(["session_get"]);
+    expect((await getSession(client.db, grant.workspaceId, target.id))!.firstPartyMcpTools).toEqual(
+      ["set_session_title"],
+    );
+  }, 60_000);
+
   test("a human/API-created task keeps deployment defaults within the scheduled destination boundary", async () => {
     if (!available) return;
     const grant = await workspaceGrant();

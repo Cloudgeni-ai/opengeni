@@ -1,5 +1,5 @@
 import type { AccessGrant } from "@opengeni/contracts";
-import { allowedFirstPartyMcpToolsForSession, type Settings } from "@opengeni/config";
+import { resolveSessionFirstPartyMcpTools, type Settings } from "@opengeni/config";
 import { requireSession, requireWorkspace, type Database } from "@opengeni/db";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import {
@@ -24,6 +24,7 @@ export async function freezeSessionRealtimeConnectionAccounts(input: {
 }) {
   const { db, settings, grant, workspaceId, sessionId } = input;
   const session = await requireSession(db, workspaceId, sessionId);
+  const workspace = await requireWorkspace(db, workspaceId);
   const capabilitySettings = await settingsWithEnabledCapabilityMcpServers(
     db,
     workspaceId,
@@ -41,12 +42,13 @@ export async function freezeSessionRealtimeConnectionAccounts(input: {
     runtimeMcpServers: runtimeSettings.mcpServers,
     defaultMcpServerIds: workspaceSessionToolPolicyDefaultServerIdsFor(
       capabilitySettings.mcpServers,
-      (await requireWorkspace(db, workspaceId)).settings,
+      workspace.settings,
     ),
   });
-  const effectiveFirstPartyTools = allowedFirstPartyMcpToolsForSession(
+  const effectiveFirstPartyTools = resolveSessionFirstPartyMcpTools(
     settings,
-    session.firstPartyMcpTools,
+    session,
+    workspace.settings,
   );
   return await freezeConnectionAccounts({
     db,
@@ -64,7 +66,7 @@ export async function freezeSessionRealtimeConnectionAccounts(input: {
         (session.firstPartyMcpPermissions.includes("artifacts:read") &&
           session.firstPartyMcpPermissions.includes("artifacts:publish"))),
     atlassianEnabled:
-      session.firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
+      effectiveFirstPartyTools.some((tool) => tool.startsWith("atlassian_")) &&
       (!session.firstPartyMcpPermissions?.length ||
         session.firstPartyMcpPermissions.includes("connections:read")),
   });
