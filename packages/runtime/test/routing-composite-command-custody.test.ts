@@ -3,6 +3,7 @@ import {
   RoutingMutationOutcomeUnknownError,
   RoutingSandboxSession,
 } from "../src/sandbox/routing/routing-session";
+import { synchronousNativeOutputFixture } from "./synchronous-output-fixture";
 
 type Scenario = "success" | "nonzero" | "observation-loss";
 
@@ -34,8 +35,13 @@ function fixture(scenario: Scenario) {
   let failFirstObservation = scenario === "observation-loss";
   let cancelled = false;
   let admissionId = 0;
+  const output = synchronousNativeOutputFixture();
 
+  // Model the supported local-native collector contract, not Connected Machine
+  // op-stream (whose synchronous exec does not return a numeric shell handle).
+  // Actual SDK collection is exercised in synchronous-command-collection.test.ts.
   const session = {
+    getSynchronousCommandOutput: output.getSynchronousCommandOutput,
     exec: async (args: unknown) => {
       const command = (args as { cmd: string }).cmd;
       if (command.includes("__OPENGENI_FS_CONFINED_OK__")) {
@@ -44,7 +50,13 @@ function fixture(scenario: Scenario) {
       const marker = command.match(/__OPENGENI_WORKSPACE_IMPORT_[0-9a-f]+_OK__/u)?.[0];
       if (!marker) throw new Error("unexpected non-Modal exec command");
       starts.push({ command, marker });
-      return { stdout: "start output", stderr: "", sessionId: 23, exitCode: null };
+      return output.record(
+        { stdout: "start output", stderr: "", sessionId: 23, exitCode: null },
+        "start output",
+        "",
+        null,
+        23,
+      );
     },
     execCommand: async () => {
       throw new Error("non-Modal composite start must preserve the native exec surface");
@@ -55,15 +67,20 @@ function fixture(scenario: Scenario) {
       if (input.chars === "\u0003") {
         controlInputs.push(input.chars);
         cancelled = true;
-        return "Process running with session ID 23\n\nOutput:\n";
+        return output.record("Process running with session ID 23\n\nOutput:\n", "", "", null, 23);
       }
       if (failFirstObservation) {
         failFirstObservation = false;
         throw new Error("provider control transport unavailable");
       }
       const exitCode = cancelled ? 130 : scenario === "nonzero" ? 7 : 0;
-      const output = exitCode === 0 ? `${starts[0]!.marker}\tcreated` : "";
-      return `Process exited with code ${exitCode}\n\nOutput:\n${output}`;
+      const stdout = exitCode === 0 ? `${starts[0]!.marker}\tcreated` : "";
+      return output.record(
+        `Process exited with code ${exitCode}\n\nOutput:\npresentation only`,
+        stdout,
+        "",
+        exitCode,
+      );
     },
     writePlacementPrivate: async (args: unknown) => {
       privateWrites.push((args as { path: string }).path);
@@ -72,10 +89,10 @@ function fixture(scenario: Scenario) {
       privateDeletes.push(path);
     },
   };
-  const backend = { session, sandboxId: "machine-1", kind: "selfhosted" };
+  const backend = { session, sandboxId: null, kind: "local" };
   const route = new RoutingSandboxSession({
     defaultResolved: backend,
-    readPointer: async () => ({ activeSandboxId: "machine-1", activeEpoch: 1 }),
+    readPointer: async () => ({ activeSandboxId: null, activeEpoch: 1 }),
     resolveActiveBackend: async () => backend,
     beforeMutation: async ({ op }) => {
       admissions.push(op);
