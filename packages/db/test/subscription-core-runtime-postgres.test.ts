@@ -2547,39 +2547,39 @@ describe("provider-neutral subscription runtime persistence", () => {
         );
         try {
           await authorizedSignal;
-        // No row lock is held across the provider call: lease release and an
-        // administrator revoking this workspace's access both complete.
-        const released = await withinFiveSeconds(
-          withSessionRlsActorContext(actor, () =>
-            withRlsContext(
-              client!.db,
-              { accountId: state.accountId, workspaceId: state.workspaceId },
-              (db) => releaseSubscriptionTurnLease(db, request),
+          // No row lock is held across the provider call: lease release and an
+          // administrator revoking this workspace's access both complete.
+          const released = await withinFiveSeconds(
+            withSessionRlsActorContext(actor, () =>
+              withRlsContext(
+                client!.db,
+                { accountId: state.accountId, workspaceId: state.workspaceId },
+                (db) => releaseSubscriptionTurnLease(db, request),
+              ),
             ),
-          ),
-          "lease release",
-        );
-        expect(released).toBe(true);
-        const rescoped = await withinFiveSeconds(
-          withSessionRlsActorContext({ subjectId: scopeManagerSubject }, () =>
-            withRlsContext(
-              client!.db,
-              { accountId: state.accountId, workspaceId: state.workspaceId },
-              async (db) => {
-                const [row] = await rawRows<{ scope_kind: string }>(
-                  db,
-                  sql`update subscription_connections set scope_kind = 'people'
+            "lease release",
+          );
+          expect(released).toBe(true);
+          const rescoped = await withinFiveSeconds(
+            withSessionRlsActorContext({ subjectId: scopeManagerSubject }, () =>
+              withRlsContext(
+                client!.db,
+                { accountId: state.accountId, workspaceId: state.workspaceId },
+                async (db) => {
+                  const [row] = await rawRows<{ scope_kind: string }>(
+                    db,
+                    sql`update subscription_connections set scope_kind = 'people'
                     where account_id = ${state.accountId}::uuid
                       and id = ${state.connectionId}::uuid
                     returning scope_kind`,
-                );
-                return row?.scope_kind;
-              },
+                  );
+                  return row?.scope_kind;
+                },
+              ),
             ),
-          ),
-          "connection rescope",
-        );
-        expect(rescoped).toBe("people");
+            "connection rescope",
+          );
+          expect(rescoped).toBe("people");
         } finally {
           finishProviderCall();
         }
