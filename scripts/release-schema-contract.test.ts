@@ -58,7 +58,7 @@ describe("release schema contract", () => {
     });
   });
 
-  test("registers provider-neutral subscription runtime storage as rolling", async () => {
+  test("registers provider-neutral subscription runtime storage as maintenance-only", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
@@ -66,7 +66,7 @@ describe("release schema contract", () => {
       ),
     ).toMatchObject({
       path: "0645_subscription_core_runtime.sql",
-      deploymentMode: "rolling",
+      deploymentMode: "maintenance",
     });
   });
 

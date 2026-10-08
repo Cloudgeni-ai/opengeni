@@ -1,5 +1,5 @@
--- deployment-mode: rolling
--- Add provider-neutral runtime persistence without activating provider cutovers.
+-- deployment-mode: maintenance
+-- Runtime posture is an exact relation/grant contract; deploy after old binaries drain.
 
 ALTER TABLE subscription_capacity_waiters
   ADD COLUMN waiter_id uuid NOT NULL DEFAULT gen_random_uuid(),
@@ -104,6 +104,7 @@ DECLARE
   session_owner text;
   turn_human text;
   visible boolean;
+  personal_authorized boolean := false;
 BEGIN
   IF NEW.account_id IS DISTINCT FROM nullif(current_setting('opengeni.account_id', true), '')::uuid
     OR NEW.workspace_id IS DISTINCT FROM nullif(current_setting('opengeni.workspace_id', true), '')::uuid
@@ -165,6 +166,13 @@ BEGIN
     END IF;
   END IF;
 
+  IF NEW.session_id IS NOT NULL AND NEW.turn_id IS NOT NULL THEN
+    personal_authorized := opengeni_private.authorize_subscription_personal_access(
+      NEW.account_id, NEW.workspace_id, NEW.session_id, NEW.turn_id, NEW.connection_id,
+      NEW.provider, session_owner, turn_human
+    );
+  END IF;
+
   SELECT connection.* INTO target
   FROM subscription_connections connection
   WHERE connection.account_id = NEW.account_id AND connection.id = NEW.connection_id
@@ -178,10 +186,7 @@ BEGIN
   END IF;
   IF target.ownership = 'personal' THEN
     IF NEW.session_id IS NULL OR NEW.turn_id IS NULL
-      OR NOT opengeni_private.authorize_subscription_personal_access(
-        NEW.account_id, NEW.workspace_id, NEW.session_id, NEW.turn_id, NEW.connection_id,
-        NEW.provider, session_owner, turn_human
-      )
+      OR NOT personal_authorized
       OR NOT coalesce((subscription_effective_settings(
         NEW.account_id, NEW.workspace_id
       ) #>> '{values,personalConnectionsAllowed}')::boolean, false)
@@ -225,6 +230,13 @@ CREATE POLICY subscription_connection_assignment_policy_manage
     OR (workspace_id = nullif(current_setting('opengeni.workspace_id', true), '')::uuid
       AND managed_by_workspace_id = workspace_id
       AND EXISTS (
+        SELECT 1 FROM subscription_connections connection
+        WHERE connection.account_id = subscription_connection_assignment_policies.account_id
+          AND connection.id = subscription_connection_assignment_policies.connection_id
+          AND connection.ownership = 'shared'
+          AND connection.managed_by_workspace_id = subscription_connection_assignment_policies.workspace_id
+      )
+      AND EXISTS (
         SELECT 1 FROM workspace_memberships manager
         WHERE manager.account_id = subscription_connection_assignment_policies.account_id
           AND manager.workspace_id = subscription_connection_assignment_policies.workspace_id
@@ -236,6 +248,13 @@ CREATE POLICY subscription_connection_assignment_policy_manage
     opengeni_private.subscription_organization_admin(account_id)
     OR (workspace_id = nullif(current_setting('opengeni.workspace_id', true), '')::uuid
       AND managed_by_workspace_id = workspace_id
+      AND EXISTS (
+        SELECT 1 FROM subscription_connections connection
+        WHERE connection.account_id = subscription_connection_assignment_policies.account_id
+          AND connection.id = subscription_connection_assignment_policies.connection_id
+          AND connection.ownership = 'shared'
+          AND connection.managed_by_workspace_id = subscription_connection_assignment_policies.workspace_id
+      )
       AND EXISTS (
         SELECT 1 FROM workspace_memberships manager
         WHERE manager.account_id = subscription_connection_assignment_policies.account_id

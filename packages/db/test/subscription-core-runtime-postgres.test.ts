@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
   acquireSubscriptionOperationLease,
@@ -261,6 +262,13 @@ describe("provider-neutral subscription runtime persistence", () => {
             );
             expect(revision).toBe(2);
             expect(
+              await upsertSubscriptionCapacityWaiter(db, {
+                ...waiter,
+                wakeRevision: 1,
+                nextCheckAt: new Date(Date.now() + 120_000),
+              }),
+            ).toMatchObject({ waiterId: waiter.waiterId, wakeRevision: 2, nextCheckAt: null });
+            expect(
               await observeSubscriptionCapacityWaiterWake(db, {
                 accountId: state.accountId,
                 workspaceId: state.workspaceId,
@@ -304,6 +312,21 @@ describe("provider-neutral subscription runtime persistence", () => {
           (db) => markSubscriptionCapacityWakeDelivered(db, delivery),
         ),
       ).toBe(true);
+      const nextGeneration = await withSessionRlsActorContext(actor, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: state.accountId, workspaceId: state.workspaceId },
+          (db) =>
+            upsertSubscriptionCapacityWaiter(db, {
+              ...waiter,
+              waiterId: crypto.randomUUID(),
+              generation: 3,
+              wakeRevision: 1,
+              observedWakeRevision: 0,
+            }),
+        ),
+      );
+      expect(nextGeneration).toMatchObject({ waiterId: waiter.waiterId, generation: 3 });
     },
     180_000,
   );
@@ -369,6 +392,90 @@ describe("provider-neutral subscription runtime persistence", () => {
                 sessionId: state.sessionId,
               }),
             ).toMatchObject({ modelId: "codex/b", version: 2 });
+          },
+        ),
+      );
+    },
+    180_000,
+  );
+
+  test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
+    "workspace administrators can manage only organization-delegated connection policies",
+    async () => {
+      const state = await fixture();
+      const managerSubject = `user:subscription-policy-manager-${crypto.randomUUID()}`;
+      const [personalWorkspace] = await shared!.admin<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${state.accountId}::uuid, 'Subscription policy manager Personal')
+        returning id::text as id`;
+      await shared!.admin`
+        insert into organization_memberships (
+          account_id, subject_id, role, status, personal_workspace_id
+        ) values (
+          ${state.accountId}::uuid, ${managerSubject}, 'member', 'active', ${personalWorkspace!.id}::uuid
+        )`;
+      await shared!.admin`
+        insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+        values (${state.accountId}::uuid, ${state.workspaceId}::uuid, ${managerSubject}, 'admin')`;
+
+      const [delegated] = await shared!.admin<{ id: string }[]>`
+        insert into subscription_connections (
+          account_id, provider, credential_encrypted, ownership, scope_kind, managed_by_workspace_id
+        ) values (
+          ${state.accountId}::uuid, 'codex', 'v1:delegated-policy', 'shared', 'organization',
+          ${state.workspaceId}::uuid
+        ) returning id::text as id`;
+      await shared!.admin`
+        insert into subscription_connection_assignment_policies (
+          account_id, connection_id, workspace_id, inference_pool, managed_by_workspace_id
+        ) values (
+          ${state.accountId}::uuid, ${delegated!.id}::uuid, ${state.workspaceId}::uuid,
+          'organization', ${state.workspaceId}::uuid
+        )`;
+
+      await withSessionRlsActorContext({ subjectId: managerSubject }, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: state.accountId, workspaceId: state.workspaceId },
+          async (db) => {
+            const [changed] = await db.execute<{ allocator_enabled: boolean }>(sql`
+              update subscription_connection_assignment_policies
+              set allocator_enabled = false, allowed_model_ids = array['codex/a']::text[]
+              where connection_id = ${delegated!.id}::uuid and inference_pool = 'organization'
+              returning allocator_enabled
+            `);
+            expect(changed?.allocator_enabled).toBe(false);
+
+            let markerMutationError: unknown;
+            try {
+              await db.transaction((nested) =>
+                nested.execute(sql`
+                  update subscription_connection_assignment_policies
+                  set managed_by_workspace_id = null
+                  where connection_id = ${delegated!.id}::uuid and inference_pool = 'organization'
+                `),
+              );
+            } catch (error) {
+              markerMutationError = error;
+            }
+            expect(markerMutationError).toBeDefined();
+
+            let selfDelegationError: unknown;
+            try {
+              await db.transaction((nested) =>
+                nested.execute(sql`
+                  insert into subscription_connection_assignment_policies (
+                    account_id, connection_id, workspace_id, inference_pool, managed_by_workspace_id
+                  ) values (
+                    ${state.accountId}::uuid, ${state.connectionId}::uuid, ${state.workspaceId}::uuid,
+                    'organization', ${state.workspaceId}::uuid
+                  )
+                `),
+              );
+            } catch (error) {
+              selfDelegationError = error;
+            }
+            expect(selfDelegationError).toBeDefined();
           },
         ),
       );

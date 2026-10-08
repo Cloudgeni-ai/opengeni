@@ -402,7 +402,21 @@ export async function upsertSubscriptionCapacityWaiter(
   ) {
     throw new Error("Subscription waiter observed revision must be between zero and wake revision");
   }
-  const [row] = await rawRows<{ waiter_id: string; wake_revision: number | string }>(
+  const [row] = await rawRows<{
+    waiter_id: string;
+    provider: ProviderId;
+    wait_reason: string;
+    policy_hash: string | null;
+    reset_kind: string | null;
+    refresh_attempt: number | string;
+    resumed_update_id: string | null;
+    earliest_reset_at: Date | string | null;
+    generation: number | string;
+    wake_revision: number | string;
+    observed_wake_revision: number | string;
+    next_check_at: Date | string | null;
+    blocked_turn_generation: number | string | null;
+  }>(
     db,
     sql`insert into subscription_capacity_waiters (
       account_id, workspace_id, session_id, turn_id, waiter_id, provider, wait_reason,
@@ -420,29 +434,70 @@ export async function upsertSubscriptionCapacityWaiter(
     )
     on conflict (workspace_id, session_id) do update
       set turn_id = excluded.turn_id,
-          provider = excluded.provider,
-          wait_reason = excluded.wait_reason,
-          policy_hash = excluded.policy_hash,
-          reset_kind = excluded.reset_kind,
-          refresh_attempt = excluded.refresh_attempt,
-          resumed_update_id = excluded.resumed_update_id,
-          earliest_reset_at = excluded.earliest_reset_at,
-          waiter_id = excluded.waiter_id,
-          generation = excluded.generation,
-          wake_revision = excluded.wake_revision,
-          observed_wake_revision = excluded.observed_wake_revision,
-          next_check_at = excluded.next_check_at,
-          blocked_turn_generation = excluded.blocked_turn_generation,
-          updated_at = clock_timestamp()
+          provider = CASE WHEN excluded.generation > subscription_capacity_waiters.generation
+              OR excluded.wake_revision > subscription_capacity_waiters.wake_revision
+            THEN excluded.provider ELSE subscription_capacity_waiters.provider END,
+          wait_reason = CASE WHEN excluded.generation > subscription_capacity_waiters.generation
+              OR excluded.wake_revision > subscription_capacity_waiters.wake_revision
+            THEN excluded.wait_reason ELSE subscription_capacity_waiters.wait_reason END,
+          policy_hash = CASE WHEN excluded.generation > subscription_capacity_waiters.generation
+              OR excluded.wake_revision > subscription_capacity_waiters.wake_revision
+            THEN excluded.policy_hash ELSE subscription_capacity_waiters.policy_hash END,
+          reset_kind = CASE WHEN excluded.generation > subscription_capacity_waiters.generation
+              OR excluded.wake_revision > subscription_capacity_waiters.wake_revision
+            THEN excluded.reset_kind ELSE subscription_capacity_waiters.reset_kind END,
+          refresh_attempt = CASE WHEN excluded.generation > subscription_capacity_waiters.generation
+              OR excluded.wake_revision > subscription_capacity_waiters.wake_revision
+            THEN excluded.refresh_attempt ELSE subscription_capacity_waiters.refresh_attempt END,
+          resumed_update_id = CASE WHEN excluded.generation > subscription_capacity_waiters.generation
+              OR excluded.wake_revision > subscription_capacity_waiters.wake_revision
+            THEN excluded.resumed_update_id ELSE subscription_capacity_waiters.resumed_update_id END,
+          earliest_reset_at = CASE WHEN excluded.generation > subscription_capacity_waiters.generation
+              OR excluded.wake_revision > subscription_capacity_waiters.wake_revision
+            THEN excluded.earliest_reset_at ELSE subscription_capacity_waiters.earliest_reset_at END,
+          generation = greatest(subscription_capacity_waiters.generation, excluded.generation),
+          wake_revision = CASE WHEN excluded.generation > subscription_capacity_waiters.generation
+              THEN excluded.wake_revision
+            ELSE greatest(subscription_capacity_waiters.wake_revision, excluded.wake_revision) END,
+          observed_wake_revision = CASE WHEN excluded.generation > subscription_capacity_waiters.generation
+              THEN excluded.observed_wake_revision
+            ELSE greatest(subscription_capacity_waiters.observed_wake_revision, excluded.observed_wake_revision) END,
+          next_check_at = CASE WHEN excluded.generation > subscription_capacity_waiters.generation
+              OR excluded.wake_revision > subscription_capacity_waiters.wake_revision
+            THEN excluded.next_check_at ELSE subscription_capacity_waiters.next_check_at END,
+          blocked_turn_generation = CASE WHEN excluded.generation > subscription_capacity_waiters.generation
+              OR excluded.wake_revision > subscription_capacity_waiters.wake_revision
+            THEN excluded.blocked_turn_generation ELSE subscription_capacity_waiters.blocked_turn_generation END,
+          updated_at = CASE WHEN excluded.generation > subscription_capacity_waiters.generation
+              OR excluded.wake_revision > subscription_capacity_waiters.wake_revision
+            THEN clock_timestamp() ELSE subscription_capacity_waiters.updated_at END
       where subscription_capacity_waiters.account_id = excluded.account_id
         and (subscription_capacity_waiters.generation < excluded.generation
           or (subscription_capacity_waiters.generation = excluded.generation
             and subscription_capacity_waiters.waiter_id = excluded.waiter_id
             and subscription_capacity_waiters.turn_id = excluded.turn_id))
-    returning waiter_id::text as waiter_id, wake_revision`,
+    returning waiter_id::text as waiter_id, provider, wait_reason, policy_hash, reset_kind,
+      refresh_attempt, resumed_update_id::text as resumed_update_id, earliest_reset_at,
+      generation, wake_revision, observed_wake_revision, next_check_at, blocked_turn_generation`,
   );
   if (!row) return null;
-  return { ...input, waiterId: row.waiter_id, wakeRevision: Number(row.wake_revision) };
+  return {
+    ...input,
+    waiterId: row.waiter_id,
+    provider: row.provider,
+    waitReason: row.wait_reason,
+    policyHash: row.policy_hash,
+    resetKind: row.reset_kind,
+    refreshAttempt: Number(row.refresh_attempt),
+    resumedUpdateId: row.resumed_update_id,
+    earliestResetAt: row.earliest_reset_at === null ? null : new Date(row.earliest_reset_at),
+    generation: Number(row.generation),
+    wakeRevision: Number(row.wake_revision),
+    observedWakeRevision: Number(row.observed_wake_revision),
+    nextCheckAt: row.next_check_at === null ? null : new Date(row.next_check_at),
+    blockedTurnGeneration:
+      row.blocked_turn_generation === null ? null : Number(row.blocked_turn_generation),
+  };
 }
 
 /** Bump one exact waiter's revision; workflow signalling remains outbox-owned. */
