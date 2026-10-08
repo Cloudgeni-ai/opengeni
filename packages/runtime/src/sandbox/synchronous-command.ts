@@ -16,11 +16,12 @@ export type SynchronousCommandResult = {
 export type SynchronousCommandPage = {
   stdout: string;
   stderr: string;
+  /** Authenticated physical exit; complete output is an independent requirement. */
   exitCode: number | null;
   sessionId?: number;
   wallTimeSeconds: number;
-  /** Only presentation output or an unsupported yielded reader is available.
-   * Preserve the handle, but do not consume that reader's output. */
+  /** Output completeness is unprovable, even if physical exit is known.
+   * Preserve custody; do not claim full streams or consume a presentation reader. */
   collectionUnavailable?: boolean;
   outputCursor?: {
     identity: string;
