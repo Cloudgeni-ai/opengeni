@@ -9,7 +9,8 @@ export type SubscriptionCoreCodexFailurePayload = {
     | "subscription_lease_busy"
     | "subscription_core_unsupported"
     | "subscription_core_cutover_disabled"
-    | "subscription_account_refused";
+    | "subscription_account_refused"
+    | "subscription_failover_exhausted";
   retryable: boolean;
   detail?: string;
   /** Placement wait reason when `code` is `subscription_capacity_unavailable`. */
@@ -18,6 +19,13 @@ export type SubscriptionCoreCodexFailurePayload = {
   refusal?: SubscriptionCoreAccountRefusal;
   /** ISO time the earliest known capacity returns, when placement knows it. */
   resetsAt?: string;
+  /**
+   * Refusals this turn took, and the per-turn refusal bound, when `code` is
+   * `subscription_failover_exhausted` (refusals, not switches: the turn
+   * switched accounts `maxRefusals - 1` times before the last refusal).
+   */
+  refusals?: number;
+  maxRefusals?: number;
 };
 
 export class SubscriptionCoreCodexTurnError extends Error {
@@ -41,10 +49,55 @@ const WAIT_COPY: Record<WaitReason, string> = {
     "This session is tied to a provider that has no capacity right now. Send a new message once an account is available again.",
 };
 
+const WAITING_COPY: Record<WaitReason, string> = {
+  pinned_account_unavailable:
+    "The Codex account chosen for this session is unavailable right now. This turn continues automatically once it is available again.",
+  pinned_account_ineligible:
+    "The Codex account chosen for this session can no longer serve this work. This turn continues once another account is chosen or the session is switched back to automatic.",
+  no_eligible_capacity:
+    "No Codex subscription has capacity for this turn right now. It continues automatically when an account is available.",
+  model_not_allowed:
+    "This model is not allowed for the Codex subscriptions available here. This turn continues if that changes.",
+  compaction_provider_locked:
+    "This session is tied to a provider that has no capacity right now. It continues automatically when an account is available.",
+};
+
 /**
- * The capacity wait the core decided. Until the core wake delivery loop is
- * wired (PR 2) the turn fails closed with this copy instead of parking on a
- * waiter nothing would wake.
+ * The `codex.capacity.waiting` payload for a turn parked on a core waiter
+ * (M3 PR 2a): the legacy event shape with the core wait reason and the
+ * earliest known reset.
+ */
+export function subscriptionCoreCapacityWaitPayload(
+  reason: WaitReason,
+  earliestResetAt: Date | null,
+): Record<string, unknown> {
+  return {
+    error: WAITING_COPY[reason],
+    code: "subscription_capacity_unavailable",
+    waitReason: reason,
+    ...(earliestResetAt ? { resetsAt: earliestResetAt.toISOString() } : {}),
+  };
+}
+
+/** The per-turn failover bound was reached; the session stays usable. */
+export function subscriptionCoreFailoverExhaustedFailure(
+  refusals: number,
+  maxRefusals: number,
+): SubscriptionCoreCodexTurnError {
+  return new SubscriptionCoreCodexTurnError({
+    error:
+      "Codex accounts refused this turn too many times in a row. Send a new message after checking the accounts' health or capacity.",
+    code: "subscription_failover_exhausted",
+    retryable: false,
+    refusals,
+    maxRefusals,
+  });
+}
+
+/**
+ * The capacity wait the core decided, as a typed terminal failure. PR 2a
+ * parks waits on a durable core waiter instead; this remains for callers that
+ * cannot wait.
  */
 export function subscriptionCoreCapacityFailure(
   reason: WaitReason,

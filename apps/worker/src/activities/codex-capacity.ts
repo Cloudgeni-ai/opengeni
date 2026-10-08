@@ -1,6 +1,8 @@
 import {
   armCodexCapacityWait,
   fetchCodexUsageForAccount,
+  getSubscriptionCoreCodexCapacityWaitForSession,
+  subscriptionCoreCodexCapacityWaitRef,
   getCodexCapacityWaitForSession,
   getXaiCapacityWaitForSession,
   getClaudeCapacityWaitForSession,
@@ -16,6 +18,7 @@ import {
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { refreshExhaustedXaiQuota } from "./xai-quota";
+import { reconcileCoreCodexCapacityWait } from "./subscription-core-codex-waits";
 import {
   authoritativeCodexCapacityResetAt,
   codexAccountNeedsLiveCapacityRefresh,
@@ -271,6 +274,14 @@ async function refreshCapacityMetadata(
 export function createCodexCapacityActivities(services: () => Promise<ControlActivityServices>) {
   async function getCodexCapacityWait(input: GetCodexCapacityWaitInput) {
     const { db } = await services();
+    // A core Codex waiter (shared subscription core, M3) keeps the legacy
+    // Codex reference shape and is the only waiter written after cutover.
+    const coreWaiter = await getSubscriptionCoreCodexCapacityWaitForSession(
+      db,
+      input.workspaceId,
+      input.sessionId,
+    );
+    if (coreWaiter) return subscriptionCoreCodexCapacityWaitRef(coreWaiter);
     const codexWaiter = await getCodexCapacityWaitForSession(
       db,
       input.workspaceId,
@@ -358,6 +369,15 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
       }
       return { action: result.action };
     }
+    // The same reference may name a core waiter (looked up by its exact id).
+    const core = await reconcileCoreCodexCapacityWait(resolved, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      waiterId: input.waiterId,
+      generation: input.generation,
+    });
+    if (core) return core;
     const current = await getCodexCapacityWaitForSession(
       resolved.db,
       input.workspaceId,

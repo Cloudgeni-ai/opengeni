@@ -4,8 +4,10 @@
  * row is enabled; the legacy selector is untouched for every other turn.
  */
 import {
+  armSubscriptionCoreCodexCapacityWait,
   assertModelConnectionAllowsTurn,
   CODEX_CREDENTIAL_LEASE_TTL_MS,
+  getSessionGoal,
   CodexCredentialLeaseAttemptFencedError,
   SubscriptionCoreCodexLeaseLostError,
   buildSubscriptionCoreCodexTokenResolver,
@@ -15,13 +17,20 @@ import {
   subscriptionCoreTurnActor,
   type CodexCredentialTokenSnapshot,
   type Database,
+  type SubscriptionCoreCodexPlacement,
 } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { recordTurnStartupPhase } from "../../observability-metrics";
+import {
+  recoverCoreCodexHealthAndWake,
+  reconcileCoreCodexCapacityWait,
+  wakeSubscriptionCoreCodexWaitersAndDeliver,
+  type CoreCodexWakeServices,
+} from "../subscription-core-codex-waits";
 import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
 import {
-  subscriptionCoreCapacityFailure,
+  subscriptionCoreCapacityWaitPayload,
   subscriptionCoreCutoverDisabledFailure,
   subscriptionCoreLeaseBusyFailure,
   subscriptionCoreUnsupportedFailure,
@@ -55,6 +64,7 @@ export function buildCoreCodexRequestTokenResolver(
   settings: Settings,
   core: CodexSubscriptionCoreTurn,
   lease: CodexTurnLease,
+  wake?: Pick<CoreCodexWakeServices, "signalCodexCapacityWorkflow">,
 ): {
   getToken: () => Promise<CodexCredentialTokenSnapshot>;
   refresh: () => Promise<CodexCredentialTokenSnapshot>;
@@ -65,11 +75,25 @@ export function buildCoreCodexRequestTokenResolver(
   if (lease.subscriptionCoreConnection !== core.connectionId) {
     throw new Error("Core Codex lease does not hold the placed connection");
   }
-  const resolver = buildSubscriptionCoreCodexTokenResolver(db, settings, core.identity, {
-    connectionId: core.connectionId,
-    holderId: lease.holderId,
-    generation: lease.generation,
-  });
+  const resolver = buildSubscriptionCoreCodexTokenResolver(
+    db,
+    settings,
+    core.identity,
+    {
+      connectionId: core.connectionId,
+      holderId: lease.holderId,
+      generation: lease.generation,
+    },
+    {
+      // A rotated id_token reporting a new plan cleared the connection's
+      // model cooldowns in the same commit; waiters may now place (EP-T10).
+      onPlanChanged: () =>
+        void wakeSubscriptionCoreCodexWaitersAndDeliver(
+          { db, signalCodexCapacityWorkflow: wake?.signalCodexCapacityWorkflow },
+          { accountId: core.identity.accountId, reason: "plan_changed" },
+        ),
+    },
+  );
   const guarded =
     (resolve: () => Promise<CodexCredentialTokenSnapshot>) =>
     async (): Promise<CodexCredentialTokenSnapshot> => {
@@ -104,6 +128,7 @@ export async function selectCoreCodexTurnCapacity(
     turn,
     turnExecutionPolicy,
     codexWorkspaceKey,
+    signalCodexCapacityWorkflow,
   } = deps;
   const turnId = attempt.turnId;
   const holderId = leases.codex.holderId;
@@ -130,6 +155,9 @@ export async function selectCoreCodexTurnCapacity(
       turnId,
     });
     if (!identity) return fenced();
+    // Quarantines that ran out return to service before placement reads the
+    // world; a recovery wakes the account's other waiters too.
+    await recoverCoreCodexHealthAndWake({ db, signalCodexCapacityWorkflow }, identity);
     const leaseRequestedAt = performance.now();
     const placement = await placeSubscriptionCoreCodexTurn(db, {
       identity,
@@ -149,7 +177,9 @@ export async function selectCoreCodexTurnCapacity(
       case "lease_busy":
         throw subscriptionCoreLeaseBusyFailure(placement.leasedUntil);
       case "wait":
-        throw subscriptionCoreCapacityFailure(placement.reason, placement.earliestResetAt);
+        // Park the same turn on the durable core waiter (EP-T09); it resumes
+        // when placement can serve it again (a reset, a wake or a timer).
+        return await parkCoreCodexTurn(deps, placement);
       case "run":
         break;
     }
@@ -213,4 +243,83 @@ export async function selectCoreCodexTurnCapacity(
       durationSeconds: (performance.now() - startedAt) / 1_000,
     });
   }
+}
+
+/**
+ * Arm the session's core waiter for this attempt's turn and re-evaluate it at
+ * once: a capacity change that committed before the waiter existed could not
+ * wake it, so the arm closes that edge itself (as the legacy Codex arm does).
+ */
+async function parkCoreCodexTurn(
+  deps: CapacityPhaseDeps,
+  wait: Extract<SubscriptionCoreCodexPlacement, { kind: "wait" }>,
+): Promise<CapacityPhaseOutcome> {
+  const {
+    input,
+    db,
+    bus,
+    control,
+    attempt,
+    claimedResult,
+    acknowledgeLostAttemptOwnership,
+    signalCodexCapacityWorkflow,
+  } = deps;
+  const turnId = attempt.turnId!;
+  const goal = await getSessionGoal(db, input.workspaceId, input.sessionId);
+  const activeGoal = goal?.status === "active" ? goal : null;
+  const armed = await armSubscriptionCoreCodexCapacityWait(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId,
+    attemptId: input.attemptId,
+    goalId: activeGoal?.id ?? null,
+    goalVersion: activeGoal?.version ?? null,
+    waitReason: wait.reason,
+    earliestResetAt: wait.earliestResetAt,
+    healthRetryAt: wait.healthRetryAt,
+    failurePayload: subscriptionCoreCapacityWaitPayload(wait.reason, wait.earliestResetAt),
+  });
+  await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
+  if (armed.action === "stopped") {
+    control.turnMetricOutcome = "failed";
+    control.activityStatus = armed.sessionStatus === "queued" ? "idle" : "failed";
+    return { exit: claimedResult({ status: control.activityStatus }) };
+  }
+  if (armed.action === "waiting") {
+    const evaluated = await reconcileCoreCodexCapacityWait(
+      { db, bus, signalCodexCapacityWorkflow },
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        waiterId: armed.waiter.waiterId,
+        generation: armed.waiter.generation,
+      },
+    );
+    if (evaluated?.action === "resumed") {
+      control.turnMetricOutcome = "recovering";
+      control.activityStatus = "recovering";
+      return { exit: claimedResult({ status: "recovering" }) };
+    }
+    if (evaluated?.action === "waiting") {
+      control.turnMetricOutcome = "recovering";
+      control.activityStatus = "waiting_capacity";
+      return {
+        exit: claimedResult({
+          status: "waiting_capacity",
+          capacityWait: {
+            waiterId: evaluated.waiterId,
+            generation: evaluated.generation,
+            nextCheckAt: evaluated.nextCheckAt,
+            wakeRevision: evaluated.wakeRevision,
+          },
+        }),
+      };
+    }
+  }
+  acknowledgeLostAttemptOwnership();
+  control.turnMetricOutcome = "cancelled";
+  control.activityStatus = "cancelled";
+  return { exit: claimedResult({ status: "cancelled" }) };
 }

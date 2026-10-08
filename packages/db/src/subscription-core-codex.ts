@@ -27,6 +27,7 @@ import {
   refreshCodexToken,
 } from "@opengeni/codex";
 import {
+  readTurnExecutionPolicyV1,
   EMPTY_SUBSCRIPTION_PERSONAL_AUTHORITY_V2,
   SubscriptionPersonalAuthorityV2,
   subscriptionPersonalAuthorityForProviderV2,
@@ -35,8 +36,11 @@ import {
   applyQuotaObservation,
   connectionIneligibility,
   decidePlacement,
+  quotaCapacity,
+  type PlacementDecision,
   type PlacementInput,
   type PlacementSwitch,
+  type ReselectionPoint,
   type SubscriptionQuota,
   type WaitReason,
 } from "@opengeni/subscriptions";
@@ -56,7 +60,7 @@ import {
   acquireSubscriptionTurnLease,
   assertSubscriptionTurnLeaseCurrent,
   decodeSubscriptionQuota,
-  persistSubscriptionCodexRefresh,
+  persistSubscriptionCodexRefreshWithPlan,
   readSubscriptionProviderCutoverState,
   readSubscriptionSessionBinding,
   releaseSubscriptionTurnLease,
@@ -129,6 +133,43 @@ export async function readSubscriptionCoreTurnIdentity(
 }
 
 /**
+ * The accepted model and reasoning level of a (waiting) turn, for evaluating
+ * where it could run. The frozen execution policy wins; the turn columns are
+ * the fallback for turns accepted without one. The resumed attempt re-verifies
+ * its policy at claim, so this read never authorizes anything by itself.
+ */
+export async function readSubscriptionCoreCodexTurnModel(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; turnId: string },
+): Promise<{ productModelId: string; reasoningLevel: string } | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => {
+      const [row] = await rawRows<{
+        model: string;
+        reasoning_effort: string;
+        metadata: Record<string, unknown> | null;
+      }>(
+        tx,
+        sql`select model, reasoning_effort, metadata from session_turns
+          where account_id = ${input.accountId}::uuid
+            and workspace_id = ${input.workspaceId}::uuid
+            and session_id = ${input.sessionId}::uuid and id = ${input.turnId}::uuid`,
+      );
+      if (!row) return null;
+      const policy = readTurnExecutionPolicyV1(row.metadata ?? {});
+      return policy.kind === "valid"
+        ? {
+            productModelId: policy.policy.productModelId,
+            reasoningLevel: policy.policy.reasoningEffort,
+          }
+        : { productModelId: row.model, reasoningLevel: row.reasoning_effort };
+    },
+  );
+}
+
+/**
  * The RLS actor that core lease and credential operations run as for this turn.
  *
  * For a service-initiated turn in an owned session the session owner stands in
@@ -177,6 +218,8 @@ export type SubscriptionCoreCodexPlacement =
       kind: "wait";
       reason: WaitReason;
       earliestResetAt: Date | null;
+      /** When a quarantined connection in this world returns, if any. */
+      healthRetryAt: Date | null;
       explicitConnectionId: string | null;
     }
   | {
@@ -236,32 +279,14 @@ async function placeOnce(
   const now = request.now ?? new Date();
   const result = await withSubscriptionCorePlacementWorld(
     db,
-    {
-      ...identity,
-      preferredModelId: request.productModelId,
-      reasoningLevel: request.reasoningLevel,
-      // Codex only: Claude and SuperGrok stay on their v1 selectors in M3.
-      models: [
-        {
-          id: request.productModelId,
-          provider: "codex",
-          reasoningLevels: [request.reasoningLevel],
-        },
-      ],
-      reselectionPoints: [],
-      now,
-    },
+    codexPlacementWorldRequest(identity, request.productModelId, request.reasoningLevel, now),
     async (tx, worldInput): Promise<SubscriptionCoreCodexPlacement> => {
       if (!(await codexCutoverEnabled(tx, identity.accountId)))
         return { kind: "cutover_not_enabled" };
       const fence = await readAttemptFence(tx, request);
       if (!fence) return { kind: "attempt_fenced" };
 
-      const input: PlacementInput = {
-        ...worldInput,
-        settings: { ...worldInput.settings, crossProviderFailover: false, fallbackOrder: {} },
-        connections: worldInput.connections.filter((connection) => connection.provider === "codex"),
-      };
+      const input = await codexPlacementInput(tx, identity, worldInput, request.productModelId);
       const lease = {
         accountId: identity.accountId,
         workspaceId: identity.workspaceId,
@@ -317,6 +342,7 @@ async function placeOnce(
           reason: decision.reason,
           earliestResetAt:
             decision.earliestResetAt === null ? null : new Date(decision.earliestResetAt),
+          healthRetryAt: await earliestCodexHealthRetryAt(tx, identity),
           explicitConnectionId,
         };
       }
@@ -367,6 +393,325 @@ async function codexCutoverEnabled(tx: Database, accountId: string): Promise<boo
   return (
     (await readSubscriptionProviderCutoverState(tx, { accountId, provider: "codex" })) === "enabled"
   );
+}
+
+/** The world request for one Codex chat turn: its accepted product model only. */
+function codexPlacementWorldRequest(
+  identity: SubscriptionCoreTurnIdentity,
+  productModelId: string,
+  reasoningLevel: string,
+  now: Date,
+) {
+  return {
+    ...identity,
+    preferredModelId: productModelId,
+    reasoningLevel,
+    // Codex only: Claude and SuperGrok stay on their v1 selectors in M3.
+    models: [{ id: productModelId, provider: "codex", reasoningLevels: [reasoningLevel] }],
+    // Re-selection points are derived inside the transaction from the
+    // binding and session it reads (codexPlacementInput).
+    reselectionPoints: [],
+    now,
+  };
+}
+
+/**
+ * Re-selection points since the binding's last model call (SUB-STICK-05).
+ *
+ * - `model_changed`: the turn's accepted model is not the bound model.
+ * - `compaction_completed`: the session's durable `session.context.compacted`
+ *   or `session.context.cleared` event occurred after the binding's last
+ *   model call, so the cached prefix the binding kept warm was replaced. The
+ *   explicit event is the marker: an unknown input-token count (an aggregate
+ *   usage fallback, a provider that reports none) is not a compaction.
+ *
+ * Both only ever release an automatic binding; an explicit choice is kept.
+ */
+export function subscriptionCoreCodexReselectionPoints(input: {
+  binding: { modelId: string; lastModelCallAt: number } | null;
+  productModelId: string;
+  /** When the session's context was last compacted or cleared (epoch ms). */
+  lastContextReplacedAt: number | null;
+}): ReselectionPoint[] {
+  const { binding } = input;
+  if (!binding) return [];
+  const points: ReselectionPoint[] = [];
+  if (
+    binding.lastModelCallAt > 0 &&
+    input.lastContextReplacedAt !== null &&
+    input.lastContextReplacedAt > binding.lastModelCallAt
+  ) {
+    points.push("compaction_completed");
+  }
+  if (binding.modelId !== input.productModelId) points.push("model_changed");
+  return points;
+}
+
+/** The latest compaction or context clear of the session (newest per type by sequence). */
+async function lastCodexContextReplacedAt(
+  tx: Database,
+  identity: SubscriptionCoreAcceptedTurnIdentity,
+): Promise<number | null> {
+  const [row] = await rawRows<{ replaced_at: Date | string | null }>(
+    tx,
+    sql`select greatest(
+        (select occurred_at from session_events
+          where workspace_id = ${identity.workspaceId}::uuid
+            and session_id = ${identity.sessionId}::uuid
+            and type = 'session.context.compacted'
+          order by sequence desc limit 1),
+        (select occurred_at from session_events
+          where workspace_id = ${identity.workspaceId}::uuid
+            and session_id = ${identity.sessionId}::uuid
+            and type = 'session.context.cleared'
+          order by sequence desc limit 1)
+      ) as replaced_at`,
+  );
+  return row?.replaced_at === null || row?.replaced_at === undefined
+    ? null
+    : new Date(row.replaced_at).getTime();
+}
+
+/** Strict M3 placement input: Codex connections only, no cross-provider failover. */
+async function codexPlacementInput(
+  tx: Database,
+  identity: SubscriptionCoreAcceptedTurnIdentity,
+  worldInput: PlacementInput,
+  productModelId: string,
+): Promise<PlacementInput> {
+  const binding = worldInput.session.binding;
+  const lastContextReplacedAt =
+    binding && binding.lastModelCallAt > 0 ? await lastCodexContextReplacedAt(tx, identity) : null;
+  return {
+    ...worldInput,
+    session: {
+      ...worldInput.session,
+      reselectionPoints: subscriptionCoreCodexReselectionPoints({
+        binding: binding
+          ? { modelId: binding.modelId, lastModelCallAt: binding.lastModelCallAt }
+          : null,
+        productModelId,
+        lastContextReplacedAt,
+      }),
+    },
+    settings: { ...worldInput.settings, crossProviderFailover: false, fallbackOrder: {} },
+    connections: worldInput.connections.filter((connection) => connection.provider === "codex"),
+  };
+}
+
+/** Earliest end of a time-bound health quarantine among the visible Codex connections. */
+async function earliestCodexHealthRetryAt(
+  tx: Database,
+  identity: SubscriptionCoreAcceptedTurnIdentity,
+): Promise<Date | null> {
+  const [row] = await rawRows<{ retry_at: Date | string | null }>(
+    tx,
+    sql`select min(health_retry_at) as retry_at from subscription_connections
+      where account_id = ${identity.accountId}::uuid and provider = 'codex'
+        and status = 'error' and health_retry_at > clock_timestamp()`,
+  );
+  return row?.retry_at ? new Date(row.retry_at) : null;
+}
+
+export type SubscriptionCoreCodexPlacementEvaluation =
+  | { kind: "not_visible" }
+  | { kind: "cutover_not_enabled" }
+  | { kind: "run"; connectionId: string; switch: PlacementSwitch }
+  | {
+      kind: "wait";
+      reason: WaitReason;
+      earliestResetAt: Date | null;
+      /** When a quarantined connection in this world returns, if sooner than any reset. */
+      healthRetryAt: Date | null;
+      explicitConnectionId: string | null;
+    };
+
+/**
+ * Decide where this exact accepted turn would run now, without leasing,
+ * binding or writing anything. Waiter reconciliation uses it to decide
+ * between resuming the blocked turn and waiting longer; the resumed attempt
+ * then places (and leases) through placeSubscriptionCoreCodexTurn, which
+ * rechecks everything in its own transaction.
+ */
+export async function evaluateSubscriptionCoreCodexPlacement(
+  db: Database,
+  request: {
+    identity: SubscriptionCoreTurnIdentity;
+    productModelId: string;
+    reasoningLevel: string;
+    now?: Date;
+  },
+): Promise<SubscriptionCoreCodexPlacementEvaluation> {
+  const { identity } = request;
+  const now = request.now ?? new Date();
+  const result = await withSubscriptionCorePlacementWorld(
+    db,
+    codexPlacementWorldRequest(identity, request.productModelId, request.reasoningLevel, now),
+    async (tx, worldInput): Promise<SubscriptionCoreCodexPlacementEvaluation> => {
+      if (!(await codexCutoverEnabled(tx, identity.accountId)))
+        return { kind: "cutover_not_enabled" };
+      const input = await codexPlacementInput(tx, identity, worldInput, request.productModelId);
+      const decision: PlacementDecision = decidePlacement(input);
+      if (decision.kind === "run") {
+        return { kind: "run", connectionId: decision.connectionId, switch: decision.switch };
+      }
+      const binding = input.session.binding;
+      return {
+        kind: "wait",
+        reason: decision.reason,
+        earliestResetAt:
+          decision.earliestResetAt === null ? null : new Date(decision.earliestResetAt),
+        healthRetryAt: await earliestCodexHealthRetryAt(tx, identity),
+        explicitConnectionId: binding?.choice === "explicit" ? binding.connectionId : null,
+      };
+    },
+  );
+  return result.status === "not_visible" ? { kind: "not_visible" } : result.value;
+}
+
+/**
+ * Return due time-bound quarantines (a 403 refusal) to service, inside this
+ * exact accepted turn's own transaction. The SQL function filters explicitly
+ * (it does not rely on row-level security, which its owner may bypass):
+ * shared connections by the ordinary visibility rule for this workspace and
+ * turn, personal connections only for the owner's own turn (stored turn
+ * human = owner; never a service or API-key turn) with the owner's
+ * membership still active and a frozen v2 entry for the connection's
+ * membership and generation. Sign-in failures and administrator status changes
+ * are never cleared here (any other status or error write drops the retry
+ * time). Returns how many connections recovered, so the caller can wake
+ * waiters that may now place.
+ */
+export async function recoverSubscriptionCoreCodexConnectionHealth(
+  db: Database,
+  identity: SubscriptionCoreTurnIdentity,
+): Promise<number> {
+  const access = await withSubscriptionCoreAcceptedTurn(db, identity, async (tx) => {
+    if (!(await codexCutoverEnabled(tx, identity.accountId))) return 0;
+    const [row] = await rawRows<{ recovered: number | string }>(
+      tx,
+      sql`select opengeni_private.recover_subscription_codex_connection_health(
+          ${identity.accountId}::uuid, ${identity.workspaceId}::uuid,
+          ${identity.sessionId}::uuid, ${identity.turnId}::uuid
+        ) as recovered`,
+    );
+    return Number(row?.recovered ?? 0);
+  });
+  return access.status === "completed" ? access.value : 0;
+}
+
+/** How long a 403 that survived refresh keeps a connection out of placement. */
+export const SUBSCRIPTION_CORE_CODEX_FORBIDDEN_QUARANTINE_MS = 60 * 60 * 1000;
+/** How long a plan-entitlement refusal keeps a model off a connection (legacy parity, 0524). */
+export const SUBSCRIPTION_CORE_CODEX_ENTITLEMENT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Record a refusal that survived refresh as connection health, so eligibility
+ * excludes the connection and sticky placement does not return to it:
+ * a revoked sign-in becomes `needs_relogin` (cleared only by a new sign-in),
+ * and a 403 becomes a time-bound `error` quarantine. Written only for the
+ * exact accepted turn holding the live lease, under the refresh-generation
+ * compare-and-swap of the credential that was refused.
+ */
+export async function quarantineSubscriptionCoreCodexConnection(
+  db: Database,
+  identity: SubscriptionCoreTurnIdentity,
+  lease: SubscriptionCoreCodexLeaseRef,
+  input: {
+    kind: "sign_in" | "forbidden";
+    refreshGeneration: number;
+    now?: Date;
+  },
+): Promise<boolean> {
+  const now = input.now ?? new Date();
+  const forbidden = input.kind === "forbidden";
+  const access = await withLeasedCodexConnection(db, identity, lease, async (tx) => {
+    const [row] = await rawRows<{ marked: boolean }>(
+      tx,
+      sql`select opengeni_private.quarantine_subscription_codex_connection(
+          ${identity.accountId}::uuid, ${identity.workspaceId}::uuid,
+          ${identity.sessionId}::uuid, ${identity.turnId}::uuid,
+          ${lease.connectionId}::uuid, ${lease.holderId}, ${lease.generation}::bigint,
+          ${input.refreshGeneration}::bigint,
+          ${forbidden ? "error" : "needs_relogin"},
+          ${
+            forbidden
+              ? "model request was forbidden for this credential"
+              : "model request remained unauthorized after refresh"
+          },
+          ${
+            forbidden
+              ? new Date(
+                  now.getTime() + SUBSCRIPTION_CORE_CODEX_FORBIDDEN_QUARANTINE_MS,
+                ).toISOString()
+              : null
+          }::timestamptz
+        ) as marked`,
+    );
+    return row?.marked === true;
+  });
+  return access.status === "ok" && access.value;
+}
+
+/**
+ * Keep one model off the leased connection until `until` after the plan
+ * refused it (SUB-ELIG-03). The cooldown is part of the connection's quota
+ * state, so placement excludes the model there, a waiter learns when it
+ * returns, and a plan change seen on refresh clears it early. Fenced on the
+ * refresh generation the refused bearer carried; never shortens a cooldown.
+ */
+export async function recordSubscriptionCoreCodexModelCooldown(
+  db: Database,
+  identity: SubscriptionCoreTurnIdentity,
+  lease: SubscriptionCoreCodexLeaseRef,
+  input: { modelId: string; until: Date; refreshGeneration: number },
+): Promise<boolean> {
+  if (!input.modelId.trim() || input.modelId.length > 256) return false;
+  const access = await withLeasedCodexConnection(db, identity, lease, async (tx) => {
+    const [connection] = await rawRows<{ refresh_generation: number | string }>(
+      tx,
+      sql`select refresh_generation from subscription_connections
+        where account_id = ${identity.accountId}::uuid and provider = 'codex'
+          and id = ${lease.connectionId}::uuid`,
+    );
+    if (!connection || Number(connection.refresh_generation) !== input.refreshGeneration)
+      return false;
+    const empty = {
+      windows: [],
+      modelCooldowns: {},
+      exhaustedUntil: null,
+      exhaustedKind: null,
+      source: "refusal",
+    };
+    const rows = await rawRows<{ connection_id: string }>(
+      tx,
+      sql`insert into subscription_connection_quota (
+          account_id, connection_id, quota, observed_refresh_generation, revision, updated_at
+        ) values (
+          ${identity.accountId}::uuid, ${lease.connectionId}::uuid,
+          jsonb_set(${JSON.stringify(empty)}::jsonb, array['modelCooldowns', ${input.modelId}],
+            to_jsonb(${input.until.getTime()}::bigint)),
+          ${input.refreshGeneration}, 1, clock_timestamp()
+        )
+        on conflict (connection_id) do update
+          set quota = jsonb_set(
+                case when jsonb_typeof(subscription_connection_quota.quota->'modelCooldowns') = 'object'
+                  then subscription_connection_quota.quota
+                  else jsonb_set(subscription_connection_quota.quota, '{modelCooldowns}', '{}'::jsonb)
+                end,
+                array['modelCooldowns', ${input.modelId}],
+                to_jsonb(greatest(
+                  coalesce((subscription_connection_quota.quota->'modelCooldowns'->>${input.modelId})::bigint, 0),
+                  ${input.until.getTime()}::bigint
+                ))
+              ),
+              revision = subscription_connection_quota.revision + 1
+          where subscription_connection_quota.account_id = excluded.account_id
+        returning connection_id::text as connection_id`,
+    );
+    return rows.length === 1;
+  });
+  return access.status === "ok" && access.value;
 }
 
 async function readAttemptFence(
@@ -684,6 +1029,12 @@ export type SubscriptionCoreCodexRefreshOutcome =
 export type SubscriptionCoreCodexRefreshDeps = {
   refresh?: typeof refreshCodexToken;
   now?: () => Date;
+  /**
+   * Called after a persisted refresh whose id_token reports a plan different
+   * from the recorded one. The database already cleared the connection's
+   * model cooldowns; the caller wakes waiters that may now place.
+   */
+  onPlanChanged?: (connectionId: string) => void;
 };
 
 /**
@@ -725,9 +1076,17 @@ export async function refreshSubscriptionCoreCodexCredential(
           refresh_token: next.refreshToken ?? tokens.refreshToken,
           id_token: next.idToken ?? tokens.idToken,
         };
+        // The plan the rotated id_token carries is persisted with the token.
+        // Parsing cannot fail the refresh: an unreadable token keeps the plan.
+        let planType: string | null = null;
+        try {
+          planType = next.idToken ? parseIdToken(next.idToken).planType : null;
+        } catch {
+          planType = null;
+        }
         // Persist before any other fallible work: a rolled-back transaction
         // would discard the only valid refresh token.
-        const persisted = await persistSubscriptionCodexRefresh(tx, {
+        const persisted = await persistSubscriptionCodexRefreshWithPlan(tx, {
           accountId: identity.accountId,
           workspaceId: identity.workspaceId,
           sessionId: identity.sessionId,
@@ -737,14 +1096,9 @@ export async function refreshSubscriptionCoreCodexCredential(
           credentialEncrypted: encryptEnvironmentValue(key, JSON.stringify(rotated)),
           expiresAt: accessTokenExpiry(rotated.access_token),
           lastRefreshAt: now(),
+          planType,
         });
         if (!persisted) return { kind: "superseded" };
-        let planType: string | null = null;
-        try {
-          planType = next.idToken ? parseIdToken(next.idToken).planType : null;
-        } catch {
-          planType = null;
-        }
         return {
           kind: "refreshed",
           accessToken: rotated.access_token,
@@ -893,6 +1247,17 @@ export function buildSubscriptionCoreCodexTokenResolver(
     const outcome = await sharedRefresh(credential);
     switch (outcome.kind) {
       case "refreshed":
+        if (
+          outcome.planType !== null &&
+          credential.planType !== null &&
+          outcome.planType !== credential.planType
+        ) {
+          try {
+            deps.onPlanChanged?.(lease.connectionId);
+          } catch {
+            // A wake hint must never fail the request it rode on.
+          }
+        }
         return {
           accessToken: outcome.accessToken,
           chatgptAccountId: credential.chatgptAccountId,
@@ -938,6 +1303,21 @@ export async function recordSubscriptionCoreCodexQuotaObservation(
   lease: SubscriptionCoreCodexLeaseRef,
   observation: SubscriptionQuota,
 ): Promise<boolean> {
+  return (await applySubscriptionCoreCodexQuotaObservation(db, identity, lease, observation))
+    .applied;
+}
+
+/**
+ * Same as recordSubscriptionCoreCodexQuotaObservation, and also reports
+ * whether the observation ended an exhaustion the store still held: that is
+ * a capacity change other waiters must hear about (the caller wakes them).
+ */
+export async function applySubscriptionCoreCodexQuotaObservation(
+  db: Database,
+  identity: SubscriptionCoreTurnIdentity,
+  lease: SubscriptionCoreCodexLeaseRef,
+  observation: SubscriptionQuota,
+): Promise<{ applied: boolean; recovered: boolean }> {
   const access = await withLeasedCodexConnection(db, identity, lease, async (tx) => {
     const [connection] = await rawRows<{ refresh_generation: number | string }>(
       tx,
@@ -945,7 +1325,7 @@ export async function recordSubscriptionCoreCodexQuotaObservation(
         where account_id = ${identity.accountId}::uuid and provider = 'codex'
           and id = ${lease.connectionId}::uuid`,
     );
-    if (!connection) return false;
+    if (!connection) return { applied: false, recovered: false };
     const refreshGeneration = Number(connection.refresh_generation);
     const [row] = await rawRows<{
       quota: unknown;
@@ -963,7 +1343,12 @@ export async function recordSubscriptionCoreCodexQuotaObservation(
     );
     const current = row ? decodeSubscriptionQuota(row) : null;
     const next = applyQuotaObservation({ refreshGeneration, quota: current }, observation);
-    if (!next || next === current) return false;
+    if (!next || next === current) return { applied: false, recovered: false };
+    const observedNow = observation.observedAt ?? Date.now();
+    const recovered =
+      current !== null &&
+      quotaCapacity(current, observedNow).kind === "exhausted" &&
+      quotaCapacity(next, observedNow).kind !== "exhausted";
     const stored = {
       windows: next.windows,
       modelCooldowns: next.modelCooldowns,
@@ -986,9 +1371,9 @@ export async function recordSubscriptionCoreCodexQuotaObservation(
               updated_at = excluded.updated_at
           where subscription_connection_quota.account_id = excluded.account_id`,
     );
-    return true;
+    return { applied: true, recovered };
   });
-  return access.status === "ok" && access.value;
+  return access.status === "ok" ? access.value : { applied: false, recovered: false };
 }
 
 /** A (turn, connection) failure receipt for core settlement and audit. */
@@ -1013,13 +1398,44 @@ export async function recordSubscriptionCoreCodexTurnFailure(
         )
         on conflict (workspace_id, turn_id, connection_id) do update
           set failure_kind = excluded.failure_kind,
-              recovery_evidence = excluded.recovery_evidence
+              -- Every refusal of this turn by this connection is counted, so
+              -- the per-turn failover bound covers alternating accounts too.
+              recovery_evidence = excluded.recovery_evidence || jsonb_build_object(
+                'refusals',
+                coalesce((subscription_turn_failures.recovery_evidence->>'refusals')::integer, 1) + 1
+              )
           where subscription_turn_failures.account_id = excluded.account_id
         returning turn_id::text as turn_id`,
     );
     return rows.length === 1;
   });
   return access.status === "ok" && access.value;
+}
+
+/**
+ * How many times connections refused this exact turn (each failure receipt
+ * counts its refusals). The in-turn failover bound reads it after recording
+ * the refusal it is settling. Null when the turn is not visible or the gate
+ * is off, which callers treat as "do not fail over".
+ */
+export async function countSubscriptionCoreCodexTurnRefusals(
+  db: Database,
+  identity: SubscriptionCoreTurnIdentity,
+): Promise<number | null> {
+  const access = await withSubscriptionCoreAcceptedTurn(db, identity, async (tx) => {
+    if (!(await codexCutoverEnabled(tx, identity.accountId))) return null;
+    const [row] = await rawRows<{ refusals: number | string | null }>(
+      tx,
+      sql`select coalesce(sum(coalesce((recovery_evidence->>'refusals')::integer, 1)), 0) as refusals
+        from subscription_turn_failures
+        where account_id = ${identity.accountId}::uuid
+          and workspace_id = ${identity.workspaceId}::uuid
+          and session_id = ${identity.sessionId}::uuid
+          and turn_id = ${identity.turnId}::uuid and provider = 'codex'`,
+    );
+    return Number(row?.refusals ?? 0);
+  });
+  return access.status === "completed" ? access.value : null;
 }
 
 /**

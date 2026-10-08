@@ -6,8 +6,12 @@
  */
 import type { CodexUsageHeaderSnapshot } from "@opengeni/codex";
 import {
+  applySubscriptionCoreCodexQuotaObservation,
+  quarantineSubscriptionCoreCodexConnection,
+  recordSubscriptionCoreCodexModelCooldown,
   recordSubscriptionCoreCodexQuotaObservation,
   recordSubscriptionCoreCodexTurnFailure,
+  SUBSCRIPTION_CORE_CODEX_ENTITLEMENT_COOLDOWN_MS,
   touchSubscriptionCoreCodexBinding,
   type Database,
   type SubscriptionCoreCodexLeaseRef,
@@ -103,10 +107,20 @@ function leaseRef(
 }
 
 /**
- * Record a definitive Codex refusal against the leased connection: a
- * (turn, connection) failure receipt, and for quota and rate limits a quota
- * observation fenced on the refresh generation the refused bearer carried.
- * Health changes for revoked sign-ins are written by the refresh seam itself.
+ * Record a definitive Codex refusal against the leased connection: always a
+ * (turn, connection) failure receipt, which also counts toward the per-turn
+ * failover bound, then the connection state that keeps placement away from
+ * it (M3 PR 2a):
+ *
+ * - quota and rate limits: a quota observation fenced on the refresh
+ *   generation the refused bearer carried (exhausted until the reset);
+ * - a 401 that survived refresh: health `needs_relogin` (the refresh seam
+ *   itself already marks a refused OAuth refresh);
+ * - a 403 that survived refresh: a time-bound health quarantine;
+ * - a plan-entitlement refusal: a cooldown of that model on the connection.
+ *
+ * Every write requires the exact accepted turn, the enabled gate and this
+ * turn's live lease. `receipt` reports whether the refusal was recorded.
  */
 export async function recordCoreCodexRefusal(input: {
   db: Database;
@@ -114,41 +128,72 @@ export async function recordCoreCodexRefusal(input: {
   lease: Pick<CodexTurnLease, "holderId" | "generation">;
   failure: CodexCredentialFailure;
   credentialVersion: number | null;
+  /** The refused model; required to keep a plan-entitlement refusal model-scoped. */
+  modelId?: string | null;
   now?: Date;
-}): Promise<void> {
+}): Promise<{ receipt: boolean; health: boolean }> {
   const ref = leaseRef(input.core, input.lease);
-  if (!ref) return;
+  if (!ref) return { receipt: false, health: false };
+  const now = input.now ?? new Date();
   const generation = input.credentialVersion ?? input.core.placedRefreshGeneration;
-  const observation = codexRefusalQuotaObservation(
-    input.failure,
-    generation,
-    input.now ?? new Date(),
-  );
-  await Promise.allSettled([
-    recordSubscriptionCoreCodexTurnFailure(input.db, input.core.identity, ref, {
-      kind: input.failure.kind,
-      evidence: {
-        refreshGeneration: generation,
-        cooldownSeconds: input.failure.cooldownSeconds,
-      },
-    }),
-    ...(observation
-      ? [
-          recordSubscriptionCoreCodexQuotaObservation(
-            input.db,
-            input.core.identity,
-            ref,
-            observation,
-          ),
-        ]
-      : []),
-  ]);
+  const receipt = await recordSubscriptionCoreCodexTurnFailure(input.db, input.core.identity, ref, {
+    kind: input.failure.kind,
+    evidence: {
+      refreshGeneration: generation,
+      cooldownSeconds: input.failure.cooldownSeconds,
+    },
+  }).catch(() => false);
+  let health = false;
+  try {
+    switch (input.failure.kind) {
+      case "quota":
+      case "rate_limit": {
+        const observation = codexRefusalQuotaObservation(input.failure, generation, now);
+        health = observation
+          ? await recordSubscriptionCoreCodexQuotaObservation(
+              input.db,
+              input.core.identity,
+              ref,
+              observation,
+            )
+          : false;
+        break;
+      }
+      case "auth":
+      case "forbidden":
+        health = await quarantineSubscriptionCoreCodexConnection(
+          input.db,
+          input.core.identity,
+          ref,
+          {
+            kind: input.failure.kind === "auth" ? "sign_in" : "forbidden",
+            refreshGeneration: generation,
+            now,
+          },
+        );
+        break;
+      case "plan_entitlement":
+        health = input.modelId
+          ? await recordSubscriptionCoreCodexModelCooldown(input.db, input.core.identity, ref, {
+              modelId: input.modelId,
+              until: new Date(now.getTime() + SUBSCRIPTION_CORE_CODEX_ENTITLEMENT_COOLDOWN_MS),
+              refreshGeneration: generation,
+            })
+          : false;
+        break;
+    }
+  } catch {
+    health = false;
+  }
+  return { receipt, health };
 }
 
 /**
  * Finalization for a core turn: the latest usage headers become a quota
  * observation on the leased connection, and a completed model call moves
  * the binding's cache-warmth clock. Both run before the lease is released.
+ * `capacityRecovered` reports an observation that ended a stored exhaustion,
+ * which the caller turns into a wake for the account's waiters.
  */
 export async function finalizeCoreCodexUsage(input: {
   db: Database;
@@ -157,18 +202,21 @@ export async function finalizeCoreCodexUsage(input: {
   usage: CodexUsageHeaderSnapshot | null;
   credentialVersion: number | null;
   modelCallCompletedAt: Date | null;
-}): Promise<void> {
+}): Promise<{ capacityRecovered: boolean }> {
   const ref = leaseRef(input.core, input.lease);
-  if (!ref) return;
+  if (!ref) return { capacityRecovered: false };
+  let capacityRecovered = false;
   const writes: Promise<unknown>[] = [];
   if (input.usage && input.credentialVersion !== null) {
     writes.push(
-      recordSubscriptionCoreCodexQuotaObservation(
+      applySubscriptionCoreCodexQuotaObservation(
         input.db,
         input.core.identity,
         ref,
         codexUsageHeadersQuotaObservation(input.usage, input.credentialVersion),
-      ),
+      ).then((applied) => {
+        capacityRecovered = applied.recovered;
+      }),
     );
   }
   if (input.modelCallCompletedAt) {
@@ -182,4 +230,5 @@ export async function finalizeCoreCodexUsage(input: {
     );
   }
   await Promise.allSettled(writes);
+  return { capacityRecovered };
 }

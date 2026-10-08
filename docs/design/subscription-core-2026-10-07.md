@@ -856,7 +856,8 @@ fail-closed reading of this plan and the contract where they were silent.
   the turn with typed copy (`subscription_capacity_unavailable` with the wait
   reason and known reset), leaves the session idle for the next message and
   wakes a waiting parent, instead of parking on a waiter nothing would wake.
-  No core waiter row is written.
+  No core waiter row is written. (Superseded by PR 2a, below: the turn now
+  parks on a durable core waiter.)
 - **Failure, usage and release.** Core turns never reach the legacy Codex
   settlement. Lease loss recovers the same turn (`codex_lease_lost`), as for
   Claude and SuperGrok. Quota and rate-limit refusals record a
@@ -879,7 +880,8 @@ fail-closed reading of this plan and the contract where they were silent.
   compaction and title generation use the core bearer and touch no legacy
   table.
 
-Deferred to PR 2 (all behind the same gate):
+Deferred to PR 2 (all behind the same gate; PR 2a below takes the first
+six items, PR 2b the rest):
 
 - core capacity waiters, the wake delivery loop and both-shape workflow
   reconciliation (EP-T09/T10);
@@ -905,6 +907,214 @@ organization.
 
 Migration 0668 follows the precursor's 0667; renumber with
 `scripts/renumber-migration.ts` if the shared ledger moves again.
+
+##### PR 2a: Codex chat waits, wakes, re-placement and health (dormant)
+
+PR 2 is split. PR 2a completes the Codex chat path on the core: EP-T06
+(in-turn re-placement), EP-T09/T10 (durable waits and wakes), connection
+health for refusals, re-selection points, plan persistence on refresh, and
+the v2 accepted-authority writer (EP-T11..T15). PR 2b takes everything else
+from the PR 2 list: compaction, transcription, realtime, media, the Apps
+gateway and designation, reset credits, billing attribution and the
+route/SDK/React compatibility projections. Everything below is reached only
+with an enabled Codex cutover row; without a row the legacy path is
+unchanged apart from a few extra reads: one indexed read of the (empty) core
+waiter table per workflow peek, `getCodexCapacityWait` and legacy Codex
+reconcile; one cutover-row read per non-edit human prompt and per non-child
+initial message (after a once-per-process `to_regprocedure` check that the
+writer routine exists); and one read of the causal turn per pure
+goal-continuation claim (not gated on the cutover, since the copy is a
+no-op when the causal value is NULL). Migration 0669 is rolling: nullable
+columns on tables the legacy path never reads, a trigger that only acts on
+the new `health_retry_at` column, and `SECURITY DEFINER` routines that
+refuse unless the cutover is enabled. It directly follows the stack's
+0667/0668 in dependency order; if those are renumbered again, this branch is
+rebased onto them and 0669 is renumbered with `--next` (no gaps), so it
+always stays after them.
+
+- **Waiter row.** A placement wait no longer fails the turn: the attempt is
+  closed and the same logical turn parks on the session's
+  `subscription_capacity_waiters` row, with the legacy Codex arm's lock order,
+  events (`codex.capacity.waiting`, `session.status.changed`), tool closure,
+  child "waiting for capacity" notice, goal fence (new `goal_id` and
+  `goal_version` columns) and false-resumption budget (the same
+  `codexCapacityRecoveryV1` turn metadata, ten resumptions with persisted
+  backoff). The row exists only while the turn waits: resuming or
+  superseding deletes it (and, by cascade, its outbox rows), so a timer or
+  signal that still carries an older waiter id finds nothing and is stale.
+  The next check is the earliest reset placement knows (authoritative); else
+  the earliest end of a health quarantine, if sooner than the bounded
+  control-plane backoff (1 minute doubling to 15). A check never calls the
+  provider; it only evaluates placement.
+- **Reconcile.** Two steps. Placement is evaluated for the exact accepted
+  turn without leasing or writing (`evaluateSubscriptionCoreCodexPlacement`),
+  then the waiter is settled under the session row locks: `run` makes the
+  blocked turn `recovering` (its next attempt places and leases normally);
+  `wait` updates the reason and schedule and acknowledges only the wake
+  revision the evaluation saw, so a capacity change that lands during the
+  evaluation is checked again at once; a turn whose accepted identity or
+  authority no longer admits core use is superseded
+  (`subscription_access_revoked`); a disabled cutover keeps the work parked
+  with the bounded backoff (maintenance behavior, never the legacy tables).
+  Pause leaves the waiter alone; a changed goal, session or turn supersedes
+  it at the next reconcile.
+- **Steer and Cancel.** As with the legacy waiter, the Steer and Cancel
+  transactions end the wait themselves: they delete the blocked turn's core
+  waiter (and, by cascade, its pending outbox rows) in the same commit that
+  supersedes or cancels the turn, so the Steer turn runs at once and a
+  cancelled session receives no further wakes. As defense in depth, the
+  workflow peek and `getCodexCapacityWait` treat a core row that no longer
+  belongs to the session's active turn in `waiting_capacity` as an immediate
+  check, whose reconcile supersedes and deletes it without placing; the
+  workflow never sleeps on such a row until its next check.
+- **Workflow compatibility.** The session workflow is unchanged. A core
+  waiter is addressed by the legacy Codex reference
+  `{ waiterId, generation, nextCheckAt, wakeRevision }` without a `provider`
+  field, so activity names, signal names and argument shapes are identical.
+  `getCodexCapacityWait`, `reconcileCodexCapacityWait` and the
+  `peekSessionWork` capacity branch look the waiter id up in the core table
+  first and fall back to the legacy Codex table; SuperGrok and Claude waits
+  never consult the core. An unobserved wake revision is reported as an
+  immediate check, which carries a lost signal across restart and
+  continue-as-new. The pinned legacy history and recorded core histories
+  (signal before peek, peek before signal, continue-as-new with a pending
+  wake, outbox retry) replay against the current bundle
+  (`test/integration/subscription-core-codex-wait.integration.ts`).
+- **Wakes.** `wakeSubscriptionCoreCodexCapacityWaiters` advances the wake
+  revision of every waiting core Codex waiter of the account. It enumerates
+  the organization's workspaces with the existing content-free
+  `list_organization_codex_workspace_ids` and writes in the trusted
+  empty-subject worker scope the outbox policy requires, never through legacy
+  active pointers. Each woken waiter gets a provider-neutral outbox row and a
+  generic session workflow wake in the same commit; the generic wake is the
+  crash-safe backstop the global dispatcher always delivers. Typed delivery
+  claims due rows (claim-generation fenced), signals `codexCapacityChanged`
+  with the waiter's wake revision through `signalWithStart`, then marks the
+  row delivered; a failed signal retries after 1 second doubling to 5
+  minutes and is given up after 8 attempts (the generic wake still reaches
+  the workflow). The retry is opportunistic, not scheduled: a row whose
+  retry time has come is delivered by the next wake or reconcile that drains
+  its workspace (every core reconcile drains its workspace's due rows first,
+  which also repairs a crash between the database wake and the signal); until
+  then the generic wake committed with the row is what reaches the workflow.
+  A host without a typed signaler claims nothing and leaves the rows pending
+  for a worker that has one. Producers in
+  this PR: a usage observation that ended a stored exhaustion
+  (finalization), a quarantine that returned to service, and a plan change
+  on refresh. A reached reset is the waiter's own timer. Wakes are
+  account-wide hints (no per-connection filter); every waiter re-places
+  under its own accepted turn, and the workflow's jitter spreads the herd.
+  Binding/pin, assignment and administrator health changes belong to the
+  PR 2b route adapters, which must call the same function.
+- **In-turn re-placement and bound (EP-T06).** A definitive refusal on a core
+  turn records a failure receipt and the state that keeps placement away from
+  the connection (below). After a durable checkpoint the lease is released
+  and the same accepted turn recovers with a new attempt
+  (`codex_credential_failover`), whose placement chooses again: another
+  eligible account (the binding moves and the existing
+  `codex.account.switched` is emitted), or a durable wait. An explicit choice
+  never fails over: its next placement waits on the chosen account (D-24).
+  The contract requires a bound but fixes none; **the bound is four refusals
+  per turn (at most three switches)**, counted over every refusal by any
+  account including repeats (the receipt keeps a per-connection `refusals`
+  count), so a turn cannot alternate between failing accounts (SUB-FAIL-11).
+  The recovery detail keeps the legacy switch counters (`failoverCount` n of
+  `maxFailovers` 3); the refusal that reaches the bound fails the turn with
+  `subscription_failover_exhausted`, `refusals: 4, maxRefusals: 4`, and an
+  idle session. The explicit-pin rule itself is PR 1's placement; PR 2a's
+  Postgres suite also proves a pin refused mid-turn (a 403) re-places to a
+  `pinned_account_unavailable` wait with the quarantine's end, never to
+  another account. A refusal whose
+  receipt could not be recorded, or whose checkpoint did not become durable,
+  is not replayed: the turn keeps PR 1's typed terminal copy. Mid-turn loss of
+  access (`subscription_core_access_lost`) stays terminal, the stricter
+  reading; re-placing it is left to a later change.
+- **Connection health.** Written only by `SECURITY DEFINER` routines that
+  require the enabled cutover, the exact accepted turn's session-access
+  capability in the same transaction and that turn's live lease on the
+  connection, under the refresh-generation compare-and-swap of the refused
+  credential (a refusal seen with an older token family cannot quarantine a
+  renewed one). They reuse the existing one-statement `codex_refresh_write`
+  capability; the application role has no other write path.
+  - A 401 that survived refresh marks the connection `needs_relogin`
+    (cleared only by a new sign-in; the refresh seam already marks a refused
+    OAuth refresh).
+  - A 403 refusal (only a 401 triggers a refresh first) sets
+    `status = 'error'` with `health_retry_at` one hour later. The next
+    placement or waiter check that could lease the connection returns due
+    quarantines to service and wakes the account's waiters; a waiter's next
+    check includes the quarantine's end. The recovery routine filters
+    explicitly rather than relying on row-level security (its owner may
+    bypass it): shared rows by `subscription_connection_visible` for the
+    turn's workspace, personal rows only for the owner's own turn (the
+    stored turn human is the owner, so a service or API-key turn in the
+    owner's session never qualifies) whose frozen v2 authority names the
+    row's owner membership and authority generation, exactly as placement
+    decides. Only quarantines this mechanism wrote are cleared: a
+    `BEFORE UPDATE` trigger drops `health_retry_at` whenever another write
+    changes the status or the error without setting it (an administrator, a
+    sign-in failure, or a failed refresh that marks the connection; a
+    successful refresh changes neither, so the quarantine stands), so an
+    unrelated later `error` is never cleared by a leftover retry time.
+  - A plan-entitlement refusal becomes a 24-hour cooldown of that model on
+    the connection's quota state (legacy 0524 parity), so placement excludes
+    only that model there and a waiter learns when it returns.
+- **Plan persistence.** `persist_subscription_codex_refresh_with_plan` is the
+  persist seam plus the plan from the rotated id_token, under the same
+  one-shot authorization and compare-and-swap; a missing plan keeps the
+  recorded one. A changed plan clears the connection's model cooldowns in
+  the same commit and the worker wakes the account's waiters.
+- **Re-selection points.** `model_changed` (the turn's accepted model is not
+  the bound model) and `compaction_completed` (the session's latest durable
+  `session.context.compacted` or `session.context.cleared` event occurred
+  after the binding's last recorded model call; an unknown input-token count
+  is not a compaction) are passed to placement and to waiter evaluation.
+  Both release only an automatic binding.
+- **v2 accepted-authority writer (EP-T11..T15).** With the Codex cutover
+  enabled, acceptance freezes the Codex entry of
+  `session_turns.subscription_authority` through
+  `subscription_codex_acceptance_authority_v2`; without an enabled cutover
+  nothing is computed and the column stays NULL (v1 authoritative). A
+  personal entry is written only for exact owner-caused acceptance: the
+  authenticated request subject (or, in the trusted session-start context,
+  the session's frozen subject creator) is the session owner, the owner
+  membership is active, and the session is private or in the owner's
+  Personal workspace. The generation is the single authority generation
+  across the owner's own personal Codex connections that can serve without
+  a human (`active`, or `error` under a time-bound quarantine), each joined
+  to its exact active authority as placement joins it; other providers'
+  authorities and connections waiting for a new sign-in or disabled do not
+  count. When those Codex connections still carry different generations (a
+  re-grant not yet applied to all of them), or there are none, the value is
+  empty (strictest: never a wider grant). Every other acceptance writes the
+  empty v2 value. Acceptance calls the routine only once
+  `to_regprocedure` finds it, so an enabled cutover row on a database that
+  predates 0669 writes nothing instead of failing the prompt.
+  Claude and SuperGrok keep v1. Coverage:
+  - human prompts (`submitHumanPromptInTransaction`): resolved for the human;
+    an edit copies its source turn's value; operator, service and API-key
+    actors get the empty value;
+  - the initial session message (`initializeSessionStartAtomically`):
+    resolved for the owner creator; a child session's first turn gets none;
+  - goal continuations: a delivery made only of goal continuations copies
+    its exact causal turn's value when that turn's human is this turn's human
+    (the claim derives the continuation's human from that causal turn, so the
+    human check is a defensive fence rather than a reachable branch).
+  Kept empty (shared capacity only) and left to PR 3, with the reason:
+  agent messages and Steer (EP-T14 asks for the receiving session's value,
+  which has no single frozen v2 source yet); batched internal updates and
+  child-result notices; child agents' first turns (EP-T13); scheduled tasks
+  and their firings (EP-T15: `scheduled_tasks`,
+  `scheduled_task_revision_authorities`, `session_system_updates`, the outbox
+  and `sessions.initial_*` have no v2 column yet); compaction turns (moved
+  with compaction in PR 2b).
+
+Known gaps after PR 2a: an ownerless session has no binding, so its
+re-placement emits no `codex.account.switched`; wakes are not filtered by
+connection; the core reconcile acknowledges at most the revision it
+evaluated, so a burst of wakes may cost one extra check; the "Running on"
+display and the legacy pointer stay PR 2b; the PR 3 precondition above
+(gateway and capability overlays) is unchanged.
 
 #### Verification plan
 

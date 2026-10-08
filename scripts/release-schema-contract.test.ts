@@ -246,6 +246,12 @@ describe("release schema contract", () => {
     if (subscriptionCoreCodexChatAuthority) {
       expect(subscriptionCoreCodexChatAuthority.deploymentMode).toBe("rolling");
     }
+    const subscriptionCoreCodexWaits = sourceContract.migrations.find(
+      (migration) => migration.path === "0669_subscription_core_codex_waits.sql",
+    );
+    if (subscriptionCoreCodexWaits) {
+      expect(subscriptionCoreCodexWaits.deploymentMode).toBe("rolling");
+    }
     // Keep the published-history assertions below scoped to their existing
     // migration range; the new forward migration is checked explicitly above.
     let completeSourceContract = failedSessionVariableSetAttach
@@ -2154,6 +2160,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0669_subscription_core_codex_waits.sql",
       "0668_subscription_core_codex_chat_authority.sql",
       "0667_subscription_authority_refresh_contract.sql",
       "0647_slack_bot_branding.sql",
