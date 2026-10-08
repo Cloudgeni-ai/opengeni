@@ -789,9 +789,10 @@ function retainedProcessTerminalProof(
     result,
   );
   if (nativePage)
-    return nativePage.collectionUnavailable ||
-      nativePage.exitCode === null ||
-      nativePage.sessionId !== undefined
+    // A trusted adapter can separately authenticate physical exit after losing
+    // stream EOF. Settle physical custody after captured partial pages, while
+    // the synchronous collector still rejects collectionUnavailable output.
+    return nativePage.exitCode === null || nativePage.sessionId !== undefined
       ? null
       : { outcome: "exited", exitCode: nativePage.exitCode, reason: "provider_exit_banner" };
   if (isExecSessionLostBanner(result, providerSessionId, source)) {
@@ -1712,6 +1713,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       structured &&
       (typeof structured.stdout === "string" || typeof structured.stderr === "string")
     ) {
+      if (nativePage && typeof result === "string") record.pendingProviderReceipt = result;
       for (const stream of ["stdout", "stderr"] as const) {
         const chunk = structured[stream];
         if (typeof chunk === "string" && chunk)

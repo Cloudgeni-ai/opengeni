@@ -61,6 +61,7 @@ import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "
 import { nextDurableOpId } from "../op-correlation";
 import { parseOpenSandboxSignedUriPath, redactOpenSandboxSignedUriPath } from "../stream-port";
 import type { RuntimeMetricsHooks } from "../../metrics";
+import type { SynchronousCommandPage } from "../synchronous-command";
 
 const WORKSPACE_ROOT = "/workspace";
 const PRIVATE_ROOT = "/tmp/opengeni-private";
@@ -132,7 +133,7 @@ export interface OpenSandboxSessionState extends SandboxSessionState {
   expiresAt: string | null;
 }
 
-type ProcessEvent = { stream: "stdout" | "stderr"; text: string };
+type ProcessEvent = { stream: "stdout" | "stderr"; text: string; commandOutput?: false };
 type ProcessOutcome = {
   exitCode: number | null;
   error?: unknown;
@@ -149,6 +150,9 @@ type RetainedProcess = {
   completed: Promise<ProcessOutcome>;
   settled: boolean;
   transportUncertain: boolean;
+  /** Status can prove physical exit, never reconstruct a lost event stream. */
+  outputUnavailable: boolean;
+  outputCursor: { stdout: number; stderr: number };
 };
 
 function canonicalBaseUrl(value: string): string {
@@ -341,9 +345,26 @@ function consumeProcessOutput(process: RetainedProcess): {
   output: string;
   stdout: string;
   stderr: string;
+  commandStdout: string;
+  commandStderr: string;
+  outputCursor: {
+    expected: { stdout: number; stderr: number };
+    next: { stdout: number; stderr: number };
+  };
 } {
   const events = process.events.slice(process.cursor);
   process.cursor = process.events.length;
+  const commandStdout = events
+    .filter((entry) => entry.stream === "stdout" && entry.commandOutput !== false)
+    .map((entry) => entry.text)
+    .join("");
+  const commandStderr = events
+    .filter((entry) => entry.stream === "stderr" && entry.commandOutput !== false)
+    .map((entry) => entry.text)
+    .join("");
+  const expected = { ...process.outputCursor };
+  process.outputCursor.stdout += Buffer.byteLength(commandStdout);
+  process.outputCursor.stderr += Buffer.byteLength(commandStderr);
   return {
     output: events.map((entry) => entry.text).join(""),
     stdout: events
@@ -354,6 +375,9 @@ function consumeProcessOutput(process: RetainedProcess): {
       .filter((entry) => entry.stream === "stderr")
       .map((entry) => entry.text)
       .join(""),
+    commandStdout,
+    commandStderr,
+    outputCursor: { expected, next: { ...process.outputCursor } },
   };
 }
 
@@ -496,6 +520,8 @@ export class OpenSandboxSession {
   private nextSessionId = 1;
   private readonly processesBySession = new Map<number, RetainedProcess>();
   private readonly processesByOpId = new Map<string, RetainedProcess>();
+  private readonly synchronousResults = new WeakMap<object, SynchronousCommandPage>();
+  private readonly synchronousBanners = new Map<string, SynchronousCommandPage>();
 
   constructor(args: {
     state: OpenSandboxSessionState;
@@ -626,6 +652,53 @@ export class OpenSandboxSession {
     return "remote_operation";
   }
 
+  /** Adapter-owned event pages, never projections of the presentation banner.
+   * Reading a receipt does not acknowledge or release its output custody. */
+  getSynchronousCommandOutput(result: unknown): SynchronousCommandPage | null {
+    return typeof result === "string"
+      ? (this.synchronousBanners.get(result) ?? null)
+      : result && typeof result === "object"
+        ? (this.synchronousResults.get(result) ?? null)
+        : null;
+  }
+
+  async acknowledgeCommandOutput(result: string): Promise<void> {
+    const page = this.synchronousBanners.get(result);
+    if (page && !page.collectionUnavailable) this.synchronousBanners.delete(result);
+  }
+
+  private commandResult(
+    process: RetainedProcess,
+    consumed: ReturnType<typeof consumeProcessOutput>,
+    result: SandboxExecResult,
+  ): SandboxExecResult {
+    this.synchronousResults.set(result, {
+      stdout: consumed.commandStdout,
+      stderr: consumed.commandStderr,
+      exitCode: Number.isSafeInteger(result.exitCode) ? result.exitCode! : null,
+      ...(result.sessionId !== undefined ? { sessionId: result.sessionId } : {}),
+      wallTimeSeconds: result.wallTimeSeconds,
+      ...(process.outputUnavailable ? { collectionUnavailable: true } : {}),
+      outputCursor: {
+        identity: JSON.stringify([this.state.sandboxId, process.opId]),
+        ...consumed.outputCursor,
+      },
+    });
+    return result;
+  }
+
+  private commandBanner(result: SandboxExecResult): string {
+    let banner = formatExecResponse(result);
+    const page = this.synchronousResults.get(result);
+    if (page) {
+      // The SDK chooses the opaque Chunk ID. Do not rebind a still-owned
+      // receipt on a collision; formatting again performs no provider action.
+      while (this.synchronousBanners.has(banner)) banner = formatExecResponse(result);
+      this.synchronousBanners.set(banner, page);
+    }
+    return banner;
+  }
+
   private async ensureInitialManifestMaterialized(): Promise<void> {
     const provider = await this.ensureStarted();
     if (this.state.workspaceReady) return;
@@ -652,6 +725,8 @@ export class OpenSandboxSession {
       completed: Promise.resolve({ exitCode: 1 }),
       settled: false,
       transportUncertain: false,
+      outputUnavailable: false,
+      outputCursor: { stdout: 0, stderr: 0 },
     };
     this.processesByOpId.set(opId, process);
     process.completed = this.ensureInitialManifestMaterialized()
@@ -680,10 +755,16 @@ export class OpenSandboxSession {
           process.executionId = execution.id ?? null;
           process.resolveExecutionId(process.executionId);
         }
-        const exitCode =
-          typeof execution.exitCode === "number" ? execution.exitCode : execution.error ? 1 : 0;
+        const exitCode = execution.exitCode;
+        if (!execution.complete || !Number.isSafeInteger(exitCode)) {
+          // A resolved transport without its completion envelope is not stream
+          // EOF or exit proof. Keep the original execution for status/control.
+          process.outputUnavailable = true;
+          process.transportUncertain = true;
+          return { exitCode: null, uncertain: true };
+        }
         return {
-          exitCode,
+          exitCode: exitCode!,
           ...(execution.error ? { error: execution.error } : {}),
         };
       })
@@ -691,9 +772,11 @@ export class OpenSandboxSession {
         process.events.push({
           stream: "stderr",
           text: `${error instanceof Error ? error.message : String(error)}\n`,
+          commandOutput: false,
         });
         if (process.executionId) {
           process.transportUncertain = true;
+          process.outputUnavailable = true;
           return { exitCode: null, error, uncertain: true };
         }
         process.resolveExecutionId(null);
@@ -719,15 +802,19 @@ export class OpenSandboxSession {
     while (true) {
       try {
         const status = await provider.commands.getCommandStatus(executionId);
-        if (status.running === false) {
+        if (status.running === false && Number.isSafeInteger(status.exitCode)) {
           if (status.error) {
-            process.events.push({ stream: "stderr", text: `${status.error}\n` });
+            process.events.push({
+              stream: "stderr",
+              text: `${status.error}\n`,
+              commandOutput: false,
+            });
           }
           process.settled = true;
           process.transportUncertain = false;
           this.processesByOpId.delete(process.opId);
           return {
-            exitCode: status.exitCode ?? 1,
+            exitCode: status.exitCode!,
             ...(status.error ? { error: status.error } : {}),
           };
         }
@@ -756,7 +843,7 @@ export class OpenSandboxSession {
     const consumed = consumeProcessOutput(process);
     const output = truncateOutput(consumed.output, args.maxOutputTokens);
     if (outcome.error && !process.executionId) throw outcome.error;
-    return {
+    return this.commandResult(process, consumed, {
       output: output.text,
       stdout: consumed.stdout,
       stderr: consumed.stderr,
@@ -765,7 +852,7 @@ export class OpenSandboxSession {
       ...(output.originalTokenCount !== undefined
         ? { originalTokenCount: output.originalTokenCount }
         : {}),
-    };
+    });
   }
 
   async exec(args: ExecCommandArgs): Promise<SandboxExecResult> {
@@ -792,7 +879,7 @@ export class OpenSandboxSession {
       if (outcome.value.uncertain) {
         const sessionId = this.nextSessionId++;
         this.processesBySession.set(sessionId, process);
-        return {
+        return this.commandResult(process, consumed, {
           output: output.text,
           stdout: consumed.stdout,
           stderr: consumed.stderr,
@@ -801,10 +888,10 @@ export class OpenSandboxSession {
           ...(output.originalTokenCount !== undefined
             ? { originalTokenCount: output.originalTokenCount }
             : {}),
-        };
+        });
       }
       if (outcome.value.error && !process.executionId) throw outcome.value.error;
-      return {
+      return this.commandResult(process, consumed, {
         output: output.text,
         stdout: consumed.stdout,
         stderr: consumed.stderr,
@@ -813,11 +900,11 @@ export class OpenSandboxSession {
         ...(output.originalTokenCount !== undefined
           ? { originalTokenCount: output.originalTokenCount }
           : {}),
-      };
+      });
     }
     const sessionId = this.nextSessionId++;
     this.processesBySession.set(sessionId, process);
-    return {
+    return this.commandResult(process, consumed, {
       output: output.text,
       stdout: consumed.stdout,
       stderr: consumed.stderr,
@@ -826,11 +913,11 @@ export class OpenSandboxSession {
       ...(output.originalTokenCount !== undefined
         ? { originalTokenCount: output.originalTokenCount }
         : {}),
-    };
+    });
   }
 
   async execCommand(args: ExecCommandArgs): Promise<string> {
-    return formatExecResponse(await this.exec(args));
+    return this.commandBanner(await this.exec(args));
   }
 
   hasRetainedProcess(providerSessionId: number): boolean {
@@ -881,31 +968,39 @@ export class OpenSandboxSession {
       const provider = await this.ensureStarted();
       const status = await provider.commands.getCommandStatus(executionId);
       if (status.error) {
-        process.events.push({ stream: "stderr", text: `${status.error}\n` });
+        process.events.push({ stream: "stderr", text: `${status.error}\n`, commandOutput: false });
       }
       const consumed = consumeProcessOutput(process);
       const output = truncateOutput(consumed.output, args.maxOutputTokens);
-      if (status.running !== false) {
-        return formatExecResponse({
-          output: output.text,
-          wallTimeSeconds: elapsedSeconds(startedAt),
-          sessionId: args.sessionId,
-          ...(output.originalTokenCount !== undefined
-            ? { originalTokenCount: output.originalTokenCount }
-            : {}),
-        });
+      if (status.running !== false || !Number.isSafeInteger(status.exitCode)) {
+        return this.commandBanner(
+          this.commandResult(process, consumed, {
+            output: output.text,
+            stdout: consumed.stdout,
+            stderr: consumed.stderr,
+            wallTimeSeconds: elapsedSeconds(startedAt),
+            sessionId: args.sessionId,
+            ...(output.originalTokenCount !== undefined
+              ? { originalTokenCount: output.originalTokenCount }
+              : {}),
+          }),
+        );
       }
       process.settled = true;
       this.processesBySession.delete(args.sessionId);
       this.processesByOpId.delete(process.opId);
-      return formatExecResponse({
-        output: output.text,
-        wallTimeSeconds: elapsedSeconds(startedAt),
-        exitCode: status.exitCode ?? 1,
-        ...(output.originalTokenCount !== undefined
-          ? { originalTokenCount: output.originalTokenCount }
-          : {}),
-      });
+      return this.commandBanner(
+        this.commandResult(process, consumed, {
+          output: output.text,
+          stdout: consumed.stdout,
+          stderr: consumed.stderr,
+          wallTimeSeconds: elapsedSeconds(startedAt),
+          exitCode: status.exitCode!,
+          ...(output.originalTokenCount !== undefined
+            ? { originalTokenCount: output.originalTokenCount }
+            : {}),
+        }),
+      );
     }
     const outcome = await Promise.race([
       process.completed.then((value) => ({ done: true as const, value })),
@@ -916,24 +1011,36 @@ export class OpenSandboxSession {
     const consumed = consumeProcessOutput(process);
     const output = truncateOutput(consumed.output, args.maxOutputTokens);
     if (outcome.done) {
-      this.processesBySession.delete(args.sessionId);
-      return formatExecResponse({
+      // Loss can arrive while this read awaits completion, not only before it.
+      // The same alias remains available for exact status/control observation.
+      if (!outcome.value.uncertain) this.processesBySession.delete(args.sessionId);
+      return this.commandBanner(
+        this.commandResult(process, consumed, {
+          output: output.text,
+          stdout: consumed.stdout,
+          stderr: consumed.stderr,
+          wallTimeSeconds: elapsedSeconds(startedAt),
+          ...(outcome.value.uncertain
+            ? { sessionId: args.sessionId }
+            : { exitCode: outcome.value.exitCode }),
+          ...(output.originalTokenCount !== undefined
+            ? { originalTokenCount: output.originalTokenCount }
+            : {}),
+        }),
+      );
+    }
+    return this.commandBanner(
+      this.commandResult(process, consumed, {
         output: output.text,
+        stdout: consumed.stdout,
+        stderr: consumed.stderr,
         wallTimeSeconds: elapsedSeconds(startedAt),
-        exitCode: outcome.value.exitCode,
+        sessionId: args.sessionId,
         ...(output.originalTokenCount !== undefined
           ? { originalTokenCount: output.originalTokenCount }
           : {}),
-      });
-    }
-    return formatExecResponse({
-      output: output.text,
-      wallTimeSeconds: elapsedSeconds(startedAt),
-      sessionId: args.sessionId,
-      ...(output.originalTokenCount !== undefined
-        ? { originalTokenCount: output.originalTokenCount }
-        : {}),
-    });
+      }),
+    );
   }
 
   async writeStdinForProcessControl(args: WriteStdinArgs): Promise<string> {
