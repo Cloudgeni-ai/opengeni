@@ -77,6 +77,15 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
         subjectId: "human:upgrade-fixture",
       })
     ).workspaceGrants[0]!;
+    // Current session adapters select columns from later migrations. Supply
+    // only those reader columns for the seed, and remove them before replay.
+    await owner`alter table sessions
+      add column keep_live boolean not null default false,
+      add column content_archive_state text,
+      add column content_archive_started_at timestamptz,
+      add column content_archived_at timestamptz,
+      add column content_archive jsonb,
+      add column content_archive_purged_at timestamptz`;
     const session = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -193,6 +202,13 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
     expect(
       await owner`select column_name from information_schema.columns where table_name='session_attempt_codemode_calls' and column_name='durable_approval'`,
     ).toHaveLength(0);
+    await owner`alter table sessions
+      drop column keep_live,
+      drop column content_archive_state,
+      drop column content_archive_started_at,
+      drop column content_archived_at,
+      drop column content_archive,
+      drop column content_archive_purged_at`;
     // The real runner commits one file at a time: the rolling default may
     // succeed, but activation must refuse a still-connected runtime login.
     await expect(
