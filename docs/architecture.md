@@ -266,7 +266,7 @@ confirmation, and Automatic activates eligible proposals without another
 prompt. Every mode requires an exact live turn from the active organization
 owner and the company-profile compare-and-swap lifecycle; workspace Learning
 mode and admin authority cannot widen this scope. The web app shows it as an
-owner-only row on Knowledge > Agent learning, in the same Off / Review first /
+owner-only row on Settings > Agent learning, in the same Off / Review first /
 Automatic words as the workspace modes, while each store stays separate.
 
 Accepted conversation and tool content stays intact at its canonical boundary;
@@ -1098,7 +1098,8 @@ Library, Instructions and Review tabs on the Knowledge page (`/state`).
 navigation, including old Files, Skills, Memory and Documents links (a Documents
 `?authority=` link keeps its scope as the Library filter). Agent learning has one
 home per scope in the web app: workspace and private-chat defaults (plus the
-owner-only organization identity row) on Knowledge > Agent learning, and one
+owner-only organization identity row) on Settings > Agent learning (also opened
+from Knowledge's ⋯ menu), and one
 chat's override in the session dock's Agent tab beside its identity and
 capabilities (`apps/web/src/components/session/agent-configuration-panel.tsx`);
 the composer's Chat settings opens that tab. Groups appear

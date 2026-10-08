@@ -72,7 +72,7 @@ controls the result:
   through the existing company-profile compare-and-swap lifecycle, without a
   second human prompt.
 
-In the web app the owner changes this policy on Knowledge > Agent learning, as
+In the web app the owner changes this policy on Settings > Agent learning, as
 an owner-only **Organization identity** row beside the workspace modes and in
 the same Off / Review first / Automatic words. Organization settings >
 Organization identity shows the current mode as one row that links there. The

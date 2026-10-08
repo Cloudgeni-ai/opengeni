@@ -61,9 +61,9 @@ export function workspaceAgentDefaultsHref(workspaceId: string): string {
   return `/workspaces/${workspaceId}/settings?section=general&view=agent-defaults`;
 }
 
-/** Knowledge > Agent learning: the workspace and private-chat defaults. */
+/** Settings > Agent learning: the workspace and private-chat defaults. */
 export function agentLearningHref(workspaceId: string): string {
-  return `/workspaces/${workspaceId}/state?page=learning`;
+  return `/workspaces/${workspaceId}/settings?section=learning`;
 }
 
 export function AgentConfigurationPanel(props: {

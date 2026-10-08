@@ -1,5 +1,5 @@
 import type { KnowledgeEntryScope, KnowledgeEntrySummary } from "@opengeni/sdk";
-import { Navigate } from "@tanstack/react-router";
+import { Navigate, useNavigate } from "@tanstack/react-router";
 import {
   BrainCircuitIcon,
   FolderPlusIcon,
@@ -23,13 +23,7 @@ import { MoreMenu } from "@/components/ui/page-actions";
 import { PageHeader } from "@/components/ui/page-header";
 import { useAppContext } from "@/context";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
-import { orgLabel } from "@/lib/org";
-import { organizationSettingsAccess } from "@/lib/organization-settings-access";
-import {
-  canManageWorkspaceSettings,
-  hasAccountPermission,
-  hasWorkspacePermission,
-} from "@/lib/permissions";
+import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 
 import { errorText, useArchiveKnowledge } from "./knowledge-data";
 import { AddKnowledgePage, EntryEditPage, EntryPage, NewCollectionDialog } from "./knowledge-entry";
@@ -43,10 +37,8 @@ import {
 } from "./knowledge-instructions";
 import {
   AGENT_LEARNING_TITLE,
-  LearningPage,
   learningSummary,
   reviewEmptyLine,
-  useIdentityLearningPolicy,
   useLearningDefaults,
 } from "./knowledge-learning";
 import {
@@ -67,10 +59,11 @@ import { UploadFilesDialog } from "./knowledge-upload";
    Knowledge: one rail page with tabs Library, Instructions and Review (n),
    built like every resource page: a header with one primary action (Add
    knowledge) and a ⋯ menu, a toolbar, and flat lists of rows. Every entry,
-   each change waiting for review, the instructions, Agent learning, Add knowledge,
-   Edit and History open as their own pages in the content area with a back
+   each change waiting for review, the instructions, Add knowledge, Edit and
+   History open as their own pages in the content area with a back
    link. The URL says which one, so each page can be linked and the browser's
-   back button works.
+   back button works. Agent learning is a workspace settings page; the ⋯ menu
+   opens it there.
    -------------------------------------------------------------------------- */
 
 const TAB_LABEL: Record<KnowledgeTab, string> = {
@@ -92,18 +85,10 @@ export function KnowledgePage({
   const workspaceName = personal
     ? "your Personal workspace"
     : (workspace?.name ?? "this workspace");
-  const organizationName = workspace?.accountId
-    ? orgLabel(workspace.accountId, context.accessContext.accountGrants)
-    : null;
   const canEdit = hasWorkspacePermission(context.accessContext, workspaceId, "documents:manage");
   const canWriteOrganization = Boolean(
     workspace?.accountId &&
     hasAccountPermission(context.accessContext, workspace.accountId, "account:admin"),
-  );
-  const canManageWorkspace = canManageWorkspaceSettings(
-    context.accessContext,
-    workspace,
-    context.managedSelfContext,
   );
   const canEditInstructions = hasWorkspacePermission(
     context.accessContext,
@@ -116,6 +101,7 @@ export function KnowledgePage({
     hasWorkspacePermission(context.accessContext, workspaceId, "files:upload");
 
   const nav = useKnowledgeNavigation(workspaceId);
+  const navigate = useNavigate();
   const [library, setLibrary] = useState<LibraryView>(() => initialLibraryView(personal));
   const [refresh, setRefresh] = useState(0);
   const changed = useCallback(() => setRefresh((value) => value + 1), []);
@@ -158,20 +144,6 @@ export function KnowledgePage({
     onChanged: changed,
   });
   const shared = useLearningDefaults(workspaceId, personal ? "personal" : "workspace");
-  const mine = useLearningDefaults(workspaceId, "personal");
-  // Owner-only, the same rule as Organization settings > Organization identity.
-  const ownsOrganization = Boolean(
-    workspace?.accountId &&
-    organizationSettingsAccess({
-      accessContext: context.accessContext,
-      clientConfig: context.clientConfig,
-      accountId: workspace.accountId,
-    }).canManageCompanyProfileAgentPolicy,
-  );
-  const identityPolicy = useIdentityLearningPolicy(
-    workspaceId,
-    ownsOrganization && search.page === "learning",
-  );
   const instructions = useWorkspaceInstructions(workspaceId);
   const archive = useArchiveKnowledge(workspaceId, changed);
 
@@ -278,25 +250,23 @@ export function KnowledgePage({
     );
   }
 
+  // Agent learning is a settings page now; old Knowledge links open it there.
+  if (search.page === "learning") {
+    return (
+      <Navigate
+        to="/workspaces/$workspaceId/settings"
+        params={{ workspaceId }}
+        search={{ section: "learning" }}
+        replace
+      />
+    );
+  }
+
   const backToTab = () => nav.showTab(tab);
   const openEntry = (id: string, revision?: string) =>
     nav.openEntry(id, { ...(revision ? { revision } : {}), from: tab });
 
   const subpage = (() => {
-    if (search.page === "learning") {
-      return (
-        <LearningPage
-          workspaceName={workspace?.name ?? "this workspace"}
-          organizationName={organizationName}
-          personal={personal}
-          canManageWorkspace={canManageWorkspace}
-          shared={shared}
-          mine={mine}
-          identity={identityPolicy}
-          onClose={backToTab}
-        />
-      );
-    }
     if (search.page === "instructions") {
       return (
         <InstructionsPage
@@ -433,7 +403,12 @@ export function KnowledgePage({
 
   const waiting = review.items.length;
   const showReview = waiting > 0 || tab === "review";
-  const openLearning = withScroll(() => nav.openPage("learning", { view: tab }));
+  const openLearning = () =>
+    void navigate({
+      to: "/workspaces/$workspaceId/settings",
+      params: { workspaceId },
+      search: { section: "learning" },
+    });
   const showAdd = canEdit && !(tab === "library" && libraryEmpty);
 
   return (

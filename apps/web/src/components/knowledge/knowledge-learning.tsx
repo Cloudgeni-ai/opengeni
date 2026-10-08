@@ -4,18 +4,20 @@ import type {
   AgentLearningMode,
   AgentLearningSettingsRecord,
 } from "@opengeni/sdk";
-import { GraduationCapIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
 import { InlineHelp } from "@/components/ui/inline-help";
-import { LogoTile } from "@/components/ui/logo-tile";
 import { Notice } from "@/components/ui/notice";
 import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingRow, SettingRowGroup, SettingRowSkeleton } from "@/components/ui/setting-row";
+import { Section, SectionStack } from "@/components/ui/section";
+import {
+  SettingNavRow,
+  SettingRow,
+  SettingRowGroup,
+  SettingRowSkeleton,
+} from "@/components/ui/setting-row";
 import { useAppContext } from "@/context";
 import {
   AGENT_LEARNING_TITLE,
@@ -33,7 +35,9 @@ import { errorText } from "./knowledge-data";
    your OK. One control, "Automatic | Review first | Off", worded the same
    everywhere. Shared chats and your private chats are two labelled groups;
    organization owners also get the organization identity here, in the same
-   words. Each change saves at once, so the page has no footer.
+   words. Each change saves at once, so the page has no footer. It is a
+   workspace settings page (Settings > Agent learning); Knowledge's ⋯ menu,
+   Review and the chat Agent tab link to it.
    -------------------------------------------------------------------------- */
 
 export { AGENT_LEARNING_TITLE };
@@ -252,7 +256,10 @@ function ModeRow({
         <SegmentedControl<AgentLearningMode>
           size="sm"
           aria-label={`${label}: what agents may change`}
-          options={MODES.map((mode) => ({ value: mode, label: LEARNING_MODE_LABEL[mode] }))}
+          options={MODES.map((mode) => ({
+            value: mode,
+            label: LEARNING_MODE_LABEL[mode],
+          }))}
           value={value}
           disabled={disabled}
           pending={pending}
@@ -385,7 +392,21 @@ function IdentityRow({ policy }: { policy: IdentityLearningPolicy }) {
   );
 }
 
-export function LearningPage({
+/** Changes waiting in Knowledge > Review, for the Agent learning page. */
+export interface LearningReviewSummary {
+  /** Null while loading. */
+  count: number | null;
+  /** More than one page of something is waiting. */
+  partial: boolean;
+  onOpen: () => void;
+}
+
+/**
+ * Agent learning, the body of its settings page: shared chats and your private
+ * chats as two labelled groups, the organization identity for owners, and a
+ * way into Review, where Review first changes wait.
+ */
+export function LearningSettings({
   workspaceName,
   organizationName,
   personal,
@@ -393,7 +414,7 @@ export function LearningPage({
   shared,
   mine,
   identity,
-  onClose,
+  review,
 }: {
   workspaceName: string;
   organizationName: string | null;
@@ -405,67 +426,80 @@ export function LearningPage({
   mine: LearningDefaults;
   /** Organization owners only: whether agents may change the organization identity. */
   identity?: IdentityLearningPolicy | null;
-  onClose: () => void;
+  /** Where Review first changes wait. */
+  review?: LearningReviewSummary | null;
 }) {
   return (
-    <DetailPage back={{ label: "Knowledge", onClick: onClose }}>
-      <DetailPageHeader
-        leading={<LogoTile icon={<GraduationCapIcon />} />}
-        title={AGENT_LEARNING_TITLE}
-        meta="What agents can change on their own, and what waits for your OK"
-      />
-      <DetailPageBody>
-        {!personal ? (
-          <DetailSection
-            title={`Shared chats in ${workspaceName}`}
-            description={
-              canManageWorkspace
-                ? "Everyone's shared chats and schedules here."
-                : "Everyone's shared chats and schedules here. Only workspace admins can change this."
-            }
-          >
-            <GroupRows
-              defaults={shared}
-              categories={LEARNING_DESTINATIONS}
-              canEdit={canManageWorkspace}
-            />
-          </DetailSection>
-        ) : null}
-        <DetailSection
-          title={personal ? "Your chats" : "Your private chats (all workspaces)"}
+    <SectionStack>
+      {!personal ? (
+        <Section
+          title={`Shared chats in ${workspaceName}`}
           description={
-            personal
-              ? "Chats in your Personal workspace, and your Only me chats in every workspace."
-              : `Only me chats and your Personal workspace, anywhere in ${organizationName ?? "your organization"}.`
+            canManageWorkspace
+              ? "Everyone's shared chats and schedules here."
+              : "Everyone's shared chats and schedules here. Only workspace admins can change this."
           }
         >
           <GroupRows
-            defaults={mine}
-            categories={personal ? LEARNING_DESTINATIONS : ["knowledge", "skills"]}
-            canEdit
+            defaults={shared}
+            categories={LEARNING_DESTINATIONS}
+            canEdit={canManageWorkspace}
           />
-          {!personal ? (
-            <InlineHelp icon className="mt-3">
-              Instructions for private chats only apply in your Personal workspace, so they're set
-              there.
-            </InlineHelp>
-          ) : null}
-        </DetailSection>
-        {identity ? (
-          <DetailSection
-            title={`All of ${organizationName ?? "your organization"}`}
-            description="Only organization owners see and change this."
-          >
-            <IdentityRow policy={identity} />
-          </DetailSection>
-        ) : null}
-        <DetailSection>
-          <InlineHelp icon>
-            A chat or schedule can use its own settings. Change them in the chat's Agent tab or on
-            the schedule.
+        </Section>
+      ) : null}
+      <Section
+        title={personal ? "Your chats" : "Your private chats (all workspaces)"}
+        description={
+          personal
+            ? "Chats in your Personal workspace, and your Only me chats in every workspace."
+            : `Only me chats and your Personal workspace, anywhere in ${organizationName ?? "your organization"}.`
+        }
+      >
+        <GroupRows
+          defaults={mine}
+          categories={personal ? LEARNING_DESTINATIONS : ["knowledge", "skills"]}
+          canEdit
+        />
+        {!personal ? (
+          <InlineHelp icon className="mt-3">
+            Instructions for private chats only apply in your Personal workspace, so they're set
+            there.
           </InlineHelp>
-        </DetailSection>
-      </DetailPageBody>
-    </DetailPage>
+        ) : null}
+      </Section>
+      {identity ? (
+        <Section
+          title={`All of ${organizationName ?? "your organization"}`}
+          description="Only organization owners see and change this."
+        >
+          <IdentityRow policy={identity} />
+        </Section>
+      ) : null}
+      {review ? (
+        <Section
+          title="Review"
+          description="Changes agents propose under Review first wait in Knowledge › Review for your OK."
+        >
+          <SettingRowGroup>
+            <SettingNavRow
+              label="Waiting for review"
+              description="Approve or dismiss them there."
+              value={
+                review.count === null
+                  ? null
+                  : review.count === 0
+                    ? "Nothing waiting"
+                    : `${review.count}${review.partial ? "+" : ""} waiting`
+              }
+              onOpen={review.onOpen}
+            />
+          </SettingRowGroup>
+        </Section>
+      ) : null}
+      <InlineHelp icon>
+        A chat or schedule can use its own settings. Change them in the chat's Agent tab or on the
+        schedule.
+      </InlineHelp>
+    </SectionStack>
   );
 }

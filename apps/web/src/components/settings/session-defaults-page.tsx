@@ -207,7 +207,7 @@ export function SessionDefaultsPage({
           {!personal ? (
             <p className="-mt-2 text-xs leading-4.5 text-fg-muted">
               These apply to shared chats. Only-me chats use{" "}
-              <InAppHelpLink href={`/workspaces/${workspaceId}/state?page=learning`}>
+              <InAppHelpLink href={`/workspaces/${workspaceId}/settings?section=learning`}>
                 your private chat settings
               </InAppHelpLink>
               .
