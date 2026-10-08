@@ -1,7 +1,7 @@
 import { sql, type SQL } from "drizzle-orm";
 
 /**
- * An exact turn request whose attempt lost its execution (OPE-743): closed
+ * An exact turn request whose attempt lost its execution: closed
  * `lease_lost_recoverable` or `failed` (worker death, redispatch exhaustion,
  * credential-lease loss), its turn holder gone from the lease, never adopted as
  * a retained process, provider outcome still unknown. Nothing reliably settles

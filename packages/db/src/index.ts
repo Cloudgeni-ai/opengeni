@@ -53482,7 +53482,7 @@ async function settleExactLostProviderWorkspaceBlockersTx(
 
   if (rejectedAdmissions.length) {
     // A rejected request whose closed owner still awaits its quiescence receipt
-    // (a crashed worker's orphan, OPE-743) has no process delivery to wake that
+    // (a crashed worker's orphan) has no process delivery to wake that
     // owner either; the receipt reconciliation runs from this durable wake.
     const owners = await rawRows<{ session_id: string; temporal_workflow_id: string }>(
       tx,
@@ -55280,7 +55280,7 @@ export const COMMAND_CONTAINMENT_TURN_STARTING_UPDATE_KINDS = (() => {
 /** Whether a lease's provider capture images the paused box at one instant
  * (Modal native filesystem/directory snapshots). Mirrors the runtime's
  * `providerWorkspaceCaptureIsPointInTime` for the lease envelope: only such a
- * capture may run around a crashed worker's orphaned request (OPE-743), so
+ * capture may run around a crashed worker's orphaned request, so
  * containment may treat the orphan as non-blocking only then; otherwise its
  * drain could never capture and the box would stay fenced until it died. */
 function leaseCaptureIsPointInTime(backend: string, resumeState: unknown): boolean {

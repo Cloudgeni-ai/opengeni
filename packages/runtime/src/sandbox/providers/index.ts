@@ -169,7 +169,7 @@ export function providerWorkspaceCapturePolicy(
 /** True when the provider's workspace capture images the paused box at one
  * instant (Modal native filesystem/directory snapshots), so a command still
  * running cannot tear the captured state across files the way a file-by-file
- * tar read of a running box can (OPE-743). */
+ * tar read of a running box can. */
 export function providerWorkspaceCaptureIsPointInTime(backend: string, state: unknown): boolean {
   if (backend !== "modal") return false;
   const persistence = providerWorkspacePersistence(state);

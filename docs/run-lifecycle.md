@@ -138,7 +138,7 @@ The admission and physical quiescence remain unresolved; recovery tool results
 tell the model to inspect actual state before replay. Accepted Pause/Steer
 interruptions retain their independent receipt gate.
 
-**Requests a crashed worker left behind no longer pin the box (OPE-743).** A
+**Requests a crashed worker left behind no longer pin the box.** A
 turn admission whose attempt closed `lease_lost_recoverable` or `failed` (worker
 death, redispatch exhaustion, credential-lease loss), whose turn holder is gone,
 that was never adopted as a retained process and whose provider outcome is still

@@ -1,4 +1,4 @@
-// OPE-743 regression: a request a crashed worker left behind must not pin a
+// Regression: a request a crashed worker left behind must not pin a
 // Modal box until the provider deadline kills it uncaptured. In staging
 // session 5040c525 two exec requests of a lease-lost attempt stayed open (no
 // retained process, provider outcome unknown, quiescence never written). Idle
@@ -326,7 +326,7 @@ async function ownerWake(fixture: Fixture) {
   return row?.reason ?? null;
 }
 
-describe("requests left by a crashed worker (OPE-743)", () => {
+describe("requests left by a crashed worker", () => {
   test("an orphaned request alone no longer pins the zero-holder drain", async () => {
     const fixture = await crashedAttemptFixture();
     expect(await readLease(db, fixture.workspaceId, fixture.sandboxGroupId)).toMatchObject({
@@ -334,7 +334,7 @@ describe("requests left by a crashed worker (OPE-743)", () => {
       refcount: 0,
     });
     const { result, persisted, probes } = await drain(fixture);
-    // Before OPE-743: capture refused (mutation_in_progress), the probe saw a
+    // Before capture refused (mutation_in_progress), the probe saw a
     // live box, and the drain skipped on every sweep until the provider died.
     expect(probes).toEqual([]);
     expect(persisted).toEqual([true]);
@@ -392,7 +392,7 @@ describe("requests left by a crashed worker (OPE-743)", () => {
       workspaceId: fixture.workspaceId,
       sandboxGroupId: fixture.sandboxGroupId,
     });
-    // Before OPE-743 this was null ("not_eligible") on every sweep.
+    // Before this was null ("not_eligible") on every sweep.
     expect(enrolled?.mode).toBe("deadline");
     const { result, persisted } = await drain(fixture);
     expect(persisted).toEqual([true]);
