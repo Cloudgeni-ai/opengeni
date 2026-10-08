@@ -1,4 +1,47 @@
-import type { AdapterFactory } from "@alibaba-group/opensandbox";
+import { DefaultAdapterFactory, type AdapterFactory } from "@alibaba-group/opensandbox";
+import { AsyncLocalStorage } from "node:async_hooks";
+
+type Commands = ReturnType<AdapterFactory["createExecdStack"]>["commands"];
+const defaultCreateExecdStack = DefaultAdapterFactory.prototype.createExecdStack;
+const boundDefaultCommands = new WeakMap<Commands, Pick<Commands, "run" | "runStream">>();
+const commandDispatch = new AsyncLocalStorage<{ attempted: boolean }>();
+
+/** Local proof from the actual command invocation and its bound wire seam,
+ * never inferred from provider status codes, error text or a missing init. */
+export class OpenSandboxCommandDispatchError extends Error {
+  constructor(
+    readonly notDispatched: boolean,
+    cause: unknown,
+  ) {
+    super(
+      notDispatched
+        ? "OpenSandbox command was not dispatched"
+        : "OpenSandbox command dispatch is uncertain",
+      { cause },
+    );
+    this.name = "OpenSandboxCommandDispatchError";
+  }
+}
+
+export async function withOpenSandboxCommandDispatchProof<T>(
+  commands: Commands,
+  invoke: () => Promise<T>,
+): Promise<T> {
+  const bound = boundDefaultCommands.get(commands);
+  const trusted =
+    bound !== undefined && bound.run === commands.run && bound.runStream === commands.runStream;
+  const state = { attempted: false };
+  return await commandDispatch.run(state, async () => {
+    try {
+      return await invoke();
+    } catch (cause) {
+      // A custom adapter can bypass this fetch entirely. Its absence is never
+      // no-dispatch proof; only an unchanged, genuinely bound default SDK path
+      // that failed before invoking the command transport can grant that proof.
+      throw new OpenSandboxCommandDispatchError(trusted && !state.attempted, cause);
+    }
+  });
+}
 
 /** A successful command HTTP response was accepted, but its event stream no
  * longer proves complete output or exit. It is not proof of an unstarted op. */
@@ -156,15 +199,16 @@ async function* commandFrames(response: Response): AsyncGenerator<Uint8Array> {
 
 function strictCommandFetch(original: typeof fetch): typeof fetch {
   const wrapped = (async (input, init) => {
-    const response = await original(input, init);
     const url = input instanceof Request ? input.url : String(input);
-    if (
-      !response.ok ||
-      (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase() !==
-        "POST" ||
-      !new URL(url).pathname.endsWith("/command")
-    )
-      return response;
+    const isCommand =
+      (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase() ===
+        "POST" && new URL(url).pathname.endsWith("/command");
+    // Mark BEFORE the original transport. Header loss and a non-2xx response
+    // do not prove that the provider refused the original mutation.
+    const dispatch = commandDispatch.getStore();
+    if (isCommand && dispatch) dispatch.attempted = true;
+    const response = await original(input, init);
+    if (!response.ok || !isCommand) return response;
     if (!response.body) throw new OpenSandboxCommandStreamError("missing response body");
     const frames = commandFrames(response);
     const body = new ReadableStream<Uint8Array>(
@@ -206,7 +250,8 @@ export function withOpenSandboxCommandStreamProof(factory: AdapterFactory): Adap
     createEgressStack: (options) => factory.createEgressStack(options),
     createExecdStack(options) {
       const sseFetch = strictCommandFetch(options.connectionConfig.sseFetch);
-      return factory.createExecdStack({
+      const createExecdStack = factory.createExecdStack;
+      const stack = createExecdStack.call(factory, {
         ...options,
         connectionConfig: new Proxy(options.connectionConfig, {
           get(target, property) {
@@ -214,6 +259,15 @@ export function withOpenSandboxCommandStreamProof(factory: AdapterFactory): Adap
           },
         }),
       });
+      if (createExecdStack === defaultCreateExecdStack) {
+        // The public default constructor binds THIS sseFetch to its commands.
+        // Delegating/custom factory methods are not assumed to do the same.
+        boundDefaultCommands.set(stack.commands, {
+          run: stack.commands.run,
+          runStream: stack.commands.runStream,
+        });
+      }
+      return stack;
     },
   };
 }
