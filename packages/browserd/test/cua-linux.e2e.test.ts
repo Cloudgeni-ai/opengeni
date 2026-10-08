@@ -64,10 +64,20 @@ test.skipIf(process.platform !== "linux" || process.env.OPENGENI_CUA_E2E !== "1"
       const firstState = await actual(0);
       expect(firstState.composited).toBe(true);
       expect((await actual(1)).composited).toBe(true);
-      const target = first!.targets.find((target) => target.processId === firstState.pid)!;
+      let target = first!.targets.find((candidate) => candidate.processId === firstState.pid);
+      const targetDeadline = Date.now() + 30_000;
+      // A mapped fixture can precede native window discovery under load.
+      // Refresh discovery only; never replay an input while waiting.
+      while (!target && Date.now() < targetDeadline) {
+        await Bun.sleep(100);
+        target = (await supervisor.listTargets(references[0]!)).find(
+          (candidate) => candidate.processId === firstState.pid,
+        );
+      }
       expect(target).toBeDefined();
-      expect(second!.targets.some((target) => target.processId === firstState.pid)).toBe(false);
-      const windowId = Number(target.id.split(":").at(-1));
+      const secondTargets = await supervisor.listTargets(references[1]!);
+      expect(secondTargets.some((candidate) => candidate.processId === firstState.pid)).toBe(false);
+      const windowId = Number(target!.id.split(":").at(-1));
       const command = (tool: string, args: Record<string, unknown>, index = 0) => ({
         protocolVersion: 1 as const,
         operationId: randomUUID(),
@@ -117,7 +127,7 @@ test.skipIf(process.platform !== "linux" || process.env.OPENGENI_CUA_E2E !== "1"
       expect(button.element_token).toBeString();
       // Passive viewer reads may neither replace the native tokens nor the scale.
       for (let i = 0; i < 4; i++) {
-        const frame = await supervisor.capture(references[0]!, target.id, {
+        const frame = await supervisor.capture(references[0]!, target!.id, {
           maxWidth: 240,
           maxHeight: 180,
         });

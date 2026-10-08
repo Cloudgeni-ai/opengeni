@@ -77,7 +77,15 @@ for (const decorations of ["server", "client"]) {
         const session = await supervisor.createSession(reference);
         const actual = () => Bun.file(statePath).json();
         const pid = (await actual()).pid;
-        const target = session.targets.find((candidate) => candidate.processId === pid);
+        let target = session.targets.find((candidate) => candidate.processId === pid);
+        const targetDeadline = Date.now() + 30_000;
+        // A mapped fixture can precede native window discovery under load.
+        while (!target && Date.now() < targetDeadline) {
+          await Bun.sleep(100);
+          target = (await supervisor.listTargets(reference)).find(
+            (candidate) => candidate.processId === pid,
+          );
+        }
         expect(target).toBeDefined();
         const window = { pid, window_id: Number(target!.id.split(":").at(-1)) };
         let expected = 0;
@@ -128,6 +136,6 @@ for (const decorations of ["server", "client"]) {
         await rm(root, { recursive: true, force: true });
       }
     },
-    60_000,
+    120_000,
   );
 }
