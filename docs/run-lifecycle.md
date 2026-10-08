@@ -134,9 +134,32 @@ retain their own lifetime and do not hold this turn-cleanup gate.
 Inference alone may resume on the same machine for a closed lease-lost attempt's
 legacy Modal home-route `execCommand` admission with unknown provider outcome
 and no retained locator. Exact actor, turn and execution generation must match.
-The admission, physical quiescence and capture/rotation fences remain unresolved;
-recovery tool results tell the model to inspect actual state before replay.
-Accepted Pause/Steer interruptions retain their independent receipt gate.
+The admission and physical quiescence remain unresolved; recovery tool results
+tell the model to inspect actual state before replay. Accepted Pause/Steer
+interruptions retain their independent receipt gate.
+
+**Requests a crashed worker left behind no longer pin the box.** A
+turn admission whose attempt closed `lease_lost_recoverable` or `failed` (worker
+death, redispatch exhaustion, credential-lease loss), whose turn holder is gone,
+that was never adopted as a retained process and whose provider outcome is still
+unknown (`crashedWorkerOrphanAdmissionSql`) has no owner that can admit more work,
+and nothing reliably settles it. It used to refuse every capture, idle drain,
+idle containment and provider-deadline containment of its box, and to hold its
+attempt's quiescence open, until the provider killed the box uncaptured (staging
+session 5040c525). The predicate does not prove the worker is dead; safety comes
+from what each caller does with it. Only a point-in-time (Modal native) capture
+may run around such a request: a drain, which terminates the box right after, and
+a warm capture, which records itself as having run around writers so the archive
+stays one generation behind. Tar-style captures keep it as a blocker. Containment
+enrollment and the containment/deadline quiescence checks ignore it. The drain's
+cold commit rejects the exact request only after the reaper stopped the box (or
+proved it gone), so a late settlement by a still-running owner is fenced, and
+wakes the closed, unquiesced owner of every rejected request (its session is
+locked in the canonical prefix first) so the ordinary quiescence receipt
+reconciliation can complete. Attempts closed by Pause, Steer or cancellation keep
+their requests as writers because the replacement attempt resumes the same box;
+the holder clause is defence in depth. The physical quiescence receipt itself
+keeps the strict predicate.
 
 A resumed attempt may attach another atomic internal-update batch to the same
 logical turn after its resolved open suffix. Each delivered update retains its
