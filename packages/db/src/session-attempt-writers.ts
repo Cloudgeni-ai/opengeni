@@ -1,20 +1,23 @@
 import { sql, type SQL } from "drizzle-orm";
 
 /**
- * An exact turn request that a crashed worker left behind (OPE-743): its attempt
- * was closed `lease_lost_recoverable`, its turn lease holder is gone (reaped as
- * dead), it was never adopted as a retained process, and its provider outcome
- * is still unknown. Nothing will ever settle it: the owner cannot admit more
- * work, and the only physical writer it can stand for is a command that may
- * still be running on that exact box. It therefore must not pin the sandbox
- * (idle drain, command containment, deadline rotation) or refuse checkpoints
- * forever; it is settled only after the exact provider box is terminated or
- * proven gone, which is when nothing it started can still be running.
+ * An exact turn request whose attempt lost its execution (OPE-743): closed
+ * `lease_lost_recoverable` or `failed` (worker death, redispatch exhaustion,
+ * credential-lease loss), its turn holder gone from the lease, never adopted as
+ * a retained process, provider outcome still unknown. Nothing reliably settles
+ * it: the owner can admit no more work, and the only physical writer it can
+ * stand for is a command that may still be running on that exact box. It must
+ * not pin the sandbox (drain, command containment, deadline rotation) or
+ * refuse checkpoints forever.
  *
- * The holder check is what separates a crash from an ordinary cancellation:
- * Pause/Steer may drop the turn holder eagerly while the live activity is still
- * draining a request, but those attempts close with another outcome. A
- * lease-lost attempt whose holder still exists stays a writer.
+ * This does not prove the owning worker is dead. Safety comes from what the
+ * callers do: a drain captures around the request only before terminating the
+ * box, a warm capture only when it is a point-in-time image and then records
+ * itself as having run around writers, and the request is rejected only in the
+ * cold commit after the exact box was terminated or proven gone. A late
+ * settlement by a still-running owner is then fenced. Pause, Steer and
+ * cancellation closures keep their requests as writers because the replacement
+ * attempt resumes the same box; the holder clause is defence in depth.
  */
 export function crashedWorkerOrphanAdmissionSql(admission: SQL): SQL {
   return sql`(
@@ -32,7 +35,7 @@ export function crashedWorkerOrphanAdmissionSql(admission: SQL): SQL {
         and orphan_owner.id = ${admission}.actor_id
         and orphan_owner.execution_generation = ${admission}.execution_generation
         and orphan_owner.state = 'closed'
-        and orphan_owner.outcome = 'lease_lost_recoverable'
+        and orphan_owner.outcome in ('lease_lost_recoverable', 'failed')
     )
     and not exists (
       select 1 from sandbox_retained_processes orphan_process

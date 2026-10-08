@@ -139,26 +139,27 @@ tell the model to inspect actual state before replay. Accepted Pause/Steer
 interruptions retain their independent receipt gate.
 
 **Requests a crashed worker left behind no longer pin the box (OPE-743).** A
-turn admission whose attempt closed `lease_lost_recoverable`, whose turn holder
-is gone (reaped as dead), that was never adopted as a retained process and whose
-provider outcome is still unknown (`crashedWorkerOrphanAdmissionSql`) has no
-owner that can finish it. Nothing will ever settle it, so it used to refuse
-every capture, idle drain, idle containment and provider-deadline containment
-of its box, and to hold its attempt's quiescence open, until the provider killed
-the box uncaptured (staging session 5040c525). Capture claims, drain
-publication, containment enrollment and the containment/deadline quiescence
-checks now treat such an orphan like a background command the drain will stop:
-a drain (which terminates the box next) captures around it, and so does a
-point-in-time (Modal native) warm capture, which then records the archive one
-generation behind the workspace like any capture that ran around commands;
-a tar-style warm capture still waits. The drain's cold commit rejects the
-exact orphan only after the box was terminated (or proven gone), which is when
-nothing it started can still be running, and wakes its owner so the ordinary
-quiescence receipt reconciliation can complete. A lease-lost attempt whose
-holder still exists, and an attempt closed by Pause, Steer or cancellation
-(which may drop its holder eagerly while it is still draining), keep their
-requests as writers. The physical quiescence receipt itself keeps the strict
-predicate.
+turn admission whose attempt closed `lease_lost_recoverable` or `failed` (worker
+death, redispatch exhaustion, credential-lease loss), whose turn holder is gone,
+that was never adopted as a retained process and whose provider outcome is still
+unknown (`crashedWorkerOrphanAdmissionSql`) has no owner that can admit more work,
+and nothing reliably settles it. It used to refuse every capture, idle drain,
+idle containment and provider-deadline containment of its box, and to hold its
+attempt's quiescence open, until the provider killed the box uncaptured (staging
+session 5040c525). The predicate does not prove the worker is dead; safety comes
+from what each caller does with it. Only a point-in-time (Modal native) capture
+may run around such a request: a drain, which terminates the box right after, and
+a warm capture, which records itself as having run around writers so the archive
+stays one generation behind. Tar-style captures keep it as a blocker. Containment
+enrollment and the containment/deadline quiescence checks ignore it. The drain's
+cold commit rejects the exact request only after the reaper stopped the box (or
+proved it gone), so a late settlement by a still-running owner is fenced, and
+wakes the closed, unquiesced owner of every rejected request (its session is
+locked in the canonical prefix first) so the ordinary quiescence receipt
+reconciliation can complete. Attempts closed by Pause, Steer or cancellation keep
+their requests as writers because the replacement attempt resumes the same box;
+the holder clause is defence in depth. The physical quiescence receipt itself
+keeps the strict predicate.
 
 A resumed attempt may attach another atomic internal-update batch to the same
 logical turn after its resolved open suffix. Each delivered update retains its

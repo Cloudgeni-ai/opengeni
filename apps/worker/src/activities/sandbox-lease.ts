@@ -124,6 +124,7 @@ import {
   parseExecBannerExitCode,
   prepareProviderForTeardownAfterCapture,
   providerWorkspaceCapturePolicy,
+  providerWorkspaceCaptureIsPointInTime,
   resolveModalCheckpointProviderBindingForLiveSandbox,
   resolveModalCheckpointProviderBinding,
   findModalProviderCreateReceipt,
@@ -3332,6 +3333,7 @@ async function terminateDrainableBox(
         liveness: "draining",
         captureTimeoutMs,
         minIntervalMs: 0,
+        pointInTimeCapture: providerWorkspaceCaptureIsPointInTime(backend, lease.resumeState),
         providerReplaySafe: capturePolicy?.takeover === "same_request",
         takeoverSafe: capturePolicy !== null && capturePolicy.takeover !== "exclusive",
       });
@@ -3619,6 +3621,7 @@ async function terminateDrainableBox(
       ...(captureClaim ? { expectedCaptureId: captureClaim.id } : {}),
       providerMissingBeforeCapture: providerMissing,
       idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
+      providerStopped: managedProvider,
     },
   );
   // The command terminal events and agent inputs are already durable in the

@@ -53210,6 +53210,23 @@ async function linkedLostProviderCommandSessionIdsTx(
         and process.provider_backend = ${input.lostBackend}
         and process.provider_instance_id = ${input.lostInstanceId}
         and process.state = 'active'
+      union
+      -- A closed, unquiesced owner of an open request on the lost box is woken
+      -- by the settlement; lock its session in the canonical prefix first.
+      select admission.session_id
+      from sandbox_workspace_mutation_admissions admission
+      join session_turn_attempts attempt on attempt.id = admission.attempt_id
+        and attempt.workspace_id = admission.workspace_id
+        and attempt.session_id = admission.session_id
+      where admission.account_id = ${input.accountId}
+        and admission.workspace_id = ${input.workspaceId}
+        and admission.lease_id = ${input.leaseId}
+        and admission.sandbox_group_id = ${input.sandboxGroupId}
+        and admission.lease_epoch = ${input.lostEpoch}
+        and admission.provider_backend = ${input.lostBackend}
+        and admission.provider_instance_id = ${input.lostInstanceId}
+        and admission.settled_at is null
+        and attempt.state = 'closed' and attempt.quiesced_at is null
       ) owners order by session_id
     `,
   );
@@ -55988,6 +56005,10 @@ export async function confirmDrainCold(
     providerMissingBeforeCapture?: boolean;
     /** The idle window named in contained commands' agent notice. */
     idleCommandContainmentMs?: number | undefined;
+    /** The reaper stopped the exact provider box (or proved it gone) before
+     * this commit. Only then may a crashed worker's orphaned request on it be
+     * settled; a selfhosted machine or backend-less lease is never stopped. */
+    providerStopped?: boolean;
   },
 ): Promise<{
   wentCold: boolean;
@@ -56045,7 +56066,8 @@ export async function confirmDrainCold(
         // quiescence forever. Selfhosted and backend-less leases are never
         // terminated by a drain and keep their requests.
         const orphanedRequests =
-          observed.instance_id && observed.backend !== "selfhosted" && observed.backend !== "none"
+          observed.instance_id &&
+          (input.providerStopped === true || input.providerMissingBeforeCapture === true)
             ? await rawRows<{ present: boolean }>(
                 tx,
                 sql`
@@ -59971,10 +59993,11 @@ export async function claimWorkspaceArchiveCapture(
       attemptId: string;
       holderId: string;
     };
-    /** Warm only: the provider capture is a point-in-time image of a paused
-     * box (Modal native filesystem/directory snapshots), so it may run around
-     * active background commands. Tar-style captures read files one
-     * by one from a running box and keep every command as a blocker. */
+    /** The provider capture is a point-in-time image of a paused box (Modal
+     * native filesystem/directory snapshots). A warm one may run around active
+     * background commands, and any may run around a crashed worker's orphaned
+     * request. Tar-style captures read files one by one from a
+     * running box and keep both as blockers. */
     pointInTimeCapture?: boolean;
   },
 ): Promise<ClaimWorkspaceArchiveCaptureResult> {
@@ -60215,10 +60238,11 @@ export async function claimWorkspaceArchiveCapture(
                 : sql``
             }
             ${
-              // A crashed worker's request may still be running a command: a
-              // drain (which terminates the box next) or a point-in-time warm
-              // capture may run around it, a tar-style warm capture may not.
-              input.warmAttempt === undefined || aroundCommands
+              // A crashed worker's request may still be running a command. Only
+              // a point-in-time capture may run around it: a warm one marks the
+              // claim below, a drain terminates the box next. A file-by-file
+              // tar read of the running box could publish torn state as complete.
+              input.pointInTimeCapture === true
                 ? sql`and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}`
                 : sql``
             }

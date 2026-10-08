@@ -124,7 +124,13 @@ function terminateSpy() {
  * quiescence receipt, and its turn holder was reaped as dead. Optionally the
  * same attempt had already started a background command that keeps running. */
 async function crashedAttemptFixture(
-  options: { backgroundCommand?: boolean; outcome?: string; keepHolder?: boolean } = {},
+  options: {
+    backgroundCommand?: boolean;
+    outcome?: string;
+    keepHolder?: boolean;
+    /** Modal native snapshots image the paused box; tar reads it file by file. */
+    persistence?: "snapshot_directory" | "tar";
+  } = {},
 ) {
   const [account] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('orphan-request') returning id`;
@@ -175,7 +181,17 @@ async function crashedAttemptFixture(
       resume_state, expires_at)
     values (${ids.accountId}, ${ids.workspaceId}, ${attempt.sandboxGroupId}, 'warm', 1, 1, 0,
       ${instanceId}, 'modal', ${EPOCH}, 'modal',
-      ${JSON.stringify({ backendId: "modal", sessionState: { providerState: { sandboxId: instanceId } } })}::text::jsonb,
+      ${JSON.stringify({
+        backendId: "modal",
+        sessionState: {
+          providerState: {
+            sandboxId: instanceId,
+            ...((options.persistence ?? "snapshot_directory") === "tar"
+              ? {}
+              : { workspacePersistence: options.persistence ?? "snapshot_directory" }),
+          },
+        },
+      })}::text::jsonb,
       now() + interval '10 minutes')
     returning id`;
   await admin`insert into sandbox_lease_holders
@@ -468,6 +484,92 @@ describe("requests left by a crashed worker (OPE-743)", () => {
     expect((await orphanRow(fixture)).settled_at).toBeNull();
   }, 60_000);
 
+  test("a request of an attempt that failed after losing its worker is handled the same way", async () => {
+    const fixture = await crashedAttemptFixture({ outcome: "failed" });
+    const { result, persisted } = await drain(fixture);
+    expect(persisted).toEqual([true]);
+    expect(result.status).toBe("terminated");
+    expect((await orphanRow(fixture)).provider_outcome).toBe("rejected");
+  }, 60_000);
+
+  test("a tar-style capture keeps an orphaned request as a blocker", async () => {
+    // A file-by-file read of the running box could publish torn state as the
+    // complete final archive; only point-in-time captures run around it.
+    const fixture = await crashedAttemptFixture({ persistence: "tar" });
+    const { result, persisted, probes } = await drain(fixture);
+    expect(persisted).toEqual([]);
+    expect(probes).toEqual(["alive"]);
+    expect(result.status).toBe("skipped");
+    expect((await orphanRow(fixture)).settled_at).toBeNull();
+  }, 60_000);
+
+  test("an orphan next to a request that may still finish keeps fencing the box", async () => {
+    const fixture = await crashedAttemptFixture();
+    // A sibling session's cancelled attempt left a request open on the same
+    // box; Pause/Steer/cancel owners may still be draining it.
+    const sibling = await createSession(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      initialMessage: "sibling",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      sandboxGroupId: fixture.sandboxGroupId,
+    });
+    await initializeSessionStartAtomically(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: sibling.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(db, fixture.workspaceId, {
+      sessionId: sibling.id,
+      workflowId: `session-${sibling.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `orphan-sibling-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error(`sibling turn not claimed: ${claim.reason}`);
+    const holderId = sandboxLeaseHolderIdForAttempt(attemptId);
+    await admin`update sandbox_leases set liveness = 'warm', refcount = 1, turn_holders = 1,
+      expires_at = now() + interval '10 minutes' where id = ${fixture.leaseId}`;
+    await admin`insert into sandbox_lease_holders
+      (account_id, lease_id, workspace_id, kind, holder_id, subject_id, last_heartbeat_at)
+      values (${fixture.accountId}, ${fixture.leaseId}, ${fixture.workspaceId}, 'turn', ${holderId},
+        ${sibling.id}, now())`;
+    await advanceWorkspaceGeneration(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: sibling.id,
+      turnId: claim.turn.id,
+      executionGeneration: claim.turn.executionGeneration,
+      attemptId,
+      holderId,
+      sandboxGroupId: fixture.sandboxGroupId,
+      expectedEpoch: EPOCH,
+      expectedInstanceId: fixture.instanceId,
+      operation: "execCommand",
+      routeKind: "home",
+      routeTargetId: null,
+      routeEpoch: 0,
+    });
+    await admin`update session_turn_attempts set state = 'closed', outcome = 'cancelled',
+      closed_at = now() where id = ${attemptId}`;
+    await admin`delete from sandbox_lease_holders where lease_id = ${fixture.leaseId}`;
+    await admin`update sandbox_leases set liveness = 'draining', refcount = 0, turn_holders = 0,
+      expires_at = now() - interval '1 second' where id = ${fixture.leaseId}`;
+    const { result, persisted } = await drain(fixture);
+    expect(persisted).toEqual([]);
+    expect(result.status).toBe("skipped");
+    expect((await orphanRow(fixture)).settled_at).toBeNull();
+  }, 60_000);
+
   test("a request whose owner may still be draining keeps fencing the box", async () => {
     // Pause/Steer may drop the turn holder eagerly while the live activity is
     // still draining its request: that attempt does not close lease-lost.
@@ -478,7 +580,8 @@ describe("requests left by a crashed worker (OPE-743)", () => {
     expect(cancelledDrain.result.status).toBe("skipped");
     expect((await orphanRow(cancelled)).settled_at).toBeNull();
 
-    // A lease-lost attempt whose holder still exists is not proven dead.
+    // A lease-lost attempt whose holder still exists keeps the box (the holder
+    // itself also blocks; the predicate's holder clause is defence in depth).
     const held = await crashedAttemptFixture({ backgroundCommand: true, keepHolder: true });
     await idleFor(held, 31);
     expect(

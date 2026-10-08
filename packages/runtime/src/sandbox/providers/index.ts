@@ -24,10 +24,11 @@ import { noneProvider } from "./none";
 import { opensandboxProvider } from "./opensandbox";
 import { runloopProvider } from "./runloop";
 import { selfhostedProvider } from "./selfhosted";
-import type {
-  ProviderImmutableImageBuildResult,
-  ProviderRegistration,
-  ProviderWorkspaceCapturePolicy,
+import {
+  providerWorkspacePersistence,
+  type ProviderImmutableImageBuildResult,
+  type ProviderRegistration,
+  type ProviderWorkspaceCapturePolicy,
 } from "./types";
 import { vercelProvider } from "./vercel";
 
@@ -163,6 +164,16 @@ export function providerWorkspaceCapturePolicy(
 ): ProviderWorkspaceCapturePolicy | null {
   const registration = PROVIDER_REGISTRY[backend as SandboxBackend];
   return registration?.workspaceCapturePolicy(state) ?? null;
+}
+
+/** True when the provider's workspace capture images the paused box at one
+ * instant (Modal native filesystem/directory snapshots), so a command still
+ * running cannot tear the captured state across files the way a file-by-file
+ * tar read of a running box can (OPE-743). */
+export function providerWorkspaceCaptureIsPointInTime(backend: string, state: unknown): boolean {
+  if (backend !== "modal") return false;
+  const persistence = providerWorkspacePersistence(state);
+  return persistence === "snapshot_filesystem" || persistence === "snapshot_directory";
 }
 
 export function prepareProviderForTeardownAfterCapture(backend: string, session: unknown): void {
