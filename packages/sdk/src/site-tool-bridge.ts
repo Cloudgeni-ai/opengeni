@@ -1,5 +1,6 @@
 import { siteRequestHeaders } from "@opengeni/contracts/site-session-http";
 import { OpenGeniApiError } from "./errors";
+import { createSharedCatalogLoader } from "./shared-catalog-loader";
 import { siteSessionPath, type SiteHttpRequest } from "./site-http";
 import type { OpenGeniSiteToolCatalog } from "./site";
 import type { OpenGeniWorkspaceTools } from "./tools";
@@ -42,33 +43,42 @@ export type CreateSiteToolBridgeOptions = {
  * Recreate on actor/version change. Never take these pinned fields from HTML. */
 export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteToolBridge {
   const allowed = input.requestedTools ? new Set(input.requestedTools.map(identityKey)) : null;
-  let projectedCatalog: OpenGeniSiteToolCatalog | null = null;
+  // One shared load serves every concurrent Site request (cancelled only when
+  // all of them abort); a stale rejection reloads once for all requests
+  // rejected on that digest.
+  const projectedCatalog = createSharedCatalogLoader<OpenGeniSiteToolCatalog>(
+    async (refresh, signal) => {
+      const current = await input.workspaceTools.$catalog({
+        signal,
+        ...(refresh ? { refresh } : {}),
+      });
+      if (current.workspaceId !== input.workspaceId)
+        throw new Error("Site catalog workspace mismatch");
+      return {
+        version: current.version,
+        generation: current.generation,
+        digest: current.digest,
+        createdAt: current.createdAt,
+        entries: current.entries.filter(
+          (entry) => !allowed || allowed.has(identityKey(entry.identity)),
+        ),
+      };
+    },
+  );
   const loadCatalog = async ({
     signal,
-    refresh = false,
+    staleDigest,
   }: {
     signal: AbortSignal;
-    refresh?: boolean;
+    staleDigest?: string;
   }): Promise<OpenGeniSiteToolCatalog> => {
     signal.throwIfAborted();
-    if (projectedCatalog && !refresh) return projectedCatalog;
-    const current = await input.workspaceTools.$catalog({
-      signal,
-      ...(refresh ? { refresh } : {}),
-    });
+    const catalog =
+      staleDigest === undefined
+        ? await projectedCatalog.load({ signal })
+        : await projectedCatalog.reloadAfterStale(staleDigest, signal);
     signal.throwIfAborted();
-    if (current.workspaceId !== input.workspaceId)
-      throw new Error("Site catalog workspace mismatch");
-    projectedCatalog = {
-      version: current.version,
-      generation: current.generation,
-      digest: current.digest,
-      createdAt: current.createdAt,
-      entries: current.entries.filter(
-        (entry) => !allowed || allowed.has(identityKey(entry.identity)),
-      ),
-    };
-    return projectedCatalog;
+    return catalog;
   };
   return {
     ...(input.fetchResponse
@@ -95,12 +105,17 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
           },
         }
       : {}),
-    catalog: loadCatalog,
+    catalog: async ({ signal }) => await loadCatalog({ signal }),
     call: async (request, { signal }) => {
       if (allowed && !allowed.has(identityKey(request.identity)))
         throw new Error("This tool is not available to the Site");
-      const call = async (refresh = false) => {
-        const catalog = await loadCatalog({ signal, refresh });
+      let usedDigest: string | undefined;
+      const call = async (staleDigest?: string) => {
+        const catalog = await loadCatalog({
+          signal,
+          ...(staleDigest === undefined ? {} : { staleDigest }),
+        });
+        usedDigest = catalog.digest;
         if (
           !catalog.entries.some(
             (entry) => identityKey(entry.identity) === identityKey(request.identity),
@@ -126,9 +141,9 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
       } catch (error) {
         // Only pre-execution catalog rejection permits one retry. Never retry
         // transport failures, expired credentials or uncertain tool effects.
-        if (!(input.isCatalogStale ?? isSiteCatalogStaleError)(error)) throw error;
-        projectedCatalog = null;
-        return await call(true);
+        if (!(input.isCatalogStale ?? isSiteCatalogStaleError)(error) || usedDigest === undefined)
+          throw error;
+        return await call(usedDigest);
       }
     },
   };
