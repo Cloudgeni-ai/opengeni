@@ -183,6 +183,7 @@ import {
   scheduledTaskCreateToolValidation,
 } from "./scheduled-task-input";
 import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
+import { readOnlySessionRefusal } from "../routes/session-history-imports";
 import { registerKnowledgeEntryTools } from "./knowledge-entries";
 import {
   FIRST_PARTY_TOOL_AUTHORIZATION,
@@ -449,7 +450,7 @@ function sessionCreateValidationFailureResult(error: z4.ZodError) {
   };
 }
 
-function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknown) {
+export function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknown) {
   if (
     tool === "session_create" &&
     error instanceof SessionCreateConnectionSelectionUnavailableError
@@ -458,6 +459,19 @@ function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknow
       error: {
         code: "session_create_connection_selection_unavailable",
         message: error.message,
+        retryable: false,
+      },
+    };
+  }
+  // An archived or imported session is read-only: say so, so the calling agent
+  // starts a new session instead of retrying.
+  const readOnly = readOnlySessionRefusal(error);
+  if (readOnly) {
+    return {
+      error: {
+        code: `${tool}_session_read_only`,
+        message: readOnly.message,
+        reason: readOnly.code,
         retryable: false,
       },
     };

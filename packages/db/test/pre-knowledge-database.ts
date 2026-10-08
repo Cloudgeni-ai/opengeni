@@ -13,6 +13,7 @@ const sessionStorageMigrationTail = [
   "0651_session_event_delta_folding.sql",
   "0652_session_archive_guard_search_path.sql",
   "0653_session_archive_tenancy_fence.sql",
+  "0657_session_archive_purge_retained_evidence.sql",
 ] as const;
 
 /** Historical migration proofs run against the last schema that owned Memory.

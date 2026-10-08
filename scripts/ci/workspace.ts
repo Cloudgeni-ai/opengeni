@@ -30,6 +30,8 @@ export type ShardWeightResolution = {
 };
 
 export const OPT_IN_TESTS: Readonly<Record<string, string>> = {
+  "apps/worker/test/skill-checkout-synchronous-live.e2e.ts":
+    "is retained for explicitly pinned sandbox Skill checkout, execution, and publish acceptance using a deterministic adapter or existing Codex credentials",
   "apps/api/test/native-report-delivery.test.ts":
     "requires a verified native runtime and real PostgreSQL and is owned by the required package-contracts gate",
   "test/integration/workspace-capture.integration.ts":

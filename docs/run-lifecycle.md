@@ -2086,6 +2086,62 @@ original tool call, while an explicitly short yield or a command still running
 after the requested window returns the retained session id. Empty internal
 polls use the exact process-control route and never create another model turn or
 workspace mutation admission.
+
+Internal synchronous filesystem commands use `sandbox/synchronous-command.ts`
+to collect complete output from the same invocation until provider terminal/EOF
+proof. Routing retains and atomically captures the raw initial receipt before
+observation; read-only setup handles stay on their resolved backend for the
+whole wait. Composite imports keep an enclosing admission and backend pin;
+admitted Modal shell subcommands receive fresh exact retained admissions rather
+than reusing the enclosing command alias. Worker Skill operations use the turn
+cancellation controller's non-PTY, lossless runner, with no background adoption.
+Markers never substitute for original exit proof. An unobservable command
+remains pending/unknown and is not replayed through another write path.
+Existing interrupted-command recovery and physical settlement gates still apply.
+
+Complete output is a separate requirement from physical exit. Trusted adapter
+pages bind separate stdout/stderr bytes to the original identity and contiguous
+cursors; a truncated or merged presentation banner is not a collection receipt.
+The SDK-native collection scope starts before dispatch and tees the original
+process streams without replacing its child, handle, or ordinary shell behavior.
+Shared terminal reads and custody retries preserve the trusted page until
+capture and settlement succeed. A status query may prove physical quiescence
+after stream loss, but must not turn incomplete output into filesystem success.
+
+Daytona filesystem collection uses a runtime-owned binding to the registered
+client's exact authenticated sandbox and one framed native command session.
+`daytona-command-frames.ts` validates nonce/source-bound separate-stream frames,
+both EOFs and matching original exit; `daytona-framed-command.ts` recovers only
+that session and command. Existing marker/PGID control owns physical cancellation.
+After durable output capture and settlement, routing awaits native namespace
+cleanup before releasing the route. Cleanup failure remains retryable; deletion
+or a missing session never substitutes for exit/EOF proof. Ordinary shell and PTY
+execution stay outside this collection scope.
+
+OpenSandbox validates original SSE/NDJSON framing, UTF-8, error data and execution
+identity in `sandbox/providers/opensandbox-command-stream.ts` before the SDK can
+project or discard events. The adapter retains the first execution ID and launch
+transport. Its control-only observer accepts matching terminal status and caches
+that physical proof across native alias retirement, without consuming output,
+advancing cursors, acknowledging pages or releasing routed output custody.
+Malformed output can therefore reject filesystem completion while independent
+physical cleanup still reconciles the exact command.
+
+An attempted command transport that loses its first execution ID remains
+outcome-unknown, including response-header loss and ambiguous HTTP failures.
+It cannot manufacture exit 1, replay Start or invent a control target; physical
+cleanup remains joined when exact recovery authority is unavailable. Local
+non-dispatch proof is restricted to the unchanged default SDK command binding
+failing before its command transport is invoked. A custom factory's absent
+fetch, remote error classification or missing init is not that proof.
+
+Remote cancellation joins survive observation loss and transfer-start. Only
+exact terminal proof or committed durable adoption releases the join; failed
+adoption restores cleanup through the original launch client. Locally proven
+pre-dispatch refusal retires a provisional join without inventing a remote
+process. Offline RPC errors are not that proof. The synchronous runner checks
+won cancellation before returning a terminal result, including exit-zero races.
+
 If that process's durable row already records exit or loss, a later model-visible
 `write_stdin` remains fenced before provider dispatch but returns the stored
 terminal exit/loss banner. It never labels a permanently dead handle as a

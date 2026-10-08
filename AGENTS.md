@@ -536,6 +536,11 @@ Use [`docs/README.md`](docs/README.md) as the docs map. When you move or rename 
 
 ## Sandbox Notes
 
+Daytona synchronous filesystem collection binds the registered client's exact
+native sandbox and framed original command. Routing awaits namespace cleanup
+after durable output settlement; deletion or absence never proves exit/EOF or
+cancellation. See `docs/run-lifecycle.md` before changing this boundary.
+
 Modal Start transport errors are not rejection proof, including DNS-shaped
 `UNAVAILABLE`. Only locally constructed pre-dispatch readiness proof permits
 recovery. Function tools return explicit outcome-unknown results without replay;
