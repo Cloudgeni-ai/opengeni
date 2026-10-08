@@ -614,6 +614,16 @@ release-schema registration and deployment runbook. The migration and
 consumer code ship as one matched release and are activated only after the
 required drain. Retire legacy Codex executable paths in M3; retain old tables
 only where needed for later provider cutovers or the planned M6 schema cleanup.
+
+The PR1 runtime-store migration is also maintenance-mode, although it moves no
+records and opens no `NO FORCE` window: the standalone runtime-posture contract
+is exact, so an older binary rejects the newly added FORCE-RLS relations and
+grants. Drain old API, control-worker, and turn-worker processes before applying
+0645, then start only binaries that include its matching runtime-posture and
+repository contract. The provider switch remains disabled; it cannot make this
+schema change a per-organization rolling rollout. PR3 remains the separate
+one-way Codex data-move and switch-activation maintenance cutover.
+
 Do not merge a partial Codex caller cutover that can strand Codex on the
 core-disabled path. Each
 implementation PR follows the repository's complex-change process: two

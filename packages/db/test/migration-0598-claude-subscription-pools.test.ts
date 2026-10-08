@@ -21,6 +21,7 @@ const subscriptionCoreMigrations = [
   "0642_shared_subscription_core.sql",
   "0643_model_call_facts_subscription_connection_index.sql",
   "0644_subscription_inference_source_settings.sql",
+  "0645_subscription_core_runtime.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {
