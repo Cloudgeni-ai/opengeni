@@ -204,6 +204,16 @@ describe("idle-session archive lifecycle", () => {
       });
       exported[spec.table] = page.rows.length;
       for (const row of page.rows) expect(typeof JSON.parse(row)).toBe("object");
+      // The rendering carries exactly the values jsonb would, column for column.
+      const order = spec.keys.map((key) => `t."${key.column}"`).join(", ");
+      const reference = await shared.admin.unsafe(
+        `select to_jsonb(t)::text as row from "${spec.table}" t
+          where t.workspace_id = $1 and t.session_id = $2 order by ${order} limit 1000`,
+        [scope.workspaceId, scope.sessionId],
+      );
+      expect(page.rows.map((row) => JSON.parse(row))).toEqual(
+        reference.map((row) => JSON.parse((row as unknown as { row: string }).row)),
+      );
     }
     expect(exported.session_events).toBeGreaterThan(3);
     expect(exported.session_history_items).toBeGreaterThanOrEqual(1);

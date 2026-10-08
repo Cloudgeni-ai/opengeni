@@ -363,6 +363,7 @@ import {
   withRunCredentialsSession,
   type RunCredentialSessionReady,
 } from "./sandbox";
+import { SynchronousCommandOutcomeUnknownError } from "./sandbox/synchronous-command";
 import { runWithToolCallCorrelation } from "./sandbox/op-correlation";
 import {
   sandboxCommandExitCode,
@@ -2755,6 +2756,10 @@ export function mcpToolErrorOutput(error: unknown): {
   if (interactionFailure) return interactionFailure;
   const text =
     invalidToolArgumentsText(error) ??
+    (error instanceof SynchronousCommandOutcomeUnknownError ? error.message : null) ??
+    (isRoutingMutationOutcomeUnknownError(error)
+      ? renderRoutingMutationOutcomeUnknownToolResult(error)
+      : null) ??
     (isIntegrationInvocationOutcomeUnknownError(error)
       ? `The tool outcome is uncertain. Do not retry automatically; check the provider before a new attempt. Error: ${exactErrorMessage(error)}`
       : null) ??

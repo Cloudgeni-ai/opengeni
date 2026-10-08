@@ -7,7 +7,8 @@ import { GITHUB_PAGE_FONT_FACES } from "./github-browser-fonts.gen";
 // scripts/generate-github-page-fonts.ts), the @opengeni/react token values
 // (packages/react/styles/tokens.css), the page glow and header of the signed-out
 // pages, the "teal wash" primary button and the Opengeni brand mark and wordmark
-// (apps/web/src/components/brand-mark.tsx).
+// (apps/web/src/components/brand-mark.tsx). Every card opens with an Opengeni +
+// GitHub lockup so each step of the flow visibly belongs to GitHub.
 // Dark is the default like the app; light follows prefers-color-scheme.
 const pageStyle = `
   :root{color-scheme:dark;--bg:#202020;--surface:#333333;--surface-2:#383838;--border:#454545;--border-strong:#555555;--fg:#e6e6e6;--muted:#b8b8b8;--subtle:#a3a3a3;--accent:#c4c4c4;--selected:rgb(196 196 196 / .07);--hover:rgb(230 230 230 / .06);--primary:#2b3432;--primary-fg:#eeeeee;--primary-border:#4e5e59;--primary-hover:#47504e;--glow-teal:#79d9c125;--glow-peach:#ffb78724;--ring:rgb(196 196 196 / .55);--shadow:0 8px 28px rgb(0 0 0 / .32),0 2px 8px rgb(0 0 0 / .2)}
@@ -27,6 +28,11 @@ const pageStyle = `
   p{margin:0;color:var(--muted);font-size:14px;line-height:20px}
   p strong{color:var(--fg);font-weight:600}
   .intro{margin-bottom:24px}
+  .lockup{display:flex;align-items:center;gap:10px;margin-bottom:20px}
+  .lockup-tile{display:grid;place-items:center;flex:none;width:44px;height:44px;border:1px solid var(--border);border-radius:12px;background:var(--surface-2);color:var(--fg)}
+  .lockup-tile svg{width:24px;height:24px}
+  .lockup-tile .opengeni-mark{height:auto}
+  .lockup-link{flex:none;width:18px;border-top:2px dotted var(--border-strong)}
   .options{display:grid;gap:8px;margin:-4px;padding:4px;border:0;min-width:0;max-height:min(368px,50vh);overflow:auto}
   .option{display:flex;gap:12px;align-items:center;min-height:56px;padding:10px 14px;border:1px solid var(--border);border-radius:10px;background:var(--surface);background-image:linear-gradient(transparent,transparent);cursor:pointer;transition:background-color .12s,border-color .12s}
   .option:hover{background-image:linear-gradient(var(--hover),var(--hover))}
@@ -60,10 +66,20 @@ const pageStyle = `
 `;
 
 // The Opengeni iconmark (two stacked chevrons), filled with the text color.
-const brandMark = `<svg viewBox="0 0 176 138.73" fill="currentColor" aria-hidden="true"><path transform="translate(-75 -39.5966)" d="M251 83.5966L207 109L163 83.5966L119 109L75 83.5966L141 45.4915A44 44 0 0 1 185 45.4915ZM185.25 172.3642A44.5 44.5 0 0 1 140.75 172.3642L75 134.4034L119 109L163 134.4034L207 109L251 134.4034Z"/></svg>`;
+const brandMark = `<svg class="opengeni-mark" viewBox="0 0 176 138.73" fill="currentColor" aria-hidden="true"><path transform="translate(-75 -39.5966)" d="M251 83.5966L207 109L163 83.5966L119 109L75 83.5966L141 45.4915A44 44 0 0 1 185 45.4915ZM185.25 172.3642A44.5 44.5 0 0 1 140.75 172.3642L75 134.4034L119 109L163 134.4034L207 109L251 134.4034Z"/></svg>`;
+
+// GitHub's mark (the Octocat silhouette), the same reviewed path as the web
+// app's GitHub logo (apps/web/public/capability-logos/github.svg). Filled with
+// the text color, so it is dark on the light theme and light on the dark theme,
+// both of which GitHub's logo guidelines allow.
+const githubMark = `<svg class="github-mark" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M 12 .7a11.5 11.5 0 0 0-3.6 22.4c.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.4-4-1.4-.5-1.4-1.3-1.8-1.3-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0C17 4.8 18 5.1 18 5.1c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.9 1.2 3.1 0 4.4-2.8 5.4-5.5 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A11.5 11.5 0 0 0 12 .7Z"/></svg>`;
+
+// Opengeni and GitHub side by side, joined by a dotted link: this page is a
+// step of connecting the two.
+const lockup = `<div class="lockup" role="img" aria-label="Opengeni and GitHub"><span class="lockup-tile">${brandMark}</span><span class="lockup-link"></span><span class="lockup-tile">${githubMark}</span></div>`;
 
 function page(title: string, content: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><title>${escapeHtml(title)} · Opengeni</title><style>${GITHUB_PAGE_FONT_FACES}${pageStyle}</style></head><body><header><span class="brand">${brandMark}<span class="wordmark">Opengeni</span></span><span class="context">GitHub connection</span></header><main><div class="card">${content}</div></main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><title>${escapeHtml(title)} · Opengeni</title><style>${GITHUB_PAGE_FONT_FACES}${pageStyle}</style></head><body><header><span class="brand">${brandMark}<span class="wordmark">Opengeni</span></span><span class="context">GitHub connection</span></header><main><div class="card">${lockup}${content}</div></main></body></html>`;
 }
 
 export function githubInstallationChooserHtml(
@@ -180,6 +196,42 @@ export function githubConnectFailureHtml(
   return page(
     copy.title,
     `<h1>${escapeHtml(copy.title)}</h1><p class="intro">${escapeHtml(copy.body)}</p><a class="button" href="${escapeHtml(returnUrl)}">Back to Opengeni</a>${note}`,
+  );
+}
+
+// Opengeni Lens (pull-request review) installs its own GitHub App through the
+// same owner-proof flow, so its pages share this design and GitHub lockup.
+export function prReviewInstallationChooserHtml(
+  candidates: GitHubInstallationBindingCandidate[],
+  state: string,
+  action: string,
+): string {
+  const options = candidates
+    .map(({ installation, authorityKind }) => {
+      const account = escapeHtml(
+        installation.accountLogin ?? `installation ${installation.installationId}`,
+      );
+      const label = authorityKind === "personal_owner" ? "Personal account" : "Organization owner";
+      return `<label class="option"><input type="radio" name="installation_id" value="${installation.installationId}" required><span class="option-text"><strong>${account}</strong><small>${label}</small></span></label>`;
+    })
+    .join("");
+  return page(
+    "Connect Opengeni Lens",
+    `<h1>Connect Opengeni Lens</h1><p class="intro">Choose an account where GitHub proved you are the owner.</p><form method="get" action="${escapeHtml(action)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><fieldset class="options" aria-label="Available GitHub accounts">${options}</fieldset><div class="actions"><button class="button" type="submit">Connect selected</button><button class="button secondary" type="submit" name="installation_id" value="new" formnovalidate>Install on another account</button></div></form>`,
+  );
+}
+
+export function prReviewSetupSuccessHtml(account: string, returnUrl: string): string {
+  return page(
+    "Opengeni Lens connected",
+    `<h1>Opengeni Lens connected</h1><p class="intro"><strong>${escapeHtml(account)}</strong> and its selected repositories are ready for pull-request review.</p><a class="button" href="${escapeHtml(returnUrl)}">Back to Opengeni</a>`,
+  );
+}
+
+export function prReviewSetupPendingHtml(): string {
+  return page(
+    "Opengeni Lens requested",
+    `<h1>Installation requested</h1><p class="intro">A GitHub organization owner must approve Opengeni Lens. No repository was connected yet.</p>`,
   );
 }
 
