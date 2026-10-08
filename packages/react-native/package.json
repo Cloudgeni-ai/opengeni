@@ -13,7 +13,9 @@
     "src",
     "ios",
     "expo-module.config.json",
-    "README.md"
+    "README.md",
+    "app.plugin.js",
+    "plugin"
   ],
   "type": "module",
   "main": "./src/index.ts",
