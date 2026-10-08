@@ -757,20 +757,16 @@ BEGIN
         RAISE EXCEPTION 'subscription connection refresh generation cannot move backwards'
           USING ERRCODE = '23514';
       END IF;
-      IF NEW.credential_encrypted IS DISTINCT FROM OLD.credential_encrypted
-        OR NEW.credential_format IS DISTINCT FROM OLD.credential_format
-      THEN
-        IF NEW.refresh_generation = OLD.refresh_generation THEN
-          NEW.refresh_generation := OLD.refresh_generation + 1;
-        ELSIF NEW.refresh_generation <> OLD.refresh_generation + 1 THEN
-          RAISE EXCEPTION 'a credential change advances refresh generation by exactly one'
-            USING ERRCODE = '23514';
-        END IF;
-      ELSIF NEW.refresh_generation <> OLD.refresh_generation THEN
-        -- Without a credential change the generation is fixed, so it grows by
-        -- one per credential write and its safe-integer ceiling is unreachable.
-        RAISE EXCEPTION 'refresh generation changes only with the credential'
+      -- One step per write at most, so the safe-integer ceiling is unreachable.
+      IF NEW.refresh_generation > OLD.refresh_generation + 1 THEN
+        RAISE EXCEPTION 'refresh generation advances by exactly one per write'
           USING ERRCODE = '23514';
+      END IF;
+      IF (NEW.credential_encrypted IS DISTINCT FROM OLD.credential_encrypted
+          OR NEW.credential_format IS DISTINCT FROM OLD.credential_format)
+        AND NEW.refresh_generation = OLD.refresh_generation
+      THEN
+        NEW.refresh_generation := OLD.refresh_generation + 1;
       END IF;
       RETURN NEW;
     END;

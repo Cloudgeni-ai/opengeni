@@ -2047,7 +2047,7 @@ describe("provider-neutral subscription runtime persistence", () => {
   );
 
   test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
-    "Codex token refresh writes require the exact live turn lease and cannot authorize other column writes",
+    "Codex refresh authorization requires the exact live turn lease, and its write cannot authorize other column writes",
     async () => {
       const state = await fixture();
       const actor = {
@@ -2764,23 +2764,18 @@ describe("provider-neutral subscription runtime persistence", () => {
           return String((error as { cause?: unknown }).cause ?? error);
         }
       };
-      // A credential change may not skip generations, and the generation stays
-      // a JavaScript-safe integer so callers' compare-and-swap never rounds.
+      // No write may skip generations, so the generation stays a
+      // JavaScript-safe integer and callers' compare-and-swap never rounds.
       expect(
         await adminWriteError(sql`update subscription_connections
           set credential_encrypted = 'v1:c2tpcA==:c2VjcmV0', refresh_generation = 4
           where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid`),
-      ).toContain("advances refresh generation by exactly one");
+      ).toContain("refresh generation advances by exactly one per write");
       expect(
         await adminWriteError(sql`update subscription_connections
           set refresh_generation = 9007199254740992
           where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid`),
-      ).toContain("refresh generation changes only with the credential");
-      expect(
-        await adminWriteError(sql`update subscription_connections
-          set refresh_generation = 3
-          where account_id = ${state.accountId}::uuid and id = ${state.connectionId}::uuid`),
-      ).toContain("refresh generation changes only with the credential");
+      ).toContain("refresh generation advances by exactly one per write");
       // The safe-integer CHECK still backs the trigger for any other writer.
       const [bound] = await shared!.admin<{ present: boolean }[]>`
         select exists (
