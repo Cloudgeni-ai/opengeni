@@ -1,4 +1,5 @@
 import type { ChannelAExecArgs, ChannelAExecResult, ChannelASession } from "./channel-a";
+import { withNativeSynchronousCommandCollection } from "./native-synchronous-collection";
 import {
   hasTypedExecHandleLoss,
   isExecSessionLostBanner,
@@ -18,6 +19,9 @@ export type SynchronousCommandPage = {
   exitCode: number | null;
   sessionId?: number;
   wallTimeSeconds: number;
+  /** Only presentation output or an unsupported yielded reader is available.
+   * Preserve the handle, but do not consume that reader's output. */
+  collectionUnavailable?: boolean;
   outputCursor?: {
     identity: string;
     expected: { stdout: number; stderr: number };
@@ -44,10 +48,12 @@ export class SynchronousCommandOutcomeUnknownError extends Error {
 /** Snapshot before routing commits/acknowledges the raw provider receipt. The
  * protocol must consume complete separate streams, not a human-facing tail. */
 export function synchronousCommandPage(
-  session: Pick<ChannelASession, "getProviderCommandOutput">,
+  session: Pick<ChannelASession, "getProviderCommandOutput" | "getSynchronousCommandOutput">,
   raw: string | ChannelAExecResult,
   originalSessionId?: number,
 ): SynchronousCommandPage {
+  const nativePage = session.getSynchronousCommandOutput?.(raw);
+  if (nativePage) return nativePage;
   const page = session.getProviderCommandOutput?.(raw);
   if (
     !page &&
@@ -63,15 +69,6 @@ export function synchronousCommandPage(
     );
   }
   const banner = typeof raw === "string" ? parseExecResponseBanner(raw) : null;
-  const delimiter = typeof raw === "string" ? /\r?\nOutput:\r?\n/u.exec(raw) : null;
-  const framedOutput =
-    typeof raw === "string"
-      ? delimiter
-        ? raw.slice(delimiter.index + delimiter[0].length)
-        : raw.startsWith("Output:\n")
-          ? raw.slice(8)
-          : raw
-      : "";
   const command = page?.command;
   const streamsComplete =
     command?.kind !== "modal-router-v1" ||
@@ -83,8 +80,8 @@ export function synchronousCommandPage(
           .map((chunk) => chunk.text)
           .join("")
       : typeof raw === "string"
-        ? framedOutput
-        : (raw.stdout ?? raw.output ?? ""),
+        ? ""
+        : (raw.stdout ?? ""),
     stderr: page
       ? page.chunks
           .filter((chunk) => chunk.stream === "stderr")
@@ -110,6 +107,16 @@ export function synchronousCommandPage(
         ? { sessionId: raw.sessionId }
         : {}),
     wallTimeSeconds: typeof raw === "string" ? 0 : (raw.wallTimeSeconds ?? 0),
+    ...(page
+      ? page.streamFidelity === "merged"
+        ? { collectionUnavailable: true }
+        : {}
+      : typeof raw === "string" ||
+          typeof raw.stdout !== "string" ||
+          typeof raw.stderr !== "string" ||
+          typeof raw.sessionId === "number"
+        ? { collectionUnavailable: true }
+        : {}),
     ...(command?.kind === "modal-router-v1"
       ? {
           outputCursor: {
@@ -137,6 +144,15 @@ export async function executeSynchronousCommand(
   args: ChannelAExecArgs,
 ): Promise<SynchronousCommandResult> {
   if (session.execSynchronous) return await session.execSynchronous(args);
+  return await withNativeSynchronousCommandCollection(session, () =>
+    executeSynchronousCommandOnce(session, args),
+  );
+}
+
+async function executeSynchronousCommandOnce(
+  session: ChannelASession,
+  args: ChannelAExecArgs,
+): Promise<SynchronousCommandResult> {
   const raw = session.exec
     ? await session.exec(args)
     : session.execCommand
@@ -176,6 +192,13 @@ export async function observeSynchronousCommand(
   let page = initial;
   let cursor = initial.outputCursor;
   while (true) {
+    if (page.collectionUnavailable) {
+      throw new SynchronousCommandOutcomeUnknownError(
+        sessionId,
+        { stdout, stderr },
+        new Error("Command adapter cannot prove lossless separate output collection"),
+      );
+    }
     if (page.sessionId === undefined && page.exitCode !== null) {
       return {
         stdout,
@@ -194,8 +217,8 @@ export async function observeSynchronousCommand(
       }
       if (
         cursor &&
-        page.outputCursor &&
-        (cursor.identity !== page.outputCursor.identity ||
+        (!page.outputCursor ||
+          cursor.identity !== page.outputCursor.identity ||
           cursor.next.stdout !== page.outputCursor.expected.stdout ||
           cursor.next.stderr !== page.outputCursor.expected.stderr)
       ) {
@@ -207,6 +230,13 @@ export async function observeSynchronousCommand(
       }
     } catch (cause) {
       throw new SynchronousCommandOutcomeUnknownError(sessionId, { stdout, stderr }, cause);
+    }
+    if (page.collectionUnavailable) {
+      throw new SynchronousCommandOutcomeUnknownError(
+        sessionId,
+        { stdout, stderr },
+        new Error("Command adapter returned output without lossless separate stream proof"),
+      );
     }
     stdout += page.stdout;
     stderr += page.stderr;

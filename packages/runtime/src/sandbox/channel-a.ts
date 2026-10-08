@@ -79,6 +79,7 @@ import {
   executeSynchronousCommand,
   SynchronousCommandOutcomeUnknownError,
   type SynchronousCommandResult,
+  type SynchronousCommandPage,
 } from "./synchronous-command";
 import {
   isRoutingMutationOutcomeUnknownError,
@@ -141,6 +142,8 @@ export type ChannelAEditor = {
   deleteFile?(op: unknown): Promise<unknown>;
 };
 export type ChannelASession = ProviderCommandSession & {
+  /** Trusted native SDK stream capture; never inferred from presentation text. */
+  getSynchronousCommandOutput?(result: unknown): SynchronousCommandPage | null;
   /** Commit a provider output page only after durable capture succeeds. */
   acknowledgeCommandOutput?(result: string): Promise<void>;
   exec?(args: ChannelAExecArgs): Promise<ChannelAExecResult>;
