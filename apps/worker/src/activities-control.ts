@@ -15,6 +15,7 @@ import { createSandboxLeaseActivities } from "./activities/sandbox-lease";
 import { createScheduledTaskActivities } from "./activities/scheduled-tasks";
 import { createSiteAuthMaintenanceActivities } from "./activities/site-auth-maintenance";
 import { createSessionStateActivities } from "./activities/session-state";
+import { createSessionStorageActivities } from "./activities/session-storage";
 import type { ActivityDependencies, ControlActivityServices } from "./activities/types";
 import { createWorkflowWakeActivities } from "./activities/workflow-wake";
 
@@ -35,6 +36,7 @@ export function createControlActivitiesFromServices(
     ...createKnowledgeIndexingActivities(services, resolveDocumentServices),
     ...createKnowledgeSourceSyncActivities(services, resolveDocumentServices),
     ...createSessionStateActivities(services),
+    ...createSessionStorageActivities(services),
     ...createScheduledTaskActivities(services),
     ...createSiteAuthMaintenanceActivities(services),
     ...createGoalActivities(services),

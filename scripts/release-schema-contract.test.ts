@@ -2463,6 +2463,7 @@ describe("release schema contract", () => {
       "0644_subscription_inference_source_settings.sql",
       "0645_subscription_core_runtime.sql",
       "0646_subscription_core_people_assignment_read.sql",
+      "0648_session_content_blobs.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

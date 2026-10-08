@@ -7824,6 +7824,8 @@ export const sessionAttemptToolCatalogs = pgTable(
     generation: integer("generation").notNull(),
     digest: text("digest").notNull(),
     catalog: jsonb("catalog").$type<AttemptToolCatalog>().notNull(),
+    /** Session content-blob digests for `catalog.entries`; NULL means inline legacy form. */
+    contentRefs: jsonb("content_refs").$type<{ v: 1; entries: string[] }>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   },
   (table) => ({
@@ -7901,6 +7903,15 @@ export const sessionAttemptModelContextSnapshots = pgTable(
     requestIndex: integer("request_index").notNull(),
     capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
     snapshot: jsonb("snapshot").$type<ModelContextSnapshot>().notNull(),
+    /** Session content-blob digests for externalized snapshot values; NULL means inline. */
+    contentRefs: jsonb("content_refs").$type<{
+      v: 1;
+      instructions: string;
+      layers: string;
+      tools: string;
+      skills: string;
+      body: string[] | null;
+    }>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
   },
@@ -7938,6 +7949,40 @@ export const sessionAttemptModelContextSnapshots = pgTable(
         and jsonb_typeof(${table.snapshot}->'layers') = 'array'
         and jsonb_typeof(${table.snapshot}->'tools') = 'array'
         and jsonb_typeof(${table.snapshot}->'skills') = 'array'`,
+    ),
+  }),
+);
+
+/** Session-owned content-addressed JSON values (see `session-content-blobs.ts`). */
+export const sessionContentBlobs = pgTable(
+  "session_content_blobs",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    digest: text("digest").notNull(),
+    value: jsonb("value").$type<unknown>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({
+      name: "session_content_blobs_pkey",
+      columns: [table.workspaceId, table.sessionId, table.digest],
+    }),
+    sessionOwner: foreignKey({
+      name: "session_content_blobs_session_fk",
+      columns: [table.sessionId],
+      foreignColumns: [sessions.id],
+    }).onDelete("cascade"),
+    workspaceAccount: foreignKey({
+      name: "session_content_blobs_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    session: index("session_content_blobs_session_idx").on(table.sessionId),
+    digestValid: check(
+      "session_content_blobs_digest_check",
+      sql`${table.digest} ~ '^[0-9a-f]{64}$'`,
     ),
   }),
 );
