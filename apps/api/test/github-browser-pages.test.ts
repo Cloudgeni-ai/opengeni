@@ -161,7 +161,7 @@ describe("API GitHub browser pages", () => {
       expect(lockup![1]).toContain('class="opengeni-mark"');
       // The Octocat path, filled with the text color so it flips with the theme.
       expect(lockup![1]).toMatch(
-        /<svg class="github-mark" viewBox="0 0 24 24" fill="currentColor"[^>]*><path d="M12 \.7a11\.5/,
+        /<svg class="github-mark" viewBox="0 0 24 24" fill="currentColor"[^>]*><path d="M 12 \.7a11\.5/,
       );
       expect(html).toMatch(/\.lockup-tile\{[^}]*color:var\(--fg\)/);
     }
