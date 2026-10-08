@@ -136,7 +136,7 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
        generation,digest,catalog,created_at)
       values(${attemptId},${scope.accountId},${scope.workspaceId},${scope.sessionId},${scope.turnId},
        ${scope.executionGeneration},${catalog.version},${catalog.generation},${catalog.digest},
-       ${owned.admin.json(catalog)},${new Date(catalog.createdAt)})`;
+       ${owned.admin.json(catalog as unknown as postgres.JSONValue)},${new Date(catalog.createdAt)})`;
     const requestId = crypto.randomUUID();
     await owned.admin`insert into connector_action_requests
       (id,account_id,workspace_id,session_id,turn_id,creation_attempt_id,creation_execution_generation,
