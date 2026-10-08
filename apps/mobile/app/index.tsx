@@ -388,6 +388,9 @@ function Home() {
             onPasteImages={(files) => void attachments.addFiles(files)}
             renderLeading={() => (
               <ComposerPlusMenu
+                onTakePhoto={
+                  attachments.takePhoto ? () => void attachments.takePhoto?.() : undefined
+                }
                 onPickImages={() => void attachments.pickImages()}
                 onPickFiles={() => void attachments.pickDocuments()}
                 options={options}

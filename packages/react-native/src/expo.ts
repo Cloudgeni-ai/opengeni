@@ -150,6 +150,30 @@ export const expoFileAdapter: OpenGeniReactNativeAdapters["files"] = {
       };
     });
   },
+  takePhoto: async () => {
+    const permission = await ImagePicker.requestCameraPermissionsAsync();
+    if (!permission.granted) {
+      throw new Error(
+        permission.canAskAgain
+          ? "Camera access is needed to take a photo."
+          : "Camera access is off for this app. Turn it on in Settings to take photos.",
+      );
+    }
+    const result = await ImagePicker.launchCameraAsync({ mediaTypes: ["images"], quality: 0.9 });
+    if (result.canceled) return [];
+    return result.assets.map((asset): NativePickedFile => {
+      const contentType = asset.mimeType ?? "image/jpeg";
+      return {
+        id: Crypto.randomUUID(),
+        uri: asset.uri,
+        name: asset.fileName ?? fallbackFilename(asset.uri, contentType),
+        contentType,
+        sizeBytes: asset.fileSize ?? null,
+        kind: "image",
+        previewUri: asset.uri,
+      };
+    });
+  },
   // Expo FileSystem's iOS `bytes()` requests write authority that read-only photo-picker
   // exports do not grant; `base64()` uses read authority, so decode once here.
   readBytes: async (source) => base64ToBytes(await new File(source.uri).base64()),
