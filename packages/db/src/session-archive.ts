@@ -289,7 +289,12 @@ export async function abandonSessionArchive(
   );
 }
 
-/** One keyset page of raw rows as exact JSON text, in bundle order. */
+/**
+ * One keyset page of raw rows as exact JSON text, in bundle order. Rows are
+ * rendered with row_to_json, not to_jsonb: a row whose jsonb columns together
+ * exceed jsonb's 256 MB object limit (for example a huge retained tool output
+ * stored twice) still renders as JSON text, and column order is preserved.
+ */
 export async function readSessionArchiveRows(
   db: Database,
   scope: SessionArchiveScope,
@@ -318,7 +323,7 @@ export async function readSessionArchiveRows(
     async (scoped) => {
       const rows = await rawRows<Record<string, string>>(
         scoped,
-        sql`select to_jsonb(t)::text as row, ${keyText}
+        sql`select row_to_json(t)::text as row, ${keyText}
           from ${sql.identifier(spec.table)} t
           where t.workspace_id = ${scope.workspaceId}::uuid
             and t.session_id = ${scope.sessionId}::uuid
@@ -391,7 +396,7 @@ export async function readSessionArchiveSessionRow(
     async (scoped) => {
       const [row] = await rawRows<{ row: string }>(
         scoped,
-        sql`select to_jsonb(s)::text as row from sessions s
+        sql`select row_to_json(s)::text as row from sessions s
           where s.workspace_id = ${scope.workspaceId}::uuid and s.id = ${scope.sessionId}::uuid`,
       );
       if (!row) throw new Error("Archived session row is not visible");

@@ -21553,9 +21553,24 @@ export async function updateSessionVariableSets(
                   and request_row.session_id = ${input.sessionId}
                   and request_row.status = 'pending')
               then 'pending_human_input'
+            -- Same live-receipt predicate as migration 0658: a receipt stranded
+            -- by a terminal turn whose attempt settled can never be resumed.
             when exists (select 1 from ${schema.sessionPendingToolCalls} tool_row
                 where tool_row.workspace_id = ${input.workspaceId}
-                  and tool_row.session_id = ${input.sessionId})
+                  and tool_row.session_id = ${input.sessionId}
+                  and (exists (select 1 from ${schema.sessionTurns} owner_turn
+                      where owner_turn.workspace_id = tool_row.workspace_id
+                        and owner_turn.id = tool_row.turn_id
+                        and owner_turn.status not in (
+                          'completed', 'failed', 'cancelled', 'superseded', 'withdrawn_for_edit'
+                        ))
+                    or exists (select 1 from ${schema.sessionTurnAttempts} owner_attempt
+                      where owner_attempt.workspace_id = tool_row.workspace_id
+                        and owner_attempt.id = tool_row.attempt_id
+                        and (owner_attempt.state <> 'closed'
+                          or (owner_attempt.quiesced_at is null and exists (
+                            select 1 from ${schema.sessionAttemptInterruptions} interruption
+                            where interruption.attempt_id = owner_attempt.id))))))
               then 'pending_tool_receipt'
             when exists (select 1 from ${schema.agentRunStates} run_state
                 where run_state.workspace_id = ${input.workspaceId}

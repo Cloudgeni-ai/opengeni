@@ -1773,6 +1773,11 @@ The activated database contract is intentionally narrow:
   interaction holders are all quiescent. The stale 0225 auto-cancellation
   behavior is not ported. The nested quiescence helper is owner-internal and
   ungranted; only the fully authorized lifecycle functions may invoke it.
+  Rolling migration 0658 counts only live tool receipts: one whose turn is
+  nonterminal or whose attempt is open or lacks its interruption quiescence
+  receipt. A receipt stranded by a completed turn cannot be resumed or
+  resolved, so it no longer blocks transitions, whole-session forks or
+  Variable Set changes. This is the same predicate Retry already uses.
 - Transition-to-private additionally requires a singleton sandbox group. A
   fresh transition to private in a shared workspace also requires the 0323
   organization setting. Migration 0344 fences the actual visibility update,
