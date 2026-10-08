@@ -19,6 +19,7 @@
  * re-exports it); only types cross that edge.
  */
 import { z } from "zod";
+import { isCuaDesktopModelTool } from "./cua-desktop-tools";
 import type { FirstPartyMcpToolName, SessionToolPolicy, ToolRef } from "./index";
 
 export const AGENT_CAPABILITY_IDS = [
@@ -597,6 +598,8 @@ export function resolveAgentToolFamilies(
           ];
     },
     allowsFunctionTool(name: string): boolean {
+      if (isCuaDesktopModelTool(name))
+        return !environment.unavailable?.includes("browser") && enabled("browser");
       if (!config) return true;
       const owner = (AGENT_FUNCTION_TOOL_CAPABILITIES as Record<string, AgentFunctionToolClass>)[
         name

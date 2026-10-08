@@ -442,7 +442,7 @@ describe("CUA desktop boundary", () => {
     expect(fixture.stopped).toBe(true);
   });
 
-  test("maps window coordinates and permits repeated scroll/drag without new screenshots", async () => {
+  test("maps viewer coordinates into fresh action captures for repeated scroll/drag", async () => {
     const fixture = new Fixture(),
       backend = await CuaComputerBackend.open(fixture);
     try {
@@ -499,7 +499,7 @@ describe("CUA desktop boundary", () => {
           endY: 80,
         },
       });
-      expect(fixture.captures).toBe(capturesBeforeInput);
+      expect(fixture.captures).toBe(capturesBeforeInput + 3);
       expect(fixture.calls.find((call) => call.name === "scroll")?.args).toMatchObject({
         direction: "down",
         amount: 2,

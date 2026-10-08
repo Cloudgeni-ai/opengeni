@@ -3410,3 +3410,65 @@ export const ComputerSessionHeartbeatResponse = z
   })
   .strict();
 export type ComputerSessionHeartbeatResponse = z.infer<typeof ComputerSessionHeartbeatResponse>;
+
+/** Native desktop calls share ComputerSession authority and its operation journal.
+ * CUA owns argument schemas; session/lifecycle authority never comes from callers. */
+export const ComputerNativeCallRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    tool: z
+      .string()
+      .regex(/^[a-z_]+$/)
+      .max(80),
+    arguments: z.record(z.string(), z.unknown()),
+  })
+  .strict();
+export type ComputerNativeCallRequest = z.infer<typeof ComputerNativeCallRequest>;
+export const ComputerNativeCommand = ComputerNativeCallRequest.extend({
+  protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
+  computerSessionId: z.string().uuid(),
+  controllerGeneration: opaqueGeneration,
+  targetId: z.null(),
+  actor: InteractionActor,
+}).strict();
+export type ComputerNativeCommand = z.infer<typeof ComputerNativeCommand>;
+export const ComputerNativeResult = z
+  .object({
+    target: z.null(),
+    computerSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    tool: z.string(),
+    // Original MCP content, including partial/refusal evidence and images.
+    result: z
+      .object({
+        content: z.array(z.record(z.string(), z.unknown())),
+        structuredContent: z.unknown().optional(),
+        isError: z.boolean().optional(),
+      })
+      .passthrough(),
+    outcome: z.enum(["completed", "failed", "outcome_unknown"]),
+    error: InteractionError.nullable(),
+  })
+  .strict();
+export type ComputerNativeResult = z.infer<typeof ComputerNativeResult>;
+export const ComputerNativeReceipt = z
+  .object({
+    protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
+    operationId: z.string().uuid(),
+    computerSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    targetId: z.null(),
+    state: InteractionOperationState,
+    dispatchedAt: z.string().datetime({ offset: true }).nullable(),
+    settledAt: z.string().datetime({ offset: true }).nullable(),
+    observation: ComputerNativeResult.nullable(),
+    error: InteractionError.nullable(),
+  })
+  .strict();
+export type ComputerNativeReceipt = z.infer<typeof ComputerNativeReceipt>;
+export const ComputerOperationCommand = z.union([ComputerNativeCommand, ComputerActionCommand]);
+export type ComputerOperationCommand = z.infer<typeof ComputerOperationCommand>;
+export const ComputerOperationReceipt = z.union([ComputerNativeReceipt, ComputerActionReceipt]);
+export type ComputerOperationReceipt = z.infer<typeof ComputerOperationReceipt>;
+export const ComputerOperationObservation = z.union([ComputerNativeResult, ComputerObservation]);
+export type ComputerOperationObservation = z.infer<typeof ComputerOperationObservation>;

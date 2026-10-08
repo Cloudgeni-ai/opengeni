@@ -7606,7 +7606,9 @@ export function toolFamilyForCatalogIdentity(
     case "files":
     case "docs":
     case "interaction":
-      return firstPartyToolFamily(entry.identity.toolName);
+      return firstPartyToolFamily(
+        entry.identity.toolName.startsWith("cua_") ? "computer_act" : entry.identity.toolName,
+      );
     case "codex_apps":
       return integrationToolFamily(["chatgpt.com"]);
     case "mcp":

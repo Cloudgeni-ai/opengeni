@@ -395,6 +395,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "callNativeComputerTool",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/native-calls",
+    "request": [
+      "ComputerNativeCallRequest"
+    ],
+    "response": [
+      "ComputerNativeReceipt"
+    ]
+  },
+  {
     "id": "callWorkspaceSiteTool",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/tools/calls",
@@ -2250,7 +2261,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/operations/:operationId",
     "request": [],
     "response": [
-      "ComputerActionReceipt"
+      "ComputerActionReceipt",
+      "ComputerNativeReceipt"
     ]
   },
   {

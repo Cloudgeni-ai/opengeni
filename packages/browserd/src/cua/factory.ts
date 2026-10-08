@@ -23,6 +23,7 @@ export async function createCuaComputerDriver(
     let closed = false;
     const backend = await CuaComputerBackend.open(
       {
+        listToolsJson: () => sdk.listToolsJson(),
         callTool: (name, args) => sdk.callTool(name, args),
         shutdown: async () => {
           if (closed) return;

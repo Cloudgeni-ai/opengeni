@@ -1,3 +1,8 @@
+import {
+  ComputerNativeReceipt as ContractComputerNativeReceipt,
+  ComputerActionReceipt as ContractComputerActionReceipt,
+} from "@opengeni/contracts";
+import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
 import type {
   ClaudeSubscriptionAccountsResponse,
   ClaudeSubscriptionAccount,
@@ -4713,6 +4718,21 @@ export class OpenGeniClient {
     return { ...metadata, data: bytes };
   }
 
+  async callNativeComputerTool(
+    workspaceId: string,
+    computerSessionId: string,
+    request: ComputerNativeCallRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerNativeReceipt> {
+    return await this.requestJson<ComputerNativeReceipt>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/native-calls`,
+      request,
+      {},
+      options,
+    );
+  }
+
   async actInComputer(
     workspaceId: string,
     computerSessionId: string,
@@ -4728,18 +4748,37 @@ export class OpenGeniClient {
     );
   }
 
+  async getNativeComputerToolReceipt(
+    workspaceId: string,
+    computerSessionId: string,
+    operationId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerNativeReceipt> {
+    return ContractComputerNativeReceipt.parse(
+      await this.requestJson(
+        "GET",
+        `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/operations/${encodeURIComponent(operationId)}`,
+        undefined,
+        {},
+        options,
+      ),
+    );
+  }
+
   async getComputerActionReceipt(
     workspaceId: string,
     computerSessionId: string,
     operationId: string,
     options: OpenGeniRequestOptions = {},
   ): Promise<ComputerActionReceipt> {
-    return await this.requestJson<ComputerActionReceipt>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/operations/${encodeURIComponent(operationId)}`,
-      undefined,
-      {},
-      options,
+    return ContractComputerActionReceipt.parse(
+      await this.requestJson<ComputerActionReceipt>(
+        "GET",
+        `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/operations/${encodeURIComponent(operationId)}`,
+        undefined,
+        {},
+        options,
+      ),
     );
   }
 

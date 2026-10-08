@@ -186,6 +186,139 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
         );
         expect(((await actual()) as State & { dragEvents: number }).dragEvents).toBe(0);
         expect((await actual()).frontmostPid).not.toBe(fixturePid);
+
+        const nativeCall = (tool: string, args: Record<string, unknown>) => ({
+          protocolVersion: 1 as const,
+          operationId: randomUUID(),
+          ...reference,
+          targetId: null,
+          actor: { kind: "agent" as const, subjectId: "agent:cua-fixture" },
+          tool,
+          arguments: { pid: fixturePid, window_id: windowId, ...args },
+        });
+        const read = await supervisor.nativeCall(
+          nativeCall("get_window_state", {
+            tree_format: "elements",
+            include_screenshot: true,
+            max_image_dimension: 960,
+          }),
+        );
+        expect(read.state).toBe("completed");
+        expect(read.observation!.result.content.some((entry) => entry.type === "image")).toBe(true);
+        const nativeState = read.observation!.result.structuredContent as {
+          elements: Array<{ label?: string; element_token: string }>;
+          screenshot_width: number;
+          screenshot_height: number;
+        };
+        const increment = nativeState.elements.find((entry) => entry.label === "Increment")!;
+        expect(increment).toBeDefined();
+        // The actual web hook polls semantic state every two seconds. Both
+        // those reads and continuous frame streaming must preserve this token.
+        for (let poll = 0; poll < 3; poll++) {
+          await supervisor.observe(reference, target.id);
+          await Bun.sleep(2100);
+        }
+        const batched = nativeCall("run_actions", {
+          steps: [{ tool: "click", args: { element_token: increment.element_token } }],
+          observe: true,
+        });
+        const batchedReceipt = await supervisor.nativeCall(batched);
+        expect(batchedReceipt.state).toBe("completed");
+        expect(await supervisor.nativeCall(batched)).toEqual(batchedReceipt);
+        expect((await actual()).clicks).toBe(3);
+        // Native pixel coordinates use a different image size from the viewer.
+        // A passive preview must not change their scale or retire zoom state.
+        const pixelRead = await supervisor.nativeCall(
+          nativeCall("get_window_state", {
+            include_screenshot: true,
+            max_image_dimension: 960,
+          }),
+        );
+        const pixels = pixelRead.observation!.result.structuredContent as typeof nativeState;
+        const pixelX =
+          ((button.x - bounds.x + button.width / 2) * pixels.screenshot_width) / bounds.width;
+        const pixelY =
+          ((button.y - bounds.y + button.height / 2) * pixels.screenshot_height) / bounds.height;
+        await supervisor.capture(reference, target.id, {
+          maxWidth: 240,
+          maxHeight: 150,
+          format: "png",
+        });
+        expect(
+          await supervisor.nativeCall(
+            nativeCall("click", { x: pixelX, y: pixelY, delivery_mode: "background" }),
+          ),
+        ).toMatchObject({ state: "completed" });
+        await Bun.sleep(100);
+        expect((await actual()).clicks).toBe(4);
+        const zoom = await supervisor.nativeCall(
+          nativeCall("zoom", {
+            x1: pixelX - 20,
+            y1: pixelY - 15,
+            x2: pixelX + 20,
+            y2: pixelY + 15,
+          }),
+        );
+        expect(zoom.state).toBe("completed");
+        await supervisor.capture(reference, target.id, {
+          maxWidth: 240,
+          maxHeight: 150,
+          format: "png",
+        });
+        const zoomSize = zoom.observation!.result.structuredContent as {
+          width: number;
+          height: number;
+        };
+        expect(
+          await supervisor.nativeCall(
+            nativeCall("click", {
+              x: zoomSize.width / 2,
+              y: zoomSize.height / 2,
+              from_zoom: true,
+              delivery_mode: "background",
+            }),
+          ),
+        ).toMatchObject({ state: "completed" });
+        await Bun.sleep(100);
+        expect((await actual()).clicks).toBe(5);
+        // Actual viewer input replaces the coordinate basis. Old native pixels
+        // must fail closed; a normal native read restores the action basis.
+        const takeoverFrame = await supervisor.capture(reference, target.id, {
+          maxWidth: 480,
+          maxHeight: 300,
+          format: "png",
+        });
+        const takeover = {
+          ...makeCommand(await supervisor.observe(reference, target.id), {
+            type: "pointer",
+            action: "click",
+            frameId: takeoverFrame.frameId,
+            x: (pixelX * takeoverFrame.width) / pixels.screenshot_width,
+            y: (pixelY * takeoverFrame.height) / pixels.screenshot_height,
+          }),
+          expectedFrameId: takeoverFrame.frameId,
+        };
+        expect(await supervisor.action(takeover)).toMatchObject({ state: "completed" });
+        const staleNative = await supervisor.nativeCall(
+          nativeCall("click", { x: pixelX, y: pixelY, delivery_mode: "background" }),
+        );
+        expect(staleNative.state).not.toBe("completed");
+        await Bun.sleep(100);
+        expect((await actual()).clicks).toBe(6);
+        expect(
+          await supervisor.nativeCall(nativeCall("get_window_state", { include_screenshot: true })),
+        ).toMatchObject({ state: "completed" });
+        const after = await supervisor.observe(reference, target.id);
+        expect(
+          await supervisor.action(
+            makeCommand(after, {
+              type: "keyboard",
+              action: "press",
+              value: "Tab",
+            }),
+          ),
+        ).toMatchObject({ state: "completed" });
+        expect((await actual()).frontmostPid).not.toBe(fixturePid);
       } finally {
         await stream.close();
       }

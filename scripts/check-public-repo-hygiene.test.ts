@@ -7,10 +7,11 @@ import {
 } from "./check-public-repo-hygiene";
 
 describe("public repository hygiene", () => {
-  test("bounds upstream random-label exemptions to exact paths and bytes", () => {
+  test("bounds upstream label exemptions to exact paths and bytes", () => {
     for (const file of [
       "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_010000.txt",
       "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_100000.txt",
+      "packages/contracts/src/cua-desktop-tools.gen.json",
     ]) {
       const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
       expect(auditPublicText(file, source)).toEqual([]);

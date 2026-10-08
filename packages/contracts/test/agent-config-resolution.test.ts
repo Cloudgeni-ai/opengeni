@@ -5,6 +5,7 @@ import {
   AgentConfigError,
   AgentConfigRequest,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  CUA_DESKTOP_TOOLS,
   FIRST_PARTY_MCP_TOOL_CAPABILITIES,
   FIRST_PARTY_MCP_TOOL_NAMES,
   ResolvedAgentConfig,
@@ -53,6 +54,17 @@ function errorCode(fn: () => unknown): string | null {
 }
 
 describe("agent config schemas", () => {
+  test("native CUA names obey the existing browser/computer family ceiling", () => {
+    const off = resolveAgentToolFamilies(resolve({ request: { capabilities: "none" } }).config);
+    const on = resolveAgentToolFamilies(resolve({ request: { capabilities: "all" } }).config);
+    const unavailable = resolveAgentToolFamilies(null, { unavailable: ["browser"] });
+    for (const tool of CUA_DESKTOP_TOOLS) {
+      expect(off.allowsFunctionTool("interaction__cua_" + tool.name)).toBe(false);
+      expect(on.allowsFunctionTool("interaction__cua_" + tool.name)).toBe(true);
+      // Legacy configuration still respects runtime unavailability.
+      expect(unavailable.allowsFunctionTool("interaction__cua_" + tool.name)).toBe(false);
+    }
+  });
   test("capability shapes", () => {
     expect(AgentCapabilities.parse("all")).toBe("all");
     expect(AgentCapabilities.parse({ from: "none", goals: true, skills: "manage" })).toEqual({

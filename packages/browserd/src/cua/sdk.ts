@@ -49,7 +49,7 @@ export async function createCuaRuntime() {
         maxIdleTtlSeconds: 3600n,
       },
     },
-    environment: [],
+    environment: [{ name: "CUA_DRIVER_RS_TELEMETRY_ENABLED", value: "false" }],
     inheritStderr: false,
   });
 }

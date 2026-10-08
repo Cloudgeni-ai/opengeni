@@ -1,5 +1,7 @@
 import type {
   ComputerAction,
+  ComputerNativeCallRequest,
+  ComputerNativeResult,
   ComputerClipboard,
   ComputerSessionCapabilities,
   InteractionRect,
@@ -87,6 +89,10 @@ export class ComputerBackendError extends Error {
 }
 
 export interface ComputerBackend {
+  validateNative?(request: ComputerNativeCallRequest): Promise<void>;
+  callNative?(
+    request: ComputerNativeCallRequest,
+  ): Promise<Pick<ComputerNativeResult, "result" | "outcome" | "error">>;
   readonly identity: { adapterId: string; platform: "linux" | "macos" | "windows" };
   readonly initialCapabilities: ComputerSessionCapabilities;
   capabilities(): Promise<ComputerSessionCapabilities>;

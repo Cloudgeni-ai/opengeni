@@ -1,3 +1,8 @@
+import {
+  ComputerNativeCommand,
+  ComputerNativeReceipt,
+  ComputerOperationReceipt,
+} from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { posix as posixPath } from "node:path";
 import { parseBrowserFrameMetadata, type BrowserFrameMetadata } from "@opengeni/sdk";
@@ -1952,6 +1957,23 @@ export class ComputerControlSessionClient {
     );
   }
 
+  async nativeCall(command: ComputerNativeCommand): Promise<ComputerNativeReceipt> {
+    const parsed = ComputerNativeCommand.parse(command);
+    if (
+      parsed.computerSessionId !== this.reference.computerSessionId ||
+      parsed.controllerGeneration !== this.reference.controllerGeneration
+    )
+      throw new BrowserControlProtocolError("native call targets another controller binding");
+    return ComputerNativeReceipt.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path("native-calls"),
+        token: this.controlToken,
+        body: parsed,
+      }),
+    );
+  }
+
   async action(command: ComputerActionCommandValue): Promise<ComputerActionReceiptValue> {
     const parsed = ComputerActionCommand.parse(command);
     if (
@@ -1970,8 +1992,8 @@ export class ComputerControlSessionClient {
     );
   }
 
-  async receipt(operationId: string): Promise<ComputerActionReceiptValue> {
-    return ComputerActionReceipt.parse(
+  async receipt(operationId: string): Promise<ComputerOperationReceipt> {
+    return ComputerOperationReceipt.parse(
       await this.parent.requestForSession({
         method: "GET",
         path: this.path(`operations/${requireUuid(operationId, "operation id")}`),

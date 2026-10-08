@@ -1,13 +1,13 @@
 # CUA desktop adapter
 
 The macOS adapter uses CUA Driver source revision
-`49e924c4632882134b204b2e8a0ce8fae44418df`, including its non-invalidating preview
+`2e4736b3ebff61ef99e8c0c74270b5cd75894643`, including its non-invalidating preview
 capture and cursor support. `@trycua/cua-driver` 0.34.0 supplies the private-worker
 transport; the source-built executable performs desktop operations. The narrow
 Windows experiment still uses the published SDK in process. Native remains the
 default until platform acceptance is complete.
 
-`ComputerBackend` translates desktop calls into CUA. The existing `ComputerDriver`
+`ComputerBackend` retains the legacy desktop projection and exposes native CUA calls. The existing `ComputerDriver`
 continues to handle OpenGeni sessions, operation receipts and frame streaming.
 There is no second authorization system or operation journal. Structured browser
 control, attached Chrome and browser profiles are unchanged.
@@ -55,8 +55,9 @@ targets and Xcode tools.
 
 ## Current limits
 
-- Mac background drag is refused before input. Native hover, app launch,
-  whole-desktop capture, clipboard and foreground focus are not exposed here.
+- Mac background drag is refused before input. The legacy action projection remains
+  limited; native CUA tools expose app launch, desktop capture, clipboard and cursor
+  controls with upstream arguments and results. Foreground activation is explicit.
 - Background support depends on the target application's native controls. It
   does not make every desktop application fully operable in the background.
 - Linux and Windows have not completed adoption acceptance. Windows requires an
@@ -67,8 +68,45 @@ targets and Xcode tools.
   changing the default backend.
 
 Pointer frames supply coordinate dimensions, not one-shot action permission.
-Repeated gestures may use the same displayed frame. Capture-only reads preserve
-CUA's accessibility snapshot; the adapter explicitly requests structured elements
+Repeated gestures may use the same displayed frame. Passive captures use
+`display_only` to preserve both accessibility tokens and native pixel/zoom state.
+Viewer pointer input takes a fresh capture under the serialized worker queue,
+translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Upstream source](https://github.com/trycua/cua/tree/49e924c4632882134b204b2e8a0ce8fae44418df/libs/cua-driver)
+[Upstream source](https://github.com/trycua/cua/tree/2e4736b3ebff61ef99e8c0c74270b5cd75894643/libs/cua-driver)
+
+## Native agent interface
+
+The release catalog comes from the bundled worker's `listToolsJson()` via
+`bun packages/browserd/scripts/generate-cua-desktop-tools.ts`. It admits desktop
+workflow tools; lifecycle, escalation, configuration, updates and browser tools
+stay outside this interface. The current generated catalog is macOS-specific.
+Other platforms must supply their own qualified schemas before native admission.
+Each admitted tool's input/output schemas are checked against the running worker.
+
+Agents use `interaction__cua_<upstream_name>` or Code Mode
+`computer.<upstream_name>`. Arguments remain native snake_case, with
+`computerSessionId` replacing the host-owned CUA `session`. Existing
+`computer_open` and `computer_act` selection plus computer control permission
+are required, including for read-like tools that can write screenshot files.
+No tool-enable UI or separate permission system is added.
+
+`run_actions` retains upstream batching and optional final observation;
+`get_window_state` retains compact Markdown, query limits and diff reads.
+MCP content, structured results and images survive the journal. Responses larger
+than 12 MiB carry an explicit bounded projection, retained operation status and
+no-replay guidance; the original stays in the controller journal. Failed
+or uncertain calls also retain their native evidence and explicit no-replay
+status. Native and legacy calls share one operation-ID namespace. The SDK exposes
+`callNativeComputerTool` and `computers.get(id).callNativeTool`; the native receipt accessor is `getNativeComputerToolReceipt` or
+`nativeReceipt`. Existing legacy receipt methods keep their public types.
+
+After native calls begin, ordinary web-view observation polling returns geometry
+and pixels without minting a new accessibility snapshot. This preserves the
+agent's element tokens; human keyboard input retains a matching observation
+fence. Native tools use their own CUA session identity: after actual viewer
+pointer input changes the pixel frame, stale native pixel/zoom input is refused
+until a new native observation. The native tool result owns the semantic tree.
+The disposable Mac test covers native batching, replay, differently scaled
+preview polling, pixel and zoom clicks, and keyboard/pointer takeover.

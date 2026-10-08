@@ -2,7 +2,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 // Pin the source we tested, including fixes newer than the published SDK.
-export const cuaSourceRevision = "49e924c4632882134b204b2e8a0ce8fae44418df";
+export const cuaSourceRevision = "2e4736b3ebff61ef99e8c0c74270b5cd75894643";
 const repository = "https://github.com/trycua/cua.git";
 
 export async function buildCuaWorker(architecture: string): Promise<string> {
