@@ -97,6 +97,58 @@ conservative bounded fallback. Inline image bytes or data-URL base64 therefore
 do not grow the text estimate linearly. A data URL inside ordinary textual
 content is still text and receives ordinary text accounting.
 
+## Claude request bytes and image-heavy recovery
+
+Request bytes are independent of model context tokens. Claude's Messages API
+accepts a 32 MB body; Opengeni checks the **final UTF-8 JSON**, after subscription
+identity additions, against a conservative 24,000,000-byte transport budget.
+This is not a local token estimate or an automatic-compaction preference.
+Each inline raster is independently bounded to 2,000 pixels per side and
+512 KiB of base64. Compression and, when necessary, further resizing depend
+only on that image, never the number of later images. Originals stay retained;
+coordinate-mapping notes describe the request-local rendition. A per-image
+limit alone cannot bound an accumulating conversation.
+
+On models with prefix-bound thinking, a checkpoint or resized-image projection
+opts into the documented `thinking-binding-controls-2026-08-01` beta with
+`prefix_mismatch_behavior: "drop_block"`. The provider, not the client, may omit
+only reasoning invalidated by the changed prefix. Signed blocks remain verbatim
+in durable history and in requests. The retained checkpoint/image makes that
+choice stable after restart; ordinary unchanged prefixes keep strict behavior.
+Responses expose only counts of dropped blocks by closed reason, not signatures
+or prompt data. This reset can lose old reasoning and cost new reasoning tokens;
+it is not a claim that a client-generated checkpoint preserves prefix binding.
+See Anthropic's [preserved thinking](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking).
+
+Both the preflight refusal and a real HTTP 413 before a response stream use the
+same worker-owned recovery. The worker checkpoints the largest complete earlier
+prefix that fits both the summary's token budget and at most half the rejected
+body's bytes (also capped at 24 MB). Fitting uses the same serializer and image
+projection as dispatch, without making inference calls. The complete remaining
+suffix stays verbatim, including unread images and paired tool calls/results;
+cuts never separate signed reasoning from its assistant/tool batch. The durable
+replacement appends that suffix after the checkpoint. Historical tool actions
+are not executed again, and neither a queue entry nor a new turn is created.
+
+The exact turn-attempt fence claims one size-recovery allowance in logical-turn
+metadata before requesting the summary. It survives worker restart, attempt
+replacement, and successful checkpointing. A second size refusal is terminal,
+not another automatic summary or replay. An irreducible prefix, empty/failed
+summary, non-shrinking replacement, cancellation, or stale attempt cannot replace
+active history. Explicit subsequent input or compaction can create a new attempt
+at the task; no automatic retry promises that irreducibly large new input fits.
+Portable Claude compaction also uses exact-byte prefix fitting when its normal
+checkpoint would otherwise be too large. Other provider protocols are unchanged.
+
+Diagnostics retain only total UTF-8 bytes, image count/base64 bytes, system/tool
+schema bytes, the budget, and an available provider request ID; they do not retain
+prompt/image contents or depend on full request capture. A stream error after HTTP
+200 and an unrelated file-upload 413 do not enter this pre-dispatch recovery.
+
+See `packages/runtime/src/anthropic-request-size.ts`,
+`packages/runtime/src/anthropic-compaction.ts`, and Anthropic's
+[request-size limits](https://platform.claude.com/docs/en/api/errors#request-size-limits).
+
 ## Model-facing tool output
 
 Every resolved model carries a textual tool-output policy. The Codex catalog's

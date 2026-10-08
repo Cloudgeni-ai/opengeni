@@ -45055,10 +45055,12 @@ export async function recordStartedContextCompaction(
     trigger: "auto" | "operator" | "proactive" | "overflow";
     implementation?: string;
     estimatedTokensBefore?: number;
+    /** One request-byte recovery per logical turn, including recovered attempts. */
+    requestSizeRecovery?: Record<string, number>;
   },
 ): Promise<
   | { recorded: true; events: SessionEvent[] }
-  | { recorded: false; reason: TurnAttemptFenceRejectReason }
+  | { recorded: false; reason: TurnAttemptFenceRejectReason | "request_size_recovery_exhausted" }
 > {
   return await withSessionActivityRlsContext(
     db,
@@ -45073,6 +45075,18 @@ export async function recordStartedContextCompaction(
           attemptId: input.expectedAttemptId,
         });
         if (!fence.allowed) return { recorded: false as const, reason: fence.reason };
+        if (input.requestSizeRecovery) {
+          if (fence.turn!.metadata.claudeRequestSizeRecoveryUsed === true)
+            return { recorded: false as const, reason: "request_size_recovery_exhausted" as const };
+          await tx
+            .update(schema.sessionTurns)
+            .set({
+              metadata: { ...fence.turn!.metadata, claudeRequestSizeRecoveryUsed: true },
+              version: fence.turn!.version + 1,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.sessionTurns.id, input.turnId));
+        }
         const inserted = await tx
           .insert(schema.sessionEvents)
           .values(
@@ -45089,6 +45103,7 @@ export async function recordStartedContextCompaction(
                 type: "session.context.compaction.started",
                 payload: {
                   trigger: input.trigger,
+                  ...(input.requestSizeRecovery ? { requestSize: input.requestSizeRecovery } : {}),
                   ...(input.implementation ? { implementation: input.implementation } : {}),
                   ...(typeof input.estimatedTokensBefore === "number"
                     ? { estimatedTokensBefore: input.estimatedTokensBefore }

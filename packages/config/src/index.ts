@@ -10395,6 +10395,7 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
       defaultEffort: ReasoningEffort | null;
       contextWindowTokens: number;
       maxOutputTokens: number;
+      prefixBoundThinking?: boolean;
     }>
   >
 > = Object.fromEntries([
@@ -10412,6 +10413,7 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
       defaultEffort,
       contextWindowTokens: 1_000_000,
       maxOutputTokens: 128_000,
+      prefixBoundThinking: id === "claude-opus-5-5" || id === "claude-sonnet-5-5",
     },
   ]),
   ...["claude-opus-4-6", "claude-sonnet-4-6"].map((id) => [
