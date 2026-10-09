@@ -1816,13 +1816,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
-    "id": "GET /v1/organizations/:organizationId/codex/accounts/:accountId/usage",
-    "method": "GET",
-    "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/usage",
-    "request": [],
-    "response": []
-  },
-  {
     "id": "GET /v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
     "method": "GET",
     "path": "/v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
@@ -4500,6 +4493,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "organizationCodexAccountUsage",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/usage",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "organizationSupergrokConnectPoll",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/supergrok/connect/poll",
@@ -4802,6 +4802,54 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayCallResponse",
       "ToolGatewayCatalog",
       "ToolGatewayDeclarationsResponse"
+    ]
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/tools/invoke",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/tools/invoke",
+    "request": [],
+    "response": [
+      "ToolGatewayInvokeResponse",
+      "ToolGatewayManifestResponse",
+      "ToolGatewayResolvedTool",
+      "ToolGatewayTargetApprovalResponse"
+    ]
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/tools/manifest",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/tools/manifest",
+    "request": [],
+    "response": [
+      "ToolGatewayInvokeResponse",
+      "ToolGatewayManifestResponse",
+      "ToolGatewayResolvedTool",
+      "ToolGatewayTargetApprovalResponse"
+    ]
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/tools/resolve",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/tools/resolve",
+    "request": [],
+    "response": [
+      "ToolGatewayInvokeResponse",
+      "ToolGatewayManifestResponse",
+      "ToolGatewayResolvedTool",
+      "ToolGatewayTargetApprovalResponse"
+    ]
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/tools/target-approvals",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/tools/target-approvals",
+    "request": [],
+    "response": [
+      "ToolGatewayInvokeResponse",
+      "ToolGatewayManifestResponse",
+      "ToolGatewayResolvedTool",
+      "ToolGatewayTargetApprovalResponse"
     ]
   },
   {
