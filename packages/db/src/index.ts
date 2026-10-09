@@ -88486,7 +88486,10 @@ export async function addSessionSystemUpdateWithSourceMutation<
     rejectionReason: "session_cancelled" | "session_not_idle" | null,
   ) => Promise<void>,
   options: {
-    /** Admit only when the already-locked session is at its idle boundary. */
+    /**
+     * Admit only when the already-locked session has no work in progress:
+     * idle, or failed (its last turn ended and it accepts new turns).
+     */
     requireIdleSession?: RequireIdleSession;
     /** Runs under the locked session/source transaction before any update/event insert. */
     prepareSource?: (
@@ -88572,7 +88575,13 @@ export async function addSessionSystemUpdateWithSourceMutation<
           } as const;
         };
 
-        if (options.requireIdleSession && session.status !== "idle") {
+        // A failed session has finished its work and accepts new turns; only
+        // work still in progress (or awaiting a person) overlaps a new run.
+        if (
+          options.requireIdleSession &&
+          session.status !== "idle" &&
+          session.status !== "failed"
+        ) {
           const replayed = await replayExistingUpdate([]);
           if (replayed) {
             return replayed;
