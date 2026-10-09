@@ -2868,6 +2868,21 @@ UUID, parent admission, process holder, lease/group, provider backend/instance,
 lease epoch, route target/epoch, and provider session; exact replays are
 idempotent and cannot touch a successor. This reconciliation never calls a
 provider terminate/kill API and never captures or rotates a workspace snapshot.
+When a probe of a command on the lease's exact current warm box resumes that box
+and the provider answers NotFound, the box itself is gone, not just the command.
+The reconciler then retires the whole box in one transaction through
+the same `markWarmLeaseInstanceLost` path routing uses: every active command,
+open request, PTY and process holder of that exact epoch and instance is settled,
+the lease goes cold with loss evidence, lifecycle waiters (including a turn
+parked behind the rotation) are woken, and the other commands of that box in the
+same batch are not probed again (any of them a closed turn never adopted first
+gets its session background record, so the agent hears about it). Before, each command needed its own probe, at
+most 20 per sweep, so 35 commands took 11 extra minutes. A lease already
+draining is left to its drain, whose capture finds the box missing and settles
+the same set. Their agent notices say the command "is no longer running because its
+sandbox was shut down or lost; whether it finished is unknown" and to check its
+effects before running it again, instead of the generic "result unavailable".
+The session's Incoming panel shows several such results as one row.
 Repeated Modal binding-missing or binding-mismatch observations enter a durable
 24-hour reconciliation quarantine after five claimed probes. Quarantine is
 only backoff: the process remains active, retains every blocker, carries no

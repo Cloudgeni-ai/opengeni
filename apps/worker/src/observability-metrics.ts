@@ -1967,6 +1967,7 @@ export const RETAINED_PROCESS_RECONCILIATION_OUTCOMES = [
   "proof_checkpoint_failed",
   "settled_exited",
   "settled_lost",
+  "provider_lost_whole_box",
   "settlement_failed",
   "identity_mismatch",
   "resume_state_missing",

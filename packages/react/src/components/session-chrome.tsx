@@ -1320,6 +1320,14 @@ function IncomingPanel({
   onDismiss?: ((inputId: string) => void) | undefined;
   onOpenSession?: ((sessionId: string) => void) | undefined;
 }) {
+  // When a sandbox is shut down or lost, every command on it reports at once.
+  // One row reads better than dozens of identical ones; each result still
+  // reaches the agent. Ordinary results keep their own rows.
+  const lostWithSandbox = inputs.filter(isLostWithSandboxResult);
+  const grouped = new Set(
+    lostWithSandbox.length >= 2 ? lostWithSandbox.map((input) => input.id) : [],
+  );
+  const firstGrouped = lostWithSandbox.length >= 2 ? lostWithSandbox[0]!.id : null;
   return (
     <div>
       <p className="mb-2 text-og-xs text-og-fg-subtle">Waiting to be included in an agent turn.</p>
@@ -1328,45 +1336,101 @@ function IncomingPanel({
         aria-label="Incoming updates"
         data-og-session-chrome-panel="incoming"
       >
-        {inputs.map((input) => (
-          <li
-            key={input.id}
-            className="group flex items-start gap-1.5 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--_og-session-chrome-row-hover)]"
-          >
-            <span
-              className={cn(
-                "mt-px shrink-0 rounded px-1 py-px text-[10px] font-medium leading-4",
-                input.classification === "action_required" || input.classification === "failure"
-                  ? "bg-og-status-waiting/12 text-og-status-waiting"
-                  : "bg-og-surface-3/80 text-og-fg-muted",
-              )}
+        {inputs.map((input) =>
+          grouped.has(input.id) ? (
+            input.id === firstGrouped ? (
+              <CommandResultsRow key={input.id} inputs={lostWithSandbox} onDismiss={onDismiss} />
+            ) : null
+          ) : (
+            <li
+              key={input.id}
+              className="group flex items-start gap-1.5 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--_og-session-chrome-row-hover)]"
             >
-              {pendingKindLabel(input.kind)}
-            </span>
-            <div className="min-w-0 flex-1">
-              <p className="break-words text-og-xs leading-4 text-og-fg">{input.summary}</p>
-              <ChildSessionLink
-                kind={input.kind}
-                sourceId={input.sourceId}
-                onOpenSession={onOpenSession}
-              />
-            </div>
-            {onDismiss ? (
-              <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">
-                <IconAction
-                  label={`Dismiss incoming ${pendingKindLabel(input.kind)}`}
-                  tip="Dismiss"
-                  onClick={() => onDismiss(input.id)}
-                  danger
-                >
-                  <Trash2Icon className="size-3" />
-                </IconAction>
+              <span
+                className={cn(
+                  "mt-px shrink-0 rounded px-1 py-px text-[10px] font-medium leading-4",
+                  input.classification === "action_required" || input.classification === "failure"
+                    ? "bg-og-status-waiting/12 text-og-status-waiting"
+                    : "bg-og-surface-3/80 text-og-fg-muted",
+                )}
+              >
+                {pendingKindLabel(input.kind)}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="break-words text-og-xs leading-4 text-og-fg">{input.summary}</p>
+                <ChildSessionLink
+                  kind={input.kind}
+                  sourceId={input.sourceId}
+                  onOpenSession={onOpenSession}
+                />
               </div>
-            ) : null}
-          </li>
-        ))}
+              {onDismiss ? (
+                <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">
+                  <IconAction
+                    label={`Dismiss incoming ${pendingKindLabel(input.kind)}`}
+                    tip="Dismiss"
+                    onClick={() => onDismiss(input.id)}
+                    danger
+                  >
+                    <Trash2Icon className="size-3" />
+                  </IconAction>
+                </div>
+              ) : null}
+            </li>
+          ),
+        )}
       </ul>
     </div>
+  );
+}
+
+/** Matches the worker's notice for a command whose sandbox is gone. */
+function isLostWithSandboxResult(input: SessionPendingInputPreview): boolean {
+  return (
+    input.kind === "background_command_result" &&
+    input.summary.includes("is no longer running because its sandbox was shut down or lost")
+  );
+}
+
+function commandResultsSummary(inputs: SessionPendingInputPreview[]): string {
+  return `${inputs.length} background commands are no longer running because their sandbox was shut down or lost. Whether they finished is unknown.`;
+}
+
+function CommandResultsRow({
+  inputs,
+  onDismiss,
+}: {
+  inputs: SessionPendingInputPreview[];
+  onDismiss?: ((inputId: string) => void) | undefined;
+}) {
+  return (
+    <li
+      className="group flex items-start gap-1.5 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--_og-session-chrome-row-hover)]"
+      data-og-session-chrome-command-results={inputs.length}
+    >
+      <span className="mt-px shrink-0 rounded bg-og-status-waiting/12 px-1 py-px text-[10px] font-medium leading-4 text-og-status-waiting">
+        Command results
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="break-words text-og-xs leading-4 text-og-fg">
+          {commandResultsSummary(inputs)}
+        </p>
+      </div>
+      {onDismiss ? (
+        <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">
+          <IconAction
+            label="Dismiss incoming command results"
+            tip="Dismiss all"
+            onClick={() => {
+              for (const input of inputs) onDismiss(input.id);
+            }}
+            danger
+          >
+            <Trash2Icon className="size-3" />
+          </IconAction>
+        </div>
+      ) : null}
+    </li>
   );
 }
 
