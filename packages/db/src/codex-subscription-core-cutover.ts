@@ -20,10 +20,10 @@ import type postgres from "postgres";
 import { codexPlanKey, parseIdToken } from "@opengeni/codex";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 
-/** Splits the 0683 migration into its owner-window prelude and its SQL backfill. */
+/** Splits the 0685 migration into its owner-window prelude and its SQL backfill. */
 export const CODEX_SUBSCRIPTION_CORE_CUTOVER_MARKER =
   "-- opengeni:codex-subscription-core-cutover-v1";
-export const CODEX_SUBSCRIPTION_CORE_CUTOVER_MIGRATION = "0683_subscription_core_codex_cutover.sql";
+export const CODEX_SUBSCRIPTION_CORE_CUTOVER_MIGRATION = "0685_subscription_core_codex_cutover.sql";
 
 /** As the legacy fleet read classifies a window. */
 const NEAR_EXHAUSTION_PERCENT = 90;
@@ -723,7 +723,7 @@ export function contentFreeCodexCutoverError(error: unknown): Error {
   if (error instanceof CodexCutoverStageError) return error;
   const source = (error ?? {}) as { code?: unknown; constraint_name?: unknown; message?: unknown };
   const code = typeof source.code === "string" && SQLSTATE.test(source.code) ? source.code : null;
-  // The migration's own fixed refusals ("0683 parity mismatch (live_leases)")
+  // The migration's own fixed refusals ("0685 parity mismatch (live_leases)")
   // carry no data; keep their text, never the driver's attachments.
   if (code === "55000" && typeof source.message === "string" && OWN_REFUSAL.test(source.message)) {
     return new CodexCutoverStageError(source.message, code);

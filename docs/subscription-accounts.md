@@ -363,9 +363,9 @@ for it until the matching requirement below is implemented:
 
 - **SUB-COMPAT-01** Migration preserves existing credentials, scopes, pins,
   settings, accepted authority, live waits and workflow histories.
-  Verification: `packages/db/test/migration-0683-subscription-core-codex-cutover.test.ts`,
+  Verification: `packages/db/test/migration-0685-subscription-core-codex-cutover.test.ts`,
   `test/integration/subscription-core-codex-cutover.integration.ts` (Codex,
-  migration 0683; Claude and SuperGrok move at M4).
+  migration 0685; Claude and SuperGrok move at M4).
 - **SUB-COMPAT-02** Existing per-provider API and SDK shapes keep working as
   aliases that delegate to the core until they are versioned out.
   Verification: pending (rollout).

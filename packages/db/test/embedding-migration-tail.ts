@@ -149,5 +149,5 @@ export const embeddingMigrationTail = [
   // Extends the shared connection table created by withheld 0642.
   "0679_codex_extra_credit_consent.sql",
   "0688_subscription_core_codex_writers.sql",
-  "0683_subscription_core_codex_cutover.sql",
+  "0685_subscription_core_codex_cutover.sql",
 ];

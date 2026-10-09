@@ -4069,15 +4069,15 @@ DDL, converted credentials and the activation receipt together. Never restart
 a pre-cutover image after commit. Restart sign-in attempts that were pending
 during the cutover. Anthropic API-key connections are unchanged.
 
-### Codex on the shared subscription core (0683)
+### Codex on the shared subscription core (0685)
 
-Migration `0683_subscription_core_codex_cutover.sql` is a one-way maintenance
+Migration `0685_subscription_core_codex_cutover.sql` is a one-way maintenance
 cutover. It moves every organization's Codex (ChatGPT subscription) state onto
 the shared subscription core and enables the Codex cutover for every
 organization in the same transaction. Design record:
 [subscription core, PR 3](design/subscription-core-2026-10-07.md#pr-3-the-drained-codex-cutover).
 The dormant core Codex writers (rolling migration 0682, after 0679 credit consent) ship before it, so
-connect, disconnect and redemption keep working on the core once 0683
+connect, disconnect and redemption keep working on the core once 0685
 enables the cutover.
 
 Migrated logins without a verified signed-in upstream person remain separate;
@@ -4095,7 +4095,7 @@ authority, with no personal entry for a missing human authorizer.
 Rolling 0682 keeps owner-only writer implementations outside the previous
 binary's runtime capability inventory, in `opengeni_subscription_internal`.
 Never grant that schema or its functions to runtime roles to repair readiness.
-Old and new binaries remain compatible before 0683; after 0683, only matching
+Old and new binaries remain compatible before 0685; after 0685, only matching
 cutover binaries may start.
 
 Duplicate local rows merge the model policies of **enabled** rows only; a paused
@@ -4149,7 +4149,7 @@ ownership ambiguity (the message lists content-free classes such as
 `provider_identity_mismatch`, `personal_workspace_owner_ambiguous`,
 `personal_owner_missing`, `fedramp_mismatch`, `unrepresentable_status`,
 `session_owner_ambiguous`); pre-existing core Codex state; or any parity
-mismatch (`0683 parity mismatch (<metrics>)`). A database error while writing
+mismatch (`0685 parity mismatch (<metrics>)`). A database error while writing
 the core surfaces only as `could not write the shared core (SQLSTATE <code>,
 <constraint>)`: no statement parameter, credential, label or email leaves the
 migration. Fix the named legacy rows (for example disconnect a duplicate
@@ -4157,7 +4157,7 @@ account whose `id_token` names another ChatGPT account) and run the migrator
 again; nothing was committed.
 
 **5. Provision roles and start.** Run `db:provision-roles`, then start only
-binaries of this release. Runtime readiness refuses a database without the 0683
+binaries of this release. Runtime readiness refuses a database without the 0685
 receipt (`opengeni_private.subscription_codex_cutover_v1_active()`), so a new
 binary cannot run before the migration, and an older binary must never be
 restarted after it.

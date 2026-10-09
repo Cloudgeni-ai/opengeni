@@ -1,6 +1,6 @@
 # Codex subscription rotation (superseded)
 
-Since maintenance migration `0683_subscription_core_codex_cutover.sql`, Codex
+Since maintenance migration `0685_subscription_core_codex_cutover.sql`, Codex
 (ChatGPT subscription) accounts run on the shared subscription core. The legacy
 selector, leases, refresh and failover path is unreachable and is deleted in M3
 PR 4. Its historical text remains in git history.
@@ -81,7 +81,7 @@ For a stalled waiter check `next_check_at`, `wake_revision`,
 
 ## Historical maintenance cutovers
 
-Databases older than 0683 still upgrade through 0403, 0422 and 0492. Each needs
+Databases older than 0685 still upgrade through 0403, 0422 and 0492. Each needs
 drained processes and `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` listing
 every old and new runtime login. Include both the retiring and replacement roles during
 rotation; embedded callers pass the same list through

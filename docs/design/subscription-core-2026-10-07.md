@@ -1704,11 +1704,11 @@ under a NOBYPASSRLS migration owner),
 ##### PR 3: the drained Codex cutover
 
 PR 3 is the one-way step. Maintenance migration
-`0683_subscription_core_codex_cutover.sql` moves every organization's Codex
+`0685_subscription_core_codex_cutover.sql` moves every organization's Codex
 state onto the core and enables the Codex cutover for every organization in
 the same transaction. It is split around a codec stage
 (`packages/db/src/codex-subscription-core-cutover.ts`, restricted by the
-runner to 0683 like 0598's Claude stage): the SQL prelude checks the drain and
+runner to 0685 like 0598's Claude stage): the SQL prelude checks the drain and
 opens the owner window, the stage moves credentials, and the SQL that follows
 moves everything that references them, validates parity and restores the
 window. Plain SQL is refused before any change.
@@ -1871,7 +1871,7 @@ Steps, as implemented:
 8. **Window.** All 35 relations are locked, their user triggers disabled and
    FORCE lifted by literal statements; both are restored from the captured
    state before commit, deferred keys are validated first, and the 0667 v2
-   check is validated. The release-schema contract registers 0683 as
+   check is validated. The release-schema contract registers 0685 as
    maintenance at its three sites.
 
 Activation decision. The migration writes **enabled** Codex cutover rows for
@@ -1884,11 +1884,11 @@ the Codex cutover together". Organizations created later are seeded enabled by
 an owner trigger on `managed_accounts`, and the application role can no longer
 delete a Codex row, so "no row" is unreachable in a migrated database; the
 switch remains a containment control whose off state is the existing
-fail-closed maintenance behaviour. Runtime readiness requires the 0683
+fail-closed maintenance behaviour. Runtime readiness requires the 0685
 receipt, so a binary of this release cannot start against an unmigrated
 database.
 
-No dual write. After 0683 every Codex reader and writer the earlier PRs moved
+No dual write. After 0685 every Codex reader and writer the earlier PRs moved
 targets the core. Also in this PR: plan-change history is recorded on the
 core (a trigger keeps the previous plan and time in `provider_state` whenever
 a writer changes a Codex connection's plan) and projected with the
@@ -1902,11 +1902,11 @@ The writers this cutover needs already exist, dormant, from PR 3b (migration
 0682, which lands first): connect start/poll and disconnect on the core with
 the redemption share lock and the `subscription-refresh:<id>` key,
 organization-level reset redemption fenced per (connection, credit) across
-workspaces (it re-files the person's own lapsed attempt that 0683 keeps in its
+workspaces (it re-files the person's own lapsed attempt that 0685 keeps in its
 legacy workspace, and refuses another workspace's open or consumed attempt),
 personal connections in the owner's views, and the v2 writers at acceptance
 for scheduled tasks and firings, internal updates and child-result notices,
-agent messages and Steer. 0683 backfills the v2 slots 0682 added for work
+agent messages and Steer. 0685 backfills the v2 slots 0682 added for work
 accepted before it; enabling the cutover switches those writers on.
 
 Assignment-change wakes need no writer yet: no route edits workspace
@@ -1914,14 +1914,14 @@ assignments (the M5 scope editor must call the core wake).
 
 Workflow compatibility. Activity and signal names and payloads are unchanged.
 `test/integration/subscription-core-codex-cutover.integration.ts` arms a wait
-through the legacy path, records the legacy peek's result, runs 0683, then
+through the legacy path, records the legacy peek's result, runs 0685, then
 executes the recorded arguments: the core waiter has the same id, generation
 and revision, keeps waiting while exhausted and resumes the same turn after a
 core wake. The pinned legacy capacity-wait history replays against the current
 bundle there and in the PR 2a suite.
 
 Legacy readers after the cutover (review finding, fixed here). Every reader
-that is reachable after 0683 now follows the Codex cutover disposition the
+that is reachable after 0685 now follows the Codex cutover disposition the
 same way (no row: legacy unchanged; disabled: not ready, no legacy read;
 enabled: core): the model catalog and its readiness, the default session
 model (session create, drafts, scheduled occurrences, `list_models`),
@@ -1941,7 +1941,7 @@ per refresh generation; a personal connection's list cannot be read outside
 an accepted turn, so its models are selectable with unknown status unless a
 refusal cooldown applies. Known gap: a person's personal-fallback opt-in can
 only be read inside an accepted turn, so the catalog may show Codex ready for
-someone who has not opted in and placement then waits (0683 opts in the
+someone who has not opted in and placement then waits (0685 opts in the
 owners it migrates). The full reader/writer inventory, with each call site
 gated, unreachable or intentional, is in the PR 3 description.
 
@@ -1965,7 +1965,7 @@ a content-free error (fixed refusal text, or the SQLSTATE and constraint
 name), never a driver error carrying statement parameters; and the Insights
 repair lookup filters by turn so the workspace/turn/type index serves it.
 
-Left to PR 4 (unreachable after 0683, safe to delete): the legacy Codex
+Left to PR 4 (unreachable after 0685, safe to delete): the legacy Codex
 selector (`apps/worker/src/activities/codex-rotation.ts`, the Codex-only
 capacity, settlement and recovery branches, the fleet shadow), the legacy
 arms of `peekSessionWork`/`getCodexCapacityWait`/`reconcileCodexCapacityWait`
