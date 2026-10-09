@@ -9,6 +9,7 @@ import Ajv, {
 } from "ajv";
 import Ajv2019 from "ajv/dist/2019.js";
 import Ajv2020 from "ajv/dist/2020.js";
+import { schemaPatternEngine } from "./schema-pattern";
 import {
   TOOL_GATEWAY_CATALOG_VERSION,
   ToolGatewayCallRequest,
@@ -547,6 +548,8 @@ function createSchemaValidators(mode: SchemaValidatorMode): SchemaValidators {
     strict: false,
     useDefaults: false,
     validateFormats: false,
+    // Remote schemas: a pattern invalid in Unicode mode must not fail the catalog.
+    code: { regExp: schemaPatternEngine },
   } as const;
   const validators = {
     draft7: new Ajv(options),
