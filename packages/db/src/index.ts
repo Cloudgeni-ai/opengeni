@@ -375,6 +375,7 @@ import { z } from "zod";
 import {
   latestStartedSessionTurnQuery,
   withEffectiveSessionPolicy,
+  withSessionListModelPolicy,
 } from "./session-execution-policy";
 import {
   assignedConnectionDefault,
@@ -41120,12 +41121,17 @@ async function readSessionListForSubject(
           ...pinnedRows.map((row) => row.session.id),
           ...pageRows.map((row) => row.session.id),
         ];
-        const canonicalSessions = await canonicalSessionRowsFromEventCursors(
+        const canonicalRows = await canonicalSessionRowsFromEventCursors(
           tx,
           workspaceId,
           [...pinnedRows, ...pageRows].map((row) => row.session),
           !summary,
         );
+        // Compact rows skip the unbounded effective-policy walk but still name
+        // the model with two fixed index probes per row.
+        const canonicalSessions = summary
+          ? await withSessionListModelPolicy(tx, workspaceId, canonicalRows)
+          : canonicalRows;
         const canonicalSessionById = new Map(
           canonicalSessions.map((session) => [session.id, session]),
         );

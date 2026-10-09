@@ -37,7 +37,10 @@ import {
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
 import * as schema from "../src/schema";
-import { withEffectiveSessionPolicy } from "../src/session-execution-policy";
+import {
+  withEffectiveSessionPolicy,
+  withSessionListModelPolicy,
+} from "../src/session-execution-policy";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -326,6 +329,77 @@ describe("latest started session policy", () => {
       db.select().from(schema.sessions).where(eq(schema.sessions.id, value.session.id)),
     );
     expect(stored[0]).toMatchObject(initial);
+  });
+});
+
+describe("compact list model policy", () => {
+  test("names the latest started turn's model unless a settings write is newer", async () => {
+    const value = await fixture(0);
+    const workspaceId = value.grant.workspaceId!;
+    const listPolicy = async () => {
+      const [projected] = await withWorkspaceRls(client.db, workspaceId, (db) =>
+        withSessionListModelPolicy(db, workspaceId, [value.session]),
+      );
+      return { model: projected!.model, reasoningEffort: projected!.reasoningEffort };
+    };
+    const startTurn = async (model: string, reasoningEffort: ReasoningEffort) => {
+      const accepted = await withWorkspaceSubjectRls(
+        client.db,
+        workspaceId,
+        value.grant.subjectId,
+        (db) =>
+          submitHumanPromptInTransaction(db, {
+            accountId: value.grant.accountId,
+            workspaceId,
+            sessionId: value.session.id,
+            subjectId: value.grant.subjectId,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "follow up",
+            resources: [],
+            reasoningEffortFallback: "medium",
+            source: "user",
+            model,
+            reasoningEffort,
+          }),
+      );
+      await appendSessionEvents(client.db, workspaceId, value.session.id, [
+        { type: "turn.started", turnId: accepted.turnId, payload: {} },
+      ]);
+    };
+
+    // Nothing has run yet: the stored creation defaults.
+    expect(await listPolicy()).toEqual({ model: "scripted-model", reasoningEffort: "medium" });
+
+    await startTurn("composer-model", "max");
+    expect(await listPolicy()).toEqual({ model: "composer-model", reasoningEffort: "max" });
+
+    // An explicit settings change after that turn is the current model.
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      setSessionModelInTransaction(db, {
+        accountId: value.grant.accountId,
+        workspaceId,
+        sessionId: value.session.id,
+        actor: value.actor,
+        operationKey: crypto.randomUUID(),
+        model: "settings-model",
+        reasoningEffort: "low",
+      }),
+    );
+    expect(await listPolicy()).toEqual({ model: "settings-model", reasoningEffort: "low" });
+    expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject({
+      model: "settings-model",
+      reasoningEffort: "low",
+    });
+
+    await startTurn("next-model", "high");
+    expect(await listPolicy()).toEqual({ model: "next-model", reasoningEffort: "high" });
+    // Detail reads agree for ordinary human turns.
+    expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject({
+      model: "next-model",
+      reasoningEffort: "high",
+    });
   });
 });
 

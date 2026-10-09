@@ -66,6 +66,8 @@ export function sessionListEntry(session: SessionListEntryInput): SessionListEnt
     scheduledTaskId:
       typeof scheduledTaskId === "string" && scheduledTaskId.length > 0 ? scheduledTaskId : null,
     siteOrigin,
+    ...(session.model ? { model: session.model } : {}),
+    ...(session.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}),
     createdBy: session.createdBy,
     channelId: session.channelId,
     parentSessionId: session.parentSessionId,

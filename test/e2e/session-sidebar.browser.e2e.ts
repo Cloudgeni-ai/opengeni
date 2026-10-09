@@ -656,3 +656,56 @@ test("stale pagination completion does not restore focus or grow a new browse ge
   expect(await rows(group("Today")).count()).toBe(4);
   expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
 }, 30_000);
+
+test("the row hover explains status, model and activity from the compact list row", async () => {
+  await page.goto(`${url}?scenario=hover&theme=light`);
+  const row = (number: number) =>
+    page.locator(
+      `a[data-session-row="00000000-0000-4000-9000-${String(number).padStart(12, "0")}"]`,
+    );
+  const card = page.locator("[data-session-row-hover-details]");
+
+  await row(3001).hover();
+  await card.waitFor();
+  const working = await card.innerText();
+  expect(working).toContain("Astra strategy takeover - preserve and improve Grocery Bot");
+  expect(working).toContain("Running");
+  expect(working).toContain("GPT-6 Astra · Max reasoning");
+  expect(working).toContain("5 sub-agents · 1 needs you · 1 unread failure · 2 running · 1 paused");
+  expect(working).toContain("2 background commands running");
+  expect(working).not.toMatch(/\b0 /);
+  await capture("hover-working");
+
+  // Keyboard focus opens the same card for the roving row.
+  await page.mouse.move(1150, 10);
+  await card.waitFor({ state: "detached" });
+  await row(3003).focus();
+  await card.waitFor();
+  const waiting = await card.innerText();
+  expect(waiting).toMatch(/Next check at \d{2}:\d{2}/);
+  expect(waiting).toContain("Waiting for the nightly import to finish");
+
+  await page.mouse.move(1150, 10);
+  await row(3004).focus();
+  await row(3004)
+    .locator("xpath=..")
+    .getByRole("button", { name: "Expand spawned sessions" })
+    .click();
+  await row(3005).hover();
+  await page.waitForFunction(() =>
+    document
+      .querySelector("[data-session-row-hover-details]")
+      ?.textContent?.includes("Paused through"),
+  );
+  expect(await card.innerText()).toContain("Paused through Grocery Bot setup");
+
+  // On a phone-width rail the card opens below the row and stays on screen.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${url}?scenario=hover&theme=light`);
+  await row(3002).hover();
+  await card.waitFor();
+  const box = (await page.locator("[data-slot=hover-card-content]").boundingBox())!;
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(390);
+  expect(await card.innerText()).toContain("Waiting on you for 24 min");
+}, 30_000);

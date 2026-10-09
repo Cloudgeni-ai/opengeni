@@ -49,11 +49,12 @@ import { useRail } from "@/components/rail/rail-context";
 import {
   ActiveWorkMark,
   RailTrailingMetadata,
-  SessionRowHoverDetails,
   SessionRowContent,
   sessionRowAccessibleName,
 } from "@/components/rail/session-row-content";
+import { SessionRowHoverDetails } from "@/components/rail/session-row-hover-details";
 export { RailTrailingMetadata } from "@/components/rail/session-row-content";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
@@ -4013,6 +4014,11 @@ function SessionRow(props: {
   const contextPinSelection = useRef(false);
   const hasChildren = props.hasChildren;
   const creator = railRowCreator(props.session);
+  // Who started a session only adds information where other people work too.
+  const personalWorkspace = isPersonalWorkspace(
+    context.workspaces?.find((workspace) => workspace.id === rail.workspaceId) ?? null,
+    null,
+  );
   const stateLabel = sessionStateLabel(props.session);
   const waiting = Boolean(sessionInputWait(props.session));
   const [, refreshWaitClock] = useState(0);
@@ -4221,15 +4227,20 @@ function SessionRow(props: {
                 />
               </Link>
             </HoverCardTrigger>
-            <HoverCardContent side="right" collisionPadding={8}>
+            <HoverCardContent
+              // The narrow rail fills the screen, so there is no room beside it.
+              side={rail.isMobile ? "bottom" : "right"}
+              collisionPadding={8}
+              className="w-80 max-w-[calc(100vw-16px)] p-3.5"
+            >
               <SessionRowHoverDetails
+                session={props.session}
                 title={title}
-                createdAt={props.session.createdAt}
-                createdBy={props.session.createdBy}
                 descendantCount={props.session.treeStats?.totalDescendants ?? props.childCount}
                 descendantCountTruncated={
                   props.session.treeStats?.truncated ?? props.childCountTruncated
                 }
+                showCreator={!personalWorkspace}
               />
             </HoverCardContent>
           </HoverCard>
