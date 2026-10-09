@@ -909,6 +909,147 @@ describe("core Codex failure settlement", () => {
     expect(legacy).not.toHaveBeenCalled();
   });
 
+  test("lease loss checkpoints a completed response before deciding recovery is safe", async () => {
+    const order: string[] = [];
+    const requests = createCoreCodexRequests({
+      reserve: async () => ({ operationId: "completed-request" }),
+      settle: async ({ outcome }) => {
+        order.push(outcome);
+      },
+    });
+    await requests.reserve({ requestId: "completed", transportAttempt: 1 });
+    await requests.observe({
+      requestId: "completed",
+      transportAttempt: 1,
+      outcome: "response_received",
+    });
+    expect(requests.canRecover()).toBe(false);
+    const { deps, settle } = failureDeps(new db.SubscriptionCoreCodexLeaseLostError(), {
+      ...core,
+      requests,
+    });
+    deps.flushRuntimeBatcher = async () => {
+      order.push("flush");
+    };
+    deps.historySink.reconcileConversationTruth = async (options?: unknown) => {
+      expect(options).toEqual({ requireDurable: true });
+      order.push("durable_history");
+    };
+    const recovery = spy(db, "requestSessionTurnRecovery").mockImplementation(async () => {
+      order.push("recover");
+      return { action: "recovering", events: [] };
+    });
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+    expect(await settleTurnFailure(deps as never)).toMatchObject({
+      status: "recovering",
+      turnId: "turn-1",
+    });
+    expect(order).toEqual(["flush", "durable_history", "response_received", "recover"]);
+    expect(recovery).toHaveBeenCalledWith(
+      {},
+      "workspace-1",
+      expect.objectContaining({
+        turnId: "turn-1",
+        attemptId: "attempt-1",
+        reason: "codex_lease_lost",
+      }),
+    );
+    expect(requests.canRecover()).toBe(true);
+    expect(settle).not.toHaveBeenCalled();
+  });
+
+  test.each(["pending_model", "unknown_model", "uncheckpointed_title"] as const)(
+    "lease loss never upgrades %s to replay proof at the history checkpoint",
+    async (state) => {
+      const outcomes: string[] = [];
+      const requests = createCoreCodexRequests({
+        reserve: async () => ({ operationId: "pending" }),
+        settle: async ({ outcome }) => {
+          outcomes.push(outcome);
+        },
+      });
+      await requests.reserve({ requestId: "request", transportAttempt: 1 });
+      if (state !== "pending_model") {
+        await requests.observe({
+          requestId: "request",
+          transportAttempt: 1,
+          outcome: state === "unknown_model" ? "unknown" : "response_received",
+        });
+      }
+      const { deps } = failureDeps(new db.SubscriptionCoreCodexLeaseLostError(), {
+        ...core,
+        ...(state === "uncheckpointed_title" ? { titleRequests: requests } : { requests }),
+      });
+      const checkpoint = mock(async (_options?: unknown) => undefined);
+      deps.historySink.reconcileConversationTruth = checkpoint;
+      const recovery = spy(db, "requestSessionTurnRecovery");
+      spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+      expect(checkpoint).toHaveBeenCalledWith({ requireDurable: true });
+      expect(outcomes).toEqual(state === "unknown_model" ? ["unknown"] : []);
+      expect(recovery).not.toHaveBeenCalled();
+      expect(requests.canRecover()).toBe(false);
+    },
+  );
+
+  test.each(["flush", "history", "request_settlement"] as const)(
+    "lease loss cannot recover after the mandatory %s checkpoint fails",
+    async (stage) => {
+      let settlements = 0;
+      const requests = createCoreCodexRequests({
+        reserve: async () => ({ operationId: "completed" }),
+        settle: async () => {
+          settlements++;
+          if (stage === "request_settlement") throw new Error("outcome write unavailable");
+        },
+      });
+      await requests.reserve({ requestId: "completed", transportAttempt: 1 });
+      await requests.observe({
+        requestId: "completed",
+        transportAttempt: 1,
+        outcome: "response_received",
+      });
+      const { deps } = failureDeps(new db.SubscriptionCoreCodexLeaseLostError(), {
+        ...core,
+        requests,
+      });
+      let flushes = 0;
+      deps.flushRuntimeBatcher = async () => {
+        if (++flushes === 1 && stage === "flush") throw new Error("flush unavailable");
+      };
+      deps.historySink.reconcileConversationTruth = async (options?: unknown) => {
+        if (options && stage === "history") throw new Error("durable history unavailable");
+      };
+      const recovery = spy(db, "requestSessionTurnRecovery");
+      spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+      expect(recovery).not.toHaveBeenCalled();
+      expect(settlements).toBe(stage === "request_settlement" ? 1 : 0);
+      expect(requests.canRecover()).toBe(false);
+    },
+  );
+
+  test("a failed lease-loss checkpoint cannot fall through to generic retry with empty custody", async () => {
+    const requests = createCoreCodexRequests({
+      reserve: async () => ({ operationId: "unused" }),
+      settle: async () => undefined,
+    });
+    const error = Object.assign(new Error("503 provider unavailable"), {
+      status: 503,
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+    });
+    const { deps } = failureDeps(error, { ...core, requests });
+    deps.leases.codex.lost = true;
+    deps.historySink.reconcileConversationTruth = async (options?: unknown) => {
+      if (options) throw new Error("durable history unavailable");
+    };
+    const recovery = spy(db, "requestSessionTurnRecovery");
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+    expect(requests.canRecover()).toBe(true);
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+    expect(recovery).not.toHaveBeenCalled();
+  });
+
   test("graceful disappearance checkpoints the same continuation without refusal counts or quarantine", async () => {
     const order: string[] = [];
     const requests = createCoreCodexRequests({

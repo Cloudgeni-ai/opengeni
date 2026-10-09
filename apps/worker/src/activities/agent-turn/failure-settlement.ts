@@ -868,11 +868,30 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   const coreCodexLeaseLost =
     coreCodex !== null &&
     !coreRequestOutcomeUnknown &&
-    (!coreCodex.requests || coreCodex.requests.canRecover()) &&
-    (!coreCodex.titleRequests || coreCodex.titleRequests.canRecover()) &&
     (leases.codex.lost ||
       error instanceof CodexCredentialLeaseLostError ||
       error instanceof SubscriptionCoreCodexLeaseLostError);
+  let coreCodexLeaseRecoverable = false;
+  let coreLeaseCheckpointFailed = false;
+  if (coreCodexLeaseLost && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
+    try {
+      // A completed response still owns a pending reservation until its
+      // history commits. Test replay safety after that rendezvous, not before.
+      await flushRuntimeBatcher();
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+      await coreCodex.requests?.checkpoint();
+      coreCodexLeaseRecoverable =
+        (!coreCodex.requests || coreCodex.requests.canRecover()) &&
+        (!coreCodex.titleRequests || coreCodex.titleRequests.canRecover());
+    } catch {
+      coreLeaseCheckpointFailed = true;
+      observability.incrementCounter({
+        name: "opengeni_codex_failover_checkpoints_total",
+        help: "Durable Codex failover checkpoint attempts by outcome.",
+        labels: { workspace_key: codexWorkspaceKey, outcome: "failed" },
+      });
+    }
+  }
   if (
     (leases.codex.lost || error instanceof CodexCredentialLeaseLostError) &&
     legacyCodexTurn &&
@@ -893,12 +912,14 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       ? "claude"
       : billingState.isXaiTurn && leases.xai.lost
         ? "xai"
-        : coreCodexLeaseLost
+        : coreCodexLeaseRecoverable
           ? "codex"
           : null;
   if (scopedLeaseLost && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
-    await flushRuntimeBatcher();
-    await historySink.reconcileConversationTruth({ requireDurable: true });
+    if (scopedLeaseLost !== "codex") {
+      await flushRuntimeBatcher();
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+    }
     const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
       sessionId: input.sessionId,
       turnId: attempt.turnId,
@@ -936,7 +957,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // A definitive account refusal on a core turn becomes a typed terminal
   // failure that idles the session (settled below).
   let coreAccountRefusal: SubscriptionCoreCodexTurnError | null = null;
-  if (coreCodex && !coreRequestOutcomeUnknown) {
+  if (coreCodex && !coreRequestOutcomeUnknown && !coreLeaseCheckpointFailed) {
     // Core turns record the refusal against the leased connection (failure
     // receipt, plus the quota, health or model-cooldown state that keeps
     // placement away from it) and re-place the same turn within the per-turn
@@ -2177,6 +2198,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // request forever.
   const encryptedArtifactRejection =
     !coreRequestOutcomeUnknown &&
+    !coreLeaseCheckpointFailed &&
     billingState.isCodexTurn &&
     providerTurn.effectiveCodexCredentialId
       ? classifyCodexEncryptedArtifactRejection(error)
@@ -2278,6 +2300,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   if (
     attempt.turnId &&
     !coreRequestOutcomeUnknown &&
+    !coreLeaseCheckpointFailed &&
     (!coreCodex?.requests || coreCodex.requests.canRecover()) &&
     (!coreCodex?.titleRequests || coreCodex.titleRequests.canRecover()) &&
     (earlyRecoverableSetup ||

@@ -2,8 +2,8 @@ import type { CodexProviderRequestIdentity, CodexProviderRequestSettlement } fro
 import { fetchCodexUsage } from "@opengeni/codex";
 import {
   buildSubscriptionCoreCodexOperationFetch,
-  reserveSubscriptionCoreCodexRequest,
-  settleSubscriptionCoreCodexRequest,
+  reserveSubscriptionCoreCodexTurnCredentialRequest,
+  settleSubscriptionCoreCodexTurnCredentialRequest,
   SubscriptionCoreCodexRequestOutcomeUnknownError,
   type Database,
   type SubscriptionCoreTurnIdentity,
@@ -26,12 +26,19 @@ export function buildCoreCodexUsageReader(
     fetchImpl,
     {
       // There is no separate operation lease for a turn's usage precheck.
-      // Use the exact-attempt chat request fence, not a naked turn scope.
+      // Keep exact-attempt/chat-lease authority, but classify the read as a
+      // credential request: an unknown GET is not an unknown model response.
       // Reuse finite-body buffering and bounded timeout custody.
       reserve: (_db, _scope, _lease, _connection, request) =>
-        reserveSubscriptionCoreCodexRequest(db, identity, ref, { ...request, ...execution }),
+        reserveSubscriptionCoreCodexTurnCredentialRequest(db, identity, ref, {
+          ...request,
+          ...execution,
+        }),
       settle: (_db, _scope, request) =>
-        settleSubscriptionCoreCodexRequest(db, identity, ref, { ...request, ...execution }),
+        settleSubscriptionCoreCodexTurnCredentialRequest(db, identity, ref, {
+          ...request,
+          ...execution,
+        }),
     },
   );
   return async (auth, _fetch, timeout) => {
