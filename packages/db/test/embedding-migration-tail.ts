@@ -150,4 +150,5 @@ export const embeddingMigrationTail = [
   "0672_subscription_core_codex_writers.sql",
   "0674_subscription_core_codex_writers.sql",
   "0676_subscription_core_codex_writers.sql",
+  "0678_subscription_core_codex_writers.sql",
 ];
