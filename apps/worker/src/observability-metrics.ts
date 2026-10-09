@@ -1565,6 +1565,7 @@ export const SUBSCRIPTION_CORE_SHADOW_PLACEMENTS = [
 /** Requirements the reference checker can report, plus checker failure. */
 export const SUBSCRIPTION_CORE_SHADOW_REQUIREMENTS = [
   "SUB-ACCESS-06",
+  "SUB-CREDITS-01",
   "SUB-ELIG-01",
   "SUB-ELIG-02",
   "SUB-ELIG-03",
