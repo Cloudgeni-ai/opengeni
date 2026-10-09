@@ -14,6 +14,10 @@ import {
   inboxSubjectForContext,
   requireAccessContext,
   requireAccessGrant,
+  requireSessionAuthorization,
+  SessionAuthorizationDeniedError,
+  SessionAuthorizationUnavailableError,
+  withResolvedSessionAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -77,6 +81,16 @@ async function readableWorkspaces(
 
 function isNeedsYou(kind: InboxItem["kind"]): boolean {
   return kind === "question" || kind === "approval" || kind === "goal_paused";
+}
+
+// The mute routes name a target session outside the session module, so they
+// call the session seam themselves; a session the caller cannot see is absent.
+function muteSessionError(error: unknown): never {
+  if (error instanceof SessionAuthorizationDeniedError)
+    throw new HTTPException(404, { message: "Session not found" });
+  if (error instanceof SessionAuthorizationUnavailableError)
+    throw new HTTPException(503, { message: "Session authorization unavailable" });
+  throw error;
 }
 
 export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -198,12 +212,17 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
     const context = await requireAccessContext(c, deps);
     const subjectId = requirePerson(context);
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
-    const muted = await getSessionRepliesMuted(deps.db, {
-      workspaceId,
-      sessionId: c.req.param("sessionId"),
-      subjectId,
-    });
+    const sessionId = c.req.param("sessionId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const authorization = await requireSessionAuthorization(deps, grant, {
+      sessionId,
+      operation: "session.read",
+      surface: "http",
+    }).catch(muteSessionError);
+    const read = () => getSessionRepliesMuted(deps.db, { workspaceId, sessionId, subjectId });
+    const muted = authorization
+      ? await withResolvedSessionAuthorization(authorization, read)
+      : await read();
     if (muted === null) throw new HTTPException(404, { message: "Session not found" });
     c.header("cache-control", "private, no-store");
     return c.json(SessionInboxMute.parse({ repliesMuted: muted }));
@@ -213,15 +232,21 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
     const context = await requireAccessContext(c, deps);
     const subjectId = requirePerson(context);
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const sessionId = c.req.param("sessionId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const parsed = SessionInboxMute.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HTTPException(400, { message: "Invalid session mute" });
-    const muted = await setSessionRepliesMuted(deps.db, {
-      workspaceId,
-      sessionId: c.req.param("sessionId"),
-      subjectId,
-      muted: parsed.data.repliesMuted,
-    });
+    const repliesMuted = parsed.data.repliesMuted;
+    const authorization = await requireSessionAuthorization(deps, grant, {
+      sessionId,
+      operation: "session.attention.write",
+      surface: "http",
+    }).catch(muteSessionError);
+    const write = () =>
+      setSessionRepliesMuted(deps.db, { workspaceId, sessionId, subjectId, muted: repliesMuted });
+    const muted = authorization
+      ? await withResolvedSessionAuthorization(authorization, write)
+      : await write();
     if (muted === null) throw new HTTPException(404, { message: "Session not found" });
     return c.json(SessionInboxMute.parse({ repliesMuted: muted }));
   });
