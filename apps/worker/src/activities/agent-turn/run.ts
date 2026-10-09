@@ -113,7 +113,11 @@ import {
   assertCoreCodexSourceConnected,
   buildCoreCodexRequestTokenResolver,
 } from "./codex-core-capacity";
-import { createCoreCodexRequests, buildCoreCodexUsageReader } from "./codex-core-requests";
+import {
+  buildCoreCodexUsageReader,
+  createCoreCodexRequests,
+  providerRequestIdPrefix,
+} from "./codex-core-requests";
 import { observeCodexResponseCompletion } from "./codex-core-settlement";
 import { prepareGovernanceAndModel } from "./governance-model";
 import { prepareCompaction, runPostAgentCompaction } from "./compaction-prep";
@@ -263,6 +267,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       once: true,
     });
     const dispatchId = activityContext?.info.activityId ?? randomUUID();
+    const requestIdPrefix = providerRequestIdPrefix({
+      turnAttemptId: input.attemptId,
+      activityId: dispatchId,
+      activityAttempt: activityContext?.info.attempt ?? 1,
+    });
     const activityStarted = performance.now();
     const acknowledgeLostAttemptOwnership = (): void => {
       // A stale terminal/recovery settlement can lose either to a benign
@@ -913,7 +922,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         durationSeconds: event.durationMs / 1000,
                       });
                     },
-                    nextRequestId: () => `${dispatchId}:${++codexModelRequestSequence}`,
+                    nextRequestId: () => `${requestIdPrefix}:${++codexModelRequestSequence}`,
                     onModelRequestEvent: async (event) => {
                       if (!eventing.publish || !attempt.turnId) {
                         throw new Error(
@@ -1009,7 +1018,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 }).webSearch,
               },
               streamIdleTimeoutMs: runSettings.supergrokResponseStreamIdleTimeoutMs,
-              nextRequestId: () => `${dispatchId}:xai:${++xaiModelRequestSequence}`,
+              nextRequestId: () => `${requestIdPrefix}:xai:${++xaiModelRequestSequence}`,
               onModelRequestDiagnostic: (event) => {
                 const requestKey = `${event.requestId}:${event.transportAttempt}`;
                 if (event.phase === "started") {
@@ -1215,14 +1224,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const codexSessionTitleContext = codexContext
             ? sessionTitleCodexRequestContext(
                 codexContext,
-                () => `${dispatchId}:title:${++codexSessionTitleRequestSequence}`,
+                () => `${requestIdPrefix}:title:${++codexSessionTitleRequestSequence}`,
                 providerTurn.codexSubscriptionCore?.titleRequests,
               )
             : null;
           const xaiSessionTitleContext = providerTurn.xaiRequestContext
             ? sessionTitleXaiRequestContext(
                 providerTurn.xaiRequestContext,
-                () => `${dispatchId}:xai:title:${++xaiSessionTitleRequestSequence}`,
+                () => `${requestIdPrefix}:xai:title:${++xaiSessionTitleRequestSequence}`,
               )
             : null;
           const withSessionTitleProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
