@@ -32,6 +32,7 @@ import {
   useEditableArtifactView,
 } from "./editable-artifact-ui";
 import { SparseSpreadsheetCellIndex } from "./spreadsheet-canvas";
+import { SpreadsheetDownloadButton, type SpreadsheetDownload } from "./spreadsheet-download";
 import {
   SpreadsheetProjectionGrid,
   type SpreadsheetCommit,
@@ -81,6 +82,8 @@ export type EditableSpreadsheetArtifactSurfaceProps = Omit<
   showHeader?: boolean | undefined;
   subtitle?: ReactNode | undefined;
   actions?: ReactNode | undefined;
+  /** Authenticated XLSX export of the current saved native head. */
+  download?: SpreadsheetDownload | undefined;
   initialSheetId?: string | undefined;
   allowAddSheet?: boolean | undefined;
 };
@@ -436,6 +439,7 @@ function EditableSpreadsheetArtifactSurfaceSession({
   showHeader,
   subtitle,
   actions,
+  download,
   initialSheetId,
   allowAddSheet = true,
   readOnly = false,
@@ -521,7 +525,16 @@ function EditableSpreadsheetArtifactSurfaceSession({
             ? `${sheets.length} sheet${sheets.length === 1 ? "" : "s"}`
             : editableArtifactStatusLabel(view))
       }
-      actions={actions}
+      actions={
+        download ? (
+          <>
+            {actions}
+            <SpreadsheetDownloadButton session={session} title={title} download={download} />
+          </>
+        ) : (
+          actions
+        )
+      }
       footer={accessRevoked ? undefined : footer}
       busy={!accessRevoked && !metadata && !error}
     >
