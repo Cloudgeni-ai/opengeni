@@ -38,6 +38,7 @@ root.id = "root";
 document.body.append(root);
 const fixture = mountSpreadsheetUxFixture(root, {
   showHeader: !new URLSearchParams(location.search).has("embedded"),
+  authoringDelay: 500,
   download: (signal) =>
     downloadSpreadsheet(
       client,

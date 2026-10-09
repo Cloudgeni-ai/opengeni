@@ -1,9 +1,10 @@
 import type { EditableArtifactSession } from "@opengeni/sdk/editable-artifacts";
 import { DownloadIcon, LoaderCircleIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { ArtifactButton } from "./artifact-chrome";
 import { useEditableArtifactView } from "./editable-artifact-ui";
+import { useSpreadsheetSubmissions } from "./spreadsheet-submissions";
 
 export type SpreadsheetDownload = (signal: AbortSignal) => Promise<Blob>;
 
@@ -17,11 +18,18 @@ export function SpreadsheetDownloadButton({
   download: SpreadsheetDownload;
 }) {
   const view = useEditableArtifactView(session);
+  const submissions = useSpreadsheetSubmissions();
+  const submitting = useSyncExternalStore(
+    submissions.subscribe,
+    submissions.getPending,
+    submissions.getPending,
+  );
   const active = useRef<AbortController | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(false);
   const ready =
     view.state === "live" &&
+    submitting === 0 &&
     view.pendingTransactions === 0 &&
     view.blockedPending.length === 0 &&
     !view.authoringBlockedReason;
@@ -35,7 +43,7 @@ export function SpreadsheetDownloadButton({
   }, [view.state]);
 
   const start = async () => {
-    if (active.current || !ready) return;
+    if (active.current || !ready || submissions.getPending()) return;
     // Re-read the live view: a just-committed edit may precede React's next render.
     const current = session.getView();
     if (

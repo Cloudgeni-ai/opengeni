@@ -41,6 +41,22 @@ async function open(suffix = "") {
 try {
   await open();
   await page.screenshot({ path: `${output}/desktop.png` });
+  const formula = page.getByRole("textbox", { name: "Formula or value", exact: true });
+  await formula.fill("Edited period");
+  await page.evaluate(() => {
+    (document.activeElement as HTMLElement).blur();
+    [...document.querySelectorAll("button")]
+      .find((button) => button.textContent === "Download")!
+      .click();
+  });
+  expect(await page.getByRole("button", { name: "Download", exact: true }).isDisabled()).toBe(true);
+  expect(await page.evaluate(() => (window as any).downloadFixture.calls.length)).toBe(0);
+  await page.screenshot({ path: `${output}/submitting.png` });
+  await page.waitForFunction(
+    () =>
+      ![...document.querySelectorAll("button")].find((button) => button.textContent === "Download")
+        ?.disabled,
+  );
   await page.evaluate(() => (window as any).downloadFixture.setPending(1));
   await page.waitForFunction(
     () =>

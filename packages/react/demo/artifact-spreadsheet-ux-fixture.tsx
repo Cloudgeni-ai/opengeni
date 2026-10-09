@@ -19,6 +19,7 @@ export function mountSpreadsheetUxFixture(
   options: {
     download?: (signal: AbortSignal) => Promise<Blob>;
     showHeader?: boolean;
+    authoringDelay?: number;
   } = {},
 ) {
   const calls: SpreadsheetArtifactCommandBatch[] = [];
@@ -136,6 +137,9 @@ export function mountSpreadsheetUxFixture(
       calls.push(batch);
       const fail = failNext;
       failNext = false;
+      // Model the real SDK's async authoring before its pending WAL is visible.
+      if (options.authoringDelay)
+        await new Promise<void>((resolve) => setTimeout(resolve, options.authoringDelay));
       updateView({ pendingTransactions: view.pendingTransactions + 1 });
       await new Promise<void>((resolve) => setTimeout(resolve, 500));
       if (fail) {

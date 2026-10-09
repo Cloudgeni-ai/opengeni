@@ -139,3 +139,33 @@ test("failure is visible and retryable, teardown aborts outstanding work", async
   await mounted.unmount();
   expect(signal.aborted).toBe(true);
 });
+
+test("failed and closed sessions abort an outstanding download and suppress late results", async () => {
+  for (const state of ["failed", "closed"] as const) {
+    const f = fixture();
+    let signal!: AbortSignal;
+    let resolve!: (blob: Blob) => void;
+    const mounted = await renderComponent(
+      <SpreadsheetDownloadButton
+        session={f.session}
+        title="Workbook"
+        download={(input) => {
+          signal = input;
+          return new Promise((yes) => {
+            resolve = yes;
+          });
+        }}
+      />,
+    );
+    try {
+      await actRun(() => mounted.container.querySelector("button")!.click());
+      await actRun(() => f.update({ state }));
+      expect(signal.aborted).toBe(true);
+      await actRun(() => resolve(new Blob(["late result"])));
+      expect(mounted.container.querySelector("button")!.disabled).toBe(true);
+      expect(mounted.container.querySelector('[role="alert"]')).toBeNull();
+    } finally {
+      await mounted.unmount();
+    }
+  }
+});
