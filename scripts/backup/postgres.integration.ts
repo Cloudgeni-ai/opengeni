@@ -8,7 +8,7 @@ import type { BackupIndex } from "./config";
 // Explicit operator integration lane; never connects to an existing server.
 const integration = process.env.OPENGENI_BACKUP_REAL_DB === "1" ? test : test.skip;
 integration(
-  "real PostgreSQL + Age + rclone round-trip preserves rows/grants and rejects corruption",
+  "real PostgreSQL + Age + rclone round-trip preserves rows/grants/owners and rejects corruption",
   () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-backup-postgres-"));
     const data = join(root, "postgres"),
@@ -43,7 +43,7 @@ integration(
           "-v",
           "ON_ERROR_STOP=1",
           "-c",
-          "CREATE ROLE backup_reader; CREATE TABLE records (id integer primary key, body text); INSERT INTO records SELECT i, repeat('payload',1000) FROM generate_series(1,100) i; GRANT SELECT ON records TO backup_reader;",
+          "CREATE ROLE backup_reader; CREATE ROLE backup_owner; CREATE TABLE records (id integer primary key, body text); INSERT INTO records SELECT i, repeat('payload',1000) FROM generate_series(1,100) i; ALTER TABLE records OWNER TO backup_owner; ALTER TABLE records ENABLE ROW LEVEL SECURITY; ALTER TABLE records FORCE ROW LEVEL SECURITY; CREATE POLICY records_reader ON records FOR SELECT TO backup_reader USING (true); GRANT SELECT ON records TO backup_reader; CREATE FUNCTION recovery_owner() RETURNS name LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog AS 'SELECT current_user'; ALTER FUNCTION recovery_owner() OWNER TO backup_owner;",
         ],
         pgEnv,
       );
@@ -113,6 +113,18 @@ integration(
           pgEnv,
         ).trim(),
       ).toBe("t");
+      expect(
+        invoke(
+          "psql",
+          [
+            "-d",
+            "recovery",
+            "-Atc",
+            "SELECT pg_get_userbyid(relowner),relrowsecurity,relforcerowsecurity FROM pg_class WHERE oid='records'::regclass; SELECT recovery_owner(); SET ROLE backup_reader; SELECT count(*) FROM records;",
+          ],
+          pgEnv,
+        ).trim(),
+      ).toBe("backup_owner|t|t\nbackup_owner\nSET\n100");
       expect(cli("restore", restoreArgs).status).not.toBe(0);
       const index = JSON.parse(readFileSync(join(remote, "CURRENT.json"), "utf8")) as BackupIndex;
       const dump = join(remote, index.nightly.files[0]!.key);

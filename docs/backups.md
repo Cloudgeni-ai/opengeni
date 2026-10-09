@@ -157,7 +157,7 @@ the `<release>-backup-run` CronJob.
 ## Restore into isolation
 
 Restore never requires the source database to be alive. Provision roles and
-extensions required by the source schema on an isolated recovery PostgreSQL
+install extension binaries required by the source schema on an isolated recovery PostgreSQL
 cluster, using the encrypted `roles.sql.age` or your provider's normal bootstrap
 procedure. Review role SQL before applying it; it can contain privileged roles.
 Create an empty target database and add a distinct service, e.g. `recovery`, to
@@ -170,8 +170,12 @@ bun run deployment:backup restore --config /etc/opengeni-backup/config.json \
 
 Restore downloads ciphertext, verifies size/hash/decryption/full archive parsing,
 rejects configured source-service names and nonempty targets, then restores in a
-single transaction with `--exit-on-error --no-owner`. Database grants remain in
-the archive. Service aliases are configuration, not proof of isolation: ensure
+single transaction with `--exit-on-error`. Object ownership, grants, RLS policies
+and security-definer function owners are preserved; the recovery login needs
+permission to restore objects to the original roles. Missing roles fail the
+transaction rather than silently transferring ownership to that login. Let the
+archive create extensions in the empty target database. Service aliases are
+configuration, not proof of isolation: ensure
 the target host/database really is separate and has no writers. Repeat for the
 other databases into their isolated targets, validate rows/grants/application
 behavior, then perform an explicit operational cutover. A failed restore rolls
