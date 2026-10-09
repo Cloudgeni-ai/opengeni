@@ -130,6 +130,7 @@ describeRealDatabase("legacy Codex disconnect: known pre-fix behavior", () => {
   beforeAll(async () => {
     const owned = await acquireBlankTestDatabase("codex-disconnect-characterization");
     if (!owned) throw new Error("Disconnect characterization requires real PostgreSQL");
+    if (!owned.appPassword) throw new Error("Fixture application password is required");
     const appUrl = new URL(owned.databaseUrl);
     appUrl.username = "opengeni_app";
     appUrl.password = owned.appPassword;

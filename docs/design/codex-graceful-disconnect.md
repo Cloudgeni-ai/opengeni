@@ -68,6 +68,11 @@ transcription, usage, discovery, Apps and reset redemption. A returned Response
 header is not body completion; in particular transcription must consume its
 body before releasing custody. Refresh is serialized with disconnect and late
 credential writes are generation-fenced and cannot reactivate a tombstone.
+The existing transaction-bound refresh capability and token deadline remain
+intact: a refresh admitted first can hold that connection lock until it settles
+or reaches its bounded deadline. Disconnect linearizes when it acquires the
+lock and commits, not at HTTP arrival. No new request or refresh admitted after
+that fence can reuse the removed source.
 
 ## Limits that must remain explicit
 
