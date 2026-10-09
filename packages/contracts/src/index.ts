@@ -911,6 +911,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "sandbox_provision",
   "connected_machine_remove",
   "connected_machine_enroll_token",
+  "connected_machine_enable_screen_control",
   "project_list",
   "project_get",
   "project_create",
@@ -18137,6 +18138,12 @@ export const MachineRuntimeCapabilities = z.object({
   operationResourcePolicy: z.boolean(),
   operationCpuQuota: z.boolean(),
   transactionalFsWrite: z.boolean().default(false),
+  // The agent renews its credentials on request, so consent changes (screen
+  // control turned on) apply in place without reconnecting.
+  credentialRenew: z.boolean().default(false),
+  // Whether the live agent's credentials carry screen-control consent, from its
+  // Hello. Null when not reported since this field shipped (unknown).
+  screenControl: z.boolean().nullable().default(null),
 });
 export type MachineRuntimeCapabilities = z.infer<typeof MachineRuntimeCapabilities>;
 
@@ -18170,6 +18177,14 @@ export const MachineUpdateState = z.object({
 });
 export type MachineUpdateState = z.infer<typeof MachineUpdateState>;
 
+/** The three macOS Privacy & Security grants desktop capture and input need. */
+export const MachineMacPermissions = z.object({
+  screenRecording: z.boolean(),
+  accessibility: z.boolean(),
+  inputMonitoring: z.boolean(),
+});
+export type MachineMacPermissions = z.infer<typeof MachineMacPermissions>;
+
 export const MachineRuntime = z.object({
   installedVersion: z.string().nullable(),
   binarySha256: z
@@ -18182,6 +18197,9 @@ export const MachineRuntime = z.object({
   updateBlockedReason: z.string().nullable().optional(),
   capabilities: MachineRuntimeCapabilities,
   update: MachineUpdateState.nullable(),
+  // Live macOS desktop permissions; null off macOS or when the agent does not
+  // report them (unknown, not denied).
+  macPermissions: MachineMacPermissions.nullable().default(null),
 });
 export type MachineRuntime = z.infer<typeof MachineRuntime>;
 
@@ -18191,6 +18209,39 @@ export const UpdateMachineAgentResponse = z.object({
   targetVersion: z.string(),
 });
 export type UpdateMachineAgentResponse = z.infer<typeof UpdateMachineAgentResponse>;
+
+/** Turn screen control on for one connected machine, in place. The consent is
+ * recorded on the machine's enrollment and the live agent renews its
+ * credentials to carry it. active: the machine now holds screen-control
+ * credentials. pending: allowed, and applies by itself when the machine next
+ * connects (offline) or once its agent is updated (agent_update_required);
+ * renewal_failed: retry the call; reconnect_required: the machine's connection
+ * predates in-place renewal, so run the connect command on it again. */
+export const EnableMachineScreenControlResponse = z.object({
+  status: z.enum(["active", "pending"]),
+  reason: z
+    .enum(["offline", "agent_update_required", "renewal_failed", "reconnect_required"])
+    .nullable(),
+  message: z.string().nullable(),
+});
+export type EnableMachineScreenControlResponse = z.infer<typeof EnableMachineScreenControlResponse>;
+
+/** macOS Privacy & Security panes the agent needs for desktop capture/input. */
+export const MachinePrivacySettingsPane = z.enum([
+  "screen_recording",
+  "accessibility",
+  "input_monitoring",
+]);
+export type MachinePrivacySettingsPane = z.infer<typeof MachinePrivacySettingsPane>;
+
+export const OpenMachinePrivacySettingsRequest = z.object({ pane: MachinePrivacySettingsPane });
+export type OpenMachinePrivacySettingsRequest = z.infer<typeof OpenMachinePrivacySettingsRequest>;
+
+export const OpenMachinePrivacySettingsResponse = z.object({
+  opened: z.boolean(),
+  message: z.string().nullable(),
+});
+export type OpenMachinePrivacySettingsResponse = z.infer<typeof OpenMachinePrivacySettingsResponse>;
 
 const OperationMemoryBytes = z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable();
 const OperationCpuMillicores = z.number().int().positive().max(0xffff_ffff).nullable();

@@ -54,6 +54,7 @@ use tracing::{debug, error, info, warn};
 use crate::backoff::Backoff;
 use crate::browser_bridge::BrowserBridgeInventory;
 use crate::config::StoredCredentials;
+use crate::credential_renewal::{renew_now, RenewNowError};
 use crate::dispatch::{self, DispatchContext};
 use crate::engine::Engine;
 
@@ -709,6 +710,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             *link.desktop_status.write().expect("desktop status lock") = Some(v1::DesktopStatus {
                 available: capabilities.desktop,
                 unavailable_reason: capabilities.desktop_unavailable_reason,
+                mac_permissions: capabilities.mac_permissions,
             });
             tokio::time::sleep(DEFAULT_HEARTBEAT).await;
         }
@@ -1065,7 +1067,11 @@ impl<P: Platform + 'static> Supervisor<P> {
         // The reservation is synchronous with the update fence, before any task
         // can be spawned but not yet visible in the engine's admission counters.
         let upload = crate::uploads::handles(&request);
-        let reservation = if upload || !matches!(&route, Route::Liveness | Route::AgentUpdate(_)) {
+        let reservation = if upload
+            || !matches!(
+                &route,
+                Route::Liveness | Route::AgentUpdate(_) | Route::CredentialRenew
+            ) {
             let identity = upload
                 .then(|| crate::uploads::identity(&request, &link.connection_id))
                 .flatten();
@@ -1174,6 +1180,19 @@ impl<P: Platform + 'static> Supervisor<P> {
             Route::AgentUpdate(update) => {
                 self.spawn_agent_update(link, client, &request, update, reply)
                     .await;
+            }
+            Route::CredentialRenew => {
+                // Bounded by the renewal HTTP timeout. Detached so adopting the
+                // renewed file (which restarts this link) cannot cut the reply.
+                let connection_id = link.connection_id.clone();
+                let client = client.clone();
+                tokio::spawn(async move {
+                    let response =
+                        credential_renew_response(request_id, renew_now(&connection_id).await);
+                    publish_response(&client, reply, response, label, max_payload).await;
+                    // Adopting the renewed file restarts this link; send first.
+                    let _ = client.flush().await;
+                });
             }
             Route::LegacyGit(git) => {
                 let resource_policy = request.resource_policy;
@@ -1744,11 +1763,15 @@ impl<P: Platform + 'static> Supervisor<P> {
         // (both are synchronous OS calls): a display can physically exist while the OS
         // withholds the screen-capture grant (macOS Screen Recording / TCC), in which
         // case capture would yield nothing and the model would see a blank.
-        let (display, capture_blocked) = tokio::task::spawn_blocking(move || {
-            (desktop.probe(), desktop.capture_blocked_reason())
+        let (display, capture_blocked, mac_permissions) = tokio::task::spawn_blocking(move || {
+            (
+                desktop.probe(),
+                desktop.capture_blocked_reason(),
+                mac_desktop_permissions(),
+            )
         })
         .await
-        .unwrap_or((None, None));
+        .unwrap_or((None, None, None));
         let has_relay = link.platform.stream_registry().is_some();
         // A desktop is available only when a display probes, we can stream it, AND the
         // OS actually permits capture. Advertising `desktop: true` on a machine that
@@ -1777,6 +1800,8 @@ impl<P: Platform + 'static> Supervisor<P> {
             operation_resource_policy: link.platform.operation_resource_policy_supported(),
             operation_cpu_quota: link.platform.operation_cpu_quota_supported(),
             transactional_fs_write: link.platform.transactional_fs_write_supported(),
+            credential_renew: true,
+            mac_permissions,
         }
     }
 
@@ -1897,6 +1922,8 @@ enum Route {
     OpControl,
     /// Process-global signed self-update, coordinated outside host admission.
     AgentUpdate(v1::AgentUpdateApplyRequest),
+    /// Renew this connection's credentials now; touches no host work.
+    CredentialRenew,
     /// Runs on its own task behind an engine admission ticket of this class.
     Work(JobClass),
 }
@@ -1912,6 +1939,7 @@ fn classify(request: &ControlRequest) -> Route {
         Some(Op::OpStart(start)) => Route::OpStart(start.clone()),
         Some(Op::OpCancel(_) | Op::OpQuery(_) | Op::OpAttach(_)) => Route::OpControl,
         Some(Op::AgentUpdateApply(update)) => Route::AgentUpdate(update.clone()),
+        Some(Op::CredentialRenew(_)) => Route::CredentialRenew,
         _ => Route::Work(JobClass::Light),
     }
 }
@@ -1937,6 +1965,57 @@ fn serve_op_control(
             crate::ops::serve_op_attach_scoped(engine, scope, request_id, attach)
         }
         _ => unreachable!("classified OpControl"),
+    }
+}
+
+/// The three macOS desktop permissions, read without prompting. `None` off
+/// macOS desktop builds, where the control plane must treat them as unknown.
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+fn mac_desktop_permissions() -> Option<v1::MacDesktopPermissions> {
+    let grants = opengeni_agent_platform::desktop_grants();
+    Some(v1::MacDesktopPermissions {
+        screen_recording: grants.screen_recording,
+        accessibility: grants.accessibility,
+        input_monitoring: grants.input_monitoring,
+    })
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macos-desktop")))]
+fn mac_desktop_permissions() -> Option<v1::MacDesktopPermissions> {
+    None
+}
+
+/// The reply to a CredentialRenewRequest. Failures carry a stable
+/// `failure_code` so the control plane can explain them without parsing text.
+fn credential_renew_response(
+    request_id: String,
+    outcome: Result<bool, RenewNowError>,
+) -> v1::ControlResponse {
+    match outcome {
+        Ok(consented_screen_control) => v1::ControlResponse {
+            request_id,
+            error: None,
+            result: Some(v1::control_response::Result::CredentialRenew(
+                v1::CredentialRenewResponse {
+                    renewed: true,
+                    consented_screen_control,
+                },
+            )),
+        },
+        Err(error) => {
+            let mut detail = HashMap::new();
+            detail.insert("failure_code".to_string(), error.code().to_string());
+            v1::ControlResponse {
+                request_id,
+                error: Some(v1::AgentError {
+                    code: v1::ErrorCode::Os as i32,
+                    message: format!("credential renewal failed: {}", error.code()),
+                    retryable: error.retryable(),
+                    detail,
+                }),
+                result: None,
+            }
+        }
     }
 }
 
@@ -2157,6 +2236,7 @@ fn op_label(req: &ControlRequest) -> &'static str {
         Some(Op::BrowserFramesOpen(_)) => "browser_frames_open",
         Some(Op::ComputerFramesOpen(_)) => "computer_frames_open",
         Some(Op::AgentUpdateApply(_)) => "agent_update_apply",
+        Some(Op::CredentialRenew(_)) => "credential_renew",
         Some(Op::Metrics(_)) => "metrics",
         Some(Op::UpdateMayProceed(_)) => "update_may_proceed",
         // Op-stream (v1.1) — wire types present; no runtime serves them yet.
@@ -3517,6 +3597,44 @@ mod tests {
             classify(&ControlRequest::default()),
             Route::Work(JobClass::Light)
         ));
+        // Credential renewal is served by the supervisor outside host admission.
+        let renew = request(Op::CredentialRenew(v1::CredentialRenewRequest {}));
+        assert!(matches!(classify(&renew), Route::CredentialRenew));
+        assert_eq!(op_label(&renew), "credential_renew");
+    }
+
+    #[test]
+    fn credential_renew_replies_carry_consent_or_a_stable_failure_code() {
+        let ok = credential_renew_response("r1".into(), Ok(true));
+        assert!(ok.error.is_none());
+        assert!(matches!(
+            ok.result,
+            Some(v1::control_response::Result::CredentialRenew(
+                v1::CredentialRenewResponse {
+                    renewed: true,
+                    consented_screen_control: true,
+                }
+            ))
+        ));
+        for (failure, code, retryable) in [
+            (RenewNowError::Renewal, "renewal_failed", true),
+            (
+                RenewNowError::ConnectionMissing,
+                "connection_missing",
+                false,
+            ),
+            (RenewNowError::LegacyOrigin, "legacy_origin", false),
+            (RenewNowError::LocalState, "local_state_unavailable", false),
+        ] {
+            let response = credential_renew_response("r2".into(), Err(failure));
+            assert!(response.result.is_none());
+            let error = response.error.expect("error");
+            assert_eq!(error.retryable, retryable);
+            assert_eq!(
+                error.detail.get("failure_code").map(String::as_str),
+                Some(code)
+            );
+        }
     }
 
     #[tokio::test]
@@ -4404,7 +4522,9 @@ mod tests {
             .await
             .expect("frames");
         let supervisor = Supervisor::new_links(&[definition], "test-0.0.0");
-        assert!(supervisor.capabilities(&link).await.transactional_fs_write);
+        let capabilities = supervisor.capabilities(&link).await;
+        assert!(capabilities.transactional_fs_write);
+        assert!(capabilities.credential_renew);
         let shutdown = supervisor.shutdown_handle();
         let run = tokio::spawn(async move { supervisor.run().await });
         assert!(

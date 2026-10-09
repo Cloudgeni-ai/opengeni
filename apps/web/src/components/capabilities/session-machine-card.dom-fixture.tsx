@@ -18,7 +18,25 @@ type Machine = {
   isSessionGroup: boolean;
   os: string;
   hasDisplay: boolean;
+  allowScreenControl: boolean;
+  desktopUnavailableReason: string | null;
+  runtime: Runtime | null;
 };
+type Permissions = { screenRecording: boolean; accessibility: boolean; inputMonitoring: boolean };
+type Runtime = {
+  capabilities: { credentialRenew: boolean; screenControl: boolean | null };
+  macPermissions: Permissions | null;
+};
+const runtime = (
+  screenControl: boolean | null,
+  macPermissions: Permissions | null = null,
+  credentialRenew = true,
+): Runtime => ({ capabilities: { credentialRenew, screenControl }, macPermissions });
+const granted = (screenRecording: boolean, accessibility: boolean, inputMonitoring: boolean) => ({
+  screenRecording,
+  accessibility,
+  inputMonitoring,
+});
 const machine = (sandboxId: string, name: string, overrides: Partial<Machine> = {}): Machine => ({
   sandboxId,
   enrollmentId: `enrollment-${sandboxId}`,
@@ -29,6 +47,9 @@ const machine = (sandboxId: string, name: string, overrides: Partial<Machine> = 
   isSessionGroup: false,
   os: "macos",
   hasDisplay: true,
+  allowScreenControl: false,
+  desktopUnavailableReason: null,
+  runtime: null,
   ...overrides,
 });
 const sessionBox = machine("home", "Cloud sandbox", {
@@ -39,6 +60,7 @@ const sessionBox = machine("home", "Cloud sandbox", {
 });
 
 const attach = mock(async (_sandboxId: string) => true);
+const refresh = mock(async () => {});
 const fleet = {
   machines: [sessionBox] as Machine[],
   canRead: true,
@@ -49,6 +71,7 @@ const fleet = {
   error: null as unknown,
   mutationError: null as unknown,
   attach,
+  refresh,
 };
 mock.module("@/lib/use-workspace-machines", () => ({ useWorkspaceMachines: () => fleet }));
 mock.module("@/api", () => ({ apiBaseUrl: "https://app.example.test" }));
@@ -73,9 +96,33 @@ const sendMessage = mock(async (_workspaceId: string, _sessionId: string, _input
   type: "user.message",
   payload: { routing: "accepted_for_execution" },
 }));
+let enableResult: Record<string, unknown> = { status: "active", reason: null, message: null };
+let enableFailure: Error | null = null;
+const enableMachineScreenControl = mock(async (_workspaceId: string, _enrollmentId: string) => {
+  if (enableFailure) throw enableFailure;
+  return enableResult;
+});
+const updateMachineAgent = mock(async (_workspaceId: string, _enrollmentId: string) => ({
+  operationId: "operation",
+  accepted: true,
+  targetVersion: "9.9.9",
+}));
+const openMachinePrivacySettings = mock(
+  async (_workspaceId: string, _enrollmentId: string, _input: { pane: string }) => ({
+    opened: true,
+    message: null,
+  }),
+);
 const everyone = ["enrollments:read", "enrollments:manage", "sessions:control"];
 const context = {
-  client: { mintEnrollToken, listAttachedBrowsers, sendMessage },
+  client: {
+    mintEnrollToken,
+    listAttachedBrowsers,
+    sendMessage,
+    enableMachineScreenControl,
+    openMachinePrivacySettings,
+    updateMachineAgent,
+  },
   accessContext: {
     subjectId: "member",
     workspaceGrants: [{ workspaceId: "workspace", permissions: everyone }],
@@ -115,6 +162,11 @@ afterAll(() => {
 beforeEach(() => {
   mintCount = 0;
   attach.mockClear();
+  enableMachineScreenControl.mockClear();
+  updateMachineAgent.mockClear();
+  openMachinePrivacySettings.mockClear();
+  enableResult = { status: "active", reason: null, message: null };
+  enableFailure = null;
   sendMessage.mockClear();
   mintEnrollToken.mockClear();
   listAttachedBrowsers.mockClear();
@@ -325,6 +377,182 @@ describe("Connected Machine conversation card", () => {
       await click(h.button("Connect another machine"));
       expect(mintEnrollToken).toHaveBeenCalledTimes(1);
       expect(h.text()).toContain("Waiting for the machine");
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("screen control turns on in place, then follows each Mac permission", async () => {
+    const mac = (overrides: Partial<Machine>) => machine("mac", "Studio Mac", overrides);
+    fleet.machines = [sessionBox, mac({ runtime: runtime(false, granted(false, false, false)) })];
+    const h = await render();
+    try {
+      expect(h.text()).toContain("Let agents see and use this screen");
+      await click(h.button("Turn on"));
+      expect(enableMachineScreenControl.mock.calls[0]).toEqual(["workspace", "enrollment-mac"]);
+
+      // Allowed, but the agent hasn't picked it up yet.
+      fleet.machines = [
+        sessionBox,
+        mac({ allowScreenControl: true, runtime: runtime(false, granted(false, false, false)) }),
+      ];
+      await h.rerender();
+      expect(h.text()).toContain("Turning on…");
+
+      fleet.machines = [
+        sessionBox,
+        mac({ allowScreenControl: true, runtime: runtime(true, granted(false, false, false)) }),
+      ];
+      await h.rerender();
+      expect(h.text()).toContain("Allow Screen Recording for OpenGeni on this Mac.");
+      await click(h.button("Open settings"));
+      expect(openMachinePrivacySettings.mock.calls.at(-1)?.[2]).toEqual({
+        pane: "screen_recording",
+      });
+      expect(h.text()).toContain(
+        "On the Mac, switch on OpenGeni under Screen Recording. Choose Quit & Reopen if macOS asks.",
+      );
+      await click(h.button("Open again"));
+      expect(openMachinePrivacySettings).toHaveBeenCalledTimes(2);
+
+      fleet.machines = [
+        sessionBox,
+        mac({ allowScreenControl: true, runtime: runtime(true, granted(true, false, false)) }),
+      ];
+      await h.rerender();
+      expect(h.text()).toContain("Allow Accessibility for OpenGeni on this Mac.");
+      await click(h.button("Open settings"));
+      expect(openMachinePrivacySettings.mock.calls.at(-1)?.[2]).toEqual({ pane: "accessibility" });
+
+      fleet.machines = [
+        sessionBox,
+        mac({ allowScreenControl: true, runtime: runtime(true, granted(true, true, true)) }),
+      ];
+      await h.rerender();
+      expect(h.text()).toContain("Agents can see and use this screen");
+      expect(h.button("Open settings")).toBeNull();
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("allowed screen control says when it will apply", async () => {
+    fleet.machines = [
+      sessionBox,
+      machine("mac", "Studio Mac", {
+        allowScreenControl: true,
+        runtime: runtime(false, null, false),
+      }),
+    ];
+    const h = await render();
+    try {
+      expect(h.text()).toContain("It turns on by itself once this machine's agent is updated.");
+      expect(h.button("Turn on")).toBeNull();
+      await click(h.button("Update agent"));
+      expect(updateMachineAgent.mock.calls[0]).toEqual(["workspace", "enrollment-mac"]);
+      // Reports from before the agent said whether it holds the consent.
+      fleet.machines = [
+        sessionBox,
+        machine("pc", "Linux box", { os: "linux", allowScreenControl: true, runtime: null }),
+      ];
+      await h.rerender();
+      expect(h.text()).toContain("Agents can see and use this screen");
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("a renewal that didn't complete offers Try again", async () => {
+    enableResult = {
+      status: "pending",
+      reason: "renewal_failed",
+      message: "The machine couldn't refresh its credentials. Try again in a moment.",
+    };
+    fleet.machines = [sessionBox, machine("mac", "Studio Mac", { runtime: runtime(false) })];
+    const h = await render();
+    try {
+      await click(h.button("Turn on"));
+      fleet.machines = [
+        sessionBox,
+        machine("mac", "Studio Mac", { allowScreenControl: true, runtime: runtime(false) }),
+      ];
+      await h.rerender();
+      expect(h.text()).toContain("couldn't refresh its credentials");
+      expect(h.text()).toContain("Not on yet");
+      await click(h.button("Try again"));
+      expect(enableMachineScreenControl).toHaveBeenCalledTimes(2);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("a connection too old to change in place asks for the connect command again", async () => {
+    enableResult = {
+      status: "pending",
+      reason: "reconnect_required",
+      message: "Run the connect command on the machine again with screen control on.",
+    };
+    fleet.machines = [sessionBox, machine("mac", "Studio Mac", { runtime: runtime(false) })];
+    const h = await render();
+    try {
+      await click(h.button("Turn on"));
+      fleet.machines = [
+        sessionBox,
+        machine("mac", "Studio Mac", { allowScreenControl: true, runtime: runtime(false) }),
+      ];
+      await h.rerender();
+      expect(h.text()).toContain("Needs a fresh connection");
+      await click(h.button("Connect again"));
+      expect(h.container.querySelector("pre")).not.toBeNull();
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("an older Mac agent still gets the Screen Recording step from its reason", async () => {
+    fleet.machines = [
+      sessionBox,
+      machine("mac", "Studio Mac", {
+        allowScreenControl: true,
+        desktopUnavailableReason:
+          "Screen Recording permission not granted — enable it for Opengeni in System Settings.",
+      }),
+    ];
+    const h = await render();
+    try {
+      expect(h.text()).toContain("Allow Screen Recording for OpenGeni on this Mac.");
+      await click(h.button("Open settings"));
+      expect(openMachinePrivacySettings.mock.calls.at(-1)?.[2]).toEqual({
+        pane: "screen_recording",
+      });
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("an organization machine needs an organization admin", async () => {
+    const { OpenGeniApiError } = await import("@opengeni/sdk");
+    enableFailure = new OpenGeniApiError(403, "missing permission: account:admin", {});
+    fleet.machines = [sessionBox, machine("mac", "Studio Mac")];
+    const h = await render();
+    try {
+      await click(h.button("Turn on"));
+      expect(h.text()).toContain("Only an organization admin can turn this on.");
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("members who can't manage machines are told who can turn screen control on", async () => {
+    context.accessContext.workspaceGrants = [
+      { workspaceId: "workspace", permissions: ["enrollments:read", "sessions:control"] },
+    ];
+    fleet.canManage = false;
+    fleet.machines = [sessionBox, machine("mac", "Studio Mac")];
+    const h = await render();
+    try {
+      expect(h.text()).toContain("Ask a workspace admin to turn it on");
+      expect(h.button("Turn on")).toBeNull();
     } finally {
       await h.close();
     }
