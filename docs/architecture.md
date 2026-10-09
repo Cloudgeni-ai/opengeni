@@ -179,6 +179,15 @@ Docker/local SDK processes expose bounded-wait, turn-scoped handles, stay
 cancellation-fenced and stop before finalization; agents can test preview
 servers without awaiting exit.
 
+Interactive ttyd input readiness is separate from command execution proof.
+`agent/native/terminal-ready` owns the stock image's Bash 5.2 Readline producer;
+`docker/desktop/opengeni-terminal-up.sh` advertises the installed contract via
+ttyd preferences without restarting existing daemons. The React terminal hook
+binds explicit HELLO/READY metadata to one socket/PTY generation before releasing
+bounded early typing. Startup prompts/unsupported shells have a deliberate
+queue-discarding manual escape; old images remain labelled legacy. Relay PTYs
+retain OPEN_ACK and cursor resumption. See the [readiness contract](../agent/native/terminal-ready/README.md).
+
 Internal filesystem completion is owned by
 `packages/runtime/src/sandbox/synchronous-command.ts`: one invocation,
 complete separate-stream pages and provider terminal/EOF proof. SDK-native

@@ -276,6 +276,8 @@ export function SandboxTerminal({
     write: ptyWrite,
     resize: resizePty,
     connected: ptyConnected,
+    inputReadiness,
+    useLegacyInput,
   } = useTerminalStream({
     // Connect only after xterm exists. This makes the renderer the sole output
     // owner from the first websocket frame and removes an otherwise unbounded
@@ -298,7 +300,8 @@ export function SandboxTerminal({
   // A pty-ws capability exclusively owns the screen even while connecting or
   // after a visible connection failure; never silently switch one terminal UI
   // between two PTYs. Input is enabled during the handshake because the stream
-  // hook buffers it strictly and flushes only after ttyd auth succeeds.
+  // hook buffers it strictly until negotiated readiness. Old servers are
+  // explicitly legacy: their transport-open state is not shell readiness.
   const ptyMode = ptyDescriptor;
   // Keep xterm stdin live for an attachable descriptor even before its URL has
   // arrived. Focus/click triggers the grant; any immediately following input is
@@ -314,7 +317,7 @@ export function SandboxTerminal({
   if (readOnly) terminalModeLabel = "read-only";
   else if (!ptyAttachable) terminalModeLabel = acceptsInput ? null : "output only";
   else if (ptyStatus === "error") terminalModeLabel = "connection error";
-  else if (acceptsInput) terminalModeLabel = null;
+  else if (acceptsInput) terminalModeLabel = inputReadiness === "legacy" ? "legacy input" : null;
   else terminalModeLabel = activated ? "connecting" : "connect on input";
 
   // Boot-in-terminal: after the user engages a not-yet-warm box, show styled
@@ -626,6 +629,11 @@ export function SandboxTerminal({
               <span
                 className="rounded-og-sm bg-og-surface-2 px-1.5 py-0.5 text-og-xs uppercase tracking-wide"
                 role="status"
+                title={
+                  inputReadiness === "legacy"
+                    ? "Shell readiness is not guaranteed. Wait for startup before typing."
+                    : undefined
+                }
               >
                 {terminalModeLabel}
               </span>
@@ -642,6 +650,29 @@ export function SandboxTerminal({
               Clear
             </button>
           </span>
+        </div>
+      )}
+      {ptyAttachable && !readOnly && !showHeader && inputReadiness === "legacy" && (
+        <p role="status" className="shrink-0 px-3 py-1 text-og-xs text-og-fg-subtle">
+          Legacy input — wait for shell startup before typing.
+        </p>
+      )}
+      {ptyAttachable && !readOnly && inputReadiness === "waiting" && (
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-og-border px-3 py-2 text-og-xs text-og-fg-subtle">
+          <span role="status">
+            Waiting for shell readiness. Manual input clears buffered typing.
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              useLegacyInput();
+              termRef.current?.focus();
+            }}
+            title="Use for startup prompts or shells without readiness support. Early input is not guaranteed."
+            className="shrink-0 rounded-og-sm px-2 py-1 text-og-fg hover:bg-og-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-og-accent pointer-coarse:min-h-11"
+          >
+            Use manual input
+          </button>
         </div>
       )}
       {/* `onPointerDownCapture`/`onFocusCapture` fire on the FIRST user engagement
@@ -670,6 +701,7 @@ export function SandboxTerminal({
           data-opengeni-terminal-interactive={surfaceState === "interactive" ? "true" : "false"}
           data-opengeni-terminal-state={surfaceState}
           data-opengeni-terminal-status={ptyAttachable ? ptyStatus : "firehose"}
+          data-opengeni-terminal-input-readiness={ptyAttachable ? inputReadiness : "firehose"}
         />
       </div>
     </div>

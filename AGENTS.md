@@ -624,6 +624,14 @@ The Docker sandbox image includes Terraform, Checkov, AnyDoc, Azure CLI, GitHub 
 
 The runtime also carries a separate `document-parsing` descriptor under `bundled_default_skills`, indexed by default when the runtime owns the Skill catalog. This default guidance points to the preinstalled parser and does not install tools or activate the curated library entry. An explicitly host-owned catalog remains authoritative, including when it is empty.
 
+For ttyd input-readiness changes, run `make -C agent/native/terminal-ready test`
+(Bash 5.2 development headers, C compiler, Python 3) and the React terminal hook,
+decoder and component tests. Both stock images must pass the installed-profile
+PTY smoke against their actual runtime Bash. Never substitute first output or
+a timeout for explicit readiness, restart existing daemons to upgrade the
+contract, or remove the queue-discarding manual escape for unsupported startup.
+See `agent/native/terminal-ready/README.md` for package/image release boundaries.
+
 ### Bring-your-own-compute — the Connected Machine (`selfhosted`)
 
 A **Connected Machine** (the `selfhosted` backend) is a user's own always-on machine — a **first-class, co-equal PRIMARY compute target**, not merely a swappable sandbox. When a turn's _effective_ backend is a machine, the agent runs on it **directly**; there is no provisioned box behind it. Use "Connected Machine" in product-facing prose and reserve "selfhosted" for the enum value / internal plumbing. Key invariants — do not break them:

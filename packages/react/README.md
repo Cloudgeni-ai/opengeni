@@ -1297,6 +1297,22 @@ The conversation's "usage limit reached" row is customized on
 replaced with `renderAllowanceExhausted`. See
 [usage allowances](../../docs/usage-allowances.md#react-components-and-the-console).
 
+## Terminal startup input
+
+`SandboxTerminal` captures bounded early typing while attaching. Supported stock
+sandbox images negotiate explicit Bash Readline readiness; banners and first
+output do not release queued commands. Silent prompts work too. If a startup
+profile asks for input or disables line editing, **Use manual input** clears
+buffered typing before enabling unguaranteed input. Old images/running ttyd
+daemons retain labelled **legacy input** behavior; wait for their shell startup
+before typing. Relay PTYs retain their existing OPEN_ACK behavior.
+
+Custom consumers of `useTerminalStream` can inspect `inputReadiness` and expose
+`useLegacyInput()` for `waiting` states. That action discards queued typing; it
+is not an acknowledgement of shell readiness. A new React package alone cannot
+upgrade an old sandbox image. See the [native readiness contract](../../agent/native/terminal-ready/README.md)
+for compatibility, startup limits and coordinated release requirements.
+
 ## Optional peer dependencies
 
 The chat/timeline surface needs only the required React/React DOM peers. All

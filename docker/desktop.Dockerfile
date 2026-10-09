@@ -34,6 +34,9 @@ ADD --checksum=sha256:bfb6e6d345055eb481a50db423256fa2732ce010f785a56c327e213a63
 
 FROM rust:1.82-bookworm AS computer-native-build
 
+RUN apt-get update && apt-get install -y --no-install-recommends bash-builtins \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /src/agent
 ARG TARGETPLATFORM
 COPY agent .
@@ -50,6 +53,10 @@ RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/carg
 
 RUN cc -O2 -std=c11 -Wall -Wextra -Werror \
       native/command-supervisor/supervisor.c -o /out/opengeni-command-supervisor
+
+RUN cc -std=c11 -O2 -Wall -Wextra -Werror -fPIC -shared -Wl,-z,noexecstack \
+      -I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins \
+      native/terminal-ready/terminal-ready.c -o /out/opengeni-terminal-ready.so
 
 FROM oven/bun:${BUN_VERSION} AS bun-runtime
 
@@ -213,6 +220,10 @@ RUN set -eux; \
 
 COPY --from=computer-native-build /out/opengeni-computer-native /out/opengeni-computer-native
 COPY --from=computer-native-build /out/opengeni-command-supervisor /out/opengeni-command-supervisor
+COPY --from=computer-native-build /out/opengeni-terminal-ready.so /out/opengeni-terminal-ready.so
+RUN printf '%s  %s\n' \
+      "$(sha256sum /out/opengeni-terminal-ready.so | awk '{print $1}')" \
+      /usr/local/lib/opengeni/opengeni-terminal-ready.so >> /out/SHA256SUMS
 RUN printf '%s  %s\n' \
       "$(sha256sum /out/opengeni-command-supervisor | awk '{print $1}')" \
       /usr/local/bin/opengeni-command-supervisor >> /out/SHA256SUMS
@@ -606,6 +617,11 @@ COPY --from=browserd-build /out/lightpanda-LICENSE /usr/local/share/licenses/lig
 COPY --from=browserd-build /out/lightpanda-0.3.5-source.tar.gz /usr/local/share/source/lightpanda-0.3.5.tar.gz
 COPY --from=browserd-build /out/opengeni-computer-native /usr/local/lib/opengeni/opengeni-computer-native
 COPY --from=browserd-build /out/opengeni-command-supervisor /usr/local/bin/opengeni-command-supervisor
+COPY --from=browserd-build /out/opengeni-terminal-ready.so /usr/local/lib/opengeni/opengeni-terminal-ready.so
+COPY docker/desktop/opengeni-terminal-ready.sh /etc/profile.d/00-opengeni-terminal-ready.sh
+COPY agent/native/terminal-ready/tests/test_ready.py /tmp/opengeni-terminal-ready-test.py
+RUN python3 /tmp/opengeni-terminal-ready-test.py /usr/local/lib/opengeni/opengeni-terminal-ready.so --installed \
+    && rm /tmp/opengeni-terminal-ready-test.py
 COPY --from=browserd-build /out/SHA256SUMS /usr/local/share/opengeni/browserd-SHA256SUMS
 COPY docker/browserd-THIRD-PARTY-NOTICES /usr/local/share/opengeni/browserd-THIRD-PARTY-NOTICES
 COPY --from=browserd-build /out/codemode-runtime /opt/opengeni/codemode-runtime
