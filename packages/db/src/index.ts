@@ -292,6 +292,7 @@ export type {
   WorkspaceCodexSubscriptionMode,
   WorkspaceCodexSubscriptionSource,
 } from "./codex-account-types";
+export * from "./subscription-core-codex-operations";
 import {
   projectSubscriptionCoreCodexWorkspace,
   type SubscriptionCoreCodexWake,
@@ -5692,6 +5693,11 @@ export async function recordModelCallFact(
     reasoningTokens?: number | null;
     totalTokens?: number | null;
     occurredAt?: Date;
+    /**
+     * The shared-core subscription connection that served the call (core
+     * Codex turns). Legacy and non-subscription calls leave it NULL.
+     */
+    connectionId?: string | null;
   },
 ): Promise<ModelCallFact> {
   if (input.pricedCostMicros < 0 || !Number.isSafeInteger(input.pricedCostMicros)) {
@@ -5801,6 +5807,7 @@ export async function recordModelCallFact(
           listOutputCostMicros: classes?.output ?? null,
           listCostIsApprox: classes == null ? null : (input.listByClassApprox ?? false),
           contextContributions,
+          connectionId: input.connectionId ?? null,
           occurredAt,
         })
         .onConflictDoUpdate({
@@ -5824,6 +5831,7 @@ export async function recordModelCallFact(
             listOutputCostMicros: sql`coalesce(${schema.modelCallFacts.listOutputCostMicros}, excluded.list_output_cost_micros)`,
             listCostIsApprox: sql`coalesce(${schema.modelCallFacts.listCostIsApprox}, excluded.list_cost_is_approx)`,
             contextContributions: sql`coalesce(${schema.modelCallFacts.contextContributions}, excluded.context_contributions)`,
+            connectionId: sql`coalesce(${schema.modelCallFacts.connectionId}, excluded.connection_id)`,
           },
         })
         .returning();
@@ -76350,6 +76358,11 @@ export async function claimSessionWorkForAttempt(
                     claudeProviderAccountAuthoritySnapshot:
                       latestStarted?.claudeProviderAccountAuthoritySnapshot ??
                       sharedCompactionPool!.claude,
+                    // The immutable v2 accepted authority of the turn this
+                    // compacts after (NULL without a Codex cutover, so the
+                    // legacy path is unchanged). A session with no started
+                    // turn has none: shared capacity only.
+                    subscriptionAuthority: latestStarted?.subscriptionAuthority ?? null,
                     startedAt: now,
                     createdAt: now,
                     updatedAt: now,

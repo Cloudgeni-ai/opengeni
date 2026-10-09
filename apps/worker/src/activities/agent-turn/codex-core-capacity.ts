@@ -33,7 +33,6 @@ import {
   subscriptionCoreCapacityWaitPayload,
   subscriptionCoreCutoverDisabledFailure,
   subscriptionCoreLeaseBusyFailure,
-  subscriptionCoreUnsupportedFailure,
 } from "./codex-core-errors";
 import type { CodexTurnLease } from "./credential-leases";
 import type { CodexSubscriptionCoreTurn, ProviderTurnState } from "./turn-context";
@@ -134,9 +133,11 @@ export async function selectCoreCodexTurnCapacity(
   const holderId = leases.codex.holderId;
   if (!turnId) throw new Error("Turn id was not initialized");
   if (!holderId) throw new Error("Codex lease holder was not initialized");
-  // Compaction turns move to the core with the other Codex consumers (PR 2).
-  // Until then they fail closed instead of reading the legacy Codex tables.
-  if (turn.source === "compaction") throw subscriptionCoreUnsupportedFailure("Context compaction");
+  // A compaction turn places, leases and refreshes exactly like a chat turn
+  // (PR 2c): the same accepted authority (copied from the turn it compacts
+  // after), lease, and history sanitization. An existing remote_v2 session
+  // keeps its Codex model lock because placement uses only the accepted
+  // model with cross-provider failover off.
 
   const fenced = (): CapacityPhaseOutcome => {
     acknowledgeLostAttemptOwnership();
@@ -177,6 +178,10 @@ export async function selectCoreCodexTurnCapacity(
       case "lease_busy":
         throw subscriptionCoreLeaseBusyFailure(placement.leasedUntil);
       case "wait":
+        // Maintenance never parks: as on the legacy path, compaction is
+        // cancelled with its request preserved and runs again with the
+        // session's next work, instead of holding a capacity waiter.
+        if (turn.source === "compaction") return await deferCoreCodexCompaction(deps, placement);
         // Park the same turn on the durable core waiter (EP-T09); it resumes
         // when placement can serve it again (a reset, a wake or a timer).
         return await parkCoreCodexTurn(deps, placement);
@@ -243,6 +248,35 @@ export async function selectCoreCodexTurnCapacity(
       durationSeconds: (performance.now() - startedAt) / 1_000,
     });
   }
+}
+
+/** The legacy compaction capacity outcome (`requestPreserved`), on a core wait. */
+async function deferCoreCodexCompaction(
+  deps: CapacityPhaseDeps,
+  wait: Extract<SubscriptionCoreCodexPlacement, { kind: "wait" }>,
+): Promise<CapacityPhaseOutcome> {
+  const { eventing, control, claimedResult } = deps;
+  const settled = await eventing.settle({
+    events: [
+      {
+        type: "turn.cancelled",
+        payload: {
+          maintenance: "context_compaction",
+          reason: "subscription_capacity_unavailable",
+          waitReason: wait.reason,
+          requestPreserved: true,
+        },
+      },
+      { type: "session.status.changed", payload: { status: "idle" } },
+    ],
+    turnStatus: "cancelled",
+    sessionStatus: "idle",
+    activeTurnId: null,
+  });
+  if (!settled) return { exit: claimedResult({ status: "cancelled" }) };
+  control.turnMetricOutcome = "cancelled";
+  control.activityStatus = "idle";
+  return { exit: claimedResult({ status: "idle", deferredUntilWake: true }) };
 }
 
 /**

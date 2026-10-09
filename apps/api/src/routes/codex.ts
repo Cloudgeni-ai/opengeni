@@ -206,7 +206,7 @@ export function codexWorkerReadiness(input: {
 // The /codex/usage{,/refresh,/:id} wire wrapper: the rich normalized payload
 // carries its own `status`, surfaced at the top level for back-compat with the
 // existing CodexUsage = { status; usage } shape.
-function codexUsageJson(payload: CodexUsagePayload): {
+export function codexUsageJson(payload: CodexUsagePayload): {
   status: CodexUsagePayload["status"];
   usage: CodexUsagePayload;
 } {
@@ -249,6 +249,8 @@ import {
 import type { Context, Hono } from "hono";
 import {
   codexRouteDisposition,
+  coreCodexUsage,
+  coreCodexUsageRefresh,
   coreCodexAccounts,
   coreCodexActivate,
   coreCodexAllocator,
@@ -1871,8 +1873,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/codex/usage", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    if ((await codexRouteDisposition(deps, grant.accountId)) === "core")
-      coreCodexRouteUnsupported();
+    if ((await codexRouteDisposition(deps, grant.accountId)) === "core") {
+      return await coreCodexUsage(c, deps, grant, workspaceId, null);
+    }
     const status = await getCodexCredentialStatus(db, workspaceId);
     if (!status?.credentialId) {
       throw new HTTPException(404, {
@@ -1889,8 +1892,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/codex/accounts/:accountId/usage", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    if ((await codexRouteDisposition(deps, grant.accountId)) === "core")
-      coreCodexRouteUnsupported();
+    if ((await codexRouteDisposition(deps, grant.accountId)) === "core") {
+      return await coreCodexUsage(c, deps, grant, workspaceId, c.req.param("accountId"));
+    }
     const accountId = c.req.param("accountId");
     // Constrain to a real account in this workspace (RLS already scopes, but a 404
     // for an unknown id is friendlier than an opaque needs_relogin payload).
@@ -1911,8 +1915,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/codex/usage/refresh", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    if ((await codexRouteDisposition(deps, grant.accountId)) === "core")
-      coreCodexRouteUnsupported();
+    if ((await codexRouteDisposition(deps, grant.accountId)) === "core") {
+      return await coreCodexUsageRefresh(c, deps, grant, workspaceId);
+    }
     const accounts = await listCodexAccountStatuses(db, workspaceId);
     const usage: Record<string, { status: CodexUsagePayload["status"]; usage: CodexUsagePayload }> =
       {};

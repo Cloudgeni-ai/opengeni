@@ -90,6 +90,8 @@ import {
   upsertWorkspaceMemberAsWorkspaceManager,
   upsertWorkspaceModelPolicy,
   workspaceCodexSubscriptionActive,
+  readCodexCutoverDisposition,
+  listSubscriptionCoreCodexOperationCandidates,
   workspaceControlRequestLockTimeoutMs,
   workspaceXaiSubscriptionActive,
   workspaceVercelAiGatewayConnectionActive,
@@ -577,7 +579,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     ] = await Promise.all([
       getWorkspaceConnectionModelRestrictions(deps.db, workspaceId, grant.subjectId),
       getWorkspaceModelPolicy(deps.db, workspaceId),
-      workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
+      workspaceCodexRealtimeReady(deps, grant, workspaceId),
       loadWorkspaceCodexModelAvailability(deps.db, resolvedCatalog.settings, workspaceId),
       workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
       loadWorkspaceClaudeSubscriptionReadiness(deps.db, resolvedCatalog.settings, {
@@ -1112,11 +1114,35 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.body(null, 204);
   });
 
+  /**
+   * Codex Live readiness: the legacy active subscription without a cutover
+   * row; on the shared core, any shared connection that could serve a
+   * realtime operation here; never ready during maintenance.
+   */
+  async function workspaceCodexRealtimeReady(
+    routeDeps: typeof deps,
+    grant: { accountId: string; subjectId: string },
+    workspaceId: string,
+  ): Promise<boolean> {
+    const disposition = await readCodexCutoverDisposition(routeDeps.db, grant.accountId);
+    if (disposition === "legacy") {
+      return await workspaceCodexSubscriptionActive(routeDeps.db, routeDeps.settings, workspaceId);
+    }
+    if (disposition === "maintenance" || !routeDeps.settings.codexSubscriptionEnabled) return false;
+    const candidates = await listSubscriptionCoreCodexOperationCandidates(routeDeps.db, {
+      kind: "workspace",
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+    });
+    return candidates.length > 0;
+  }
+
   app.get("/v1/workspaces/:workspaceId/realtime-model-catalog", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const [codexConnected, supergrokConnected, workspaceGatewayConnected] = await Promise.all([
-      workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
+      workspaceCodexRealtimeReady(deps, grant, workspaceId),
       workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
       workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
     ]);

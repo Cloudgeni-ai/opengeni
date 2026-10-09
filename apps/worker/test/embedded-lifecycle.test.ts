@@ -757,6 +757,10 @@ describe("embedded worker lifecycle contract", () => {
           "begin_subscription_codex_apps_refresh(uuid, uuid, uuid)",
           "persist_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
           "fail_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text)",
+          "read_subscription_codex_connection_credential(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+          "begin_subscription_codex_connection_refresh(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+          "persist_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+          "fail_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text)",
         ].map((name) => ({
           name,
           owner: "opengeni_migrator",

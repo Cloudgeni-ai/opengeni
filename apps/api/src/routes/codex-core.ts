@@ -15,20 +15,24 @@ import {
   clearSubscriptionCoreCodexApps,
   deliverSubscriptionCoreCodexWake,
   designateSubscriptionCoreCodexApps,
+  fetchSubscriptionCoreCodexUsage,
   getSubscriptionCoreCodexAppsSettings,
   getSubscriptionCoreCodexWorkspaceProjection,
   getSubscriptionCoreOrganizationCodexProjection,
   readCodexCutoverDisposition,
   renameSubscriptionCoreCodexConnection,
+  resolveSubscriptionCoreCodexConnectionId,
   setSubscriptionCoreCodexAllocator,
   setSubscriptionCoreCodexPrimary,
   setSubscriptionCoreCodexRotation,
   setSubscriptionCoreWorkspaceCodexSource,
   SubscriptionCoreCodexSourceRefusedError,
 } from "@opengeni/db";
+import type { CodexFetch, CodexUsagePayload } from "@opengeni/codex";
 import {
   codexAccountJson,
   codexModelsForPicker,
+  codexUsageJson,
   codexWorkerReadiness,
   managedHumanOrAgent,
   requireCodexAppsHuman,
@@ -67,7 +71,7 @@ export async function codexRouteDisposition(
   return disposition;
 }
 
-/** An operation the shared core does not serve yet (listed as a PR 2c/PR 3 leftover). */
+/** An operation the shared core does not serve yet (listed as a PR 3 leftover). */
 export function coreCodexRouteUnsupported(): never {
   throw typedHttpError(
     409,
@@ -386,4 +390,101 @@ export async function coreOrganizationCodexAccounts(
       activeCredentialId: rotation.activeCredentialId,
     },
   });
+}
+
+type Grant = Awaited<ReturnType<typeof requireAccessGrant>>;
+
+/** One connection's live usage through the core seam; wakes waiters on recovery. */
+async function liveCoreCodexUsage(
+  deps: ApiRouteDeps,
+  grant: Grant,
+  workspaceId: string,
+  connectionId: string,
+): Promise<CodexUsagePayload> {
+  const { usage, recovered } = await fetchSubscriptionCoreCodexUsage(
+    deps.db,
+    deps.settings,
+    { kind: "workspace", accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+    connectionId,
+    (deps.codexFetch ?? fetch) as CodexFetch,
+  );
+  if (recovered) {
+    await deliverSubscriptionCoreCodexWake(deps.db, {
+      accountId: grant.accountId,
+      reason: "usage_recovered",
+    });
+  }
+  return usage;
+}
+
+/**
+ * Live usage on the core (EP-N21): the workspace's effective primary
+ * connection (the legacy active account), or one connection of the
+ * workspace's pool by id or legacy alias. The 404 copy matches legacy.
+ */
+export async function coreCodexUsage(
+  c: Context,
+  deps: ApiRouteDeps,
+  grant: Grant,
+  workspaceId: string,
+  requestedId: string | null,
+) {
+  const { accounts, rotation } = await projection(deps, grant.accountId, workspaceId);
+  let connectionId: string | null;
+  if (requestedId === null) {
+    connectionId = rotation.activeCredentialId;
+    if (!connectionId || !accounts.some((account) => account.id === connectionId)) {
+      throw new HTTPException(404, { message: "codex subscription is not connected" });
+    }
+  } else {
+    connectionId = z.uuid().safeParse(requestedId).success
+      ? await resolveSubscriptionCoreCodexConnectionId(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          connectionId: requestedId,
+        })
+      : null;
+    if (!connectionId || !accounts.some((account) => account.id === connectionId)) {
+      throw new HTTPException(404, { message: "codex account not found" });
+    }
+  }
+  return c.json(codexUsageJson(await liveCoreCodexUsage(deps, grant, workspaceId, connectionId)));
+}
+
+/** Batched live refresh over the workspace's core pool, four provider calls at a time. */
+export async function coreCodexUsageRefresh(
+  c: Context,
+  deps: ApiRouteDeps,
+  grant: Grant,
+  workspaceId: string,
+) {
+  const { accounts } = await projection(deps, grant.accountId, workspaceId);
+  const usage: Record<string, ReturnType<typeof codexUsageJson>> = {};
+  const queue = [...accounts];
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const account = queue.shift();
+      if (!account) return;
+      const settled = await Promise.allSettled([
+        liveCoreCodexUsage(deps, grant, workspaceId, account.id),
+      ]);
+      const result = settled[0];
+      usage[account.id] =
+        result.status === "fulfilled"
+          ? codexUsageJson(result.value)
+          : codexUsageJson({
+              status: "error",
+              planType: null,
+              fiveHour: null,
+              weekly: null,
+              limitReached: false,
+              fetchedAt: new Date().toISOString(),
+              rateLimitResetCredits: null,
+            });
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(4, Math.max(1, accounts.length)) }, () => worker()),
+  );
+  return c.json({ usage });
 }

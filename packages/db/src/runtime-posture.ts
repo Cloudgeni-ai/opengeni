@@ -693,6 +693,11 @@ export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   "begin_subscription_codex_apps_refresh(uuid, uuid, uuid)",
   "persist_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
   "fail_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text)",
+  // M3 PR 2c: the connection-level Codex credential seam for operations.
+  "read_subscription_codex_connection_credential(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "begin_subscription_codex_connection_refresh(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "persist_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text)",
 ] as const;
 
 /** Owner-only private helpers the runtime role must never be able to execute. */
