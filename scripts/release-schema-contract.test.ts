@@ -2579,6 +2579,8 @@ describe("release schema contract", () => {
       "0665_inbox_replies.sql",
       "0666_inbox_reply_current_turn.sql",
       "0672_sandbox_checkpoint_staleness.sql",
+      "0680_sandbox_admission_settled_index.sql",
+      "0681_sandbox_checkpoint_staleness_any_settled.sql",
       "0673_delete_stranded_completed_turn_tool_receipts.sql",
       "0674_inbox_reply_hands_back.sql",
       "0675_inbox_subagent_turn_push.sql",

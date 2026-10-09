@@ -118,12 +118,15 @@ counted.
 `opengeni_sandbox_checkpoint_staleness{kind}` (`dirty`, `stale_4h`,
 `stale_12h`) and `opengeni_sandbox_checkpoint_age_max_seconds` are a fresh,
 content-free reaper inventory (`opengeni_private.sandbox_checkpoint_staleness()`,
-migration 0672) of live Modal sandboxes with a write their last checkpoint did
-not capture: a mutation admission on that exact box newer than the archive
-generation, or a write still open (or settled) after the checkpoint. A
-generation bump with no write behind it, such as a fresh or restored box, does
-not count. Age runs from the first uncaptured write, clamped to the box's
-creation. `OpenGeniSandboxCheckpointStale` warns when any box has held such a
+migrations 0672 and 0681) of live Modal sandboxes with a write their last
+checkpoint did not capture: a mutation admission on that exact box newer than
+the archive generation, any captured write that is still open or settled
+after the checkpoint (a background command the checkpoint ran around), or an
+attached viewer or interaction (a desktop or terminal tab, a browser or computer
+controller), which can write without an admission. A generation bump with no
+write behind it, such as a fresh or restored box, does not count. Age runs from
+the first uncaptured write, or for an attached writer from the later of the
+checkpoint and the attach, clamped to the box's creation. `OpenGeniSandboxCheckpointStale` warns when any box has held such a
 write for more than 12 hours, half the default provider lifetime: an unplanned
 provider loss would lose it. Boxes kept warm while idle (an open tab after a
 short turn, or a turn held on `wait_for_input` with a running command) are not
@@ -132,8 +135,7 @@ checkpointed between turns and can raise it too.
 To find the leases behind the alert, run this as a role that bypasses row-level
 security (a superuser or a `BYPASSRLS` role); under forced row-level security an
 ordinary role silently sees no rows. It ages boxes the way the inventory does,
-except that it checks every captured write for a settlement after the
-checkpoint, not only the latest:
+checking every captured write for a settlement after the checkpoint:
 
 ```sql
 with live as (
@@ -142,13 +144,16 @@ with live as (
     coalesce(lease.archive_generation, 0) as archived_generation,
     coalesce(lease.provider_created_at, lease.created_at) as box_created_at,
     opengeni_private.sandbox_checkpoint_staleness_at(
-      lease.resume_state #>> '{sessionState,workspaceArchiveAt}') as checkpoint_at
+      lease.resume_state #>> '{sessionState,workspaceArchiveAt}') as checkpoint_at,
+    (select min(holder.created_at) from sandbox_lease_holders holder
+      where holder.lease_id = lease.id
+        and holder.kind in ('viewer', 'interaction')) as writer_attached_at
   from sandbox_leases lease
   where lease.backend = 'modal' and lease.liveness in ('warm', 'draining')
     and lease.instance_id is not null
 ), evidence as (
   select live.id, live.workspace_id, live.sandbox_group_id, live.liveness,
-    live.box_created_at, live.checkpoint_at,
+    live.box_created_at, live.checkpoint_at, live.writer_attached_at,
     min(admission.admitted_at) filter (
       where admission.workspace_generation > live.archived_generation
     ) as newer_write_at,
@@ -156,19 +161,21 @@ with live as (
       and (admission.settled_at is null
         or admission.settled_at > live.checkpoint_at)) as spanning_write
   from live
-  join sandbox_workspace_mutation_admissions admission
+  left join sandbox_workspace_mutation_admissions admission
     on admission.lease_id = live.id
    and admission.provider_instance_id = live.instance_id
   group by live.id, live.workspace_id, live.sandbox_group_id, live.liveness,
-    live.box_created_at, live.checkpoint_at
+    live.box_created_at, live.checkpoint_at, live.writer_attached_at
 )
 select id, workspace_id, sandbox_group_id, liveness,
   greatest(
     least(newer_write_at,
-      case when spanning_write then coalesce(checkpoint_at, box_created_at) end),
+      case when spanning_write then coalesce(checkpoint_at, box_created_at) end,
+      case when writer_attached_at is not null then greatest(writer_attached_at,
+        coalesce(checkpoint_at, box_created_at)) end),
     box_created_at) as unsaved_since
 from evidence
-where newer_write_at is not null or spanning_write
+where newer_write_at is not null or spanning_write or writer_attached_at is not null
 order by unsaved_since
 limit 20;
 ```
