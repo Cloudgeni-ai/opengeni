@@ -48,7 +48,7 @@ export type ConnectionScope =
 export type Quota =
   | { kind: "available" }
   | { kind: "unknown" }
-  | { kind: "exhausted"; resetsAt: number };
+  | { kind: "exhausted"; resetsAt: number | null };
 
 export type Connection = {
   id: string;
@@ -70,6 +70,10 @@ export type Connection = {
   /** Per-model cooldowns (Claude reports model-specific limits). */
   modelCooldowns?: Readonly<Record<ModelId, number>>;
   quota: Quota;
+  /** Explicit consent to spend credits after the included Codex allowance. */
+  extraCreditsEnabled?: boolean;
+  /** A provider refusal blocks even paid credits until this deadline. */
+  refusalUntil?: number | null;
 };
 
 export type Workspace = {
@@ -196,7 +200,21 @@ export function isCacheWarm(world: World, binding: SessionBinding, now: number):
 
 function hasCapacity(connection: Connection, now: number): boolean {
   // Unknown quota stays unknown: it is neither availability nor exhaustion (SUB-ELIG-06).
-  return connection.quota.kind !== "exhausted" || connection.quota.resetsAt <= now;
+  return (
+    connection.quota.kind !== "exhausted" ||
+    (connection.quota.resetsAt !== null && connection.quota.resetsAt <= now) ||
+    spendsCredits(connection, now)
+  );
+}
+
+function spendsCredits(connection: Connection, now: number): boolean {
+  return (
+    connection.provider === "codex" &&
+    connection.extraCreditsEnabled === true &&
+    (connection.refusalUntil == null || connection.refusalUntil <= now) &&
+    connection.quota.kind === "exhausted" &&
+    (connection.quota.resetsAt === null || connection.quota.resetsAt > now)
+  );
 }
 
 function modelAllowed(world: World, session: Session, modelId: ModelId): boolean {
@@ -393,8 +411,6 @@ function pick(world: World, session: Session, candidates: Connection[]): Connect
     if (primary) return primary;
   }
   const ranked = [...candidates].sort((left, right) => {
-    const known = Number(left.quota.kind === "unknown") - Number(right.quota.kind === "unknown");
-    if (known !== 0) return known;
     const spread = spreadHash(session.id, left.id) - spreadHash(session.id, right.id);
     if (spread !== 0) return spread;
     return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
@@ -455,64 +471,6 @@ export function candidateModels(world: World, session: Session): ModelId[] {
 }
 
 /**
- * The earliest reset among accounts automatic selection could use for these
- * models. A personal account counts only under the opt-in fallback (SUB-SEL-02).
- */
-function earliestReset(
-  world: World,
-  session: Session,
-  models: ModelId[],
-  personalFallback: boolean,
-  now: number,
-): number | null {
-  let earliest: number | null = null;
-  for (const connection of world.connections) {
-    if (connection.ownership.kind === "personal" && !personalFallback) continue;
-    if (!isAuthorized(world, session, connection)) continue;
-    for (const modelId of models) {
-      const model = byId(world.models, modelId);
-      if (
-        !model ||
-        model.provider !== connection.provider ||
-        !connection.entitledModels.includes(modelId) ||
-        (connection.allowedModelIds != null && !connection.allowedModelIds.includes(modelId))
-      ) {
-        continue;
-      }
-      if (connection.assignmentPolicies !== undefined) {
-        const source =
-          effectiveSettings(world.settings, session.workspaceId).values.inferenceSource?.[
-            connection.provider
-          ] ?? "automatic";
-        const assignments = connection.assignmentPolicies.filter(
-          (policy) =>
-            policy.workspaceId === session.workspaceId &&
-            (source === "automatic" || policy.inferencePool === source),
-        );
-        if (
-          !assignments.some(
-            (policy) =>
-              policy.allocatorEnabled &&
-              (policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId)) &&
-              !policy.excludedModelIds?.includes(modelId),
-          )
-        ) {
-          continue;
-        }
-      }
-      const cooldownUntil = connection.modelCooldowns?.[modelId] ?? -Infinity;
-      const quotaUntil =
-        connection.quota.kind === "exhausted" ? connection.quota.resetsAt : -Infinity;
-      const availableAt = Math.max(cooldownUntil, quotaUntil);
-      if (availableAt > now) {
-        earliest = earliest === null ? availableAt : Math.min(earliest, availableAt);
-      }
-    }
-  }
-  return earliest;
-}
-
-/**
  * D-24: an explicit choice that can never serve this session's model: gone,
  * no longer authorized for this work, another provider's account, or not
  * entitled or allowed for the model. Health, allocation, capacity and
@@ -555,9 +513,15 @@ export function pinnedNeverServes(
 function futureResetTimes(world: World, now: number): number[] {
   const times = new Set<number>();
   for (const connection of world.connections) {
-    if (connection.quota.kind === "exhausted" && connection.quota.resetsAt > now) {
+    if (
+      connection.quota.kind === "exhausted" &&
+      connection.quota.resetsAt !== null &&
+      connection.quota.resetsAt > now
+    ) {
       times.add(connection.quota.resetsAt);
     }
+    if (connection.refusalUntil != null && connection.refusalUntil > now)
+      times.add(connection.refusalUntil);
     for (const until of Object.values(connection.modelCooldowns ?? {})) {
       if (until > now) times.add(until);
     }
@@ -581,7 +545,10 @@ function personalFallbackFor(world: World, session: Session): boolean {
   if (session.ownerId === null) return false;
   const settings = effectiveSettings(world.settings, session.workspaceId).values;
   return (
-    settings.personalFallbackAllowed && !!byId(world.people, session.ownerId)?.personalFallbackOptIn
+    (byId(world.workspaces, session.workspaceId)?.kind === "personal" &&
+      byId(world.workspaces, session.workspaceId)?.ownerId === session.ownerId) ||
+    (settings.personalFallbackAllowed &&
+      !!byId(world.people, session.ownerId)?.personalFallbackOptIn)
   );
 }
 
@@ -643,16 +610,34 @@ export function decide(world: World, sessionId: string, now: number): Decision {
     canServe(world, session, bound, binding.modelId, now);
 
   // Stickiness while the cache is warm (SUB-STICK-02, SUB-STICK-03, SUB-FAIL-07).
-  if (binding && bindingServable && !session.reselectionPoint && isCacheWarm(world, binding, now)) {
+  const includedAlternative = (modelId: string) =>
+    world.connections.some(
+      (connection) =>
+        (connection.ownership.kind === "shared" || personalFallback) &&
+        !spendsCredits(connection, now) &&
+        canServe(world, session, connection, modelId, now),
+    );
+  if (
+    binding &&
+    bound &&
+    bindingServable &&
+    !session.reselectionPoint &&
+    isCacheWarm(world, binding, now) &&
+    (!spendsCredits(bound, now) || !includedAlternative(binding.modelId))
+  ) {
     return run(binding.connectionId, binding.modelId, "sticky");
   }
 
   // Order: each candidate model on shared accounts, then (opt-in) on the
   // owner's personal accounts, before moving to the next model (D-12).
   for (const [index, modelId] of models.entries()) {
-    const servable = world.connections.filter((connection) =>
-      canServe(world, session, connection, modelId, now),
+    const eligible = world.connections.filter(
+      (connection) =>
+        (connection.ownership.kind === "shared" || personalFallback) &&
+        canServe(world, session, connection, modelId, now),
     );
+    const included = eligible.filter((connection) => !spendsCredits(connection, now));
+    const servable = included.length ? included : eligible;
     const shared = servable.filter((connection) => connection.ownership.kind === "shared");
     const personal = servable.filter((connection) => connection.ownership.kind === "personal");
     const chosen =
@@ -675,7 +660,15 @@ export function decide(world: World, sessionId: string, now: number): Decision {
   return {
     kind: "wait",
     reason: "no_eligible_capacity",
-    earliestResetAt: earliestReset(world, session, allowedModels, personalFallback, now),
+    earliestResetAt: earliestRunnableAt(world, now, (at) =>
+      allowedModels.some((modelId) =>
+        world.connections.some(
+          (connection) =>
+            (connection.ownership.kind === "shared" || personalFallback) &&
+            canServe(world, session, connection, modelId, at),
+        ),
+      ),
+    ),
   };
 }
 
@@ -725,14 +718,12 @@ export function checkDecision(
   const models = candidateModels(world, session);
   const fail = (requirement: string, message: string) => violations.push({ requirement, message });
 
-  const personalFallback =
-    session.ownerId !== null &&
-    settings.personalFallbackAllowed &&
-    !!byId(world.people, session.ownerId)?.personalFallbackOptIn;
-  const servableShared = (modelId: ModelId) =>
+  const personalFallback = personalFallbackFor(world, session);
+  const servableShared = (modelId: ModelId, credits: boolean) =>
     world.connections.some(
       (connection) =>
         connection.ownership.kind === "shared" &&
+        (credits || !spendsCredits(connection, now)) &&
         canServe(world, session, connection, modelId, now),
     );
   const servableAutomatically = (modelId: ModelId) =>
@@ -790,15 +781,30 @@ export function checkDecision(
       }
       if (
         connection.ownership.kind === "personal" &&
-        (!personalFallback || servableShared(decision.modelId))
+        (!personalFallback || servableShared(decision.modelId, spendsCredits(connection, now)))
       ) {
         fail("SUB-SEL-02", "used a personal account without an explicit choice or opt-in fallback");
       }
+    }
+    const includedAlternative = (modelId: string) =>
+      world.connections.some(
+        (candidate) =>
+          (candidate.ownership.kind === "shared" || personalFallback) &&
+          !spendsCredits(candidate, now) &&
+          canServe(world, session, candidate, modelId, now),
+      );
+    if (
+      !session.pinnedConnectionId &&
+      spendsCredits(connection, now) &&
+      includedAlternative(decision.modelId)
+    ) {
+      fail("SUB-CREDITS-01", "spent extra credits while an eligible account had included capacity");
     }
     if (binding && bindingWarm && !session.pinnedConnectionId) {
       const bound = byId(world.connections, binding.connectionId);
       const stillServable =
         !!bound &&
+        (!spendsCredits(bound, now) || !includedAlternative(binding.modelId)) &&
         models.includes(binding.modelId) &&
         canServe(world, session, bound, binding.modelId, now);
       if (

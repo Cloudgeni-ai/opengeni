@@ -156,6 +156,7 @@ export async function withSubscriptionCorePlacementWorld<T>(
         accountId: request.accountId,
         workspaceId: request.workspaceId,
         provider: "codex",
+        now: request.now,
       }),
     ]);
 

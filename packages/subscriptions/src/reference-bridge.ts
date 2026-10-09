@@ -14,8 +14,8 @@
  * - Quota and cache lifetimes are decoded here, independently of the
  *   production decoders, from the raw shared quota model (design 2.2) and
  *   cache facts (design 6.1), including the input's staleness bounds. An
- *   exhaustion with no known reset can never become servable by time alone, so
- *   it is presented as excluded from allocation.
+ *   exhaustion with no known reset stays exhausted, including when evaluating
+ *   the separate permission to spend extra credits.
  * - An exact cache lifetime on the binding is that provider's lifetime.
  * - An explicit binding is the reference model's pin.
  */
@@ -37,7 +37,7 @@ function lifetimeOf(facts: CacheFacts | undefined): number {
   return Math.max(0, facts?.cutoffMs ?? UNMEASURED_CUTOFF_MS);
 }
 
-type DecodedQuota = reference.Quota | { kind: "exhausted_without_reset" };
+type DecodedQuota = reference.Quota;
 
 /**
  * Design 2.2 read from the raw fields: a running deadline or exhausted
@@ -65,7 +65,7 @@ function decodeQuota(
   }
   if (blockingResets.length > 0) {
     return blockingResets.includes(null)
-      ? { kind: "exhausted_without_reset" }
+      ? { kind: "exhausted", resetsAt: null }
       : { kind: "exhausted", resetsAt: Math.max(...(blockingResets as number[])) };
   }
   const observed =
@@ -110,14 +110,16 @@ function referenceConnection(
     provider: connection.provider,
     ownership,
     healthy: connection.health === "healthy",
-    allocatorEnabled: connection.allocatorEnabled && capacity.kind !== "exhausted_without_reset",
+    allocatorEnabled: connection.allocatorEnabled,
+    extraCreditsEnabled: connection.extraCreditsEnabled === true,
+    refusalUntil: connection.quota?.exhaustedUntil ?? null,
     entitledModels: entitled,
     allowedModelIds: connection.allowedModelIds,
     ...(connection.assignmentPolicies === undefined
       ? {}
       : { assignmentPolicies: connection.assignmentPolicies }),
     modelCooldowns: { ...connection.quota?.modelCooldowns },
-    quota: capacity.kind === "exhausted_without_reset" ? { kind: "unknown" } : capacity,
+    quota: capacity,
   };
 }
 

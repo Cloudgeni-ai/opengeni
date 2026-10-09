@@ -204,6 +204,10 @@ export const subscriptionConnectionQuota = pgTable("subscription_connection_quot
   selectionCount: bigint("selection_count", { mode: "number" }).notNull().default(0),
   lastSelectedAt: timestamp("last_selected_at", { withTimezone: true }),
   observedRefreshGeneration: bigint("observed_refresh_generation", { mode: "number" }),
+  modelCatalogSlugs: text("model_catalog_slugs").array(),
+  modelCatalogRefreshGeneration: bigint("model_catalog_refresh_generation", { mode: "number" }),
+  modelCatalogObservedAt: timestamp("model_catalog_observed_at", { withTimezone: true }),
+  modelCatalogExpiresAt: timestamp("model_catalog_expires_at", { withTimezone: true }),
   revision: bigint("revision", { mode: "number" }).notNull().default(1),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

@@ -486,6 +486,19 @@ async function codexPlacementInput(
   const binding = worldInput.session.binding;
   const lastContextReplacedAt =
     binding && binding.lastModelCallAt > 0 ? await lastCodexContextReplacedAt(tx, identity) : null;
+  const [turn] = await rawRows<{ metadata: Record<string, unknown> | null }>(
+    tx,
+    sql`select metadata from session_turns where account_id = ${identity.accountId}::uuid
+      and workspace_id = ${identity.workspaceId}::uuid and session_id = ${identity.sessionId}::uuid
+      and id = ${identity.turnId}::uuid`,
+  );
+  const policy = readTurnExecutionPolicyV1(turn?.metadata ?? {});
+  // Keep accepted retired models: a picker catalog is not the execution contract.
+  // Legacy turns without a frozen mapping retain unknown entitlement.
+  const upstreamModelId =
+    policy.kind === "valid" && policy.policy.productModelId === productModelId
+      ? policy.policy.upstreamModelId
+      : null;
   return {
     ...worldInput,
     session: {
@@ -499,20 +512,41 @@ async function codexPlacementInput(
       }),
     },
     settings: { ...worldInput.settings, crossProviderFailover: false, fallbackOrder: {} },
-    connections: worldInput.connections.filter((connection) => connection.provider === "codex"),
+    connections: worldInput.connections
+      .filter((connection) => connection.provider === "codex")
+      .map((connection) =>
+        upstreamModelId !== null && connection.observedModelSlugs != null
+          ? {
+              ...connection,
+              entitledModelIds: connection.observedModelSlugs.includes(upstreamModelId)
+                ? [productModelId]
+                : [],
+            }
+          : connection,
+      ),
   };
 }
 
-/** Earliest end of a time-bound health quarantine among the visible Codex connections. */
+/** Earliest retry when a quarantine or fresh catalog observation expires. */
 async function earliestCodexHealthRetryAt(
   tx: Database,
   identity: SubscriptionCoreAcceptedTurnIdentity,
 ): Promise<Date | null> {
   const [row] = await rawRows<{ retry_at: Date | string | null }>(
     tx,
-    sql`select min(health_retry_at) as retry_at from subscription_connections
-      where account_id = ${identity.accountId}::uuid and provider = 'codex'
-        and status = 'error' and health_retry_at > clock_timestamp()`,
+    sql`select min(retry_at) as retry_at from (
+      select health_retry_at as retry_at from subscription_connections
+        where account_id = ${identity.accountId}::uuid and provider = 'codex'
+          and status = 'error' and health_retry_at > clock_timestamp()
+      union all
+      select quota.model_catalog_expires_at from subscription_connection_quota quota
+        join subscription_connections connection on connection.id = quota.connection_id
+          and connection.account_id = quota.account_id
+        where connection.account_id = ${identity.accountId}::uuid and connection.provider = 'codex'
+          and connection.status = 'active' and connection.allocator_enabled
+          and quota.model_catalog_refresh_generation = connection.refresh_generation
+          and quota.model_catalog_expires_at > clock_timestamp()
+      ) deadlines`,
   );
   return row?.retry_at ? new Date(row.retry_at) : null;
 }

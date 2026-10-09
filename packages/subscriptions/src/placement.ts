@@ -1,7 +1,6 @@
 import { isCacheWarm } from "./cache";
 import {
   canServe,
-  connectionCapacity,
   connectionUsesExtraCredits,
   connectionIneligibility,
   isPermanentIneligibility,
@@ -74,8 +73,8 @@ export function modelPermitted(
 
 /**
  * Order servable connections for one model (design 4 step 5): the primary
- * first, whether or not its quota is known (D-13, D-15), then known capacity
- * before unknown (D-14), then the session's spread hash (D-21, D-23), then id.
+ * first, whether or not its quota is known (D-13, D-15), then the session's
+ * spread hash (D-14, D-21, D-23), then id. Missing telemetry is not a penalty.
  */
 export function rankConnections(
   input: PlacementInput,
@@ -87,7 +86,6 @@ export function rankConnections(
       connection,
       credits: connectionUsesExtraCredits(input, connection),
       primary: rotation.mode === "primary_first" && rotation.primaryConnectionId === connection.id,
-      known: connectionCapacity(input, connection).kind === "available",
       hash: spreadHash(input.session.id, connection.id),
     };
   });
@@ -95,7 +93,6 @@ export function rankConnections(
     (left, right) =>
       Number(left.credits) - Number(right.credits) ||
       Number(right.primary) - Number(left.primary) ||
-      Number(right.known) - Number(left.known) ||
       left.hash - right.hash ||
       (left.connection.id < right.connection.id
         ? -1

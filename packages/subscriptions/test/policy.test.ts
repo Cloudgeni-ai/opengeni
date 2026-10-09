@@ -999,7 +999,7 @@ describe("explicit choices, personal fallback and explained waits", () => {
 });
 
 describe("quota freshness and observations", () => {
-  test("SUB-ELIG-06: a stale reading counts as unknown, so it no longer outranks unknown quota", () => {
+  test("SUB-ELIG-06: fresh and stale telemetry do not outrank unknown quota", () => {
     const weekOld = quota({ observedAt: NOW - 7 * 24 * 3_600_000 });
     expect(quotaCapacity(weekOld, NOW)).toEqual({ kind: "available" });
     expect(quotaCapacity(weekOld, NOW, 3_600_000)).toEqual({ kind: "unknown" });
@@ -1027,8 +1027,8 @@ describe("quota freshness and observations", () => {
         },
         pool,
       ).map((candidate) => candidate.id);
-    expect(ranked(undefined)[0]).toBe("codex-1");
-    // With the bound both are unknown: the spread hash decides.
+    expect(ranked(undefined)).toEqual(ranked(3_600_000));
+    // The same spread hash decides regardless of which account has telemetry.
     expect(new Set(ranked(3_600_000))).toEqual(new Set(["codex-1", "codex-2"]));
   });
 
@@ -1134,5 +1134,92 @@ describe("Codex credit consent", () => {
         ),
       ).toMatchObject({ kind: "wait" });
     }
+  });
+});
+
+describe("subscription review regressions", () => {
+  test("fresh personal connections work in their owner's Personal workspace without fallback opt-in", () => {
+    const own = input({
+      workspace: { kind: "personal", ownerMembershipId: "member-a" },
+      settings: { personalFallbackAllowed: false },
+      session: {
+        visibility: "private",
+        personalAuthority: [{ provider: "codex", ownerMembershipId: "member-a" }],
+      },
+      connections: [
+        connection("personal", "codex", {
+          ownership: { kind: "personal", ownerMembershipId: "member-a" },
+        }),
+      ],
+    });
+    expect(decidePlacement(own)).toMatchObject({ kind: "run", connectionId: "personal" });
+    expect(checkPlacementDecision(own, decidePlacement(own))).toEqual([]);
+    for (const denied of [
+      { ...own, settings: { ...own.settings, personalConnectionsAllowed: false } },
+      { ...own, session: { ...own.session, personalAuthority: [] } },
+      {
+        ...own,
+        workspace: { ...own.workspace, kind: "shared" as const, ownerMembershipId: null },
+        session: { ...own.session, visibility: "shared" as const },
+      },
+      { ...own, session: { ...own.session, ownerMembershipId: "member-b" } },
+      { ...own, workspace: { ...own.workspace, kind: "shared" as const, ownerMembershipId: null } },
+    ])
+      expect(decidePlacement(denied)).toMatchObject({ kind: "wait" });
+  });
+
+  test("Spread actually sends new sessions to accounts with unknown quota", () => {
+    const seen = new Set<string>();
+    for (let i = 0; i < 100; i++) {
+      const world = input({
+        session: { id: `new-session-${i}` },
+        connections: [
+          connection("known", "codex"),
+          connection("unknown", "codex", { quota: null }),
+        ],
+      });
+      const decision = decidePlacement(world);
+      if (decision.kind === "run") seen.add(decision.connectionId);
+    }
+    expect(seen).toEqual(new Set(["known", "unknown"]));
+  });
+
+  test("independent oracle covers credit consent, included alternatives, pins and provider refusals", () => {
+    for (const reset of [null, NOW - 1, NOW + 60_000])
+      for (const consent of [false, true])
+        for (const refusal of [null, NOW + 30_000])
+          for (const alternative of [false, true])
+            for (const explicit of [false, true]) {
+              const paid = connection("paid", "codex", {
+                extraCreditsEnabled: consent,
+                quota: quota({
+                  windows: [
+                    { id: "primary", usedPercent: 100, status: "exhausted", resetsAt: reset },
+                  ],
+                  exhaustedUntil: refusal,
+                  exhaustedKind: refusal === null ? null : "quota",
+                }),
+              });
+              const world = input({
+                connections: [paid, ...(alternative ? [connection("included", "codex")] : [])],
+                session: {
+                  onlyThisModel: true,
+                  binding: {
+                    connectionId: "paid",
+                    provider: "codex",
+                    modelId: "codex/a",
+                    choice: explicit ? "explicit" : "automatic",
+                    lastModelCallAt: NOW,
+                  },
+                },
+              });
+              const decision = decidePlacement(world);
+              expect(checkPlacementDecision(world, decision)).toEqual([]);
+              const mapped = toReferenceWorld(world);
+              const oracle = decideReference(mapped.world, mapped.sessionId, NOW);
+              expect(oracle.kind).toBe(decision.kind);
+              if (oracle.kind === "run" && decision.kind === "run")
+                expect(oracle.connectionId).toBe(decision.connectionId);
+            }
   });
 });

@@ -1,6 +1,15 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import type { Settings } from "@opengeni/config";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
+import {
+  resolveTurnExecutionPolicyV1,
+  configuredModels,
+  withCodexCatalogProvider,
+  type Settings,
+} from "@opengeni/config";
 import { CodexReloginRequired } from "@opengeni/codex";
 import { sql } from "drizzle-orm";
 import {
@@ -15,6 +24,8 @@ import {
   ensureManagedAccessForUser,
   loadSubscriptionCoreCodexCredential,
   placeSubscriptionCoreCodexTurn,
+  evaluateSubscriptionCoreCodexPlacement,
+  recordSubscriptionCoreCodexModelCatalog,
   readSubscriptionCoreTurnIdentity,
   readSubscriptionSessionBinding,
   recordSubscriptionCoreCodexQuotaObservation,
@@ -203,8 +214,10 @@ async function runningTurn(
     owner?: "owner" | "none";
     initiator?: { kind: "subject"; subjectId: string } | { kind: "service" };
     personalAuthority?: boolean;
+    upstreamModelId?: string;
   },
 ): Promise<TurnFixture> {
+  const catalog = withCodexCatalogProvider(testSettings({ codexSubscriptionEnabled: true }));
   const ownerless = input.owner === "none";
   const createSessionCall = () =>
     createSession(client!.db, {
@@ -248,7 +261,25 @@ async function runningTurn(
       model: MODEL,
       reasoningEffort: "medium",
       sandboxBackend: "none",
-      metadata: {},
+      metadata: input.upstreamModelId
+        ? {
+            turnExecutionPolicyV1: {
+              ...resolveTurnExecutionPolicyV1(catalog, {
+                modelId: configuredModels(catalog).find(
+                  (model) =>
+                    model.credentialSource.kind === "connected_subscription" &&
+                    model.credentialSource.provider === "codex",
+                )!.id,
+                requestedModelId: null,
+                modelSource: "session",
+                reasoningEffort: "medium",
+                reasoningSource: "session",
+              }),
+              productModelId: MODEL,
+              upstreamModelId: input.upstreamModelId,
+            },
+          }
+        : {},
       initiator:
         initiator.kind === "subject"
           ? { kind: "subject", subjectId: initiator.subjectId }
@@ -1570,5 +1601,107 @@ describe("core Codex resolver single-flight", () => {
       { load: async () => ({ kind: "needs_relogin" }) },
     );
     await expect(revoked.getToken()).rejects.toBeInstanceOf(CodexReloginRequired);
+  });
+});
+
+describe.skipIf(!realDb)("durable model catalog observations", () => {
+  test("placement, wait reconciliation and credit admission share exact accepted model facts", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    const a = await sharedConnection(org, {
+      workspaceId: org.sharedWorkspaceId,
+      label: "catalog-a",
+    });
+    const b = await sharedConnection(org, {
+      workspaceId: org.sharedWorkspaceId,
+      label: "catalog-b",
+    });
+    // This upstream slug deliberately differs from the product id and need not
+    // occur in today's picker: retained accepted turns must keep working.
+    const upstream = "retained-upstream-model";
+    const turn = await runningTurn(org, {
+      workspaceId: org.sharedWorkspaceId,
+      upstreamModelId: upstream,
+    });
+    const scope = {
+      kind: "workspace" as const,
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      subjectId: org.ownerSubjectId,
+    };
+    const observe = (
+      connectionId: string,
+      slugs: string[],
+      generation = 1,
+      observedAt = Date.now(),
+    ) =>
+      recordSubscriptionCoreCodexModelCatalog(client!.db, scope, connectionId, {
+        slugs,
+        refreshGeneration: generation,
+        observedAt,
+      });
+    const evaluate = (now = new Date()) =>
+      evaluateSubscriptionCoreCodexPlacement(client!.db, {
+        identity: turn.identity,
+        productModelId: MODEL,
+        reasoningLevel: "medium",
+        now,
+      });
+    expect(await observe(a, [])).toBe(true);
+    expect(await observe(b, ["other-model", upstream])).toBe(true);
+    expect(await place(turn)).toMatchObject({ kind: "run", connectionId: b });
+    expect(await evaluate()).toMatchObject({ kind: "run", connectionId: b });
+    expect(await observe(b, [])).toBe(true);
+    expect(await place(turn)).toMatchObject({ kind: "wait", reason: "no_eligible_capacity" });
+    // The same evaluator used immediately after arming a waiter must not wake
+    // the turn on the model-ineligible account it just rejected.
+    const parked = await evaluate();
+    expect(parked).toMatchObject({ kind: "wait", reason: "no_eligible_capacity" });
+    if (parked.kind !== "wait") throw Error("expected wait");
+    expect(parked.healthRetryAt).toBeInstanceOf(Date);
+    expect(await evaluate(new Date(Date.now() + 61_000))).toMatchObject({ kind: "run" });
+
+    expect(await observe(a, [upstream])).toBe(true);
+    // An older response cannot replace the newer catalog.
+    expect(await observe(a, [], 1, Date.now() - 5_000)).toBe(false);
+    await shared!
+      .admin`update subscription_connections set extra_credits_enabled=true where id=${a}::uuid`;
+    await shared!.admin`update subscription_connection_quota set quota=${shared!.admin.json({
+      windows: [
+        { id: "primary", usedPercent: 100, status: "exhausted", resetsAt: Date.now() + 3600_000 },
+      ],
+      modelCooldowns: {},
+      exhaustedUntil: null,
+      exhaustedKind: null,
+    })}::jsonb, observed_refresh_generation=1 where connection_id=${a}::uuid`;
+    expect(await place(turn)).toMatchObject({ kind: "run", connectionId: a });
+    expect(
+      await canSpendSubscriptionCoreCodexExtraCredits(client!.db, {
+        ...turn,
+        connectionId: a,
+        productModelId: MODEL,
+        reasoningLevel: "medium",
+        leaseTtlMs: TTL,
+      }),
+    ).toBe(true);
+    // Refresh invalidates observations immediately, without waiting for TTL.
+    await shared!
+      .admin`update subscription_connections set refresh_generation=2 where id=${b}::uuid`;
+    expect(await observe(b, [], 1)).toBe(false);
+    expect(await evaluate()).toMatchObject({ kind: "run", connectionId: b });
+    const stranger = await organization();
+    expect(
+      await recordSubscriptionCoreCodexModelCatalog(
+        client!.db,
+        {
+          kind: "workspace",
+          accountId: stranger.accountId,
+          workspaceId: stranger.sharedWorkspaceId,
+          subjectId: stranger.ownerSubjectId,
+        },
+        a,
+        { slugs: [], refreshGeneration: 1, observedAt: Date.now() },
+      ),
+    ).toBe(false);
   });
 });

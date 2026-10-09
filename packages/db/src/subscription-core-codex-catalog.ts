@@ -19,11 +19,10 @@
  * - the acting person's own personal connections, only in their own Personal
  *   workspace (generic workspace readers never represent a private session's
  *   exact accepted context), only while the effective settings allow personal connections
- *   and personal fallback (chat placement uses a personal connection only as
- *   fallback), and only when active and allocatable. They are read through
+ *   and only when active and allocatable. They are read through
  *   the owner-only reader, so another person's personal connection is never
- *   seen. The person's own fallback opt-in is readable only inside an exact
- *   accepted turn and is not checked here; placement still enforces it.
+ *   seen. Fallback consent applies to private work outside the owner's
+ *   Personal workspace, which this catalog reader does not represent.
  *
  * A connection's model policy is what placement intersects: the connection
  * allowlist and exclusions, and the workspace assignment policies of the
@@ -256,8 +255,7 @@ export async function listSubscriptionCoreCodexServingConnections(
       if (
         !personalWorkspace ||
         !providerSwitchesFor(effective.values, "codex").enabled ||
-        !effective.values.personalConnectionsAllowed ||
-        !effective.values.personalFallbackAllowed
+        !effective.values.personalConnectionsAllowed
       ) {
         return servingShared;
       }
