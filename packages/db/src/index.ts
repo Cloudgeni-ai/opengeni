@@ -10500,6 +10500,14 @@ function skillSourceFromManifest(
   if (source === "library" || source === "github" || source === "skills_sh") {
     return source;
   }
+  // Migration 0482 removed Packs but deliberately kept Skills that another
+  // owner still holds. Their immutable plugin versions still record "pack".
+  // Those Skills carried inline, Opengeni-managed content with no external
+  // origin to re-import from, which "library" is the only public source to
+  // express. Rejecting them failed every catalog read and turn in the workspace.
+  if (source === "pack") {
+    return "library";
+  }
   throw new Error(`Installed Skill ${capabilityId} has invalid immutable source metadata`);
 }
 
