@@ -44,6 +44,7 @@ import {
 } from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
 import type { Hono } from "hono";
+import { offerClaudeDefaultModels } from "../claude-default-models";
 import { registerSubscriptionAccountPoolRoutes } from "./subscription-account-pools";
 
 function accountJson(account: ClaudeSubscriptionAccountMetadata, activeId: string | null) {
@@ -323,6 +324,11 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
           reason: "claude_setup_account_connected",
         });
       }
+      await offerClaudeDefaultModels(deps, {
+        ...(workspaceId ? { accountId, workspaceId } : { organizationId: accountId }),
+        actorSubjectId: subjectId,
+        providerKind: "claude_subscription",
+      });
       return c.json({
         connected: true,
         accountId: saved.account.id,

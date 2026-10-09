@@ -10564,6 +10564,16 @@ export function claudeNativeModelProfile(upstreamModelId: string) {
     ? CLAUDE_NATIVE_MODEL_PROFILES[upstreamModelId]
     : undefined;
 }
+/**
+ * Models a new Claude connection offers without anyone adding them. Seeded
+ * once per scope and connection kind, only when that scope never configured
+ * Claude models; a removed model stays removed.
+ */
+export const CLAUDE_DEFAULT_CONNECTION_MODEL_IDS = [
+  "claude-opus-5-5",
+  "claude-sonnet-5-5",
+  "claude-haiku-5-5",
+] as const;
 export function claudeProviderId(
   kind: ClaudeConnectionKind,
   scope: "workspace" | "organization" = "organization",

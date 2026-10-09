@@ -136,6 +136,7 @@ import {
   isApiIntegrationProviderOAuthState,
   startApiIntegrationProviderOAuth,
 } from "../integrations/provider-oauth";
+import { offerClaudeDefaultModels } from "../claude-default-models";
 import { disconnectPersonalGitHub } from "../integrations/personal-github";
 import {
   browseAtlassianSources,
@@ -388,6 +389,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                 message: `${provider.label} is already connected; reload before replacing its key`,
               });
             }
+            if (workspaceProviderKind === "anthropic")
+              await offerClaudeDefaultModels(deps, {
+                accountId: grant.accountId,
+                workspaceId,
+                actorSubjectId: grant.subjectId,
+                providerKind: "anthropic",
+              });
             return created;
           })()
         : await createConnectionIdempotently(db, {

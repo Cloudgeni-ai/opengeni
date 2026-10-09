@@ -33,6 +33,7 @@ import {
 import { readResponseJsonBounded } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { offerClaudeDefaultModels } from "./claude-default-models";
 import { prepareClaudeSubscriptionCredential } from "./claude-workspace-connection";
 import {
   fetchClaudeSubscriptionProfile,
@@ -353,6 +354,13 @@ export async function completeClaudeSubscriptionOAuth(
           : (await target(deps, scope, saved.id))!.authoritySnapshot,
       reason: "claude_account_connected",
     });
+  await offerClaudeDefaultModels(deps, {
+    ...(scope.workspaceId
+      ? { accountId: scope.accountId, workspaceId: scope.workspaceId }
+      : { organizationId: scope.accountId }),
+    actorSubjectId: scope.actorSubjectId,
+    providerKind: "claude_subscription",
+  });
   return ClaudeSubscriptionOAuthCompleteResponse.parse({
     connected: true,
     accountId: saved.id,
