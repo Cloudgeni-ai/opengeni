@@ -256,8 +256,11 @@ function NotificationContent({ item }: { item: InboxItem }) {
 const SWIPE_ACTION = 76;
 /** A partial swipe past this opens the actions. */
 const SWIPE_OPEN = 56;
-/** A full swipe past this dismisses outright. */
-const SWIPE_FULL = 220;
+/** A long swipe past this dismisses outright: just beyond the open actions,
+ * so dismissing never needs a drag across the whole row. */
+const SWIPE_FULL = SWIPE_ACTION * 2 + 20;
+/** A quick leftward flick past one action's width also dismisses. */
+const FLICK_VELOCITY = 1.1;
 
 type SwipeAction = { label: string; icon: NativeIconName; color: string; onPress: () => void };
 
@@ -317,7 +320,8 @@ function SwipeRow(props: {
         },
         onPanResponderRelease: (_event, gesture) => {
           const end = Math.min(0, base.current + gesture.dx);
-          if (full.current) {
+          const flicked = gesture.vx < -FLICK_VELOCITY && end < -SWIPE_ACTION;
+          if (full.current || flicked) {
             full.current = false;
             Animated.timing(x, {
               toValue: -(width.current || 400),
