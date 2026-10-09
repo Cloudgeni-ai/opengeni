@@ -146,6 +146,8 @@ export type UseChatComposerControllerOptions = {
   commandContext?: SlashCommandContext | undefined;
   onClearView?: (() => void) | undefined;
   onPaste?: ((event: ClipboardEvent<HTMLTextAreaElement>) => void) | undefined;
+  /** Return true only when an empty-composer queue checkout was started. */
+  onEditLatestQueuedMessage?: (() => boolean) | undefined;
   messages?: Partial<ChatComposerMessages> | undefined;
   /** Run control presentation. Defaults to `pause`. */
   runControl?: ComposerRunControl | undefined;
@@ -256,6 +258,7 @@ export function useChatComposerController({
   commandContext,
   onClearView,
   onPaste,
+  onEditLatestQueuedMessage,
   messages: messageOverrides,
   runControl = "pause",
   running = false,
@@ -526,11 +529,41 @@ export function useChatComposerController({
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>) => {
       if (paletteEnabled && paletteMounted && palette.onKeyDown(event)) return;
+      if (
+        event.key === "ArrowUp" &&
+        !event.defaultPrevented &&
+        !event.nativeEvent.isComposing &&
+        event.nativeEvent.keyCode !== 229 &&
+        !event.repeat &&
+        !event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.shiftKey &&
+        !disabled &&
+        !delivery.sending &&
+        !submittingRef.current &&
+        liveValueRef.current.length === 0 &&
+        event.currentTarget.value.length === 0 &&
+        !attachments?.attachments.length &&
+        onEditLatestQueuedMessage?.()
+      ) {
+        event.preventDefault();
+        return;
+      }
       if (!shouldSubmitOnKey(event)) return;
       event.preventDefault();
       void submit(shouldSteerOnKey(event) ? "steer" : "queue");
     },
-    [palette, paletteEnabled, paletteMounted, submit],
+    [
+      attachments,
+      delivery.sending,
+      disabled,
+      onEditLatestQueuedMessage,
+      palette,
+      paletteEnabled,
+      paletteMounted,
+      submit,
+    ],
   );
   const handlePaste = useCallback(
     (event: ClipboardEvent<HTMLTextAreaElement>) => {

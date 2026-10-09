@@ -1,4 +1,32 @@
 import type { ComposerState } from "../hooks/use-composer";
+import type { SessionTurn } from "@opengeni/sdk";
+import type { UseTurnQueueResult } from "../hooks/use-turn-queue";
+
+/** Creation order, not execution position: reordering must not change recall. */
+export function latestEditableQueuedTurn(turns: readonly SessionTurn[]): SessionTurn | undefined {
+  return turns.reduce<SessionTurn | undefined>((latest, turn) => {
+    if (turn.status !== "queued" || (turn.source !== "user" && turn.source !== "api"))
+      return latest;
+    return !latest || turn.createdAt >= latest.createdAt ? turn : latest;
+  }, undefined);
+}
+
+/** Shared atomic checkout for the queue menu and composer keyboard shortcut. */
+export async function checkoutQueueDraft(
+  composer: ComposerState,
+  queue: UseTurnQueueResult,
+  turnId: string,
+  replaceDraft: boolean,
+): Promise<boolean> {
+  if (composer.draftPersistence === "disabled") return false;
+  const restored = await queue.editTurn(turnId, {
+    expectedDraftRevision: composer.draftRevision,
+    replaceDraft,
+  });
+  if (!restored) return false;
+  composer.applyDraft(restored);
+  return true;
+}
 
 /**
  * Decide whether checking out a queued prompt would replace current composer
