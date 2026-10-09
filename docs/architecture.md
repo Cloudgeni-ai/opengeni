@@ -2209,6 +2209,14 @@ organization-workspace lifecycle authority; see [external membership operation r
 
 ### Operations
 
+The standalone database backup runner (`scripts/backup.ts`, `scripts/backup/`)
+uses PostgreSQL clients, Age and rclone without depending on the API or worker.
+Deployment-owned scheduling and a dedicated credential boundary keep recovery
+available during application failure. Its optional Helm CronJobs share a
+persistent checkpoint/lock volume; the independent operator image is published
+separately from runtime images. See [database backups](backups.md) for retention,
+validation, isolated restoration and coverage limits.
+
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
 | Deployment profile, Helm, Terraform, or conformance | `packages/deployment/`, `deploy/` | [`deployment.md`](deployment.md) |
