@@ -56,7 +56,7 @@ export const subscriptionConnections = pgTable(
     allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(true),
     managedByWorkspaceId: uuid("managed_by_workspace_id"),
     providerState: jsonb("provider_state").notNull().default({}),
-    /** The signed-in person within the upstream account (M3 PR 3b, 0678). */
+    /** The signed-in person within the upstream account (M3 PR 3b, 0679). */
     providerSubjectId: text("provider_subject_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
