@@ -53,11 +53,13 @@ describe("session-only entry", () => {
     expect(visited.has(join(packageRoot, "src/session-context.ts"))).toBe(true);
     expect([...visited].some((file) => file.includes("/src/components/"))).toBe(false);
     expect([...visited].some((file) => file.includes("/src/commands/"))).toBe(false);
-    // The synchronous refusal presenter is an explicit schema-runtime-free
-    // SDK leaf, not permission to import contracts/server/workbench barrels.
+    // Refusal copy and the controller's model labels/order are explicit pure
+    // SDK leaves, not permission to import contracts/server/workbench barrels.
     expect([...thirdParty].sort()).toEqual([
       "@opengeni/sdk",
       "@opengeni/sdk/allowance-refusal",
+      "@opengeni/sdk/model-display",
+      "@opengeni/sdk/model-picker-order",
       "react",
     ]);
     expect(visited.size).toBeGreaterThan(5);
@@ -116,7 +118,10 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/lib/error-message.ts"))).toBe(true);
     // Pure provider-recovery copy used by failure presentation; no React graph.
     expect(reactSources.some((id) => id.endsWith("/src/lib/provider-recovery.ts"))).toBe(true);
-    expect(reactSources.length).toBe(25);
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/use-session-conversation.ts"))).toBe(
+      true,
+    );
+    expect(reactSources.length).toBe(29);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

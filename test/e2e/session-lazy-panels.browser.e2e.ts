@@ -57,9 +57,10 @@ describe("production session conditional loading", () => {
     const manifest = JSON.parse(
       await readFile(`${repoRoot}/apps/web/dist/.vite/manifest.json`, "utf8"),
     ) as Record<string, { file: string; name?: string; imports?: string[]; isEntry?: boolean }>;
-    panelAsset = Object.values(manifest).find(
-      (entry) => entry.name === "session-conditional-panels",
-    )!.file;
+    const panelKey = Object.keys(manifest).find(
+      (key) => manifest[key]?.name === "session-conditional-panels",
+    )!;
+    panelAsset = manifest[panelKey]!.file;
     attachmentAsset = manifest["src/components/session/message-resource-attachments.tsx"]!.file;
     variableSetAsset = manifest["src/components/session/session-variable-set-picker.tsx"]!.file;
     const filesKey = "../../packages/react/src/components/sandbox-files.tsx";
@@ -73,6 +74,9 @@ describe("production session conditional loading", () => {
     for (const [key, entry] of Object.entries(manifest))
       if (entry.isEntry || key === "src/routes/session.tsx") visit(key);
     expect(eager.has(filesKey)).toBe(false);
+    // Shared conversation state must not pull the embedded view's optional
+    // question/command implementations into the direct session's static graph.
+    expect(eager.has(panelKey)).toBe(false);
     // The mobile menu is shared with settings; its icon must not bring the
     // lazy payment and organization-identity glyphs into a direct session.
     const eagerSource = (

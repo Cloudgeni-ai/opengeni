@@ -1,7 +1,7 @@
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { useCallback } from "react";
 import { projectPickerRows, sortPickerRows, type PickerModelRow } from "../model-policy";
-import { useOpenGeniClient, type ClientOverride } from "../provider";
+import { useOpenGeniClient, type ClientOverride } from "../session-context";
 import { usePolledValue } from "./internal";
 
 export type UseAvailableModelsOptions = Pick<ClientOverride, "client"> & {
