@@ -5,7 +5,11 @@ import type { UseTurnQueueResult } from "../hooks/use-turn-queue";
 /** Creation order, not execution position: reordering must not change recall. */
 export function latestEditableQueuedTurn(turns: readonly SessionTurn[]): SessionTurn | undefined {
   return turns.reduce<SessionTurn | undefined>((latest, turn) => {
-    if (turn.status !== "queued" || (turn.source !== "user" && turn.source !== "api"))
+    if (
+      turn.status !== "queued" ||
+      (turn.source !== "user" && turn.source !== "api") ||
+      turn.personalResources?.mode === "once"
+    )
       return latest;
     return !latest || turn.createdAt >= latest.createdAt ? turn : latest;
   }, undefined);
@@ -19,12 +23,13 @@ export async function checkoutQueueDraft(
   replaceDraft: boolean,
 ): Promise<boolean> {
   if (composer.draftPersistence === "disabled") return false;
+  const applyCheckout = composer.prepareDraftCheckout?.() ?? composer.applyDraft;
   const restored = await queue.editTurn(turnId, {
     expectedDraftRevision: composer.draftRevision,
     replaceDraft,
   });
   if (!restored) return false;
-  composer.applyDraft(restored);
+  applyCheckout(restored);
   return true;
 }
 

@@ -571,6 +571,7 @@ function OpsChannel({ sessionId }: { sessionId: string }) {
       <QueueSurface queue={queue} composer={composer} />
       <ChatComposer
         composer={composer}
+        queue={queue}
         effectiveControl={queue.effectiveControl}
       />
     </div>
@@ -915,6 +916,14 @@ state remains application-owned; durable draft and session state remain in
   sync timeout does not mean the agent turn has stopped. `composer.policy` and
   `setModel` / `setReasoningEffort` / `setLatencyMode` expose the exact policy
   owned by that actor/session draft; policy is `null` until hydration completes.
+  `ChatComposer` accepts the same `queue` to recall its latest editable prompt
+  with Arrow Up from an empty composer. Custom queue-checkout hosts can capture
+  `composer.prepareDraftCheckout?.() ?? composer.applyDraft` before awaiting
+  `queue.editTurn` and pass its non-null receipt to that callback. The native
+  callback adopts the exact server revision while preserving intervening local
+  notes, resources, text and policy changes for autosave; new free text is
+  appended to the checked-out prompt. Custom `ComposerState` implementations
+  without this optional callback retain their own `applyDraft` behavior.
   `sendExtras` (object or function evaluated at send time) is only for
   non-policy per-message fields such as live attachment resources and connection
   authority. Disabling durable draft persistence requires an explicit

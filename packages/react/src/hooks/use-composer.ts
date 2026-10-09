@@ -536,6 +536,8 @@ export type ComposerState = {
   draftPersistence?: "durable" | "disabled" | undefined;
   /** Apply an atomic queue Edit checkout without a second read. */
   applyDraft: (draft: ComposerDraft) => void;
+  /** Capture before queue checkout; apply its receipt while preserving intervening local edits. */
+  prepareDraftCheckout?: (() => (draft: ComposerDraft) => void) | undefined;
   reloadDraft: () => Promise<void>;
   resolveDraftConflict: (choice: "keep_mine" | "use_remote") => Promise<void>;
   restoredResources: ResourceRef[];
@@ -780,6 +782,9 @@ export function useComposer(
     initialShadow?.policy ?? options.initialPolicy ?? null,
   );
   const draftRef = useRef<ComposerDraft | null>(null);
+  // The OCC row can advance without replacing a dirty local shadow. Only a
+  // draft actually applied to that shadow is a baseline for subsequent edits.
+  const appliedDraftRef = useRef<ComposerDraft | null>(null);
   const restoredResourcesRef = useRef<ResourceRef[]>(initialShadow?.resources ?? []);
   const localEditRevision = useRef(initialShadow ? 1 : 0);
   const targetGeneration = useRef(0);
@@ -854,6 +859,7 @@ export function useComposer(
     annotationsRef.current = shadow?.annotations ?? [];
     policyRef.current = shadow?.policy ?? options.initialPolicy ?? null;
     draftRef.current = null;
+    appliedDraftRef.current = null;
     restoredResourcesRef.current = shadow?.resources ?? [];
     lastSavedSignature.current = null;
     // Old saves may still be awaiting the network. Their generation fence
@@ -941,6 +947,7 @@ export function useComposer(
         policyRef.current = nextPolicy;
         restoredResourcesRef.current = next.resources;
         draftRef.current = null;
+        appliedDraftRef.current = null;
         lastSavedSignature.current = null;
         setDraft(null);
         setValue(next.text);
@@ -977,6 +984,7 @@ export function useComposer(
       annotationsRef.current = next.annotations ?? [];
       policyRef.current = nextPolicy;
       draftRef.current = next;
+      appliedDraftRef.current = next;
       restoredResourcesRef.current = next.resources;
       lastSavedSignature.current = draftSignature(draftPayload(next));
       localEditRevision.current += 1;
@@ -1122,6 +1130,7 @@ export function useComposer(
             (!localWasDirtyAtStart && localAtStart === localEditRevision.current)
           ) {
             const fetchedPolicy = policyFromDraft(fetched);
+            appliedDraftRef.current = fetched;
             valueRef.current = fetched.text;
             restoredResourcesRef.current = fetched.resources;
             annotationsRef.current = fetched.annotations ?? [];
@@ -2675,6 +2684,78 @@ export function useComposer(
     [pendingOperationKey, setOptimisticDraftShadow, targetKey],
   );
 
+  const prepareDraftCheckout = useCallback((): ((next: ComposerDraft) => void) => {
+    const generation = targetGeneration.current;
+    const localAtStart = localEditRevision.current;
+    const original: ComposerDraftShadow = {
+      text: valueRef.current,
+      resources: [...restoredResourcesRef.current],
+      annotations: cloneAnnotations(annotationsRef.current),
+      ...(policyRef.current ? { policy: { ...policyRef.current } } : {}),
+    };
+    return (next) => {
+      if (targetKeyRef.current !== targetKey || targetGeneration.current !== generation) return;
+      const current = draftRef.current;
+      const applied = appliedDraftRef.current;
+      // A streamed read or autosave may already have adopted a newer revision.
+      const authoritative = current && current.revision > next.revision ? current : next;
+      if (localEditRevision.current === localAtStart) {
+        applyDraft(authoritative);
+        return;
+      }
+      // If SSE hydrated the checkout before its response, subsequent local
+      // changes are edits to that prompt, not additions to the original draft.
+      const hydrated =
+        next.sourceTurnId != null &&
+        applied?.sourceTurnId === next.sourceTurnId &&
+        applied.revision >= next.revision;
+      const baseline = hydrated
+        ? {
+            text: applied.text,
+            resources: applied.resources,
+            annotations: applied.annotations ?? [],
+            policy: policyFromDraft(applied),
+          }
+        : original;
+      const localText = valueRef.current;
+      const text =
+        localText === baseline.text
+          ? authoritative.text
+          : !hydrated && authoritative.text && localText && localText !== authoritative.text
+            ? `${authoritative.text}\n\n${localText}`
+            : localText;
+      const resources = mergeCheckoutChanges(
+        authoritative.resources,
+        baseline.resources,
+        restoredResourcesRef.current,
+        resourceIdentity,
+      );
+      const nextAnnotations = mergeCheckoutChanges(
+        authoritative.annotations ?? [],
+        baseline.annotations,
+        annotationsRef.current,
+        (annotation) => annotation.id,
+      );
+      const nextPolicy = policyFromDraft(authoritative);
+      const localPolicy = policyRef.current;
+      if (localPolicy) {
+        for (const field of ["model", "reasoningEffort", "latencyMode"] as const) {
+          if (localPolicy[field] !== baseline.policy?.[field]) {
+            Object.assign(nextPolicy, { [field]: localPolicy[field] });
+          }
+        }
+      }
+      // Keep the exact receipt as the OCC base and saved signature. Reapply
+      // the local shadow separately so autosave persists it on that revision.
+      applyDraft(authoritative);
+      restoredResourcesRef.current = resources;
+      setRestoredResources(resources);
+      updateValue(text);
+      updateAnnotations(nextAnnotations);
+      updatePolicy(nextPolicy);
+    };
+  }, [applyDraft, targetKey, updateAnnotations, updatePolicy, updateValue]);
+
   const hasDraftContent = useCallback((): boolean => {
     const current = draftRef.current;
     const extras = resolveSendExtras(sendExtrasRef.current);
@@ -2868,6 +2949,7 @@ export function useComposer(
     setLatencyMode: updateLatencyMode,
     draftPersistence: durableDrafts ? "durable" : "disabled",
     applyDraft,
+    prepareDraftCheckout,
     reloadDraft,
     resolveDraftConflict,
     restoredResources: identityMatches ? restoredResources : [],
@@ -3032,12 +3114,38 @@ function mergeResources(base: ResourceRef[], additions: ResourceRef[]): Resource
     // preserving the first representation keeps custom mounts and ordering
     // intact while preventing the draft and command paths from seeing
     // different duplicate counts after server normalization.
-    const key =
-      resource.kind === "file"
-        ? `file:${resource.fileId}\u0000${resource.mountPath ?? `${DEFAULT_FILE_RESOURCE_MOUNT_ROOT}/${resource.fileId}`}`
-        : JSON.stringify(resource);
+    const key = resourceIdentity(resource);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+}
+
+function resourceIdentity(resource: ResourceRef): string {
+  return resource.kind === "file"
+    ? `file:${resource.fileId}\u0000${resource.mountPath ?? `${DEFAULT_FILE_RESOURCE_MOUNT_ROOT}/${resource.fileId}`}`
+    : JSON.stringify(resource);
+}
+
+/** Apply local additions, changes and removals without replacing untouched checkout content. */
+function mergeCheckoutChanges<T>(
+  restored: readonly T[],
+  original: readonly T[],
+  current: readonly T[],
+  identity: (item: T) => string,
+): T[] {
+  const originalById = new Map(original.map((item) => [identity(item), item]));
+  const currentIds = new Set(current.map(identity));
+  const merged = new Map(
+    restored
+      .filter((item) => !originalById.has(identity(item)) || currentIds.has(identity(item)))
+      .map((item) => [identity(item), item]),
+  );
+  for (const item of current) {
+    const key = identity(item);
+    if (!originalById.has(key) || JSON.stringify(originalById.get(key)) !== JSON.stringify(item)) {
+      merged.set(key, item);
+    }
+  }
+  return [...merged.values()];
 }
