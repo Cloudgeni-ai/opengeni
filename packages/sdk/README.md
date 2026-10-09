@@ -1141,7 +1141,9 @@ The targeted SDK caches bounded per-target metadata, shares only resolution
 loads, and retries at most once after a typed pre-execution
 `tool_definition_stale`; explicit nonretryable or outcome-unknown flags veto
 replay even when a transport labels an error stale. Explicit pins are not
-silently advanced. An approved call uses the server's executable-effect and
+silently dropped when malformed: only `undefined` means no explicit pin.
+The same retry veto applies to retained v1/catalog mode and Site host adapters.
+Pins are not silently advanced. An approved call uses the server's executable-effect and
 private-authority binding, not an implicit full-public-entry pin; supply
 `expectedDefinitionDigest` when that additional precondition is wanted.
 Changed executable effect or private authority requires reapproval. Operation IDs are correlation

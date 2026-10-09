@@ -72,7 +72,7 @@ export function createCodemodeSiteRequestHandler(
         if (!invoking) return Response.json(tool);
         const input = ToolGatewayInvokeRequest.parse(body);
         if (
-          input.expectedDefinitionDigest &&
+          input.expectedDefinitionDigest !== undefined &&
           input.expectedDefinitionDigest !== tool.definitionDigest
         )
           return siteError(409, "tool_definition_stale", "The tool definition changed", true);

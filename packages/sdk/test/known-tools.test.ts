@@ -4,6 +4,7 @@ import { OpenGeniToolReapprovalRequiredError } from "../src/tools";
 import { createKnownWorkspaceTools } from "../src/known-tools";
 import { createSiteToolBridge } from "../src/site-tool-bridge";
 import type { ToolGatewayResolvedTool, ToolGatewayInvokeRequest } from "../src/types";
+import { ToolGatewayInvokeRequest as InvokeSchema } from "@opengeni/contracts";
 
 const identity = { serverId: "account-known", toolName: "search" };
 const tool = (digest = "a".repeat(64)): ToolGatewayResolvedTool => ({
@@ -56,6 +57,27 @@ function fixture(
 }
 
 describe("known tools SDK", () => {
+  test("explicit malformed target pins reach validation rather than becoming unpinned execution", async () => {
+    for (const pin of ["", null, "not-a-digest"] as const) {
+      let effects = 0;
+      const f = fixture((path, body) => {
+        expect(path).toBe("invoke");
+        expect(body).toHaveProperty("expectedDefinitionDigest", pin);
+        if (!InvokeSchema.safeParse(body).success)
+          return response(
+            { error: { code: "invalid_request", retryable: false, outcomeUnknown: false } },
+            400,
+          );
+        effects++;
+        return response(result(body));
+      });
+      await expect(
+        f.tools.$call(identity, {}, { expectedDefinitionDigest: pin as string }),
+      ).rejects.toMatchObject({ status: 400 });
+      expect(effects).toBe(0);
+      expect(f.requests).toHaveLength(1);
+    }
+  });
   test("cold exact and symbolic calls invoke directly and unwrap using executed metadata", async () => {
     const f = fixture((path, body) => {
       expect(path).toBe("invoke");

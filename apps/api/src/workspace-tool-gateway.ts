@@ -796,6 +796,30 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       ...(codexAppsAuth ? { codexAppsAuth } : {}),
       workspaceToolGateway: {
         mapDefinition: (definition) => {
+          // Raw/local providers have no native credential revision. The legacy
+          // gateway fallback binds the whole public catalog, including Ask/Allow
+          // presentation. Targeted approvals instead use the runtime's existing
+          // executable authority plus the exact selected configuration already
+          // fenced by authorizeTargetMetadata. Never replace adapter authority.
+          if (options.target && definition.approvalAuthorityDigest === undefined) {
+            const config = gatewaySettings.mcpServers.find(
+              (server) => server.id === definition.identity.serverId,
+            );
+            if (!config || !definition.effectAuthorityDigest)
+              throw new Error("target approval authority unavailable");
+            definition = {
+              ...definition,
+              approvalAuthorityDigest: digestCanonicalJson({
+                domain: "opengeni.target-tool-config-authority",
+                version: 1,
+                accountId: grant.accountId,
+                workspaceId: grant.workspaceId,
+                identity: definition.identity,
+                effectAuthorityDigest: definition.effectAuthorityDigest,
+                configuration: config,
+              }),
+            };
+          }
           const recommendation = definition.approval === "human" ? "ask" : "allow";
           recommendations.set(workspaceToolGatewayIdentityKey(definition.identity), recommendation);
           const target = policyTargets.get(definition.identity.serverId);

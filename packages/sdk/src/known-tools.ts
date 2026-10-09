@@ -151,8 +151,11 @@ export function createKnownWorkspaceTools(
       : snapshots.get(key);
     const approved = options.approvalToken ? approvals.get(options.approvalToken) : undefined;
     const expected =
-      options.expectedDefinitionDigest ??
-      (options.approvalToken ? undefined : tool?.definitionDigest);
+      options.expectedDefinitionDigest !== undefined
+        ? options.expectedDefinitionDigest
+        : options.approvalToken
+          ? undefined
+          : tool?.definitionDigest;
     if (
       approved &&
       (approved.operationId !== operationId ||
@@ -170,7 +173,7 @@ export function createKnownWorkspaceTools(
           operationId,
           target,
           arguments: args,
-          ...(digest ? { expectedDefinitionDigest: digest } : {}),
+          ...(digest === undefined ? {} : { expectedDefinitionDigest: digest }),
           ...(options.approvalToken ? { approvalToken: options.approvalToken } : {}),
         },
         options.signal ? { signal: options.signal } : {},
@@ -181,10 +184,10 @@ export function createKnownWorkspaceTools(
     } catch (error) {
       if (!isToolDefinitionStale(error) || expected === undefined) throw error;
       if (revisions.get(key) === revision) snapshots.delete(key);
-      if (options.expectedDefinitionDigest && !options.approvalToken) throw error;
+      if (options.expectedDefinitionDigest !== undefined && !options.approvalToken) throw error;
       tool = await loader(target).reloadAfterStale(expected, options.signal);
       remember(target, tool, revision);
-      if (options.approvalToken || options.expectedDefinitionDigest)
+      if (options.approvalToken || options.expectedDefinitionDigest !== undefined)
         throw new OpenGeniToolReapprovalRequiredError(
           operationId,
           expected,
@@ -216,7 +219,10 @@ export function createKnownWorkspaceTools(
         identity,
         arguments: args,
         operationId: options.operationId ?? crypto.randomUUID(),
-        expectedDefinitionDigest: options.expectedDefinitionDigest ?? tool.definitionDigest,
+        expectedDefinitionDigest:
+          options.expectedDefinitionDigest === undefined
+            ? tool.definitionDigest
+            : options.expectedDefinitionDigest,
       },
       {},
       options.signal ? { signal: options.signal } : {},

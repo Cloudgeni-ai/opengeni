@@ -131,9 +131,15 @@ executable effect digest and Site tuple. Exact caller, identity, arguments and
 private authority are checked separately. The full public definition digest is
 only an optional invocation precondition, not approval provenance: changing
 Ask to Allow changes its public approval field without changing the approved
-effect. Missing executable effect digests fail closed. The shared operation
-namespace and consumed tombstones survive policy
-Ask-to-Allow and protocol changes. Supplied tokens cannot be silently ignored.
+effect. Missing executable effect digests fail closed.
+For targeted raw/local providers without an adapter-owned private revision, the
+private binding uses the existing runtime executable-authority digest and exact
+selected server configuration, scoped to account, workspace and identity. It
+does not use public catalog presentation; endpoint or private-header changes
+still require reapproval. Existing adapter authority and legacy/frozen fallback
+semantics remain unchanged. The shared operation namespace and consumed
+tombstones survive policy Ask-to-Allow and protocol changes. Supplied tokens
+cannot be silently ignored.
 Allow-only calls without approval provenance are not generally idempotent.
 Unknown dispatch outcomes never replay automatically.
 
@@ -160,7 +166,7 @@ require explicit SDK catalog mode. Local preview keeps frozen attempt/Codemode
 authority, fencing the entry again after any pre-submission catalog refresh.
 OAuth and explicit catalog/declarations discovery are unchanged.
 For a mixed-version fleet, apply rolling migration
-`0680_target_tool_approval_bindings.sql` first. Bring up a fully upgraded API pool
+`0685_target_tool_approval_bindings.sql` first. Bring up a fully upgraded API pool
 and route all four new endpoints (`resolve`, `invoke`, `target-approvals`, and
 `manifest`) exclusively to that pool before sending new-protocol traffic.
 Existing v1 endpoints may still reach older replicas during the rollout. If

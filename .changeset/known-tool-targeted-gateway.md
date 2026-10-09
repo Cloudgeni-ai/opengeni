@@ -17,4 +17,7 @@ live account authority, versioned executable-effect one-shot approval
 bindings, optional full-definition preconditions, and explicit legacy discovery.
 SDK calls use the targeted path by default; older APIs require explicit catalog
 mode. Upgraded Site hosts adapt saved legacy bundles using bounded manifests.
-Deploy rolling migration 0680 before enabling the new API and matched SDK/host.
+Raw/local target approvals bind existing executable/configuration authority
+instead of public catalog presentation. Retained catalog clients also veto
+uncertain stale retries; explicit malformed pins are never silently omitted.
+Deploy rolling migration 0685 before enabling the new API and matched SDK/host.

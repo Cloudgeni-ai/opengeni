@@ -96,9 +96,9 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
         target: request.target,
         operationId: request.operationId,
         arguments: request.arguments,
-        ...(request.expectedDefinitionDigest
-          ? { expectedDefinitionDigest: request.expectedDefinitionDigest }
-          : {}),
+        ...(request.expectedDefinitionDigest === undefined
+          ? {}
+          : { expectedDefinitionDigest: request.expectedDefinitionDigest }),
         ...context,
       },
       { signal },
@@ -270,7 +270,11 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
       } catch (error) {
         // Only pre-execution catalog rejection permits one retry. Never retry
         // transport failures, expired credentials or uncertain tool effects.
-        if (!(input.isCatalogStale ?? isSiteCatalogStaleError)(error) || usedDigest === undefined)
+        if (
+          staleRetryVetoed(error) ||
+          !(input.isCatalogStale ?? isSiteCatalogStaleError)(error) ||
+          usedDigest === undefined
+        )
           throw error;
         return await call(usedDigest);
       }
@@ -280,9 +284,18 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
 
 export function isSiteCatalogStaleError(error: unknown): boolean {
   return (
+    !staleRetryVetoed(error) &&
     error instanceof OpenGeniApiError &&
     error.status === 409 &&
     error.details?.code === "catalog_stale"
+  );
+}
+function staleRetryVetoed(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (("outcomeUnknown" in error && error.outcomeUnknown === true) ||
+      ("retryable" in error && error.retryable === false))
   );
 }
 function identityKey(identity: ToolGatewayIdentity): string {

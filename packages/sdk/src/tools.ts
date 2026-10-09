@@ -427,6 +427,13 @@ function requireCatalogPath(
 function isCatalogStaleApiError(
   error: unknown,
 ): error is OpenGeniApiError | { code: "catalog_stale" } {
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    ("outcomeUnknown" in error && error.outcomeUnknown === true) ||
+    ("retryable" in error && error.retryable === false)
+  )
+    return false;
   return (
     (error instanceof OpenGeniApiError &&
       error.status === 409 &&

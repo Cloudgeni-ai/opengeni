@@ -361,7 +361,10 @@ only the selected authorized registry/account route before constructing provider
 do not add full-workspace discovery as a fallback. Definition pins are full-entry
 preconditions, never authority. Version-2 approvals bind the existing executable
 effect digest and Site tuple, separately from private authority, and retain the
-v1 operation tombstone namespace. Targeted current-human physical callbacks
+v1 operation tombstone namespace.
+For raw/local targets lacking adapter private authority, use the runtime's
+existing executable-authority digest and exact selected configuration, never
+the public-catalog fallback; preserve v1/frozen semantics. Targeted physical callbacks
 recheck caller/Site authority and the selected live action policy; do not change
 frozen worker/Codemode policy semantics. SDK/Site adoption and explicit legacy mode are documented in
 `packages/sdk/README.md`; local previews retain frozen Codemode authority.

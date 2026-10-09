@@ -2196,6 +2196,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0685_target_tool_approval_bindings.sql",
       "0671_subscription_core_codex_operations.sql",
       "0670_subscription_core_codex_apps.sql",
       "0669_subscription_core_codex_waits.sql",
@@ -2567,6 +2568,8 @@ describe("release schema contract", () => {
       "0665_inbox_replies.sql",
       "0666_inbox_reply_current_turn.sql",
       "0672_sandbox_checkpoint_staleness.sql",
+      "0682_sandbox_admission_settled_index.sql",
+      "0683_sandbox_checkpoint_staleness_any_settled.sql",
       "0673_delete_stranded_completed_turn_tool_receipts.sql",
       "0674_inbox_reply_hands_back.sql",
       "0675_inbox_subagent_turn_push.sql",
@@ -2574,7 +2577,9 @@ describe("release schema contract", () => {
       "0677_local_human_inbox_recipient.sql",
       "0678_inbox_mute_session_replies.sql",
       "0679_codex_extra_credit_consent.sql",
-      "0680_target_tool_approval_bindings.sql",
+      "0680_sandbox_idle_checkpoint.sql",
+      "0681_sandbox_ended_epoch_blockers.sql",
+      "0684_claude_haiku_5_5_default_model.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
