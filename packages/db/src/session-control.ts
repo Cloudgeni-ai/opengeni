@@ -253,10 +253,21 @@ export async function assertAgentCommandAuthorityInTransaction(
     workspaceId: string;
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     targetSessionId: string;
-    action: "pause" | "resume" | "steer" | "message" | "goal" | "wait" | "model_settings" | "context";
+    action:
+      | "pause"
+      | "resume"
+      | "steer"
+      | "message"
+      | "goal"
+      | "wait"
+      | "model_settings"
+      | "context";
   },
 ): Promise<void> {
-  if (["goal", "wait", "context"].includes(input.action) && input.targetSessionId !== input.actor.sessionId) {
+  if (
+    ["goal", "wait", "context"].includes(input.action) &&
+    input.targetSessionId !== input.actor.sessionId
+  ) {
     throw new SessionControlInvariantError("An agent self command must target its own session");
   }
   // Every command caller establishes the control/workspace prefix first.

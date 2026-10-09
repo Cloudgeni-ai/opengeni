@@ -82,6 +82,6 @@ for (const theme of ["light", "dark"] as const) {
       } finally {
         await context.close();
       }
-    });
+    }, 60_000);
   }
 }

@@ -188,6 +188,7 @@ for it until the matching requirement below is implemented:
   A live provider refusal, model cooldown, health or access restriction still
   blocks the account. When a refusal expires, the next wait deadline considers
   credit eligibility independently of the included allowance's reset time.
+  Verification: pending (verification-suite).
 
 ### Stickiness and the prompt cache
 
