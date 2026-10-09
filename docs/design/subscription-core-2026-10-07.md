@@ -1519,7 +1519,7 @@ Left to PR 3:
 
 ##### PR 3b: the remaining Codex writers (dormant)
 
-Migration 0672 (rolling) and the matching code complete every Codex writer on
+Migration 0674 (rolling) and the matching code complete every Codex writer on
 the core before the drained cutover, so the cutover moves data and flips no
 route to a 409. Like PR 1/2 everything is dormant: no cutover row keeps the
 legacy path unchanged, a disabled row fails closed (typed 503), and every

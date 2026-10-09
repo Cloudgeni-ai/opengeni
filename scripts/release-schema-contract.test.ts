@@ -74,10 +74,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0672_subscription_core_codex_writers.sql",
+        (migration) => migration.path === "0674_subscription_core_codex_writers.sql",
       ),
     ).toMatchObject({
-      path: "0672_subscription_core_codex_writers.sql",
+      path: "0674_subscription_core_codex_writers.sql",
       deploymentMode: "rolling",
     });
   });
@@ -313,7 +313,7 @@ describe("release schema contract", () => {
       expect(subscriptionCoreCodexOperations.deploymentMode).toBe("rolling");
     }
     const subscriptionCoreCodexWriters = sourceContract.migrations.find(
-      (migration) => migration.path === "0672_subscription_core_codex_writers.sql",
+      (migration) => migration.path === "0674_subscription_core_codex_writers.sql",
     );
     if (subscriptionCoreCodexWriters) {
       expect(subscriptionCoreCodexWriters.deploymentMode).toBe("rolling");
@@ -2226,7 +2226,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
-      "0672_subscription_core_codex_writers.sql",
+      "0674_subscription_core_codex_writers.sql",
       "0671_subscription_core_codex_operations.sql",
       "0670_subscription_core_codex_apps.sql",
       "0669_subscription_core_codex_waits.sql",
