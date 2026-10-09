@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { hostedSearchFixture } from "./fixtures/hosted-search";
 
 import {
   chmodSync,
@@ -13132,6 +13133,36 @@ describe("portable skill artifact validation", () => {
 });
 
 describe("provider item id stripping", () => {
+  test("composed model filter keeps search evidence and append-only prefix identity before detaching ids", async () => {
+    const search = hostedSearchFixture();
+    const input = [
+      search,
+      {
+        type: "function_call",
+        id: "fc_fixture",
+        callId: "checkpoint",
+        name: "checkpoint",
+        arguments: "{}",
+      },
+    ];
+    const before = structuredClone(input);
+    const filter = callModelInputFilterForSettings(testSettings())!;
+    const run = (items: unknown[]) =>
+      filter({ modelData: { input: items as never }, agent: {} as never, context: undefined });
+    const first = await run(input);
+    const next = await run([
+      ...input,
+      { type: "function_call_result", callId: "checkpoint", output: "ACK" },
+    ]);
+    expect(first.input[0]).toMatchObject({ type: "message", role: "assistant" });
+    expect(JSON.stringify(first.input[0])).toContain("exactly seven colors");
+    expect(next.input[0]).toBe(first.input[0]);
+    expect(next.input[1]).toBe(first.input[1]);
+    expect(next.input[1]).toMatchObject({ callId: "checkpoint" });
+    expect(next.input[2]).toMatchObject({ callId: "checkpoint" });
+    expect(JSON.stringify(next.input)).not.toContain("ws_fixture");
+    expect(input).toEqual(before);
+  });
   test("stripProviderItemIdsFilter removes provider ids from every item without touching pairing fields", () => {
     const reasoning = {
       type: "reasoning",

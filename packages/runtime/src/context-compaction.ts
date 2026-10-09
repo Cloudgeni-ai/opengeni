@@ -27,6 +27,7 @@ import {
 } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import { isProxy } from "node:util/types";
+import { projectHostedSearchEvidence } from "./hosted-search-evidence";
 
 import {
   latestReasoningConfiguration,
@@ -1551,7 +1552,9 @@ export function prepareCompactionPromptInput(
   maxInputTokens: number,
 ): PreparedCompactionPromptInput {
   const budget = Math.max(0, Math.floor(maxInputTokens));
-  let history = omitOpaqueArtifactsFromPortableCompactionHistory(items).slice();
+  let history = omitOpaqueArtifactsFromPortableCompactionHistory(items).map(
+    projectHostedSearchEvidence,
+  );
   let estimatedInputTokens = estimateTokens(buildCompactionPromptInput(history));
   let rewrittenToolOutputs = 0;
 
@@ -2002,7 +2005,7 @@ function messageText(item: CompactionItem): string {
 }
 
 export function renderCompactionPromptInputForChat(input: readonly CompactionItem[]): string {
-  return input.map(renderItem).join("\n");
+  return input.map(projectHostedSearchEvidence).map(renderItem).join("\n");
 }
 
 function renderItem(item: CompactionItem): string {

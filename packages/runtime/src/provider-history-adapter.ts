@@ -1,4 +1,5 @@
 import { chatReasoning, chatReasoningDetails, chatReasoningDetailsText } from "./chat-reasoning";
+import { projectHostedSearchEvidence } from "./hosted-search-evidence";
 
 export type HistoryProviderApi = "responses" | "chat" | "anthropic-messages";
 
@@ -226,7 +227,9 @@ export function projectHistoryForProvider(
   items: Array<Record<string, unknown>>,
   providerApi: HistoryProviderApi,
 ): Array<Record<string, unknown>> {
-  return projectWireHistory(withWireValidFunctionCallArguments(items), providerApi);
+  const projected = items.map(projectHostedSearchEvidence);
+  const input = projected.every((item, index) => item === items[index]) ? items : projected;
+  return projectWireHistory(withWireValidFunctionCallArguments(input), providerApi);
 }
 
 /** Bound on the raw text carried by a request-local invalid-arguments wrapper. */
