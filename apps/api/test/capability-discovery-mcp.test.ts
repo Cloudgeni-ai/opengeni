@@ -566,6 +566,66 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       await Promise.all([mcp.close(), server.close()]);
     }
   }, 60_000);
+  test("finds a near-spelled custom MCP and suggests closest names on a miss", async () => {
+    if (!shared) throw new Error("Real PostgreSQL fixture required");
+    const capabilityId = `mcp:whisprflow-${crypto.randomUUID()}`;
+    await upsertCapabilityCatalogItem(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      id: capabilityId,
+      kind: "mcp",
+      source: "manual",
+      name: "Whisprflow",
+      endpointUrl: "https://api.wisprflow.ai/connect/mcp",
+      metadata: { mcpServerId: `whisprflow-${crypto.randomUUID()}` },
+    });
+    const attempt = await seedAttempt();
+    const server = buildOpenGeniMcpServer(
+      { settings: testSettings(), db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
+      {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "worker:first-party-mcp",
+        permissions: ["workspace:read"],
+        principalKind: "agent_attempt",
+        metadata: {
+          ...attempt,
+          firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],
+        },
+      },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: "capability-near-spelling-test", version: "1" });
+    await server.connect(serverTransport);
+    await mcp.connect(clientTransport);
+    type SearchBody = {
+      matches: Array<{ capabilityId: string; approximate: boolean }>;
+      suggestions: Array<{ capabilityId: string; name: string; similarity: number }>;
+      note?: string;
+    };
+    const search = async (query: string) => {
+      const result = await mcp.callTool({
+        name: "capability_catalog_search",
+        arguments: { query },
+      });
+      expect(result.isError).not.toBe(true);
+      return mcpJson(result) as SearchBody;
+    };
+    try {
+      for (const query of ["Wispr", "Wisprflow", "Wispr Flow"]) {
+        const body = await search(query);
+        expect(body.matches[0]?.capabilityId).toBe(capabilityId);
+        expect(body.suggestions).toEqual([]);
+        expect(body.note).toBeUndefined();
+      }
+      const miss = await search("Wspr Flw");
+      expect(miss.matches).toEqual([]);
+      expect(miss.suggestions[0]).toMatchObject({ capabilityId, name: "Whisprflow" });
+      expect(miss.note).toContain("not matches");
+    } finally {
+      await Promise.all([mcp.close(), server.close()]);
+    }
+  }, 60_000);
   for (const scenario of [
     {
       name: "Arbitrary metrics service",
