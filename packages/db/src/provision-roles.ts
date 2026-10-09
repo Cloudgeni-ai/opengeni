@@ -2082,6 +2082,11 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
     FOREACH routine_signature IN ARRAY ARRAY[
       'subscription_connection_visible(uuid,uuid,uuid,text,text,uuid,text,text)',
+      'authorize_subscription_ownerless_session_access(uuid,uuid,uuid,uuid)',
+      'authorize_subscription_personal_placement_access(uuid,uuid,uuid,uuid,text,uuid,bigint,text,text)',
+      'subscription_codex_refresh_write_allowed(uuid,uuid,uuid)',
+      'begin_subscription_codex_refresh(uuid,uuid,uuid,uuid,text,text,uuid,text,bigint)',
+      'persist_subscription_codex_refresh(uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)',
       'subscription_organization_admin(uuid)',
       'subscription_people_assignment_visible(uuid,uuid,uuid,text,text)',
       'subscription_person_preference_visible(uuid,uuid,text,text)',

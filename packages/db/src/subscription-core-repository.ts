@@ -563,6 +563,43 @@ export async function acquireSubscriptionTurnLease(
   return row ? { ...turnLeaseIdentity(input), leasedUntil: new Date(row.leased_until) } : null;
 }
 
+/**
+ * Persist one successful Codex token refresh through the private database
+ * seam. Call only inside withSubscriptionCoreCodexRefreshLock, immediately
+ * after the provider returns. SQL consumes the one-shot authorization that
+ * begin_subscription_codex_refresh minted in the same transaction and writes
+ * under the refresh lock and refresh-generation compare-and-swap, so a caller
+ * cannot turn the helper into a general credential update API, and a rotated
+ * token is not discarded because the lease or visibility changed meanwhile.
+ */
+export async function persistSubscriptionCodexRefresh(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    connectionId: string;
+    expectedRefreshGeneration: number;
+    credentialEncrypted: string;
+    expiresAt: Date | null;
+    lastRefreshAt: Date;
+  },
+): Promise<boolean> {
+  assertPositiveGeneration(input.expectedRefreshGeneration);
+  const [row] = await rawRows<{ persisted: boolean }>(
+    db,
+    sql`select opengeni_private.persist_subscription_codex_refresh(
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+      ${input.sessionId}::uuid, ${input.turnId}::uuid,
+      ${input.connectionId}::uuid, ${input.expectedRefreshGeneration}::bigint,
+      ${input.credentialEncrypted}, ${input.expiresAt?.toISOString() ?? null}::timestamptz,
+      ${input.lastRefreshAt.toISOString()}::timestamptz
+    ) as persisted`,
+  );
+  return row?.persisted === true;
+}
+
 /** Renew only the exact, still-live chat-turn lease generation. */
 export async function renewSubscriptionTurnLease(
   db: Database,

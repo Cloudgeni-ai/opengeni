@@ -230,9 +230,15 @@ describe("release schema contract", () => {
     const failedSessionVariableSetAttach = sourceContract.migrations.find(
       (migration) => migration.path === "0514_failed_session_variable_set_attach.sql",
     );
+    const subscriptionAuthorityRefreshContract = sourceContract.migrations.find(
+      (migration) => migration.path === "0667_subscription_authority_refresh_contract.sql",
+    );
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(sourceContract.migrations.at(-1)?.path ?? null);
       expect(failedSessionVariableSetAttach.deploymentMode).toBe("rolling");
+    }
+    if (subscriptionAuthorityRefreshContract) {
+      expect(subscriptionAuthorityRefreshContract.deploymentMode).toBe("rolling");
     }
     // Keep the published-history assertions below scoped to their existing
     // migration range; the new forward migration is checked explicitly above.
@@ -2142,6 +2148,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0667_subscription_authority_refresh_contract.sql",
       "0647_slack_bot_branding.sql",
       // Exclusion membership is unordered; keep this addition away from the shared tail.
       "0640_knowledge_entry_created_since.sql",

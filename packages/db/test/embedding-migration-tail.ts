@@ -130,4 +130,5 @@ export const embeddingMigrationTail = [
   "0664_inbox_rich_notifications.sql",
   "0665_inbox_replies.sql",
   "0666_inbox_reply_current_turn.sql",
+  "0667_subscription_authority_refresh_contract.sql",
 ];

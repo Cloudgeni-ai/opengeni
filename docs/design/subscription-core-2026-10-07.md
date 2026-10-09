@@ -247,7 +247,17 @@ request; it marks the lease for failover at the next model-call boundary.
   private sessions or Personal workspace. The check is a `SECURITY DEFINER`
   function that takes the session owner and the turn's human as explicit
   arguments and reads memberships through the existing per-transaction
-  capability pattern (0234), never through an empty subject.
+  capability pattern (0234), never through an empty subject. The v2 personal
+  placement helper also requires that provider's cutover row to be enabled,
+  the exact `session_access` capability to exist, effective personal access to
+  be enabled, and the frozen resource-authority generation to match an active,
+  non-revoked resource. It leaves only per-connection, owner/provider-scoped
+  capabilities in the transaction. Before drained cutover, this helper is
+  inert and v1 remains authoritative.
+- Ownerless sessions are shared-only: they may use organization- or
+  workspace-scoped shared connections only. The database rejects personal and
+  people-scoped connections for ownerless turns. Bindings remain denied because
+  they do not carry an exact accepted-turn identity.
 - Binding, lease, waiter and failure rows reference the session and inherit
   `session_visibility_isolation`. Core operations run with the acting turn's
   initiating human (`withSubscriptionPoolSessionAccess`, SUB-ACCESS-02..04).
@@ -339,6 +349,102 @@ Claude and SuperGrok continue through their existing paths and retain the M1
 shadow comparison. No web UI redesign or new visible control is in scope. The
 existing Codex account/session surfaces must continue to work through the
 compatibility projections and event aliases below.
+
+#### Rolling precursor and drained cutover sequence
+
+M3 begins with a rolling-compatible precursor that adds only nullable v2
+accepted-authority storage and an inactive Codex credential-refresh seam whose
+authorization is exact-turn and live-lease fenced before the provider call. It
+performs no backfill, secret copy, data move, or
+cutover-gate activation. Every provider continues to read its existing v1
+accepted authority, and old API/worker binaries remain compatible. The
+selector/materializer can be deployed only after this precursor is present;
+the final one-way migration still requires the complete runtime drain described
+below, then backfills v2 authority and activates the Codex cutover together.
+
+The precursor also repairs the gated ownerless-session authorization seam: an
+ownerless session is shared-only, must be workspace-visible, and may lease only
+shared organization- or workspace-scoped connections. Private sessions,
+human-initiated turns, personal connections, people-scoped connections, and
+ownerless session bindings remain rejected. This is a database authorization
+fix, not a v2 authority writer or an early selector activation.
+
+The nullable v2 accepted-authority slot is immutable to application sessions
+after acceptance, matching the existing v1 snapshot contract. Only the
+`session_turns` table owner can populate it during the later drained backfill;
+ordinary app-role writes, including writes nested under `SECURITY DEFINER`,
+cannot rewrite accepted authority. The precursor itself does not write v2
+snapshots.
+
+Accepted v2 snapshots store canonical lowercase membership UUIDs only. The
+`session_turns` CHECK and the TypeScript schema both reject other spellings,
+and the placement reader compares as `uuid`, so a stored snapshot can never
+look valid while silently failing to match.
+
+The v2 personal-placement helper never rewrites or removes a capability the
+caller already held in the same transaction (for example an earlier v1 Claude
+authorization for the same owner). It inserts with `ON CONFLICT DO NOTHING`
+and limits every cleanup to the rows it inserted itself.
+
+##### Codex credential refresh seam
+
+Codex OAuth refresh tokens rotate: once the provider accepts the old refresh
+token, only the returned token is valid. Refresh is therefore split into two
+calls inside one transaction around the provider request.
+
+1. `begin_subscription_codex_refresh` authorizes before the network call. It
+   takes the per-connection advisory key `subscription-refresh:<connection
+   id>`, then checks the exact accepted session and turn, session access
+   (owned, service or ownerless), the live lease holder and generation,
+   shared-only scope for ownerless turns, the frozen personal authority for
+   personal connections (through the same helper the lease guard uses, whose
+   authority source the drained cutover switches to v2), whether personal
+   connections are allowed now, and current visibility. It requires an active
+   `subscription`-kind Codex connection, returns the credential to rotate, and
+   mints a one-shot `codex_refresh_authorized` capability that no RLS policy
+   reads. A second `begin` for the same connection in one transaction is
+   refused, and a personal capability the caller already holds for another
+   turn is left untouched and refuses the refresh.
+2. `persist_subscription_codex_refresh` runs as soon as the provider returns.
+   It consumes that capability and writes under the still-held advisory lock and
+   the `refresh_generation` compare-and-swap only. A short-lived
+   `codex_refresh_write` capability exposes the exact row to that one UPDATE
+   (SELECT and UPDATE policies) and is removed before the function returns.
+   It runs with no lock timeout so a briefly held row delays rather than aborts
+   the write, and it does not bump the metadata `version`.
+
+`refresh_generation` is enforced for every writer by a trigger: it never
+moves backwards, it advances by at most one per write (so its safe-integer
+CHECK ceiling is unreachable), and any change to the stored credential
+advances it. An administrator replacing a credential during an in-flight
+refresh therefore makes that refresh's compare-and-swap fail instead of being
+overwritten. No writer may advance the generation without changing the
+credential: that would only make an in-flight refresh discard its rotated
+token.
+
+Decision (strictest design that does not strand a shared credential):
+persistence deliberately does not repeat lease-expiry, visibility, settings or
+authority checks. Refusing the write after rotation would leave the connection
+needing a fresh login for every user, while writing it back gives the turn
+nothing it does not already hold. Authorization for the turn's own use of the
+credential is still decided before the call; the rotated token is only stored.
+A connection disabled during the call keeps a usable token; a deleted row
+matches nothing. The caller must persist before any other fallible work,
+because a rolled-back transaction also discards the rotated token.
+
+Lock order: the advisory key first, then the connection row (taken
+`FOR NO KEY UPDATE` by the UPDATE, which does not block foreign-key checks).
+Neither function locks the lease row, and no row lock is held across the
+provider call, so lease renewal, release, takeover and connection
+administration never wait on a refresh. Any future writer that replaces a
+Codex credential, such as reconnect, should also take the same advisory key so
+it does not race the provider call itself.
+
+Residual risk, accepted for now: a rotated token is still lost if the
+surrounding transaction fails after `persist` (commit failure, a dropped
+connection, or an idle-in-transaction timeout during a slow provider call).
+Moving refresh to a session-level advisory lock with its own short persist
+transaction would remove it; that belongs with the refresh consumer.
 
 #### Runtime and consumer entry points
 
@@ -603,26 +709,47 @@ passing production-path tests.
 
 #### Focused implementation PR sequence
 
-Keep the implementation reviewable in three dependent changesets: (1) the
-provider-neutral production runtime repository, operation-lease support,
-assignment-policy relation, effective `inference_source` resolver and generic
-capacity wait/recovery/wake path on the new tables, with Codex still disabled
-behind the switch; (2) the Codex adapter, every listed Codex consumer, compatibility
-route/SDK/event projections and removal of the legacy Codex selector/branches;
-(3) the drained maintenance migration, cutover switch activation semantics,
-release-schema registration and deployment runbook. The migration and
-consumer code ship as one matched release and are activated only after the
-required drain. Retire legacy Codex executable paths in M3; retain old tables
-only where needed for later provider cutovers or the planned M6 schema cleanup.
+The provider-neutral runtime repository, operation leases, assignment-policy
+relation, effective `inference_source` resolver, generic wait/recovery path and
+gated placement-world foundation are delivered in the earlier M1/M2 PRs; they
+remain non-authoritative for Codex while the provider switch is disabled. Keep
+the remaining M3 implementation reviewable in five dependent changesets:
+(0) this rolling-compatible additive precursor: nullable v2 accepted-authority
+storage plus inactive exact-turn personal-placement and Codex refresh-write
+helpers; no v2 reader/writer, data move, or gate enablement, and v1 remains
+authoritative for every provider. Older workers continue unchanged. This
+precursor also supplies the ownerless shared-only authorization routines
+referenced by the already-merged gated foundation; those routines are exercised
+against migrated PostgreSQL rather than left as fail-closed placeholders;
+(1) the Codex chat selector plus credential materialization and refresh through
+the shared core, dormant behind the disabled provider switch;
+(2) the remaining Codex-specific consumers (compaction, transcription,
+realtime, media, tool gateway and billing attribution) and their compatibility
+route/SDK/event projections, still behind the switch;
+(3) the drained maintenance migration: v2 backfill, cutover row activation, no
+dual write, release-schema registration and deployment runbook; and
+(4) deletion of the legacy Codex decision path once (3) has made it
+unreachable. The selector and migration ship as one matched release and
+activate only after the required drain. Retire legacy Codex executable paths in
+M3; retain old tables only where needed for later provider cutovers or the
+planned M6 schema cleanup.
 
-The PR1 runtime-store migration is also maintenance-mode, although it moves no
-records and opens no `NO FORCE` window: the standalone runtime-posture contract
-is exact, so an older binary rejects the newly added FORCE-RLS relations and
-grants. Drain old API, control-worker, and turn-worker processes before applying
-0645, then start only binaries that include its matching runtime-posture and
-repository contract. The provider switch remains disabled; it cannot make this
-schema change a per-organization rolling rollout. PR3 remains the separate
-one-way Codex data-move and switch-activation maintenance cutover.
+The precursor corrects two authorization gaps found while reviewing the
+already-merged gated foundation: the ownerless-session authorization function
+was referenced but not defined, and its lease guard rejected the intended
+ownerless shared-only path. It also defines (but does not activate) the v2
+personal-placement helper. These repairs do not enable routing or change v1
+authority; the exact provider cutover gate remains off until the drained step.
+
+The earlier M2 runtime-store migration 0645 is maintenance-mode, although it
+moves no records and opens no `NO FORCE` window: the standalone runtime-posture
+contract is exact, so an older binary rejects the newly added FORCE-RLS
+relations and grants. Drain old API, control-worker, and turn-worker processes
+before applying 0645, then start only binaries that include its matching
+runtime-posture and repository contract. The provider switch remains disabled;
+it cannot make that schema change a per-organization rolling rollout. M3's
+final migration remains the separate one-way Codex data-move and
+switch-activation maintenance cutover.
 
 Do not merge a partial Codex caller cutover that can strand Codex on the
 core-disabled path. Each

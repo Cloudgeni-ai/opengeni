@@ -741,6 +741,24 @@ describe("embedded worker lifecycle contract", () => {
           public_execute: false,
           security_definer: true,
         },
+        ...[
+          "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
+          "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
+          "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)",
+          "begin_subscription_codex_refresh(uuid, uuid, uuid, uuid, text, text, uuid, text, bigint)",
+          "persist_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+        ].map((name) => ({
+          name,
+          owner: "opengeni_migrator",
+          can_execute: true,
+          public_execute: false,
+          security_definer: true,
+          configuration: [
+            name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)"
+              ? "search_path=pg_catalog, opengeni_private, pg_temp"
+              : "search_path=pg_catalog, public, opengeni_private, pg_temp",
+          ],
+        })),
       ],
     ];
     const db = {

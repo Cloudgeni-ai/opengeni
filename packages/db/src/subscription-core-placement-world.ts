@@ -54,7 +54,15 @@ export type SubscriptionCoreAcceptedTurnAccessResult<T> =
 export type SubscriptionCoreCodexRefreshResult<T> =
   | { status: "not_visible" }
   | { status: "lease_lost" }
+  | { status: "refused" }
   | { status: "completed"; value: T };
+
+/** The credential a refresh callback rotates, read under the refresh lock. */
+export type SubscriptionCoreCodexRefreshCredential = {
+  refreshGeneration: number;
+  credentialEncrypted: string;
+  expiresAt: Date | null;
+};
 
 type SessionPlacementRow = {
   owner_subject_id: string | null;
@@ -334,6 +342,13 @@ export async function withSubscriptionCoreAcceptedTurn<T>(
  * Serialize one Codex connection's rotating OAuth refresh token under the
  * canonical connection lock, while requiring both exact accepted-turn access
  * and its live lease generation in the same RLS transaction.
+ *
+ * Authorization happens once, before the callback's provider call, through
+ * begin_subscription_codex_refresh. The callback receives the credential to
+ * rotate and must call persistSubscriptionCodexRefresh as soon as the
+ * provider returns, before any other fallible work: a rolled-back
+ * transaction discards the rotated token. Persistence no longer depends on
+ * the lease or visibility surviving the provider call.
  */
 export async function withSubscriptionCoreCodexRefreshLock<T>(
   db: Database,
@@ -342,7 +357,7 @@ export async function withSubscriptionCoreCodexRefreshLock<T>(
     holderId: string;
     generation: number;
   },
-  operation: (tx: Database) => Promise<T>,
+  operation: (tx: Database, credential: SubscriptionCoreCodexRefreshCredential) => Promise<T>,
 ): Promise<SubscriptionCoreCodexRefreshResult<T>> {
   const access = await withSubscriptionCoreAcceptedTurn(db, request, async (tx) => {
     const leaseIsCurrent = await assertSubscriptionTurnLeaseCurrent(tx, {
@@ -373,9 +388,32 @@ export async function withSubscriptionCoreCodexRefreshLock<T>(
       generation: request.generation,
     });
     if (!leaseStillCurrent) return { status: "lease_lost" } as const;
-    return { status: "locked", value: await operation(tx) } as const;
+    const [credential] = await rawRows<{
+      refresh_generation: number | string;
+      credential_encrypted: string;
+      expires_at: Date | string | null;
+    }>(
+      tx,
+      sql`select refresh_generation, credential_encrypted, expires_at
+        from opengeni_private.begin_subscription_codex_refresh(
+          ${request.accountId}::uuid, ${request.workspaceId}::uuid,
+          ${request.sessionId}::uuid, ${request.turnId}::uuid,
+          ${request.sessionOwnerSubjectId}, ${request.initiatingHumanSubjectId},
+          ${request.connectionId}::uuid, ${request.holderId}, ${request.generation}::bigint
+        )`,
+    );
+    if (!credential) return { status: "refused" } as const;
+    return {
+      status: "locked",
+      value: await operation(tx, {
+        refreshGeneration: Number(credential.refresh_generation),
+        credentialEncrypted: credential.credential_encrypted,
+        expiresAt: credential.expires_at === null ? null : new Date(credential.expires_at),
+      }),
+    } as const;
   });
   if (access.status === "not_visible") return access;
   if (access.value.status === "lease_lost") return access.value;
+  if (access.value.status === "refused") return access.value;
   return { status: "completed", value: access.value.value };
 }
