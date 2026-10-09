@@ -60,6 +60,8 @@ export type SubscriptionCoreCodexWake = {
   accountId: string;
   reason: string;
   workspaceIds?: readonly string[];
+  /** Only these sessions' waiters (requires exactly one workspace). */
+  sessionIds?: readonly string[];
 };
 
 type ConnectionRow = {
@@ -426,14 +428,22 @@ async function withCodexAdministration<T>(
   );
 }
 
-/** Resolve a legacy or canonical id to a visible shared Codex subscription connection. */
+/**
+ * Resolve a legacy or canonical id to a shared Codex subscription connection
+ * the route may manage, checked before anything is written. A workspace route
+ * may name only a connection in the workspace's projected account pool (the
+ * pool `projectSubscriptionCoreCodexWorkspace` lists), as legacy did; an
+ * organization route only an organization account (shared, managed by no
+ * workspace). Management authority itself is still the core tables' write
+ * policies.
+ */
 async function visibleSharedConnection(
   tx: Database,
-  accountId: string,
+  input: Administration,
   rawId: string,
 ): Promise<{ id: string; allocatorEnabled: boolean; allocatorVersion: number } | null> {
   const connectionId = await resolveSubscriptionConnectionId(tx, {
-    accountId,
+    accountId: input.accountId,
     provider: "codex",
     connectionId: rawId,
   });
@@ -441,16 +451,23 @@ async function visibleSharedConnection(
   const [row] = await rawRows<{ allocator_enabled: boolean; allocator_version: number | string }>(
     tx,
     sql`select allocator_enabled, allocator_version from subscription_connections
-      where account_id = ${accountId}::uuid and provider = 'codex' and kind = 'subscription'
-        and ownership = 'shared' and id = ${connectionId}::uuid`,
+      where account_id = ${input.accountId}::uuid and provider = 'codex' and kind = 'subscription'
+        and ownership = 'shared' and id = ${connectionId}::uuid
+        and (${input.workspaceId}::uuid is not null or managed_by_workspace_id is null)`,
   );
-  return row
-    ? {
-        id: connectionId,
-        allocatorEnabled: row.allocator_enabled,
-        allocatorVersion: Number(row.allocator_version),
-      }
-    : null;
+  if (!row) return null;
+  if (input.workspaceId !== null) {
+    const pool = await projectSubscriptionCoreCodexWorkspace(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+    });
+    if (!pool.accounts.some((account) => account.id === connectionId)) return null;
+  }
+  return {
+    id: connectionId,
+    allocatorEnabled: row.allocator_enabled,
+    allocatorVersion: Number(row.allocator_version),
+  };
 }
 
 export type SubscriptionCoreCodexAllocatorResult =
@@ -476,7 +493,7 @@ export async function setSubscriptionCoreCodexAllocator(
   wake: SubscriptionCoreCodexWake | null;
 }> {
   return await withCodexAdministration(db, input, async (tx) => {
-    const current = await visibleSharedConnection(tx, input.accountId, input.connectionId);
+    const current = await visibleSharedConnection(tx, input, input.connectionId);
     if (!current) return { result: { kind: "not_found" }, wake: null };
     const projection = (
       kind: "updated" | "unchanged" | "conflict",
@@ -560,7 +577,7 @@ export async function renameSubscriptionCoreCodexConnection(
   input: Administration & { connectionId: string; label: string | null },
 ): Promise<string | null> {
   return await withCodexAdministration(db, input, async (tx) => {
-    const current = await visibleSharedConnection(tx, input.accountId, input.connectionId);
+    const current = await visibleSharedConnection(tx, input, input.connectionId);
     if (!current) return null;
     const label = input.label === null ? null : input.label.trim().slice(0, 200) || null;
     try {
@@ -582,8 +599,16 @@ export async function renameSubscriptionCoreCodexConnection(
 }
 
 /**
- * Upsert one settings row (organization row for a NULL workspace) through the
- * settings manager policy. Returns false when the subject may not write it.
+ * Write one settings row (the organization row for a NULL workspace) through
+ * the settings manager policy. Returns false when the subject may not write it.
+ *
+ * The existing row is updated in place. The organization row's CHECK requires
+ * every organization default to be present, so an upsert's proposed insert
+ * row (which sets only the Codex columns) would be refused before ON CONFLICT
+ * ran; a missing row is therefore inserted with the defaults the settings
+ * resolver already applies to an absent value (empty rotation, providers and
+ * fallback order, no cross-provider failover, personal connections allowed,
+ * no personal fallback). A workspace override row may leave them NULL.
  */
 async function writeSettingsRow(
   tx: Database,
@@ -604,36 +629,57 @@ async function writeSettingsRow(
       : JSON.stringify({ codex: patch.codexProvider });
   const clearProvider = patch.codexProvider === null;
   const setPrimary = patch.primaryConnectionId !== undefined;
+  const primary = setPrimary ? (patch.primaryConnectionId ?? null) : null;
+  const organizationRow = input.workspaceId === null;
+  const update = async (db: Database) =>
+    await rawRows<{ id: string }>(
+      db,
+      sql`update subscription_settings set
+          rotation = case when ${rotationJson}::jsonb is null then rotation
+            else coalesce(rotation, '{}'::jsonb) || ${rotationJson}::jsonb end,
+          providers = case
+            when ${clearProvider} then providers - 'codex'
+            when ${providerJson}::jsonb is null then providers
+            else coalesce(providers, '{}'::jsonb) || ${providerJson}::jsonb end,
+          codex_primary_connection_id = case when ${setPrimary}
+            then ${primary}::uuid else codex_primary_connection_id end,
+          version = version + 1,
+          updated_by_subject_id = ${input.subjectId},
+          updated_at = clock_timestamp()
+        where account_id = ${input.accountId}::uuid
+          and workspace_id is not distinct from ${input.workspaceId}::uuid
+        returning id::text as id`,
+    );
   try {
-    const rows = await tx.transaction(async (savepoint) =>
-      rawRows<{ id: string }>(
-        savepoint as unknown as Database,
+    return await tx.transaction(async (savepoint) => {
+      const scoped = savepoint as unknown as Database;
+      if ((await update(scoped)).length > 0) return true;
+      const inserted = await rawRows<{ id: string }>(
+        scoped,
         sql`insert into subscription_settings (
             account_id, workspace_id, rotation, providers, codex_primary_connection_id,
-            updated_by_subject_id, updated_at
+            cross_provider_failover, fallback_order, personal_connections_allowed,
+            personal_fallback_allowed, updated_by_subject_id, updated_at
           ) values (
             ${input.accountId}::uuid, ${input.workspaceId}::uuid,
-            ${rotationJson}::jsonb, ${providerJson}::jsonb,
-            ${setPrimary ? (patch.primaryConnectionId ?? null) : null}::uuid,
+            case when ${organizationRow} then coalesce(${rotationJson}::jsonb, '{}'::jsonb)
+              else ${rotationJson}::jsonb end,
+            case when ${organizationRow} then coalesce(${providerJson}::jsonb, '{}'::jsonb)
+              else ${providerJson}::jsonb end,
+            ${primary}::uuid,
+            case when ${organizationRow} then false end,
+            case when ${organizationRow} then '{}'::jsonb end,
+            case when ${organizationRow} then true end,
+            case when ${organizationRow} then false end,
             ${input.subjectId}, clock_timestamp()
           )
-          on conflict (account_id, workspace_id) do update set
-            rotation = case when ${rotationJson}::jsonb is null then subscription_settings.rotation
-              else coalesce(subscription_settings.rotation, '{}'::jsonb) || ${rotationJson}::jsonb end,
-            providers = case
-              when ${clearProvider} then subscription_settings.providers - 'codex'
-              when ${providerJson}::jsonb is null then subscription_settings.providers
-              else coalesce(subscription_settings.providers, '{}'::jsonb) || ${providerJson}::jsonb end,
-            codex_primary_connection_id = case when ${setPrimary}
-              then ${setPrimary ? (patch.primaryConnectionId ?? null) : null}::uuid
-              else subscription_settings.codex_primary_connection_id end,
-            version = subscription_settings.version + 1,
-            updated_by_subject_id = excluded.updated_by_subject_id,
-            updated_at = excluded.updated_at
+          on conflict (account_id, workspace_id) do nothing
           returning id::text as id`,
-      ),
-    );
-    return rows.length > 0;
+      );
+      if (inserted.length > 0) return true;
+      // A concurrent writer inserted the row first; update it.
+      return (await update(scoped)).length > 0;
+    });
   } catch (error) {
     if (isRlsRefusal(error)) return false;
     throw error;
@@ -674,7 +720,7 @@ export async function setSubscriptionCoreCodexPrimary(
   input: Administration & { connectionId: string },
 ): Promise<{ activated: string | null; wake: SubscriptionCoreCodexWake | null }> {
   return await withCodexAdministration(db, input, async (tx) => {
-    const current = await visibleSharedConnection(tx, input.accountId, input.connectionId);
+    const current = await visibleSharedConnection(tx, input, input.connectionId);
     if (!current) return { activated: null, wake: null };
     const written = await writeSettingsRow(tx, input, {
       rotationMode: await effectiveRotationMode(tx, input),
@@ -686,7 +732,28 @@ export async function setSubscriptionCoreCodexPrimary(
   });
 }
 
-/** Legacy rotation toggle: on is `spread`, off is `primary_first` (D-13). */
+/**
+ * The primary a new or updated workspace rotation override must carry so the
+ * effective primary does not change: the organization's while the workspace
+ * inherits rotation from it, nothing to change while it already has its own.
+ */
+async function inheritedPrimaryForOverride(
+  tx: Database,
+  input: Administration,
+): Promise<{ primaryConnectionId: string | null } | Record<string, never>> {
+  if (!input.workspaceId) return {};
+  const settings = effectiveCodexSettings(
+    await readSubscriptionEffectiveSettings(tx, input.accountId, input.workspaceId),
+  );
+  if (settings.rotationSource === "workspace") return {};
+  return { primaryConnectionId: await readPrimaryConnectionId(tx, input.accountId, null) };
+}
+
+/**
+ * Legacy rotation toggle: on is `spread`, off is `primary_first` (D-13). A
+ * workspace override carries the effective (inherited) primary, so toggling
+ * rotation never drops the account unpinned sessions prefer.
+ */
 export async function setSubscriptionCoreCodexRotation(
   db: Database,
   input: Administration & { rotationEnabled: boolean },
@@ -694,6 +761,7 @@ export async function setSubscriptionCoreCodexRotation(
   return await withCodexAdministration(db, input, async (tx) => {
     const written = await writeSettingsRow(tx, input, {
       rotationMode: input.rotationEnabled ? "spread" : "primary_first",
+      ...(await inheritedPrimaryForOverride(tx, input)),
     });
     if (!written) return { rotation: null, wake: null };
     return {

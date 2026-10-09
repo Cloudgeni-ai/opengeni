@@ -50,6 +50,7 @@ import {
   rlsContextForWorkspace,
   subscriptionCoreCodexAppsRequestAuth,
   type CodexAppsRequestAuth,
+  type CodexCutoverDisposition,
   getStoredCapabilityHeaderCiphertext,
   listCapabilityCatalogItems,
   listCapabilityInstallations,
@@ -90,6 +91,8 @@ export async function buildCapabilityCatalog(input: {
   workspaceId: string;
   settings: Settings;
   subjectId?: string | null;
+  /** The workspace's organization, when the caller knows it (skips a lookup). */
+  accountId?: string;
 }): Promise<CapabilityCatalogResponse> {
   const [
     persistedItems,
@@ -108,7 +111,11 @@ export async function buildCapabilityCatalog(input: {
     discoverCuratedSkillLibraryItems(),
     listInstalledSkills(input.db, input.workspaceId),
     input.settings.codexConnectedAppsEnabled
-      ? resolveCodexAppsDesignationForRun(input.db, input.workspaceId)
+      ? resolveCodexAppsDesignationForRun(
+          input.db,
+          input.workspaceId,
+          input.accountId ? { accountId: input.accountId } : {},
+        )
       : Promise.resolve(null),
     listEnabledMcpCapabilityServers(input.db, input.workspaceId),
   ]);
@@ -937,6 +944,11 @@ export async function settingsWithEnabledCapabilityMcpServers(
     subjectId?: string;
     personalConnectionDelegations?: readonly McpPersonalConnectionDelegation[];
     onResolvedApiIntegrations?: (integrations: readonly ApiIntegrationRuntime[]) => void;
+    /**
+     * The Codex Apps designation the caller already resolves (a claim reads
+     * its cutover once), or what it knows for resolving it here.
+     */
+    codexApps?: Promise<CodexAppsDesignationForRun | null> | CodexAppsRunContext;
   },
 ): Promise<Settings> {
   const apiIntegrationsPromise = options?.subjectId
@@ -949,7 +961,13 @@ export async function settingsWithEnabledCapabilityMcpServers(
   const [enabled, apiIntegrations, codexAppsDesignation] = await Promise.all([
     listEnabledMcpCapabilityServers(db, workspaceId),
     apiIntegrationsPromise,
-    resolveCodexAppsDesignationForRun(db, workspaceId),
+    // Registration is dropped below when Apps are off for the deployment, so
+    // resolving the designation then would be pure cost.
+    !settings.codexConnectedAppsEnabled
+      ? Promise.resolve(null)
+      : options?.codexApps instanceof Promise
+        ? options.codexApps
+        : resolveCodexAppsDesignationForRun(db, workspaceId, options?.codexApps ?? {}),
   ]);
   options?.onResolvedApiIntegrations?.(apiIntegrations);
   return settingsWithCodexAppsMcpServer(
@@ -1048,21 +1066,37 @@ export type CodexAppsDesignationForRun =
   | { source: "legacy"; credentialId: string }
   | { source: "core"; accountId: string; connectionId: string };
 
+/**
+ * What the caller already knows, so the resolver does not read it again: the
+ * workspace's organization (skips the workspace lookup) and the organization's
+ * Codex cutover disposition (skips the cutover read; a claim has read it).
+ */
+export type CodexAppsRunContext = {
+  accountId?: string;
+  disposition?: CodexCutoverDisposition | Promise<CodexCutoverDisposition>;
+};
+
 export async function resolveCodexAppsDesignationForRun(
   db: Database,
   workspaceId: string,
-  accountId?: string,
+  known: CodexAppsRunContext = {},
 ): Promise<CodexAppsDesignationForRun | null> {
-  const owner = accountId ?? (await rlsContextForWorkspace(db, workspaceId)).accountId;
-  const disposition = await readCodexCutoverDisposition(db, owner, workspaceId);
+  let owner = known.accountId;
+  const accountId = async () =>
+    (owner ??= (await rlsContextForWorkspace(db, workspaceId)).accountId);
+  const disposition =
+    known.disposition !== undefined
+      ? await known.disposition
+      : await readCodexCutoverDisposition(db, await accountId(), workspaceId);
   if (disposition === "maintenance") return null;
   if (disposition === "core") {
+    const coreAccountId = await accountId();
     const designation = await resolveSubscriptionCoreCodexAppsDesignation(db, {
-      accountId: owner,
+      accountId: coreAccountId,
       workspaceId,
     });
     return designation?.status === "active"
-      ? { source: "core", accountId: owner, connectionId: designation.connectionId }
+      ? { source: "core", accountId: coreAccountId, connectionId: designation.connectionId }
       : null;
   }
   const credentialId = await resolveLegacyCodexAppsCredentialIdForRun(db, workspaceId);

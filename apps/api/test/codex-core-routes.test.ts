@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
+import {
+  codexAppsRequestAuthForDesignation,
+  resolveCodexAppsCredentialIdForRun,
+  resolveCodexAppsDesignationForRun,
+  stampDelegatedHumanAuthorization,
+} from "@opengeni/core";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { createApp } from "../src/app";
@@ -400,5 +406,250 @@ describe("Codex routes with an enabled cutover", () => {
       },
     );
     expect(refused.status).toBe(404);
+  });
+});
+
+/** A request an agent makes as the organization administrator (no browser session). */
+function organizationAdminRequest(path: string, init: RequestInit = {}): Request {
+  // With a declared length the body-limit middleware keeps this Request
+  // object, which carries the in-process authorization stamp.
+  const request = new Request(`http://opengeni.test${path}`, {
+    ...init,
+    headers: {
+      "content-type": "application/json",
+      ...(typeof init.body === "string"
+        ? { "content-length": String(Buffer.byteLength(init.body)) }
+        : {}),
+    },
+  });
+  stampDelegatedHumanAuthorization(request, {
+    organizationId: ACCOUNT,
+    subjectId: "user:org-admin",
+    permissions: ["account:read", "account:admin"] as never,
+    workspaceScope: { kind: "all" },
+  });
+  return request;
+}
+
+describe("organization Codex routes with a cutover row", () => {
+  function organizationCutover(disposition: "core" | "maintenance") {
+    cutover(disposition);
+    // The organization administrator check (no Codex state is returned).
+    mock("getOrganizationCodexRotationSettings", async () => null);
+    for (const legacy of [
+      "listOrganizationCodexAccountStatuses",
+      "setActiveOrganizationCodexCredential",
+      "updateOrganizationCodexRotationSettings",
+      "renameOrganizationCodexAccount",
+    ] as const) {
+      mock(legacy, async () => {
+        throw new Error(`legacy Codex accessor ${legacy} must not run`);
+      });
+    }
+  }
+  const orgPath = `/v1/organizations/${ACCOUNT}/codex`;
+  const orgAdmin = { accountId: ACCOUNT, workspaceId: null, subjectId: "user:org-admin" };
+
+  test("a disabled cutover fails closed on every organization route", async () => {
+    organizationCutover("maintenance");
+    for (const [method, path, body] of [
+      ["GET", "/accounts", undefined],
+      ["POST", `/accounts/${CONNECTION}/activate`, {}],
+      ["PATCH", "/settings", { rotationEnabled: false }],
+      ["PATCH", `/accounts/${CONNECTION}`, { label: "x" }],
+    ] as const) {
+      const response = await app().fetch(
+        organizationAdminRequest(`${orgPath}${path}`, {
+          method,
+          ...(body ? { body: JSON.stringify(body) } : {}),
+        }),
+      );
+      expect(response.status).toBe(503);
+      expect((await response.json()).error.details.reason).toBe(
+        "subscription_core_cutover_disabled",
+      );
+    }
+  });
+
+  test("accounts, activate, settings and rename go to the core organization row", async () => {
+    organizationCutover("core");
+    const orgProjection = mock("getSubscriptionCoreOrganizationCodexProjection", async () => ({
+      accounts: [{ ...account, label: "Renamed" }],
+      rotation: projection.rotation,
+    }));
+    const listed = await app().fetch(organizationAdminRequest(`${orgPath}/accounts`));
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toMatchObject({
+      accounts: [{ id: CONNECTION, active: true }],
+      activeAccountId: CONNECTION,
+      settings: { rotationEnabled: false, activeCredentialId: CONNECTION },
+    });
+    expect(orgProjection.mock.calls[0]![1]).toEqual({
+      organizationId: ACCOUNT,
+      subjectId: "user:org-admin",
+    });
+
+    const activate = mock("setSubscriptionCoreCodexPrimary", async () => ({
+      activated: CONNECTION,
+      wake: { accountId: ACCOUNT, reason: "core_codex_primary_changed" },
+    }));
+    const activated = await app().fetch(
+      organizationAdminRequest(`${orgPath}/accounts/${CONNECTION}/activate`, {
+        method: "POST",
+        body: "{}",
+      }),
+    );
+    expect(activated.status).toBe(200);
+    expect(await activated.json()).toEqual({ activated: true, accountId: CONNECTION });
+    expect(activate.mock.calls[0]![1]).toEqual({ ...orgAdmin, connectionId: CONNECTION });
+    expect(wakes).toEqual([{ accountId: ACCOUNT, reason: "core_codex_primary_changed" }]);
+
+    const rotation = mock("setSubscriptionCoreCodexRotation", async () => ({
+      rotation: {
+        activeCredentialId: CONNECTION,
+        rotationEnabled: false,
+        rotationStrategy: "sharded",
+      },
+      wake: { accountId: ACCOUNT, reason: "core_codex_rotation_changed" },
+    }));
+    const settingsResponse = await app().fetch(
+      organizationAdminRequest(`${orgPath}/settings`, {
+        method: "PATCH",
+        body: JSON.stringify({ rotationEnabled: false }),
+      }),
+    );
+    expect(settingsResponse.status).toBe(200);
+    expect(await settingsResponse.json()).toEqual({
+      rotationEnabled: false,
+      rotationStrategy: "sharded",
+      activeCredentialId: CONNECTION,
+    });
+    expect(rotation.mock.calls[0]![1]).toEqual({ ...orgAdmin, rotationEnabled: false });
+
+    const rename = mock("renameSubscriptionCoreCodexConnection", async () => CONNECTION);
+    const renamed = await app().fetch(
+      organizationAdminRequest(`${orgPath}/accounts/${CONNECTION}`, {
+        method: "PATCH",
+        body: JSON.stringify({ label: "Renamed" }),
+      }),
+    );
+    expect(renamed.status).toBe(200);
+    expect(await renamed.json()).toMatchObject({ id: CONNECTION, label: "Renamed" });
+    expect(rename.mock.calls[0]![1]).toEqual({
+      ...orgAdmin,
+      connectionId: CONNECTION,
+      label: "Renamed",
+    });
+
+    // A refused account (not an organization account, or not manageable) is the legacy 404.
+    mock("setSubscriptionCoreCodexPrimary", async () => ({ activated: null, wake: null }));
+    mock("renameSubscriptionCoreCodexConnection", async () => null);
+    for (const [method, path, body] of [
+      ["POST", `/accounts/${CONNECTION}/activate`, {}],
+      ["PATCH", `/accounts/${CONNECTION}`, { label: "x" }],
+    ] as const) {
+      const refused = await app().fetch(
+        organizationAdminRequest(`${orgPath}${path}`, { method, body: JSON.stringify(body) }),
+      );
+      expect(refused.status).toBe(404);
+    }
+  });
+});
+
+describe("the Codex Apps designation for a run", () => {
+  const poison = poisonDb as never;
+  function leaves() {
+    const legacy = mock("getCodexAppsCredentialAuthorizationForRun", async () => ({
+      credentialId: "legacy-apps",
+      ownerSubjectId: "user:owner",
+    }));
+    mock("getWorkspaceGrant", async () => ({
+      accountId: ACCOUNT,
+      workspaceId: WS,
+      subjectId: "user:owner",
+      permissions: ["connections:write"],
+    }));
+    const core = mock("resolveSubscriptionCoreCodexAppsDesignation", async () => ({
+      connectionId: CONNECTION,
+      status: "active",
+    }));
+    const lookup = mock("rlsContextForWorkspace", async () => ({
+      accountId: ACCOUNT,
+      workspaceId: WS,
+    }));
+    return { legacy, core, lookup };
+  }
+
+  test("maintenance designates nothing and reads neither the legacy nor the core designation", async () => {
+    const { legacy, core, lookup } = leaves();
+    mock("readCodexCutoverDisposition", async () => "maintenance");
+    expect(await resolveCodexAppsDesignationForRun(poison, WS, { accountId: ACCOUNT })).toBeNull();
+    expect(await resolveCodexAppsDesignationForRun(poison, WS)).toBeNull();
+    expect(
+      await resolveCodexAppsDesignationForRun(poison, WS, { disposition: "maintenance" }),
+    ).toBeNull();
+    expect(await resolveCodexAppsCredentialIdForRun(poison, WS)).toBeNull();
+    expect(legacy.mock.calls.length).toBe(0);
+    expect(core.mock.calls.length).toBe(0);
+    // A known organization (or a known disposition) is never looked up.
+    expect(lookup.mock.calls.length).toBe(2);
+  });
+
+  test("core uses only an active core designation; legacy only the legacy one", async () => {
+    const { legacy, core, lookup } = leaves();
+    mock("readCodexCutoverDisposition", async () => "core");
+    expect(await resolveCodexAppsDesignationForRun(poison, WS, { accountId: ACCOUNT })).toEqual({
+      source: "core",
+      accountId: ACCOUNT,
+      connectionId: CONNECTION,
+    });
+    expect(await resolveCodexAppsCredentialIdForRun(poison, WS)).toBeNull();
+    mock("resolveSubscriptionCoreCodexAppsDesignation", async () => ({
+      connectionId: CONNECTION,
+      status: "needs_relogin",
+    }));
+    expect(await resolveCodexAppsDesignationForRun(poison, WS, { accountId: ACCOUNT })).toBeNull();
+    expect(legacy.mock.calls.length).toBe(0);
+
+    const dispositionRead = mock("readCodexCutoverDisposition", async () => "legacy");
+    expect(await resolveCodexAppsDesignationForRun(poison, WS, { accountId: ACCOUNT })).toEqual({
+      source: "legacy",
+      credentialId: "legacy-apps",
+    });
+    expect(await resolveCodexAppsCredentialIdForRun(poison, WS)).toBe("legacy-apps");
+    // A known disposition skips both the cutover read and the organization lookup.
+    const lookupsBefore = lookup.mock.calls.length;
+    const readsBefore = dispositionRead.mock.calls.length;
+    expect(await resolveCodexAppsDesignationForRun(poison, WS, { disposition: "legacy" })).toEqual({
+      source: "legacy",
+      credentialId: "legacy-apps",
+    });
+    expect(lookup.mock.calls.length).toBe(lookupsBefore);
+    expect(dispositionRead.mock.calls.length).toBe(readsBefore);
+    expect(core.mock.calls.length).toBeGreaterThan(0);
+  });
+
+  test("request authentication follows the designation's source", () => {
+    const coreAuth = mock("subscriptionCoreCodexAppsRequestAuth", () => ({ kind: "core" }));
+    const legacyAuth = mock("codexAppsRequestAuth", () => ({ kind: "legacy" }));
+    expect(
+      codexAppsRequestAuthForDesignation(poison, settings, WS, {
+        source: "core",
+        accountId: ACCOUNT,
+        connectionId: CONNECTION,
+      }),
+    ).toEqual({ kind: "core" } as never);
+    expect(coreAuth.mock.calls[0]![2]).toEqual({
+      accountId: ACCOUNT,
+      workspaceId: WS,
+      connectionId: CONNECTION,
+    });
+    expect(
+      codexAppsRequestAuthForDesignation(poison, settings, WS, {
+        source: "legacy",
+        credentialId: "legacy-apps",
+      }),
+    ).toEqual({ kind: "legacy" } as never);
+    expect(legacyAuth.mock.calls[0]![2]).toEqual({ workspaceId: WS, credentialId: "legacy-apps" });
   });
 });

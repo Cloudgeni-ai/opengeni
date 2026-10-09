@@ -26,12 +26,14 @@ import { codexAccountJson } from "./codex";
 import {
   deliverSubscriptionCoreCodexWake,
   getSessionCodexAccounts,
-  getSubscriptionCoreCodexSessionPointers,
   getSubscriptionCoreSessionCodexAccounts,
   pinSubscriptionCoreSessionCodexAccount,
-  readCodexCutoverDisposition,
 } from "@opengeni/db";
 import { codexRouteDisposition } from "./codex-core";
+import {
+  loadCodexSessionPointerProjection,
+  type CodexSessionPointerProjection,
+} from "../codex-session-pointers";
 import { getToolActionReview, getToolReviewDetailsPage } from "@opengeni/db";
 import {
   AcknowledgeStreamRequest,
@@ -974,27 +976,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       ...page.pinned,
       ...page.sessions,
     ]);
-    const codexSessions = new Map(
-      (
-        await withCoreCodexSessionPointers(deps, grant.accountId, workspaceId, [
-          ...page.pinned,
-          ...page.sessions,
-        ])
-      ).map((session) => [session.id, session]),
-    );
     const decorate = (session: Session): Session => {
       const activity = commandActivity.get(session.id);
       const decorated = {
-        ...(codexSessions.get(session.id) ?? session),
+        ...session,
         hasSchedules: scheduleTargets.has(session.id),
         ...(activity ? { backgroundCommandActivity: activity } : {}),
       };
-      return sessionWithEffectiveToolPolicy(
-        decorated,
-        policy.workspaceServerIds,
-        policy.workspaceDefaultServerIds,
-        policy.effectiveToolsContext,
-      );
+      return sessionResponse(decorated, policy);
     };
     if (pageView) {
       return c.json({
@@ -1222,9 +1211,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const [codexSession] = await withCoreCodexSessionPointers(deps, grant.accountId, workspaceId, [
-      session,
-    ]);
     // Independent reads of the already-authorized session: the effective
     // policy context depends only on the session row, not on the activity or
     // schedule annotations, so all three are read concurrently.
@@ -1241,17 +1227,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [session]),
     ]);
     return c.json(
-      sessionWithEffectiveToolPolicy(
+      sessionResponse(
         {
-          ...codexSession!,
+          ...session,
           hasSchedules: scheduleTargets.has(sessionId),
           ...(activity.get(sessionId)
             ? { backgroundCommandActivity: activity.get(sessionId) }
             : {}),
         },
-        policy.workspaceServerIds,
-        policy.workspaceDefaultServerIds,
-        policy.effectiveToolsContext,
+        policy,
       ),
     );
   });
@@ -2339,12 +2323,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       ...lineage,
       sessionHasSchedules: targets.has(c.req.param("sessionId")),
       ancestors: lineage.ancestors.map((session) =>
-        sessionWithEffectiveToolPolicy(
-          { ...session, hasSchedules: targets.has(session.id) },
-          policy.workspaceServerIds,
-          policy.workspaceDefaultServerIds,
-          policy.effectiveToolsContext,
-        ),
+        sessionResponse({ ...session, hasSchedules: targets.has(session.id) }, policy),
       ),
       children: decorateNodes(mapLineageNodes(lineage.children, policy)),
     });
@@ -6355,8 +6334,15 @@ type EffectivePolicyContext = {
   workspaceServerIds: string[];
   workspaceDefaultServerIds: string[];
   effectiveToolsContext: Awaited<ReturnType<typeof workspaceSessionEffectiveToolsContext>>;
+  /** The Codex session pointers by cutover disposition (see codex-session-pointers). */
+  codexPointers: CodexSessionPointerProjection;
 };
 
+/**
+ * Everything a Session response projection needs, loaded once for all the
+ * sessions it returns. Every route that returns a Session projects it through
+ * `sessionResponse` with this context.
+ */
 async function loadEffectivePolicyContext(
   deps: ApiRouteDeps,
   workspaceId: string,
@@ -6366,7 +6352,7 @@ async function loadEffectivePolicyContext(
   // Both projections read the same workspace row; hydrate it once.
   const workspaceRead = requireWorkspace(deps.db, workspaceId);
   void workspaceRead.catch(() => undefined);
-  const [policy, effectiveToolsContext] = await Promise.all([
+  const [policy, effectiveToolsContext, codexPointers] = await Promise.all([
     workspaceSessionToolPolicyContext(
       deps.db,
       workspaceId,
@@ -6375,8 +6361,19 @@ async function loadEffectivePolicyContext(
       workspaceRead,
     ),
     workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, sessions, workspaceRead),
+    loadCodexSessionPointerProjection(deps.db, workspaceId, sessions),
   ]);
-  return { ...policy, effectiveToolsContext };
+  return { ...policy, effectiveToolsContext, codexPointers };
+}
+
+/** The response projection of one Session: Codex pointers and effective tool policy. */
+function sessionResponse(session: Session, policy: EffectivePolicyContext): Session {
+  return sessionWithEffectiveToolPolicy(
+    policy.codexPointers(session),
+    policy.workspaceServerIds,
+    policy.workspaceDefaultServerIds,
+    policy.effectiveToolsContext,
+  );
 }
 
 async function withEffectivePolicy(
@@ -6386,59 +6383,13 @@ async function withEffectivePolicy(
   session: Session,
 ): Promise<Session> {
   const policy = await loadEffectivePolicyContext(deps, workspaceId, subjectId, [session]);
-  return sessionWithEffectiveToolPolicy(
-    session,
-    policy.workspaceServerIds,
-    policy.workspaceDefaultServerIds,
-    policy.effectiveToolsContext,
-  );
+  return sessionResponse(session, policy);
 }
 
 function mapLineageNodes(nodes: LineageNode[], policy: EffectivePolicyContext): LineageNode[] {
   return nodes.map((node) => ({
     ...node,
-    session: sessionWithEffectiveToolPolicy(
-      node.session as Session,
-      policy.workspaceServerIds,
-      policy.workspaceDefaultServerIds,
-      policy.effectiveToolsContext,
-    ),
+    session: sessionResponse(node.session as Session, policy),
     children: mapLineageNodes(node.children, policy),
   }));
-}
-
-/**
- * Sessions of an organization whose Codex cutover is enabled show their core
- * binding in the legacy pointer fields; the legacy columns are never written
- * with core ids. Without a cutover row the sessions are returned unchanged
- * (one cutover-row read).
- */
-async function withCoreCodexSessionPointers<
-  T extends {
-    id: string;
-    codexPinnedCredentialId: string | null;
-    codexLastCredentialId: string | null;
-  },
->(deps: ApiRouteDeps, accountId: string, workspaceId: string, sessions: T[]): Promise<T[]> {
-  if (sessions.length === 0) return sessions;
-  // Never fail a session read on Codex state: a disabled cutover (maintenance)
-  // shows no pointers rather than legacy ones.
-  const disposition = await readCodexCutoverDisposition(deps.db, accountId, workspaceId);
-  if (disposition === "legacy") return sessions;
-  const pointers =
-    disposition === "core"
-      ? await getSubscriptionCoreCodexSessionPointers(deps.db, {
-          accountId,
-          workspaceId,
-          sessionIds: sessions.map((session) => session.id),
-        })
-      : new Map<string, { pinnedCredentialId: string | null; lastCredentialId: string | null }>();
-  return sessions.map((session) => {
-    const pointer = pointers.get(session.id);
-    return {
-      ...session,
-      codexPinnedCredentialId: pointer?.pinnedCredentialId ?? null,
-      codexLastCredentialId: pointer?.lastCredentialId ?? null,
-    };
-  });
 }

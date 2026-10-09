@@ -501,6 +501,15 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     },
   );
   let integrations: readonly ApiIntegrationRuntime[] = [];
+  // One designation read serves the catalog overlay and the Apps request
+  // authentication below (every Apps request is rechecked by the database).
+  let codexAppsDesignationRead: ReturnType<typeof resolveCodexAppsDesignationForRun> | null = null;
+  const codexAppsDesignationForGrant = () =>
+    (codexAppsDesignationRead ??= resolveCodexAppsDesignationForRun(
+      routeDeps.db,
+      grant.workspaceId,
+      { accountId: grant.accountId },
+    ));
   const settings = await settingsWithEnabledCapabilityMcpServers(
     routeDeps.db,
     grant.workspaceId,
@@ -510,6 +519,9 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       onResolvedApiIntegrations: (resolved) => {
         integrations = resolved;
       },
+      ...(resolvedCatalog.settings.codexConnectedAppsEnabled
+        ? { codexApps: codexAppsDesignationForGrant() }
+        : {}),
     },
   );
   // Transport admission has already verified the current caller. A service
@@ -601,7 +613,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   // (rechecked by the database on every request) with an enabled cutover;
   // none with a disabled cutover.
   const codexAppsDesignation = gatewayServerIds.has("codex_apps")
-    ? await resolveCodexAppsDesignationForRun(routeDeps.db, grant.workspaceId, grant.accountId)
+    ? await codexAppsDesignationForGrant()
     : null;
   const codexAppsAuth = codexAppsDesignation
     ? codexAppsRequestAuthForDesignation(

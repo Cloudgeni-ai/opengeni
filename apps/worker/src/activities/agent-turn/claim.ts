@@ -1,8 +1,5 @@
 import { withDirectModelProviders } from "@opengeni/config";
-import {
-  loadDirectModelProviderConnection,
-  resolveSubscriptionCoreCodexAppsDesignation,
-} from "@opengeni/db";
+import { loadDirectModelProviderConnection } from "@opengeni/db";
 import { FILESYSTEM_DISCONTINUITY_PROTOCOL } from "./recovery-warning";
 import {
   claimCodexActiveFromCutover,
@@ -49,7 +46,7 @@ import { validateIncidentTelemetrySystemUpdateAuthority } from "../incident-tele
 import {
   assertSessionAllowsProductModel,
   resolveCatalogSettings,
-  resolveCodexAppsCredentialIdForRun,
+  resolveCodexAppsDesignationForRun,
 } from "@opengeni/core";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { currentActivityContext, startActivityHeartbeat } from "../streaming";
@@ -292,6 +289,29 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   let installedApiIntegrations: readonly ApiIntegrationRuntime[] = [];
   const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
   const fileAuthoritySubjectId = turn.initiatingHumanSubjectId ?? null;
+  // An organization whose Codex cutover row exists (enabled or disabled)
+  // reads no legacy Codex table at claim. The row is read once, with the
+  // legacy read's bounded retry, and serves the capability overlay, the Apps
+  // designation and the Codex availability below.
+  let codexCutoverRead: Promise<ClaimCodexCutoverState> | null = null;
+  const codexCutoverState = () =>
+    (codexCutoverRead ??= readClaimCodexCutoverState(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+    }));
+  // The Apps designation for this claim, resolved once: legacy without a
+  // cutover row, the core designation (rechecked by the database on every
+  // Apps request) with an enabled one, none with a disabled one. The
+  // organization and cutover are known here, so neither is read again.
+  const codexAppsDesignationRead = deploymentCatalogSettings.codexConnectedAppsEnabled
+    ? resolveCodexAppsDesignationForRun(db, input.workspaceId, {
+        accountId: input.accountId,
+        disposition: codexCutoverState().then((cutover) =>
+          cutover === "not_configured" ? "legacy" : cutover === "enabled" ? "core" : "maintenance",
+        ),
+      })
+    : Promise.resolve(null);
+  void codexAppsDesignationRead.catch(() => undefined);
   // Both are fresh scoped reads on the root pool after exact claim ownership.
   // Neither consumes the other's result; retain the capability helper's own
   // subject/delegation authority and await both before credential/policy gates.
@@ -322,6 +342,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
           onResolvedApiIntegrations: (integrations) => {
             installedApiIntegrations = integrations;
           },
+          codexApps: codexAppsDesignationRead,
         }),
     ),
   ]);
@@ -333,12 +354,6 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // shared core decides availability at placement, so the catalog provider is
   // installed when the cutover is enabled; a disabled cutover fails closed at
   // placement. The row is read once, with the legacy read's bounded retry.
-  let codexCutoverRead: Promise<ClaimCodexCutoverState> | null = null;
-  const codexCutoverState = () =>
-    (codexCutoverRead ??= readClaimCodexCutoverState(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-    }));
   const codexPolicyTurn =
     claimedPolicy.kind === "valid" && claimedPolicy.policy.providerId === "codex-subscription";
   const codexActive =
@@ -401,26 +416,24 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // resolves the legacy Apps designation. With an enabled cutover the core
   // designation (rechecked by the database on every Apps request) is used; a
   // disabled cutover resolves none.
+  const codexAppsDesignation = capabilitySettings.codexConnectedAppsEnabled
+    ? await codexAppsDesignationRead
+    : null;
   const codexAppsCoreConnectionId =
-    capabilitySettings.codexConnectedAppsEnabled &&
+    codexAppsDesignation?.source === "core" &&
     claimMayResolveCoreCodexApps({
       codexConnectedAppsEnabled: true,
       cutover: await codexCutoverState(),
     })
-      ? await resolveSubscriptionCoreCodexAppsDesignation(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-        }).then((designation) =>
-          designation?.status === "active" ? designation.connectionId : null,
-        )
+      ? codexAppsDesignation.connectionId
       : null;
   const codexAppsCredentialId =
-    capabilitySettings.codexConnectedAppsEnabled &&
+    codexAppsDesignation?.source === "legacy" &&
     claimMayResolveLegacyCodexApps({
       codexConnectedAppsEnabled: true,
       cutover: await codexCutoverState(),
     })
-      ? await resolveCodexAppsCredentialIdForRun(db, input.workspaceId)
+      ? codexAppsDesignation.credentialId
       : null;
   const candidatePolicy =
     claimedPolicy.kind === "valid"

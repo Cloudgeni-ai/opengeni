@@ -356,6 +356,7 @@ import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { orchestrationFailureDiagnostic } from "./orchestration-failure-diagnostic";
+import { loadCodexSessionPointerProjection } from "../codex-session-pointers";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -4877,7 +4878,15 @@ function registerWorkspaceOrchestrationTools(
         }
         return json(
           boundSessionDetailMcp(
-            await withMcpEffectivePolicy(deps, grant.workspaceId, grant.subjectId, projected),
+            await withMcpEffectivePolicy(
+              deps,
+              grant.workspaceId,
+              grant.subjectId,
+              // The Codex pointers by cutover disposition, as REST shows them.
+              (await loadCodexSessionPointerProjection(deps.db, grant.workspaceId, [projected]))(
+                projected,
+              ),
+            ),
           ),
         );
       },

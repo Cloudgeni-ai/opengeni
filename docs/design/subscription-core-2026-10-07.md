@@ -1174,17 +1174,44 @@ nothing unless the account's Codex cutover is enabled.
   Designate/clear on the core use the designation table's own policy: an
   organization administrator, or a workspace administrator for a connection
   that workspace manages, in any inference source mode. The core row is
-  deleted on clear, so the projected version returns to 0 (decision: a
-  stale client conflicts at most once; the state it would overwrite is
-  equal). Personal connections cannot be designated (the M2 policy is
-  shared-only), and the catalog still requires an active connection.
+  deleted on clear, so the projected version returns to 0. Decision: a new
+  designation's version is the transaction-clock microsecond (never below
+  the stored version + 1), so it is greater than every earlier designation
+  of that workspace (designate and clear serialize on the settings lock) and
+  a stale clear always conflicts instead of removing a newer designation; no
+  tombstone or schema change is needed. Personal connections cannot be
+  designated (the M2 policy is shared-only), and the catalog still requires
+  an active connection. The in-process Apps refresh flight is keyed by
+  workspace, connection and refresh generation, because one
+  organization-scoped connection can be designated by several workspaces
+  and one workspace's `unavailable` must never reach another's request.
+  Authorization in every 0670 routine is an explicit predicate (account and
+  workspace equal the caller's context, enabled cutover, a designation row
+  for this workspace naming the connection, shared Codex subscription
+  connection, organization scope or an exact workspace assignment, active
+  status, and begin's one-shot authorization for persist/fail), never row
+  visibility, so the routines are equally safe when their owner bypasses RLS
+  (a superuser-owned routine) and when it is subject to FORCE RLS; the
+  authorization tests run under both the shared template and an
+  owner-migrated database. Gate-off cost: `resolveCodexAppsDesignationForRun`
+  takes what the caller knows (the organization, skipping the workspace
+  lookup; the cutover disposition, skipping the cutover read). The claim
+  reads its cutover row once and resolves the designation once for both the
+  capability overlay and the Apps credential; the overlay resolves nothing
+  while Apps are off for the deployment.
 - **Running on and the legacy pointer.** `GET .../sessions/:id/codex-accounts`
   projects from the session's core binding, the active turn's live core
   lease and the workspace's core pool: a running turn shows its leased
-  connection, a waiting turn only an explicit choice. Session GET and list
-  responses fill `codexPinnedCredentialId`/`codexLastCredentialId` from the
-  binding (explicit choice and bound connection); a core session without a
-  binding shows nulls. `sessions.codex_last_credential_id` is still never
+  connection, a waiting turn only an explicit choice. Every response that
+  returns a Session (GET, list, lineage ancestors and children, and every
+  mutation that answers with the session, through the routes' one shared
+  response projection; and MCP `session_get`) fills
+  `codexPinnedCredentialId`/`codexLastCredentialId` by disposition
+  (`apps/api/src/codex-session-pointers.ts`): legacy ids unchanged without a
+  row; from the binding (explicit choice and bound connection) with an
+  enabled row, nulls for a core session without a binding; nulls in
+  maintenance. A session read never fails on Codex state: an unreadable
+  cutover or binding shows nulls and is logged. `sessions.codex_last_credential_id` is still never
   written with a core id (it carries a legacy-table guard), and legacy reads
   of it are unchanged for organizations without a row.
 - **Route projections (SUB-COMPAT-02).** Same paths, verbs, request fields
@@ -1205,7 +1232,20 @@ nothing unless the account's Codex cutover is enabled.
   Codex provider override (`automatic` removes it, `workspace`/`organization`
   set `inferenceSource`, `disabled` sets `enabled = false`), never connection
   scope; the allocator toggle is the connection's `allocator_enabled` with
-  the legacy optimistic concurrency on `allocator_version`. Status readiness
+  the legacy optimistic concurrency on `allocator_version`. Workspace
+  activate, rename and allocator accept only a connection in the
+  workspace's projected pool (the pool the accounts route lists), and
+  organization activate and rename only an organization account (shared,
+  managed by no workspace), as legacy did; both are checked before anything
+  is written. Settings writes update the existing row in place. Decision: a
+  missing organization row is inserted with the defaults the settings
+  resolver applies to absent values (empty rotation, providers and fallback
+  order, no cross-provider failover, personal connections allowed, no
+  personal fallback), because the organization row's CHECK requires them;
+  an upsert's proposed row would be refused before ON CONFLICT. A workspace
+  rotation override carries the effective primary (the organization's while
+  rotation is inherited), so toggling rotation never drops the account
+  unpinned sessions prefer. Status readiness
   comes from the core pool with no live provider model probe (`valid` means
   a serviceable account exists; `models` is the configured catalog), because
   a connection-level credential read for the API belongs to PR 2c. A session
@@ -1213,7 +1253,10 @@ nothing unless the account's Codex cutover is enabled.
   the connection so an unhealthy connection does not block "auto"), through
   the binding guard: the connection must be active and eligible for that
   session, and a personal connection only in its owner's own session. It
-  emits the legacy `codex.account.selection.changed` receipt. Management
+  emits the legacy `codex.account.selection.changed` receipt. The pin locks
+  the binding row (`FOR UPDATE`) before its version compare-and-swap, so a
+  running turn's concurrent binding write makes it wait, not report the
+  choice as not found. Management
   authority is the core tables' policies: an organization administrator, or
   a workspace administrator for what that workspace manages (stricter than
   the legacy `connections:write` alone, which the route still requires).
@@ -1221,10 +1264,12 @@ nothing unless the account's Codex cutover is enabled.
 - **Wakes.** Pin, allocator, primary, rotation and source changes return a
   wake that the route delivers after commit through PR 2a's
   `wakeSubscriptionCoreCodexCapacityWaiters` (workspace-scoped for workspace
-  changes, account-wide for organization changes). No existing Codex route
-  edits workspace assignment; the M5 scope editor must call the same wake.
-  A failed wake never fails the committed change: every core waiter has its
-  own bounded recheck (1 minute doubling to 15).
+  changes, account-wide for organization changes, and session-scoped for a
+  session pin, which wakes only that session's waiter as legacy did, with
+  the same outbox and generic-wake mechanics). No existing Codex route edits
+  workspace assignment; the M5 scope editor must call the same wake. A
+  failed wake never fails the committed change (every core waiter has its
+  own bounded recheck, 1 minute doubling to 15) and is logged.
 - **Not served on the core yet** (typed `409 conflict` with
   `details.reason = subscription_core_route_unsupported`, no legacy state
   read): live usage reads and refresh, the overview, reset-credit

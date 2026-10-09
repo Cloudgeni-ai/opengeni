@@ -32,6 +32,22 @@
 --    refresh-generation compare-and-swap; fail marks needs_relogin under the
 --    same compare-and-swap. They mirror the chat seam (0664/0665) with the
 --    designation in place of the turn lease.
+--
+-- Authorization never relies on row visibility. Every routine is SECURITY
+-- DEFINER, and its owner may bypass row-level security (a superuser-owned
+-- routine, as in the shared test template or docker-compose) or be subject to
+-- FORCE RLS (an owner-migrated database), so every check is an explicit
+-- predicate that holds either way: the account and workspace arguments equal
+-- the caller's RLS context; the account's Codex cutover row is enabled; a
+-- designation row exists for exactly this account and workspace and names the
+-- connection; the connection is a Codex subscription connection of that
+-- account with shared ownership; it is organization-scoped or has an exact
+-- assignment to this workspace; credential material and refresh need status
+-- 'active'; and persist/fail consume the one-shot authorization that begin
+-- minted for this backend, transaction, account, workspace and connection
+-- (the application role has no privilege on the capability table). The
+-- capability rows inserted below only widen what the routine itself may read
+-- when its owner is subject to RLS; they never stand in for a check.
 
 SET LOCAL lock_timeout = '5s';
 

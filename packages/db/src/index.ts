@@ -29415,10 +29415,24 @@ export type SubscriptionCoreCodexWakeScope = { accountId: string; workspaceId: s
  */
 export async function wakeSubscriptionCoreCodexCapacityWaiters(
   db: Database,
-  input: { accountId: string; reason: string; workspaceIds?: readonly string[] },
+  input: {
+    accountId: string;
+    reason: string;
+    workspaceIds?: readonly string[];
+    /**
+     * Wake only these sessions' waiters (for example a session pin, which
+     * changes nothing another session can place on). Requires exactly one
+     * workspace in `workspaceIds`.
+     */
+    sessionIds?: readonly string[];
+  },
 ): Promise<SubscriptionCoreCodexWakeScope[]> {
   if (!/^[a-z][a-z0-9_]{0,127}$/.test(input.reason))
     throw new Error("Core Codex wake reason must be a bounded identifier");
+  if (input.sessionIds !== undefined && input.workspaceIds?.length !== 1)
+    throw new Error("A session-scoped core Codex wake names exactly one workspace");
+  const sessionIds = input.sessionIds ? [...new Set(input.sessionIds)] : null;
+  if (sessionIds !== null && sessionIds.length === 0) return [];
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: null }, async (tx) =>
     withPoolWakeServiceScopeInTransaction(tx, async () => {
       const cutover = await readCoreProviderCutoverState(tx, {
@@ -29457,6 +29471,14 @@ export async function wakeSubscriptionCoreCodexCapacityWaiters(
                 updated_at = clock_timestamp()
             where account_id = ${input.accountId}::uuid
               and workspace_id = ${workspaceId}::uuid and provider = 'codex'
+              ${
+                sessionIds === null
+                  ? sql``
+                  : sql`and session_id in (${sql.join(
+                      sessionIds.map((id) => sql`${id}::uuid`),
+                      sql`, `,
+                    )})`
+              }
             returning session_id::text as session_id, waiter_id::text as waiter_id,
               generation, wake_revision`,
         );
@@ -33673,10 +33695,19 @@ export async function pinSubscriptionCoreSessionCodexAccount(
         wake: null,
       };
       if (!session || session.accountId !== input.accountId) return unchanged;
-      const binding = await readCoreSessionBinding(tx, {
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-      });
+      // Lock the binding: a running turn's placement or cache-warmth touch
+      // (`writeSubscriptionSessionBinding`, `touchSubscriptionCoreCodexBinding`)
+      // advances its version, and an unlocked read would lose the version
+      // compare-and-swap below to it and report the choice as not found.
+      const [lockedBinding] = await rawRows<{ choice: string; version: number | string }>(
+        tx,
+        sql`select choice, version from subscription_session_bindings
+          where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
+          for update`,
+      );
+      const binding = lockedBinding
+        ? { choice: lockedBinding.choice, version: Number(lockedBinding.version) }
+        : null;
       let connectionId: string | null = null;
       if (input.connectionId !== null) {
         // Canonical or visible alias; otherwise the raw id, which the binding
@@ -33782,10 +33813,13 @@ export async function pinSubscriptionCoreSessionCodexAccount(
         );
       return {
         result: { changed: true, appliedTo, events: inserted.map(mapEvent) },
+        // Legacy woke only this session: a pin changes nothing another
+        // session's waiter can place on.
         wake: {
           accountId: input.accountId,
           reason: "core_codex_session_pin_changed",
           workspaceIds: [input.workspaceId],
+          sessionIds: [input.sessionId],
         },
       };
     },
@@ -33795,7 +33829,8 @@ export async function pinSubscriptionCoreSessionCodexAccount(
 /**
  * Deliver a core Codex wake after the mutation that caused it committed. A
  * failed wake never fails the committed change: every core waiter also has
- * its own bounded recheck, so the change is observed at the latest then.
+ * its own bounded recheck, so the change is observed at the latest then. The
+ * failure is logged (identifiers and error class only).
  */
 export async function deliverSubscriptionCoreCodexWake(
   db: Database,
@@ -33807,9 +33842,21 @@ export async function deliverSubscriptionCoreCodexWake(
       accountId: wake.accountId,
       reason: wake.reason,
       ...(wake.workspaceIds ? { workspaceIds: wake.workspaceIds } : {}),
+      ...(wake.sessionIds ? { sessionIds: wake.sessionIds } : {}),
     });
-  } catch {
+  } catch (error) {
     // Bounded waiter recheck is the backstop (see above).
+    console.warn("core Codex wake delivery failed; waiters recheck on their own timer", {
+      accountId: wake.accountId,
+      reason: wake.reason,
+      workspaceIds: wake.workspaceIds ?? null,
+      sessionIds: wake.sessionIds ?? null,
+      error: error instanceof Error ? error.name : typeof error,
+      code:
+        (error as { code?: unknown } | null)?.code ??
+        (error as { cause?: { code?: unknown } } | null)?.cause?.code ??
+        null,
+    });
   }
 }
 

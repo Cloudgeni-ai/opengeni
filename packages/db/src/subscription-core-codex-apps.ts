@@ -208,18 +208,27 @@ export async function designateSubscriptionCoreCodexApps(
     if (!connection || connection.kind !== "subscription" || connection.ownership !== "shared")
       return { kind: "not_found" };
     if (connection.status !== "active") return { kind: "unavailable" };
-    const version = current.version + 1;
-    let written: { updated_at: Date | string } | undefined;
+    let written: { version: number | string; updated_at: Date | string } | undefined;
     try {
       written = await tx.transaction(async (savepoint) => {
-        const [row] = await rawRows<{ updated_at: Date | string }>(
+        // Clear deletes the row, so the version cannot simply count up from
+        // the stored one: a designation made after a clear would reuse a
+        // version a stale client still holds, and that client's clear would
+        // remove the newer designation. The version is therefore the
+        // transaction-clock microsecond (never below the stored version + 1).
+        // Designate and clear serialize on the workspace's settings lock, so
+        // every designation of a workspace gets a version strictly greater
+        // than any earlier one, and a stale expectedVersion always conflicts.
+        const [row] = await rawRows<{ version: number | string; updated_at: Date | string }>(
           savepoint as unknown as Database,
           sql`insert into subscription_apps_designations (
               account_id, workspace_id, connection_id, version, updated_by_subject_id, updated_at
             ) values (
               ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${connectionId}::uuid,
-              ${version}, ${input.subjectId}, clock_timestamp()
-            ) returning updated_at`,
+              greatest(${current.version + 1}::bigint,
+                floor(extract(epoch from clock_timestamp()) * 1000000)::bigint),
+              ${input.subjectId}, clock_timestamp()
+            ) returning version, updated_at`,
         );
         return row;
       });
@@ -228,6 +237,7 @@ export async function designateSubscriptionCoreCodexApps(
       throw error;
     }
     if (!written) throw new Error("Core Codex Apps designation was not persisted");
+    const version = Number(written.version);
     await auditAppsDesignation(tx, input, "codex_apps.designated", connectionId, version);
     return {
       kind: "updated",
@@ -244,7 +254,8 @@ export type ClearSubscriptionCoreCodexAppsResult = {
 
 /**
  * Clear the designation, valid in any inference source mode. The core row is
- * deleted, so the projected version returns to 0 (no designation).
+ * deleted, so the projected version returns to 0 (no designation); the next
+ * designation's version is greater than every earlier one (see designate).
  */
 export async function clearSubscriptionCoreCodexApps(
   db: Database,
@@ -460,7 +471,10 @@ export function buildSubscriptionCoreCodexAppsTokenResolver(
         chatgptAccountId: credential.chatgptAccountId,
       };
     }
-    const flightKey = `${target.connectionId}:${credential.refreshGeneration}`;
+    // Per workspace as well: an organization-scoped connection can be
+    // designated by several workspaces, and one workspace's `unavailable`
+    // (its designation ended) must never be shared with another's request.
+    const flightKey = `${target.workspaceId}:${target.connectionId}:${credential.refreshGeneration}`;
     let flight = appsRefreshFlights.get(flightKey);
     if (!flight) {
       flight = refreshAppsCredential(db, key, target, credential.refreshGeneration, deps).finally(

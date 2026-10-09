@@ -1,5 +1,10 @@
-import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
+import {
+  acquireOwnerMigratedTestDatabase,
+  acquireSharedTestDatabase,
+  type OwnerMigratedTestDatabase,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import type { Settings } from "@opengeni/config";
 import { CodexReloginRequired, isCodexAppsCredentialUnavailable } from "@opengeni/codex";
 import { sql } from "drizzle-orm";
@@ -17,7 +22,9 @@ import {
   getSubscriptionCoreCodexWorkspaceProjection,
   getSubscriptionCoreOrganizationCodexProjection,
   getSubscriptionCoreSessionCodexAccounts,
+  migrate,
   pinSubscriptionCoreSessionCodexAccount,
+  provisionRoles,
   readCodexCutoverDisposition,
   renameSubscriptionCoreCodexConnection,
   resolveSubscriptionCoreCodexAppsDesignation,
@@ -255,8 +262,23 @@ function readCredential(org: Org, workspaceId: string, connectionId: string) {
   );
 }
 
-describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
-  test("runs as the non-superuser, non-bypass application role", async () => {
+/**
+ * Authorization of the 0670 routines. Run against two harnesses: the shared
+ * template, whose routines are owned by a role that bypasses row-level
+ * security (a superuser), and an owner-migrated database, whose routine owner
+ * is an ordinary role subject to FORCE RLS. Every check must be an explicit
+ * predicate, so both must agree.
+ */
+function authorizationCases(harness: "template" | "owner-migrated") {
+  test(`${harness}: the 0670 routines' owner ${harness === "template" ? "bypasses" : "is subject to"} row-level security`, async () => {
+    const [owner] = await shared!.admin<{ bypasses: boolean }[]>`
+      select (role.rolsuper or role.rolbypassrls) as bypasses
+      from pg_proc proc join pg_roles role on role.oid = proc.proowner
+      where proc.proname = 'subscription_codex_apps_designation_target'`;
+    expect(owner!.bypasses).toBe(harness === "template");
+  });
+
+  test(`${harness}: runs as the non-superuser, non-bypass application role`, async () => {
     const [role] = await rawRows<{ currentUser: string; superuser: boolean; bypassRls: boolean }>(
       client!.db,
       sql`select current_user as "currentUser", rolsuper as superuser,
@@ -266,7 +288,7 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
     expect(role).toEqual({ currentUser: "opengeni_app", superuser: false, bypassRls: false });
   });
 
-  test("without a cutover row nothing on the core resolves, even with core rows present", async () => {
+  test(`${harness}: without a cutover row nothing on the core resolves, even with core rows present`, async () => {
     const org = await organization();
     const connectionId = await sharedConnection(org, "gate-off");
     await shared!.admin`
@@ -292,7 +314,7 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
     expect(await readCredential(org, org.sharedWorkspaceId, connectionId)).toEqual([]);
   });
 
-  test("an administrator designates Apps on the core; requests recheck and refresh by designation", async () => {
+  test(`${harness}: an administrator designates Apps on the core; requests recheck and refresh by designation`, async () => {
     const org = await organization();
     await setCutover(org.accountId, true);
     expect(await readCodexCutoverDisposition(client!.db, org.accountId)).toBe("core");
@@ -312,20 +334,22 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
       subjectId: org.ownerSubjectId,
       expectedVersion: 0,
     });
-    expect(designated).toMatchObject({ kind: "updated", credentialId: connectionId, version: 1 });
+    expect(designated).toMatchObject({ kind: "updated", credentialId: connectionId });
+    const designatedVersion = (designated as { version: number }).version;
+    expect(designatedVersion).toBeGreaterThan(0);
     expect(
       (
         await designateSubscriptionCoreCodexApps(client!.db, {
           ...scope,
           connectionId,
           subjectId: org.ownerSubjectId,
-          expectedVersion: 1,
+          expectedVersion: designatedVersion,
         })
       ).kind,
     ).toBe("already_designated");
     expect(await getSubscriptionCoreCodexAppsSettings(client!.db, scope)).toMatchObject({
       credentialId: connectionId,
-      version: 1,
+      version: designatedVersion,
     });
     expect(await resolveSubscriptionCoreCodexAppsDesignation(client!.db, scope)).toEqual({
       connectionId,
@@ -397,20 +421,30 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
       { status: "needs_relogin", credential_encrypted: null },
     ]);
 
+    await shared!.admin`update subscription_connections
+      set status = 'active', expires_at = now() + interval '1 hour'
+      where id = ${connectionId}::uuid`;
+    // Maintenance (a disabled cutover row) ends authority for in-flight
+    // request auth too; re-enabling restores it.
+    await setCutover(org.accountId, false);
+    const paused = await auth.withAuthorization(async (token) => token).catch((caught) => caught);
+    expect(isCodexAppsCredentialUnavailable(paused)).toBe(true);
+    await setCutover(org.accountId, true);
+    expect((await auth.withAuthorization(async (token) => token)).accessToken).toBe(
+      "access-rotated",
+    );
     // Clearing ends authority for in-flight request auth.
-    await shared!
-      .admin`update subscription_connections set status = 'active' where id = ${connectionId}::uuid`;
     const cleared = await clearSubscriptionCoreCodexApps(client!.db, {
       ...scope,
       subjectId: org.ownerSubjectId,
-      expectedVersion: 1,
+      expectedVersion: designatedVersion,
     });
     expect(cleared).toMatchObject({ kind: "updated", credentialId: null, version: 0 });
     const error = await auth.withAuthorization(async (token) => token).catch((caught) => caught);
     expect(isCodexAppsCredentialUnavailable(error)).toBe(true);
   });
 
-  test("designation authority, scope and personal-connection rules are enforced by the database", async () => {
+  test(`${harness}: designation authority, scope and personal-connection rules are enforced by the database`, async () => {
     const org = await organization();
     const other = await organization();
     await setCutover(org.accountId, true);
@@ -447,21 +481,20 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
       ).kind,
     ).toBe("forbidden");
     // The delegated manager may designate the connection its workspace manages.
-    expect(
-      await designateSubscriptionCoreCodexApps(client!.db, {
-        ...scope,
-        connectionId: managedHere,
-        subjectId: manager,
-        expectedVersion: 0,
-      }),
-    ).toMatchObject({ kind: "updated", credentialId: managedHere });
+    const managerDesignation = await designateSubscriptionCoreCodexApps(client!.db, {
+      ...scope,
+      connectionId: managedHere,
+      subjectId: manager,
+      expectedVersion: 0,
+    });
+    expect(managerDesignation).toMatchObject({ kind: "updated", credentialId: managedHere });
     // A stranger cannot clear it.
     expect(
       (
         await clearSubscriptionCoreCodexApps(client!.db, {
           ...scope,
           subjectId: stranger,
-          expectedVersion: 1,
+          expectedVersion: (managerDesignation as { version: number }).version,
         })
       ).kind,
     ).toBe("forbidden");
@@ -536,6 +569,63 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
     expect(await resolveSubscriptionCoreCodexAppsDesignation(client!.db, scope)).toBeNull();
     expect(await readCredential(org, org.sharedWorkspaceId, peopleScoped!.id)).toEqual([]);
 
+    // Explicit predicates, not row visibility, refuse everything else: a
+    // designation naming another provider's or a non-subscription connection,
+    // a workspace argument that is not the caller's, and a refresh write
+    // without its begin in the same transaction.
+    for (const [provider, kind] of [
+      ["claude", "subscription"],
+      ["codex", "api_key"],
+    ] as const) {
+      const [foreignKind] = await shared!.admin<{ id: string }[]>`
+        insert into subscription_connections (
+          account_id, provider, kind, credential_encrypted, ownership, scope_kind, provider_account_id
+        ) values (
+          ${org.accountId}::uuid, ${provider}, ${kind}, ${encryptedTokens(`${provider}-${kind}`)},
+          'shared', 'organization', ${`${provider}-${kind}-account`}
+        ) returning id::text as id`;
+      await shared!.admin`
+        update subscription_apps_designations set connection_id = ${foreignKind!.id}::uuid
+        where workspace_id = ${org.sharedWorkspaceId}::uuid`;
+      expect(await resolveSubscriptionCoreCodexAppsDesignation(client!.db, scope)).toBeNull();
+      expect(await readCredential(org, org.sharedWorkspaceId, foreignKind!.id)).toEqual([]);
+    }
+    await shared!.admin`
+      update subscription_apps_designations set connection_id = ${organizationScoped}::uuid
+      where workspace_id = ${org.sharedWorkspaceId}::uuid`;
+    expect(await resolveSubscriptionCoreCodexAppsDesignation(client!.db, scope)).toEqual({
+      connectionId: organizationScoped,
+      status: "active",
+    });
+    const crossWorkspace = await withRlsContext(
+      client!.db,
+      { accountId: org.accountId, workspaceId: org.personalWorkspaceId },
+      (tx) =>
+        rawRows(
+          tx,
+          sql`select * from opengeni_private.read_subscription_codex_apps_credential(
+            ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${organizationScoped}::uuid)`,
+        ),
+    );
+    expect(crossWorkspace).toEqual([]);
+    const generation = Number((await connectionRow(organizationScoped)).refresh_generation);
+    const unbegun = await withRlsContext(client!.db, scope, (tx) =>
+      rawRows<{ persisted: boolean; failed: boolean }>(
+        tx,
+        sql`select opengeni_private.persist_subscription_codex_apps_refresh(
+            ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${organizationScoped}::uuid,
+            ${generation}::bigint, ${encryptedTokens("forged")}, null, now()) as persisted,
+          opengeni_private.fail_subscription_codex_apps_refresh(
+            ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${organizationScoped}::uuid,
+            ${generation}::bigint, 'forged') as failed`,
+      ),
+    );
+    expect(unbegun).toEqual([{ persisted: false, failed: false }]);
+    expect(await connectionRow(organizationScoped)).toMatchObject({
+      status: "active",
+      refresh_generation: String(generation),
+    });
+
     // The internal target helper (full connection row) is owner-only.
     const direct = await withRlsContext(client!.db, scope, (tx) =>
       rawRows(
@@ -546,7 +636,13 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
     ).catch((error: unknown) => error);
     expect(String((direct as { cause?: unknown })?.cause ?? direct)).toContain("permission denied");
   });
+}
 
+describe.skipIf(!realDb)("Codex Apps routine authorization (shared template)", () => {
+  authorizationCases("template");
+});
+
+describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
   test("workspace and organization projections keep the legacy shapes and hide personal connections", async () => {
     const org = await organization();
     const other = await organization();
@@ -943,4 +1039,600 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
       select last_wake_reason from subscription_capacity_waiters where session_id = ${sessionId}::uuid`;
     expect(reason!.last_wake_reason).toBe("core_codex_allocator_changed");
   });
+
+  test("organization activate and rotation write the organization row (H1, L5)", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const orgAccount = await sharedConnection(org, "org-write-a");
+    const workspaceManaged = await sharedConnection(org, "org-write-managed", {
+      scope: "workspaces",
+      workspaces: [org.sharedWorkspaceId],
+      managedBy: org.sharedWorkspaceId,
+      pool: "workspace",
+    });
+    const admin = { accountId: org.accountId, workspaceId: null, subjectId: org.ownerSubjectId };
+    const orgRow = async () =>
+      (
+        await shared!.admin<
+          {
+            rotation: Record<string, unknown>;
+            providers: Record<string, unknown>;
+            primary_id: string | null;
+            cross_provider_failover: boolean;
+            fallback_order: Record<string, unknown>;
+            personal_connections_allowed: boolean;
+            personal_fallback_allowed: boolean;
+          }[]
+        >`select rotation, providers, codex_primary_connection_id::text as primary_id,
+            cross_provider_failover, fallback_order, personal_connections_allowed,
+            personal_fallback_allowed
+          from subscription_settings
+          where account_id = ${org.accountId}::uuid and workspace_id is null`
+      )[0];
+
+    // Activate keeps the organization's rotation mode; the toggle keeps the primary.
+    const activated = await setSubscriptionCoreCodexPrimary(client!.db, {
+      ...admin,
+      connectionId: orgAccount,
+    });
+    expect(activated.activated).toBe(orgAccount);
+    expect(activated.wake).toEqual({
+      accountId: org.accountId,
+      reason: "core_codex_primary_changed",
+    });
+    expect(await orgRow()).toMatchObject({
+      rotation: { codex: { mode: "spread" } },
+      primary_id: orgAccount,
+      personal_fallback_allowed: true,
+    });
+    const rotation = await setSubscriptionCoreCodexRotation(client!.db, {
+      ...admin,
+      rotationEnabled: false,
+    });
+    expect(rotation.rotation).toEqual({
+      activeCredentialId: orgAccount,
+      rotationEnabled: false,
+      rotationStrategy: "sharded",
+    });
+    expect(
+      await getSubscriptionCoreOrganizationCodexProjection(client!.db, {
+        organizationId: org.accountId,
+        subjectId: org.ownerSubjectId,
+      }),
+    ).toMatchObject({ rotation: { activeCredentialId: orgAccount, rotationEnabled: false } });
+
+    // Organization routes manage organization accounts only (legacy parity):
+    // a workspace-managed connection is refused before anything is written.
+    expect(
+      (
+        await setSubscriptionCoreCodexPrimary(client!.db, {
+          ...admin,
+          connectionId: workspaceManaged,
+        })
+      ).activated,
+    ).toBeNull();
+    expect(
+      await renameSubscriptionCoreCodexConnection(client!.db, {
+        ...admin,
+        connectionId: workspaceManaged,
+        label: "renamed by the organization route",
+      }),
+    ).toBeNull();
+    expect((await connectionRow(workspaceManaged)).label).toBe("org-write-managed");
+    expect((await orgRow())!.primary_id).toBe(orgAccount);
+    expect(
+      await renameSubscriptionCoreCodexConnection(client!.db, {
+        ...admin,
+        connectionId: orgAccount,
+        label: "Organization A",
+      }),
+    ).toBe(orgAccount);
+
+    // A non-administrator writes nothing.
+    const manager = await workspaceAdmin(org, org.sharedWorkspaceId);
+    expect(
+      (
+        await setSubscriptionCoreCodexRotation(client!.db, {
+          ...admin,
+          subjectId: manager,
+          rotationEnabled: true,
+        })
+      ).rotation,
+    ).toBeNull();
+    expect((await orgRow())!.rotation).toEqual({ codex: { mode: "primary_first" } });
+
+    // A missing organization row is created with the resolver's defaults.
+    await shared!.admin`delete from subscription_settings
+      where account_id = ${org.accountId}::uuid and workspace_id is null`;
+    expect(
+      (
+        await setSubscriptionCoreCodexRotation(client!.db, {
+          ...admin,
+          subjectId: manager,
+          rotationEnabled: true,
+        })
+      ).rotation,
+    ).toBeNull();
+    expect(await orgRow()).toBeUndefined();
+    const created = await setSubscriptionCoreCodexRotation(client!.db, {
+      ...admin,
+      rotationEnabled: false,
+    });
+    expect(created.rotation).toEqual({
+      activeCredentialId: null,
+      rotationEnabled: false,
+      rotationStrategy: "sharded",
+    });
+    expect(await orgRow()).toEqual({
+      rotation: { codex: { mode: "primary_first" } },
+      providers: {},
+      primary_id: null,
+      cross_provider_failover: false,
+      fallback_order: {},
+      personal_connections_allowed: true,
+      personal_fallback_allowed: false,
+    });
+    expect(
+      (await setSubscriptionCoreCodexPrimary(client!.db, { ...admin, connectionId: orgAccount }))
+        .activated,
+    ).toBe(orgAccount);
+    expect(
+      (
+        await getSubscriptionCoreCodexWorkspaceProjection(client!.db, {
+          accountId: org.accountId,
+          workspaceId: org.sharedWorkspaceId,
+        })
+      ).rotation,
+    ).toEqual({
+      activeCredentialId: orgAccount,
+      rotationEnabled: false,
+      rotationStrategy: "sharded",
+    });
+  });
+
+  test("the workspace rotation toggle keeps the inherited primary (M1)", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const a = await sharedConnection(org, "inherit-a");
+    const orgAdmin = { accountId: org.accountId, workspaceId: null, subjectId: org.ownerSubjectId };
+    const scope = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };
+    const workspaceAdministration = { ...scope, subjectId: org.ownerSubjectId };
+    await setSubscriptionCoreCodexPrimary(client!.db, { ...orgAdmin, connectionId: a });
+    await setSubscriptionCoreCodexRotation(client!.db, { ...orgAdmin, rotationEnabled: false });
+    const effectivePrimary = async () =>
+      (
+        await withRlsContext(client!.db, scope, (tx) =>
+          rawRows<{ primary_id: string | null; mode: string | null }>(
+            tx,
+            sql`select effective->'values'->'rotation'->'codex'->>'primaryConnectionId' as primary_id,
+                effective->'values'->'rotation'->'codex'->>'mode' as mode
+              from subscription_effective_settings(${org.accountId}::uuid,
+                ${org.sharedWorkspaceId}::uuid) effective`,
+          ),
+        )
+      )[0];
+    expect(await effectivePrimary()).toEqual({ primary_id: a, mode: "primary_first" });
+
+    // Toggling with inherited settings creates an override that keeps A.
+    const toggled = await setSubscriptionCoreCodexRotation(client!.db, {
+      ...workspaceAdministration,
+      rotationEnabled: false,
+    });
+    expect(toggled.rotation).toEqual({
+      activeCredentialId: a,
+      rotationEnabled: false,
+      rotationStrategy: "sharded",
+    });
+    expect(await effectivePrimary()).toEqual({ primary_id: a, mode: "primary_first" });
+    const projected = await getSubscriptionCoreCodexWorkspaceProjection(client!.db, scope);
+    expect(projected.rotation.activeCredentialId).toBe(a);
+    expect(projected.accounts.find((account) => account.id === a)!.isActive).toBe(true);
+    // Turning rotation on and off again keeps the workspace's own primary.
+    await setSubscriptionCoreCodexRotation(client!.db, {
+      ...workspaceAdministration,
+      rotationEnabled: true,
+    });
+    await setSubscriptionCoreCodexRotation(client!.db, {
+      ...workspaceAdministration,
+      rotationEnabled: false,
+    });
+    expect(await effectivePrimary()).toEqual({ primary_id: a, mode: "primary_first" });
+
+    // Before any primary exists, the toggle works and carries none; a later
+    // workspace activate sets the workspace's own.
+    const fresh = await organization();
+    await setCutover(fresh.accountId, true);
+    const c = await sharedConnection(fresh, "inherit-c");
+    const freshScope = { accountId: fresh.accountId, workspaceId: fresh.sharedWorkspaceId };
+    const none = await setSubscriptionCoreCodexRotation(client!.db, {
+      ...freshScope,
+      subjectId: fresh.ownerSubjectId,
+      rotationEnabled: false,
+    });
+    expect(none.rotation).toEqual({
+      activeCredentialId: null,
+      rotationEnabled: false,
+      rotationStrategy: "sharded",
+    });
+    expect(
+      (
+        await setSubscriptionCoreCodexPrimary(client!.db, {
+          ...freshScope,
+          subjectId: fresh.ownerSubjectId,
+          connectionId: c,
+        })
+      ).activated,
+    ).toBe(c);
+    expect(
+      (
+        await setSubscriptionCoreCodexRotation(client!.db, {
+          ...freshScope,
+          subjectId: fresh.ownerSubjectId,
+          rotationEnabled: true,
+        })
+      ).rotation,
+    ).toEqual({ activeCredentialId: c, rotationEnabled: true, rotationStrategy: "sharded" });
+  });
+
+  test("workspace routes manage only the workspace's projected pool (M3, L5)", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const [other] = await shared!.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${org.accountId}::uuid, 'Core Codex consumers second workspace')
+      returning id::text as id`;
+    await shared!.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+      values (${org.accountId}::uuid, ${other!.id}::uuid, ${org.ownerSubjectId}, 'owner')`;
+    const elsewhere = await sharedConnection(org, "pool-elsewhere", {
+      scope: "workspaces",
+      workspaces: [other!.id],
+      managedBy: other!.id,
+      pool: "workspace",
+    });
+    const here = await sharedConnection(org, "pool-here");
+    const admin = {
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      subjectId: org.ownerSubjectId,
+    };
+    expect(
+      (
+        await getSubscriptionCoreCodexWorkspaceProjection(client!.db, {
+          accountId: org.accountId,
+          workspaceId: org.sharedWorkspaceId,
+        })
+      ).accounts.map((account) => account.id),
+    ).toEqual([here]);
+    // An organization administrator still cannot pick an account outside this
+    // workspace's pool on a workspace route.
+    expect(
+      (await setSubscriptionCoreCodexPrimary(client!.db, { ...admin, connectionId: elsewhere }))
+        .activated,
+    ).toBeNull();
+    const [settingsRow] = await shared!.admin<{ count: string }[]>`
+      select count(*)::text as count from subscription_settings
+      where account_id = ${org.accountId}::uuid and workspace_id = ${org.sharedWorkspaceId}::uuid`;
+    expect(settingsRow!.count).toBe("0");
+    // Rename checks the pool before writing: the label is not committed.
+    expect(
+      await renameSubscriptionCoreCodexConnection(client!.db, {
+        ...admin,
+        connectionId: elsewhere,
+        label: "renamed from the wrong workspace",
+      }),
+    ).toBeNull();
+    expect((await connectionRow(elsewhere)).label).toBe("pool-elsewhere");
+    expect(
+      (
+        await setSubscriptionCoreCodexAllocator(client!.db, {
+          ...admin,
+          connectionId: elsewhere,
+          enabled: false,
+          expectedVersion: 1,
+        })
+      ).result.kind,
+    ).toBe("not_found");
+    expect((await connectionRow(elsewhere)).allocator_enabled).toBe(true);
+    // The same calls succeed from the workspace whose pool lists it.
+    expect(
+      (
+        await setSubscriptionCoreCodexPrimary(client!.db, {
+          ...admin,
+          workspaceId: other!.id,
+          connectionId: elsewhere,
+        })
+      ).activated,
+    ).toBe(elsewhere);
+    expect(
+      await renameSubscriptionCoreCodexConnection(client!.db, {
+        ...admin,
+        workspaceId: other!.id,
+        connectionId: elsewhere,
+        label: "Team elsewhere",
+      }),
+    ).toBe(elsewhere);
+  });
+
+  test("a stale Apps clear cannot remove a newer designation (L1)", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const x = await sharedConnection(org, "stale-clear-x");
+    const y = await sharedConnection(org, "stale-clear-y");
+    const scope = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };
+    const admin = { ...scope, subjectId: org.ownerSubjectId };
+    const first = await designateSubscriptionCoreCodexApps(client!.db, {
+      ...admin,
+      connectionId: x,
+      expectedVersion: 0,
+    });
+    expect(first.kind).toBe("updated");
+    const staleVersion = (first as { version: number }).version;
+    expect(
+      await clearSubscriptionCoreCodexApps(client!.db, { ...admin, expectedVersion: staleVersion }),
+    ).toMatchObject({ kind: "updated", version: 0 });
+    const second = await designateSubscriptionCoreCodexApps(client!.db, {
+      ...admin,
+      connectionId: y,
+      expectedVersion: 0,
+    });
+    expect(second).toMatchObject({ kind: "updated", credentialId: y });
+    expect((second as { version: number }).version).toBeGreaterThan(staleVersion);
+    // A client that still holds the first designation's version conflicts.
+    expect(
+      await clearSubscriptionCoreCodexApps(client!.db, { ...admin, expectedVersion: staleVersion }),
+    ).toMatchObject({ kind: "conflict", credentialId: y });
+    expect(await getSubscriptionCoreCodexAppsSettings(client!.db, scope)).toMatchObject({
+      credentialId: y,
+      version: (second as { version: number }).version,
+    });
+  });
+
+  test("a pin waits for a concurrent binding write instead of reporting not found (L2)", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const connectionId = await sharedConnection(org, "pin-race");
+    const sessionId = await ownedSession(org, org.sharedWorkspaceId);
+    const base = {
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      sessionId,
+      subjectId: org.ownerSubjectId,
+    };
+    expect(
+      (await pinSubscriptionCoreSessionCodexAccount(client!.db, { ...base, connectionId })).result
+        .changed,
+    ).toBe(true);
+    // A running turn's binding write (placement or cache-warmth touch) holds
+    // the binding row and advances its version while the pin runs.
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let locked!: () => void;
+    const holding = new Promise<void>((resolve) => (locked = resolve));
+    const writer = shared!.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`update subscription_session_bindings
+        set version = version + 1, last_model_call_at = clock_timestamp()
+        where session_id = ${sessionId}::uuid`;
+      locked();
+      await released;
+    });
+    await holding;
+    const pin = pinSubscriptionCoreSessionCodexAccount(client!.db, { ...base, connectionId: null });
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const [waiting] = await shared!.admin<{ count: string }[]>`
+        select count(*)::text as count from pg_stat_activity
+        where datname = current_database() and usename = 'opengeni_app'
+          and wait_event_type = 'Lock'`;
+      if (Number(waiting!.count) > 0 || Date.now() > deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    release();
+    await writer;
+    expect((await pin).result.changed).toBe(true);
+    const [binding] = await shared!.admin<{ choice: string; version: string }[]>`
+      select choice, version::text as version from subscription_session_bindings
+      where session_id = ${sessionId}::uuid`;
+    expect(binding).toEqual({ choice: "automatic", version: "3" });
+  });
+
+  test("one workspace's ended Apps designation never fails another's refresh (L3)", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const connectionId = await sharedConnection(org, "flight-shared");
+    const first = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };
+    const second = { accountId: org.accountId, workspaceId: org.personalWorkspaceId };
+    for (const scope of [first, second]) {
+      expect(
+        (
+          await designateSubscriptionCoreCodexApps(client!.db, {
+            ...scope,
+            connectionId,
+            subjectId: org.ownerSubjectId,
+            expectedVersion: 0,
+          })
+        ).kind,
+      ).toBe("updated");
+    }
+    await shared!.admin`update subscription_connections set expires_at = now() - interval '1 hour'
+      where id = ${connectionId}::uuid`;
+    let refreshes = 0;
+    const deps = {
+      refresh: async () => {
+        refreshes += 1;
+        return { accessToken: "access-flight-rotated", refreshToken: "refresh-flight-rotated" };
+      },
+    };
+    // Hold the per-connection refresh key so both requests reach refresh together.
+    const locker = await shared!.admin.reserve();
+    const refreshKey = `subscription-refresh:${connectionId}`;
+    await locker`select pg_advisory_lock(hashtextextended(${refreshKey}, 0))`;
+    const advisoryWaiters = async () =>
+      Number(
+        (
+          await shared!.admin<{ count: string }[]>`
+            select count(*)::text as count from pg_locks
+            where locktype = 'advisory' and not granted
+              and database = (select oid from pg_database where datname = current_database())`
+        )[0]!.count,
+      );
+    const waitFor = async (count: number, ms: number) => {
+      const deadline = Date.now() + ms;
+      while ((await advisoryWaiters()) < count && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    };
+    try {
+      const firstRequest = subscriptionCoreCodexAppsRequestAuth(
+        client!.db,
+        settings,
+        { ...first, connectionId },
+        deps,
+      )
+        .withAuthorization(async (token) => token)
+        .then(
+          (token) => ({ ok: true as const, token }),
+          (error: unknown) => ({ ok: false as const, error }),
+        );
+      await waitFor(1, 10_000);
+      // The first workspace's designation ends while its refresh waits.
+      await shared!.admin`delete from subscription_apps_designations
+        where workspace_id = ${first.workspaceId}::uuid`;
+      const secondRequest = subscriptionCoreCodexAppsRequestAuth(
+        client!.db,
+        settings,
+        { ...second, connectionId },
+        deps,
+      )
+        .withAuthorization(async (token) => token)
+        .then(
+          (token) => ({ ok: true as const, token }),
+          (error: unknown) => ({ ok: false as const, error }),
+        );
+      await waitFor(2, 1_000);
+      await locker`select pg_advisory_unlock(hashtextextended(${refreshKey}, 0))`;
+      const [firstOutcome, secondOutcome] = await Promise.all([firstRequest, secondRequest]);
+      expect(firstOutcome.ok).toBe(false);
+      expect(!firstOutcome.ok && isCodexAppsCredentialUnavailable(firstOutcome.error)).toBe(true);
+      expect(secondOutcome).toEqual({
+        ok: true,
+        token: { accessToken: "access-flight-rotated", chatgptAccountId: "chatgpt-flight-shared" },
+      });
+      expect(refreshes).toBe(1);
+    } finally {
+      locker.release();
+    }
+  });
+
+  test("a session pin wakes only that session's waiter; failed wakes are logged (L4)", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const connectionId = await sharedConnection(org, "pin-wake");
+    const pinnedSession = await ownedSession(org, org.sharedWorkspaceId);
+    const otherSession = await ownedSession(org, org.sharedWorkspaceId);
+    for (const sessionId of [pinnedSession, otherSession]) {
+      const turnId = await queuedTurn(org, org.sharedWorkspaceId, sessionId);
+      await shared!.admin`
+        insert into subscription_capacity_waiters (account_id, workspace_id, session_id, turn_id, provider, wait_reason)
+        values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${sessionId}::uuid,
+          ${turnId}::uuid, 'codex', 'capacity')`;
+    }
+    const pinned = await pinSubscriptionCoreSessionCodexAccount(client!.db, {
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      sessionId: pinnedSession,
+      connectionId,
+      subjectId: org.ownerSubjectId,
+    });
+    expect(pinned.result.changed).toBe(true);
+    expect(pinned.wake).toEqual({
+      accountId: org.accountId,
+      reason: "core_codex_session_pin_changed",
+      workspaceIds: [org.sharedWorkspaceId],
+      sessionIds: [pinnedSession],
+    });
+    const revisions = async () =>
+      Object.fromEntries(
+        (
+          await shared!.admin<{ session_id: string; wake_revision: string }[]>`
+            select session_id::text as session_id, wake_revision::text as wake_revision
+            from subscription_capacity_waiters where account_id = ${org.accountId}::uuid`
+        ).map((row) => [row.session_id, Number(row.wake_revision)]),
+      );
+    const outbox = async (sessionId: string) =>
+      Number(
+        (
+          await shared!.admin<{ count: string }[]>`
+            select count(*)::text as count from subscription_capacity_wake_outbox
+            where account_id = ${org.accountId}::uuid and session_id = ${sessionId}::uuid`
+        )[0]!.count,
+      );
+    const before = await revisions();
+    const outboxBefore = [await outbox(pinnedSession), await outbox(otherSession)];
+    await deliverSubscriptionCoreCodexWake(client!.db, pinned.wake);
+    expect(await revisions()).toEqual({
+      [pinnedSession]: before[pinnedSession]! + 1,
+      [otherSession]: before[otherSession]!,
+    });
+    expect([await outbox(pinnedSession), await outbox(otherSession)]).toEqual([
+      outboxBefore[0]! + 1,
+      outboxBefore[1]!,
+    ]);
+
+    // A failed wake never fails the committed change, and it is logged.
+    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await deliverSubscriptionCoreCodexWake(client!.db, {
+        accountId: org.accountId,
+        reason: "Not A Valid Reason",
+        workspaceIds: [org.sharedWorkspaceId],
+      });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]![0])).toContain("core Codex wake delivery failed");
+      expect(warn.mock.calls[0]![1]).toMatchObject({
+        accountId: org.accountId,
+        reason: "Not A Valid Reason",
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe.skipIf(!realDb)("Codex Apps routine authorization (owner-migrated database)", () => {
+  let template: { shared: SharedTestDatabase | null; client: DbClient | null } | null = null;
+  let owned: OwnerMigratedTestDatabase | null = null;
+  let ownedClient: DbClient | null = null;
+
+  beforeAll(async () => {
+    owned = await acquireOwnerMigratedTestDatabase("codex-apps-routine-owner");
+    if (!owned) throw new Error("Owner-migrated PostgreSQL database unavailable");
+    await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
+    await provisionRoles(owned.adminUrl, {
+      appRole: "opengeni_app",
+      appPassword: owned.appPassword,
+      rlsStrategy: "force",
+    });
+    const runtimeUrl = new URL(owned.adminUrl);
+    runtimeUrl.username = "opengeni_app";
+    runtimeUrl.password = owned.appPassword;
+    ownedClient = createDb(runtimeUrl.toString(), { max: 6 });
+    template = { shared, client };
+    shared = {
+      admin: owned.admin,
+      adminUrl: owned.adminUrl,
+      appUrl: runtimeUrl.toString(),
+      release: async () => undefined,
+    } as SharedTestDatabase;
+    client = ownedClient;
+  }, 180_000);
+
+  afterAll(async () => {
+    if (template) ({ shared, client } = template);
+    await ownedClient?.close();
+    await owned?.release();
+  }, 180_000);
+
+  authorizationCases("owner-migrated");
 });
