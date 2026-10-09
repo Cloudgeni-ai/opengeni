@@ -87,6 +87,8 @@ const legacyBrowserUnusedMethods = [
 // response transport as the existing computer capture method. It is intentionally
 // available to runtime callers even though the web UI does not call it.
 const agentInteractionMethods = [
+  "callNativeComputerTool",
+  "getNativeComputerToolReceipt",
   "captureBrowserTarget",
   "getBrowserTargetState",
   "readBrowserDom",

@@ -341,8 +341,8 @@ describe("worker agent-run admission funding", () => {
       initiator: { kind: "service", subjectId: "scheduler" },
     } as Awaited<ReturnType<typeof opengeniDb.getLatestStartedSessionTurn>>);
     const policy = spyOn(opengeniDb, "getWorkspaceModelPolicy").mockResolvedValue(null);
-    // Goal continuation resolves first-party tool defaults from workspace settings.
     const workspace = spyOn(opengeniDb, "requireWorkspace").mockResolvedValue({
+      id: WORKSPACE,
       settings: {},
     } as Awaited<ReturnType<typeof opengeniDb.requireWorkspace>>);
     const event = { type: "goal.paused" };

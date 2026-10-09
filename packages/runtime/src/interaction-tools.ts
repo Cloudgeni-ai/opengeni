@@ -1,3 +1,5 @@
+import { CUA_DESKTOP_TOOLS, AttemptToolResult, ComputerNativeReceipt } from "@opengeni/contracts";
+import { boundComputerNativeReceipt } from "@opengeni/interaction";
 import {
   AttachedBrowserBridge,
   AttachedBrowserDevice,
@@ -1571,6 +1573,88 @@ export function createInteractionAttemptToolDefinitions(
       }),
   });
 
+  if (
+    selected.has("computer_act") &&
+    selected.has("computer_open") &&
+    hasToolPermission(permissions, "sessions:control") &&
+    input.transport.callNativeComputerTool
+  ) {
+    for (const tool of CUA_DESKTOP_TOOLS) {
+      const properties = { ...(tool.inputSchema.properties as Record<string, unknown>) };
+      delete properties.session;
+      properties.computerSessionId = {
+        type: "string",
+        format: "uuid",
+        description: "CUA ComputerSession from computer_open",
+      };
+      definitions.push({
+        identity: { serverId: "interaction", toolName: "cua_" + tool.name },
+        modelName: "interaction__cua_" + tool.name,
+        codemodePath: ["computer", tool.name],
+        title: tool.name,
+        description:
+          "Native CUA computer tool; requires a CUA-backed computer_open session. " +
+          tool.description,
+        inputSchema: {
+          ...tool.inputSchema,
+          properties,
+          required: [
+            ...((tool.inputSchema.required as string[] | undefined) ?? []).filter(
+              (name) => name !== "session",
+            ),
+            "computerSessionId",
+          ],
+        } as AttemptToolJsonSchema,
+        ...(tool.outputSchema ? { outputSchema: tool.outputSchema as AttemptToolJsonSchema } : {}),
+        // Read-like tools can write screenshots to files; all native calls use
+        // the existing computer control authority, including ordered batches.
+        annotations: { ...tool.annotations, readOnlyHint: false, idempotentHint: false },
+        source: "interaction",
+        approval: "none",
+        execute: async (raw, context) => {
+          const { computerSessionId, ...args } = raw;
+          const id = z.string().uuid().parse(computerSessionId);
+          const receipt = boundComputerNativeReceipt(
+            ComputerNativeReceipt.parse(
+              await input.transport.callNativeComputerTool!(input.workspaceId, id, {
+                operationId: context.operationId,
+                tool: tool.name,
+                arguments: args,
+              }),
+            ),
+          );
+          const evidence = {
+            operationId: receipt.operationId,
+            state: receipt.state,
+            error: receipt.error,
+          };
+          const result = receipt.observation
+            ? AttemptToolResult.parse(receipt.observation.result)
+            : interactionErrorResult(
+                receipt.error?.code ?? "driver_failed",
+                receipt.error?.message ?? "Native CUA result is unavailable",
+              );
+          if (receipt.state !== "completed") {
+            result.isError = true;
+            result.content.push({
+              type: "text",
+              text: JSON.stringify({
+                opengeniOperation: evidence,
+                guidance:
+                  receipt.state === "outcome_unknown"
+                    ? "Do not replay this operation. Observe current state before deciding the next action."
+                    : "Operation failed. Inspect the retained CUA result before deciding the next action.",
+              }),
+            });
+          }
+          return AttemptToolResult.parse({
+            ...result,
+            _meta: { ...result._meta, opengeniOperation: evidence },
+          });
+        },
+      });
+    }
+  }
   return definitions;
 }
 

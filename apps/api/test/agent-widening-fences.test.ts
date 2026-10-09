@@ -402,8 +402,6 @@ describe("parentless tool policy: agents narrow, humans may widen (real PostgreS
     );
 
     // Adopting workspace defaults is a widen whenever it adds anything.
-    // Replacing this pinned built-in selection with future defaults is refused
-    // before the per-tool narrowing comparison runs.
     const defaults = await put(agent, { mode: "workspace_default", expectedVersion: 1 });
     expect(defaults.status).toBe(403);
     expect(await defaults.text()).toContain(
@@ -522,6 +520,7 @@ describe("Codemode SDK proxy carries only what the selection can exercise (real 
     grant: Grant,
     firstPartyMcpTools: FirstPartyMcpToolName[],
     agentConfig?: ResolvedAgentConfig,
+    acceptedTools: FirstPartyMcpToolName[] = firstPartyMcpTools,
   ): Promise<Attempt> {
     const session = await narrowedRootSession(grant, firstPartyMcpTools);
     if (agentConfig) {
@@ -557,8 +556,6 @@ describe("Codemode SDK proxy carries only what the selection can exercise (real 
         )`;
     });
     const attempt = { sessionId: session.id, turnId: turn!.id, attemptId, executionGeneration };
-    // The proxy exercises only built-ins that are both selected and frozen into
-    // this attempt's catalog, as the worker freezes them for a real turn.
     const unsigned: Omit<AttemptToolCatalog, "digest"> = {
       version: 1,
       accountId: grant.accountId,
@@ -566,13 +563,13 @@ describe("Codemode SDK proxy carries only what the selection can exercise (real 
       ...attempt,
       generation: 1,
       createdAt: new Date().toISOString(),
-      entries: firstPartyMcpTools.map((toolName) => ({
-        identity: { serverId: "opengeni", toolName },
-        modelName: `opengeni__${toolName}`,
-        codemodePath: ["opengeni", toolName],
+      entries: acceptedTools.map((name) => ({
+        identity: { serverId: "opengeni", toolName: name },
+        modelName: `opengeni__${name}`,
+        codemodePath: ["opengeni", name],
         inputSchema: { type: "object" },
-        source: "opengeni" as const,
-        approval: "none" as const,
+        source: "opengeni",
+        approval: "none",
       })),
     };
     await persistAttemptToolCatalog(client.db, {
@@ -704,6 +701,20 @@ describe("Codemode SDK proxy carries only what the selection can exercise (real 
       },
     );
     expect(create.status).toBe(403);
+  });
+
+  test("a live selection cannot grant list access absent from the accepted catalog", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const app = fullApp();
+    const attempt = await seedRunningAttempt(grant, ["sessions_list"], undefined, []);
+    const authorization = await codemodeBearer(grant, attempt);
+    const list = await app.request(
+      `/v1/workspaces/${grant.workspaceId}/codemode/sdk/v1/workspaces/site-host/sessions`,
+      { headers: { authorization } },
+    );
+    expect(list.status).toBe(403);
+    expect(await list.json()).toMatchObject({ error: { code: "forbidden" } });
   });
 
   test("the local dev API serves the proxy on the Docker sandbox route", async () => {

@@ -1408,10 +1408,13 @@ describe("first-party MCP tool visibility policy", () => {
       expect(request?.inputSchema).toMatchObject({
         required: expect.arrayContaining(["capabilityId", "rationale"]),
       });
-      // Since #3847 an authorized agent may connect a prepared server through the
-      // native connect lifecycle, but the review card itself still contacts nothing.
+      // The review card itself contacts nothing; the authorized native lifecycle
+      // requires the existing connection-management permissions.
       expect(custom?.description).toContain(
         "Posting this card does not contact or connect the server.",
+      );
+      expect(custom?.description).toContain(
+        "delegated connections:read, connections:write and capabilities:manage",
       );
       expect(custom?.inputSchema).toMatchObject({
         required: expect.arrayContaining(["name", "endpointUrl", "rationale"]),

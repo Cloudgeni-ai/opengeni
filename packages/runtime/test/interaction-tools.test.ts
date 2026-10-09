@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import {
+  CUA_DESKTOP_TOOLS,
   BrowserSession as BrowserSessionSchema,
   EPHEMERAL_CHROMIUM_DRIVER_ID,
   ComputerSession as ComputerSessionSchema,
@@ -36,6 +37,139 @@ const computerSessionId = randomUUID();
 const now = "2026-08-10T12:00:00.000Z";
 
 describe("interaction attempt tools", () => {
+  test("oversized native output retains completed operation evidence through the prepared gateway", async () => {
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open", "computer_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        callNativeComputerTool: async (_workspace, _computer, request) => ({
+          protocolVersion: 1,
+          operationId: request.operationId,
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targetId: null,
+          state: "completed",
+          dispatchedAt: now,
+          settledAt: now,
+          error: null,
+          observation: {
+            target: null,
+            computerSessionId,
+            controllerGeneration: "controller-1",
+            tool: request.tool,
+            outcome: "completed",
+            error: null,
+            result: {
+              content: [{ type: "text", text: "Large desktop inventory" }],
+              structuredContent: { apps: [], extra: "A".repeat(17 * 1024 * 1024) },
+            },
+          },
+        }),
+      }),
+    });
+    const environment = createAttemptToolEnvironment({
+      scope: { accountId, workspaceId, sessionId, turnId, attemptId, executionGeneration: 1 },
+      generation: 1,
+      definitions,
+    });
+    const operationId = randomUUID();
+    const result = await environment.callModel({
+      operationId,
+      modelName: "interaction__cua_list_apps",
+      subjectId: "model:fixture",
+      arguments: { computerSessionId },
+    });
+    expect(result.isError).toBe(true);
+    expect(result._meta?.opengeniOperation).toMatchObject({ operationId, state: "completed" });
+    expect(JSON.stringify(result)).toContain("Do not repeat the action");
+    expect(JSON.stringify(result).length).toBeLessThan(12 * 1024 * 1024);
+  });
+  test("native CUA definitions retain upstream schemas and raw partial batch evidence", async () => {
+    let calls = 0;
+    const original = {
+      content: [
+        { type: "text", text: "step 2 failed" },
+        { type: "image", mimeType: "image/png", data: "AA==" },
+      ],
+      structuredContent: { ok: false, executed: 2 },
+      isError: true,
+    };
+    const transport = partialTransport({
+      callNativeComputerTool: async (workspace, computer, request) => {
+        expect(workspace).toBe(workspaceId);
+        expect(computer).toBe(computerSessionId);
+        expect(request.arguments).toEqual({
+          steps: [{ tool: "click", args: { pid: 42, window_id: 1, element_token: "snapshot:0" } }],
+          observe: true,
+        });
+        calls++;
+        return {
+          protocolVersion: 1,
+          operationId: request.operationId,
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targetId: null,
+          state: "outcome_unknown",
+          dispatchedAt: now,
+          settledAt: now,
+          observation: {
+            target: null,
+            computerSessionId,
+            controllerGeneration: "controller-1",
+            tool: request.tool,
+            result: original,
+            outcome: "outcome_unknown",
+            error: { code: "driver_failed", message: "partial", retryable: false },
+          },
+          error: { code: "driver_failed", message: "partial", retryable: false },
+        };
+      },
+    });
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport,
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open", "computer_act"],
+      permissions: ["sessions:control"],
+    });
+    expect(calls).toBe(0);
+    const batch = definitions.find((tool) => tool.modelName === "interaction__cua_run_actions")!;
+    const upstream = CUA_DESKTOP_TOOLS.find((tool) => tool.name === "run_actions")!;
+    expect((batch.inputSchema.properties as any).steps).toEqual(
+      (upstream.inputSchema.properties as any).steps,
+    );
+    expect((batch.inputSchema.properties as any).session).toBeUndefined();
+    const result = await batch.execute(
+      {
+        computerSessionId,
+        steps: [{ tool: "click", args: { pid: 42, window_id: 1, element_token: "snapshot:0" } }],
+        observe: true,
+      },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:fixture" } },
+    );
+    expect(result.content.slice(0, 2)).toEqual(original.content);
+    expect(result.structuredContent).toEqual(original.structuredContent);
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("Do not replay");
+    expect(calls).toBe(1);
+    for (const options of [
+      { selectedTools: ["computer_open"] as const, permissions: ["sessions:control"] as const },
+      {
+        selectedTools: ["computer_open", "computer_act"] as const,
+        permissions: ["sessions:read"] as const,
+      },
+    ])
+      expect(
+        createInteractionAttemptToolDefinitions({
+          transport,
+          workspaceId,
+          sessionId,
+          ...options,
+        }).some((tool) => tool.modelName.startsWith("interaction__cua_")),
+      ).toBe(false);
+  });
   test("attached Chrome discovery never loads unrelated workspace inventories", async () => {
     const bridge = {
       enrollmentId: randomUUID(),
@@ -1790,12 +1924,17 @@ describe("interaction attempt tools", () => {
 
   test("publishes every declared atomic name only once", () => {
     const definitions = createInteractionAttemptToolDefinitions({
-      transport: unusedTransport(),
+      transport: partialTransport({
+        callNativeComputerTool: async () => {
+          throw new Error("must not call during catalog preparation");
+        },
+      }),
       workspaceId,
       sessionId,
     });
     expect(definitions.map((definition) => definition.identity.toolName)).toEqual([
       ...INTERACTION_ATTEMPT_TOOL_NAMES,
+      ...CUA_DESKTOP_TOOLS.map((tool) => "cua_" + tool.name),
     ]);
     expect(new Set(definitions.map((definition) => definition.modelName)).size).toBe(
       definitions.length,

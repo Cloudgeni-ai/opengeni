@@ -396,6 +396,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "callNativeComputerTool",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/native-calls",
+    "request": [
+      "ComputerNativeCallRequest"
+    ],
+    "response": [
+      "ComputerNativeReceipt"
+    ]
+  },
+  {
     "id": "callWorkspaceSiteTool",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/tools/calls",
@@ -2251,7 +2262,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/operations/:operationId",
     "request": [],
     "response": [
-      "ComputerActionReceipt"
+      "ComputerActionReceipt",
+      "ComputerNativeReceipt"
     ]
   },
   {
@@ -2403,7 +2415,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "InboxSettings"
-    ]
+    ],
+    "browserOnly": "the person's inbox requires their own signed-in browser session"
   },
   {
     "id": "getInstalledPluginDetails",
@@ -3663,7 +3676,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ListInboxResponse"
-    ]
+    ],
+    "browserOnly": "the person's inbox requires their own signed-in browser session"
   },
   {
     "id": "listInstalledPlugins",
@@ -6364,7 +6378,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "InboxItem"
     ],
-    "response": []
+    "response": [],
+    "browserOnly": "the person's inbox requires their own signed-in browser session"
   },
   {
     "id": "updateInboxSettings",
@@ -6375,7 +6390,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "InboxSettings"
-    ]
+    ],
+    "browserOnly": "the person's inbox requires their own signed-in browser session"
   },
   {
     "id": "updateMachineAgent",

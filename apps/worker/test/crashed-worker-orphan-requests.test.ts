@@ -1,9 +1,7 @@
 // Regression: a request a crashed worker left behind must not pin a
-// Modal box until the provider deadline kills it uncaptured. In staging
-// session 5040c525 two exec requests of a lease-lost attempt stayed open (no
-// retained process, provider outcome unknown, quiescence never written). Idle
-// containment, the deadline backstop and the zero-holder drain all refused the
-// box, so nothing was saved for a day. Drives the real reaper activities and
+// Modal box until the provider deadline kills it uncaptured. The synthetic
+// fixture keeps lease-lost requests open without retained processes or known
+// provider outcomes. It drives the real reaper activities and
 // lease/admission/process ledger against PostgreSQL; only the provider snapshot
 // + stop and the readiness probe are faked.
 

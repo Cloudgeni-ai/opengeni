@@ -1,3 +1,5 @@
+import { CuaNativeTools } from "./native-tools";
+import type { ComputerNativeCallRequest } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import type { ComputerSessionCapabilities } from "@opengeni/contracts";
 import {
@@ -14,7 +16,13 @@ import { callDesktop, Windows, WindowState, type CuaDesktopRuntime } from "./wir
 import { locate, projectElements } from "./projection";
 
 type Target = { native: ComputerBackendTarget; pid: number; windowId: number };
-type Frame = { targetId: string; width: number; height: number };
+type Frame = {
+  targetId: string;
+  width: number;
+  height: number;
+  windowWidth: number;
+  windowHeight: number;
+};
 type Operation = {
   name: "click" | "drag" | "scroll" | "set_value" | "type_text" | "press_key";
   args: Record<string, unknown>;
@@ -26,6 +34,8 @@ export class CuaComputerBackend implements ComputerBackend {
   readonly identity: { platform: "macos" | "windows"; adapterId: string };
   readonly initialCapabilities: ComputerSessionCapabilities;
   private readonly session = `opengeni-${randomUUID()}`;
+  private readonly nativeSession = `opengeni-${randomUUID()}`;
+  private nativeSessionStarted = false;
   private readonly targetsById = new Map<string, Target>();
   private readonly observations = new Map<string, ComputerBackendObservation>();
   private readonly frames = new Map<string, Frame>();
@@ -33,6 +43,8 @@ export class CuaComputerBackend implements ComputerBackend {
   private closing = false;
   private closePromise: Promise<void> | null = null;
   private pending = 0;
+  private nativeTools: CuaNativeTools | null = null;
+  private nativeObservations = false;
 
   private constructor(
     private readonly runtime: CuaDesktopRuntime,
@@ -70,6 +82,27 @@ export class CuaComputerBackend implements ComputerBackend {
       await runtime.shutdown();
       throw error;
     }
+  }
+
+  validateNative(request: ComputerNativeCallRequest): Promise<void> {
+    return this.run(async () => {
+      this.nativeTools ??= new CuaNativeTools(this.runtime, this.nativeSession);
+      await this.nativeTools.validate(request);
+    });
+  }
+  callNative(request: ComputerNativeCallRequest) {
+    return this.run(async () => {
+      this.nativeTools ??= new CuaNativeTools(this.runtime, this.nativeSession);
+      await this.nativeTools.validate(request);
+      // CUA reclaims idle sessions independently of ComputerSession. Reassert
+      // the same owned label before dispatch; active snapshots stay intact and
+      // revived sessions reject their expired tokens through CUA's own checks.
+      await callDesktop(this.runtime, "start_session", { session: this.nativeSession });
+      this.nativeSessionStarted = true;
+      this.nativeObservations = true;
+      this.observations.clear();
+      return await this.nativeTools.call(request);
+    });
   }
 
   capabilities(): Promise<ComputerSessionCapabilities> {
@@ -128,6 +161,25 @@ export class CuaComputerBackend implements ComputerBackend {
 
   dispatch(command: ComputerBackendActionCommand): Promise<ComputerBackendObservation | null> {
     return this.run(async () => {
+      // Passive previews never change the native action frame. Human pointer
+      // input obtains its own fresh frame under the same serialized queue.
+      // CUA then refuses stale native pixel/zoom input until the agent re-reads.
+      if (command.action.type === "pointer") {
+        await this.operations(command);
+        const source = this.frames.get(command.action.frameId)!;
+        const fresh = await this.captureTarget(command.targetId, undefined, true);
+        const current = this.frames.get(fresh.frameId)!;
+        if (
+          Math.abs(source.windowWidth - current.windowWidth) >= 0.5 ||
+          Math.abs(source.windowHeight - current.windowHeight) >= 0.5
+        )
+          throw new ComputerBackendError(
+            "frame_stale",
+            "Window resized; read a fresh frame before input",
+            false,
+            false,
+          );
+      }
       const operations = await this.operations(command);
       this.observations.delete(command.targetId);
       for (let index = 0; index < operations.length; index++) {
@@ -160,6 +212,8 @@ export class CuaComputerBackend implements ComputerBackend {
     this.closing = true;
     this.closePromise = this.tail.then(async () => {
       try {
+        if (this.nativeSessionStarted)
+          await callDesktop(this.runtime, "end_session", { session: this.nativeSession });
         await callDesktop(this.runtime, "end_session", { session: this.session });
       } finally {
         this.observations.clear();
@@ -181,9 +235,20 @@ export class CuaComputerBackend implements ComputerBackend {
         new ComputerBackendError("unavailable", "CUA backend queue is full", true, false),
       );
     this.pending++;
-    const result = this.tail.then(operation).finally(() => {
-      this.pending--;
-    });
+    const result = this.tail
+      .then(async () => {
+        const { data } = await callDesktop(this.runtime, "start_session", {
+          session: this.session,
+        });
+        if (data.revived === true) {
+          this.observations.clear();
+          this.frames.clear();
+        }
+        return await operation();
+      })
+      .finally(() => {
+        this.pending--;
+      });
     this.tail = result.catch(() => undefined);
     return result;
   }
@@ -244,10 +309,30 @@ export class CuaComputerBackend implements ComputerBackend {
       ![...this.frames.values()].some((frame) => frame.targetId === targetId)
     )
       await this.captureTarget(targetId);
+    // Viewer polling must never retire a native CUA element-token snapshot.
+    // Once native tools own observations, the legacy viewer receives geometry
+    // and pixels only. The native result carries its exact tree unchanged.
+    if (this.nativeObservations) {
+      const observation: ComputerBackendObservation = {
+        observationId: this.session + ":viewer",
+        target: target.native,
+        frameId:
+          [...this.frames.entries()]
+            .reverse()
+            .find(([, frame]) => frame.targetId === targetId)?.[0] ?? null,
+        roots: [],
+        nodeCount: 0,
+        focusedRef: null,
+        changedRegions: [],
+      };
+      this.observations.set(targetId, observation);
+      return observation;
+    }
     const { data } = await callDesktop(this.runtime, "get_window_state", {
       ...this.args(target),
       include_screenshot: false,
       include_accessibility_tree: true,
+      ...(this.identity.platform === "macos" ? { tree_format: "elements" } : {}),
       max_elements: 2000,
       max_depth: 25,
     });
@@ -282,6 +367,7 @@ export class CuaComputerBackend implements ComputerBackend {
   private async captureTarget(
     targetId: string,
     options?: ComputerBackendCaptureOptions,
+    actionCapture = false,
   ): Promise<ComputerBackendFrame> {
     const target = await this.target(targetId);
     const bounds = target.native.bounds!;
@@ -301,13 +387,14 @@ export class CuaComputerBackend implements ComputerBackend {
       include_accessibility_tree: false,
       include_screenshot: true,
       max_image_dimension: longEdge,
+      ...(this.identity.platform === "macos" && !actionCapture ? { display_only: true } : {}),
     });
     const state = WindowState.parse(data);
     const image = result.images[0];
     if (
       state.pid !== target.pid ||
       state.window_id !== target.windowId ||
-      !state.capture_id ||
+      ((actionCapture || this.identity.platform !== "macos") && !state.capture_id) ||
       (this.identity.platform === "macos"
         ? state.screenshot_frame_valid !== true
         : state.screenshot_frame_valid === false || data.screenshot_error !== undefined) ||
@@ -347,11 +434,13 @@ export class CuaComputerBackend implements ComputerBackend {
         false,
         false,
       );
-    const frameId = `${this.session}:${state.capture_id}`;
+    const frameId = `${this.session}:${state.capture_id ?? randomUUID()}`;
     this.frames.set(frameId, {
       targetId,
       width: state.screenshot_width,
       height: state.screenshot_height,
+      windowWidth: state.window_bounds?.width ?? bounds.width,
+      windowHeight: state.window_bounds?.height ?? bounds.height,
     });
     while (this.frames.size > 32) this.frames.delete(this.frames.keys().next().value!);
     return {

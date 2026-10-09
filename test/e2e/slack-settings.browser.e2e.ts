@@ -192,6 +192,8 @@ async function installApi(
         headers: { "x-opengeni-api-contract": OPENGENI_API_CONTRACT_REVISION },
         body: JSON.stringify(body),
       });
+    if (path === "/v1/inbox" && request.method() === "GET")
+      return json({ items: [], needsYouCount: 0, unreadCount: 0 });
     if (path === "/v1/config/client")
       return json({
         deploymentRevision: "slack-settings-test",

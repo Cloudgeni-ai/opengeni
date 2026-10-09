@@ -1,3 +1,4 @@
+import { LOCAL_HUMAN_SUBJECT_ID } from "@opengeni/contracts";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
 import * as schema from "./schema";
@@ -295,9 +296,10 @@ export async function setInboxSettings(
 }
 
 /**
- * The person a session works for (its owner, else the person who started it)
- * and its parent, or null for sessions no person owns. Matches the recipient
- * the inbox projection uses (0656).
+ * The person a session works for (its owner, else who started it, else the
+ * owner of the schedule whose run created it; on a local install, its one
+ * human) and its parent, or null when no person does. Mirrors
+ * `session_person_v1`, which the inbox projection uses (0661, 0677).
  */
 export async function getSessionInboxRecipient(
   db: Database,
@@ -307,6 +309,7 @@ export async function getSessionInboxRecipient(
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select({
+        accountId: schema.sessions.accountId,
         owner: schema.sessions.ownerSubjectId,
         creator: schema.sessions.createdBySubjectId,
         parent: schema.sessions.parentSessionId,
@@ -320,6 +323,7 @@ export async function getSessionInboxRecipient(
       : row.creator.startsWith("user:")
         ? row.creator
         : null;
+    let scheduleOwner: string | null = null;
     if (!subjectId) {
       // A scheduled run works for the schedule's owner (0661).
       const [run] = await scopedDb
@@ -337,7 +341,16 @@ export async function getSessionInboxRecipient(
         )
         .orderBy(desc(schema.scheduledTaskRuns.createdAt))
         .limit(1);
-      subjectId = run?.owner?.startsWith("user:") ? run.owner : null;
+      scheduleOwner = run?.owner ?? null;
+      subjectId = scheduleOwner?.startsWith("user:") ? scheduleOwner : null;
+    }
+    if (
+      !subjectId &&
+      [row.owner, row.creator, scheduleOwner].includes(LOCAL_HUMAN_SUBJECT_ID) &&
+      (await isLocalInstallAccount(scopedDb, row.accountId))
+    ) {
+      // A local install's one human, only inside its own organization (0677).
+      subjectId = LOCAL_HUMAN_SUBJECT_ID;
     }
     return subjectId ? { subjectId, parentSessionId: row.parent ?? null } : null;
   });
@@ -362,4 +375,75 @@ export async function getSessionTitles(
       );
     return new Map(rows.map((row) => [row.id, row.title]));
   });
+}
+
+/** The built-in organization of a local install (`opengeni:local`/`default`). */
+async function isLocalInstallAccount(db: Database, accountId: string): Promise<boolean> {
+  const [account] = await db
+    .select({ id: schema.managedAccounts.id })
+    .from(schema.managedAccounts)
+    .where(
+      and(
+        eq(schema.managedAccounts.id, accountId),
+        eq(schema.managedAccounts.externalSource, "opengeni:local"),
+        eq(schema.managedAccounts.externalId, "default"),
+      ),
+    )
+    .limit(1);
+  return Boolean(account);
+}
+
+/** The session's account, read under its workspace's context, or null if it isn't there. */
+async function sessionAccount(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ accountId: schema.sessions.accountId })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    return row?.accountId ?? null;
+  });
+}
+
+/**
+ * Whether this person muted the session's replies (0678), or null when the
+ * session is not in the workspace.
+ */
+export async function getSessionRepliesMuted(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; subjectId: string },
+): Promise<boolean | null> {
+  if (!(await sessionAccount(db, input.workspaceId, input.sessionId))) return null;
+  const [row] = await rawRows<{ muted: boolean }>(
+    db,
+    sql`select opengeni_private.session_replies_muted_for_v1(
+      ${input.sessionId}::uuid, ${input.subjectId}::text
+    ) as muted`,
+  );
+  return row?.muted ?? false;
+}
+
+/**
+ * Mute or unmute the session's replies for this person (0678). Muting takes
+ * its current reply out of their inbox. Null when the session is not in the
+ * workspace.
+ */
+export async function setSessionRepliesMuted(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; subjectId: string; muted: boolean },
+): Promise<boolean | null> {
+  const accountId = await sessionAccount(db, input.workspaceId, input.sessionId);
+  if (!accountId) return null;
+  const [row] = await rawRows<{ muted: boolean }>(
+    db,
+    sql`select opengeni_private.set_session_replies_muted_v1(
+      ${accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid,
+      ${input.subjectId}::text, ${input.muted}::boolean
+    ) as muted`,
+  );
+  return row?.muted ?? input.muted;
 }

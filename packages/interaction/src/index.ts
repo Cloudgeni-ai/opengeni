@@ -7,8 +7,13 @@ import {
   BrowserProtectedAuthFillReceipt,
   BrowserProtectedAuthObservation,
   BrowserTarget,
+  ComputerNativeCommand,
+  ComputerNativeReceipt,
+  ComputerOperationCommand,
+  ComputerOperationReceipt,
+  ComputerOperationObservation,
+  type ComputerNativeResult,
   ComputerActionCommand,
-  ComputerActionReceipt,
   ComputerObservation,
   ComputerTarget,
   type BrowserActionCommand as BrowserActionCommandValue,
@@ -422,14 +427,16 @@ export type ComputerInteractionDriver = {
   observe(targetId: string): Promise<ComputerObservationValue>;
   validate?(command: ComputerActionCommandValue, target: ComputerTargetValue): Promise<void> | void;
   dispatch(command: ComputerActionCommandValue): Promise<ComputerObservationValue | null>;
+  validateNative?(command: ComputerNativeCommand): Promise<void>;
+  dispatchNative?(command: ComputerNativeCommand): Promise<ComputerNativeResult>;
 };
 
 export type ComputerInteractionAuthority = {
-  authorizeDispatch(command: ComputerActionCommandValue): Promise<void> | void;
+  authorizeDispatch(command: ComputerOperationCommand): Promise<void> | void;
 };
 
 export type ComputerOperationJournalRecord =
-  InteractionOperationJournalRecord<ComputerActionReceiptValue>;
+  InteractionOperationJournalRecord<ComputerOperationReceipt>;
 
 export type ComputerInteractionControllerOptions = {
   computerSessionId: string;
@@ -451,19 +458,42 @@ export class ComputerInteractionController {
   // Native input additionally verifies and consumes its exact delivery proof.
   private readonly firstClicks = new Map<string, ComputerActionCommandValue>();
   private readonly core: InteractionControllerCore<
-    ComputerActionCommandValue,
+    ComputerOperationCommand,
     ComputerTargetValue,
-    ComputerObservationValue,
-    ComputerActionReceiptValue
+    ComputerOperationObservation,
+    ComputerOperationReceipt
   >;
 
   constructor(options: ComputerInteractionControllerOptions) {
     const { computerSessionId, controllerGeneration } = options;
     this.core = new InteractionControllerCore({
-      driver: options.driver,
+      driver: {
+        target: (id) => options.driver.target(id),
+        observe: (id) => options.driver.observe(id),
+        validate: (command, target) => {
+          if (command.targetId !== null) return options.driver.validate?.(command, target);
+        },
+        validateSession: async (command) => {
+          if (
+            command.targetId !== null ||
+            !options.driver.validateNative ||
+            !options.driver.dispatchNative
+          )
+            throw new InteractionControllerError(
+              "unsupported",
+              "Native CUA calls require a CUA ComputerSession",
+            );
+          await options.driver.validateNative(command);
+        },
+        dispatch: (command) =>
+          command.targetId === null
+            ? options.driver.dispatchNative!(command)
+            : options.driver.dispatch(command),
+      },
       authority: {
         authorizeDispatch: async (command) => {
           await options.authority?.authorizeDispatch(command);
+          if (command.targetId === null) return;
           if (
             command.action.type === "pointer" &&
             command.action.action === "click" &&
@@ -505,10 +535,10 @@ export class ComputerInteractionController {
       ...(options.loadJournalRecord ? { loadJournalRecord: options.loadJournalRecord } : {}),
       adapter: {
         resourceLabel: "computer",
-        parseCommand: (value) => ComputerActionCommand.parse(value),
+        parseCommand: (value) => ComputerOperationCommand.parse(value),
         parseTarget: (value) => ComputerTarget.parse(value),
-        parseObservation: (value) => ComputerObservation.parse(value),
-        parseReceipt: (value) => ComputerActionReceipt.parse(value),
+        parseObservation: (value) => ComputerOperationObservation.parse(value),
+        parseReceipt: (value) => ComputerOperationReceipt.parse(value),
         assertCommandAuthority(command) {
           if (command.computerSessionId !== computerSessionId) {
             throw new InteractionControllerError(
@@ -535,6 +565,7 @@ export class ComputerInteractionController {
           }
         },
         assertExpectedGenerations(command, target) {
+          if (command.targetId === null) return;
           if (command.expectedTargetGeneration !== target.targetGeneration) {
             throw new InteractionControllerError(
               "target_stale",
@@ -544,6 +575,18 @@ export class ComputerInteractionController {
           }
         },
         assertObservationAuthority(observation, targetId) {
+          if (observation.target === null) {
+            if (
+              targetId !== null ||
+              observation.computerSessionId !== computerSessionId ||
+              observation.controllerGeneration !== controllerGeneration
+            )
+              throw new InteractionControllerError(
+                "driver_failed",
+                "native result belongs to another computer controller",
+              );
+            return;
+          }
           if (
             observation.computerSessionId !== computerSessionId ||
             observation.target.id !== targetId ||
@@ -556,8 +599,13 @@ export class ComputerInteractionController {
             );
           }
         },
+        outcome(observation) {
+          return observation.target === null
+            ? { state: observation.outcome, error: observation.error }
+            : { state: "completed", error: null };
+        },
         makeReceipt(input) {
-          return ComputerActionReceipt.parse({
+          return ComputerOperationReceipt.parse({
             protocolVersion: 1,
             operationId: input.command.operationId,
             computerSessionId,
@@ -580,22 +628,27 @@ export class ComputerInteractionController {
             );
           }
           return recoverInteractionReceipt(receipt, settledAt, "computer", (value) =>
-            ComputerActionReceipt.parse(value),
+            ComputerOperationReceipt.parse(value),
           );
         },
       },
     });
   }
 
-  observe(targetId: string): Promise<ComputerObservationValue> {
-    return this.core.observe(targetId);
+  async observe(targetId: string): Promise<ComputerObservationValue> {
+    return ComputerObservation.parse(await this.core.observe(targetId));
   }
 
   run(command: ComputerActionCommandValue): Promise<ComputerActionReceiptValue> {
-    return this.core.run(command);
+    // The command discriminant fixes the receipt variant; retain replay Promise identity.
+    return this.core.run(command) as Promise<ComputerActionReceiptValue>;
   }
 
-  receipt(operationId: string): ComputerActionReceiptValue | null {
+  runNative(command: ComputerNativeCommand): Promise<ComputerNativeReceipt> {
+    return this.core.run(command) as Promise<ComputerNativeReceipt>;
+  }
+
+  receipt(operationId: string): ComputerOperationReceipt | null {
     return this.core.receipt(operationId);
   }
 
@@ -612,11 +665,12 @@ export function recoverComputerOperationJournalRecord(
   record: ComputerOperationJournalRecord,
   settledAt: string,
 ): ComputerOperationJournalRecord {
-  const receipt = ComputerActionReceipt.parse(record.receipt);
+  const receipt = ComputerOperationReceipt.parse(record.receipt);
   return {
     ...record,
     receipt: recoverInteractionReceipt(receipt, settledAt, "computer", (value) =>
-      ComputerActionReceipt.parse(value),
+      ComputerOperationReceipt.parse(value),
     ),
   };
 }
+export { boundComputerNativeReceipt } from "./native-result";

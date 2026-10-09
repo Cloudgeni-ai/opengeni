@@ -138,4 +138,11 @@ export const embeddingMigrationTail = [
   // session_hands_back_v1 compiles against sessions.input_wait_turn_id from
   // withheld 0402; replay after it.
   "0674_inbox_reply_hands_back.sql",
+  // Redefines 0661's inbox person resolver, which reads
+  // scheduled_tasks.owner_subject_id from withheld 0478; replay after 0661.
+  "0677_local_human_inbox_recipient.sql",
+
+  // Rewrites the inbox projection and push triggers after 0674 and resolves
+  // the session's person through 0661; replay after both so its bodies win.
+  "0678_inbox_mute_session_replies.sql",
 ];

@@ -43,8 +43,10 @@ function fixture(
     settings,
   } as never);
   const policy = spyOn(db, "getWorkspaceModelPolicy").mockResolvedValue(null);
-  // Goal continuation resolves first-party tool defaults from workspace settings.
-  const workspace = spyOn(db, "requireWorkspace").mockResolvedValue({ settings: {} } as never);
+  const workspace = spyOn(db, "requireWorkspace").mockResolvedValue({
+    id: workspaceId,
+    settings: {},
+  } as never);
   const materialize = spyOn(db, "materializeGoalContinuation");
   const publish = spyOn({ publish: async () => {} }, "publish");
   restores.push(

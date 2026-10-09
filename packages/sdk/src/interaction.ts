@@ -1,3 +1,9 @@
+import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
+export type {
+  ComputerNativeCallRequest,
+  ComputerNativeReceipt,
+  ComputerOperationReceipt,
+} from "@opengeni/contracts";
 import type { OpenGeniRequestOptions } from "./client";
 import { browserSessionStorageMode } from "@opengeni/contracts/browser-storage";
 import type {
@@ -1655,12 +1661,24 @@ export interface InteractionTransport {
     targetId: string,
     options?: OpenGeniRequestOptions,
   ): Promise<ComputerFrame>;
+  callNativeComputerTool?(
+    workspaceId: string,
+    computerSessionId: string,
+    request: ComputerNativeCallRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<ComputerNativeReceipt>;
   actInComputer(
     workspaceId: string,
     computerSessionId: string,
     request: ComputerActionRequest,
     options?: OpenGeniRequestOptions,
   ): Promise<ComputerActionReceipt>;
+  getNativeComputerToolReceipt?(
+    workspaceId: string,
+    computerSessionId: string,
+    operationId: string,
+    options?: OpenGeniRequestOptions,
+  ): Promise<ComputerNativeReceipt>;
   getComputerActionReceipt(
     workspaceId: string,
     computerSessionId: string,
@@ -2554,11 +2572,34 @@ export class ComputerSessionResource {
     return await this.transport.captureComputerTarget(this.workspaceId, this.id, targetId, options);
   }
 
+  async callNativeTool(
+    request: ComputerNativeCallRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerNativeReceipt> {
+    if (!this.transport.callNativeComputerTool)
+      throw new Error("Native CUA tools require a current interaction transport");
+    return await this.transport.callNativeComputerTool(this.workspaceId, this.id, request, options);
+  }
+
   async act(
     request: ComputerActionRequest,
     options: OpenGeniRequestOptions = {},
   ): Promise<ComputerActionReceipt> {
     return await this.transport.actInComputer(this.workspaceId, this.id, request, options);
+  }
+
+  async nativeReceipt(
+    operationId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerNativeReceipt> {
+    if (!this.transport.getNativeComputerToolReceipt)
+      throw new Error("Native CUA receipts require a current interaction transport");
+    return await this.transport.getNativeComputerToolReceipt(
+      this.workspaceId,
+      this.id,
+      operationId,
+      options,
+    );
   }
 
   async receipt(

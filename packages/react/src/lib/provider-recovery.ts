@@ -43,7 +43,7 @@ const MODEL_CODES: ReadonlySet<string> = new Set([
 
 /** A recovering turn parked behind a sandbox lifecycle transition (worker
  * `failure-settlement.ts`). Before, this showed only "Recovering" with no
- * reason, for up to an hour in staging session 5040c525. A superseded lease
+ * reason. A superseded lease
  * counts only when the worker recorded the pending transition it waits for. */
 const SANDBOX_WAIT_CODES: ReadonlySet<string> = new Set([
   "sandbox_deadline_rotation",

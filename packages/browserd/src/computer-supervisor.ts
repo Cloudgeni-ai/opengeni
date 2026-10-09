@@ -1,6 +1,9 @@
 import { chmod, mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type {
+  ComputerNativeCommand,
+  ComputerNativeReceipt,
+  ComputerOperationReceipt,
   ComputerActionCommand,
   ComputerActionReceipt,
   ComputerClipboard,
@@ -253,7 +256,17 @@ export class ComputerSupervisor {
     }).controller.run(command);
   }
 
-  receipt(reference: ComputerSessionReference, operationId: string): ComputerActionReceipt | null {
+  nativeCall(command: ComputerNativeCommand): Promise<ComputerNativeReceipt> {
+    return this.requireActive({
+      computerSessionId: command.computerSessionId,
+      controllerGeneration: command.controllerGeneration,
+    }).controller.runNative(command);
+  }
+
+  receipt(
+    reference: ComputerSessionReference,
+    operationId: string,
+  ): ComputerOperationReceipt | null {
     return this.requireBound(reference).controller.receipt(operationId);
   }
 

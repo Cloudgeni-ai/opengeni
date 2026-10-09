@@ -1,3 +1,4 @@
+import { isCuaDesktopModelTool } from "@opengeni/contracts";
 import {
   normalizeProtocolJsonValue,
   TURN_OPERATIONAL_NOTICE_PREFIX,
@@ -187,6 +188,7 @@ export function toolCallProducesRetainableSessionImage(name: string | null): boo
     name === "computer_screenshot" ||
     name === "view_image" ||
     name === "interaction__computer_observe" ||
+    isCuaDesktopModelTool(name) ||
     retainableBrowserScreenshotToolCall(name)
   );
 }

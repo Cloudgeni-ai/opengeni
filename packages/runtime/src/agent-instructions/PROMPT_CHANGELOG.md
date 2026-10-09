@@ -119,9 +119,17 @@ and literal-prefix recovery; the new `media` capability module directs image
 and video requests to runtime/provider tools rather than integration setup.
 Disabled media removes that module. The legacy prompt remains unchanged.
 
+Discovery reuse. A discovered schema is never added to the tool list (prompt
+cache stability); its exact name binds against the current authorized catalog
+for the rest of the session. The earlier "one focused capability at a time"
+rule turned one search into several sequential round trips, so the rule now
+says a found tool stays callable by name and that several capabilities can be
+searched in one response or loaded together through `names`.
+
 ```diff
 + Deferred tool schemas are omitted from the first request; absence there does not prove a tool is unavailable.
-+ When deferred tools are attached, use `tool_search` for one focused capability at a time; broad searches with small limits can omit a relevant tool.
++ A tool found with `tool_search` stays callable by its exact name for the rest of the session; search again only if its input schema is no longer in context.
++ When you need several capabilities, search for them in parallel `tool_search` calls in the same response, or load known exact names together with `names`; broad searches with small limits can omit a relevant tool.
 + If a search misses, use `tool_list` and follow `nextCursor` until the relevant authorized names are covered, then load exact names with `tool_search`.
 + `namePrefix` is a literal tool-name prefix, not a capability keyword; an empty filtered page does not prove the capability is unavailable.
 + Discovery never grants authority, and remembered tool names must still resolve against the current authorized catalog.
@@ -162,10 +170,13 @@ text named it only inside link examples).
 
 Goal completion. In the first modular-none eval runs, two of nine goal runs
 verified the work, said the goal was complete, and ended without calling the
-(deferred) goal tool. The goal module now says so explicitly.
+(deferred) goal tool. The goal module now says so explicitly. Its discovery
+clause used to say to search when the goal tools "are not listed", which is
+always true for a deferred tool and caused repeated searches for a tool whose
+schema was already in context; it now searches only when the schema is missing.
 
 ```diff
-+ Saying or verifying that the work is done does not complete the goal: call opengeni__goal_complete, and search for the goal tools first when they are not listed.
++ Saying or verifying that the work is done does not complete the goal: call opengeni__goal_complete by its exact name, and search for a goal tool only when its input schema is not in context.
 ```
 
 ## Conditional variants (capability or resource absent)

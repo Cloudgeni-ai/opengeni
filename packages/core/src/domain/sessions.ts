@@ -3561,6 +3561,18 @@ async function createSessionForRequestInFileScope(
     sandboxGroupId = sandboxChoice.groupId;
     inheritedBackend = member.sandboxBackend;
     inheritedSandboxOs = member.sandboxOs;
+    // Naming the creator's own group is the explicit spelling of "shared".
+    // The machine route is session-local, so copy the trusted parent's exact
+    // route as the omitted default does; otherwise the child lands on the
+    // group's managed box, a different filesystem from the creator's machine.
+    if (parentSession && parentSession.sandboxGroupId === sandboxChoice.groupId) {
+      inheritedActiveTarget = parentSession.activeSandboxId
+        ? {
+            sandboxId: parentSession.activeSandboxId,
+            workingDir: parentSession.workingDir,
+          }
+        : null;
+    }
   }
   // else "new": leave sandboxGroupId null → own singleton group (group ≡ id).
   // A working dir is only meaningful for a TARGETED machine (it is the chosen

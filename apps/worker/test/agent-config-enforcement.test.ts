@@ -170,6 +170,10 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
   context.eventing.publish = async () => {};
   const skillCatalogWrites: string[] = [];
   const persistence = [
+    spyOn(db, "requireWorkspace").mockResolvedValue({
+      id: SCOPE.workspaceId,
+      settings: {},
+    } as Awaited<ReturnType<typeof db.requireWorkspace>>),
     spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
     spyOn(db, "getWorkspaceVideoGenerationPolicy").mockResolvedValue({
       schemaVersion: 1,
@@ -195,10 +199,6 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       return input.catalog;
     }),
     spyOn(db, "getExternalLinkTurnAuthorization").mockResolvedValue(null),
-    // The turn resolves built-in tool defaults against the workspace's settings.
-    spyOn(db, "requireWorkspace").mockResolvedValue({
-      settings: {},
-    } as Awaited<ReturnType<typeof db.requireWorkspace>>),
     ...(typeof db.sessionHasToolRouterHistory === "function"
       ? [spyOn(db, "sessionHasToolRouterHistory").mockResolvedValue(false)]
       : []),
