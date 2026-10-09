@@ -1,5 +1,136 @@
 # @opengeni/db
 
+## 1.5.0
+
+### Minor Changes
+
+- 129ead3: Fold streamed text deltas after their turn settles. Session storage maintenance replaces each run of adjacent `agent.message.delta` or `agent.reasoning.delta` rows with its first row carrying the whole text, `coalescedUntil`, and a lossless `folded` record of every original fragment; `unfoldSessionEventDeltas` rebuilds the originals. Delta coalescing honors a stored `coalescedUntil` as coverage. Content compaction now keeps working through its backlog within a pass while it makes progress.
+- 334c470: Add an optional idle-session archive. When a deployment enables it (`OPENGENI_SESSION_ARCHIVE_ENABLED`, Helm `sessionArchive.enabled`), sessions with no activity for `OPENGENI_SESSION_ARCHIVE_IDLE_DAYS` (30 by default) move their bulky content to object storage as a verified bundle plus a readable transcript, keep their readable timeline, and become read-only. Sessions expose `retention`, and `keepLive` (on create or via `updateSessionRetention`) exempts a session permanently.
+
+### Patch Changes
+
+- 7ae7683: Add the rolling shared subscription-core storage, tenant-scoped authorization policies, effective-settings resolver, and repository declarations without changing production subscription placement.
+- 931ac51: Add provider-neutral subscription operation leases and durable capacity-wake persistence behind the provider cutover switch.
+- 91c7c0e: Turn claims no longer wait on organization membership changes. The claim takes no organization-membership lock at all, so a member being added, suspended or removed never delays turns starting in that organization; a removal that races a claim is still refused when the turn acts.
+- e8a3d83: Bound Claude's final serialized request and inline image bytes. Recover a first
+  request-size rejection through one durable checkpoint while preserving the
+  latest complete input/tool batch, signed thinking, and original history. Keep
+  the recovery allowance across attempt restarts and report content-free size
+  diagnostics instead of retrying an unchanged oversized request.
+- 4532435: Codex Apps keeps working when a workspace routes models through its organization's Codex accounts. The workspace's designated Apps account now loads, and its token refreshes persist, through the Apps designation itself instead of the model-routing pool; that authority still reaches only the designated account, owned by this workspace and its current owner. Turning Apps off (`DELETE /v1/workspaces/:workspaceId/codex/apps`) now works in every routing mode, so `apps.canDisable` is accurate.
+
+  Apps no longer posts an authorization card every time it sets up a turn. A card appears only when an Apps tool call needs one, at most once per turn, and an unusable designated account is reported with the new `tool.auth_needed` reason `designated_credential_unavailable` instead of `refresh_failed`. Clients should treat unknown reasons generically, as before.
+
+- 851cbdc: Protect Codex extra credits by default, add revocable per-account spending consent with included-allowance-first rotation, and allow organization accounts to pause without disconnecting. Preserve unknown balances as null in usage responses.
+- 5b31ec7: A request that a crashed worker left open no longer keeps a sandbox from being saved. When a worker dies mid-command, its turn attempt is closed lease-lost or failed and its lease holder is dropped, but the exec request it had dispatched stays open with an unknown outcome and nothing ever settles it. That request used to refuse every checkpoint, the idle drain, idle command containment and the provider-deadline backstop for the rest of the box's life, so the provider's 24-hour deadline killed the box uncaptured. Containment no longer waits for such a request, and Modal native checkpoints (point-in-time images of the paused box) run around it: a drain right before terminating the box, a warm checkpoint recorded one generation behind the workspace. Tar-style checkpoints still wait, and the drain's cold commit rejects it only after the box was terminated, which is when nothing it started can still run. Its owner then gets a durable wake so the attempt's quiescence receipt can complete. A lease-lost attempt whose holder still exists, and an attempt closed by Pause, Steer or cancellation, keep their open requests as writers.
+- ce7b403: Track built-in tool default inheritance independently of connector selection. New sessions and explicit resets follow current workspace defaults on the next attempt, while explicit lists, exclusions, deployment ceilings, capability restrictions, and frozen catalogs remain authoritative. A rolling migration adopts default intent only for older root sessions whose latest retained policy event proves a full reset and still matches their stored selection; ambiguous legacy selections remain pinned.
+- 7ae7683: Add rolling storage and RLS foundations for the shared subscription core.
+- 061ae01: Knowledge listing and search accept an optional `createdSince` timestamp to find newly added entries by their original creation date. Rolling migration 0640 applies the filter before ranking and pagination without changing access. The Knowledge Library offers Added filters for the last 24 hours, 7 days, and 30 days.
+- 6313dd8: Local installs have an Inbox. A local install's one human (the fixed `dev` subject of the built-in local organization) now gets its agents' questions, approvals, paused goals and notifications in the Inbox and can answer them there, as a signed-in person can. Only that human qualifies: the local bootstrap must have produced the request's access, as a keyless, non-delegated human session. API keys, services, agents, delegated bearers that name `dev`, and `dev` in any other organization still have no inbox. Phone pushes stay for signed-in people, because a push device is registered only by a native-app sign-in that local installs do not have.
+- c502add: The save before a sandbox's provider deadline is now mandatory. Before, the deadline backstop waited until every background command had received and outlived its stop request, every owner turn had written its quiescence receipt and no sibling session had a recent attempt, and the zero-holder drain waited for every open request. When any of those could not finish, the box died at the provider deadline without being saved. Inside a fixed window before the deadline (the command stop grace, the drain capture budget and two reaper periods, at most the rotation lead) the reaper now saves and stops the box anyway. Only a live turn, viewer, direct request or interaction on the box, or a supervised command, still blocks it. Requests still open on the box are recorded by rolling migration 0676, left out of the saved checkpoint and settled only after the box is stopped. A file being written at that moment can be saved half-written. Enrollment through this path is counted as `opengeni_sandbox_command_containment_total{outcome="forced_deadline_enrolled"}`.
+- 0001298: Add provider-neutral subscription lease and placement repository APIs, and tighten source-assignment model eligibility.
+- 0152516: Add low-cardinality money and per-model usage metrics: `opengeni_model_responses_total{provider,model,priced}`, `opengeni_model_tokens_total{provider,model,type}` (input, cached input, cache write, output, reasoning), `opengeni_model_provider_cost_micros_total{provider,model,payer,pricing_source}` (estimated upstream cost), `opengeni_model_credits_charged_micros_total{provider,model,funding}` (credits debited, promotional grant vs general credit), and paid credit purchases `opengeni_credit_purchases_total{mode}`, `opengeni_credit_purchased_micros_total{mode}` and `opengeni_credit_purchase_paid_usd_micros_total{mode}`. `model` is the bounded deployment catalog product id; account and user ids are never labels. A raced Stripe checkout delivery no longer double-counts `opengeni_credit_micros_total{kind="topup"}`.
+- 560acdd: Sending a new chat with connectors on Customize (following workspace connectors, optionally minus exclusions) no longer fails with a draft conflict. The exact-draft check now treats the saved draft and the create request as the same connector policy, and the web composer no longer shows "Draft not saved" after a Send whose draft did save.
+- 906d3c2: Preserve the exact scheduler authority label and immutable curated Skill artifacts during the branding refresh so scheduled dispatch and pinned library discovery remain compatible.
+
+  Refresh the canonical browser artifact kernels to match the branding-updated Rust source identity.
+
+- 38b1ba1: Use Opengeni in product copy and Slack manifest defaults, add a clearly labeled staging icon, and accept both current and historical Slack installation names without rewriting saved credentials or receipts. Expose the Opengeni chat facade while preserving the existing OpenGeni export and public identifiers.
+- 6960770: Opper is a first-class model provider with the same three rails as OpenRouter and Vercel AI Gateway. `OPENGENI_OPPER_API_KEY` adds reviewed EU-pinned `opper/vertexai/gemini-3.8-flash-eu` and `opper/aws/claude-sonnet-4-6-eu` routes billed in Opengeni credits at the exact Opper-reported cost +5% (reviewed list price as fallback); workspace admins can connect their own Opper key (`workspace-opper/…`, billed to their Opper account) and add exact custom Opper ids; organization owners can connect Opper once for every shared workspace (`organization-opper/…`). The SDK adds `listWorkspaceOpperCustomModels`, `createWorkspaceOpperCustomModel`, `deleteWorkspaceOpperCustomModel`, `ModelConnectionAccessKind`, and `"opper"` as an organization model provider kind. Opper management keys (`op-mak-…`) are rejected with an explanation. Deployment catalog documents accept a reviewed `opperModels` list. Host `OPENGENI_MODEL_PROVIDERS_JSON` can no longer use the reserved `opper`, `workspace-opper`, or `organization-opper` provider ids; move a hand-written Opper registry entry to `OPENGENI_OPPER_API_KEY`. Rolling migration `0636_opper_model_providers.sql` widens the provider-kind, lifecycle-fact, and analytics allow-lists.
+- a4f19c2: Organization owners and admins can now remove their own access to a shared workspace from the organization settings, the same way they already grant or change it, including workspaces an organization API key created for an embedded tenant. They can also list, add, change, and remove members from any shared workspace's own Members page, whether or not they hold a role in that workspace. The organization Workspaces list and each person's Workspace access editor gain a name search for organizations with many shared workspaces.
+- 55eb9b0: Personal workspace owners can view and take over their own live sessions. The owner grant now includes `stream:view`, `stream:control`, `stream:acknowledge`, `terminal:attach` and `files:write`, so joining a browser or computer sign-in handoff no longer fails with 403. Delegation permissions stay excluded.
+- 63bf721: Prepare a complete personal or workspace MCP connection once, with non-secret headers and protected secret-field mappings. People enter only the missing key in the conversation card; authorized agents that already have credentials use the same native Connect verification and storage lifecycle without another confirmation card.
+
+  Connection, installation and receipt writes are atomic. Exact retries do not repeat verification or create duplicate accounts. The agent path intersects frozen attempt permissions with live ownership, selection, policy and execution fences, and never makes new tools available inside an already accepted attempt. Existing OAuth and explicit account selections remain separate and unchanged.
+
+  Deploy matching API and worker packages before using direct agent setup. Historical attempt catalogs without the frozen permission snapshot do not gain new setup authority.
+
+- 83af41e: Allow an authorized private-session internal-update attempt to create a same-owner
+  private child while preserving service audit attribution and the existing causal
+  human, ownership, attempt and interruption checks.
+
+  Rolling migration 0654 binds insert attribution to the capability's recorded
+  parent turn instead of requiring a human audit initiator.
+
+- 78c28ca: When a sandbox is gone, all of its background commands now settle at once. The reaper used to settle each retained command only after its own provider probe, at most 20 per 30-second sweep, so a box with 35 commands that Modal had already ended took 11 more minutes to clear while the session waited. The first probe that finds the exact current box missing now retires the whole box in one transaction: every command, open request, terminal and process holder is settled, the lease goes cold, and a turn waiting on the box is woken. Commands lost with their sandbox now tell the agent "`cmd` is no longer running because its sandbox was shut down or lost; whether it finished is unknown. Check its effects before running it again." instead of "result unavailable", and the session's Incoming panel shows several such results as one row with a single dismiss action.
+- a9f5b24: Add provider-neutral inference-source modes for automatic, workspace-only, and
+  organization-only account selection. Keep workspace and organization source
+  membership and authorization policy separate on a canonical shared connection,
+  while retaining the legacy `useOrganizationAccounts` setting as a compatible
+  projection. Update the SQL settings resolver so mixed legacy/new settings
+  resolve identically in PostgreSQL and TypeScript.
+- 10624f7: The retained-process inventory (migration 0637, rolling) now classifies a process durably adopted as a session background command by that command, as the reconciliation claim already did: `background_running` is session-owned live work and never counts toward `opengeni_retained_processes_terminal_owner_backlog`, while `background_stopping` (a stop was requested but no exit/loss proof yet) still does. A server the agent leaves running after its turn no longer fires `OpenGeniRetainedProcessTerminalOwnerBacklog`.
+- feb1737: Operators can now see how long live sandboxes have gone without saving their workspace. The reaper publishes `opengeni_sandbox_checkpoint_staleness{kind="dirty"|"stale_4h"|"stale_12h"}` and `opengeni_sandbox_checkpoint_age_max_seconds` for live Modal sandboxes holding a write their last checkpoint did not capture, aged from the first such write (rolling migration 0672 adds the content-free inventory function). The new warning alert `OpenGeniSandboxCheckpointStale` fires when a sandbox has held unsaved changes for over 12 hours, half the default provider lifetime, and the sandbox dashboard gains panels for unsaved changes, the oldest unsaved change and skipped warm checkpoints.
+- 7926f10: The idle-session archive now measures activity by turns only. Bulk maintenance that touches `sessions.updated_at`, and bookkeeping events appended to idle sessions, no longer keep a long-idle session live. One maintenance pass also keeps archiving batches until its time budget ends, so a backlog drains after the archive is first enabled.
+- 1041a61: Store per-attempt tool catalogs and model-request snapshots once per session in content-addressed session blobs, and compact existing rows losslessly in the background.
+- 132684f: The durable recovery monitor now reports how long the single oldest recovering session has been past its recorded recovery due time (`summarizeSessionRecoveryBacklog`), and how many recovering sessions are still inside their recorded provider Retry-After or connectivity backoff. `OpenGeniSessionRecoveryBacklogStale` pages only when one session stays more than 10 minutes past due, so sustained provider rate limits that keep some session in backoff no longer page.
+- bc1f47f: Read only target session identity during authorization instead of expanding chat content and controls. Preserve the late visibility check, account matching, and request-scoped read reuse.
+- ce61681: Compare the shared subscription core with the legacy Codex, Claude and SuperGrok
+  account selection on every subscription turn. A legacy adapter that issues
+  only reads builds the core's placement world from today's tables under the
+  turn's own session access, and the worker records content-free metrics: security parity of the
+  legacy account, the reference checker's violations of the core's decision,
+  would-switch, and the legacy decision inputs. The comparison runs in the
+  background (at most two at once per worker), fails open, is bounded by
+  `OPENGENI_SUBSCRIPTION_CORE_SHADOW_TIMEOUT_MS` (default 250 ms, at most
+  1000 ms), is on by default and can be turned off with
+  `OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED=false`. Placement is unchanged; no
+  migration is required.
+- 1727b17: Keep private-session access when Claude and SuperGrok capacity handling runs
+  under the shared pool-worker database subject. The capacity-waiter lookup, the
+  workflow's work peek, lease acquisition, session pins and last-account metadata
+  now re-establish the acting turn's frozen initiating human, so a `user_private`
+  session waits and resumes like a shared one; arming and reconciling a shared
+  pool's wait already run without a subject. Previously the workflow peek treated
+  a waiting private session as runnable and the capacity workflow could not find
+  its waiter. The pool worker still cannot see any other member's private session,
+  and an ambient actor is never combined with another member's human. An
+  immediate wake-up after a member reconnects an account or changes a shared pool
+  now reaches every waiter of that exact pool, including other members' private
+  waiters, without giving that member access to them; it previously waited up to
+  60 seconds for the periodic recheck. A wait that cannot be armed for a
+  non-database reason now fails the turn with the explicit, retryable
+  `<provider>_capacity_wait_unavailable` state.
+
+  No database migration or configuration change is required.
+
+- a34d8f5: Agent messages and Agent Steers now run on the receiving session's Claude and SuperGrok pool instead of the sender's. The new turn keeps the sender's causal human for permissions, but its pool comes from the receiver's execution-context turn, else its latest accepted turn, else its initial snapshot. A personal pool is kept only when its owner is that same human; otherwise the receiver uses its organization or workspace pool (a model served only by that personal pool fails closed), so a personal account never funds another person's session. Prompts from service and operator actors (organization API keys, the Slack bridge), sessions created without a human creator, and internal updates without causal authority now resolve the organization or workspace pool instead of always freezing the workspace pool. Already accepted turns, queued updates and child-result outbox rows keep their frozen snapshots. Codex is unaffected because its allocator source is captured from the receiving workspace at first lease. No migration or configuration change is required.
+- 7bf1a02: Add per-workspace, exact-model compaction preferences with atomic independent
+  reset, shared effective-limit projection and a discoverable Models settings page.
+  Add the verified native Haiku 5.5 profile with a 95k compaction default and tiered
+  comparison pricing. Keep request-byte safety independent of token preferences.
+- d7b947e: A running background command (a dev server, a long benchmark, a command whose output is still draining) no longer stops workspace checkpoints. Warm checkpoints taken during a turn were refused while a background command held the sandbox, potentially leaving later changes without a recovery point if the provider instance was lost. When the checkpoint is a Modal native snapshot (a point-in-time image of the paused box), it now runs around the exact active, unsupervised retained commands on the same box. A file a command was writing at that instant can be saved half-written; that is the accepted trade-off. Tar-style checkpoints still wait for commands. Such a checkpoint is recorded one generation behind the workspace, so it is never reported complete: periodic checkpoints continue, and a restore after provider loss shows the usual discontinuity warning. Rolling migration 0659 records the claim so a drain, a drain takeover or a late adoption can never publish it as the final workspace. Viewers, sibling turns, in-flight requests and supervised commands still block a checkpoint. The worker exports `opengeni_workspace_capture_skipped_total{backend,reason}` for warm checkpoint attempts that could not start.
+- Updated dependencies [e03f1ff]
+- Updated dependencies [e8a3d83]
+- Updated dependencies [4532435]
+- Updated dependencies [851cbdc]
+- Updated dependencies [ce7b403]
+- Updated dependencies [334c470]
+- Updated dependencies [f7d53b2]
+- Updated dependencies [c13d080]
+- Updated dependencies [061ae01]
+- Updated dependencies [6313dd8]
+- Updated dependencies [c502add]
+- Updated dependencies [0001298]
+- Updated dependencies [38b1ba1]
+- Updated dependencies [1da17d9]
+- Updated dependencies [6960770]
+- Updated dependencies [63bf721]
+- Updated dependencies [1489689]
+- Updated dependencies [71c42bf]
+- Updated dependencies [a9f5b24]
+- Updated dependencies [a390b9e]
+- Updated dependencies [4d5934e]
+- Updated dependencies [ce61681]
+- Updated dependencies [7bf1a02]
+  - @opengeni/contracts@1.5.0
+  - @opengeni/config@1.5.0
+  - @opengeni/codex@1.5.0
+  - @opengeni/subscriptions@1.5.0
+  - @opengeni/codemode@1.5.0
+  - @opengeni/observability@1.5.0
+  - @opengeni/network@1.5.0
+
 ## 1.4.4
 
 ### Patch Changes

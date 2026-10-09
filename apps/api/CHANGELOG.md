@@ -1,5 +1,99 @@
 # @opengeni/api-router
 
+## 1.5.0
+
+### Patch Changes
+
+- b194e31: Agent capability catalog search now tolerates near spellings, so "Wispr" or "Wisprflow" finds a custom MCP named "Whisprflow". Typo-only hits rank below exact, prefix and substring hits and carry `approximate: true`. Custom catalog entries without a provider domain are also matched by their endpoint's registrable domain (for example `api.wisprflow.ai` matches `wisprflow.ai`). When nothing matches, `capability_catalog_search` returns the closest catalog names as labelled `suggestions` instead of a bare empty result, so the agent does not conclude an existing integration is missing.
+- ce7b403: Track built-in tool default inheritance independently of connector selection. New sessions and explicit resets follow current workspace defaults on the next attempt, while explicit lists, exclusions, deployment ceilings, capability restrictions, and frozen catalogs remain authoritative. A rolling migration adopts default intent only for older root sessions whose latest retained policy event proves a full reset and still matches their stored selection; ambiguous legacy selections remain pinned.
+- 3558595: The GitHub connection pages now render in the web app's own Inter and DM Sans fonts (inlined, no external requests), so the Opengeni wordmark and text match the app on machines without those fonts installed.
+- 8751a2e: Show the GitHub mark on every GitHub connection page, next to the Opengeni mark, in light and dark mode. The Opengeni Lens GitHub pages now use the same design.
+- 1eda9e3: Restyle the GitHub connection pages (account chooser, connected, pending and connect-failure pages) to match the Opengeni web app, with light and dark mode and a mobile layout.
+- 121f6ed: A new chat without a goal no longer logs failed `GET .../goal` 404s in the browser console. `GET /v1/workspaces/:workspaceId/sessions/:sessionId/goal?absent=null` answers 200 `null` for a goal-less session (without the opt-in the 404 is unchanged, and a missing session is always 404). The SDK adds `findGoal`, which sends the opt-in and resolves `null`; the session proxy forwards it. `useGoal` reads through `findGoal` when the client has it (falling back to `getGoal` and its absorbed 404 otherwise), and no longer re-reads a goal-less session when the stream's opening events race the first read, so an embedded Opengeni chat makes one successful goal read per new chat. A goal set later still arrives through its `goal.*` event.
+- 0152516: Add low-cardinality money and per-model usage metrics: `opengeni_model_responses_total{provider,model,priced}`, `opengeni_model_tokens_total{provider,model,type}` (input, cached input, cache write, output, reasoning), `opengeni_model_provider_cost_micros_total{provider,model,payer,pricing_source}` (estimated upstream cost), `opengeni_model_credits_charged_micros_total{provider,model,funding}` (credits debited, promotional grant vs general credit), and paid credit purchases `opengeni_credit_purchases_total{mode}`, `opengeni_credit_purchased_micros_total{mode}` and `opengeni_credit_purchase_paid_usd_micros_total{mode}`. `model` is the bounded deployment catalog product id; account and user ids are never labels. A raced Stripe checkout delivery no longer double-counts `opengeni_credit_micros_total{kind="topup"}`.
+- 6960770: Opper is a first-class model provider with the same three rails as OpenRouter and Vercel AI Gateway. `OPENGENI_OPPER_API_KEY` adds reviewed EU-pinned `opper/vertexai/gemini-3.8-flash-eu` and `opper/aws/claude-sonnet-4-6-eu` routes billed in Opengeni credits at the exact Opper-reported cost +5% (reviewed list price as fallback); workspace admins can connect their own Opper key (`workspace-opper/…`, billed to their Opper account) and add exact custom Opper ids; organization owners can connect Opper once for every shared workspace (`organization-opper/…`). The SDK adds `listWorkspaceOpperCustomModels`, `createWorkspaceOpperCustomModel`, `deleteWorkspaceOpperCustomModel`, `ModelConnectionAccessKind`, and `"opper"` as an organization model provider kind. Opper management keys (`op-mak-…`) are rejected with an explanation. Deployment catalog documents accept a reviewed `opperModels` list. Host `OPENGENI_MODEL_PROVIDERS_JSON` can no longer use the reserved `opper`, `workspace-opper`, or `organization-opper` provider ids; move a hand-written Opper registry entry to `OPENGENI_OPPER_API_KEY`. Rolling migration `0636_opper_model_providers.sql` widens the provider-kind, lifecycle-fact, and analytics allow-lists.
+- Updated dependencies [e03f1ff]
+- Updated dependencies [12bcb8e]
+- Updated dependencies [14a9340]
+- Updated dependencies [608e907]
+- Updated dependencies [0380bc5]
+- Updated dependencies [7ae7683]
+- Updated dependencies [931ac51]
+- Updated dependencies [8df9e66]
+- Updated dependencies [4cccd33]
+- Updated dependencies [b194e31]
+- Updated dependencies [91c7c0e]
+- Updated dependencies [e8a3d83]
+- Updated dependencies [6372501]
+- Updated dependencies [4532435]
+- Updated dependencies [851cbdc]
+- Updated dependencies [21d64c1]
+- Updated dependencies [5b31ec7]
+- Updated dependencies [129ead3]
+- Updated dependencies [ce7b403]
+- Updated dependencies [7ae7683]
+- Updated dependencies [334c470]
+- Updated dependencies [f7d53b2]
+- Updated dependencies [0c6f5c4]
+- Updated dependencies [e29b641]
+- Updated dependencies [c13d080]
+- Updated dependencies [061ae01]
+- Updated dependencies [6313dd8]
+- Updated dependencies [c502add]
+- Updated dependencies [0001298]
+- Updated dependencies [c43f174]
+- Updated dependencies [d15e8e9]
+- Updated dependencies [0152516]
+- Updated dependencies [560acdd]
+- Updated dependencies [906d3c2]
+- Updated dependencies [38b1ba1]
+- Updated dependencies [1da17d9]
+- Updated dependencies [6960770]
+- Updated dependencies [a4f19c2]
+- Updated dependencies [55eb9b0]
+- Updated dependencies [a15f487]
+- Updated dependencies [63bf721]
+- Updated dependencies [83af41e]
+- Updated dependencies [1489689]
+- Updated dependencies [78c28ca]
+- Updated dependencies [71c42bf]
+- Updated dependencies [a9f5b24]
+- Updated dependencies [a390b9e]
+- Updated dependencies [10624f7]
+- Updated dependencies [7f257db]
+- Updated dependencies [70332a4]
+- Updated dependencies [feb1737]
+- Updated dependencies [7926f10]
+- Updated dependencies [1041a61]
+- Updated dependencies [132684f]
+- Updated dependencies [bc1f47f]
+- Updated dependencies [ce61681]
+- Updated dependencies [1727b17]
+- Updated dependencies [a34d8f5]
+- Updated dependencies [e712954]
+- Updated dependencies [7bf1a02]
+- Updated dependencies [dd82a5c]
+- Updated dependencies [d7b947e]
+  - @opengeni/contracts@1.5.0
+  - @opengeni/runtime@1.5.0
+  - @opengeni/db@1.5.0
+  - @opengeni/core@1.5.0
+  - @opengeni/config@1.5.0
+  - @opengeni/codex@1.5.0
+  - @opengeni/events@1.5.0
+  - @opengeni/artifact-tool@1.5.0
+  - @opengeni/codemode@1.5.0
+  - @opengeni/observability@1.5.0
+  - @opengeni/capabilities@1.5.0
+  - @opengeni/documents@1.5.0
+  - @opengeni/github@1.5.0
+  - @opengeni/interaction@1.5.0
+  - @opengeni/storage@1.5.0
+  - @opengeni/tool-gateway@1.5.0
+  - @opengeni/agent-proto@1.5.0
+  - @opengeni/network@1.5.0
+  - @opengeni/xai-subscription@1.5.0
+
 ## 1.4.4
 
 ### Patch Changes

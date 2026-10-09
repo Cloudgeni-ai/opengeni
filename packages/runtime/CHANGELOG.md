@@ -1,5 +1,122 @@
 # @opengeni/runtime
 
+## 1.5.0
+
+### Minor Changes
+
+- 71c42bf: Configured agents are no longer told to call first-party tools that their attempt cannot reach. `BuildAgentOptions.agentPromptToolAvailability` (derived with `deriveAgentPromptToolAvailability` from the accepted first-party selection and permission ceiling) removes only instruction clauses that name a tool proven absent; deferred, external and unknown tools keep their guidance, and omitting it keeps today's bytes. `@opengeni/contracts` now exports the first-party tool registration table (`FIRST_PARTY_TOOL_AUTHORIZATION`, `permissionsRequiredByFirstPartyTools`) previously private to the API.
+
+### Patch Changes
+
+- 12bcb8e: Keep authorized first-party harness control tools (goal lifecycle, `command_read`, `command_wait`, `wait_for_input`) visible from the first request on every progressive-disclosure transport, so the model no longer spends a `tool_search` round trip to find them. Other first-party tools stay deferred and a disabled family stays absent.
+- 14a9340: A person's question asked while the agent is working or waiting always gets a visible answer. `wait_for_input` is refused (as a tool error, at most twice per turn attempt; a resumed or retried attempt starts again, and the check fails open if it cannot decide) when the turn answers a person's message and the agent has not written any visible reply yet, so a status drafted only in reasoning is written out before the turn yields. `prepareAgentTools` accepts the new `inputWaitReplyGuard` option for this check.
+
+  In the timeline, a reply the agent wrote before more tool work and a wait stays visible after the "Worked for" row instead of folding into it: a turn that answers a person and ends with only progress notes keeps its first and last message visible, and the notes between them still fold.
+
+- 608e907: `apply_patch` `*** Add File` now creates files that end with a newline, matching Codex: each `+` line is followed by `\n`. Previously the last line had no trailing newline. Update and Delete File sections are unchanged, and internal sandbox writers keep their exact-content behavior.
+- 0380bc5: Recover confirmed Claude overload on the same accepted turn for at most 15 retries
+  within a 15-minute durable recovery window. Require structured provider evidence,
+  honor Retry-After only inside that window, and reject expired retries before
+  dispatch. Preserve the selected budget and delay through checkpoint database
+  outages without replaying completed tools or changing account/model selection.
+  Other failure classes retain their existing recovery behavior.
+
+  Ship runtime and turn/control workers with the workflow bundle from the same
+  source release; no database migration or configuration change is required.
+
+- 8df9e66: Clarify browser action guidance for batches of known form edits, reuse of returned page observations, and inspection of uncertain outcomes.
+- 4cccd33: Return the existing compact page observation from browser tab open/select tools so agents can reuse its references and generations without another observation request.
+- e8a3d83: Bound Claude's final serialized request and inline image bytes. Recover a first
+  request-size rejection through one durable checkpoint while preserving the
+  latest complete input/tool batch, signed thinking, and original history. Keep
+  the recovery allowance across attempt restarts and report content-free size
+  diagnostics instead of retrying an unchanged oversized request.
+- 6372501: The Codemode directive no longer says every available tool is callable programmatically. It now names the Codemode catalog (`ogtool list`) and says the built-in sandbox tools for the shell, file patching, image viewing and terminal input are outside it, so the agent uses the shell and filesystem directly for those.
+- 4532435: Codex Apps keeps working when a workspace routes models through its organization's Codex accounts. The workspace's designated Apps account now loads, and its token refreshes persist, through the Apps designation itself instead of the model-routing pool; that authority still reaches only the designated account, owned by this workspace and its current owner. Turning Apps off (`DELETE /v1/workspaces/:workspaceId/codex/apps`) now works in every routing mode, so `apps.canDisable` is accurate.
+
+  Apps no longer posts an authorization card every time it sets up a turn. A card appears only when an Apps tool call needs one, at most once per turn, and an unusable designated account is reported with the new `tool.auth_needed` reason `designated_credential_unavailable` instead of `refresh_failed`. Clients should treat unknown reasons generically, as before.
+
+- 21d64c1: Align autonomous Knowledge retention across prompt paths and new Slack chats,
+  show accepted learning modes and destination scope, and improve selective
+  retrieval and feedback correction guidance.
+- e29b641: Preserve connected-machine failure details and request references in agent tool errors. Retain uncertain outcomes and guide inspection before another action instead of suggesting an automatic retry.
+- c13d080: Add canonical sparse row-height and column-width set/reset commands with live
+  spreadsheet projections and immediate, frame-coalesced drag and keyboard
+  resizing. Preserve existing dimension-free artifacts and shared artifact
+  authority, collaboration, and history.
+
+  Preserve sparse dimensions through native workbook reconciliation and verified
+  XLSX materialization, including empty-sheet geometry. Refresh all modality
+  kernel distributions together to retain their shared build identity.
+
+  Keep spreadsheet input responsive during delayed saves, retain pending cell
+  drafts when refocused, surface independent failures without unsafe overlapping
+  retries, and show server sync state separately from local command acceptance.
+
+  Center resize targets on header borders and retain valid covered cells while
+  viewport queries change. Show submitted cell input immediately without inventing
+  formula results. Support canonical worksheet renaming by double-click or F2,
+  with validated Enter/Save, Escape/Cancel, and readable pending/failure feedback.
+
+- c43f174: MCP tool-call metrics (`opengeni_mcp_tool_calls_total`, `opengeni_mcp_tool_call_duration_seconds`) carry a bounded `tool` label: the tool name for a first-party Opengeni catalog tool, and `external` for every connector, API-integration, and custom tool. The `OpenGeniMcpToolLatencyHigh` alert now fires per tool and names it.
+- d15e8e9: Modal router reads no longer report a finished command as still running when the exit poll is answered just before both output streams reach EOF; the page polls again within its existing read budget. Internal callers that read once (file writes, Skill checkout) now see the finished command's exit instead of failing, so the command is not retained and later adopted as an agent-visible background command.
+- 906d3c2: Preserve the exact scheduler authority label and immutable curated Skill artifacts during the branding refresh so scheduled dispatch and pinned library discovery remain compatible.
+
+  Refresh the canonical browser artifact kernels to match the branding-updated Rust source identity.
+
+- 38b1ba1: Use Opengeni in product copy and Slack manifest defaults, add a clearly labeled staging icon, and accept both current and historical Slack installation names without rewriting saved credentials or receipts. Expose the Opengeni chat facade while preserving the existing OpenGeni export and public identifiers.
+- 1da17d9: The deployment Opper rail now offers Claude Opus 5.5 (EU) (`opper/aws/claude-opus-5-5`, AWS Bedrock eu-north-1, no provider logging) instead of the Gemini 3.8 Flash and Claude Sonnet 4.6 EU starters. Reasoning is runnable (`low` through `max`, default `medium`), image input is enabled, and every Opper request without its own output cap gets the route's `maxOutputTokens`, because Opper otherwise stops at 4,096 tokens, which hidden thinking can use up. Opper streams use a 60-minute keepalive-only progress bound, because hidden thinking sends only keepalives and `max` effort exceeded the default 10 minutes. Billing still uses Opper's reported cost +5%. Workspace and organization custom Opper ids now get runnable reasoning, image input for the Claude and Gemini families, and a Claude output cap; an id that names a configured route inherits that route's definition. New `OPENGENI_MANAGED_MODELS_JSON` replaces the managed Gateway, OpenRouter, and Opper model lists in code catalog mode without a code deploy, using the catalog document's entry schemas. Database catalog mode ignores it.
+- 6960770: Opper is a first-class model provider with the same three rails as OpenRouter and Vercel AI Gateway. `OPENGENI_OPPER_API_KEY` adds reviewed EU-pinned `opper/vertexai/gemini-3.8-flash-eu` and `opper/aws/claude-sonnet-4-6-eu` routes billed in Opengeni credits at the exact Opper-reported cost +5% (reviewed list price as fallback); workspace admins can connect their own Opper key (`workspace-opper/…`, billed to their Opper account) and add exact custom Opper ids; organization owners can connect Opper once for every shared workspace (`organization-opper/…`). The SDK adds `listWorkspaceOpperCustomModels`, `createWorkspaceOpperCustomModel`, `deleteWorkspaceOpperCustomModel`, `ModelConnectionAccessKind`, and `"opper"` as an organization model provider kind. Opper management keys (`op-mak-…`) are rejected with an explanation. Deployment catalog documents accept a reviewed `opperModels` list. Host `OPENGENI_MODEL_PROVIDERS_JSON` can no longer use the reserved `opper`, `workspace-opper`, or `organization-opper` provider ids; move a hand-written Opper registry entry to `OPENGENI_OPPER_API_KEY`. Rolling migration `0636_opper_model_providers.sql` widens the provider-kind, lifecycle-fact, and analytics allow-lists.
+- a15f487: Preserve included hosted web-search URLs and snippets across client-tool continuations and portable compaction without depending on provider-stored item IDs. Azure native search requests now include supported evidence; request-local history exposes only bounded, untrusted provider-returned facts while canonical history remains unchanged.
+- 63bf721: Prepare a complete personal or workspace MCP connection once, with non-secret headers and protected secret-field mappings. People enter only the missing key in the conversation card; authorized agents that already have credentials use the same native Connect verification and storage lifecycle without another confirmation card.
+
+  Connection, installation and receipt writes are atomic. Exact retries do not repeat verification or create duplicate accounts. The agent path intersects frozen attempt permissions with live ownership, selection, policy and execution fences, and never makes new tools available inside an already accepted attempt. Existing OAuth and explicit account selections remain separate and unchanged.
+
+  Deploy matching API and worker packages before using direct agent setup. Historical attempt catalogs without the frozen permission snapshot do not gain new setup authority.
+
+- 70332a4: Turn-startup diagnostics: `model_prepare_runner_before_mcp_tools` is recorded only when the MCP tool snapshot happens before the first model request. A lazily prepared catalog snapshotted after that charged the model's own time to the gap (it read 14 s p50 while real first tokens took ~3 s).
+- e712954: Observe each already-started internal filesystem command to confirmed terminal completion before returning checkout, read, or mutation results. Preserve complete output, exact command custody and cancellation, and report unknown completion without replaying writes or advising a new retry. Interactive and background shell behavior is unchanged.
+- dd82a5c: Correct modular tool-discovery guidance: a tool found with `tool_search` stays callable by its exact name, several capabilities can be searched in one response or loaded together through `names`, and goal tools are searched only when their input schema is not in context.
+- d7b947e: A running background command (a dev server, a long benchmark, a command whose output is still draining) no longer stops workspace checkpoints. Warm checkpoints taken during a turn were refused while a background command held the sandbox, potentially leaving later changes without a recovery point if the provider instance was lost. When the checkpoint is a Modal native snapshot (a point-in-time image of the paused box), it now runs around the exact active, unsupervised retained commands on the same box. A file a command was writing at that instant can be saved half-written; that is the accepted trade-off. Tar-style checkpoints still wait for commands. Such a checkpoint is recorded one generation behind the workspace, so it is never reported complete: periodic checkpoints continue, and a restore after provider loss shows the usual discontinuity warning. Rolling migration 0659 records the claim so a drain, a drain takeover or a late adoption can never publish it as the final workspace. Viewers, sibling turns, in-flight requests and supervised commands still block a checkpoint. The worker exports `opengeni_workspace_capture_skipped_total{backend,reason}` for warm checkpoint attempts that could not start.
+- Updated dependencies [e03f1ff]
+- Updated dependencies [e8a3d83]
+- Updated dependencies [4532435]
+- Updated dependencies [851cbdc]
+- Updated dependencies [8017d94]
+- Updated dependencies [ce7b403]
+- Updated dependencies [121f6ed]
+- Updated dependencies [334c470]
+- Updated dependencies [f7d53b2]
+- Updated dependencies [0c6f5c4]
+- Updated dependencies [c13d080]
+- Updated dependencies [061ae01]
+- Updated dependencies [6313dd8]
+- Updated dependencies [c502add]
+- Updated dependencies [38b1ba1]
+- Updated dependencies [1da17d9]
+- Updated dependencies [6960770]
+- Updated dependencies [63bf721]
+- Updated dependencies [1489689]
+- Updated dependencies [71c42bf]
+- Updated dependencies [a390b9e]
+- Updated dependencies [7852cda]
+- Updated dependencies [a51c96e]
+- Updated dependencies [7f3f19f]
+- Updated dependencies [ce61681]
+- Updated dependencies [7bf1a02]
+  - @opengeni/contracts@1.5.0
+  - @opengeni/sdk@1.5.0
+  - @opengeni/config@1.5.0
+  - @opengeni/codex@1.5.0
+  - @opengeni/codemode@1.5.0
+  - @opengeni/observability@1.5.0
+  - @opengeni/capabilities@1.5.0
+  - @opengeni/interaction@1.5.0
+  - @opengeni/tool-gateway@1.5.0
+  - @opengeni/agent-proto@1.5.0
+  - @opengeni/network@1.5.0
+  - @opengeni/xai-subscription@1.5.0
+
 ## 1.4.4
 
 ### Patch Changes
