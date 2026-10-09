@@ -1,7 +1,7 @@
 const params = new URLSearchParams(window.location.search);
 const models = [
   { id: "synthetic/fast", label: "Claude Haiku 5.5", threshold: 95_000 },
-  { id: "synthetic/deep", label: "Claude Opus 5.5", threshold: 800_000 },
+  { id: "synthetic/deep", label: "Claude Opus 5.5", threshold: 300_000 },
 ].map(({ threshold, ...model }) => ({
   ...model,
   api: "anthropic-messages",

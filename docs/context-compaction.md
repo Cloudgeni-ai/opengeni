@@ -76,8 +76,8 @@ whole workspace settings bag. The model catalog exposes `compactionPolicy` with
 default/override/effective/minimum/maximum tokens, separately from immutable model
 execution metadata.
 
-Haiku 5.5 defaults to 95,000 tokens; Opus 5.5 retains its 800,000-token default
-unless overridden (for example, to 250,000). These are proactive thresholds, not
+Haiku 5.5 defaults to 95,000 tokens and Opus 5.5 (native Claude and Opper) to
+300,000, unless overridden (for example, to 250,000). These are proactive thresholds, not
 hard spending caps: checks run between steps and include provider-accounted
 context, so newly appended content or a large response may cross a price boundary.
 The independent request-byte guard described below always remains active.
