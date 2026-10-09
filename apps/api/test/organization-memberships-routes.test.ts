@@ -195,6 +195,7 @@ describe("organization membership routes", () => {
           email: "local@example.test",
           "https://api.openai.com/auth": {
             chatgpt_account_id: "local-codex-account",
+            chatgpt_user_id: "local-codex-person",
             chatgpt_plan_type: "team",
           },
         }),

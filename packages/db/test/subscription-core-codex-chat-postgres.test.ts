@@ -705,8 +705,11 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
       },
     });
 
-    // Same owner, Personal workspace, but no v2 entry: no personal authority.
-    const unfrozen = await runningTurn(org, { workspaceId: org.personalWorkspaceId });
+    // Same session owner, but a service acceptance freezes empty personal authority.
+    const unfrozen = await runningTurn(org, {
+      workspaceId: org.personalWorkspaceId,
+      initiator: { kind: "service" },
+    });
     expect(await place(unfrozen)).toMatchObject({ kind: "wait", reason: "no_eligible_capacity" });
 
     // The owner's shared-workspace session with a v2 entry is not their own work.
