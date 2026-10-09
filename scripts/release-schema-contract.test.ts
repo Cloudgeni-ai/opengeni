@@ -2196,7 +2196,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
-      "0685_target_tool_approval_bindings.sql",
+      "0686_target_tool_approval_bindings.sql",
       "0671_subscription_core_codex_operations.sql",
       "0670_subscription_core_codex_apps.sql",
       "0669_subscription_core_codex_waits.sql",
@@ -2580,6 +2580,7 @@ describe("release schema contract", () => {
       "0680_sandbox_idle_checkpoint.sql",
       "0681_sandbox_ended_epoch_blockers.sql",
       "0684_claude_haiku_5_5_default_model.sql",
+      "0685_sandbox_capture_around_supervised_commands.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

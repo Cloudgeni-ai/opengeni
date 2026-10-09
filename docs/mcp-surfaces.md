@@ -174,7 +174,7 @@ code in the diagnostic message. Saved bundle bytes are not rewritten; only
 genuine known preexecution stale signals authorize refresh.
 OAuth and explicit catalog/declarations discovery are unchanged.
 For a mixed-version fleet, apply rolling migration
-`0685_target_tool_approval_bindings.sql` first. Bring up a fully upgraded API pool
+`0686_target_tool_approval_bindings.sql` first. Bring up a fully upgraded API pool
 and route all four new endpoints (`resolve`, `invoke`, `target-approvals`, and
 `manifest`) exclusively to that pool before sending new-protocol traffic.
 Existing v1 endpoints may still reach older replicas during the rollout. If
