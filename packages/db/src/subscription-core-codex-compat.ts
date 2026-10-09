@@ -14,6 +14,8 @@
  * inside their owner's exact accepted turn).
  */
 import { sql } from "drizzle-orm";
+import { auditEvents } from "./schema";
+import { withLosslessContentWriteVersion } from "./lossless-json";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
 import {
   decodeSubscriptionQuota,
@@ -72,6 +74,9 @@ type ConnectionRow = {
   provider_account_id: string | null;
   status: string;
   last_error: string | null;
+  extra_credits_enabled: boolean;
+  extra_credits_version: number | string;
+  extra_credits_updated_at: Date | string | null;
   allocator_enabled: boolean;
   allocator_version: number | string;
   allowed_model_ids: string[] | null;
@@ -90,6 +95,7 @@ type ConnectionRow = {
 const CONNECTION_COLUMNS = sql`connection.id::text as id, connection.label,
   connection.account_email, connection.plan_type, connection.provider_account_id,
   connection.status, connection.last_error, connection.allocator_enabled,
+  connection.extra_credits_enabled, connection.extra_credits_version, connection.extra_credits_updated_at,
   connection.allocator_version, connection.allowed_model_ids,
   connection.connected_by_subject_id, connection.expires_at, connection.last_refresh_at,
   connection.managed_by_workspace_id::text as managed_by_workspace_id,
@@ -133,6 +139,9 @@ function projectAccount(
     planChangedAt: null,
     planEntitlementExclusion: null,
     status: row.status,
+    extraCreditsEnabled: row.extra_credits_enabled,
+    extraCreditsVersion: Number(row.extra_credits_version),
+    extraCreditsUpdatedAt: date(row.extra_credits_updated_at),
     allocatorEnabled: row.allocator_enabled && input.poolAllocatorEnabled,
     allocatorVersion: Number(row.allocator_version),
     allocatorUpdatedBySubjectId: null,
@@ -567,6 +576,141 @@ export async function setSubscriptionCoreCodexAllocator(
       // Re-enabling can make a waiting turn placeable; disabling changes nothing
       // a waiter needs, but a single wake is cheap and keeps the rule simple.
       wake: { accountId: input.accountId, reason: "core_codex_allocator_changed" },
+    };
+  });
+}
+
+export type SubscriptionCoreCodexExtraCreditsResult =
+  | {
+      kind: "updated" | "unchanged" | "conflict";
+      extraCreditsEnabled: boolean;
+      extraCreditsVersion: number;
+      extraCreditsUpdatedAt: Date | null;
+    }
+  | { kind: "not_found" };
+
+/**
+ * New-allocation eligibility of one connection, with the legacy optimistic
+ * concurrency: the same state is idempotent even with a stale version; a
+ * conflicting stale version returns the current one. Organization
+ * administrators and the connection's delegated manager may toggle it.
+ */
+export async function setSubscriptionCoreCodexExtraCredits(
+  db: Database,
+  input: Administration & { connectionId: string; enabled: boolean; expectedVersion: number },
+): Promise<{
+  result: SubscriptionCoreCodexExtraCreditsResult;
+  wake: SubscriptionCoreCodexWake | null;
+}> {
+  return await withCodexAdministration(db, input, async (tx) => {
+    const visible = await visibleSharedConnection(tx, input, input.connectionId);
+    if (!visible) return { result: { kind: "not_found" }, wake: null };
+    const [row] = await rawRows<{ enabled: boolean; version: number }>(
+      tx,
+      sql`select extra_credits_enabled as enabled, extra_credits_version as version
+        from subscription_connections where account_id = ${input.accountId}::uuid
+        and id = ${visible.id}::uuid for update`,
+    );
+    const current = row
+      ? {
+          id: visible.id,
+          extraCreditsEnabled: row.enabled,
+          extraCreditsVersion: Number(row.version),
+        }
+      : null;
+    if (!current) return { result: { kind: "not_found" }, wake: null };
+    const projection = (
+      kind: "updated" | "unchanged" | "conflict",
+      enabled: boolean,
+      version: number,
+      updatedAt: Date | string | null,
+    ) => ({
+      kind,
+      extraCreditsEnabled: enabled,
+      extraCreditsVersion: version,
+      extraCreditsUpdatedAt: date(updatedAt),
+    });
+    const [stamp] = await rawRows<{ updated_at: Date | string }>(
+      tx,
+      sql`select extra_credits_updated_at as updated_at from subscription_connections
+        where account_id = ${input.accountId}::uuid and id = ${current.id}::uuid`,
+    );
+    if (current.extraCreditsEnabled === input.enabled) {
+      return {
+        result: projection(
+          "unchanged",
+          current.extraCreditsEnabled,
+          current.extraCreditsVersion,
+          stamp?.updated_at ?? null,
+        ),
+        wake: null,
+      };
+    }
+    if (current.extraCreditsVersion !== input.expectedVersion) {
+      return {
+        result: projection(
+          "conflict",
+          current.extraCreditsEnabled,
+          current.extraCreditsVersion,
+          stamp?.updated_at ?? null,
+        ),
+        wake: null,
+      };
+    }
+    let updated: { extra_credits_version: number | string; updated_at: Date | string } | undefined;
+    try {
+      updated = await tx.transaction(async (savepoint) => {
+        const [updatedRow] = await rawRows<{
+          extra_credits_version: number | string;
+          updated_at: Date | string;
+        }>(
+          savepoint as unknown as Database,
+          sql`update subscription_connections
+            set extra_credits_enabled = ${input.enabled},
+                extra_credits_updated_by_subject_id = ${input.subjectId},
+                extra_credits_updated_at = clock_timestamp(),
+                extra_credits_version = extra_credits_version + 1,
+                updated_at = clock_timestamp()
+            where account_id = ${input.accountId}::uuid and id = ${current.id}::uuid
+              and extra_credits_version = ${input.expectedVersion}
+            returning extra_credits_version, extra_credits_updated_at as updated_at`,
+        );
+        return updatedRow;
+      });
+    } catch (error) {
+      if (isRlsRefusal(error)) return { result: { kind: "not_found" }, wake: null };
+      throw error;
+    }
+    // The update policy hides a connection this subject may not manage.
+    if (!updated) return { result: { kind: "not_found" }, wake: null };
+    await tx.insert(auditEvents).values(
+      withLosslessContentWriteVersion(
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+          action: "codex.extra_credits.updated",
+          targetType: "subscription_connection",
+          targetId: current.id,
+          metadata: {
+            extraCreditsEnabled: input.enabled,
+            extraCreditsVersion: Number(updated.extra_credits_version),
+          },
+        },
+        "metadata",
+        "metadataCodecVersion",
+      ),
+    );
+    return {
+      result: projection(
+        "updated",
+        input.enabled,
+        Number(updated.extra_credits_version),
+        updated.updated_at,
+      ),
+      // Re-enabling can make a waiting turn placeable; disabling changes nothing
+      // a waiter needs, but a single wake is cheap and keeps the rule simple.
+      wake: { accountId: input.accountId, reason: "core_codex_extra_credits_changed" },
     };
   });
 }

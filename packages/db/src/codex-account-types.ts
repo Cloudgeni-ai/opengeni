@@ -41,6 +41,12 @@ export type CodexAccountStatus = {
   planEntitlementExclusion?: CodexPlanEntitlementExclusion | null;
   status: string; // active | needs_relogin | error
   /** New automatic allocations only; health/refresh and existing turns remain independent. */
+  /** Spending consent is account-owned and off until explicitly enabled. */
+  extraCreditsEnabled?: boolean;
+  extraCreditsVersion?: number;
+  extraCreditsUpdatedBySubjectId?: string | null;
+  extraCreditsUpdatedAt?: Date | null;
+  includedUsageUnavailableUntil?: Date | null;
   allocatorEnabled: boolean;
   allocatorVersion: number;
   allocatorUpdatedBySubjectId: string | null;

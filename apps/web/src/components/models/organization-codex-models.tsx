@@ -35,6 +35,7 @@ import { Notice } from "@/components/ui/notice";
 import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { Switch } from "@/components/ui/switch";
 import { UsageMeterGroup } from "@/components/ui/usage-meter";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 
@@ -166,7 +167,13 @@ function OrgCodexAccountDetail({
       <DetailPageHeader
         leading={<ProviderTile provider="codex" />}
         title={name}
-        chips={reconnect ? <StatusBadge status="needs_reconnect" variant="outline" /> : null}
+        chips={
+          reconnect ? (
+            <StatusBadge status="needs_reconnect" variant="outline" />
+          ) : !account.allocatorEnabled ? (
+            <StatusBadge status="paused" variant="outline" />
+          ) : null
+        }
         meta={[
           planLabel(account.plan, "ChatGPT"),
           account.email && account.email !== name ? account.email : null,
@@ -214,6 +221,32 @@ function OrgCodexAccountDetail({
         ) : null}
         <DetailSection title="Settings">
           <SettingRowGroup className="-my-3">
+            <SettingRow
+              label="Available for new chats"
+              description="Turn off to pause this account across the organization. Work already running continues."
+              control={
+                <Switch
+                  aria-label={`${name} is available for new chats`}
+                  checked={account.allocatorEnabled}
+                  pending={codex.working === `allocator:${account.id}`}
+                  disabled={codex.busy}
+                  onCheckedChange={(next) => void codex.setAllocator(account, next)}
+                />
+              }
+            />
+            <SettingRow
+              label="Use extra credits"
+              description="Use this account's extra credits when included usage is exhausted. Automatic rotation tries other accounts' included usage first. Turning this off protects credits from the next request."
+              control={
+                <Switch
+                  aria-label={`Use extra credits on ${name}`}
+                  checked={account.extraCreditsEnabled ?? false}
+                  pending={codex.working === `extra-credits:${account.id}`}
+                  disabled={codex.busy}
+                  onCheckedChange={(next) => void codex.setExtraCredits(account, next)}
+                />
+              }
+            />
             {codex.accounts.length > 1 ? (
               <SettingRow
                 label="Primary account"

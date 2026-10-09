@@ -29,6 +29,7 @@ function run(
     acquire?: () => Promise<{ kind: string }>;
     renew?: () => Promise<Date | null>;
     chatLease?: () => Promise<void>;
+    creditAdmission?: () => Promise<void>;
     generate?: (context: { beforeProviderDispatch?: () => Promise<void> }) => Promise<unknown>;
     toolCallId?: string;
   } = {},
@@ -58,6 +59,9 @@ function run(
     core: { identity, connectionId: CONNECTION },
     executionGeneration: 3,
     clientVersion: "test",
+    assertCreditAdmission: async () => {
+      await options.creditAdmission?.();
+    },
     assertChatLease: async () => {
       harness.calls.push("chat_lease");
       await options.chatLease?.();
@@ -205,6 +209,18 @@ test("a failing renewal before dispatch is a pre-dispatch rejection", async () =
   expect(await promise).toBeInstanceOf(CodexCredentialLeaseLostError);
   expect(harness.calls).not.toContain("dispatched");
   expect(harness.resets).toHaveLength(1);
+});
+
+test("a transient credit admission error leaves an undispatched image retryable", async () => {
+  const { harness, promise } = run({
+    creditAdmission: async () => {
+      throw new Error("temporary database failure");
+    },
+  });
+  expect(await promise).toBeInstanceOf(CodexCredentialLeaseLostError);
+  expect(harness.calls).not.toContain("dispatched");
+  expect(harness.resets).toHaveLength(1);
+  expect(harness.unknowns).toHaveLength(0);
 });
 
 test("the holder id is bounded however long the tool call id is", async () => {

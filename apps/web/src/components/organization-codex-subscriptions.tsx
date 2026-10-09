@@ -165,6 +165,44 @@ export function useOrganizationCodexSubscriptions({
       `${codexAccountName(account)} is now the primary account`,
     );
 
+  const setAllocator = (account: CodexAccount, allocatorEnabled: boolean) =>
+    mutate(
+      `allocator:${account.id}`,
+      async () => {
+        try {
+          return await client.requestJson(
+            "PATCH",
+            `/v1/organizations/${organizationId}/codex/accounts/${account.id}/allocator`,
+            { enabled: allocatorEnabled, expectedVersion: account.allocatorVersion },
+          );
+        } catch (error) {
+          await refresh();
+          throw error;
+        }
+      },
+      allocatorEnabled
+        ? `${codexAccountName(account)} is available for new work`
+        : `${codexAccountName(account)} is paused for new work`,
+    );
+
+  const setExtraCredits = (account: CodexAccount, extraCreditsEnabled: boolean) =>
+    mutate(
+      `extra-credits:${account.id}`,
+      async () => {
+        try {
+          return await client.requestJson(
+            "PATCH",
+            `/v1/organizations/${organizationId}/codex/accounts/${account.id}/extra-credits`,
+            { enabled: extraCreditsEnabled, expectedVersion: account.extraCreditsVersion ?? 1 },
+          );
+        } catch (error) {
+          await refresh();
+          throw error;
+        }
+      },
+      extraCreditsEnabled ? "Extra credits enabled" : "Extra credits protected",
+    );
+
   const setRotation = (rotationEnabled: boolean) =>
     mutate(
       "rotation",
@@ -239,6 +277,8 @@ export function useOrganizationCodexSubscriptions({
     connect,
     activate,
     setRotation,
+    setAllocator,
+    setExtraCredits,
     rename,
     disconnect,
   };

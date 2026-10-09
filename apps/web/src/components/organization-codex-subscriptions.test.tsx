@@ -39,6 +39,27 @@ const requestJson = mock(async (method: string, path: string, _body?: unknown) =
     return response;
   }
   if (
+    method === "PATCH" &&
+    path === `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}/allocator`
+  ) {
+    const enabled = (_body as { enabled: boolean }).enabled;
+    response.accounts[1] = {
+      ...response.accounts[1]!,
+      allocatorEnabled: enabled,
+      allocatorVersion: 2,
+    };
+    return { changed: true, allocatorEnabled: enabled, allocatorVersion: 2 };
+  }
+  if (method === "PATCH" && path.endsWith("/extra-credits")) {
+    const enabled = (_body as { enabled: boolean }).enabled;
+    response.accounts[1] = {
+      ...response.accounts[1]!,
+      extraCreditsEnabled: enabled,
+      extraCreditsVersion: 2,
+    };
+    return { changed: true, extraCreditsEnabled: enabled, extraCreditsVersion: 2 };
+  }
+  if (
     method === "POST" &&
     path === `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}/activate`
   ) {
@@ -178,6 +199,95 @@ function button(container: HTMLElement, text: string | RegExp) {
 }
 
 describe("organization Codex subscriptions", () => {
+  test("a conflicting pause refreshes the account before the next change", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness accountId={inactiveAccountId} />));
+      await flush();
+      requestJson.mockImplementationOnce(async () => {
+        response.accounts[1] = {
+          ...response.accounts[1]!,
+          allocatorEnabled: false,
+          allocatorVersion: 7,
+        };
+        throw new Error("Account changed; refresh and try again");
+      });
+      const selector =
+        '[role="switch"][aria-label="Backup subscription is available for new chats"]';
+      await act(async () => container.querySelector<HTMLButtonElement>(selector)!.click());
+      await flush();
+      expect(container.textContent).toContain("Paused");
+      await act(async () => container.querySelector<HTMLButtonElement>(selector)!.click());
+      await flush();
+      expect(requestJson.mock.calls).toContainEqual([
+        "PATCH",
+        `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}/allocator`,
+        { enabled: true, expectedVersion: 7 },
+      ]);
+    } finally {
+      response.accounts[1] = account(inactiveAccountId, "Backup subscription", false);
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("credit consent is off by default and sends its own version without changing availability", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness accountId={inactiveAccountId} />));
+      await flush();
+      const toggle = container.querySelector<HTMLButtonElement>(
+        '[role="switch"][aria-label="Use extra credits on Backup subscription"]',
+      )!;
+      expect(toggle.getAttribute("aria-checked")).toBe("false");
+      await act(async () => toggle.click());
+      await flush();
+      expect(requestJson.mock.calls).toContainEqual([
+        "PATCH",
+        `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}/extra-credits`,
+        { enabled: true, expectedVersion: 1 },
+      ]);
+      expect(response.accounts[1]!.allocatorEnabled).toBe(true);
+      expect(access.policy.allowedWorkspaces).toBeNull();
+    } finally {
+      response.accounts[1] = account(inactiveAccountId, "Backup subscription", false);
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("pause changes only organization allocation and preserves workspace access", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness accountId={inactiveAccountId} />));
+      await flush();
+      const toggle = container.querySelector<HTMLButtonElement>(
+        '[role="switch"][aria-label="Backup subscription is available for new chats"]',
+      );
+      expect(toggle).not.toBeNull();
+      await act(async () => toggle!.click());
+      await flush();
+      expect(requestJson.mock.calls).toContainEqual([
+        "PATCH",
+        `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}/allocator`,
+        { enabled: false, expectedVersion: 1 },
+      ]);
+      expect(container.textContent).toContain("Paused");
+      expect(container.textContent).toContain("Everyone in Acme");
+      expect(access.policy.allowedWorkspaces).toBeNull();
+    } finally {
+      response.accounts[1] = account(inactiveAccountId, "Backup subscription", false);
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("an account's page sends explicit JSON bodies for activate and disconnect", async () => {
     backToList = mock(() => undefined);
     const container = document.createElement("div");

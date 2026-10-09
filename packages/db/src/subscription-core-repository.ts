@@ -111,6 +111,7 @@ export async function listSubscriptionConnectionsForPlacement(
     ownership: "shared" | "personal";
     owner_membership_id: string | null;
     health: string;
+    extra_credits_enabled: boolean;
     allocator_enabled: boolean;
     entitled_model_ids: string[] | null;
     excluded_models: string[];
@@ -127,7 +128,7 @@ export async function listSubscriptionConnectionsForPlacement(
     db,
     sql`select connection.id::text as id, connection.provider, connection.kind,
       connection.ownership, connection.owner_organization_membership_id::text as owner_membership_id,
-      connection.status as health, connection.allocator_enabled,
+      connection.status as health, connection.allocator_enabled, connection.extra_credits_enabled,
       null::text[] as entitled_model_ids, connection.excluded_models,
       connection.allowed_model_ids, connection.refresh_generation,
       connection.scope_kind, connection.allow_personal_workspaces,
@@ -228,6 +229,7 @@ export async function listSubscriptionConnectionsForPlacement(
       kind: row.kind,
       ownership,
       health,
+      extraCreditsEnabled: row.extra_credits_enabled,
       allocatorEnabled: row.allocator_enabled,
       entitledModelIds: row.entitled_model_ids,
       excludedModelIds: row.excluded_models,

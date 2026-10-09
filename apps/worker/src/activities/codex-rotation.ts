@@ -194,6 +194,18 @@ function cooling(acct: CodexRotationAccount, now: Date): boolean {
   return acct.exhaustedUntil != null && acct.exhaustedUntil.getTime() > now.getTime();
 }
 
+/** Included allowance is separate from actual provider-refusal cooldowns. */
+export function codexHasIncludedUsage(acct: CodexRotationAccount, now: Date): boolean {
+  return (
+    !(acct.includedUsageUnavailableUntil && acct.includedUsageUnavailableUntil > now) &&
+    bindingUsedPct(acct, now) < CODEX_USAGE_EXHAUSTED_PCT
+  );
+}
+function preferredCreditTier(accounts: CodexRotationAccount[], now: Date) {
+  const included = accounts.filter((account) => codexHasIncludedUsage(account, now));
+  return included.length ? included : accounts;
+}
+
 /**
  * Healthy for an already-leased/in-flight turn = connected/usable (status
  * "active", excludes needs_relogin/error), not cooling, and not exhausted in
@@ -204,7 +216,7 @@ export function isCodexCredentialHealthy(acct: CodexRotationAccount, now: Date):
   return (
     acct.status === "active" &&
     !cooling(acct, now) &&
-    bindingUsedPct(acct, now) < CODEX_USAGE_EXHAUSTED_PCT
+    (codexHasIncludedUsage(acct, now) || acct.extraCreditsEnabled === true)
   );
 }
 
@@ -249,7 +261,10 @@ export function shardCredentialForSession(args: {
   now: Date;
 }): string | null {
   const { sessionId, accounts, now } = args;
-  const eligibles = accounts.filter((acct) => isCodexCredentialEligible(acct, now));
+  const eligibles = preferredCreditTier(
+    accounts.filter((acct) => isCodexCredentialEligible(acct, now)),
+    now,
+  );
   if (eligibles.length === 0) {
     return null;
   }
@@ -291,7 +306,14 @@ export function chooseShardedHome(args: {
   const pinRow = currentPolicyPin
     ? (accounts.find((acct) => acct.id === currentPolicyPin) ?? null)
     : null;
-  if (pinRow && isCodexCredentialEligible(pinRow, now)) {
+  if (
+    pinRow &&
+    isCodexCredentialEligible(pinRow, now) &&
+    (codexHasIncludedUsage(pinRow, now) ||
+      !accounts.some(
+        (account) => isCodexCredentialEligible(account, now) && codexHasIncludedUsage(account, now),
+      ))
+  ) {
     return { kind: "home", credentialId: currentPolicyPin!, rewritePin: false };
   }
   const home = shardCredentialForSession({ sessionId, accounts, now });
@@ -318,13 +340,19 @@ export function availableAt(acct: CodexRotationAccount, now: Date): Date {
   // An unknown/elapsed block clears after a default cooldown, never in the past.
   const defaultClear = new Date(nowMs + DEFAULT_RESET_COOLDOWN_MS);
   const candidates: Date[] = [];
+  if (
+    !acct.extraCreditsEnabled &&
+    acct.includedUsageUnavailableUntil &&
+    acct.includedUsageUnavailableUntil > now
+  )
+    candidates.push(acct.includedUsageUnavailableUntil);
   // An active cooldown only blocks while it is still in the future; a past cooldown
   // self-clears (matches `cooling()`), so it must not pin availableAt to the past.
   if (acct.exhaustedUntil != null && acct.exhaustedUntil.getTime() > nowMs) {
     candidates.push(acct.exhaustedUntil);
   }
   const windowClear = (over: boolean, resetAt: Date | null | undefined) => {
-    if (!over) return;
+    if (!over || acct.extraCreditsEnabled === true) return;
     // Over-threshold window: wait for its KNOWN future reset; a null/elapsed cached
     // reset is unknown → default cooldown (never a past instant).
     candidates.push(resetAt != null && resetAt.getTime() > nowMs ? resetAt : defaultClear);
@@ -426,7 +454,10 @@ export function chooseRotationActive(args: {
     return { kind: "none" };
   }
 
-  const eligibles = allocatableAccounts.filter((acct) => isCodexCredentialEligible(acct, now));
+  const eligibles = preferredCreditTier(
+    allocatableAccounts.filter((acct) => isCodexCredentialEligible(acct, now)),
+    now,
+  );
 
   // The active pointer is a cursor/manual preference, NOT a sticky lease. In
   // particular, most_remaining must rank the whole eligible pool every turn;

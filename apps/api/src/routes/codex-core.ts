@@ -23,6 +23,7 @@ import {
   renameSubscriptionCoreCodexConnection,
   resolveSubscriptionCoreCodexConnectionId,
   setSubscriptionCoreCodexAllocator,
+  setSubscriptionCoreCodexExtraCredits,
   setSubscriptionCoreCodexPrimary,
   setSubscriptionCoreCodexRotation,
   setSubscriptionCoreWorkspaceCodexSource,
@@ -348,7 +349,7 @@ export async function coreCodexRename(
 export async function coreCodexAllocator(
   c: Context,
   deps: ApiRouteDeps,
-  admin: Admin & { workspaceId: string },
+  admin: Admin,
   connectionId: string,
   body: { enabled: boolean; expectedVersion: number },
 ) {
@@ -366,6 +367,32 @@ export async function coreCodexAllocator(
     allocatorEnabled: result.allocatorEnabled,
     allocatorVersion: result.allocatorVersion,
     allocatorUpdatedAt: result.allocatorUpdatedAt,
+    changed: result.kind === "updated",
+  };
+  return result.kind === "conflict" ? c.json(response, 409) : c.json(response);
+}
+
+export async function coreCodexExtraCredits(
+  c: Context,
+  deps: ApiRouteDeps,
+  admin: Admin,
+  connectionId: string,
+  body: { enabled: boolean; expectedVersion: number },
+) {
+  const mutation = await setSubscriptionCoreCodexExtraCredits(deps.db, {
+    ...admin,
+    connectionId,
+    ...body,
+  });
+  const result = mutation.result;
+  if (result.kind === "not_found") {
+    throw new HTTPException(404, { message: "codex account not found" });
+  }
+  await deliverSubscriptionCoreCodexWake(deps.db, mutation.wake);
+  const response = {
+    extraCreditsEnabled: result.extraCreditsEnabled,
+    extraCreditsVersion: result.extraCreditsVersion,
+    extraCreditsUpdatedAt: result.extraCreditsUpdatedAt,
     changed: result.kind === "updated",
   };
   return result.kind === "conflict" ? c.json(response, 409) : c.json(response);

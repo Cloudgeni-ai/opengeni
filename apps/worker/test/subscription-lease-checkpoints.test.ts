@@ -6,6 +6,7 @@ import {
   type TurnCredentialLeaseDeps,
 } from "../src/activities/agent-turn/credential-leases";
 import { recordCompletedModelCallBeforeOwnershipFences } from "../src/activities/agent-turn/model-usage";
+import { assertCodexDispatchAdmission } from "../src/activities/agent-turn/codex-credit-policy";
 
 test.each(["codex", "xai", "claude"] as const)(
   "%s checkpoint lifecycle coalesces events while preserving scoped renewal and usage truth",
@@ -336,6 +337,15 @@ test("legacy Codex dispatch keeps its existing local lease fence", async () => {
   try {
     await leases.codex.assertCurrentForDispatch();
     expect(core).not.toHaveBeenCalled();
+    const pendingConsent = Promise.withResolvers<void>();
+    const dispatch = assertCodexDispatchAdmission(
+      () => pendingConsent.promise,
+      () => leases.codex.assertCurrentForDispatch(),
+    );
+    const rejected = dispatch.catch((error) => error);
+    leases.codex.confirmedUntilMs = performance.now() - 1;
+    pendingConsent.resolve();
+    expect(((await rejected) as Error).message).toContain("lease is not usable");
   } finally {
     leases.codex.stopHeartbeat();
     core.mockRestore();

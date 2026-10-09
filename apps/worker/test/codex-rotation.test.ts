@@ -1177,3 +1177,48 @@ describe("credential allocator pin and rotation policy", () => {
     expect(selectCodexCredentialLeaseForTurn(args("round_robin"))).toEqual(legacy);
   });
 });
+
+describe("included allowance before opted-in credits", () => {
+  const credit = () =>
+    acct("a", {
+      extraCreditsEnabled: true,
+      primaryUsedPercent: 100,
+      primaryResetAt: new Date(NOW.getTime() + HOUR),
+    });
+  test("an exhausted sticky account yields, then becomes fallback when all included usage ends", () => {
+    const accounts = [credit(), acct("b")];
+    expect(
+      chooseShardedHome({ sessionId: "session", currentPolicyPin: "a", accounts, now: NOW }),
+    ).toMatchObject({ credentialId: "b", rewritePin: true });
+    accounts[1] = acct("b", {
+      primaryUsedPercent: 100,
+      primaryResetAt: new Date(NOW.getTime() + HOUR),
+    });
+    expect(
+      chooseShardedHome({ sessionId: "session", currentPolicyPin: "b", accounts, now: NOW }),
+    ).toMatchObject({ credentialId: "a" });
+  });
+  test("consent never bypasses genuine provider cooldown, pause or proven model exclusion", () => {
+    expect(
+      isCodexAccountEligible(
+        { ...credit(), exhaustedUntil: new Date(NOW.getTime() + HOUR), exhaustedKind: "quota" },
+        NOW,
+      ),
+    ).toBe(false);
+    expect(isCodexAccountEligible({ ...credit(), allocatorEnabled: false }, NOW)).toBe(false);
+    expect(
+      shardCredentialForSession({
+        sessionId: "session",
+        accounts: [{ ...credit(), extraCreditsEnabled: false }],
+        now: NOW,
+      }),
+    ).toBeNull();
+  });
+  test("feature exhaustion remains distinct from ordinary windows", () => {
+    const blocked = acct("feature", {
+      includedUsageUnavailableUntil: new Date(NOW.getTime() + HOUR),
+    });
+    expect(isCodexAccountEligible(blocked, NOW)).toBe(false);
+    expect(isCodexAccountEligible({ ...blocked, extraCreditsEnabled: true }, NOW)).toBe(true);
+  });
+});

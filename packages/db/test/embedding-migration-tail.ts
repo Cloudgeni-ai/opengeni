@@ -145,4 +145,6 @@ export const embeddingMigrationTail = [
   // Rewrites the inbox projection and push triggers after 0674 and resolves
   // the session's person through 0661; replay after both so its bodies win.
   "0678_inbox_mute_session_replies.sql",
+  // Extends the shared connection table created by withheld 0642.
+  "0679_codex_extra_credit_consent.sql",
 ];

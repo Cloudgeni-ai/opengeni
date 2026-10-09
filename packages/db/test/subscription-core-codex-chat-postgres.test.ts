@@ -5,6 +5,7 @@ import { CodexReloginRequired } from "@opengeni/codex";
 import { sql } from "drizzle-orm";
 import {
   acquireSubscriptionTurnLease,
+  canSpendSubscriptionCoreCodexExtraCredits,
   buildSubscriptionCoreCodexTokenResolver,
   claimSessionWorkForAttempt,
   createDb,
@@ -310,6 +311,50 @@ async function leaseRows(
 }
 
 describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () => {
+  test("live credit consent preserves held leases after pause, honors revocation and yields to included capacity", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    const connectionId = await sharedConnection(org, {
+      workspaceId: org.sharedWorkspaceId,
+      label: "credit-consent",
+    });
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect(await place(turn)).toMatchObject({ kind: "run", connectionId });
+    const admitted = () =>
+      canSpendSubscriptionCoreCodexExtraCredits(client!.db, {
+        ...turn,
+        connectionId,
+        productModelId: MODEL,
+        reasoningLevel: "medium",
+        leaseTtlMs: TTL,
+      });
+    expect(await admitted()).toBe(false);
+    await shared!
+      .admin`update subscription_connections set extra_credits_enabled=true,allocator_enabled=false where id=${connectionId}::uuid`;
+    expect(await admitted()).toBe(true);
+    await shared!
+      .admin`update subscription_connections set extra_credits_enabled=false where id=${connectionId}::uuid`;
+    expect(await admitted()).toBe(false);
+    await shared!
+      .admin`update subscription_connections set extra_credits_enabled=true where id=${connectionId}::uuid`;
+    await sharedConnection(org, {
+      workspaceId: org.sharedWorkspaceId,
+      label: "included-alternative",
+    });
+    expect(await admitted()).toBe(false);
+    await withRlsContext(
+      client!.db,
+      { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+      (tx) =>
+        releaseSubscriptionTurnLease(tx, {
+          ...turn.identity,
+          ...leaseOf(turn, connectionId),
+          provider: "codex",
+        }),
+    );
+    expect(await admitted()).toBe(false);
+  });
+
   test("runs as the non-superuser, non-bypass application role", async () => {
     const [role] = await rawRows<{ currentUser: string; superuser: boolean; bypassRls: boolean }>(
       client!.db,

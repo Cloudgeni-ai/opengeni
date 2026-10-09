@@ -1626,6 +1626,13 @@ export const codexSubscriptionCredentials = pgTable(
     // This flag controls NEW automatic allocations only. Credential health,
     // refresh, encrypted material, and an already-leased in-flight turn are
     // intentionally independent. account eligibility policy owns toggle OCC/audit and product UI.
+    extraCreditsEnabled: boolean("extra_credits_enabled").notNull().default(false),
+    extraCreditsVersion: integer("extra_credits_version").notNull().default(1),
+    extraCreditsUpdatedBySubjectId: text("extra_credits_updated_by_subject_id"),
+    extraCreditsUpdatedAt: timestamp("extra_credits_updated_at", { withTimezone: true }),
+    includedUsageUnavailableUntil: timestamp("included_usage_unavailable_until", {
+      withTimezone: true,
+    }),
     allocatorEnabled: boolean("allocator_enabled").notNull().default(true),
     // Independent OCC/audit sequence for the allocator toggle. Token refresh
     // continues to own `version`; quota/cache writes own neither counter.
