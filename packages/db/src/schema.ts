@@ -8708,6 +8708,11 @@ export const sessionSystemUpdates = pgTable(
       .$type<ClaudeProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
+    // M3 v2 slot (0672): the Codex entry frozen with the update; copied, never
+    // recomputed, by the turn that delivers it. NULL before the cutover.
+    subscriptionAuthority: jsonb(
+      "subscription_authority",
+    ).$type<SubscriptionPersonalAuthorityV2 | null>(),
     // Private scheduled-occurrence authority linkage. Public update/event
     // projections intentionally omit this producer identifier.
     scheduledTaskRunId: uuid("scheduled_task_run_id"),
@@ -8815,6 +8820,10 @@ export const sessionSystemUpdateOutbox = pgTable(
       .$type<ClaudeProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
+    // M3 v2 slot (0672), copied onto the update the outbox row delivers.
+    subscriptionAuthority: jsonb(
+      "subscription_authority",
+    ).$type<SubscriptionPersonalAuthorityV2 | null>(),
     status: text("status").notNull().default("pending"),
     attempts: integer("attempts").notNull().default(0),
     updateId: uuid("update_id"),
@@ -11732,6 +11741,11 @@ export const scheduledTasks = pgTable(
       .$type<ClaudeProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
+    // M3 v2 slot (0672): frozen at task creation; a firing copies it (or its
+    // current revision authority's value), never recomputes it.
+    subscriptionAuthority: jsonb(
+      "subscription_authority",
+    ).$type<SubscriptionPersonalAuthorityV2 | null>(),
     authorityRevision: bigint("authority_revision", { mode: "number" }).notNull().default(1),
     // The migration-owned BEFORE INSERT/UPDATE trigger replaces this client
     // placeholder with the canonical whole-row execution digest.

@@ -707,6 +707,16 @@ export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   "persist_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
   "fail_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text)",
   "subscription_codex_reset_authority(uuid, uuid, uuid, text)",
+  // M3 PR 3b: Codex writers, the owner's personal-connection reader, the
+  // cross-workspace reset-credit fence, the scheduled-task v2 writer and the
+  // owner-only policies' capability helpers.
+  "connect_subscription_codex_personal(uuid, uuid, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text)",
+  "disconnect_subscription_codex_connection(uuid, uuid, text, uuid)",
+  "subscription_codex_personal_connections(uuid, uuid, text)",
+  "subscription_codex_reset_credit_fence(uuid, uuid, uuid, text, text, uuid)",
+  "subscription_codex_task_authority_v2(uuid, uuid, uuid, text)",
+  "subscription_codex_owner_capability_held(uuid, text[], text, uuid, boolean)",
+  "subscription_codex_owner_membership_held(uuid, uuid)",
 ] as const;
 
 /** Owner-only private helpers the runtime role must never be able to execute. */

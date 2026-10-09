@@ -652,11 +652,15 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
       kind: "wait",
       reason: "pinned_account_unavailable",
     });
-    // ...and a pin this workspace can no longer use at all says so.
+    // ...and a pin that can never serve this work says so. (An organization-
+    // scope connection without an assignment row in a workspace keeps its
+    // management classification since M3 PR 3b, so the pin is made
+    // permanently ineligible through this workspace's assignment model
+    // policy instead.)
     await shared!.admin`
       update subscription_connections set status = 'active' where id = ${pinned}::uuid`;
     await shared!.admin`
-      delete from subscription_connection_assignment_policies
+      update subscription_connection_assignment_policies set allowed_model_ids = array['codex/other']
       where connection_id = ${pinned}::uuid and workspace_id = ${org.sharedWorkspaceId}::uuid`;
     expect(await place(turn)).toMatchObject({
       kind: "wait",

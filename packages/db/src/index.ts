@@ -130,10 +130,8 @@ export {
   type SubscriptionCorePlacementWorldRequest,
   type SubscriptionCorePlacementWorldResult,
 } from "./subscription-core-placement-world";
-import type {
-  GoalAdmissionPausedReason,
-  SubscriptionPersonalAuthorityV2,
-} from "@opengeni/contracts";
+import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
+import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import {
   claudeSubscriptionAccountRepository,
   claudeSubscriptionTables,
@@ -162,6 +160,10 @@ import {
   getAcceptedSubscriptionTurnAuthority,
   getAcceptedSubscriptionParentAuthority,
   sharedPoolSubscriptionAuthoritySnapshotsInTransaction,
+} from "./accepted-subscription-authority";
+export {
+  getScheduledTaskSubscriptionAuthority,
+  receiverCodexSubscriptionAuthorityV2InTransaction,
 } from "./accepted-subscription-authority";
 export { resolveClaudeAccountCredential } from "./claude-subscription-account-tokens";
 export * from "./claude-subscription-accounts";
@@ -334,8 +336,18 @@ import {
   resolveSubscriptionConnectionId as resolveCoreConnectionId,
   writeSubscriptionSessionBinding as writeCoreSessionBinding,
 } from "./subscription-core-repository";
-import { codexSubscriptionAuthorityV2ForAcceptanceInTransaction } from "./subscription-core-acceptance-authority";
-export { codexSubscriptionAuthorityV2ForAcceptanceInTransaction } from "./subscription-core-acceptance-authority";
+import {
+  codexSubscriptionAuthorityV2ForAcceptanceInTransaction,
+  codexSubscriptionAuthorityV2ForScheduledTaskInTransaction,
+  codexSubscriptionAuthorityV2OrEmptyInTransaction,
+} from "./subscription-core-acceptance-authority";
+export {
+  codexSubscriptionAuthorityV2ActiveInTransaction,
+  codexSubscriptionAuthorityV2ForAcceptanceInTransaction,
+  codexSubscriptionAuthorityV2ForScheduledTaskInTransaction,
+  codexSubscriptionAuthorityV2OrEmptyInTransaction,
+  EMPTY_SUBSCRIPTION_AUTHORITY_V2,
+} from "./subscription-core-acceptance-authority";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./scheduled-slack-bot-messages";
@@ -17973,6 +17985,22 @@ export async function createScheduledTask(
         input.claudeProviderAccountAuthoritySnapshot === undefined
           ? await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(scopedDb, input.workspaceId)
           : null;
+      // Codex v2 (M3 PR 3b, EP-T15): frozen once, at creation, for the exact
+      // accepting human under the acceptance rule; firings copy it and never
+      // recompute it. Non-human creators freeze the empty value; nothing
+      // before the cutover.
+      const taskOwnerSubjectId =
+        (input.action?.kind ?? "agent_turn") === "agent_turn"
+          ? (frozenCreator.initiatingHumanSubjectId ??
+            (frozenCreator.initiator.kind === "subject" ? frozenCreator.initiator.subjectId : null))
+          : null;
+      const taskSubscriptionAuthority =
+        await codexSubscriptionAuthorityV2ForScheduledTaskInTransaction(scopedDb, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          reusableSessionId: input.targetSessionId ?? null,
+          acceptingSubjectId: taskOwnerSubjectId,
+        });
       const [row] = await scopedDb
         .insert(schema.scheduledTasks)
         .values({
@@ -17999,6 +18027,7 @@ export async function createScheduledTask(
             input.xaiProviderAccountAuthoritySnapshot ?? sharedTaskPool!.xai,
           claudeProviderAccountAuthoritySnapshot:
             input.claudeProviderAccountAuthoritySnapshot ?? sharedTaskPool!.claude,
+          subscriptionAuthority: taskSubscriptionAuthority,
           creatorFirstPartyMcpTools: input.creatorPolicy?.firstPartyMcpTools ?? null,
           creatorFirstPartyMcpPermissions: input.creatorPolicy?.firstPartyMcpPermissions ?? null,
           creatorSessionPolicy: scheduledTaskCreatorSessionPolicyForInsert(input.creatorPolicy),
@@ -73403,6 +73432,12 @@ export type InitializeSessionStartInput = {
   turnExecutionPolicy?: TurnExecutionPolicyV1;
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
+  /**
+   * Codex v2 (M3 PR 3b) frozen by a trusted producer for the first turn: a
+   * scheduled firing passes its task's value, which is copied, never
+   * recomputed. Omitted by every other caller (the acceptance rule applies).
+   */
+  initialSubscriptionAuthority?: SubscriptionPersonalAuthorityV2 | null;
   createdEventPayload: Record<string, unknown>;
   /** Trusted backend-only capture for a newly inserted initial turn. Runs under
    * the canonical activity transaction; failure rolls back events and turn.
@@ -73948,17 +73983,25 @@ export async function initializeSessionStartAtomically(
           // Codex v2 accepted authority (M3 PR 2a): only the owner's own
           // initial message freezes personal authority; a child session's
           // first turn (causal parent human) and other creators freeze none.
-          const initialSubscriptionAuthority = session.parentSessionId
-            ? null
-            : await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
-                tx as unknown as Database,
-                {
-                  accountId: session.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: session.id,
-                  acceptingSubjectId: initialTurnInitiatingHumanSubjectId,
-                },
-              );
+          // A scheduled firing copies its task's frozen value (M3 PR 3b).
+          const initialSubscriptionAuthority =
+            input.initialSubscriptionAuthority !== undefined
+              ? await codexSubscriptionAuthorityV2OrEmptyInTransaction(
+                  tx as unknown as Database,
+                  session.accountId,
+                  input.initialSubscriptionAuthority,
+                )
+              : session.parentSessionId
+                ? null
+                : await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
+                    tx as unknown as Database,
+                    {
+                      accountId: session.accountId,
+                      workspaceId: input.workspaceId,
+                      sessionId: session.id,
+                      acceptingSubjectId: initialTurnInitiatingHumanSubjectId,
+                    },
+                  );
           [turn] = await tx
             .insert(schema.sessionTurns)
             .values(
@@ -74389,6 +74432,7 @@ type BoundedSystemUpdate = Pick<
   | "xaiProviderAccountAuthoritySnapshot"
   | "claudeProviderAccountAuthoritySnapshot"
   | "scheduledTaskRunId"
+  | "subscriptionAuthority"
 >;
 
 export type FrozenXaiExecutionAuthority = {
@@ -74440,6 +74484,9 @@ function systemUpdateExecutionAuthorityKey(update: BoundedSystemUpdate): string 
         ? (update.lineage.connectionAuthoritySubjectId ?? null)
         : null,
     scheduledTaskRunId: update.scheduledTaskRunId,
+    // Codex v2 (M3 PR 3b): updates frozen with different values never share
+    // one internal turn.
+    codexV2: update.subscriptionAuthority ?? null,
   });
 }
 
@@ -74742,6 +74789,11 @@ async function planInboxBatch(
       mcpAccountBindings: context.mcpAccountBindings,
       xaiProviderAccountAuthoritySnapshot: context.xaiProviderAccountAuthoritySnapshot,
       claudeProviderAccountAuthoritySnapshot: context.claudeProviderAccountAuthoritySnapshot,
+      // A Codex v2 value frozen on the update must equal the context's; an
+      // update that froze none follows the v1 rule above and the delivering
+      // turn copies the receiving context's value.
+      subscriptionAuthority:
+        update.subscriptionAuthority == null ? null : context.subscriptionAuthority,
       lineage: {
         connectionAuthoritySubjectId: human,
         xaiAuthoritySubjectId: human,
@@ -78148,15 +78200,24 @@ export async function claimSessionWorkForAttempt(
                   continuationCodexPolicy.policy,
                 )
               : baseInternalTurnMetadata;
-          // Codex v2 accepted authority (M3 PR 2a): a pure goal continuation
-          // inherits the exact causal turn's frozen value when that turn's
-          // human is this turn's human; every other internal update (agent
-          // messages, Steer, batched notices, child results, schedules)
-          // freezes none, so it runs on shared capacity only.
+          // Codex v2 accepted authority (M3 PR 2a, 3b): a pure goal
+          // continuation inherits the exact causal turn's frozen value when
+          // that turn's human is this turn's human. Every other delivery
+          // copies, exactly as its v1 pools: the receiving context turn's
+          // value for informational input, otherwise the value frozen on the
+          // delivered update (agent messages and Steer, child results,
+          // background results, scheduled occurrences; a batch only shares a
+          // turn when those values are equal). Nothing is recomputed; once
+          // the cutover is active a missing value is the empty value.
           const goalCausalTurnId = pureGoalUpdate
             ? systemUpdateCausalHumanTurnId(pureGoalUpdate)
             : null;
           let internalSubscriptionAuthority: SubscriptionPersonalAuthorityV2 | null = null;
+          if (!pureGoalUpdate) {
+            internalSubscriptionAuthority = receiverContext
+              ? (receiverContext.subscriptionAuthority ?? null)
+              : (authorityUpdate.subscriptionAuthority ?? null);
+          }
           if (goalCausalTurnId && initiatingHumanSubjectId) {
             const [goalCausalTurn] = await tx
               .select({
@@ -78179,6 +78240,11 @@ export async function claimSessionWorkForAttempt(
               internalSubscriptionAuthority = goalCausalTurn.subscriptionAuthority;
             }
           }
+          internalSubscriptionAuthority = await codexSubscriptionAuthorityV2OrEmptyInTransaction(
+            tx as unknown as Database,
+            session.accountId,
+            internalSubscriptionAuthority,
+          );
           await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
           const [internalTurn] = await tx
             .insert(schema.sessionTurns)
@@ -80507,6 +80573,7 @@ async function settleSessionInputWaitInActivity(
                   causalAuthority.xaiProviderAccountAuthoritySnapshot,
                 claudeProviderAccountAuthoritySnapshot:
                   causalAuthority.claudeProviderAccountAuthoritySnapshot,
+                subscriptionAuthority: causalAuthority.subscriptionAuthority,
               }
             : {}),
           lineage: causalAuthority?.lineage ?? {},
@@ -86477,6 +86544,7 @@ async function enqueueChildLifecycleNoticeOutboxTx(
             xaiProviderAccountAuthoritySnapshot: authority.xaiProviderAccountAuthoritySnapshot,
             claudeProviderAccountAuthoritySnapshot:
               authority.claudeProviderAccountAuthoritySnapshot,
+            subscriptionAuthority: authority.subscriptionAuthority,
           },
           "summary",
           "summaryCodecVersion",
@@ -86770,6 +86838,8 @@ export type SessionSystemUpdateOutboxDelivery = {
   mcpAccountBindings: McpConnectionAccountBinding[] | null;
   xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
   claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
+  /** Codex v2 (M3 PR 3b): the exact spawning parent turn's frozen value. */
+  subscriptionAuthority: SubscriptionPersonalAuthorityV2 | null;
 };
 
 /** Narrow an outbox row back to its correlated typed kind/payload input variant. */
@@ -86804,6 +86874,8 @@ function mapSystemUpdateOutboxRow(row: {
   mcp_account_bindings: unknown;
   xai_provider_account_authority_snapshot: unknown;
   claude_provider_account_authority_snapshot: unknown;
+  /** Absent from the claim routine's fixed columns; filled in after the claim. */
+  subscription_authority?: unknown;
 }): SessionSystemUpdateOutboxDelivery {
   const typed = parseChildLifecycleOutboxPayload(
     fromPostgresLosslessJson(row.payload, row.payload_codec_version),
@@ -86834,7 +86906,49 @@ function mapSystemUpdateOutboxRow(row: {
     claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1.parse(
       row.claude_provider_account_authority_snapshot,
     ),
+    subscriptionAuthority: frozenSubscriptionAuthorityV2(row.subscription_authority),
   };
+}
+
+/** A carrier's frozen Codex v2 value (M3 PR 3b), or null when it froze none. */
+function frozenSubscriptionAuthorityV2(value: unknown): SubscriptionPersonalAuthorityV2 | null {
+  return value === null || value === undefined
+    ? null
+    : SubscriptionPersonalAuthorityV2.parse(value);
+}
+
+/**
+ * The Codex v2 value of a child's exact spawning parent turn (M3 PR 3b): a
+ * child-lifecycle notice carries it like the v1 pools, never recomputed.
+ */
+async function childNoticeParentSubscriptionAuthorityTx(
+  tx: Database,
+  workspaceId: string,
+  childSessionId: string,
+): Promise<SubscriptionPersonalAuthorityV2 | null> {
+  const [child] = await tx
+    .select({
+      parentSessionId: schema.sessions.parentSessionId,
+      parentTurnId: schema.sessions.parentTurnId,
+    })
+    .from(schema.sessions)
+    .where(
+      and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, childSessionId)),
+    )
+    .limit(1);
+  if (!child?.parentSessionId || !child.parentTurnId) return null;
+  const [parentTurn] = await tx
+    .select({ subscriptionAuthority: schema.sessionTurns.subscriptionAuthority })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.sessionId, child.parentSessionId),
+        eq(schema.sessionTurns.id, child.parentTurnId),
+      ),
+    )
+    .limit(1);
+  return frozenSubscriptionAuthorityV2(parentTurn?.subscriptionAuthority);
 }
 
 /**
@@ -86890,6 +87004,7 @@ export async function getSessionSystemUpdateOutboxByDedupeKey(
         claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1.parse(
           row.claudeProviderAccountAuthoritySnapshot,
         ),
+        subscriptionAuthority: frozenSubscriptionAuthorityV2(row.subscriptionAuthority),
       };
     },
   );
@@ -86949,6 +87064,40 @@ export async function claimPendingSessionSystemUpdateOutbox(
             );
         },
       );
+    }
+  }
+  // The claim routine's fixed columns predate the Codex v2 slot (M3 PR 3b):
+  // read the frozen values of the claimed rows, one query per workspace.
+  const byWorkspace = new Map<string, SessionSystemUpdateOutboxDelivery[]>();
+  for (const delivery of deliveries) {
+    const group = byWorkspace.get(delivery.workspaceId) ?? [];
+    group.push(delivery);
+    byWorkspace.set(delivery.workspaceId, group);
+  }
+  for (const [workspaceId, group] of byWorkspace) {
+    const values = await withRlsContext(
+      db,
+      { accountId: group[0]!.accountId, workspaceId },
+      async (scopedDb) =>
+        await scopedDb
+          .select({
+            id: schema.sessionSystemUpdateOutbox.id,
+            subscriptionAuthority: schema.sessionSystemUpdateOutbox.subscriptionAuthority,
+          })
+          .from(schema.sessionSystemUpdateOutbox)
+          .where(
+            and(
+              eq(schema.sessionSystemUpdateOutbox.workspaceId, workspaceId),
+              inArray(
+                schema.sessionSystemUpdateOutbox.id,
+                group.map((delivery) => delivery.id),
+              ),
+            ),
+          ),
+    );
+    const frozen = new Map(values.map((value) => [value.id, value.subscriptionAuthority]));
+    for (const delivery of group) {
+      delivery.subscriptionAuthority = frozenSubscriptionAuthorityV2(frozen.get(delivery.id));
     }
   }
   return deliveries;
@@ -87459,7 +87608,10 @@ export async function markSessionWorkflowWakeFailed(
 
 export async function getOrCreateSessionSystemUpdateOutbox(
   db: Database,
-  input: Omit<SessionSystemUpdateOutboxDelivery, "id" | "status">,
+  input: Omit<SessionSystemUpdateOutboxDelivery, "id" | "status" | "subscriptionAuthority"> & {
+    /** Default: the source child's exact spawning parent turn's value. */
+    subscriptionAuthority?: SubscriptionPersonalAuthorityV2 | null;
+  },
 ): Promise<SessionSystemUpdateOutboxDelivery> {
   const persistence = {
     stage: "session_lifecycle_outbox.get_or_create",
@@ -87525,6 +87677,14 @@ export async function getOrCreateSessionSystemUpdateOutbox(
               mcpAccountBindings: input.mcpAccountBindings,
               xaiProviderAccountAuthoritySnapshot: input.xaiProviderAccountAuthoritySnapshot,
               claudeProviderAccountAuthoritySnapshot: input.claudeProviderAccountAuthoritySnapshot,
+              subscriptionAuthority:
+                input.subscriptionAuthority !== undefined
+                  ? input.subscriptionAuthority
+                  : await childNoticeParentSubscriptionAuthorityTx(
+                      scopedDb as unknown as Database,
+                      input.workspaceId,
+                      input.sourceSessionId,
+                    ),
             },
             "summary",
             "summaryCodecVersion",
@@ -87619,6 +87779,7 @@ export async function getOrCreateSessionSystemUpdateOutbox(
       claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1.parse(
         row.claudeProviderAccountAuthoritySnapshot,
       ),
+      subscriptionAuthority: frozenSubscriptionAuthorityV2(row.subscriptionAuthority),
     };
   });
 }
@@ -87731,6 +87892,12 @@ export type AddSessionSystemUpdateInput = {
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
   claudeProviderAccountAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
   scheduledTaskRunId?: string | null;
+  /**
+   * Codex v2 (M3 PR 3b) frozen by the producer (a child notice's parent turn,
+   * a scheduled task, a causal turn). Absent means none; the delivering turn
+   * then copies its receiving context or takes the empty value.
+   */
+  subscriptionAuthority?: SubscriptionPersonalAuthorityV2 | null;
 } & SessionSystemUpdateInputVariant;
 
 export type AddSessionSystemUpdateResult<RequireIdleSession extends boolean = boolean> =
@@ -87937,6 +88104,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
                     input.xaiProviderAccountAuthoritySnapshot ?? sharedUpdatePool!.xai,
                   claudeProviderAccountAuthoritySnapshot:
                     input.claudeProviderAccountAuthoritySnapshot ?? sharedUpdatePool!.claude,
+                  subscriptionAuthority: input.subscriptionAuthority ?? null,
                   scheduledTaskRunId: input.scheduledTaskRunId ?? null,
                   state: consumedByParentRead ? "superseded" : "pending",
                 },
@@ -88254,6 +88422,8 @@ async function sameSessionCausalAuthorityTx(
     personalConnectionDelegations,
     xaiProviderAccountAuthoritySnapshot,
     claudeProviderAccountAuthoritySnapshot,
+    // Codex v2 (M3 PR 3b): the causal turn's frozen value, copied.
+    subscriptionAuthority: frozenSubscriptionAuthorityV2(turn.subscriptionAuthority),
     lineage: {
       causalTurnId: turn.id,
       ...(human && personalConnectionDelegations.length > 0
@@ -88524,6 +88694,7 @@ function backgroundCommandTerminalMutation(input: {
                 claudeProviderAccountAuthoritySnapshot:
                   causalAuthority?.claudeProviderAccountAuthoritySnapshot ??
                   sharedCommandPool!.claude,
+                subscriptionAuthority: causalAuthority?.subscriptionAuthority ?? null,
                 lineage: {
                   commandId: command.id,
                   provider: command.provider,

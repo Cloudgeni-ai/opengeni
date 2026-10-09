@@ -587,7 +587,94 @@ BEGIN
     $body$
   $ddl$, data_schema);
 
-  -- 6. Reset-credit redemption: authority and the cross-workspace fence.
+  -- 6. A scheduled task's frozen v2 value at creation (design 3.7, EP-T15):
+  -- the same rule as acceptance. A task bound to a reusable session takes
+  -- that session's acceptance value; otherwise a personal entry only when
+  -- the exact requesting person creates it in their own Personal workspace,
+  -- with their one current generation. Everything else is empty; nothing
+  -- before the cutover. Firings copy it and never recompute it.
+  EXECUTE format($ddl$
+    CREATE FUNCTION opengeni_private.subscription_codex_task_authority_v2(
+      p_account_id uuid, p_workspace_id uuid, p_reusable_session_id uuid,
+      p_accepting_subject_id text
+    ) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
+    AS $body$
+    DECLARE
+      request_subject text := nullif(current_setting('opengeni.subject_id', true), '');
+      owner_membership uuid;
+      minted_lifecycle boolean := false;
+      generations bigint[];
+      empty_v2 constant jsonb := '{"version":2,"personal":[]}'::jsonb;
+    BEGIN
+      IF p_account_id IS DISTINCT FROM nullif(current_setting('opengeni.account_id', true), '')::uuid
+        OR p_workspace_id IS DISTINCT FROM nullif(current_setting('opengeni.workspace_id', true), '')::uuid
+      THEN RETURN NULL; END IF;
+      IF NOT EXISTS (
+        SELECT 1 FROM subscription_provider_cutovers cutover
+        WHERE cutover.account_id = p_account_id AND cutover.provider = 'codex'
+          AND cutover.enabled
+      ) THEN RETURN NULL; END IF;
+      IF p_reusable_session_id IS NOT NULL THEN
+        RETURN coalesce(opengeni_private.subscription_codex_acceptance_authority_v2(
+          p_account_id, p_workspace_id, p_reusable_session_id, p_accepting_subject_id), empty_v2);
+      END IF;
+      IF p_accepting_subject_id IS NULL OR length(btrim(p_accepting_subject_id)) = 0
+        OR request_subject IS DISTINCT FROM p_accepting_subject_id
+      THEN RETURN empty_v2; END IF;
+
+      INSERT INTO opengeni_private.subscription_runtime_capabilities (
+        backend_pid, transaction_id, capability_kind, account_id
+      ) VALUES (pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(), 'lifecycle', p_account_id)
+      ON CONFLICT (backend_pid, transaction_id, capability_kind, account_id, connection_id) DO NOTHING
+      RETURNING true INTO minted_lifecycle;
+      minted_lifecycle := coalesce(minted_lifecycle, false);
+
+      SELECT membership.id INTO owner_membership
+      FROM organization_memberships membership
+      WHERE membership.account_id = p_account_id AND membership.subject_id = p_accepting_subject_id
+        AND membership.status = 'active' AND membership.revoked_at IS NULL
+        AND membership.personal_workspace_id = p_workspace_id;
+      IF owner_membership IS NOT NULL THEN
+        SELECT coalesce(array_agg(DISTINCT authority.generation ORDER BY authority.generation), '{}')
+          INTO generations
+        FROM subscription_connections connection
+        JOIN organization_user_resource_authorities authority
+          ON authority.id = connection.authority_id
+          AND authority.account_id = connection.account_id
+          AND authority.resource_kind = 'subscription_connection'
+          AND authority.resource_id = connection.id
+        WHERE connection.account_id = p_account_id
+          AND connection.provider = 'codex' AND connection.kind = 'subscription'
+          AND connection.ownership = 'personal'
+          AND connection.owner_organization_membership_id = owner_membership
+          AND connection.owner_subject_id = p_accepting_subject_id
+          AND connection.status IN ('active', 'error')
+          AND connection.authority_generation = authority.generation
+          AND authority.organization_membership_id = owner_membership
+          AND authority.status = 'active' AND authority.revoked_at IS NULL;
+      END IF;
+      IF minted_lifecycle THEN
+        DELETE FROM opengeni_private.subscription_runtime_capabilities capability
+        WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+          AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+          AND capability.capability_kind = 'lifecycle' AND capability.account_id = p_account_id;
+      END IF;
+      IF owner_membership IS NULL OR cardinality(generations) <> 1 THEN RETURN empty_v2; END IF;
+      RETURN jsonb_build_object(
+        'version', 2,
+        'personal', jsonb_build_array(jsonb_build_object(
+          'provider', 'codex',
+          'ownerMembershipId', owner_membership::text,
+          'authorityGeneration', generations[1]
+        ))
+      );
+    END
+    $body$
+  $ddl$, data_schema);
+
+  -- 7. Reset-credit redemption: authority and the cross-workspace fence.
   EXECUTE format($ddl$
     CREATE OR REPLACE FUNCTION opengeni_private.subscription_codex_reset_authority(
       p_account_id uuid, p_workspace_id uuid, p_connection_id uuid, p_subject_id text
@@ -708,6 +795,8 @@ REVOKE ALL ON FUNCTION opengeni_private.subscription_codex_personal_connections(
 REVOKE ALL ON FUNCTION opengeni_private.subscription_codex_reset_authority(uuid, uuid, uuid, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.subscription_codex_reset_credit_fence(
   uuid, uuid, uuid, text, text, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.subscription_codex_task_authority_v2(
+  uuid, uuid, uuid, text) FROM PUBLIC;
 DO $grant_codex_writers$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
@@ -721,6 +810,8 @@ BEGIN
       uuid, uuid, uuid, text) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION opengeni_private.subscription_codex_reset_credit_fence(
       uuid, uuid, uuid, text, text, uuid) TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION opengeni_private.subscription_codex_task_authority_v2(
+      uuid, uuid, uuid, text) TO opengeni_app;
     -- Policy and capability internals are owner-only; the trigger function
     -- fires without the inserting role holding EXECUTE.
     REVOKE EXECUTE ON FUNCTION opengeni_private.subscription_codex_writer_context(
