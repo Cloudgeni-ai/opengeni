@@ -374,6 +374,65 @@ describe("disk-backed SDK v1 host archive codec", () => {
     }
   });
 
+  test("an abort during capture stops the reads, removes the private spool and rejects with its reason", async () => {
+    const source = await fixture();
+    const temporaryBase = await fixture();
+    await mkdir(join(source, "dir"));
+    for (let index = 0; index < 8; index++) {
+      await writeFile(join(source, "dir", `file-${index}`), `content-${index}`);
+    }
+    const previousTemp = process.env.TMPDIR;
+    process.env.TMPDIR = temporaryBase;
+    const abort = new AbortController();
+    const reason = new Error("snapshot budget elapsed");
+    const originalOpen = filesystem.open;
+    let reads = 0;
+    let readsAfterAbort = 0;
+    const hook = spyOn(filesystem, "open").mockImplementation(async (...args) => {
+      const handle = await originalOpen(...args);
+      if ((await realpath(String(args[0])).catch(() => "")).startsWith(join(source, "dir"))) {
+        const originalRead = handle.read;
+        Object.defineProperty(handle, "read", {
+          value: async (...readArgs: Parameters<typeof originalRead>) => {
+            if (abort.signal.aborted) readsAfterAbort++;
+            const result = await Reflect.apply(originalRead, handle, readArgs);
+            // The first pass hashes all 8 files; abort while serializing.
+            if (++reads === 10) abort.abort(reason);
+            return result;
+          },
+        });
+      }
+      return handle;
+    });
+    try {
+      await expect(captureHostWorkspaceArchive(source, [], undefined, abort.signal)).rejects.toBe(
+        reason,
+      );
+      expect(reads).toBe(10);
+      expect(readsAfterAbort).toBe(0);
+      expect(await readdir(temporaryBase)).toEqual([]);
+    } finally {
+      hook.mockRestore();
+      if (previousTemp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTemp;
+    }
+  });
+
+  test("an already aborted capture reads nothing", async () => {
+    const source = await fixture();
+    await writeFile(join(source, "file"), "content");
+    const reason = new Error("already elapsed");
+    const opened = spyOn(filesystem, "open");
+    try {
+      await expect(
+        captureHostWorkspaceArchive(source, [], undefined, AbortSignal.abort(reason)),
+      ).rejects.toBe(reason);
+      expect(opened).not.toHaveBeenCalled();
+    } finally {
+      opened.mockRestore();
+    }
+  });
+
   test("directory replacement between lstat and open cannot capture a symlink target", async () => {
     const source = await fixture();
     const outside = await fixture();

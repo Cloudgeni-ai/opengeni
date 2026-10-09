@@ -5120,10 +5120,10 @@ export function effectiveSandboxLifecycle(
 /**
  * One shared upper bound for the durable provider-capture claim and for command
  * admission waiting behind it. The SDK request itself is bounded by
- * sandboxSnapshotTimeoutMs; the extra window lets a non-cancellable provider
- * response settle and release its exact claim without turning a normal
- * checkpoint into a visible command failure. Database validation caps both
- * consumers at one hour.
+ * sandboxSnapshotTimeoutMs (a warm host-backed spool capture is stopped there);
+ * the extra window lets a non-cancellable provider response settle and release
+ * its exact claim without turning a normal checkpoint into a visible command
+ * failure. Database validation caps both consumers at one hour.
  */
 export function sandboxArchiveCaptureTimeoutMs(
   settings: Pick<Settings, "sandboxSnapshotTimeoutMs">,
