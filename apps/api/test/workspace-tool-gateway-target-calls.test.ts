@@ -148,12 +148,8 @@ const {
 } = await import("../src/workspace-tool-gateway");
 const { createWorkspaceToolGatewayCatalogAttestations } =
   await import("../src/workspace-tool-gateway-attestations");
-const {
-  invokeWorkspaceToolTarget,
-  resolveWorkspaceToolTarget,
-  resolveWorkspaceToolManifest,
-  approveWorkspaceToolTarget,
-} = await import("../src/workspace-tool-target");
+const { invokeWorkspaceToolTarget, resolveWorkspaceToolTarget, resolveWorkspaceToolManifest } =
+  await import("../src/workspace-tool-target");
 import type { TargetGatewayOptions } from "../src/workspace-tool-target";
 
 afterAll(() => mock.restore());

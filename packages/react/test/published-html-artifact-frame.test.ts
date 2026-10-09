@@ -31,7 +31,7 @@ test("the published frame supplies the SDK only for the optional client tag", ()
   expect(publishedHtmlArtifactDocument(optedIn, false)).toBe(optedIn);
 });
 
-function port(): MessagePort & { closeCount: number } {
+function fakePort(): MessagePort & { closeCount: number } {
   return {
     closeCount: 0,
     close() {
@@ -46,8 +46,8 @@ function connectTestSite(
 ) {
   const bootstrap = new MessageChannel();
   const ports: MessagePort[] = [];
-  bootstrap.port1.addEventListener("message", (event) => {
-    const port = event.ports[0]!;
+  bootstrap.port1.addEventListener("message", (bootstrapEvent) => {
+    const port = bootstrapEvent.ports[0]!;
     ports.push(port);
     port.addEventListener("message", async (event) => {
       const message = event.data as OpenGeniSiteBridgeRequestMessage;
@@ -266,8 +266,8 @@ describe("Site bridge request ownership", () => {
       let bridge = createBridge();
       const bootstrap = new MessageChannel();
       const ports: MessagePort[] = [];
-      bootstrap.port1.addEventListener("message", (event) => {
-        const port = event.ports[0]!;
+      bootstrap.port1.addEventListener("message", (bootstrapEvent) => {
+        const port = bootstrapEvent.ports[0]!;
         ports.push(port);
         port.addEventListener("message", async (event) => {
           const message = event.data as OpenGeniSiteBridgeRequestMessage;
@@ -337,8 +337,8 @@ describe("Site bridge request ownership", () => {
 
   test("keeps concurrent clients independent until document teardown", () => {
     const registry = new SiteBridgeRequestRegistry();
-    const firstPort = port();
-    const secondPort = port();
+    const firstPort = fakePort();
+    const secondPort = fakePort();
     registry.addPort(firstPort);
     const first = registry.start(firstPort, "request-1");
     expect(first).not.toBeNull();
