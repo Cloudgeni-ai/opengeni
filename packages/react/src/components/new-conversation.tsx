@@ -1,3 +1,4 @@
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { lazy, Suspense, useRef, type ComponentProps, type FormEvent } from "react";
 import {
   useNewConversation,
@@ -186,7 +187,12 @@ export function NewConversationView({
         </p>
       ) : error ? (
         <p role="alert" className="text-center text-og-sm text-og-status-failed">
-          {formatError(error.cause)}
+          {formatError(
+            error.cause,
+            error.cause instanceof OpenGeniApiError && error.cause.code === "route_not_allowed"
+              ? labels.unavailable
+              : undefined,
+          )}
         </p>
       ) : null}
       {pending ? (

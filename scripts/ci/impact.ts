@@ -431,6 +431,16 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/db",
     "@opengeni/testing",
   ],
+  "test/e2e/new-conversation.browser.e2e.ts": [
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
+  "test/e2e/session-conversation-controller.browser.e2e.ts": [
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
   "test/e2e/session-lazy-panels.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
