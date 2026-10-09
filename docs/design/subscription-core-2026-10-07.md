@@ -2186,7 +2186,7 @@ security-parity shadow; reference-model fixes.
 
 ### Catalog observations and selection corrections (2026-10-09)
 
-Migration 0694 stores successful Codex model-catalog observations beside quota
+Migration 0695 stores successful Codex model-catalog observations beside quota
 with an independent credential generation and 60-second expiry. It stores raw
 upstream model ids, not the active picker list. The accepted turn’s immutable
 product-to-upstream mapping determines its entitlement, preserving retained
