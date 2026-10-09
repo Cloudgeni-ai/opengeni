@@ -36,8 +36,8 @@ test("rendered MCP latency alert allows bounded polling and still detects slow t
     { tool: "command_wait", duration: 45 },
     { tool: "command_read", duration: 90, value: 117 },
     { tool: "command_wait", duration: 90, value: 117 },
-    { tool: "session_create", duration: 20, value: 29.25 },
-    { tool: "external", duration: 20, value: 29.25 },
+    { tool: "session_create", duration: 20, value: 29 },
+    { tool: "external", duration: 20, value: 29 },
     { tool: "external", duration: 3 },
     { tool: "command_read", duration: 90, lowVolume: true },
   ].map(({ tool, duration, value, lowVolume }) => {
@@ -47,7 +47,26 @@ test("rendered MCP latency alert allows bounded polling and still detects slow t
       name: `${tool} ${duration}s ${lowVolume ? "low volume" : "ordinary volume"}`,
       interval: "1m",
       input_series: [
-        ...[0.5, 1, 5, 15, 30, 60, 120, "+Inf"].map((le) => ({
+        // Match durationHistogramBuckets in packages/observability/src/index.ts.
+        ...[
+          0.01,
+          0.05,
+          0.1,
+          0.25,
+          0.5,
+          1,
+          2.5,
+          5,
+          10,
+          30,
+          60,
+          120,
+          300,
+          900,
+          1800,
+          3600,
+          "+Inf",
+        ].map((le) => ({
           series: `opengeni_mcp_tool_call_duration_seconds_bucket{${labels},le="${le}"}`,
           values: le === "+Inf" || Number(le) >= duration ? values : "0+0x30",
         })),
