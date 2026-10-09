@@ -196,6 +196,9 @@ async function connectShared(
               and kind = 'subscription' and ownership = 'shared'
               and provider_account_id = ${input.providerAccountId}`,
         );
+  // Only a managed human is recorded as the connecting person (legacy
+  // parity): local administration and service principals own no reset credit.
+  const connectedBySubjectId = input.subjectId.startsWith("user:") ? input.subjectId : null;
   const wake: SubscriptionCoreCodexWake =
     input.workspaceId === null
       ? { accountId: input.accountId, reason: "core_codex_connected" }
@@ -233,7 +236,7 @@ async function connectShared(
               provider_state = provider_state || ${JSON.stringify(providerState(input))}::jsonb,
               account_email = coalesce(${input.accountEmail}, account_email),
               label = coalesce(label, ${input.label}),
-              connected_by_subject_id = ${input.subjectId}, updated_at = clock_timestamp()
+              connected_by_subject_id = ${connectedBySubjectId}, updated_at = clock_timestamp()
             where account_id = ${input.accountId}::uuid and id = ${existing.id}::uuid
             returning id::text as id`,
         );
@@ -259,7 +262,7 @@ async function connectShared(
       ) values (
         ${input.accountId}::uuid, 'codex', 'subscription', ${input.providerAccountId},
         ${input.accountEmail}, ${input.label}, ${input.planType}, ${input.credentialEncrypted},
-        'v1', ${iso(input.expiresAt)}::timestamptz, ${iso(input.lastRefreshAt)}::timestamptz, 'active', 'shared', ${input.subjectId},
+        'v1', ${iso(input.expiresAt)}::timestamptz, ${iso(input.lastRefreshAt)}::timestamptz, 'active', 'shared', ${connectedBySubjectId},
         ${workspaceScoped ? "workspaces" : "organization"}, ${!workspaceScoped},
         ${input.workspaceId}::uuid, ${JSON.stringify(providerState(input))}::jsonb
       ) returning id::text as id`,

@@ -212,11 +212,12 @@ async function row(connectionId: string) {
       authority_generation: string | null;
       authority_id: string | null;
       allow_personal_workspaces: boolean;
+      connected_by_subject_id: string | null;
     }[]
   >`select ownership, scope_kind, managed_by_workspace_id::text as managed_by_workspace_id,
       refresh_generation::text as refresh_generation, credential_encrypted, owner_subject_id,
       authority_generation::text as authority_generation, authority_id::text as authority_id,
-      allow_personal_workspaces
+      allow_personal_workspaces, connected_by_subject_id
     from subscription_connections where id = ${connectionId}::uuid`;
   return found ?? null;
 }
@@ -330,6 +331,8 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     expect(again).toMatchObject({ kind: "connected", id: first.id, isNew: false });
     const replaced = await row(first.id);
     expect(replaced!.refresh_generation).toBe("2");
+    // A managed human is recorded as the connecting person.
+    expect(replaced!.connected_by_subject_id).toBe(org.ownerSubjectId);
     expect(accessToken(replaced!.credential_encrypted)).toBe("access-rotated");
   });
 
