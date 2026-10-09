@@ -75,6 +75,7 @@ import {
 import { SubscriptionCoreCodexTurnError } from "./codex-core-errors";
 import {
   CodexIncludedUsageExhaustedError,
+  CodexIncludedUsageUnknownError,
   findCodexCreditPolicyError,
 } from "./codex-credit-policy";
 import {
@@ -2104,7 +2105,7 @@ export type CodexCredentialFailure = {
    */
   kind: "auth" | "forbidden" | "rate_limit" | "quota" | "plan_entitlement";
   cooldownSeconds: number | null;
-  origin?: "included_usage_policy";
+  origin?: "included_usage_policy" | "usage_verification_policy";
 };
 
 export const CODEX_ALLOWANCE_FALLBACK_MS = 5 * 60 * 60_000;
@@ -2170,6 +2171,11 @@ export function codexCredentialCooldownUntil(
  */
 export function classifyCodexCredentialFailure(error: unknown): CodexCredentialFailure | null {
   const creditPolicy = findCodexCreditPolicyError(error);
+  if (creditPolicy instanceof CodexIncludedUsageUnknownError) {
+    // Verified pre-dispatch refusal. A short hard hold cannot authorize credit
+    // fallback and does not claim that the provider exhausted its allowance.
+    return { kind: "rate_limit", cooldownSeconds: 60, origin: "usage_verification_policy" };
+  }
   if (creditPolicy instanceof CodexIncludedUsageExhaustedError) {
     return {
       kind: "quota",

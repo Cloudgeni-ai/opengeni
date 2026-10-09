@@ -29,6 +29,7 @@ import {
   renameSubscriptionCoreCodexConnection,
   resolveSubscriptionCoreCodexAppsDesignation,
   setSubscriptionCoreCodexAllocator,
+  setSubscriptionCoreCodexExtraCredits,
   setSubscriptionCoreCodexPrimary,
   setSubscriptionCoreCodexRotation,
   setSubscriptionCoreWorkspaceCodexSource,
@@ -869,6 +870,49 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
         })
       ).result.kind,
     ).toBe("unchanged");
+    expect((await connectionRow(first)).allocator_enabled).toBe(false);
+
+    // Spending consent is separate from the allocator and credential version.
+    expect(
+      (
+        await setSubscriptionCoreCodexExtraCredits(client!.db, {
+          ...admin,
+          connectionId: first,
+          enabled: false,
+          expectedVersion: 1,
+        })
+      ).result.kind,
+    ).toBe("unchanged");
+    expect(
+      (
+        await setSubscriptionCoreCodexExtraCredits(client!.db, {
+          ...admin,
+          connectionId: first,
+          enabled: true,
+          expectedVersion: 1,
+        })
+      ).result,
+    ).toMatchObject({ kind: "updated", extraCreditsEnabled: true, extraCreditsVersion: 2 });
+    expect(
+      (
+        await setSubscriptionCoreCodexExtraCredits(client!.db, {
+          ...admin,
+          connectionId: first,
+          enabled: false,
+          expectedVersion: 1,
+        })
+      ).result.kind,
+    ).toBe("conflict");
+    expect(
+      (
+        await setSubscriptionCoreCodexExtraCredits(client!.db, {
+          ...stranger,
+          connectionId: first,
+          enabled: false,
+          expectedVersion: 2,
+        })
+      ).result.kind,
+    ).toBe("not_found");
     expect((await connectionRow(first)).allocator_enabled).toBe(false);
 
     // Rename: the delegated manager may rename the connection it manages only.

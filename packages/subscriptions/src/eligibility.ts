@@ -81,7 +81,26 @@ export function connectionCapacity(
   input: PlacementInput,
   connection: SubscriptionConnection,
 ): QuotaCapacity {
-  return quotaCapacity(connection.quota, input.now, input.quotaStaleAfterMs?.[connection.provider]);
+  const capacity = quotaCapacity(
+    connection.quota,
+    input.now,
+    input.quotaStaleAfterMs?.[connection.provider],
+  );
+  if (connectionUsesExtraCredits(input, connection)) return { kind: "available" };
+  return capacity;
+}
+
+/** Only included-window exhaustion is eligible for opted-in credit fallback. */
+export function connectionUsesExtraCredits(
+  input: PlacementInput,
+  connection: SubscriptionConnection,
+): boolean {
+  return (
+    connection.provider === "codex" &&
+    connection.extraCreditsEnabled === true &&
+    !(connection.quota?.exhaustedUntil != null && connection.quota.exhaustedUntil > input.now) &&
+    quotaCapacity(connection.quota, input.now, input.quotaStaleAfterMs?.codex).kind === "exhausted"
+  );
 }
 
 function findModel(input: PlacementInput, modelId: ModelId): ModelDescriptor | undefined {

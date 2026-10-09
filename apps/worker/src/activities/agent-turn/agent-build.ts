@@ -333,6 +333,10 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
                 executionGeneration,
                 clientVersion: codexContext.clientVersion,
                 assertChatLease: () => leases.codex.assertCurrentForDispatch(),
+                assertCreditAdmission: async () => {
+                  await codexContext.getToken();
+                  await codexContext.beforeProviderDispatch?.();
+                },
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,

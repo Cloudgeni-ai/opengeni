@@ -37,6 +37,10 @@ export const subscriptionConnections = pgTable(
     lastError: text("last_error"),
     /** When a time-bound health quarantine (status error) ends. */
     healthRetryAt: timestamp("health_retry_at", { withTimezone: true }),
+    extraCreditsEnabled: boolean("extra_credits_enabled").notNull().default(false),
+    extraCreditsVersion: integer("extra_credits_version").notNull().default(1),
+    extraCreditsUpdatedBySubjectId: text("extra_credits_updated_by_subject_id"),
+    extraCreditsUpdatedAt: timestamp("extra_credits_updated_at", { withTimezone: true }),
     allocatorEnabled: boolean("allocator_enabled").notNull().default(true),
     allocatorVersion: integer("allocator_version").notNull().default(1),
     excludedModels: text("excluded_models").array().notNull().default([]),

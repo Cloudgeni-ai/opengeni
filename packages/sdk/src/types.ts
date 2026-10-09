@@ -4049,6 +4049,9 @@ export type CodexAccount = {
   // (rotated-off after a usage cap). null/absent ⇒ not cooling.
   exhaustedUntil?: string | null;
   /** Controls only NEW automatic allocations. */
+  extraCreditsEnabled?: boolean;
+  extraCreditsVersion?: number;
+  extraCreditsUpdatedAt?: string | null;
   allocatorEnabled: boolean;
   /** Independent OCC sequence; credential/token `version` is never exposed. */
   allocatorVersion: number;

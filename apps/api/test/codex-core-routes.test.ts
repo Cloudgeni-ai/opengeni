@@ -251,6 +251,46 @@ describe("Codex routes with an enabled cutover", () => {
     });
   });
 
+  test("per-account credit consent writes use their own revision and wake placement", async () => {
+    cutover("core");
+    const consent = mock("setSubscriptionCoreCodexExtraCredits", async () => ({
+      result: {
+        kind: "updated",
+        extraCreditsEnabled: true,
+        extraCreditsVersion: 2,
+        extraCreditsUpdatedAt: null,
+      },
+      wake: { accountId: ACCOUNT, reason: "core_codex_extra_credits_changed" },
+    }));
+    const response = await app().request(
+      `/v1/workspaces/${WS}/codex/accounts/${CONNECTION}/extra-credits`,
+      {
+        method: "PATCH",
+        headers: {
+          authorization: await bearer(["connections:write"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ enabled: true, expectedVersion: 1 }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      changed: true,
+      extraCreditsEnabled: true,
+      extraCreditsVersion: 2,
+      extraCreditsUpdatedAt: null,
+    });
+    expect(consent.mock.calls[0]![1]).toMatchObject({
+      accountId: ACCOUNT,
+      workspaceId: WS,
+      connectionId: CONNECTION,
+      subjectId: "tester",
+      enabled: true,
+      expectedVersion: 1,
+    });
+    expect(wakes).toEqual([{ accountId: ACCOUNT, reason: "core_codex_extra_credits_changed" }]);
+  });
+
   test("allocator and source writes go to the core and wake waiters", async () => {
     cutover("core");
     const allocator = mock("setSubscriptionCoreCodexAllocator", async () => ({

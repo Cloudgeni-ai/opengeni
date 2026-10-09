@@ -234,6 +234,19 @@ function OrgCodexAccountDetail({
                 />
               }
             />
+            <SettingRow
+              label="Use extra credits"
+              description="Use this account's extra credits when included usage is exhausted. Automatic rotation tries other accounts' included usage first. Turning this off protects credits from the next request."
+              control={
+                <Switch
+                  aria-label={`Use extra credits on ${name}`}
+                  checked={account.extraCreditsEnabled ?? false}
+                  pending={codex.working === `extra-credits:${account.id}`}
+                  disabled={codex.busy}
+                  onCheckedChange={(next) => void codex.setExtraCredits(account, next)}
+                />
+              }
+            />
             {codex.accounts.length > 1 ? (
               <SettingRow
                 label="Primary account"

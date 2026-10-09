@@ -1150,8 +1150,15 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
               holderId: leases.codex.holderId,
               generation: leases.codex.generation,
               maxFailovers: providerTurn.codexCredentialFailoverLimit,
-              quarantine:
-                codexCredentialFailure.kind === "auth"
+              quarantine: codexCredentialFailure.origin
+                ? {
+                    kind:
+                      codexCredentialFailure.origin === "included_usage_policy"
+                        ? "included_usage"
+                        : "usage_verification",
+                    until: cooldownUntil!,
+                  }
+                : codexCredentialFailure.kind === "auth"
                   ? {
                       kind: "status",
                       status: "needs_relogin",
@@ -1178,7 +1185,9 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
             })
           : null;
       if (
-        quarantineResult?.action === "credential_changed" &&
+        (quarantineResult?.action === "credential_changed" ||
+          (quarantineResult?.action === "recorded" &&
+            codexCredentialFailure.origin !== undefined)) &&
         leases.codex.holderId &&
         leases.codex.generation !== null
       ) {
@@ -1194,7 +1203,11 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
           checkpointDurable: true,
           recoveryPayload: {
             triggerEventId: attempt.triggerEventId!,
-            reason: "codex_credential_version_changed",
+            reason: codexCredentialFailure.origin
+              ? codexCredentialFailure.origin === "included_usage_policy"
+                ? "codex_included_usage_changed"
+                : "codex_usage_verification_unavailable"
+              : "codex_credential_version_changed",
           },
           failedPayload: {},
         });

@@ -24705,6 +24705,11 @@ export async function listOrganizationCodexAccountStatuses(
         accountEmail: schema.codexSubscriptionCredentials.accountEmail,
         planType: schema.codexSubscriptionCredentials.planType,
         status: schema.codexSubscriptionCredentials.status,
+        extraCreditsEnabled: schema.codexSubscriptionCredentials.extraCreditsEnabled,
+        extraCreditsVersion: schema.codexSubscriptionCredentials.extraCreditsVersion,
+        extraCreditsUpdatedAt: schema.codexSubscriptionCredentials.extraCreditsUpdatedAt,
+        includedUsageUnavailableUntil:
+          schema.codexSubscriptionCredentials.includedUsageUnavailableUntil,
         allocatorEnabled: schema.codexSubscriptionCredentials.allocatorEnabled,
         allocatorVersion: schema.codexSubscriptionCredentials.allocatorVersion,
         allocatorUpdatedBySubjectId:
@@ -24742,6 +24747,8 @@ export async function listOrganizationCodexAccountStatuses(
       isActive: row.id === rotation?.activeCredentialId,
       expiresAt: codexMetadataDate(row.expiresAt),
       lastRefreshAt: codexMetadataDate(row.lastRefreshAt),
+      extraCreditsUpdatedAt: codexMetadataDate(row.extraCreditsUpdatedAt),
+      includedUsageUnavailableUntil: codexMetadataDate(row.includedUsageUnavailableUntil),
       allocatorUpdatedAt: codexMetadataDate(row.allocatorUpdatedAt),
       resetCreditsCheckedAt: codexMetadataDate(row.resetCreditsCheckedAt),
       primaryResetAt: codexMetadataDate(row.primaryResetAt),
@@ -26173,6 +26180,8 @@ type CodexLeaseCandidateRow = {
   plan_checked_at?: Date | string | null;
   plan_entitlement_exclusion?: unknown;
   status: string;
+  extra_credits_enabled?: boolean;
+  included_usage_unavailable_until?: Date | string | null;
   allocator_enabled: boolean;
   expires_at: Date | string | null;
   last_refresh_at: Date | string | null;
@@ -26210,6 +26219,8 @@ function mapCodexLeaseCandidate(
     planCheckedAt: codexMetadataDate(row.plan_checked_at),
     planEntitlementExclusion: readCodexPlanEntitlementExclusion(row.plan_entitlement_exclusion),
     status: row.status,
+    extraCreditsEnabled: row.extra_credits_enabled === true,
+    includedUsageUnavailableUntil: codexMetadataDate(row.included_usage_unavailable_until),
     allocatorEnabled: row.allocator_enabled,
     isActive: row.id === activeCredentialId,
     expiresAt: codexMetadataDate(row.expires_at),
@@ -26283,6 +26294,8 @@ async function listCodexLeaseCandidatesInTransaction(
       c.plan_type,
       c.status,
       c.allocator_enabled,
+      coalesce((to_jsonb(c) ->> 'extra_credits_enabled')::boolean, false) as extra_credits_enabled,
+      to_jsonb(c) ->> 'included_usage_unavailable_until' as included_usage_unavailable_until,
       c.expires_at,
       c.last_refresh_at,
       c.last_error,
@@ -26348,6 +26361,92 @@ async function listCodexLeaseCandidatesInTransaction(
  * RLS-scoped candidate set before any write, closing a malicious/buggy callback
  * from naming another workspace's row.
  */
+/** Read-only credit admission under the exact accepted turn and live lease. */
+export async function canSpendCodexExtraCreditsForTurn(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    credentialId: string;
+    holderId: string;
+    generation: number;
+  },
+  select: (
+    context: CodexCredentialLeaseSelectionContext,
+    session: CodexCredentialLeaseSessionState,
+  ) => { credentialId: string | null },
+): Promise<boolean> {
+  return await withSessionActivityRlsContext(db, input, async (tx) => {
+    const [turn] = await tx
+      .select({ metadata: schema.sessionTurns.metadata, model: schema.sessionTurns.model })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.accountId, input.accountId),
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          eq(schema.sessionTurns.id, input.turnId),
+          eq(schema.sessionTurns.activeAttemptId, input.attemptId),
+          eq(schema.sessionTurns.executionGeneration, input.executionGeneration),
+          eq(schema.sessionTurns.status, "running"),
+        ),
+      )
+      .limit(1);
+    if (!turn) return false;
+    const parsed = readCodexCredentialPolicySnapshotV1(turn.metadata);
+    if (
+      parsed.kind !== "valid" ||
+      (parsed.policy.source !== "organization" && parsed.policy.source !== "workspace")
+    )
+      return false;
+    const policy = parsed.policy;
+    const condition = await codexCredentialUseCondition(tx, input.workspaceId, input);
+    if (!condition) return false;
+    const [current] = await tx
+      .select({ enabled: schema.codexSubscriptionCredentials.extraCreditsEnabled })
+      .from(schema.codexSubscriptionCredentials)
+      .where(and(eq(schema.codexSubscriptionCredentials.id, input.credentialId), condition))
+      .limit(1);
+    if (!current?.enabled) return false;
+    const accounts = await listCodexLeaseCandidatesInTransaction(tx, {
+      ...input,
+      activeCredentialId: policy.activeCredentialId,
+      source: policy.source as "organization" | "workspace",
+      excludeTurnId: input.turnId,
+    });
+    const candidate = accounts.find((row) => row.id === input.credentialId);
+    if (!candidate) return false;
+    // The guard just observed this exhaustion, before the durable settlement.
+    candidate.includedUsageUnavailableUntil = new Date(Date.now() + 60_000);
+    // This exact lease predates pause. Pause only governs new allocations;
+    // consent, model access and hard cooldowns still apply to this request.
+    candidate.allocatorEnabled = true;
+    const selected = select(
+      {
+        accounts,
+        activeCredentialId: policy.activeCredentialId,
+        rotationEnabled: policy.rotationEnabled,
+        rotationStrategy: policy.rotationStrategy,
+        existingCredentialId: null,
+        modelId: turn.model,
+        failedCredentialIds: unresolvedCodexCredentialFailures(turn.metadata, accounts),
+        policyScope: null,
+        unavailableDiagnostics: [],
+      },
+      {
+        pinnedCredentialId: policy.pinnedCredentialId,
+        pinSource: policy.pinSource,
+        lastCredentialId: policy.lastCredentialId,
+      },
+    );
+    return selected.credentialId === input.credentialId;
+  });
+}
+
 export async function acquireCodexCredentialLease<
   T,
   TPolicyScope = never,
@@ -30884,6 +30983,8 @@ export async function releaseCodexCredentialLease(
 }
 
 export type CodexCredentialLeaseQuarantine =
+  | { kind: "included_usage"; until: Date }
+  | { kind: "usage_verification"; until: Date }
   | {
       kind: "status";
       status: "needs_relogin" | "error";
@@ -31076,6 +31177,33 @@ export async function quarantineCodexCredentialForLease(
             failoverCount: metadata.failoverCount,
             maxFailovers,
             currentCredentialVersion: credential.version,
+          } as const;
+        }
+        if (
+          input.quarantine.kind === "included_usage" ||
+          input.quarantine.kind === "usage_verification"
+        ) {
+          await tx
+            .update(schema.codexSubscriptionCredentials)
+            .set(
+              input.quarantine.kind === "usage_verification"
+                ? {
+                    exhaustedUntil: sql`greatest(${schema.codexSubscriptionCredentials.exhaustedUntil}, ${input.quarantine.until.toISOString()}::timestamptz)`,
+                    exhaustedKind: sql`case when ${schema.codexSubscriptionCredentials.exhaustedUntil} >= ${input.quarantine.until.toISOString()}::timestamptz then ${schema.codexSubscriptionCredentials.exhaustedKind} else 'rate_limit' end`,
+                    exhaustedRevision: sql`${schema.codexSubscriptionCredentials.exhaustedRevision} + 1`,
+                  }
+                : {
+                    includedUsageUnavailableUntil: new Date(
+                      Math.min(input.quarantine.until.getTime(), Date.now() + 60_000),
+                    ),
+                  },
+            )
+            .where(and(eq(schema.codexSubscriptionCredentials.id, input.credentialId), condition));
+          return {
+            action: "recorded",
+            failoverCount: metadata.failoverCount,
+            maxFailovers,
+            exhausted: false,
           } as const;
         }
         const planKey =
@@ -31320,6 +31448,11 @@ export async function listCodexAccountStatuses(
         planChangedAt: schema.codexSubscriptionCredentials.planChangedAt,
         planEntitlementExclusion: schema.codexSubscriptionCredentials.planEntitlementExclusion,
         status: schema.codexSubscriptionCredentials.status,
+        extraCreditsEnabled: schema.codexSubscriptionCredentials.extraCreditsEnabled,
+        extraCreditsVersion: schema.codexSubscriptionCredentials.extraCreditsVersion,
+        extraCreditsUpdatedAt: schema.codexSubscriptionCredentials.extraCreditsUpdatedAt,
+        includedUsageUnavailableUntil:
+          schema.codexSubscriptionCredentials.includedUsageUnavailableUntil,
         allocatorEnabled: schema.codexSubscriptionCredentials.allocatorEnabled,
         allocatorVersion: schema.codexSubscriptionCredentials.allocatorVersion,
         allocatorUpdatedBySubjectId:
@@ -31355,6 +31488,8 @@ export async function listCodexAccountStatuses(
       planEntitlementExclusion: readCodexPlanEntitlementExclusion(row.planEntitlementExclusion),
       expiresAt: codexMetadataDate(row.expiresAt),
       lastRefreshAt: codexMetadataDate(row.lastRefreshAt),
+      extraCreditsUpdatedAt: codexMetadataDate(row.extraCreditsUpdatedAt),
+      includedUsageUnavailableUntil: codexMetadataDate(row.includedUsageUnavailableUntil),
       allocatorUpdatedAt: codexMetadataDate(row.allocatorUpdatedAt),
       resetCreditsCheckedAt: codexMetadataDate(row.resetCreditsCheckedAt),
       primaryResetAt: codexMetadataDate(row.primaryResetAt),
@@ -31630,6 +31765,180 @@ export async function updateCodexAllocatorEligibility(
     {
       workspaceId: input.workspaceId,
       reason: "codex_allocator_eligibility_changed",
+    },
+    mutate,
+  );
+}
+
+export type CodexExtraCreditsUpdateResult =
+  | {
+      kind: "updated" | "unchanged";
+      extraCreditsEnabled: boolean;
+      extraCreditsVersion: number;
+      extraCreditsUpdatedBySubjectId: string | null;
+      extraCreditsUpdatedAt: Date | null;
+    }
+  | {
+      kind: "conflict";
+      extraCreditsEnabled: boolean;
+      extraCreditsVersion: number;
+      extraCreditsUpdatedBySubjectId: string | null;
+      extraCreditsUpdatedAt: Date | null;
+    }
+  | { kind: "not_found" };
+
+/**
+ * Toggle per-account extra-credit consent under credential-row OCC.
+ *
+ * Same-state writes are idempotent even when `expectedVersion` is stale. A real
+ * state transition requires the exact current version, increments only the
+ * spending-policy version, and writes one audit row in the same transaction. It never
+ * touches credential `version`, health, encrypted material, cooldown, or quota.
+ */
+export async function updateCodexExtraCreditsPolicy(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string | null;
+    credentialId: string;
+    subjectId: string;
+    enabled: boolean;
+    expectedVersion: number;
+  },
+): Promise<CodexCapacityMutationResult<CodexExtraCreditsUpdateResult>> {
+  const scope =
+    input.workspaceId === null
+      ? and(
+          eq(schema.codexSubscriptionCredentials.organizationId, input.accountId),
+          eq(schema.codexSubscriptionCredentials.authorityScope, "organization"),
+        )
+      : eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId);
+  const mutate = async (
+    tx: Database,
+  ): Promise<{ result: CodexExtraCreditsUpdateResult; changed: boolean }> => {
+    const [row] = await tx
+      .select({
+        extraCreditsEnabled: schema.codexSubscriptionCredentials.extraCreditsEnabled,
+        extraCreditsVersion: schema.codexSubscriptionCredentials.extraCreditsVersion,
+        extraCreditsUpdatedBySubjectId:
+          schema.codexSubscriptionCredentials.extraCreditsUpdatedBySubjectId,
+        extraCreditsUpdatedAt: schema.codexSubscriptionCredentials.extraCreditsUpdatedAt,
+      })
+      .from(schema.codexSubscriptionCredentials)
+      .where(
+        and(
+          eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
+          scope,
+          eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!row) return { result: { kind: "not_found" } as const, changed: false };
+    const current = {
+      extraCreditsEnabled: row.extraCreditsEnabled,
+      extraCreditsVersion: row.extraCreditsVersion,
+      extraCreditsUpdatedBySubjectId: row.extraCreditsUpdatedBySubjectId,
+      extraCreditsUpdatedAt: codexMetadataDate(row.extraCreditsUpdatedAt),
+    };
+    if (row.extraCreditsEnabled === input.enabled) {
+      return {
+        result: { kind: "unchanged", ...current } as const,
+        changed: false,
+      };
+    }
+    if (row.extraCreditsVersion !== input.expectedVersion) {
+      return {
+        result: { kind: "conflict", ...current } as const,
+        changed: false,
+      };
+    }
+
+    const changedAt = new Date();
+    const [updated] = await tx
+      .update(schema.codexSubscriptionCredentials)
+      .set({
+        extraCreditsEnabled: input.enabled,
+        extraCreditsVersion: sql`${schema.codexSubscriptionCredentials.extraCreditsVersion} + 1`,
+        extraCreditsUpdatedBySubjectId: input.subjectId,
+        extraCreditsUpdatedAt: changedAt,
+        // Deliberately no credential version/updatedAt write.
+      })
+      .where(
+        and(
+          eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
+          scope,
+          eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+          eq(schema.codexSubscriptionCredentials.extraCreditsVersion, input.expectedVersion),
+        ),
+      )
+      .returning({
+        extraCreditsEnabled: schema.codexSubscriptionCredentials.extraCreditsEnabled,
+        extraCreditsVersion: schema.codexSubscriptionCredentials.extraCreditsVersion,
+        extraCreditsUpdatedBySubjectId:
+          schema.codexSubscriptionCredentials.extraCreditsUpdatedBySubjectId,
+        extraCreditsUpdatedAt: schema.codexSubscriptionCredentials.extraCreditsUpdatedAt,
+      });
+    if (!updated) {
+      throw new Error("Codex credit-policy row changed while locked");
+    }
+    await tx.insert(schema.auditEvents).values(
+      withLosslessContentWriteVersion(
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+          action: "codex.extra_credits.updated",
+          targetType: "codex_subscription_credential",
+          targetId: input.credentialId,
+          metadata: {
+            extraCreditsEnabled: updated.extraCreditsEnabled,
+            extraCreditsVersion: updated.extraCreditsVersion,
+          },
+        },
+        "metadata",
+        "metadataCodecVersion",
+      ),
+    );
+    return {
+      result: {
+        kind: "updated",
+        extraCreditsEnabled: updated.extraCreditsEnabled,
+        extraCreditsVersion: updated.extraCreditsVersion,
+        extraCreditsUpdatedBySubjectId: updated.extraCreditsUpdatedBySubjectId,
+        extraCreditsUpdatedAt: codexMetadataDate(updated.extraCreditsUpdatedAt),
+      } as const,
+      changed: true,
+    };
+  };
+  if (input.workspaceId === null) {
+    return await withOrganizationCodexAdministrator(
+      db,
+      { organizationId: input.accountId, actorSubjectId: input.subjectId },
+      async (tx) => {
+        await lockOrganizationCodexSubscriptionSources(tx, input.accountId);
+        await tx
+          .select({ accountId: schema.organizationCodexRotationSettings.accountId })
+          .from(schema.organizationCodexRotationSettings)
+          .where(eq(schema.organizationCodexRotationSettings.accountId, input.accountId))
+          .for("update");
+        const mutation = await mutate(tx);
+        const wakeTargets = mutation.changed
+          ? await wakeOrganizationCodexCapacityWaitersInTransaction(tx, {
+              accountId: input.accountId,
+              reason: "codex_extra_credits_policy_changed",
+              restoreWorkspaceId: null,
+            })
+          : [];
+        return { result: mutation.result, wakeTargets };
+      },
+    );
+  }
+  return await withCodexCapacityMutation(
+    db,
+    {
+      workspaceId: input.workspaceId,
+      reason: "codex_extra_credits_policy_changed",
     },
     mutate,
   );

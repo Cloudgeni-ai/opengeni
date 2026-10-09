@@ -111,6 +111,49 @@ export async function codexAccountsLackingTurnModel(
   }
 }
 
+/** Same model eligibility for placement and live credit consent. */
+export function selectCodexTurnAccount(input: {
+  context: CodexCredentialLeaseSelectionContext;
+  session: CodexCredentialLeaseSessionState;
+  sessionId: string;
+  productModelId: string;
+  lackingModel: ReadonlySet<string>;
+}) {
+  const { context, session: lockedSessionCodexState } = input;
+  const allowed = context.accounts.filter((account) =>
+    connectionModelAllowed(account.allowedModelIds, input.productModelId),
+  );
+  if (context.accounts.length > 0 && allowed.length === 0)
+    throw new Error("This model is disabled for the connected Codex subscriptions");
+  const sessionPin = lockedSessionCodexState.pinnedCredentialId;
+  if (
+    sessionPin &&
+    lockedSessionCodexState.pinSource !== "policy" &&
+    context.accounts.some((account) => account.id === sessionPin) &&
+    !allowed.some((account) => account.id === sessionPin)
+  )
+    throw new Error("This model is disabled for the pinned Codex subscription");
+  // An explicit session pin is honored as is; otherwise prefer accounts
+  // that serve the model, keeping the full list when none is known to.
+  const explicitPin = Boolean(sessionPin && lockedSessionCodexState.pinSource !== "policy");
+  const serving = allowed.filter((account) => !input.lackingModel.has(account.id));
+  const candidates = explicitPin || serving.length === 0 ? allowed : serving;
+  return selectCodexCredentialLeaseForTurn({
+    // The accepted product model also scopes proven plan entitlement:
+    // an account whose current plan excludes it is not a candidate.
+    context: {
+      ...context,
+      accounts: candidates,
+      modelId: input.productModelId,
+    },
+    sessionId: input.sessionId,
+    sessionPinnedCredentialId: lockedSessionCodexState.pinnedCredentialId,
+    sessionPinSource: lockedSessionCodexState.pinSource,
+    sessionLastCredentialId: lockedSessionCodexState.lastCredentialId,
+    now: new Date(),
+  });
+}
+
 const codexPoolLowWarningThrottle = createLogThrottle({
   intervalMs: CODEX_POOL_LOW_WARNING_INTERVAL_MS,
   maxKeys: 1_024,
@@ -254,37 +297,12 @@ async function selectLegacyCodexTurnCapacity(
         context: CodexCredentialLeaseSelectionContext,
         lockedSessionCodexState: CodexCredentialLeaseSessionState,
       ) => {
-        const allowed = context.accounts.filter((account) =>
-          connectionModelAllowed(account.allowedModelIds, deps.turnExecutionPolicy.productModelId),
-        );
-        if (context.accounts.length > 0 && allowed.length === 0)
-          throw new Error("This model is disabled for the connected Codex subscriptions");
-        const sessionPin = lockedSessionCodexState.pinnedCredentialId;
-        if (
-          sessionPin &&
-          lockedSessionCodexState.pinSource !== "policy" &&
-          context.accounts.some((account) => account.id === sessionPin) &&
-          !allowed.some((account) => account.id === sessionPin)
-        )
-          throw new Error("This model is disabled for the pinned Codex subscription");
-        // An explicit session pin is honored as is; otherwise prefer accounts
-        // that serve the model, keeping the full list when none is known to.
-        const explicitPin = Boolean(sessionPin && lockedSessionCodexState.pinSource !== "policy");
-        const serving = allowed.filter((account) => !lackingModel.has(account.id));
-        const candidates = explicitPin || serving.length === 0 ? allowed : serving;
-        return selectCodexCredentialLeaseForTurn({
-          // The accepted product model also scopes proven plan entitlement:
-          // an account whose current plan excludes it is not a candidate.
-          context: {
-            ...context,
-            accounts: candidates,
-            modelId: deps.turnExecutionPolicy.productModelId,
-          },
+        return selectCodexTurnAccount({
+          context,
+          session: lockedSessionCodexState,
           sessionId: input.sessionId,
-          sessionPinnedCredentialId: lockedSessionCodexState.pinnedCredentialId,
-          sessionPinSource: lockedSessionCodexState.pinSource,
-          sessionLastCredentialId: lockedSessionCodexState.lastCredentialId,
-          now: new Date(),
+          productModelId: deps.turnExecutionPolicy.productModelId,
+          lackingModel,
         });
       };
 

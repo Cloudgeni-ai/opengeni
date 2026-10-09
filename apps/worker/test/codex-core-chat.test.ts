@@ -778,7 +778,7 @@ describe("core Codex failure settlement", () => {
     ["local included-usage protection", () => new CodexIncludedUsageExhaustedError(3600)],
   ] as const)(
     "%s records against the core connection and re-places the same turn",
-    async (_label, makeError) => {
+    async (label, makeError) => {
       const quota = spy(db, "recordSubscriptionCoreCodexQuotaObservation").mockResolvedValue(true);
       const failure = spy(db, "recordSubscriptionCoreCodexTurnFailure").mockResolvedValue(true);
       spy(db, "countSubscriptionCoreCodexTurnRefusals").mockResolvedValue(1);
@@ -796,9 +796,12 @@ describe("core Codex failure settlement", () => {
         {},
         identity,
         { connectionId: "connection-core", holderId: "codex-turn:holder", generation: 3 },
-        expect.objectContaining({ exhaustedKind: "quota", observedRefreshGeneration: 5 }),
+        expect.objectContaining({
+          exhaustedKind: label === "provider quota refusal" ? "quota" : null,
+          observedRefreshGeneration: 5,
+        }),
       );
-      expect(failure).toHaveBeenCalledTimes(1);
+      expect(failure).toHaveBeenCalledTimes(label === "provider quota refusal" ? 1 : 0);
       // The lease is released first so the next placement need not wait for it.
       expect(deps.leases.codex.releaseCurrent).toHaveBeenCalledTimes(1);
       expect(deps.leases.codex.held).toBe(false);

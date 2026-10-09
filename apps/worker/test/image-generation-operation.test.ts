@@ -8,6 +8,11 @@ import {
   type ExecuteImageGenerationOperationInput,
   type ImageGenerationOperationPorts,
 } from "../src/activities/image-generation-operation";
+import { executeCodexImageGeneration } from "../src/activities/codex-image-generation";
+import {
+  CodexIncludedUsageExhaustedError,
+  CodexIncludedUsageUnknownError,
+} from "../src/activities/agent-turn/codex-credit-policy";
 import type { GeneratedImageReceipt } from "../src/activities/generated-images";
 
 const base = {
@@ -433,4 +438,48 @@ describe("image generation paid-operation fence", () => {
     ).rejects.toBeInstanceOf(ImageGenerationRetentionFailedError);
     expect(generateCalls.count).toBe(0);
   });
+});
+
+test("a Codex credit-policy refusal before image dispatch leaves the operation retryable", async () => {
+  for (const failure of [
+    new CodexIncludedUsageExhaustedError(60),
+    new CodexIncludedUsageUnknownError(),
+  ]) {
+    let resets = 0;
+    let unknown = 0;
+    const baseInput = executionInput({ count: 0 });
+    await expect(
+      executeCodexImageGeneration(
+        {
+          ...baseInput,
+          credentialId: "77777777-7777-4777-8777-777777777777",
+          codexContext: {
+            clientVersion: "test",
+            getToken: async () => {
+              throw failure;
+            },
+            refresh: async () => {
+              throw failure;
+            },
+          },
+          generateImage: async ({ context }) => {
+            await context.getToken();
+            throw new Error("unreachable");
+          },
+        },
+        operationPorts({
+          resetBeforeProviderDispatch: async () => {
+            resets++;
+            return { status: "prepared" } as never;
+          },
+          markOutcomeUnknown: async () => {
+            unknown++;
+            return { status: "outcome_unknown" } as never;
+          },
+        }),
+      ),
+    ).rejects.toBe(failure);
+    expect(resets).toBe(1);
+    expect(unknown).toBe(0);
+  }
 });

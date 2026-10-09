@@ -1131,6 +1131,10 @@ describe("definitive Codex failure settlement", () => {
         maxFailovers: 2,
         events: [],
       });
+      const localRecovery = spyOn(opengeniDb, "settleCodexCredentialLeaseLoss").mockResolvedValue({
+        action: "recovering",
+        events: [],
+      });
       const { deps } = codexFailureDeps({
         codexPolicySnapshot: {
           schemaVersion: 1,
@@ -1147,13 +1151,15 @@ describe("definitive Codex failure settlement", () => {
         deps.error = new CodexIncludedUsageExhaustedError(3600);
       try {
         expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
-        expect(listAccounts).toHaveBeenCalledTimes(2);
+        expect(listAccounts).toHaveBeenCalledTimes(origin === "included_usage_policy" ? 1 : 2);
         for (const args of listAccounts.mock.calls) expect(args[2]).toBe("turn-1");
-        expect(failover).toHaveBeenCalledTimes(1);
+        expect(failover).toHaveBeenCalledTimes(origin === "included_usage_policy" ? 0 : 1);
+        expect(localRecovery).toHaveBeenCalledTimes(origin === "included_usage_policy" ? 1 : 0);
       } finally {
         listAccounts.mockRestore();
         quarantine.mockRestore();
         failover.mockRestore();
+        localRecovery.mockRestore();
       }
     },
   );

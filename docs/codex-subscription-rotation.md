@@ -57,7 +57,7 @@ window after activation.
 
 ## Included allowance and extra credits
 
-Codex chat and compaction check included allowance immediately before each
+Codex chat, compaction and chat-owned image generation check included allowance immediately before each
 provider request, in `agent-turn/codex-credit-policy.ts`. This is independent
 of account selection: a long-running turn must not keep spending just because
 the provider accepts requests after the included limit.
@@ -66,23 +66,28 @@ The default protects extra credits. An exhausted response-header observation
 stops dispatch immediately; otherwise a bounded `/wham/usage` read is required
 for each request. A successful check is never reused for the next request.
 Weekly-only plans use their reported window, without inventing a five-hour cap.
-Missing/unreadable allowance stops the turn with typed, non-retryable copy;
-it does not mark the account unhealthy or manufacture quota evidence.
+Missing/unreadable allowance gives that account a one-minute local admission
+hold, then re-places the checkpointed turn or waits when no account is eligible.
+It never authorizes extra credits or marks the account unhealthy.
 Reported exhausted feature allowances also block spending conservatively:
 provider feature identifiers do not yet have an authoritative model mapping.
 
 Observed exhaustion is a local admission refusal, not a fabricated HTTP error.
 Both allocator implementations checkpoint durable progress before switching
-the same turn. Existing manual pins, rotation policy, failover bounds and
-capacity waits still apply. Reset credits are never redeemed automatically.
-The explicit deployment opt-in `OPENGENI_CODEX_ALLOW_EXTRA_CREDITS=true` permits
-active turns to continue past included limits; it does not change which
-accounts the allocator prefers for new work. It defaults to false.
+the same turn. Existing manual pins, rotation policy and capacity waits still apply.
+Local allowance observations never consume the provider-refusal budget. Reset credits are never redeemed automatically.
+Each account has a **Use extra credits** switch, off by default. Automatic
+routing prefers included allowance across eligible accounts before opted-in
+credits, including when the primary or a warm account has exhausted its allowance.
+Manual pins and primary-only selection follow that account's credit policy.
+A live consent and accepted-pool check runs before credit dispatch, so revoking
+consent applies to the next request. Real provider refusals still block the
+account. Pausing, reconnecting and token refresh preserve credit consent.
 
 This is request-boundary protection, not a provider-enforced monetary cap:
 an individual request can cross a limit, provider reporting can lag, and
-concurrent clients can consume allowance after a check. Independent image,
-voice and external-client requests have their own admission paths.
+concurrent clients can consume allowance after a check. Voice and external-client
+requests have their own admission paths.
 
 Account usage details display the provider's extra-credit balance without
 inventing a currency or converting missing data to zero. This balance is

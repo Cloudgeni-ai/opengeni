@@ -2289,6 +2289,34 @@ describe("credential allocator atomic Codex credential allocation", () => {
     ).toBe(true);
   });
 
+  test("unknown usage holds never shorten a real provider cooldown or consume refusal budget", async () => {
+    if (!available) return;
+    const [ws] = await freshAccount();
+    const credentialId = await connectCredential(ws!, "unknown-usage-hold");
+    const turnId = await seedTurn(ws!, 1);
+    const lease = await acquire(dbA, ws!, turnId);
+    const until = new Date(Date.now() + 3_600_000);
+    await admin`update codex_subscription_credentials set exhausted_until=${until},exhausted_kind='quota',exhausted_revision=exhausted_revision+1 where id=${credentialId}`;
+    const result = await quarantineCodexCredentialForLease(dbA, {
+      accountId: ws!.accountId,
+      workspaceId: ws!.workspaceId,
+      ...(await attemptFenceForTurn(turnId)),
+      turnId,
+      credentialId,
+      credentialVersion: 1,
+      holderId: lease.holderId!,
+      generation: lease.generation!,
+      maxFailovers: lease.failoverLimit,
+      quarantine: { kind: "usage_verification", until: new Date(Date.now() + 60_000) },
+    });
+    expect(result).toMatchObject({ action: "recorded", failoverCount: 0, exhausted: false });
+    const [after] = await admin<
+      { exhausted_until: Date; exhausted_kind: string }[]
+    >`select exhausted_until,exhausted_kind from codex_subscription_credentials where id=${credentialId}`;
+    expect(after!.exhausted_until.getTime()).toBe(until.getTime());
+    expect(after!.exhausted_kind).toBe("quota");
+  });
+
   test("a reconnect version fences a stale provider refusal from poisoning the fresh token family", async () => {
     if (!available) return;
     const [ws] = await freshAccount();

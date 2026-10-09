@@ -77,6 +77,7 @@ import {
   nestedPostgresSqlState,
   releaseCodexResetRedemptionClaim,
   updateCodexAllocatorEligibility,
+  updateCodexExtraCreditsPolicy,
   loadCodexCredentialForRun,
   renameCodexAccount,
   renameOrganizationCodexAccount,
@@ -148,6 +149,9 @@ export function codexAccountJson(
       CODEX_WEEKLY_WINDOW_SECONDS,
     ),
     usageCheckedAt: row.usageCheckedAt,
+    extraCreditsEnabled: row.extraCreditsEnabled ?? false,
+    extraCreditsVersion: row.extraCreditsVersion ?? 1,
+    extraCreditsUpdatedAt: row.extraCreditsUpdatedAt ?? null,
     allocatorEnabled: row.allocatorEnabled,
     allocatorVersion: row.allocatorVersion,
     allocatorUpdatedAt: row.allocatorUpdatedAt,
@@ -267,6 +271,7 @@ import {
   coreCodexAccounts,
   coreCodexActivate,
   coreCodexAllocator,
+  coreCodexExtraCredits,
   coreCodexClearApps,
   coreCodexDesignateApps,
   coreCodexRename,
@@ -1237,6 +1242,45 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     return result.kind === "conflict" ? c.json(response, 409) : c.json(response);
   });
 
+  app.patch(
+    "/v1/organizations/:organizationId/codex/accounts/:accountId/extra-credits",
+    async (c) => {
+      const organizationId = c.req.param("organizationId");
+      requireSameOriginBrowserMutation(c, deps);
+      const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+      const parsed = z
+        .object({
+          enabled: z.boolean(),
+          expectedVersion: z.number().int().positive(),
+        })
+        .safeParse(await c.req.json().catch(() => null));
+      if (!parsed.success) {
+        throw new HTTPException(400, { message: "enabled and expectedVersion are required" });
+      }
+      const admin = { accountId: organizationId, workspaceId: null, subjectId: human.subjectId };
+      if ((await codexRouteDisposition(deps, organizationId)) === "core") {
+        return await coreCodexExtraCredits(c, deps, admin, c.req.param("accountId"), parsed.data);
+      }
+      const mutation = await updateCodexExtraCreditsPolicy(db, {
+        ...admin,
+        credentialId: c.req.param("accountId"),
+        ...parsed.data,
+      });
+      const result = mutation.result;
+      if (result.kind === "not_found") {
+        throw new HTTPException(404, { message: "codex account not found" });
+      }
+      await signalCodexCapacityTargets(deps, mutation.wakeTargets);
+      const response = {
+        extraCreditsEnabled: result.extraCreditsEnabled,
+        extraCreditsVersion: result.extraCreditsVersion,
+        extraCreditsUpdatedAt: result.extraCreditsUpdatedAt,
+        changed: result.kind === "updated",
+      };
+      return result.kind === "conflict" ? c.json(response, 409) : c.json(response);
+    },
+  );
+
   app.patch("/v1/organizations/:organizationId/codex/accounts/:accountId", async (c) => {
     const organizationId = c.req.param("organizationId");
     requireSameOriginBrowserMutation(c, deps);
@@ -1865,6 +1909,54 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       allocatorEnabled: result.allocatorEnabled,
       allocatorVersion: result.allocatorVersion,
       allocatorUpdatedAt: result.allocatorUpdatedAt,
+      changed: result.kind === "updated",
+    };
+    await signalCodexCapacityTargets(deps, mutation.wakeTargets);
+    return result.kind === "conflict" ? c.json(response, 409) : c.json(response);
+  });
+
+  app.patch("/v1/workspaces/:workspaceId/codex/accounts/:accountId/extra-credits", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const codexDisposition = await codexRouteDisposition(deps, grant.accountId);
+    if (codexDisposition === "legacy")
+      await requireWorkspaceCodexManagementSource(deps, workspaceId);
+    const parsed = z
+      .object({
+        enabled: z.boolean(),
+        expectedVersion: z.number().int().positive(),
+      })
+      .safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: "enabled and expectedVersion are required",
+      });
+    }
+    if (codexDisposition === "core") {
+      return await coreCodexExtraCredits(
+        c,
+        deps,
+        { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+        c.req.param("accountId"),
+        parsed.data,
+      );
+    }
+    const mutation = await updateCodexExtraCreditsPolicy(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      credentialId: c.req.param("accountId"),
+      subjectId: grant.subjectId,
+      enabled: parsed.data.enabled,
+      expectedVersion: parsed.data.expectedVersion,
+    });
+    const result = mutation.result;
+    if (result.kind === "not_found") {
+      throw new HTTPException(404, { message: "codex account not found" });
+    }
+    const response = {
+      extraCreditsEnabled: result.extraCreditsEnabled,
+      extraCreditsVersion: result.extraCreditsVersion,
+      extraCreditsUpdatedAt: result.extraCreditsUpdatedAt,
       changed: result.kind === "updated",
     };
     await signalCodexCapacityTargets(deps, mutation.wakeTargets);

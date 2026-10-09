@@ -84,7 +84,8 @@ export async function failOverCoreCodexTurn(
   const refusals = await countSubscriptionCoreCodexTurnRefusals(db, core.identity).catch(
     () => null,
   );
-  const disposition = coreCodexFailoverDisposition(refusals);
+  const disposition =
+    refusal.origin !== undefined ? "failover" : coreCodexFailoverDisposition(refusals);
   observability.incrementCounter({
     name: "opengeni_codex_failover_settlements_total",
     help: "Atomic Codex failover settlements by outcome.",

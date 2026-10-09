@@ -838,7 +838,6 @@ const SettingsSchema = z.object({
   codexSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_CODEX_SUBSCRIPTION_ENABLED
   // Explicit operator opt-in for active turns to continue using provider extra credits.
   // Default: re-admit each model request against included subscription usage.
-  codexAllowExtraCredits: EnvBoolean.default(false), // OPENGENI_CODEX_ALLOW_EXTRA_CREDITS
   // SuperGrok/xAI connected subscription. This is a workspace-scoped OAuth
   // account pool and a distinct rail from the existing xai/* API-key provider.
   supergrokSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED
@@ -4594,7 +4593,6 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
-    codexAllowExtraCredits: optional("OPENGENI_CODEX_ALLOW_EXTRA_CREDITS"),
     subscriptionCoreShadowEnabled: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED"),
     subscriptionCoreShadowTimeoutMs: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_TIMEOUT_MS"),
     codexProductSku: optional("OPENGENI_CODEX_PRODUCT_SKU"),

@@ -1,8 +1,8 @@
 ---
 "@opengeni/codex": patch
-"@opengeni/config": patch
 "@opengeni/db": patch
+"@opengeni/subscriptions": patch
 "@opengeni/sdk": patch
 ---
 
-Protect included Codex allowance by default, add organization account pause without changing access, and preserve unknown extra-credit balances as null in usage responses.
+Protect Codex extra credits by default, add revocable per-account spending consent with included-allowance-first rotation, and allow organization accounts to pause without disconnecting. Preserve unknown balances as null in usage responses.

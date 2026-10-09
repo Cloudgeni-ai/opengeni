@@ -146,7 +146,11 @@ describe("Codex extra credit protection", () => {
       throw new Error("timeout");
     });
     await expect(guard.assertCanDispatch()).rejects.toBeInstanceOf(CodexIncludedUsageUnknownError);
-    expect(classifyCodexCredentialFailure(new CodexIncludedUsageUnknownError())).toBeNull();
+    expect(classifyCodexCredentialFailure(new CodexIncludedUsageUnknownError())).toEqual({
+      kind: "rate_limit",
+      cooldownSeconds: 60,
+      origin: "usage_verification_policy",
+    });
     expect(agentRunFailurePayload(new CodexIncludedUsageUnknownError())).toMatchObject({
       code: "codex_included_usage_unknown",
       retryable: false,
@@ -276,5 +280,124 @@ describe("Codex extra credit protection", () => {
         CodexIncludedUsageExhaustedError,
       );
     }
+  });
+});
+
+describe("concurrent admission and revocable consent", () => {
+  test("a delayed credit permission cannot supersede newer unknown usage", async () => {
+    const permission = Promise.withResolvers<boolean>();
+    let reads = 0,
+      checks = 0;
+    const capped = usage();
+    capped.limitReached = true;
+    const guard = createCodexCreditGuard({
+      readUsage: async () => (++reads === 1 ? capped : normalizeCodexUsage(503, null)),
+      canSpendCredits: async () => (++checks === 1 ? true : permission.promise),
+      now: () => now,
+    });
+    guard.setToken(token);
+    await guard.assertCanDispatch();
+    const dispatch = guard.assertObservedUsageAllowsDispatch();
+    const rejected = dispatch.catch((error) => error);
+    await expect(guard.assertCanDispatch()).rejects.toBeInstanceOf(CodexIncludedUsageUnknownError);
+    permission.resolve(true);
+    expect(await rejected).toBeInstanceOf(CodexIncludedUsageUnknownError);
+  });
+  test("a pending title read cannot erase feature exhaustion after consent is revoked", async () => {
+    const pending = Promise.withResolvers<ReturnType<typeof usage>>();
+    let allowed = true;
+    let reads = 0;
+    const data = usage();
+    data.limitReached = true;
+    const guard = createCodexCreditGuard({
+      readUsage: async () => (++reads === 1 ? data : pending.promise),
+      canSpendCredits: async () => allowed,
+      now: () => now,
+    });
+    guard.setToken(token);
+    await guard.assertCanDispatch();
+    allowed = false;
+    const title = guard.assertCanDispatch();
+    await Promise.resolve();
+    expect(reads).toBe(2);
+    await expect(guard.assertObservedUsageAllowsDispatch()).rejects.toBeInstanceOf(
+      CodexIncludedUsageExhaustedError,
+    );
+    pending.resolve(usage());
+    await title;
+    await guard.assertObservedUsageAllowsDispatch();
+  });
+  test("main and title admissions serialize; delayed success cannot erase exhaustion", async () => {
+    const first = Promise.withResolvers<ReturnType<typeof usage>>();
+    const readUsage = mock(async () => usage(100));
+    readUsage.mockImplementationOnce(() => first.promise);
+    const guard = createCodexCreditGuard({ readUsage, now: () => now });
+    guard.setToken(token);
+    const main = guard.assertCanDispatch();
+    const title = guard.assertCanDispatch();
+    const titleRejected = title.catch((error) => error);
+    await Promise.resolve();
+    expect(readUsage).toHaveBeenCalledTimes(1);
+    first.resolve(usage(20));
+    await main;
+    expect(await titleRejected).toBeInstanceOf(CodexIncludedUsageExhaustedError);
+    await expect(guard.assertObservedUsageAllowsDispatch()).rejects.toBeInstanceOf(
+      CodexIncludedUsageExhaustedError,
+    );
+  });
+
+  test("an exhausted header arriving during a usage read wins over its delayed success", async () => {
+    const pending = Promise.withResolvers<ReturnType<typeof usage>>();
+    const guard = createCodexCreditGuard({ readUsage: () => pending.promise, now: () => now });
+    guard.setToken(token);
+    const admission = guard.assertCanDispatch();
+    const rejected = admission.catch((error) => error);
+    await Promise.resolve();
+    guard.observe(headers(100));
+    pending.resolve(usage(20));
+    expect(await rejected).toBeInstanceOf(CodexIncludedUsageExhaustedError);
+    await expect(guard.assertObservedUsageAllowsDispatch()).rejects.toBeInstanceOf(
+      CodexIncludedUsageExhaustedError,
+    );
+  });
+
+  test("credit fallback needs live consent again at the physical dispatch fence", async () => {
+    let allowed = true;
+    const guard = createCodexCreditGuard({
+      readUsage: async () => usage(100),
+      canSpendCredits: async () => allowed,
+      now: () => now,
+    });
+    guard.setToken(token);
+    await guard.assertCanDispatch();
+    allowed = false;
+    await expect(guard.assertObservedUsageAllowsDispatch()).rejects.toBeInstanceOf(
+      CodexIncludedUsageExhaustedError,
+    );
+  });
+
+  test("revocation during a usage read and unknown usage cannot spend", async () => {
+    const pending = Promise.withResolvers<ReturnType<typeof usage>>();
+    let allowed = true;
+    const guard = createCodexCreditGuard({
+      readUsage: () => pending.promise,
+      canSpendCredits: async () => allowed,
+      now: () => now,
+    });
+    guard.setToken(token);
+    const admission = guard.assertCanDispatch();
+    const rejected = admission.catch((error) => error);
+    await Promise.resolve();
+    allowed = false;
+    pending.resolve(usage(100));
+    expect(await rejected).toBeInstanceOf(CodexIncludedUsageExhaustedError);
+    const unknown = createCodexCreditGuard({
+      readUsage: async () => normalizeCodexUsage(200, {}),
+      canSpendCredits: async () => true,
+    });
+    unknown.setToken(token);
+    await expect(unknown.assertCanDispatch()).rejects.toBeInstanceOf(
+      CodexIncludedUsageUnknownError,
+    );
   });
 });

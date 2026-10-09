@@ -50,6 +50,15 @@ const requestJson = mock(async (method: string, path: string, _body?: unknown) =
     };
     return { changed: true, allocatorEnabled: enabled, allocatorVersion: 2 };
   }
+  if (method === "PATCH" && path.endsWith("/extra-credits")) {
+    const enabled = (_body as { enabled: boolean }).enabled;
+    response.accounts[1] = {
+      ...response.accounts[1]!,
+      extraCreditsEnabled: enabled,
+      extraCreditsVersion: 2,
+    };
+    return { changed: true, extraCreditsEnabled: enabled, extraCreditsVersion: 2 };
+  }
   if (
     method === "POST" &&
     path === `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}/activate`
@@ -217,6 +226,33 @@ describe("organization Codex subscriptions", () => {
         `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}/allocator`,
         { enabled: true, expectedVersion: 7 },
       ]);
+    } finally {
+      response.accounts[1] = account(inactiveAccountId, "Backup subscription", false);
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("credit consent is off by default and sends its own version without changing availability", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness accountId={inactiveAccountId} />));
+      await flush();
+      const toggle = container.querySelector<HTMLButtonElement>(
+        '[role="switch"][aria-label="Use extra credits on Backup subscription"]',
+      )!;
+      expect(toggle.getAttribute("aria-checked")).toBe("false");
+      await act(async () => toggle.click());
+      await flush();
+      expect(requestJson.mock.calls).toContainEqual([
+        "PATCH",
+        `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}/extra-credits`,
+        { enabled: true, expectedVersion: 1 },
+      ]);
+      expect(response.accounts[1]!.allocatorEnabled).toBe(true);
+      expect(access.policy.allowedWorkspaces).toBeNull();
     } finally {
       response.accounts[1] = account(inactiveAccountId, "Backup subscription", false);
       await act(async () => root.unmount());
