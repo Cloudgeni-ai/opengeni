@@ -712,6 +712,26 @@ export async function setSubscriptionCoreCodexAllocator(
               and allocator_version = ${input.expectedVersion}
             returning allocator_version, updated_at`,
         );
+        if (row) {
+          // The per-workspace pool rows carry their own allocator copy, which
+          // placement also requires: keep the copies in this route's scope (the
+          // organization pool, or this workspace's local copy) and the reach for
+          // workspaces created later in step with the switch the admin sees.
+          if (input.workspaceId === null) {
+            await savepoint.execute(sql`update subscription_connection_assignment_policies
+              set allocator_enabled = ${input.enabled}, updated_at = clock_timestamp()
+              where account_id = ${input.accountId}::uuid and connection_id = ${current.id}::uuid
+                and inference_pool = 'organization' and managed_by_workspace_id is null`);
+            await savepoint.execute(sql`select opengeni_private.set_subscription_codex_reach(
+              ${input.accountId}::uuid, ${current.id}::uuid, null, null)`);
+          } else {
+            await savepoint.execute(sql`update subscription_connection_assignment_policies
+              set allocator_enabled = ${input.enabled}, updated_at = clock_timestamp()
+              where account_id = ${input.accountId}::uuid and connection_id = ${current.id}::uuid
+                and workspace_id = ${input.workspaceId}::uuid and inference_pool = 'workspace'
+                and managed_by_workspace_id = ${input.workspaceId}::uuid`);
+          }
+        }
         return row;
       });
     } catch (error) {

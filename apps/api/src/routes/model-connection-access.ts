@@ -14,9 +14,13 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
+  deliverSubscriptionCoreCodexWake,
   getModelConnectionAccess,
   getSubscriptionCoreCodexModelConnectionAccess,
+  ModelConnectionAccessForbiddenError,
+  ModelConnectionWorkspaceNotInOrganizationError,
   updateModelConnectionAccess,
+  updateSubscriptionCoreCodexModelConnectionAccess,
   getOrganizationAdministrationOverview,
   getXaiSubscriptionAccountAuthoritySnapshot,
   getClaudeSubscriptionAccountAuthoritySnapshot,
@@ -32,7 +36,7 @@ import {
   requireOrganizationCodexHuman,
   requireSameOriginBrowserMutation,
 } from "./codex";
-import { codexRouteDisposition, coreCodexRouteUnsupported } from "./codex-core";
+import { codexRouteDisposition } from "./codex-core";
 import { requireScopeMutation } from "./supergrok";
 import {
   requirePrivateSubscriptionHuman,
@@ -216,9 +220,8 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
     });
     app.put(path, async (c) => {
       const connection = await target(c, true);
-      // The core has no Codex access-policy writer yet (scope and per-workspace
-      // allowlists are the M5 editor); never write the frozen legacy row.
-      if ((await codexAccessDisposition(deps, connection)) === "core") coreCodexRouteUnsupported();
+      // Codex access lives on the shared core; the frozen legacy row is never written.
+      const core = (await codexAccessDisposition(deps, connection)) === "core";
       const parsed = ModelConnectionAccessPolicy.safeParse(await c.req.json().catch(() => null));
       if (!parsed.success)
         throw new HTTPException(422, { message: "Invalid connection access policy" });
@@ -231,11 +234,33 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         throw new HTTPException(422, {
           message: "Workspace connections cannot be assigned to other workspaces",
         });
-      const updated = await updateModelConnectionAccess(deps.db, connection, policy);
+      let updated;
+      try {
+        updated = core
+          ? await updateSubscriptionCoreCodexModelConnectionAccess(deps.db, connection, policy)
+          : await updateModelConnectionAccess(deps.db, connection, policy);
+      } catch (error) {
+        if (error instanceof ModelConnectionWorkspaceNotInOrganizationError)
+          throw new HTTPException(422, { message: error.message });
+        if (error instanceof ModelConnectionAccessForbiddenError)
+          throw new HTTPException(403, { message: error.message });
+        throw error;
+      }
       if (!updated)
         throw new HTTPException(409, {
           message: "Connection access changed. Reload before saving.",
         });
+      if (core) {
+        // A wider scope or model list can make waiting work placeable.
+        try {
+          await deliverSubscriptionCoreCodexWake(deps.db, {
+            accountId: connection.accountId,
+            reason: "core_codex_access_changed",
+          });
+        } catch {
+          // Every core waiter has its own bounded recheck; a lost wake only delays.
+        }
+      }
       return c.json(updated);
     });
   }

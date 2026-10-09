@@ -726,6 +726,9 @@ export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   "subscription_codex_task_authority_v2(uuid, uuid, uuid, text)",
   "subscription_codex_revision_authority_v2(uuid, uuid, uuid, bigint)",
   "manage_subscription_codex_personal(uuid, uuid, text, uuid, text, text, boolean, integer)",
+  // Migration 0702: the organization connection reach behind the access editor.
+  "subscription_codex_reach(uuid, uuid)",
+  "set_subscription_codex_reach(uuid, uuid, boolean, boolean)",
   "subscription_codex_owner_capability_held(uuid, text[], text, uuid, boolean)",
   "subscription_codex_owner_membership_held(uuid, uuid)",
 ] as const;

@@ -45,6 +45,8 @@ export const subscriptionConnections = pgTable(
     extraCreditsUpdatedAt: timestamp("extra_credits_updated_at", { withTimezone: true }),
     allocatorEnabled: boolean("allocator_enabled").notNull().default(true),
     allocatorVersion: integer("allocator_version").notNull().default(1),
+    /** Optimistic-concurrency version of the models and workspaces it serves. */
+    accessVersion: integer("access_version").notNull().default(1),
     excludedModels: text("excluded_models").array().notNull().default([]),
     allowedModelIds: text("allowed_model_ids").array(),
     ownership: text("ownership").notNull().default("shared"),

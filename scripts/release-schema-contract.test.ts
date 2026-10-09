@@ -2264,6 +2264,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0702_subscription_codex_access_editor.sql",
       "0701_quiescence_receipt_wake_repair.sql",
       "0700_codex_ownerless_person_refresh.sql",
       "0699_codex_recovery_after_interrupted_attempt.sql",
