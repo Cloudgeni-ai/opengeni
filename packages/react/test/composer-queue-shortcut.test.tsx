@@ -110,7 +110,7 @@ describe("queued-message Arrow Up", () => {
       let calls = 0;
       const attachments = {
         attachments: [
-          { id: "upload", filename: "notes.txt", contentType: "text/plain", sizeBytes: 10, status },
+          { id: "upload", name: "notes.txt", contentType: "text/plain", sizeBytes: 10, status },
         ],
         readyResources: [],
         uploading: status === "uploading",
