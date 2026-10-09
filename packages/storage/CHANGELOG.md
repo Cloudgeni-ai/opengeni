@@ -1,5 +1,30 @@
 # @opengeni/storage
 
+## 1.5.0
+
+### Patch Changes
+
+- Updated dependencies [e03f1ff]
+- Updated dependencies [e8a3d83]
+- Updated dependencies [4532435]
+- Updated dependencies [ce7b403]
+- Updated dependencies [334c470]
+- Updated dependencies [f7d53b2]
+- Updated dependencies [c13d080]
+- Updated dependencies [061ae01]
+- Updated dependencies [6313dd8]
+- Updated dependencies [c502add]
+- Updated dependencies [38b1ba1]
+- Updated dependencies [1da17d9]
+- Updated dependencies [6960770]
+- Updated dependencies [63bf721]
+- Updated dependencies [71c42bf]
+- Updated dependencies [a390b9e]
+- Updated dependencies [ce61681]
+- Updated dependencies [7bf1a02]
+  - @opengeni/contracts@1.5.0
+  - @opengeni/config@1.5.0
+
 ## 1.4.4
 
 ### Patch Changes

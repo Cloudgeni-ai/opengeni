@@ -1,5 +1,59 @@
 # @opengeni/documents
 
+## 1.5.0
+
+### Patch Changes
+
+- Updated dependencies [e03f1ff]
+- Updated dependencies [7ae7683]
+- Updated dependencies [931ac51]
+- Updated dependencies [91c7c0e]
+- Updated dependencies [e8a3d83]
+- Updated dependencies [4532435]
+- Updated dependencies [851cbdc]
+- Updated dependencies [5b31ec7]
+- Updated dependencies [129ead3]
+- Updated dependencies [ce7b403]
+- Updated dependencies [7ae7683]
+- Updated dependencies [3e00c37]
+- Updated dependencies [334c470]
+- Updated dependencies [f7d53b2]
+- Updated dependencies [c13d080]
+- Updated dependencies [061ae01]
+- Updated dependencies [6313dd8]
+- Updated dependencies [c502add]
+- Updated dependencies [0001298]
+- Updated dependencies [0152516]
+- Updated dependencies [560acdd]
+- Updated dependencies [906d3c2]
+- Updated dependencies [38b1ba1]
+- Updated dependencies [1da17d9]
+- Updated dependencies [6960770]
+- Updated dependencies [a4f19c2]
+- Updated dependencies [55eb9b0]
+- Updated dependencies [63bf721]
+- Updated dependencies [83af41e]
+- Updated dependencies [78c28ca]
+- Updated dependencies [71c42bf]
+- Updated dependencies [a9f5b24]
+- Updated dependencies [a390b9e]
+- Updated dependencies [10624f7]
+- Updated dependencies [feb1737]
+- Updated dependencies [7926f10]
+- Updated dependencies [1041a61]
+- Updated dependencies [132684f]
+- Updated dependencies [bc1f47f]
+- Updated dependencies [3179009]
+- Updated dependencies [ce61681]
+- Updated dependencies [1727b17]
+- Updated dependencies [a34d8f5]
+- Updated dependencies [7bf1a02]
+- Updated dependencies [d7b947e]
+  - @opengeni/contracts@1.5.0
+  - @opengeni/db@1.5.0
+  - @opengeni/config@1.5.0
+  - @opengeni/storage@1.5.0
+
 ## 1.4.4
 
 ### Patch Changes

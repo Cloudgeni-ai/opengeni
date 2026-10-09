@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/subscriptions",
-  "version": "1.4.4",
+  "version": "1.5.0",
   "description": "Pure, provider-neutral subscription account policy for Opengeni: contract types, effective settings, eligibility, placement, failover order, cache coldness, the shared quota model and adapter interfaces. No database, provider SDK or network dependency.",
   "license": "Apache-2.0",
   "repository": {
