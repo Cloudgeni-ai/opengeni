@@ -1752,10 +1752,20 @@ Steps, as implemented:
    `personal_owner_missing`, `fedramp_mismatch`, `unrepresentable_status`,
    `unrepresentable_scope`. After parity the legacy ciphertext is blanked:
    one secret copy.
-3. **Health, quota, policy, scope.** Duplicate policies in one workspace/pool
-   union only enabled rows' model sets; a disabled unrestricted row cannot widen
-   an enabled limited row. If all are disabled the union remains disabled. SQL
-   parity independently reconstructs this enabled union. Extra-credit consent
+3. **Health, quota, policy, scope.** One policy-union implementation merges both
+   connection ceilings (personal and shared) and duplicate workspace/pool
+   assignments: only enabled rows contribute model sets when any row is enabled;
+   if all are disabled their model union remains disabled. The personal ceiling
+   is the entire policy because personal connections have no assignment-policy
+   narrowing. This also covers Personal-workspace duplicates with NULL stored
+   account IDs and a Personal-workspace row merged with a verified user-authority
+   row for the same decoded account/person. A disabled unrestricted row cannot
+   widen an enabled limited row, while multiple enabled rows retain their full
+   legitimate union. SQL parity independently reconstructs both connection
+   ceilings (`connection_model_policies`) and local assignment unions. The final
+   review found that the earlier assignment-only repair missed personal ceilings;
+   this bounded correction preserves identities, credentials and aliases rather
+   than rejecting representable groups. Extra-credit consent
    carries only when every merged row opted in, retaining the maximum version;
    conflicting consent fails closed to disabled with the content-free disposition
    `extra_credit_consent_conflict_disabled`. Single-row consent is preserved.

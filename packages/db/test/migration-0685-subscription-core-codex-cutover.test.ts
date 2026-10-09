@@ -1216,6 +1216,7 @@ describe.skipIf(!realDb)(
           "aliases",
           "unique_upstream_identities",
           "workspace_pool_policies",
+          "connection_model_policies",
           "organization_pool_admissions",
           "personal_connections",
           "source_modes",

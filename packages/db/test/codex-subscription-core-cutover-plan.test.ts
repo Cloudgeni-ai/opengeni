@@ -105,6 +105,198 @@ const plan = (
   });
 
 describe("Codex cutover dedupe and scope planning", () => {
+  const policyCases: Array<{
+    name: string;
+    sources: Array<{ allocator_enabled: boolean; allowed_model_ids: string[] | null }>;
+    enabled: boolean;
+    models: string[] | null;
+  }> = [
+    {
+      name: "paused unrestricted plus enabled restricted",
+      sources: [
+        { allocator_enabled: false, allowed_model_ids: null },
+        { allocator_enabled: true, allowed_model_ids: ["codex/b"] },
+      ],
+      enabled: true,
+      models: ["codex/b"],
+    },
+    {
+      name: "multiple enabled restricted plus paused unrestricted",
+      sources: [
+        { allocator_enabled: true, allowed_model_ids: ["codex/b"] },
+        { allocator_enabled: false, allowed_model_ids: null },
+        { allocator_enabled: true, allowed_model_ids: ["codex/a", "codex/b"] },
+      ],
+      enabled: true,
+      models: ["codex/a", "codex/b"],
+    },
+    {
+      name: "all paused restricted",
+      sources: [
+        { allocator_enabled: false, allowed_model_ids: ["codex/b"] },
+        { allocator_enabled: false, allowed_model_ids: ["codex/a"] },
+      ],
+      enabled: false,
+      models: ["codex/a", "codex/b"],
+    },
+    {
+      name: "all paused including unrestricted",
+      sources: [
+        { allocator_enabled: false, allowed_model_ids: null },
+        { allocator_enabled: false, allowed_model_ids: ["codex/b"] },
+      ],
+      enabled: false,
+      models: null,
+    },
+    {
+      name: "enabled unrestricted preserves legitimate capacity",
+      sources: [
+        { allocator_enabled: false, allowed_model_ids: ["codex/b"] },
+        { allocator_enabled: true, allowed_model_ids: null },
+      ],
+      enabled: true,
+      models: null,
+    },
+  ];
+  for (const shape of ["shared", "personal-workspace", "personal-user"] as const) {
+    for (const scenario of policyCases) {
+      test(`${shape}: ${scenario.name} preserves exactly the active model union`, () => {
+        const isPersonal = shape !== "shared";
+        const workspaceId = isPersonal ? personal : w1;
+        const authorityId = "00000000-0000-4000-8000-0000000000d1";
+        const rows = scenario.sources.map((policy, index) =>
+          row({
+            ...policy,
+            workspace_id: workspaceId,
+            chatgpt_account_id: null,
+            ...(shape === "personal-user" && index === scenario.sources.length - 1
+              ? {
+                  workspace_id: w1,
+                  authority_scope: "user" as const,
+                  owner_organization_membership_id: owner,
+                  organization_user_resource_authority_id: authorityId,
+                  organization_user_resource_authority_generation: 1,
+                  last_refresh_at: new Date("2026-02-01T00:00:00Z"),
+                }
+              : {}),
+          }),
+        );
+        const legacyAuthorities: CutoverLegacyAuthority[] =
+          shape === "personal-user"
+            ? [
+                {
+                  id: authorityId,
+                  accountId: account,
+                  membershipId: owner,
+                  resourceId: rows.at(-1)!.id,
+                  generation: 1,
+                  active: true,
+                },
+              ]
+            : [];
+        for (const ordered of [rows, [...rows].reverse()]) {
+          const result = plan(
+            ordered,
+            Object.fromEntries(rows.map((r) => [r.id, "acct"])),
+            {},
+            { legacyAuthorities },
+          );
+          expect(result.conflicts).toEqual([]);
+          expect(result.connections).toHaveLength(1);
+          const migrated = result.connections[0]!;
+          expect(migrated.members).toHaveLength(rows.length);
+          expect(migrated).toMatchObject({
+            allocatorEnabled: scenario.enabled,
+            allowedModelIds: scenario.models,
+          });
+          const connection: SubscriptionConnection = {
+            id: migrated.id,
+            provider: "codex",
+            kind: "subscription",
+            health: "healthy",
+            ownership: isPersonal
+              ? { kind: "personal", ownerMembershipId: owner }
+              : {
+                  kind: "shared",
+                  managedByWorkspaceId: w1,
+                  scope: { kind: "workspaces", workspaceIds: [w1], allowPersonalWorkspaces: false },
+                },
+            allocatorEnabled: migrated.allocatorEnabled,
+            allowedModelIds: migrated.allowedModelIds,
+            entitledModelIds: null,
+            excludedModelIds: [],
+            refreshGeneration: 1,
+            quota: null,
+            ...(isPersonal
+              ? {}
+              : {
+                  assignmentPolicies: migrated.policies.map((p) => ({
+                    ...p,
+                    inferencePool: p.pool,
+                  })),
+                }),
+          };
+          const world: PlacementInput = {
+            now: Date.now(),
+            workspace: {
+              id: workspaceId,
+              kind: isPersonal ? "personal" : "shared",
+              ownerMembershipId: isPersonal ? owner : null,
+              allowedModelIds: null,
+            },
+            session: {
+              id: "policy-union",
+              workspaceId,
+              visibility: isPersonal ? "private" : "shared",
+              ownerMembershipId: owner,
+              preferredModelId: "codex/a",
+              reasoningLevel: "medium",
+              binding: null,
+              onlyThisModel: true,
+              reselectionPoints: [],
+              compactionProviderLock: null,
+              personalAuthority: isPersonal
+                ? [{ provider: "codex", ownerMembershipId: owner }]
+                : [],
+            },
+            settings: {
+              rotation: {},
+              providers: {},
+              crossProviderFailover: false,
+              fallbackOrder: {},
+              personalConnectionsAllowed: true,
+              personalFallbackAllowed: true,
+            },
+            people: [{ membershipId: owner, active: true, personalFallbackOptIn: true }],
+            models: ["codex/a", "codex/b", "codex/c"].map((id) => ({
+              id,
+              provider: "codex",
+              reasoningLevels: ["medium"],
+            })),
+            connections: [connection],
+            cacheFacts: {},
+          };
+          const sourceConnection = { ...connection };
+          delete sourceConnection.assignmentPolicies;
+          for (const model of world.models) {
+            const previouslyEligible = rows.some((source) =>
+              canServe(
+                world,
+                {
+                  ...sourceConnection,
+                  allocatorEnabled: source.allocator_enabled,
+                  allowedModelIds: source.allowed_model_ids,
+                },
+                model.id,
+              ),
+            );
+            expect(canServe(world, connection, model.id)).toBe(previouslyEligible);
+          }
+        }
+      });
+    }
+  }
+
   test("one upstream identity collapses to the healthiest row and keeps per-workspace policy", () => {
     const healthy = row({ workspace_id: w1, last_refresh_at: new Date("2026-02-01T00:00:00Z") });
     const broken = row({

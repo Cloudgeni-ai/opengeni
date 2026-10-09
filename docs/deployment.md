@@ -4098,9 +4098,15 @@ Never grant that schema or its functions to runtime roles to repair readiness.
 Old and new binaries remain compatible before 0685; after 0685, only matching
 cutover binaries may start.
 
-Duplicate local rows merge the model policies of **enabled** rows only; a paused
-unrestricted row cannot widen an enabled restricted one. SQL parity independently
-checks this union. Extra-credit opt-in carries forward only when all merged rows
+Duplicate personal and shared connection ceilings, and local assignment policies,
+merge the model policies of **enabled** rows only; a paused unrestricted row cannot
+widen an enabled restricted one. If every source is paused, its model union stays
+paused. This includes Personal-workspace rows with NULL stored account IDs and
+verified user-authority rows identifying the same upstream person/account. SQL
+parity independently checks the connection ceiling (`connection_model_policies`)
+as well as the local assignment union; a mismatch rolls back before activation.
+The repair preserves legitimate enabled unions and canonical credentials/aliases;
+it does not reject representable duplicates. Extra-credit opt-in carries forward only when all merged rows
 opted in, retaining the maximum consent version. A mixed opt-in is disabled and
 reported as `extra_credit_consent_conflict_disabled`; an administrator may make
 a fresh explicit decision after cutover. Live/Apps retain their existing source

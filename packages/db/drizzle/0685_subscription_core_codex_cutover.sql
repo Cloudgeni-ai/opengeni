@@ -688,6 +688,31 @@ SELECT groups.*, CASE WHEN EXISTS (
     ORDER BY model
   ) END AS allowed_model_ids
 FROM groups;
+-- Personal connections have no assignment-policy narrowing. Independently
+-- check their complete policy, and the shared connection ceiling, against the
+-- enabled source union rather than trusting the codec planner's merged values.
+CREATE TEMP TABLE codex_cutover_expected_connection_policies ON COMMIT DROP AS
+WITH members AS (
+  SELECT credential.account_id, map.connection_id,
+    credential.allocator_enabled, credential.allowed_model_ids
+  FROM codex_subscription_credentials credential
+  JOIN pg_temp.codex_cutover_connection_map map ON map.legacy_id = credential.id
+), groups AS (
+  SELECT account_id, connection_id, bool_or(allocator_enabled) AS enabled
+  FROM members GROUP BY account_id, connection_id
+), selected AS (
+  SELECT member.* FROM members member JOIN groups USING (account_id, connection_id)
+  WHERE member.allocator_enabled OR NOT groups.enabled
+)
+SELECT groups.*, CASE WHEN EXISTS (
+    SELECT 1 FROM selected member WHERE member.account_id = groups.account_id
+      AND member.connection_id = groups.connection_id AND member.allowed_model_ids IS NULL
+  ) THEN NULL::text[] ELSE ARRAY(
+    SELECT DISTINCT model FROM selected member CROSS JOIN LATERAL unnest(member.allowed_model_ids) model
+    WHERE member.account_id = groups.account_id AND member.connection_id = groups.connection_id
+    ORDER BY model
+  ) END AS allowed_model_ids
+FROM groups;
 INSERT INTO codex_cutover_parity
   -- Credentials, connections, aliases, identities.
   SELECT inventory.account_id, 'credentials', sum(inventory.legacy_count)::bigint,
@@ -728,6 +753,13 @@ INSERT INTO codex_cutover_parity
         AND policy.allowed_model_ids IS NOT DISTINCT FROM expected.allowed_model_ids
         AND policy.managed_by_workspace_id = expected.workspace_id))
   FROM codex_cutover_expected_workspace_policies expected GROUP BY expected.account_id
+  UNION ALL SELECT expected.account_id, 'connection_model_policies', count(*),
+    count(*) FILTER (WHERE connection.allocator_enabled = expected.enabled
+      AND connection.allowed_model_ids IS NOT DISTINCT FROM expected.allowed_model_ids)
+  FROM codex_cutover_expected_connection_policies expected
+  JOIN subscription_connections connection ON connection.id = expected.connection_id
+    AND connection.account_id = expected.account_id
+  GROUP BY expected.account_id
   UNION ALL SELECT expected.account_id, 'extra_credit_consent', count(*),
     count(*) FILTER (WHERE connection.extra_credits_enabled = expected.enabled
       AND connection.extra_credits_version = expected.version)

@@ -222,6 +222,21 @@ function unionModels(values: Array<string[] | null>): string[] | null {
   return [...new Set(values.flatMap((value) => value ?? []))].sort();
 }
 
+/** Flags and models form one policy: paused rows contribute no enabled capacity. */
+function unionAllocationPolicies(
+  policies: readonly Pick<PlannedPolicy, "allocatorEnabled" | "allowedModelIds">[],
+): Pick<PlannedPolicy, "allocatorEnabled" | "allowedModelIds"> {
+  const allocatorEnabled = policies.some((policy) => policy.allocatorEnabled);
+  return {
+    allocatorEnabled,
+    allowedModelIds: unionModels(
+      policies
+        .filter((policy) => policy.allocatorEnabled || !allocatorEnabled)
+        .map((policy) => policy.allowedModelIds),
+    ),
+  };
+}
+
 /**
  * Plan the canonical connections for every legacy Codex credential. Pure: the
  * caller supplies decrypted identity facts, never the secret itself.
@@ -247,7 +262,9 @@ function unionModels(values: Array<string[] | null>): string[] | null {
  * had no allowlist, every Personal workspace when it admitted them) is kept as
  * an auto-assignment with that source's own policy. The core connection-level
  * policy intersects the per-assignment policy, so the connection-level value
- * is the union.
+ * is the enabled-source union (or the disabled union if every source is paused).
+ * Personal connections have no assignment policy, so this same ceiling is also
+ * their complete allocator/model policy.
  */
 export function planCodexCutover(input: {
   rows: readonly LegacyCodexCredentialRow[];
@@ -429,8 +446,13 @@ export function planCodexCutover(input: {
             ? null
             : canonical.person;
     const members = sorted.map((entry) => entry.row);
-    const unionAllocator = group.some((entry) => entry.row.allocator_enabled);
-    const unionAllowed = unionModels(group.map((entry) => entry.row.allowed_model_ids));
+    const { allocatorEnabled: unionAllocator, allowedModelIds: unionAllowed } =
+      unionAllocationPolicies(
+        group.map(({ row }) => ({
+          allocatorEnabled: row.allocator_enabled,
+          allowedModelIds: row.allowed_model_ids,
+        })),
+      );
     const base = {
       id: canonical.row.id,
       accountId,
@@ -512,15 +534,7 @@ export function planCodexCutover(input: {
         policiesByKey.set(key, policy);
         return;
       }
-      // Union enabled policies, not flags and model sets independently. A
-      // disabled unrestricted row must never broaden an enabled limited row.
-      // When both are disabled the union remains disabled.
-      if (existing.allocatorEnabled === policy.allocatorEnabled) {
-        existing.allowedModelIds = unionModels([existing.allowedModelIds, policy.allowedModelIds]);
-      } else if (policy.allocatorEnabled) {
-        existing.allowedModelIds = policy.allowedModelIds;
-      }
-      existing.allocatorEnabled ||= policy.allocatorEnabled;
+      Object.assign(existing, unionAllocationPolicies([existing, policy]));
       if (!dispositions.includes("duplicate_pool_policy_merged")) {
         dispositions.push("duplicate_pool_policy_merged");
       }
