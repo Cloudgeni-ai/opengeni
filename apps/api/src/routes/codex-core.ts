@@ -10,6 +10,7 @@ import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import * as z from "zod/v4";
 import { hasPermission, requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import { ApiHttpError } from "../http/api-error";
 import {
   clearSubscriptionCoreCodexApps,
   deliverSubscriptionCoreCodexWake,
@@ -36,10 +37,14 @@ import {
 export const SUBSCRIPTION_CORE_CUTOVER_DISABLED = "subscription_core_cutover_disabled";
 export const SUBSCRIPTION_CORE_ROUTE_UNSUPPORTED = "subscription_core_route_unsupported";
 
-function typedHttpError(status: 409 | 503, code: string, message: string): HTTPException {
-  return new HTTPException(status, {
+/** The public error envelope with the core reason in `details.reason`. */
+function typedHttpError(status: 409 | 503, reason: string, message: string): ApiHttpError {
+  return new ApiHttpError(status, {
+    code: status === 503 ? "upstream_unavailable" : "conflict",
     message,
-    res: Response.json({ code, message }, { status }),
+    retryable: status === 503,
+    outcomeUnknown: false,
+    details: { reason },
   });
 }
 

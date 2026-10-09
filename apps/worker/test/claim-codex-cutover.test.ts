@@ -62,9 +62,14 @@ async function claimWithCutover(
     "legacy-apps-credential",
   );
   const overlay = spyOn(capabilities, "settingsWithCodexCredential").mockResolvedValue(settings);
+  const coreApps = spyOn(db, "resolveSubscriptionCoreCodexAppsDesignation").mockResolvedValue({
+    connectionId: "core-apps-connection",
+    status: "active",
+  });
   restores.push(
     legacyActive,
     legacyApps,
+    coreApps,
     overlay,
     spyOn(core, "resolveCatalogSettings").mockResolvedValue({ settings } as Awaited<
       ReturnType<typeof core.resolveCatalogSettings>
@@ -122,6 +127,7 @@ async function claimWithCutover(
   return {
     legacyActiveCalls: legacyActive.mock.calls.length,
     legacyAppsCalls: legacyApps.mock.calls.length,
+    coreAppsCalls: coreApps.mock.calls.length,
     codexActive: overlay.mock.calls[0]?.[3],
     subscriptionLeaseBusy: context.attempt.subscriptionLeaseBusy,
   };
@@ -132,6 +138,7 @@ describe("claim-time Codex cutover", () => {
     const result = await claimWithCutover("not_configured", codexPolicy);
     expect(result.legacyActiveCalls).toBe(1);
     expect(result.legacyAppsCalls).toBe(1);
+    expect(result.coreAppsCalls).toBe(0);
     expect(result.codexActive).toBe(true);
   });
 
@@ -150,6 +157,8 @@ describe("claim-time Codex cutover", () => {
     async (cutover) => {
       const result = await claimWithCutover(cutover, ordinaryPolicy);
       expect(result.legacyAppsCalls).toBe(0);
+      // Only an enabled cutover resolves the core designation.
+      expect(result.coreAppsCalls).toBe(cutover === "enabled" ? 1 : 0);
     },
   );
 
