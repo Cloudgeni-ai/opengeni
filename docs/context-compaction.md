@@ -49,17 +49,21 @@ If a model has no explicit automatic limit, Opengeni uses
 0.9 and is clamped to 0.3–0.9. An explicit limit is capped at 90% of the raw
 window, matching Codex core.
 
-### Workspace preferences
+### Organization and workspace preferences
 
-Open **Organization settings → Models → your workspace → Context & compaction**
-(including your Personal workspace); its row there shows "Model defaults" or how
-many models have a custom limit. The page lists every model the workspace can use,
-grouped by provider. An empty field follows the model's default, shown as its
-placeholder; a number is the workspace's own limit (`300k` and `300,000` both
-work), with the default and **Use default** under it. A saved limit above the
-model's current maximum says which value is used. Only workspace settings
-administrators can save; readers can inspect. Setting a limit does not change any
-session's model or reasoning effort.
+Organization owners and admins set limits once for every workspace under
+**Organization settings → Models → Defaults for every workspace → Context &
+compaction**. An empty field there follows the model's default. Each workspace
+follows the organization's limit for a model until its own admins set one under
+**Organization settings → Models → your workspace → Context & compaction**
+(including your Personal workspace). On a workspace's page an empty field shows
+what it follows (the organization's limit, labeled with the organization's name,
+or the model's default) as its placeholder; a number is the workspace's own limit
+(`300k` and `300,000` both work), with what it replaces and a way back to it
+under it. The Models row says "Model defaults", the organization's limits, or how
+many models have a custom limit. A saved limit above the model's current maximum
+says which value is used. Only the respective administrators can save; readers can
+inspect. Setting a limit does not change any session's model or reasoning effort.
 
 Preferences apply when a subsequent turn attempt prepares its model, including
 existing sessions. An in-flight model call is unchanged. They never change the
@@ -70,13 +74,15 @@ does not restore stale usage or cause an immediate compaction loop.
 
 The setting is `modelCompactionThresholds`, keyed by the exact product model ID
 (so API and subscription routes can differ). PATCH `/v1/workspaces/:workspaceId/settings`
-merges model keys atomically. Omission preserves a model; `null` removes only its
+merges a workspace's model keys atomically, and PATCH
+`/v1/organizations/:organizationId/model-defaults` merges the organization's.
+The workspace's value wins, then the organization's, then the model default. Omission preserves a model; `null` removes only its
 override. Writes require whole numbers of at least 16,000 tokens. The effective
 value is bounded by both 90% of the raw window and the provider-safe input window.
 If a model's limits change, the saved preference remains visible but is clamped
 at execution. Malformed read values are ignored per model, not by resetting the
 whole workspace settings bag. The model catalog exposes `compactionPolicy` with
-default/override/effective/minimum/maximum tokens, separately from immutable model
+default/override/organization/effective/minimum/maximum tokens, separately from immutable model
 execution metadata.
 
 Haiku 5.5 defaults to 95,000 tokens and Opus 5.5 (native Claude and Opper) to

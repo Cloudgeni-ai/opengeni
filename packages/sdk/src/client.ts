@@ -270,6 +270,8 @@ import type {
   MoveDocumentRequest,
   ClientConfig,
   WorkspaceModelAccessPolicy,
+  OrganizationModelDefaults,
+  UpdateOrganizationModelDefaultsRequest,
   WorkspaceModelCatalogResponse,
   WorkspaceGatewayCustomModel,
   WorkspaceGatewayCustomModelsResponse,
@@ -5420,6 +5422,34 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceModelAccessPolicy>(
       "GET",
       `/v1/workspaces/${workspaceId}/model-policy`,
+    );
+  }
+
+  /** Remove the workspace's own allowlist so it follows its organization's default. */
+  async deleteWorkspaceModelAccessPolicy(workspaceId: string): Promise<WorkspaceModelAccessPolicy> {
+    return await this.requestJson<WorkspaceModelAccessPolicy>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/model-policy`,
+    );
+  }
+
+  /** The model defaults every workspace in the organization follows (owners and admins). */
+  async getOrganizationModelDefaults(organizationId: string): Promise<OrganizationModelDefaults> {
+    return await this.requestJson<OrganizationModelDefaults>(
+      "GET",
+      `/v1/organizations/${organizationId}/model-defaults`,
+    );
+  }
+
+  /** Change organization model defaults, field by field (owners and admins). */
+  async updateOrganizationModelDefaults(
+    organizationId: string,
+    request: UpdateOrganizationModelDefaultsRequest,
+  ): Promise<OrganizationModelDefaults> {
+    return await this.requestJson<OrganizationModelDefaults>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/model-defaults`,
+      request,
     );
   }
 

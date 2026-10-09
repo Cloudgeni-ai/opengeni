@@ -21,6 +21,8 @@ import {
   currentAgentLearningToolSelection,
   resolveWorkspaceSessionToolDefaults,
   workspaceModelCompactionThreshold,
+  organizationModelCompactionThreshold,
+  type OrganizationModelDefaults,
   type ModelCompactionPolicy,
   Entitlements,
   EntitlementsMode,
@@ -7900,6 +7902,7 @@ export function settingsWithResolvedModelContext(
     | "toolOutputTruncationTokens"
   > & { id?: string },
   workspaceSettings?: unknown,
+  organizationDefaults?: Pick<OrganizationModelDefaults, "modelCompactionThresholds"> | null,
 ): Settings {
   const contextWindowTokens = model.contextWindowTokens ?? settings.contextWindowTokens;
   const resolved = {
@@ -7927,11 +7930,16 @@ export function settingsWithResolvedModelContext(
       settings,
       { ...model, id: model.id },
       workspaceSettings,
+      organizationDefaults,
     ).effectiveTokens,
   };
 }
 
-/** One policy projection for settings UI and all model-facing worker paths. */
+/**
+ * One policy projection for settings UI and all model-facing worker paths.
+ * The workspace's own preference wins, then the organization's default for
+ * the model, then the model's own default.
+ */
 export function workspaceModelCompactionPolicy(
   settings: Settings,
   model: Pick<
@@ -7939,6 +7947,7 @@ export function workspaceModelCompactionPolicy(
     "id" | "contextWindowTokens" | "effectiveContextWindowTokens" | "autoCompactTokenLimit"
   >,
   workspaceSettings: unknown,
+  organizationDefaults?: Pick<OrganizationModelDefaults, "modelCompactionThresholds"> | null,
 ): ModelCompactionPolicy {
   const resolved = settingsWithResolvedModelContext(settings, model);
   const maximumTokens = Math.max(
@@ -7955,10 +7964,12 @@ export function workspaceModelCompactionPolicy(
         Math.max(0.3, Math.min(0.9, resolved.contextCompactionThresholdRatio)),
   );
   const overrideTokens = workspaceModelCompactionThreshold(workspaceSettings, model.id);
+  const organizationTokens = organizationModelCompactionThreshold(organizationDefaults, model.id);
   return {
     defaultTokens,
     overrideTokens,
-    effectiveTokens: clamp(overrideTokens ?? defaultTokens),
+    organizationTokens,
+    effectiveTokens: clamp(overrideTokens ?? organizationTokens ?? defaultTokens),
     minimumTokens,
     maximumTokens,
   };

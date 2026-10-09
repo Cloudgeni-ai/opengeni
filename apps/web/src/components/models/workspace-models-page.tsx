@@ -32,6 +32,7 @@ import {
   AllowedModelsFormPage,
   AllowedModelsRow,
   useModelAccessPolicy,
+  type ModelAccessPolicyState,
 } from "@/components/model-access-policy";
 import {
   ACCOUNT_COLUMNS,
@@ -121,6 +122,8 @@ import {
 } from "@/lib/models-route";
 import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
+import { useOrganizationModelDefaults } from "./use-organization-model-defaults";
+import { compactionSummary } from "./model-compaction-page";
 
 /* ----------------------------------------------------------------------------
    Organization settings > Models: every model setting in one place. This
@@ -326,6 +329,8 @@ export function WorkspaceModelsPageBody({
     organizationAccounts;
   const catalog = useWorkspaceModelCatalog(workspaceId);
   const credits = useOpenGeniCredits(organizationId);
+  // What every workspace follows until it changes it: owners and admins only.
+  const organizationDefaults = useOrganizationModelDefaults(organizationId, organizationAdmin);
 
   const backToList = () => nav.openAccount(undefined);
   const codexPlaces: CodexPlaces = {
@@ -799,13 +804,45 @@ export function WorkspaceModelsPageBody({
           fields={note}
         />
       );
-  } else if (view === "compaction" && workspacePage) {
+  } else if ((view === "compaction" || view === "allowed-models") && !workspacePage) {
+    // Opened from the organization's list: the defaults every workspace follows.
+    page = !organizationAdmin ? (
+      <DetailPage
+        back={{ label: "Models", onClick: backToList }}
+        className={FLUSH_DETAIL_PAGE_CLASS}
+      >
+        <DetailPageHeader title="Only organization owners and admins can open this" />
+        <p className="mt-2 text-sm text-fg-muted">
+          Each workspace’s admins can change its own models on the workspace’s page.
+        </p>
+      </DetailPage>
+    ) : view === "compaction" ? (
+      <ModelCompactionPage
+        key={`organization:${orgId}`}
+        workspaceId={anchorWorkspaceId}
+        canManage={organizationAdmin}
+        onClose={backToList}
+        organizationName={organizationName}
+        organizationDefaults={organizationDefaults}
+      />
+    ) : (
+      <AllowedModelsFormPage
+        key={`organization-allowed:${orgId}:${revision}`}
+        workspaceId={anchorWorkspaceId}
+        canManage={organizationAdmin}
+        onClose={backToList}
+        organizationName={organizationName}
+        organizationDefaults={organizationDefaults}
+      />
+    );
+  } else if (view === "compaction") {
     page = (
       <ModelCompactionPage
         key={workspaceId}
         workspaceId={workspaceId}
         canManage={canManageSettings}
         onClose={backToList}
+        organizationName={organizationName}
       />
     );
   } else if (view === "allowed-models") {
@@ -815,6 +852,7 @@ export function WorkspaceModelsPageBody({
         workspaceId={workspaceId}
         canManage={canManageSettings}
         onClose={backToList}
+        organizationName={organizationName}
       />
     );
   } else if (view === "model-access" && key) {
@@ -928,6 +966,9 @@ export function WorkspaceModelsPageBody({
     page = (
       <OrganizationModelsList
         client={client}
+        organizationDefaults={organizationAdmin ? organizationDefaults : null}
+        onEditAllowed={() => nav.openView("allowed-models")}
+        onEditCompaction={() => nav.openView("compaction")}
         organizationName={organizationName}
         administrator={organizationAdmin}
         claudeEnabled={claudeEnabled}
@@ -996,6 +1037,7 @@ export function WorkspaceModelsPageBody({
         <div className="mt-8 min-w-0">
           <ModelsList
             workspaceId={workspaceId}
+            organizationName={organizationName}
             revision={revision}
             canManageSettings={canManageSettings}
             canConnect={canConnect}
@@ -1322,6 +1364,7 @@ function WhoCanConnect() {
 
 function ModelsList({
   workspaceId,
+  organizationName,
   revision,
   canManageSettings,
   canConnect,
@@ -1336,6 +1379,8 @@ function ModelsList({
   providerSections,
 }: {
   workspaceId: string;
+  /** The organization whose defaults this workspace follows until it changes them. */
+  organizationName: string;
   revision: number;
   canManageSettings: boolean;
   /** Can add an account, for everyone or for this workspace. */
@@ -1369,23 +1414,16 @@ function ModelsList({
   // Defaults first: what a new chat here starts with, and who pays for it.
   return (
     <SectionStack>
-      <Section title="Defaults">
-        <SettingRowGroup>
-          <DefaultSessionModelPreferenceRow
-            key={`default-model:${workspaceId}:${revision}`}
-            workspaceId={workspaceId}
-            canManage={canManageSettings}
-            describePayer={describePayer}
-          />
-          <AllowedModelsRow state={policy} onEdit={onEditAllowed} />
-          <SettingNavRow
-            label="Context & compaction"
-            description="When to summarize long conversations, by model."
-            value={compactionSummary(policy.models)}
-            onOpen={onEditCompaction}
-          />
-        </SettingRowGroup>
-      </Section>
+      <WorkspaceDefaultsSection
+        key={`defaults:${workspaceId}:${revision}`}
+        workspaceId={workspaceId}
+        organizationName={organizationName}
+        canManage={canManageSettings}
+        policy={policy}
+        describePayer={describePayer}
+        onEditAllowed={onEditAllowed}
+        onEditCompaction={onEditCompaction}
+      />
       <Section
         title="Accounts"
         description="Subscriptions, API keys and credits that pay for models here."
@@ -1417,19 +1455,56 @@ function ModelsList({
   );
 }
 
+export { compactionSummary } from "./model-compaction-page";
+
 /**
- * The Context & compaction row's value, counting the models that page lists:
- * "Model defaults" or "2 custom limits". Nothing until the catalog is known.
+ * A workspace's Defaults: what new work here starts with. Each follows the
+ * organization's default until the workspace changes it, and says which.
  */
-export function compactionSummary(
-  models: readonly WorkspaceModelCatalogModel[],
-): string | undefined {
-  const listed = models.filter(
-    (model) => model.compactionPolicy && model.credentialReadiness.status === "ready",
+export function WorkspaceDefaultsSection({
+  workspaceId,
+  organizationName,
+  canManage,
+  policy,
+  describePayer,
+  onEditAllowed,
+  onEditCompaction,
+}: {
+  workspaceId: string;
+  organizationName: string;
+  canManage: boolean;
+  /** This workspace's Allowed models and catalog, from `useModelAccessPolicy`. */
+  policy: ModelAccessPolicyState;
+  describePayer?: ((model: WorkspaceModelCatalogModel) => string) | undefined;
+  onEditAllowed: () => void;
+  onEditCompaction: () => void;
+}) {
+  return (
+    <Section
+      title="Defaults"
+      description={`This workspace uses ${organizationName}’s defaults unless you change them here.`}
+    >
+      <SettingRowGroup>
+        <DefaultSessionModelPreferenceRow
+          workspaceId={workspaceId}
+          canManage={canManage}
+          describePayer={describePayer}
+          organizationName={organizationName}
+        />
+        <AllowedModelsRow
+          state={policy}
+          onEdit={onEditAllowed}
+          organizationName={organizationName}
+        />
+        <SettingNavRow
+          label="Context & compaction"
+          description="When to summarize long conversations, by model."
+          value={compactionSummary(policy.models, { organizationName })}
+          onOpen={onEditCompaction}
+        />
+      </SettingRowGroup>
+    </Section>
   );
-  if (listed.length === 0) return undefined;
-  const custom = listed.filter((model) => model.compactionPolicy!.overrideTokens !== null).length;
-  return custom === 0 ? "Model defaults" : `${custom} custom ${custom === 1 ? "limit" : "limits"}`;
 }
 
 type ConnectChoice =

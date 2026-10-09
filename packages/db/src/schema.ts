@@ -4496,6 +4496,29 @@ export const workspaceModelPolicies = pgTable(
   }),
 );
 
+// Model defaults every workspace in the organization follows until it sets its
+// own: the default model for new work, the model allowlist for workspaces with
+// no policy row, and compaction triggers by exact model id. One row per
+// organization; absent reads as no defaults.
+export const organizationModelDefaults = pgTable("organization_model_defaults", {
+  accountId: uuid("account_id")
+    .primaryKey()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  sessionDefaults: jsonb("session_defaults").$type<{
+    model: string;
+    reasoningEffort: string;
+  } | null>(),
+  allowedProviders: text("allowed_providers").array(),
+  allowedModels: text("allowed_models").array(),
+  modelCompactionThresholds: jsonb("model_compaction_thresholds")
+    .$type<Record<string, number>>()
+    .notNull()
+    .default({}),
+  updatedBySubjectId: text("updated_by_subject_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 // One workspace-local short-lived holder per running Codex turn. Selection and
 // insertion happen atomically while codex_rotation_settings is locked FOR
 // UPDATE, so concurrent replicas in the SAME workspace see one another's
