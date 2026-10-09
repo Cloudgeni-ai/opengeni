@@ -807,13 +807,17 @@ describe("SessionChrome", () => {
   });
 
   test.each([
-    { replace: false, succeeds: true },
-    { replace: true, succeeds: true },
-    { replace: false, succeeds: false },
-    { replace: true, succeeds: false },
+    { replace: false, succeeds: true, prepared: false },
+    { replace: true, succeeds: true, prepared: false },
+    { replace: false, succeeds: false, prepared: false },
+    { replace: true, succeeds: false, prepared: false },
+    { replace: false, succeeds: true, prepared: true },
+    { replace: true, succeeds: true, prepared: true },
+    { replace: false, succeeds: false, prepared: true },
+    { replace: true, succeeds: false, prepared: true },
   ])(
     "queue actions hand focus back only after successful checkout: %j",
-    async ({ replace, succeeds }) => {
+    async ({ replace, succeeds, prepared }) => {
       const calls: string[] = [];
       const appliedDrafts: Array<NonNullable<ComposerState["draft"]>> = [];
       const checkedOut: NonNullable<ComposerState["draft"]> = {
@@ -854,6 +858,18 @@ describe("SessionChrome", () => {
               appliedDrafts.push(draft);
               calls.push("apply-draft");
             },
+            prepareDraftCheckout: prepared
+              ? () => {
+                  calls.push("prepare-checkout");
+                  return (draft) => {
+                    calls.push("complete-checkout");
+                    if (draft) {
+                      appliedDrafts.push(draft);
+                      calls.push("apply-draft");
+                    }
+                  };
+                }
+              : undefined,
           })}
           onComposerFocus={() => calls.push("focus-composer")}
         />,
@@ -919,6 +935,13 @@ describe("SessionChrome", () => {
       expect(calls).toContain("remove:11111111-1111-4111-8111-111111111111");
       expect(calls).toContain("edit:11111111-1111-4111-8111-111111111111");
       expect(appliedDrafts).toEqual(succeeds ? [checkedOut] : []);
+      expect(calls.filter((call) => call === "prepare-checkout")).toHaveLength(prepared ? 1 : 0);
+      expect(calls.filter((call) => call === "complete-checkout")).toHaveLength(prepared ? 1 : 0);
+      if (prepared) {
+        expect(calls.indexOf("prepare-checkout")).toBeLessThan(
+          calls.indexOf(`edit:${checkedOut.sourceTurnId}`),
+        );
+      }
       if (succeeds) expect(calls.slice(-2)).toEqual(["apply-draft", "focus-composer"]);
       else expect(calls).not.toContain("focus-composer");
       expect(

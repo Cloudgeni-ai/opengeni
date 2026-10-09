@@ -1,8 +1,14 @@
 import { useRef, useState } from "react";
-import { ChatComposer, type ComposerState } from "@opengeni/react";
+import type { ComposerState } from "@opengeni/react";
 import { QueueSurface } from "@opengeni/react/session-ui";
 import type { ComposerDraft } from "@opengeni/sdk";
-import { galleryQueue, galleryTurn, idleComposer } from "../src/dev/composer-chrome-fixtures";
+import {
+  emptyAttachments,
+  galleryQueue,
+  galleryTurn,
+  idleComposer,
+} from "../src/dev/composer-chrome-fixtures";
+import { ConsoleComposer } from "../src/components/Composer";
 
 /** Real components; the queue server is simulated locally for keyboard evidence. */
 export function ComposerQueueFixture() {
@@ -16,7 +22,7 @@ export function ComposerQueueFixture() {
   const [text, setText] = useState("");
   const [draft, setDraft] = useState<ComposerDraft | null>(null);
   const [error, setError] = useState<Error | null>(null);
-  const focusRef = useRef<{ focusInput: () => void }>(null);
+  const composerRegion = useRef<HTMLElement>(null);
   const evidence = useRef({ edits: [] as string[], sends: 0 });
   Object.assign(window, { composerQueue: evidence.current });
   const composer: ComposerState = idleComposer({
@@ -60,19 +66,28 @@ export function ComposerQueueFixture() {
       <header className="border-b border-border px-6 py-4">
         <h1 className="text-xl font-semibold">Edit a queued message</h1>
         <p className="mt-1 text-xs text-fg-muted">
-          Production components · Sample queue with local-only checkout
+          Production ConsoleComposer · Sample queue with local-only checkout
         </p>
       </header>
-      <section className="mx-auto flex w-full max-w-3xl flex-1 flex-col justify-end p-6">
+      <section
+        ref={composerRegion}
+        className="mx-auto flex w-full max-w-3xl flex-1 flex-col justify-end p-6"
+      >
         <p className="mb-6 text-sm text-fg-muted">
           Press ↑ in the empty composer to edit the most recently queued message.
         </p>
         <QueueSurface
           queue={queue}
           composer={composer}
-          onRequestComposerFocus={() => focusRef.current?.focusInput()}
+          onRequestComposerFocus={() => composerRegion.current?.querySelector("textarea")?.focus()}
         />
-        <ChatComposer queue={queue} composer={composer} focusRef={focusRef} />
+        <ConsoleComposer
+          workspaceId="keyboard-preview"
+          queue={queue}
+          composer={composer}
+          attachments={emptyAttachments()}
+          fileUploadsEnabled={false}
+        />
       </section>
     </main>
   );

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { act } from "react";
 import { ChatComposer } from "../src/components/chat-composer";
-import { latestEditableQueuedTurn } from "../src/components/queue-draft-policy";
+import { checkoutQueueDraft, latestEditableQueuedTurn } from "../src/components/queue-draft-policy";
 import {
   useComposer,
   type ComposerControllerState,
@@ -10,7 +10,13 @@ import {
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
 import type { UseFileAttachmentsResult } from "../src/hooks/use-file-attachments";
 import { fakeClient, fakeTurn, WORKSPACE_ID } from "./fake-client";
-import { flush, registerDom, renderComponent, type RenderedComponent } from "./render-hook";
+import {
+  flush,
+  registerDom,
+  renderComponent,
+  renderHook,
+  type RenderedComponent,
+} from "./render-hook";
 import type {
   ComposerDraft,
   DraftTimelineAnnotation,
@@ -236,7 +242,7 @@ describe("queued-message Arrow Up", () => {
     expect(calls).toBe(0);
   });
 
-  test("deferred checkout preserves intervening real composer notes, text and policy, then autosaves on its receipt", async () => {
+  test("deferred checkout fences autosave across a soft read, preserves local edits, then saves on its receipt", async () => {
     const sessionId = crypto.randomUUID();
     const base = await fakeClient({}).getComposerDraft(WORKSPACE_ID, sessionId);
     const queuedNote = note("Queued note");
@@ -291,6 +297,15 @@ describe("queued-message Arrow Up", () => {
     expect(live.draft).toBe(receipt);
     expect(live.value).toBe("New host-written text");
     expect(live.annotations).toEqual([addedNote]);
+    // The checkout response can lag its SSE/read by more than a debounce.
+    // Saving this still-unmerged shadow would erase the withdrawn prompt.
+    await flush(650);
+    expect(saves).toHaveLength(0);
+    expect(live.canSend).toBe(false);
+    await act(async () => {
+      expect(await live.send()).toBe(false);
+      expect(await live.steer()).toBe(false);
+    });
     await act(async () => {
       settle(receipt);
     });
@@ -311,6 +326,132 @@ describe("queued-message Arrow Up", () => {
       reasoningEffort: "high",
     });
     expect(live.draftRevision).toBe(2);
+  });
+
+  test("failed checkout releases the autosave fence without replacing intervening notes", async () => {
+    const sessionId = crypto.randomUUID();
+    let serverDraft = await fakeClient({}).getComposerDraft(WORKSPACE_ID, sessionId);
+    const addedNote = note("Keep this local note");
+    const saves: SaveComposerDraftRequest[] = [];
+    const client = fakeClient({
+      getComposerDraft: async () => serverDraft,
+      saveComposerDraft: async (_workspaceId, _sessionId, input) => {
+        saves.push(input);
+        serverDraft = { ...serverDraft, ...input, revision: input.expectedRevision + 1 };
+        return serverDraft;
+      },
+    });
+    let live!: ComposerControllerState;
+    let settle!: (draft: ComposerDraft | null) => void;
+    const turns = queue({
+      editTurn: () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        }),
+    });
+    function Harness() {
+      live = useComposer(sessionId, { client, workspaceId: WORKSPACE_ID, events: [] });
+      return <ChatComposer composer={live} queue={turns} />;
+    }
+    mounted = await renderComponent(<Harness />);
+    const input = mounted.container.querySelector("textarea")!;
+    await press(input);
+    await act(async () => {
+      live.addAnnotation!(addedNote);
+    });
+    await flush(650);
+    expect(saves).toHaveLength(0);
+    await act(async () => {
+      settle(null);
+    });
+    expect(input.disabled).toBe(false);
+    expect(live.value).toBe("");
+    expect(live.annotations).toEqual([addedNote]);
+    expect(live.canSend).toBe(true);
+    await flush(600);
+    expect(saves).toHaveLength(1);
+    expect(saves[0]).toMatchObject({ expectedRevision: 0, text: "", annotations: [addedNote] });
+  });
+
+  test("a thrown checkout also completes the native autosave lifecycle", async () => {
+    const sessionId = crypto.randomUUID();
+    const saves: SaveComposerDraftRequest[] = [];
+    const base = await fakeClient({}).getComposerDraft(WORKSPACE_ID, sessionId);
+    const client = fakeClient({
+      saveComposerDraft: async (_workspaceId, _sessionId, input) => {
+        saves.push(input);
+        return { ...base, ...input, revision: input.expectedRevision + 1 };
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(sessionId, { client, workspaceId: WORKSPACE_ID, events: [] }),
+      undefined,
+    );
+    try {
+      const failure = new Error("Checkout failed");
+      await act(async () => {
+        await expect(
+          checkoutQueueDraft(
+            hook.result.current,
+            queue({
+              editTurn: async () => {
+                throw failure;
+              },
+            }),
+            newest.id,
+            false,
+          ),
+        ).rejects.toBe(failure);
+      });
+      await act(async () => {
+        hook.result.current.setValue("Keep this draft");
+      });
+      await flush(600);
+      expect(saves).toHaveLength(1);
+      expect(saves[0]?.text).toBe("Keep this draft");
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("old-session checkout callbacks cannot suspend or overwrite the new session draft", async () => {
+    const firstSessionId = crypto.randomUUID();
+    const nextSessionId = crypto.randomUUID();
+    const saves: Array<{ sessionId: string; input: SaveComposerDraftRequest }> = [];
+    const base = await fakeClient({}).getComposerDraft(WORKSPACE_ID, firstSessionId);
+    const client = fakeClient({
+      saveComposerDraft: async (_workspaceId, sessionId, input) => {
+        saves.push({ sessionId, input });
+        return { ...base, ...input, revision: input.expectedRevision + 1 };
+      },
+    });
+    const hook = await renderHook(
+      (sessionId: string) =>
+        useComposer(sessionId, { client, workspaceId: WORKSPACE_ID, events: [] }),
+      firstSessionId,
+    );
+    try {
+      const prepareOld = hook.result.current.prepareDraftCheckout!;
+      let completeOld!: ReturnType<typeof prepareOld>;
+      await act(async () => {
+        completeOld = prepareOld();
+      });
+      await hook.rerender(nextSessionId);
+      await act(async () => {
+        completeOld({ ...base, revision: 1, text: "Old session prompt" });
+        prepareOld()(null);
+        hook.result.current.setValue("New session draft");
+      });
+      await flush(600);
+      expect(hook.result.current.value).toBe("New session draft");
+      expect(saves).toHaveLength(1);
+      expect(saves[0]).toMatchObject({
+        sessionId: nextSessionId,
+        input: { text: "New session draft" },
+      });
+    } finally {
+      await hook.unmount();
+    }
   });
 
   test("deferred checkout preserves edits and removals after an authoritative draft hydration", async () => {

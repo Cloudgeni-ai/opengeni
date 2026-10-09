@@ -918,9 +918,11 @@ state remains application-owned; durable draft and session state remain in
   owned by that actor/session draft; policy is `null` until hydration completes.
   `ChatComposer` accepts the same `queue` to recall its latest editable prompt
   with Arrow Up from an empty composer. Custom queue-checkout hosts can capture
-  `composer.prepareDraftCheckout?.() ?? composer.applyDraft` before awaiting
-  `queue.editTurn` and pass its non-null receipt to that callback. The native
-  callback adopts the exact server revision while preserving intervening local
+  `composer.prepareDraftCheckout?.()` before awaiting `queue.editTurn` and
+  complete that callback with its receipt, or `null` on failure (including thrown
+  errors). Without the optional callback, apply a non-null receipt with
+  `composer.applyDraft`. Native checkout suspends draft writes until completion,
+  then adopts the exact server revision while preserving intervening local
   notes, resources, text and policy changes for autosave; new free text is
   appended to the checked-out prompt. Custom `ComposerState` implementations
   without this optional callback retain their own `applyDraft` behavior.

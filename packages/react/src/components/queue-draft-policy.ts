@@ -1,5 +1,5 @@
 import type { ComposerState } from "../hooks/use-composer";
-import type { SessionTurn } from "@opengeni/sdk";
+import type { ComposerDraft, SessionTurn } from "@opengeni/sdk";
 import type { UseTurnQueueResult } from "../hooks/use-turn-queue";
 
 /** Creation order, not execution position: reordering must not change recall. */
@@ -23,14 +23,19 @@ export async function checkoutQueueDraft(
   replaceDraft: boolean,
 ): Promise<boolean> {
   if (composer.draftPersistence === "disabled") return false;
-  const applyCheckout = composer.prepareDraftCheckout?.() ?? composer.applyDraft;
-  const restored = await queue.editTurn(turnId, {
-    expectedDraftRevision: composer.draftRevision,
-    replaceDraft,
-  });
-  if (!restored) return false;
-  applyCheckout(restored);
-  return true;
+  const completeCheckout = composer.prepareDraftCheckout?.();
+  let restored: ComposerDraft | null = null;
+  try {
+    restored = await queue.editTurn(turnId, {
+      expectedDraftRevision: composer.draftRevision,
+      replaceDraft,
+    });
+    return restored !== null;
+  } finally {
+    // Complete on every outcome so a failed checkout cannot strand autosave.
+    if (completeCheckout) completeCheckout(restored);
+    else if (restored) composer.applyDraft(restored);
+  }
 }
 
 /**
