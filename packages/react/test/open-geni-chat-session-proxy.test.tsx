@@ -739,29 +739,39 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
     ).toBe(false);
   });
 
-  test("an older proxy that refuses chat creation reads as unavailable, not as an error", async () => {
-    // An older proxy reports no capability flags; its create route still refuses.
-    const chat = await mountStockChat({}, { defaultSessionId: undefined }, (config) => {
-      const { sessionCreation: _created, ...rest } = config;
-      return rest;
-    });
-    const textarea = chat.container.querySelector("textarea") as HTMLTextAreaElement;
-    await actRun(() => {
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
-        textarea,
-        "hello",
+  for (const unavailable of [undefined, "Starting chats is turned off."]) {
+    test(`an older proxy that refuses chat creation uses ${unavailable ? "custom" : "default"} unavailable copy`, async () => {
+      // An older proxy reports no capability flags; its create route still refuses.
+      const chat = await mountStockChat(
+        {},
+        {
+          defaultSessionId: undefined,
+          labels: unavailable ? { newChatUnavailable: unavailable } : undefined,
+        },
+        (config) => {
+          const { sessionCreation: _created, ...rest } = config;
+          return rest;
+        },
       );
-      const props = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
-      (textarea as unknown as Record<string, { onChange: (event: unknown) => void }>)[
-        props
-      ]!.onChange({ target: textarea });
+      const textarea = chat.container.querySelector("textarea") as HTMLTextAreaElement;
+      await actRun(() => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
+          textarea,
+          "hello",
+        );
+        const props = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+        (textarea as unknown as Record<string, { onChange: (event: unknown) => void }>)[
+          props
+        ]!.onChange({ target: textarea });
+      });
+      await flush(50);
+      expect(await chat.click(/^Send/)).toBe(true);
+      await flush(200);
+      expect(chat.browser).toContain(`404 POST /v1/workspaces/${WS}/sessions route_not_allowed`);
+      expect(
+        [...chat.container.querySelectorAll('[role="alert"]')].map((alert) => alert.textContent),
+      ).toEqual([unavailable ?? "New chats are not enabled for this product."]);
+      expect(chat.upstream.some((line) => line.startsWith("POST "))).toBe(false);
     });
-    await flush(50);
-    expect(await chat.click(/^Send/)).toBe(true);
-    await flush(200);
-    expect(chat.browser).toContain(`404 POST /v1/workspaces/${WS}/sessions route_not_allowed`);
-    expect(
-      [...chat.container.querySelectorAll('[role="alert"]')].map((alert) => alert.textContent),
-    ).toEqual(["New chats are not enabled for this product."]);
-  });
+  }
 });
