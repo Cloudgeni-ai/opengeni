@@ -105,10 +105,10 @@ export async function readOrganizationCodexUsage(
           exhaustedRevision: 0,
         };
       }),
-    withRefreshLock: (targetDb, _scope, credentialId, use) =>
+    withRefreshLock: (targetDb, _scope, refreshCredentialId, use) =>
       scoped(targetDb, async (tx) => {
         await tx.execute(sql`set local lock_timeout = '30s'`);
-        const key = `${core ? "subscription-refresh" : "codex-refresh"}:${credentialId}`;
+        const key = `${core ? "subscription-refresh" : "codex-refresh"}:${refreshCredentialId}`;
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
         return await use(tx);
       }),
