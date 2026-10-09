@@ -3820,6 +3820,13 @@ describe("ComputerViewer input reliability", () => {
         await computerGesture(fixture.canvas, [25, 25]);
         await flush();
         expect(fixture.actions).toHaveLength(1);
+        for (const value of ["b", "c"]) {
+          await actRun(() => {
+            fixture.keyboard.value = value;
+            fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true }));
+          });
+          await flush(25);
+        }
         if (boundary === "target switch") await fixture.switchTarget();
         await actRun(() =>
           finishFirst({
@@ -4467,7 +4474,70 @@ describe("ComputerViewer input reliability", () => {
     }
   });
 
-  for (const boundary of ["target switch", "failed receipt"] as const) {
+  test.each([false, true])(
+    "combines only adjacent unsent text, preserving key order and size bounds (%s)",
+    async (large) => {
+      let finishFirst!: (value: ComputerActionReceipt) => void;
+      let calls = 0;
+      const fixture = await renderComputerInputFixture(async (request) => {
+        if (++calls === 1) return await new Promise((resolve) => (finishFirst = resolve));
+        return {
+          ...receipt(observation(), request.operationId),
+          observation: null,
+        };
+      });
+      const type = async (value: string) => {
+        await actRun(() => {
+          fixture.keyboard.value = value;
+          fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true }));
+        });
+        await flush(25);
+      };
+      try {
+        await actRun(() => fixture.keyboard.focus());
+        await type("a");
+        const b = large ? "b".repeat(600_000) : "b";
+        const c = large ? "c".repeat(400_001) : "c";
+        await type(b);
+        await type(c);
+        await actRun(() =>
+          fixture.keyboard.dispatchEvent(
+            new KeyboardEvent("keydown", { bubbles: true, key: "Tab" }),
+          ),
+        );
+        await type("d");
+        await type("e");
+        expect(fixture.actions.map(({ action }) => action)).toEqual([
+          { type: "keyboard", action: "type", value: "a" },
+        ]);
+        await actRun(() =>
+          finishFirst({
+            ...receipt(observation(), fixture.actions[0]!.operationId),
+            observation: null,
+          }),
+        );
+        await flush();
+        expect(fixture.actions.map(({ action }) => action)).toEqual([
+          { type: "keyboard", action: "type", value: "a" },
+          ...(large
+            ? ([
+                { type: "keyboard", action: "type", value: b },
+                { type: "keyboard", action: "type", value: c },
+              ] as const)
+            : ([{ type: "keyboard", action: "type", value: "bc" }] as const)),
+          { type: "keyboard", action: "press", value: "Tab" },
+          { type: "keyboard", action: "type", value: "de" },
+        ]);
+        expect(new Set(fixture.actions.map(({ operationId }) => operationId)).size).toBe(
+          large ? 5 : 4,
+        );
+      } finally {
+        await fixture.rendered.unmount();
+      }
+    },
+  );
+
+  for (const boundary of ["target switch", "failed receipt", "unknown outcome"] as const) {
     test(`discards queued keyboard input after a ${boundary}`, async () => {
       let finishFirst!: (receipt: ComputerActionReceipt) => void;
       const fixture = await renderComputerInputFixture(
@@ -4488,14 +4558,24 @@ describe("ComputerViewer input reliability", () => {
         });
         await flush();
         expect(fixture.actions).toHaveLength(1);
+        for (const value of ["b", "c"]) {
+          await actRun(() => {
+            fixture.keyboard.value = value;
+            fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true }));
+          });
+          await flush(25);
+        }
         if (boundary === "target switch") await fixture.switchTarget();
         await actRun(() =>
           finishFirst({
             ...receipt(observation(), fixture.actions[0]!.operationId),
             observation: null,
-            ...(boundary === "failed receipt"
+            ...(boundary !== "target switch"
               ? {
-                  state: "failed" as const,
+                  state:
+                    boundary === "unknown outcome"
+                      ? ("outcome_unknown" as const)
+                      : ("failed" as const),
                   error: {
                     code: "resource_unavailable",
                     message: "input failed",

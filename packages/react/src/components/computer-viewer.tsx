@@ -1280,10 +1280,16 @@ function ComputerViewport(props: {
     timer: ReturnType<typeof setTimeout>;
   } | null>(null);
   const actionRef = useRef(props.onAction);
+  const targetRef = useRef(props.target);
   const readClipboardRef = useRef(props.onReadClipboard);
   const errorRef = useRef(props.onError);
   const actionTailRef = useRef<Promise<void>>(Promise.resolve());
   const actionQueueEpochRef = useRef(0);
+  const queuedTextRef = useRef<{
+    action: Extract<ComputerAction, { type: "keyboard" }>;
+    epoch: number;
+    delivery: ComputerQueuedAction;
+  } | null>(null);
   const queuedFrameRef = useRef<ComputerFrame | null>(null);
   const currentFrameRef = useRef<ComputerFrame | null>(props.frame);
   const paintedFrameRef = useRef<ComputerFrame | null>(null);
@@ -1291,6 +1297,7 @@ function ComputerViewport(props: {
   const decodingFrameRef = useRef(false);
   const mountedRef = useRef(true);
   actionRef.current = props.onAction;
+  targetRef.current = props.target;
   readClipboardRef.current = props.onReadClipboard;
   errorRef.current = props.onError;
   const streamFailed = props.connectionState === "error";
@@ -1314,6 +1321,7 @@ function ComputerViewport(props: {
     clickTimerRef.current = null;
     wheelRef.current = null;
     pendingTextRef.current = null;
+    queuedTextRef.current = null;
     pointerStartRef.current = null;
     lastClickRef.current = null;
     composingRef.current = false;
@@ -1442,7 +1450,24 @@ function ComputerViewport(props: {
       continuation?: ComputerQueuedAction,
     ) => {
       const epoch = actionQueueEpochRef.current;
+      const plainText = action.type === "keyboard" && action.action === "type";
+      const queuedText = queuedTextRef.current;
+      if (
+        plainText &&
+        !frame &&
+        !after &&
+        !continuation &&
+        queuedText?.epoch === epoch &&
+        queuedText.delivery.completion === actionTailRef.current &&
+        queuedText.action.value.length + action.value.length <= 1_000_000
+      ) {
+        // Only combine adjacent text that has not crossed the dispatch boundary.
+        queuedText.action.value += action.value;
+        return queuedText.delivery;
+      }
+      queuedTextRef.current = null;
       const dispatch = actionRef.current;
+      const admittedTarget = targetRef.current;
       const isCurrent = () => mountedRef.current && epoch === actionQueueEpochRef.current;
       const operationId = crypto.randomUUID();
       let markStarted!: (value: boolean) => void;
@@ -1458,6 +1483,7 @@ function ComputerViewport(props: {
           : previous.then(() => true);
       const delivery = ready
         .then(async (firstStarted) => {
+          if (queuedTextRef.current?.action === action) queuedTextRef.current = null;
           if (!firstStarted || !isCurrent()) {
             markStarted(false);
             return;
@@ -1467,6 +1493,23 @@ function ComputerViewport(props: {
           const receipt = await pending;
           const isCurrentResult = () => isCurrent() && !isStaleComputerActionResult(receipt);
           if (!isCurrentResult()) return;
+          const observedTarget = receipt.observation?.target;
+          if (
+            !admittedTarget ||
+            receipt.computerSessionId !== admittedTarget.computerSessionId ||
+            receipt.controllerGeneration !== admittedTarget.controllerGeneration ||
+            receipt.targetId !== admittedTarget.id ||
+            (observedTarget &&
+              (observedTarget.computerSessionId !== admittedTarget.computerSessionId ||
+                observedTarget.controllerGeneration !== admittedTarget.controllerGeneration ||
+                observedTarget.id !== admittedTarget.id ||
+                observedTarget.targetGeneration !== admittedTarget.targetGeneration))
+          ) {
+            // Receipt projection can replace the target before React remounts us.
+            actionQueueEpochRef.current += 1;
+            clearBufferedInput();
+            return;
+          }
           await after?.(isCurrentResult);
         })
         .catch((cause) => {
@@ -1480,7 +1523,11 @@ function ComputerViewport(props: {
         ? Promise.all([previous, delivery]).then(() => undefined)
         : delivery;
       actionTailRef.current = completion;
-      return { operationId, started, completion };
+      const queued = { operationId, started, completion };
+      if (plainText && !frame && !after && !continuation) {
+        queuedTextRef.current = { action, epoch, delivery: queued };
+      }
+      return queued;
     },
     [clearBufferedInput],
   );
