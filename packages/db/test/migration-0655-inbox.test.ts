@@ -254,6 +254,20 @@ describe("0655 inbox", () => {
       pausedGoals: true,
       replies: false,
     });
+    // Full agent access (0693) is a third policy; anything else is refused.
+    expect(await setInboxSettings(db(), { ...owner, tidyPolicy: "full_access" })).toEqual({
+      tidyPolicy: "full_access",
+      pausedGoals: true,
+      replies: false,
+    });
+    expect(await getInboxTidyPolicy(db(), owner)).toBe("full_access");
+    await expect(
+      setInboxSettings(db(), {
+        ...owner,
+        tidyPolicy: "everyone" as unknown as "full_access",
+      }),
+    ).rejects.toThrow();
+    expect(await getInboxTidyPolicy(db(), owner)).toBe("full_access");
   });
 
   test("replies keep one item per session until cleared, only when turned on (0665)", async () => {

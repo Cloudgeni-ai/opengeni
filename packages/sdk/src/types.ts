@@ -5636,8 +5636,12 @@ export type UpdateInboxItemInput = {
   dismissed?: true;
 };
 
-/** Which agents may withdraw or dismiss the person's notifications. */
-export type InboxTidyPolicy = "own_sessions" | "any_agent";
+/**
+ * What agents may do in the person's inbox: tidy notifications (from their own
+ * sessions, or any agent's), or `full_access` to see every open item and
+ * snooze or dismiss it. Agents never answer or approve for the person.
+ */
+export type InboxTidyPolicy = "own_sessions" | "any_agent" | "full_access";
 
 export type InboxSettings = {
   tidyPolicy: InboxTidyPolicy;
