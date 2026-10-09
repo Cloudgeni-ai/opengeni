@@ -614,7 +614,10 @@ root device/inode/UID/GID/mode) before content reads. A live exact SDK mount may
 authenticate that receipt; historical stopped/missing state without it stays
 fenced, with no inferred custody or replacement. Capture/publication failure
 retains the workspace and lease. After verified publication, exact-container
-teardown preserves the host workspace; never use SDK close as a recovery shortcut.
+teardown then releases the host workspace directory only after re-proving the
+published capture, daemon, container absence and root identity (best effort,
+never a drain failure); a retry finding it already released completes without
+recapture. Never use SDK close as a recovery shortcut.
 Normal cold continuity and all other providers keep their existing ownership
 rules. See [run lifecycle](docs/run-lifecycle.md) and
 [workspace archive storage](docs/workspace-archive-storage.md).

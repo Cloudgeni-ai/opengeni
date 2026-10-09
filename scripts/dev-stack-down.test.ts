@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -154,6 +154,49 @@ esac`,
     ]);
     expect(result.calls.join("\n")).not.toContain("prune");
     expect(result.runtimeRemains).toBe(false);
+  });
+
+  test("clean removes the SDK workspace directories of this project's sandbox containers; down keeps them", async () => {
+    const base = await mkdtemp(join(tmpdir(), "opengeni-dev-stack-down-workspaces-"));
+    temporaryRoots.push(base);
+    const owned = join(base, "openai-agents-docker-sandbox-Ab12Cd");
+    const modules = join(owned, "go", "pkg", "mod");
+    await mkdir(modules, { recursive: true });
+    await writeFile(join(modules, "go.mod"), "module example.com/mod");
+    await chmod(modules, 0o555);
+    await chmod(join(owned, "go", "pkg"), 0o555);
+    const outside = join(base, "outside");
+    await mkdir(outside);
+    await writeFile(join(outside, "keep.txt"), "outside");
+    await symlink(outside, join(owned, "link"));
+    const unrelated = join(base, "unrelated-bind");
+    await mkdir(unrelated);
+    const fake = `case "$*" in
+  "ps -aq --filter network=down-test-stack_default --filter label=openai-agents-sandbox=true") printf 'abc123\\n' ;;
+  inspect*) printf '%s\\n' '${owned}' '${unrelated}' ;;
+esac`;
+
+    const down = await runWithFakeDocker([], fake, {
+      runtimeProject: "down-test-stack",
+    });
+    expect(down.exitCode).toBe(0);
+    expect(down.calls.some((call) => call.startsWith("inspect"))).toBe(false);
+    expect(await Bun.file(join(modules, "go.mod")).exists()).toBe(true);
+
+    const clean = await runWithFakeDocker(["--clean", "--yes"], fake, {
+      runtimeProject: "down-test-stack",
+    });
+    expect(clean.stderr).toBe("");
+    expect(clean.exitCode).toBe(0);
+    expect(clean.calls.slice(0, 3)).toEqual([
+      "ps -aq --filter network=down-test-stack_default --filter label=openai-agents-sandbox=true",
+      'inspect --format {{range .Mounts}}{{if eq .Type "bind"}}{{println .Source}}{{end}}{{end}} abc123',
+      "rm -f abc123",
+    ]);
+    expect(clean.stdout).toContain("removed 1 sandbox workspace");
+    expect(await stat(owned).catch(() => null)).toBeNull();
+    expect(await Bun.file(join(outside, "keep.txt")).text()).toBe("outside");
+    expect((await stat(unrelated)).isDirectory()).toBe(true);
   });
 
   test("native down never touches Docker and clean delegates exact project data removal", async () => {

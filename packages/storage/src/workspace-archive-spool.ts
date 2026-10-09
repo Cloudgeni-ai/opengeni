@@ -163,16 +163,36 @@ async function verifyFreshUpload(
   }
 }
 
+/** Where a download spool lives. Server processes pass an owner-marked
+ * implementation (runtime's `workspaceArchiveDownloadTemporaryDirectory`) so a
+ * process killed mid-download leaves a directory a later process can reclaim;
+ * storage cannot depend on runtime, so the plain default is unmarked. */
+export type WorkspaceArchiveTemporaryDirectory = {
+  create: () => Promise<string>;
+  remove: (directory: string) => Promise<void>;
+};
+
+const plainTemporaryDirectory: WorkspaceArchiveTemporaryDirectory = {
+  create: async () => await mkdtemp(join(tmpdir(), "opengeni-workspace-archive-")),
+  remove: async (directory) => await rm(directory, { recursive: true, force: true }),
+};
+
+export type DownloadWorkspaceArchiveSpoolOptions = {
+  temporaryDirectory?: WorkspaceArchiveTemporaryDirectory;
+};
+
 /** Caller owns the returned private spool and must dispose it after use. */
 export async function downloadWorkspaceArchiveSpool(
   storage: ObjectStorage,
   key: string,
   inputExpected: ExpectedArchive,
+  options: DownloadWorkspaceArchiveSpoolOptions = {},
 ): Promise<WorkspaceArchiveSpool> {
   const expected = { bytes: inputExpected.bytes, sha256: inputExpected.sha256 };
   requireBoundedReads(storage);
   validateExpected(expected);
-  const directory = await mkdtemp(join(tmpdir(), "opengeni-workspace-archive-"));
+  const temporary = options.temporaryDirectory ?? plainTemporaryDirectory;
+  const directory = await temporary.create();
   const path = join(directory, "archive.tar");
   let handle: FileHandle | undefined;
   try {
@@ -209,12 +229,12 @@ export async function downloadWorkspaceArchiveSpool(
       },
       async dispose() {
         disposed = true;
-        await rm(directory, { recursive: true, force: true });
+        await temporary.remove(directory);
       },
     };
   } catch (error) {
     await handle?.close().catch(() => undefined);
-    await rm(directory, { recursive: true, force: true });
+    await temporary.remove(directory);
     if (error instanceof WorkspaceArchiveStorageError) throw error;
     throw new WorkspaceArchiveStorageError(
       "archive_hydration_failed",

@@ -1760,6 +1760,19 @@ export function recordSandboxProviderMissingBeforeCapture(
   });
 }
 
+/** Host workspace directory outcome after a Docker drain's exact-container
+ * teardown (`retained` means the directory stays on disk). */
+export function recordSandboxDockerWorkspaceRelease(
+  observability: Observability,
+  status: "released" | "already_released" | "retained",
+): void {
+  observability.incrementCounter({
+    name: "opengeni_sandbox_docker_workspace_release_total",
+    help: "Docker drain host workspace directories released or retained after exact-container teardown.",
+    labels: { status },
+  });
+}
+
 export function recordSandboxRecoveryObservationGauges(
   observability: Observability,
   observations: {
