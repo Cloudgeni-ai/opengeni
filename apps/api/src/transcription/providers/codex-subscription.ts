@@ -1,4 +1,5 @@
 import { CODEX_CLIENT_VERSION, CODEX_ORIGINATOR } from "@opengeni/codex/constants";
+import type { CodexFetch } from "@opengeni/codex";
 import type { Settings } from "@opengeni/config";
 import {
   type TranscriptionAvailabilityContext,
@@ -9,6 +10,7 @@ import {
   acquireSubscriptionCoreCodexOperationLease,
   buildCodexTokenResolver,
   buildSubscriptionCoreCodexConnectionTokenResolver,
+  buildSubscriptionCoreCodexOperationFetch,
   getWorkspace,
   listCodexAccountStatuses,
   listSubscriptionCoreCodexOperationCandidates,
@@ -56,9 +58,13 @@ async function transcribeOnCore(
     workspaceId: string;
     subjectId: string;
     requestId: string;
-    send: (accessToken: string, accountId: string | null) => Promise<Response>;
+    send: (
+      accessToken: string,
+      accountId: string | null,
+      fetchImpl: CodexFetch,
+    ) => Promise<Response>;
   },
-): Promise<Response> {
+): Promise<{ text: string; languages: string[] }> {
   const scope: SubscriptionCoreCodexOperationScope = {
     kind: "workspace",
     accountId: request.accountId,
@@ -87,25 +93,37 @@ async function transcribeOnCore(
         candidate.connectionId,
         ref,
       );
+      const requestFetch = buildSubscriptionCoreCodexOperationFetch(
+        input.db,
+        scope,
+        ref,
+        candidate.connectionId,
+        input.fetch,
+        { requestId: `transcription:${request.requestId}` },
+      );
       const dispatch = async (force: boolean): Promise<Response> => {
         const token = force ? await resolver.refresh() : await resolver.getToken();
         // Pre-dispatch fence: the exact operation lease must still be live.
         if (!(await renewSubscriptionCoreCodexOperationLease(input.db, scope, ref))) {
           throw coreTranscriptionUnavailable();
         }
-        return await request.send(token.accessToken, token.chatgptAccountId);
+        return await request.send(token.accessToken, token.chatgptAccountId, requestFetch);
       };
       let response: Response;
       try {
         response = await dispatch(false);
-        if (response.status === 401) response = await dispatch(true);
+        if (response.status === 401) {
+          await response.arrayBuffer();
+          response = await dispatch(true);
+        }
       } catch (error) {
         if (error instanceof TranscriptionServiceError) throw error;
         // A provider transport failure keeps its classification but is never
         // replayed through another provider.
         throw withoutFallback(fetchError(error));
       }
-      return response;
+      // Keep operation custody through parsing, not just response headers.
+      return await transcriptionResult(response);
     } finally {
       await releaseSubscriptionCoreCodexOperationLease(input.db, scope, ref).catch(() => false);
     }
@@ -124,7 +142,7 @@ function withoutFallback(error: TranscriptionServiceError): TranscriptionService
 }
 
 async function sendTranscription(
-  fetchImpl: typeof fetch,
+  fetchImpl: CodexFetch,
   input: {
     accessToken: string;
     chatgptAccountId: string | null;
@@ -159,7 +177,10 @@ async function sendTranscription(
 async function transcriptionResult(
   response: Response,
 ): Promise<{ text: string; languages: string[] }> {
-  if (!response.ok) throw withoutFallback(responseError(response.status));
+  if (!response.ok) {
+    await response.arrayBuffer().catch(() => undefined);
+    throw withoutFallback(responseError(response.status));
+  }
   const body = await response.json().catch(() => null);
   if (!body || typeof body.text !== "string") throw withoutFallback(responseError(502));
   return {
@@ -224,15 +245,15 @@ export function createCodexSubscriptionTranscriptionProvider(input: {
       const disposition = await readCodexCutoverDisposition(input.db, organizationId, workspaceId);
       if (disposition === "maintenance") throw coreTranscriptionUnavailable();
       if (disposition === "core") {
-        const response = await transcribeOnCore(
+        return await transcribeOnCore(
           { settings: input.settings, db: input.db, fetch: fetchImpl },
           {
             accountId: organizationId,
             workspaceId,
             subjectId,
             requestId,
-            send: async (accessToken, chatgptAccountId) =>
-              await sendTranscription(fetchImpl, {
+            send: async (accessToken, chatgptAccountId, requestFetch) =>
+              await sendTranscription(requestFetch, {
                 accessToken,
                 chatgptAccountId,
                 audio,
@@ -243,7 +264,6 @@ export function createCodexSubscriptionTranscriptionProvider(input: {
               }),
           },
         );
-        return await transcriptionResult(response);
       }
       const account = (await listCodexAccountStatuses(input.db, workspaceId)).find(
         (candidate) => candidate.isActive && candidate.status === "active",
