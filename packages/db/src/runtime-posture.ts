@@ -2605,7 +2605,12 @@ export function evaluateRuntimeDatabasePosture(
       routine.name.startsWith("connect_subscription_codex_personal("),
     )
   ) {
-    const required = SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES.slice(2);
+    const required = [
+      "subscription_codex_writer_context(uuid, uuid, text)",
+      "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+      "drop_subscription_codex_owner_capabilities(uuid)",
+      "derive_scheduled_revision_subscription_authority()",
+    ];
     for (const signature of required) {
       const matches = posture.subscriptionOwnerRoutines.filter(
         (routine) => routine.name === signature,

@@ -14,19 +14,19 @@ DO $codex_cutover_drain$
 DECLARE roles jsonb := nullif(current_setting('opengeni.migration_application_roles', true), '')::jsonb;
 BEGIN
   IF to_regclass('pg_temp.codex_cutover_stage_0672') IS NULL THEN
-    RAISE EXCEPTION '0681 requires the codec-aware TypeScript migration runner' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0683 requires the codec-aware TypeScript migration runner' USING ERRCODE = '55000';
   END IF;
   IF roles IS NULL OR jsonb_typeof(roles) <> 'array' THEN
-    RAISE EXCEPTION '0681 requires explicit application database roles' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0683 requires explicit application database roles' USING ERRCODE = '55000';
   END IF;
   IF jsonb_array_length(roles) NOT BETWEEN 1 AND 16 OR EXISTS (
     SELECT 1 FROM jsonb_array_elements(roles) item WHERE jsonb_typeof(item) <> 'string'
       OR octet_length(item #>> '{}') NOT BETWEEN 1 AND 63
       OR item #>> '{}' <> btrim(item #>> '{}')
-  ) THEN RAISE EXCEPTION '0681 received invalid application roles' USING ERRCODE = '55000'; END IF;
+  ) THEN RAISE EXCEPTION '0683 received invalid application roles' USING ERRCODE = '55000'; END IF;
   IF EXISTS (SELECT 1 FROM pg_stat_activity a JOIN jsonb_array_elements_text(roles) r ON r.value = a.usename
     WHERE a.datname = current_database() AND a.pid <> pg_backend_pid()) THEN
-    RAISE EXCEPTION '0681 requires drained application sessions' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0683 requires drained application sessions' USING ERRCODE = '55000';
   END IF;
 END $codex_cutover_drain$;
 
@@ -94,11 +94,11 @@ DO $codex_cutover_owner_window$
 DECLARE item record;
 BEGIN
   IF (SELECT count(*) FROM codex_cutover_relations_0672) <> 35 THEN
-    RAISE EXCEPTION '0681 could not resolve every cutover relation' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0683 could not resolve every cutover relation' USING ERRCODE = '55000';
   END IF;
   IF EXISTS (SELECT 1 FROM codex_cutover_relations_0672 r JOIN pg_class c ON c.oid = r.oid
     WHERE c.relowner <> (SELECT oid FROM pg_roles WHERE rolname = current_user)) THEN
-    RAISE EXCEPTION '0681 requires the schema owner' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0683 requires the schema owner' USING ERRCODE = '55000';
   END IF;
   FOR item IN SELECT * FROM codex_cutover_relations_0672 ORDER BY oid LOOP
     EXECUTE format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE', item.oid::regclass);
@@ -150,7 +150,7 @@ DO $codex_cutover_owner_window_open$
 BEGIN
   IF EXISTS (SELECT 1 FROM codex_cutover_relations_0672 r JOIN pg_class c ON c.oid = r.oid
     WHERE c.relforcerowsecurity) THEN
-    RAISE EXCEPTION '0681 owner window did not open' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0683 owner window did not open' USING ERRCODE = '55000';
   END IF;
 END $codex_cutover_owner_window_open$;
 
@@ -163,7 +163,7 @@ BEGIN
   BEGIN
     EXECUTE format('ALTER TABLE %s VALIDATE CONSTRAINT codex_cutover_empty_probe', relation);
   EXCEPTION WHEN check_violation THEN
-    RAISE EXCEPTION '0681 counted zero rows in a non-empty relation' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0683 counted zero rows in a non-empty relation' USING ERRCODE = '55000';
   END;
   EXECUTE format('ALTER TABLE %s DROP CONSTRAINT codex_cutover_empty_probe', relation);
 END $codex_cutover_assert_empty$;
@@ -240,7 +240,7 @@ BEGIN
     OR EXISTS (SELECT 1 FROM subscription_capacity_waiters WHERE provider = 'codex')
     OR EXISTS (SELECT 1 FROM subscription_operation_leases WHERE provider = 'codex')
   THEN
-    RAISE EXCEPTION '0681 refuses pre-existing core Codex state' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0683 refuses pre-existing core Codex state' USING ERRCODE = '55000';
   END IF;
   -- Ambiguous session ownership on live work aborts activation (step 6).
   IF EXISTS (
@@ -256,7 +256,7 @@ BEGIN
             AND membership.id = session.owner_organization_membership_id
             AND membership.subject_id = session.owner_subject_id)))
   ) THEN
-    RAISE EXCEPTION '0681 refused ambiguous session ownership on live work (session_owner_ambiguous)'
+    RAISE EXCEPTION '0683 refused ambiguous session ownership on live work (session_owner_ambiguous)'
       USING ERRCODE = '55000';
   END IF;
 END $codex_cutover_preflight$;
@@ -266,7 +266,7 @@ END $codex_cutover_preflight$;
 DO $codex_cutover_codec_receipt$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_temp.codex_cutover_stage_0672 WHERE completed) THEN
-    RAISE EXCEPTION '0681 codec stage did not complete' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0683 codec stage did not complete' USING ERRCODE = '55000';
   END IF;
 END $codex_cutover_codec_receipt$;
 
@@ -510,7 +510,7 @@ BEGIN
     GROUP BY attempt.workspace_id, map.connection_id, attempt.credit_id
     HAVING count(*) > 1
   ) THEN
-    RAISE EXCEPTION '0681 refused ambiguous reset-credit redemption history (reset_redemption_credit_ambiguous)'
+    RAISE EXCEPTION '0683 refused ambiguous reset-credit redemption history (reset_redemption_credit_ambiguous)'
       USING ERRCODE = '55000';
   END IF;
 END $codex_cutover_reset_ledger$;
@@ -646,7 +646,7 @@ BEGIN
       WHERE source_digest <> target_digest)
     OR (SELECT count(*) FROM pg_temp.codex_cutover_readability)
       <> (SELECT count(DISTINCT connection_id) FROM pg_temp.codex_cutover_connection_map) THEN
-    RAISE EXCEPTION '0681 parity mismatch (secret_readability)' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0683 parity mismatch (secret_readability)' USING ERRCODE = '55000';
   END IF;
 END $codex_cutover_readability$;
 UPDATE codex_subscription_credentials SET credential_encrypted = ''
@@ -661,6 +661,33 @@ CREATE TEMP TABLE codex_cutover_parity (
   legacy_count bigint NOT NULL,
   core_count bigint NOT NULL
 );
+-- Independently reconstruct each local pool's enabled model union. A paused
+-- unrestricted duplicate is not an unrestricted enabled policy. If every
+-- source is paused its model union remains paused.
+CREATE TEMP TABLE codex_cutover_expected_workspace_policies ON COMMIT DROP AS
+WITH members AS (
+  SELECT credential.account_id, map.connection_id, credential.workspace_id,
+    credential.allocator_enabled, credential.allowed_model_ids
+  FROM codex_subscription_credentials credential
+  JOIN codex_cutover_shared_map map ON map.legacy_id = credential.id
+  WHERE credential.authority_scope = 'workspace'
+), groups AS (
+  SELECT account_id, connection_id, workspace_id, bool_or(allocator_enabled) AS enabled
+  FROM members GROUP BY account_id, connection_id, workspace_id
+), selected AS (
+  SELECT member.*, groups.enabled FROM members member JOIN groups
+    USING (account_id, connection_id, workspace_id)
+  WHERE member.allocator_enabled OR NOT groups.enabled
+)
+SELECT groups.*, CASE WHEN EXISTS (
+    SELECT 1 FROM selected member WHERE member.connection_id = groups.connection_id
+      AND member.workspace_id = groups.workspace_id AND member.allowed_model_ids IS NULL
+  ) THEN NULL::text[] ELSE ARRAY(
+    SELECT DISTINCT model FROM selected member CROSS JOIN LATERAL unnest(member.allowed_model_ids) model
+    WHERE member.connection_id = groups.connection_id AND member.workspace_id = groups.workspace_id
+    ORDER BY model
+  ) END AS allowed_model_ids
+FROM groups;
 INSERT INTO codex_cutover_parity
   -- Credentials, connections, aliases, identities.
   SELECT inventory.account_id, 'credentials', sum(inventory.legacy_count)::bigint,
@@ -692,17 +719,26 @@ INSERT INTO codex_cutover_parity
   JOIN subscription_connections connection ON connection.id = map.connection_id
   WHERE credential.chatgpt_account_id IS NOT NULL GROUP BY credential.account_id
   -- Local workspace rows: each keeps its exact workspace-pool policy and manager.
-  UNION ALL SELECT credential.account_id, 'workspace_pool_policies', count(*),
+  UNION ALL SELECT expected.account_id, 'workspace_pool_policies', count(*),
     count(*) FILTER (WHERE EXISTS (
       SELECT 1 FROM subscription_connection_assignment_policies policy
-      WHERE policy.account_id = credential.account_id AND policy.connection_id = map.connection_id
-        AND policy.workspace_id = credential.workspace_id AND policy.inference_pool = 'workspace'
-        AND policy.allocator_enabled = credential.allocator_enabled
-        AND policy.allowed_model_ids IS NOT DISTINCT FROM credential.allowed_model_ids
-        AND policy.managed_by_workspace_id = credential.workspace_id))
-  FROM codex_subscription_credentials credential
-  JOIN codex_cutover_shared_map map ON map.legacy_id = credential.id
-  WHERE credential.authority_scope = 'workspace' GROUP BY credential.account_id
+      WHERE policy.account_id = expected.account_id AND policy.connection_id = expected.connection_id
+        AND policy.workspace_id = expected.workspace_id AND policy.inference_pool = 'workspace'
+        AND policy.allocator_enabled = expected.enabled
+        AND policy.allowed_model_ids IS NOT DISTINCT FROM expected.allowed_model_ids
+        AND policy.managed_by_workspace_id = expected.workspace_id))
+  FROM codex_cutover_expected_workspace_policies expected GROUP BY expected.account_id
+  UNION ALL SELECT expected.account_id, 'extra_credit_consent', count(*),
+    count(*) FILTER (WHERE connection.extra_credits_enabled = expected.enabled
+      AND connection.extra_credits_version = expected.version)
+  FROM (
+    SELECT credential.account_id, map.connection_id, bool_and(credential.extra_credits_enabled) AS enabled,
+      greatest(1, max(credential.extra_credits_version)) AS version
+    FROM codex_subscription_credentials credential
+    JOIN pg_temp.codex_cutover_connection_map map ON map.legacy_id = credential.id
+    GROUP BY credential.account_id, map.connection_id
+  ) expected JOIN subscription_connections connection ON connection.id = expected.connection_id
+  GROUP BY expected.account_id
   -- Organization rows: every workspace they admit today keeps their exact
   -- policy, through organization scope or an enumerated assignment.
   UNION ALL SELECT credential.account_id, 'organization_pool_admissions', count(*),
@@ -891,19 +927,19 @@ BEGIN
   SELECT string_agg(DISTINCT metric, ', ' ORDER BY metric) INTO mismatches
   FROM codex_cutover_parity WHERE legacy_count <> core_count;
   IF mismatches IS NOT NULL THEN
-    RAISE EXCEPTION '0681 parity mismatch (%)', mismatches USING ERRCODE = '55000';
+    RAISE EXCEPTION '0683 parity mismatch (%)', mismatches USING ERRCODE = '55000';
   END IF;
   -- Zero-row success is invalid: a source with rows must yield a non-empty
   -- target, and every counted source was counted inside the owner window.
   IF EXISTS (SELECT 1 FROM codex_cutover_inventory WHERE legacy_count > 0
       AND metric LIKE 'credentials_%')
     AND NOT EXISTS (SELECT 1 FROM subscription_connections WHERE provider = 'codex') THEN
-    RAISE EXCEPTION '0681 parity mismatch (zero_row_backfill)' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0683 parity mismatch (zero_row_backfill)' USING ERRCODE = '55000';
   END IF;
   IF EXISTS (SELECT 1 FROM session_turns
       WHERE status IN ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
         AND subscription_authority IS NULL) THEN
-    RAISE EXCEPTION '0681 parity mismatch (live_turn_authority)' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0683 parity mismatch (live_turn_authority)' USING ERRCODE = '55000';
   END IF;
 END $codex_cutover_parity_check$;
 
@@ -923,7 +959,7 @@ BEGIN
   END LOOP;
   IF EXISTS (SELECT 1 FROM codex_cutover_relations_0672 r JOIN pg_class c ON c.oid = r.oid
     WHERE r.relforcerowsecurity AND NOT c.relforcerowsecurity) THEN
-    RAISE EXCEPTION '0681 could not restore FORCE row security' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0683 could not restore FORCE row security' USING ERRCODE = '55000';
   END IF;
 END $codex_cutover_restore$;
 

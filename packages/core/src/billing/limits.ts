@@ -52,6 +52,7 @@ export type LimitCheckInput = {
   workspaceId?: string;
   /** Frozen causal human, never the API key or service admitting the work. */
   initiatingHumanSubjectId?: string | null;
+  acceptedTurn?: { sessionId: string; turnId: string };
   action: LimitAction;
   quantity?: number;
   // The turn's model id, when the action represents an agent turn. The model's
@@ -114,6 +115,7 @@ export async function checkLimit(
         // connection in their Personal workspace also funds the turn.
         accountId: input.accountId,
         subjectId: input.initiatingHumanSubjectId ?? null,
+        ...(input.acceptedTurn ? { acceptedTurn: input.acceptedTurn } : {}),
       })
     : false;
   const { fundedWithoutCredits, countsTowardTokenCap } = modelFundingForAdmission(

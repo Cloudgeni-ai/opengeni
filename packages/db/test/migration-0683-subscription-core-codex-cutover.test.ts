@@ -1,5 +1,5 @@
 /**
- * Migration 0681: the drained, one-way Codex cutover onto the shared
+ * Migration 0683: the drained, one-way Codex cutover onto the shared
  * subscription core (design 5.1.1 steps 1-8). The legacy state is seeded as
  * the database superuser (an upgrade fixture, not current admission), the
  * migration runs as the NOSUPERUSER/NOBYPASSRLS schema owner exactly as in
@@ -41,7 +41,7 @@ import {
   type DbClient,
 } from "../src";
 
-const MIGRATION = "0681_subscription_core_codex_cutover.sql";
+const MIGRATION = "0683_subscription_core_codex_cutover.sql";
 const key = Buffer.alloc(32, 72);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -79,6 +79,8 @@ const a = {
   c5: randomUUID(), // owner's Personal workspace: personal connection
   c5Alias: randomUUID(), // same personal login, older unhealthy credential
   c6: randomUUID(), // W3 local, no identity anywhere
+  restricted: randomUUID(),
+  disabledDuplicate: randomUUID(),
   // Sessions and turns.
   s1: randomUUID(), // W2 shared, manual pin on alias c2
   s2: randomUUID(), // W1 shared, last c1, waiting for capacity
@@ -374,6 +376,7 @@ async function seed() {
       workspace: a.personalOwner,
       scope: "workspace",
       chatgpt: "acct-personal",
+      extra: { extra_credits_enabled: true, extra_credits_version: 2 },
     });
     await credential({
       id: a.c6,
@@ -383,12 +386,33 @@ async function seed() {
       chatgpt: null,
     });
     await credential({
+      id: a.restricted,
+      account: a.account,
+      workspace: a.w1,
+      scope: "workspace",
+      chatgpt: "acct-policy-pair",
+      allowedModels: [MODEL],
+      extra: { extra_credits_enabled: true, extra_credits_version: 3 },
+    });
+    await credential({
+      id: a.disabledDuplicate,
+      account: a.account,
+      workspace: a.w1,
+      scope: "workspace",
+      chatgpt: null,
+      tokenChatgpt: "acct-policy-pair",
+      allocator: false,
+      status: "error",
+      extra: { extra_credits_enabled: false },
+    });
+    await credential({
       id: a.c5Alias,
       account: a.account,
       workspace: a.personalOwner,
       scope: "workspace",
       chatgpt: null,
       tokenChatgpt: "acct-personal",
+      extra: { extra_credits_enabled: true, extra_credits_version: 2 },
       status: "error",
       lastRefreshAt: new Date(Date.now() - 600_000),
     });
@@ -665,7 +689,7 @@ const migrateCutover = (options: { key?: Uint8Array } = {}) =>
   });
 
 describe.skipIf(!realDb)(
-  "SUB-COMPAT-01 migration 0681: Codex onto the shared subscription core",
+  "SUB-COMPAT-01 migration 0683: Codex onto the shared subscription core",
   () => {
     beforeAll(async () => {
       const fixture = await acquireOwnerMigratedTestDatabase("codex-core-cutover");
@@ -789,7 +813,7 @@ describe.skipIf(!realDb)(
       await owned.admin`CREATE RULE codex_cutover_parity_probe AS ON INSERT TO subscription_leases DO INSTEAD NOTHING`;
       try {
         const error = await migrateCutover({ key }).catch((caught: Error) => caught);
-        expect((error as Error).message).toContain("0681 parity mismatch (live_leases)");
+        expect((error as Error).message).toContain("0683 parity mismatch (live_leases)");
         await noPartialCutover();
       } finally {
         await owned.admin`DROP RULE codex_cutover_parity_probe ON subscription_leases`;
@@ -896,7 +920,7 @@ describe.skipIf(!realDb)(
         const byId = new Map(connections.map((row) => [row.id, row]));
         // A: c1 (with alias c2), c3, c4, c5, c6; B: c1; D: alice, bob, the
         // unknown person, org (with alias orgLocal), allow, shared.
-        expect(connections).toHaveLength(12);
+        expect(connections).toHaveLength(13);
         expect(byId.has(a.c2)).toBe(false);
         expect(byId.get(a.c1)).toMatchObject({
           provider_account_id: "acct-dup",
@@ -941,7 +965,12 @@ describe.skipIf(!realDb)(
           await owned.admin`SELECT alias_connection_id::text AS alias, connection_id::text AS target
         FROM subscription_connection_aliases WHERE provider = 'codex'`;
         expect(new Set(aliases.map((row) => `${row.alias}>${row.target}`))).toEqual(
-          new Set([`${a.c2}>${a.c1}`, `${a.c5Alias}>${a.c5}`, `${d.orgLocal}>${d.org}`]),
+          new Set([
+            `${a.c2}>${a.c1}`,
+            `${a.c5Alias}>${a.c5}`,
+            `${d.orgLocal}>${d.org}`,
+            `${a.disabledDuplicate}>${a.restricted}`,
+          ]),
         );
         const wiped =
           await owned.admin`SELECT count(*)::int AS total FROM codex_subscription_credentials
@@ -956,6 +985,18 @@ describe.skipIf(!realDb)(
           resource_kind: "subscription_connection",
           origin: a.personalOwner,
         });
+      });
+
+      test("disabled unrestricted duplicates cannot broaden allocation or extra-credit consent", async () => {
+        const [policy] = await owned.admin`select allocator_enabled, allowed_model_ids
+          from subscription_connection_assignment_policies where connection_id = ${a.restricted}::uuid`;
+        expect(policy).toMatchObject({ allocator_enabled: true, allowed_model_ids: [MODEL] });
+        const [consent] = await owned.admin`select extra_credits_enabled, extra_credits_version
+          from subscription_connections where id = ${a.restricted}::uuid`;
+        expect(consent).toMatchObject({ extra_credits_enabled: false, extra_credits_version: 3 });
+        const [retained] = await owned.admin`select extra_credits_enabled, extra_credits_version
+          from subscription_connections where id = ${a.c5}::uuid`;
+        expect(retained).toMatchObject({ extra_credits_enabled: true, extra_credits_version: 2 });
       });
 
       test("step 3: assignments keep each source's exact pool policy, manager and quota facts", async () => {
@@ -1228,7 +1269,7 @@ describe.skipIf(!realDb)(
         await migrateCutover();
         const [count] =
           await owned.admin`SELECT count(*)::int AS total FROM subscription_connections WHERE provider = 'codex'`;
-        expect(count!.total).toBe(12);
+        expect(count!.total).toBe(13);
       }, 180_000);
 
       test("runs as the restricted application role", async () => {

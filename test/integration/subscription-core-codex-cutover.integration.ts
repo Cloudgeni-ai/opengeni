@@ -3,7 +3,7 @@
  *
  * A session workflow that parked on a legacy Codex capacity wait recorded the
  * legacy peek activity's result (waiter id, generation, next check, wake
- * revision) in its history before the drained migration ran. After 0681 those
+ * revision) in its history before the drained migration ran. After 0683 those
  * recorded arguments execute in reconciliation against the migrated core
  * waiter, which kept the same id, generation and revisions. The activity and
  * signal names and payload shapes are unchanged, and the pinned legacy
@@ -36,7 +36,7 @@ import { encryptEnvironmentValue } from "../../packages/db/src/environment-crypt
 import { createCodexCapacityActivities } from "../../apps/worker/src/activities/codex-capacity";
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const MIGRATION = "0681_subscription_core_codex_cutover.sql";
+const MIGRATION = "0683_subscription_core_codex_cutover.sql";
 const MODEL = "codex/gpt-5.5";
 const key = Buffer.alloc(32, 77);
 const settings = { environmentsEncryptionKey: key.toString("base64") } as never;

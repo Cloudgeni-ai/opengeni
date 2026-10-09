@@ -1704,11 +1704,11 @@ under a NOBYPASSRLS migration owner),
 ##### PR 3: the drained Codex cutover
 
 PR 3 is the one-way step. Maintenance migration
-`0681_subscription_core_codex_cutover.sql` moves every organization's Codex
+`0683_subscription_core_codex_cutover.sql` moves every organization's Codex
 state onto the core and enables the Codex cutover for every organization in
 the same transaction. It is split around a codec stage
 (`packages/db/src/codex-subscription-core-cutover.ts`, restricted by the
-runner to 0681 like 0598's Claude stage): the SQL prelude checks the drain and
+runner to 0683 like 0598's Claude stage): the SQL prelude checks the drain and
 opens the owner window, the stage moves credentials, and the SQL that follows
 moves everything that references them, validates parity and restores the
 window. Plain SQL is refused before any change.
@@ -1737,7 +1737,7 @@ Steps, as implemented:
    person's token to the other's Apps designation). Decision: merge only rows
    that are provably the same person. Distinct people stay distinct
    connections, each with its own credential, assignments, designations and
-   pins; the core identity (`provider_subject_id`, added by 0679, part of the
+   pins; the core identity (`provider_subject_id`, added by 0680, part of the
    unique key) records the person. A row whose person is unknown, or whose
    stored email contradicts another row of the same person, is kept as its own
    connection (`legacy:<id>` as its person key when it shares the upstream
@@ -1752,7 +1752,14 @@ Steps, as implemented:
    `personal_owner_missing`, `fedramp_mismatch`, `unrepresentable_status`,
    `unrepresentable_scope`. After parity the legacy ciphertext is blanked:
    one secret copy.
-3. **Health, quota, policy, scope.** Status maps 1:1; `refresh_generation` is
+3. **Health, quota, policy, scope.** Duplicate policies in one workspace/pool
+   union only enabled rows' model sets; a disabled unrestricted row cannot widen
+   an enabled limited row. If all are disabled the union remains disabled. SQL
+   parity independently reconstructs this enabled union. Extra-credit consent
+   carries only when every merged row opted in, retaining the maximum version;
+   conflicting consent fails closed to disabled with the content-free disposition
+   `extra_credit_consent_conflict_disabled`. Single-row consent is preserved.
+   Status maps 1:1; `refresh_generation` is
    the legacy `version` (so quota observations stay fenced to the same token
    family); usage windows become the shared quota model, an exhaustion keeps
    its kind, a live plan-entitlement exclusion becomes a model cooldown until
@@ -1864,7 +1871,7 @@ Steps, as implemented:
 8. **Window.** All 35 relations are locked, their user triggers disabled and
    FORCE lifted by literal statements; both are restored from the captured
    state before commit, deferred keys are validated first, and the 0667 v2
-   check is validated. The release-schema contract registers 0681 as
+   check is validated. The release-schema contract registers 0683 as
    maintenance at its three sites.
 
 Activation decision. The migration writes **enabled** Codex cutover rows for
@@ -1877,11 +1884,11 @@ the Codex cutover together". Organizations created later are seeded enabled by
 an owner trigger on `managed_accounts`, and the application role can no longer
 delete a Codex row, so "no row" is unreachable in a migrated database; the
 switch remains a containment control whose off state is the existing
-fail-closed maintenance behaviour. Runtime readiness requires the 0681
+fail-closed maintenance behaviour. Runtime readiness requires the 0683
 receipt, so a binary of this release cannot start against an unmigrated
 database.
 
-No dual write. After 0681 every Codex reader and writer the earlier PRs moved
+No dual write. After 0683 every Codex reader and writer the earlier PRs moved
 targets the core. Also in this PR: plan-change history is recorded on the
 core (a trigger keeps the previous plan and time in `provider_state` whenever
 a writer changes a Codex connection's plan) and projected with the
@@ -1892,14 +1899,14 @@ connection the workspace cannot see stays NULL); and a child agent's first
 turn copies its causal parent turn's frozen v2 value.
 
 The writers this cutover needs already exist, dormant, from PR 3b (migration
-0679, which lands first): connect start/poll and disconnect on the core with
+0680, which lands first): connect start/poll and disconnect on the core with
 the redemption share lock and the `subscription-refresh:<id>` key,
 organization-level reset redemption fenced per (connection, credit) across
-workspaces (it re-files the person's own lapsed attempt that 0681 keeps in its
+workspaces (it re-files the person's own lapsed attempt that 0683 keeps in its
 legacy workspace, and refuses another workspace's open or consumed attempt),
 personal connections in the owner's views, and the v2 writers at acceptance
 for scheduled tasks and firings, internal updates and child-result notices,
-agent messages and Steer. 0681 backfills the v2 slots 0679 added for work
+agent messages and Steer. 0683 backfills the v2 slots 0680 added for work
 accepted before it; enabling the cutover switches those writers on.
 
 Assignment-change wakes need no writer yet: no route edits workspace
@@ -1907,14 +1914,14 @@ assignments (the M5 scope editor must call the core wake).
 
 Workflow compatibility. Activity and signal names and payloads are unchanged.
 `test/integration/subscription-core-codex-cutover.integration.ts` arms a wait
-through the legacy path, records the legacy peek's result, runs 0681, then
+through the legacy path, records the legacy peek's result, runs 0683, then
 executes the recorded arguments: the core waiter has the same id, generation
 and revision, keeps waiting while exhausted and resumes the same turn after a
 core wake. The pinned legacy capacity-wait history replays against the current
 bundle there and in the PR 2a suite.
 
 Legacy readers after the cutover (review finding, fixed here). Every reader
-that is reachable after 0681 now follows the Codex cutover disposition the
+that is reachable after 0683 now follows the Codex cutover disposition the
 same way (no row: legacy unchanged; disabled: not ready, no legacy read;
 enabled: core): the model catalog and its readiness, the default session
 model (session create, drafts, scheduled occurrences, `list_models`),
@@ -1924,8 +1931,9 @@ route (core read; saving answers 409 until the M5 scope editor adds a core
 writer), the session `codexCurrentSelection`, and the goal, claim-failure,
 Variable Set and claim readers of a parked turn's waiter (they also read the
 core waiter, so a turn parked on a core waiter is not claimable). Catalog
-readiness counts the shared candidates PR 2c uses for Codex Live and
-transcription, and the caller's own personal connections only in their own
+readiness uses chat placement's shared pools (automatic admits both local and
+organization candidates), without changing PR 2c Live/transcription's single-source
+policy, and the caller's own personal connections only in their own
 Personal workspace with personal connections and personal fallback allowed,
 read through the owner-only reader; a subjectless reader sees shared
 connections only. Live model lists come from the 0671 connection seam, cached
@@ -1933,9 +1941,19 @@ per refresh generation; a personal connection's list cannot be read outside
 an accepted turn, so its models are selectable with unknown status unless a
 refusal cooldown applies. Known gap: a person's personal-fallback opt-in can
 only be read inside an accepted turn, so the catalog may show Codex ready for
-someone who has not opted in and placement then waits (0681 opts in the
+someone who has not opted in and placement then waits (0683 opts in the
 owners it migrates). The full reader/writer inventory, with each call site
 gated, unreachable or intentional, is in the PR 3 description.
+
+Personal funding in an owner-private shared-workspace session is intentionally
+not a generic workspace catalog fact. `isCodexBilledTurn` accepts an exact durable
+turn reference, re-reads its frozen v2 and uses the accepted placement world,
+including owner/human/generation and fallback checks. Service, nonowner and empty
+authority cannot borrow a live personal connection. Temporary capacity waits do
+not turn subscription-funded work into deployment-funded work. Codex initial
+turn and prompt credit admission run after authority freeze, before transaction
+commit; rejected prompts roll back, while initial-turn initialization retains
+the existing session-shell/retry lifecycle. No admission read mints authority.
 
 Review hardening (recorded with the decisions above): the live-lease parity
 compares turn, holder, generation, expiry and canonical connection against a
@@ -1947,7 +1965,7 @@ a content-free error (fixed refusal text, or the SQLSTATE and constraint
 name), never a driver error carrying statement parameters; and the Insights
 repair lookup filters by turn so the workspace/turn/type index serves it.
 
-Left to PR 4 (unreachable after 0681, safe to delete): the legacy Codex
+Left to PR 4 (unreachable after 0683, safe to delete): the legacy Codex
 selector (`apps/worker/src/activities/codex-rotation.ts`, the Codex-only
 capacity, settlement and recovery branches, the fleet shadow), the legacy
 arms of `peekSessionWork`/`getCodexCapacityWait`/`reconcileCodexCapacityWait`

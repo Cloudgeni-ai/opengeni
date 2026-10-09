@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  canServe,
+  type PlacementInput,
+  type SubscriptionConnection,
+} from "@opengeni/subscriptions";
+import {
   planCodexCutover,
   planCodexCutoverQuota,
   type CutoverLegacyAuthority,
@@ -264,11 +269,72 @@ describe("Codex cutover dedupe and scope planning", () => {
         workspaceId: w1,
         pool: "workspace",
         allocatorEnabled: true,
-        allowedModelIds: null,
+        allowedModelIds: ["codex/a"],
         managedByWorkspaceId: w1,
       },
     ]);
     expect(result.connections[0]!.dispositions).toContain("duplicate_pool_policy_merged");
+    const migrated = result.connections[0]!;
+    const connection: SubscriptionConnection = {
+      id: migrated.id,
+      provider: "codex",
+      kind: "subscription",
+      health: "healthy",
+      allocatorEnabled: migrated.allocatorEnabled,
+      entitledModelIds: null,
+      excludedModelIds: [],
+      allowedModelIds: migrated.allowedModelIds,
+      refreshGeneration: 1,
+      quota: null,
+      ownership: {
+        kind: "shared",
+        managedByWorkspaceId: migrated.managedByWorkspaceId,
+        scope: {
+          kind: "workspaces",
+          workspaceIds: migrated.workspaceIds,
+          allowPersonalWorkspaces: false,
+        },
+      },
+      assignmentPolicies: migrated.policies.map((policy) => ({
+        ...policy,
+        inferencePool: policy.pool,
+      })),
+    };
+    const world: PlacementInput = {
+      now: Date.now(),
+      workspace: { id: w1, kind: "shared", ownerMembershipId: null, allowedModelIds: null },
+      session: {
+        id: "session",
+        workspaceId: w1,
+        visibility: "shared",
+        ownerMembershipId: owner,
+        preferredModelId: "codex/a",
+        reasoningLevel: "medium",
+        binding: null,
+        onlyThisModel: true,
+        reselectionPoints: [],
+        personalAuthority: [],
+        compactionProviderLock: null,
+      },
+      settings: {
+        rotation: {},
+        providers: {},
+        crossProviderFailover: false,
+        fallbackOrder: {},
+        personalConnectionsAllowed: false,
+        personalFallbackAllowed: false,
+      },
+      people: [],
+      models: ["codex/a", "codex/b"].map((id) => ({
+        id,
+        provider: "codex",
+        reasoningLevels: ["medium"],
+      })),
+      connections: [connection],
+      cacheFacts: {},
+    };
+    expect(canServe(world, connection, "codex/a")).toBe(true);
+    expect(canServe(world, connection, "codex/b")).toBe(false);
   });
 
   test("a legacy user snapshot's generation transfers only from its verified canonical row", () => {

@@ -20,10 +20,10 @@ import type postgres from "postgres";
 import { codexPlanKey, parseIdToken } from "@opengeni/codex";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 
-/** Splits the 0681 migration into its owner-window prelude and its SQL backfill. */
+/** Splits the 0683 migration into its owner-window prelude and its SQL backfill. */
 export const CODEX_SUBSCRIPTION_CORE_CUTOVER_MARKER =
   "-- opengeni:codex-subscription-core-cutover-v1";
-export const CODEX_SUBSCRIPTION_CORE_CUTOVER_MIGRATION = "0681_subscription_core_codex_cutover.sql";
+export const CODEX_SUBSCRIPTION_CORE_CUTOVER_MIGRATION = "0683_subscription_core_codex_cutover.sql";
 
 /** As the legacy fleet read classifies a window. */
 const NEAR_EXHAUSTION_PERCENT = 90;
@@ -56,6 +56,10 @@ export type LegacyCodexCredentialRow = {
   exhausted_until: Date | null;
   exhausted_kind: string | null;
   allocator_enabled: boolean;
+  extra_credits_enabled?: boolean;
+  extra_credits_version?: number;
+  extra_credits_updated_by_subject_id?: string | null;
+  extra_credits_updated_at?: Date | null;
   selection_count: number;
   last_selected_at: Date | null;
   allocator_version: number;
@@ -396,6 +400,12 @@ export function planCodexCutover(input: {
       continue;
     }
     const dispositions: string[] = [];
+    if (
+      group.some((entry) => entry.row.extra_credits_enabled === true) &&
+      group.some((entry) => entry.row.extra_credits_enabled !== true)
+    ) {
+      dispositions.push("extra_credit_consent_conflict_disabled");
+    }
     // A row kept apart from others of its upstream account and owner carries
     // a per-row person key, so the core identity stays unique; a known person
     // is the key itself.
@@ -502,11 +512,15 @@ export function planCodexCutover(input: {
         policiesByKey.set(key, policy);
         return;
       }
-      // Two source rows of one connection in one pool of one workspace (the
-      // same person signed in twice): the pool keeps the wider of the two,
-      // as either row alone admitted it.
+      // Union enabled policies, not flags and model sets independently. A
+      // disabled unrestricted row must never broaden an enabled limited row.
+      // When both are disabled the union remains disabled.
+      if (existing.allocatorEnabled === policy.allocatorEnabled) {
+        existing.allowedModelIds = unionModels([existing.allowedModelIds, policy.allowedModelIds]);
+      } else if (policy.allocatorEnabled) {
+        existing.allowedModelIds = policy.allowedModelIds;
+      }
       existing.allocatorEnabled ||= policy.allocatorEnabled;
-      existing.allowedModelIds = unionModels([existing.allowedModelIds, policy.allowedModelIds]);
       if (!dispositions.includes("duplicate_pool_policy_merged")) {
         dispositions.push("duplicate_pool_policy_merged");
       }
@@ -709,7 +723,7 @@ export function contentFreeCodexCutoverError(error: unknown): Error {
   if (error instanceof CodexCutoverStageError) return error;
   const source = (error ?? {}) as { code?: unknown; constraint_name?: unknown; message?: unknown };
   const code = typeof source.code === "string" && SQLSTATE.test(source.code) ? source.code : null;
-  // The migration's own fixed refusals ("0681 parity mismatch (live_leases)")
+  // The migration's own fixed refusals ("0683 parity mismatch (live_leases)")
   // carry no data; keep their text, never the driver's attachments.
   if (code === "55000" && typeof source.message === "string" && OWN_REFUSAL.test(source.message)) {
     return new CodexCutoverStageError(source.message, code);
@@ -814,7 +828,8 @@ async function moveCodexCredentials(
       organization_user_resource_authority_generation,
       allowed_model_ids, allowed_workspace_ids::text[] AS allowed_workspace_ids,
       allow_personal_workspaces, plan_checked_at, plan_previous_type, plan_changed_at,
-      plan_entitlement_exclusion
+      plan_entitlement_exclusion, extra_credits_enabled, extra_credits_version,
+      extra_credits_updated_by_subject_id, extra_credits_updated_at
     FROM codex_subscription_credentials
     ORDER BY account_id, created_at, id
   `;
@@ -970,7 +985,8 @@ async function moveCodexCredentials(
         allowed_model_ids, ownership, owner_organization_membership_id, owner_subject_id,
         authority_id, authority_resource_kind, authority_generation, connected_by_subject_id,
         scope_kind, allow_personal_workspaces, managed_by_workspace_id, provider_state,
-        provider_subject_id, created_at, updated_at
+        provider_subject_id, created_at, updated_at, extra_credits_enabled,
+        extra_credits_version, extra_credits_updated_by_subject_id, extra_credits_updated_at
       ) VALUES (
         ${connection.id}::uuid, ${connection.accountId}::uuid, 'codex', 'subscription',
         ${connection.identity}, ${email}, ${label}, ${connection.canonical.plan_type},
@@ -986,7 +1002,11 @@ async function moveCodexCredentials(
         ${connection.managedByWorkspaceId}::uuid,
         ${tx.json(planCodexCutoverProviderState(connection) as postgres.JSONValue)},
         ${connection.providerSubjectId},
-        ${connection.canonical.created_at}, ${connection.canonical.updated_at}
+        ${connection.canonical.created_at}, ${connection.canonical.updated_at},
+        ${connection.members.every((row) => row.extra_credits_enabled === true)},
+        ${Math.max(1, ...connection.members.map((row) => row.extra_credits_version ?? 1))},
+        ${connection.canonical.extra_credits_updated_by_subject_id ?? null},
+        ${connection.canonical.extra_credits_updated_at ?? null}
       )`;
     if (connection.autoAssignment) {
       await tx`INSERT INTO opengeni_private.subscription_codex_auto_assignments AS auto (

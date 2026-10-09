@@ -26142,9 +26142,29 @@ export async function isCodexBilledTurn(input: {
    * either wrongly debit Opengeni credits for a ChatGPT-paid turn or the inverse.
    */
   active?: boolean;
+  /** Exact durable work; required for personal funding outside a Personal workspace. */
+  acceptedTurn?: { sessionId: string; turnId: string };
 }): Promise<boolean> {
   if (!isCodexBilledModel(input.model)) {
     return false; // cheap; no db hit on the common path
+  }
+  if (!input.settings.codexSubscriptionEnabled) return false;
+  if (input.acceptedTurn) {
+    const accountId =
+      input.accountId ?? (await rlsContextForWorkspace(input.db, input.workspaceId)).accountId;
+    const { readCodexCutoverDisposition } = await import("./subscription-core-codex-compat");
+    const disposition = await readCodexCutoverDisposition(input.db, accountId, input.workspaceId);
+    if (disposition !== "legacy") {
+      if (disposition !== "core") return false;
+      const { subscriptionCoreAcceptedCodexTurnIsFunded } =
+        await import("./subscription-core-codex");
+      return subscriptionCoreAcceptedCodexTurnIsFunded(input.db, {
+        accountId,
+        workspaceId: input.workspaceId,
+        ...input.acceptedTurn,
+        productModelId: input.model!,
+      });
+    }
   }
   if (input.active !== undefined) {
     return input.active;

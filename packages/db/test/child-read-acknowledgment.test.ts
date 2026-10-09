@@ -1789,8 +1789,7 @@ test("commands from separate turns of the same human coalesce during an explicit
   const frozen = await shared.admin`select subscription_authority from session_turns
     where id in (${first.turn.id}, ${secondClaim.turn.id}) order by created_at`;
   expect(frozen).toHaveLength(2);
-  // Before activation NULL remains the supported carrier. Once activated,
-  // exported enqueue must freeze exactly the same v2 as normal acceptance.
+  expect(frozen[0]!.subscription_authority).not.toBeNull();
   expect(frozen[1]!.subscription_authority).toEqual(frozen[0]!.subscription_authority);
   const second = {
     session: first.session,

@@ -2152,7 +2152,17 @@ BEGIN
       'subscription_codex_writer_context(uuid,uuid,text)',
       'grant_subscription_codex_owner_capability(text,uuid,uuid,text,uuid)',
       'drop_subscription_codex_owner_capabilities(uuid)',
-      'derive_scheduled_revision_subscription_authority()',
+      'derive_scheduled_revision_subscription_authority()'
+    ] LOOP
+      IF to_regprocedure('opengeni_subscription_internal.' || routine_signature) IS NOT NULL THEN
+        EXECUTE format(
+          'REVOKE EXECUTE ON FUNCTION opengeni_subscription_internal.%s FROM %I',
+          routine_signature, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
+    -- The drained cutover uses private routines: no previous binary remains.
+    FOREACH routine_signature IN ARRAY ARRAY[
       'subscription_codex_cutover_v1_active()',
       'seed_subscription_codex_cutover()',
       'record_subscription_codex_plan_change()',
@@ -2161,9 +2171,9 @@ BEGIN
       'auto_assign_subscription_codex_workspace()',
       'auto_assign_subscription_codex_personal_workspace()'
     ] LOOP
-      IF to_regprocedure('opengeni_subscription_internal.' || routine_signature) IS NOT NULL THEN
+      IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
         EXECUTE format(
-          'REVOKE EXECUTE ON FUNCTION opengeni_subscription_internal.%s FROM %I',
+          'REVOKE EXECUTE ON FUNCTION opengeni_private.%s FROM %I',
           routine_signature,
           ${literal(role)}
         );

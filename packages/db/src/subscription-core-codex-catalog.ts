@@ -2,7 +2,7 @@
  * Codex readiness for catalog, default-model and admission reads on the
  * shared subscription core (M3 PR 3 review fix).
  *
- * After the drained cutover (0680) the legacy Codex tables are frozen and
+ * After the drained cutover (0681) the legacy Codex tables are frozen and
  * their ciphertext is blank, so "is Codex ready in this workspace, and which
  * models may its connections serve?" must be answered from the core for an
  * organization with an enabled Codex cutover row. Callers decide by
@@ -13,13 +13,12 @@
  *
  * Connections that count, for one workspace and one acting subject:
  *
- * - shared organization- or workspace-scoped connections that can serve an
- *   operation here (`listSubscriptionCoreCodexOperationCandidates`: active,
- *   allocatable, in the effective inference pool, cutover enabled). This is
- *   the same rule as Codex Live readiness and transcription;
+ * - active, allocatable shared connections in chat placement's effective
+ *   inference pools. Automatic includes both workspace and organization
+ *   candidates; Live/transcription intentionally retain their one-source rule;
  * - the acting person's own personal connections, only in their own Personal
- *   workspace (the only place a new chat of theirs freezes personal
- *   authority), only while the effective settings allow personal connections
+ *   workspace (generic workspace readers never represent a private session's
+ *   exact accepted context), only while the effective settings allow personal connections
  *   and personal fallback (chat placement uses a personal connection only as
  *   fallback), and only when active and allocatable. They are read through
  *   the owner-only reader, so another person's personal connection is never
@@ -40,15 +39,12 @@ import {
   readCodexCutoverDisposition,
   type CodexCutoverDisposition,
 } from "./subscription-core-codex-compat";
-import { listSubscriptionCoreCodexOperationCandidates } from "./subscription-core-codex-operations";
 import {
+  listSubscriptionConnectionsForPlacement,
   listSubscriptionConnectionAssignmentPolicies,
   readSubscriptionEffectiveSettings,
   readSubscriptionProviderCutoverState,
 } from "./subscription-core-repository";
-
-/** The service subject a subjectless workspace read acts as (shared capacity only). */
-const CATALOG_SERVICE_SUBJECT = "service:subscription-core";
 
 export type SubscriptionCoreCodexServingConnection = {
   connectionId: string;
@@ -147,19 +143,12 @@ export async function listSubscriptionCoreCodexServingConnections(
   input: { accountId: string; workspaceId: string; subjectId: string | null },
   now: Date = new Date(),
 ): Promise<SubscriptionCoreCodexServingConnection[]> {
-  const shared = await listSubscriptionCoreCodexOperationCandidates(db, {
-    kind: "workspace",
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: input.subjectId ?? CATALOG_SERVICE_SUBJECT,
-  });
   const personalWorkspace =
     input.subjectId?.startsWith("user:") === true &&
     (await namedSubjectPersonalWorkspaceId(db, {
       accountId: input.accountId,
       subjectId: input.subjectId,
     })) === input.workspaceId;
-  if (shared.length === 0 && !personalWorkspace) return [];
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -175,7 +164,48 @@ export async function listSubscriptionCoreCodexServingConnections(
         input.workspaceId,
       );
       const source = inferenceSourceFor(effective.values, "codex");
-      const sharedIds = shared.map((candidate) => candidate.connectionId);
+      if (!providerSwitchesFor(effective.values, "codex").enabled) return [];
+      const [workspace] = await rawRows<{ kind: string }>(
+        tx,
+        sql`select get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid) as kind`,
+      );
+      const world = await listSubscriptionConnectionsForPlacement(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        provider: "codex",
+      });
+      const shared = world.filter((connection) => {
+        if (
+          connection.ownership.kind !== "shared" ||
+          connection.health !== "healthy" ||
+          !connection.allocatorEnabled
+        )
+          return false;
+        const scope = connection.ownership.scope;
+        if (
+          scope.kind !== "organization" &&
+          !(
+            scope.kind === "workspaces" &&
+            (scope.workspaceIds.includes(input.workspaceId) ||
+              (workspace?.kind === "personal" && scope.allowPersonalWorkspaces))
+          )
+        )
+          return false;
+        if (connection.assignmentPolicies)
+          return connection.assignmentPolicies.some(
+            (policy) =>
+              policy.allocatorEnabled &&
+              (source === "automatic" || policy.inferencePool === source),
+          );
+        return (
+          source === "automatic" ||
+          source ===
+            (connection.ownership.managedByWorkspaceId === input.workspaceId
+              ? "workspace"
+              : "organization")
+        );
+      });
+      const sharedIds = shared.map((candidate) => candidate.id);
       const [policies, exclusions] = await Promise.all([
         sharedIds.length === 0
           ? Promise.resolve([])
@@ -186,9 +216,9 @@ export async function listSubscriptionCoreCodexServingConnections(
             }),
         sharedIds.length === 0
           ? Promise.resolve([])
-          : rawRows<{ id: string; excluded_models: string[] | null }>(
+          : rawRows<{ id: string; excluded_models: string[] | null; plan_type: string | null }>(
               tx,
-              sql`select connection.id::text as id, connection.excluded_models
+              sql`select connection.id::text as id, connection.excluded_models, connection.plan_type
                 from subscription_connections connection
                 where connection.account_id = ${input.accountId}::uuid
                   and connection.id in (${sql.join(
@@ -201,18 +231,20 @@ export async function listSubscriptionCoreCodexServingConnections(
       const servingShared = shared.map((candidate) => {
         const applicable = policies.filter(
           (policy) =>
-            policy.connectionId === candidate.connectionId &&
+            policy.connectionId === candidate.id &&
+            policy.allocatorEnabled &&
             (source === "automatic" || policy.inferencePool === source),
         );
         return {
-          connectionId: candidate.connectionId,
+          connectionId: candidate.id,
           ownership: "shared" as const,
-          planType: candidate.planType,
-          allowedModelIds: candidate.allowedModelIds,
-          excludedModelIds: excludedById.get(candidate.connectionId) ?? [],
+          planType: exclusions.find((row) => row.id === candidate.id)?.plan_type ?? null,
+          allowedModelIds:
+            candidate.allowedModelIds === null ? null : [...candidate.allowedModelIds],
+          excludedModelIds: excludedById.get(candidate.id) ?? [],
           // Placement reads explicit rows; without one the connection keeps
           // its management classification and only its own allowlist applies.
-          assignments: policies.some((policy) => policy.connectionId === candidate.connectionId)
+          assignments: policies.some((policy) => policy.connectionId === candidate.id)
             ? applicable.map((policy) => ({
                 allowedModelIds: policy.allowedModelIds,
                 excludedModelIds: policy.excludedModels,

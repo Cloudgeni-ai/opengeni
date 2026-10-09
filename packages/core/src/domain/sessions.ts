@@ -2341,6 +2341,7 @@ export async function retryFailedSession(
       action: "agent_run:create",
       quantity: 1,
       model,
+      ...(turn ? { acceptedTurn: { sessionId: session.id, turnId: turn.id } } : {}),
     },
   );
   const result = await runIdempotentPersistenceTransaction(
@@ -3699,7 +3700,7 @@ async function createSessionForRequestInFileScope(
         "self-hosted execution runs on a Connected Machine, but no machine was selected or inherited; connect the parent session to a machine or provide machineTarget",
     });
   }
-  if (payload.startMode !== "realtime") {
+  if (payload.startMode !== "realtime" && !model.startsWith("codex/")) {
     const frozenCreationInitiator = await measureSessionStartPhase(
       unresolvedDeps.observability,
       "initiator_freeze",
@@ -3821,6 +3822,24 @@ async function createSessionForRequestInFileScope(
               turnId: string,
             ) => {
               await captureLinkedAuthority?.(tx, sessionId, turnId);
+              if (model.startsWith("codex/")) {
+                await requireLimit(
+                  { ...deps, db: tx },
+                  {
+                    accountId: grant.accountId,
+                    workspaceId,
+                    initiatingHumanSubjectId: await getSessionTurnInitiatingHumanSubjectId(
+                      tx,
+                      workspaceId,
+                      turnId,
+                    ),
+                    action: "agent_run:create",
+                    quantity: 1,
+                    model,
+                    acceptedTurn: { sessionId, turnId },
+                  },
+                );
+              }
               if (attachmentOwner)
                 await acceptSessionFileAttachments(tx, {
                   accountId: grant.accountId,
@@ -4272,14 +4291,16 @@ async function acceptSessionUserMessageInFileScope(
         }
       }
     }
-    await requireLimit(deps, {
-      accountId: grant.accountId,
-      workspaceId,
-      initiatingHumanSubjectId: initiatingHumanForAllowance(frozenAdmissionInitiator),
-      action: "agent_run:create",
-      quantity: 1,
-      model: effectiveModel,
-    });
+    if (!effectiveModel.startsWith("codex/")) {
+      await requireLimit(deps, {
+        accountId: grant.accountId,
+        workspaceId,
+        initiatingHumanSubjectId: initiatingHumanForAllowance(frozenAdmissionInitiator),
+        action: "agent_run:create",
+        quantity: 1,
+        model: effectiveModel,
+      });
+    }
     if (requestedResources.some((resource) => resource.kind === "file") && !objectStorage) {
       throw new HTTPException(503, {
         message: "object storage is not configured",
@@ -4402,12 +4423,24 @@ async function acceptSessionUserMessageInFileScope(
         personalConnectionDelegations,
         mcpAccountBindings,
 
-        ...(captureLinkedAuthority
-          ? {
-              captureTurnAuthority: (tx: Database, turnId: string) =>
-                captureLinkedAuthority(tx, sessionId, turnId),
-            }
-          : {}),
+        captureTurnAuthority: async (tx: Database, turnId: string) => {
+          await captureLinkedAuthority?.(tx, sessionId, turnId);
+          // The prompt transaction has frozen the exact authority at this
+          // point. A refusal rolls back both prompt and receipt atomically.
+          if (effectiveModel.startsWith("codex/"))
+            await requireLimit(
+              { ...deps, db: tx },
+              {
+                accountId: grant.accountId,
+                workspaceId,
+                initiatingHumanSubjectId: initiatingHumanForAllowance(frozenAdmissionInitiator),
+                action: "agent_run:create",
+                quantity: 1,
+                model: effectiveModel,
+                acceptedTurn: { sessionId, turnId },
+              },
+            );
+        },
         ...(input.personalResourceAttachment
           ? { personalResourceAttachment: input.personalResourceAttachment }
           : {}),

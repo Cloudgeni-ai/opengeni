@@ -4069,15 +4069,15 @@ DDL, converted credentials and the activation receipt together. Never restart
 a pre-cutover image after commit. Restart sign-in attempts that were pending
 during the cutover. Anthropic API-key connections are unchanged.
 
-### Codex on the shared subscription core (0681)
+### Codex on the shared subscription core (0683)
 
-Migration `0681_subscription_core_codex_cutover.sql` is a one-way maintenance
+Migration `0683_subscription_core_codex_cutover.sql` is a one-way maintenance
 cutover. It moves every organization's Codex (ChatGPT subscription) state onto
 the shared subscription core and enables the Codex cutover for every
 organization in the same transaction. Design record:
 [subscription core, PR 3](design/subscription-core-2026-10-07.md#pr-3-the-drained-codex-cutover).
-The dormant core Codex writers (rolling migration 0679) ship before it, so
-connect, disconnect and redemption keep working on the core once 0681
+The dormant core Codex writers (rolling migration 0680, after 0679 credit consent) ship before it, so
+connect, disconnect and redemption keep working on the core once 0683
 enables the cutover.
 
 Migrated logins without a verified signed-in upstream person remain separate;
@@ -4091,6 +4091,23 @@ a higher personal-authority generation, so old frozen work does not regain it.
 Scheduled-task renames and pause/resume preserve execution digests both before
 and after authority backfill; firings consume the accepted revision's frozen
 authority, with no personal entry for a missing human authorizer.
+
+Rolling 0680 keeps owner-only writer implementations outside the previous
+binary's runtime capability inventory, in `opengeni_subscription_internal`.
+Never grant that schema or its functions to runtime roles to repair readiness.
+Old and new binaries remain compatible before 0683; after 0683, only matching
+cutover binaries may start.
+
+Duplicate local rows merge the model policies of **enabled** rows only; a paused
+unrestricted row cannot widen an enabled restricted one. SQL parity independently
+checks this union. Extra-credit opt-in carries forward only when all merged rows
+opted in, retaining the maximum consent version. A mixed opt-in is disabled and
+reported as `extra_credit_consent_conflict_disabled`; an administrator may make
+a fresh explicit decision after cutover. Live/Apps retain their existing source
+policy; automatic chat catalogs consider both eligible shared pools. Personal
+funding outside a Personal workspace requires the exact durable accepted turn,
+not a viewer's live membership. Prompt admission checks this frozen context
+inside its transaction; generic shared-workspace catalogs remain personal-free.
 
 **1. Inventory (before the window).** Record the source counts the migration
 will compare, by organization and legacy source, as the schema owner:
@@ -4132,7 +4149,7 @@ ownership ambiguity (the message lists content-free classes such as
 `provider_identity_mismatch`, `personal_workspace_owner_ambiguous`,
 `personal_owner_missing`, `fedramp_mismatch`, `unrepresentable_status`,
 `session_owner_ambiguous`); pre-existing core Codex state; or any parity
-mismatch (`0681 parity mismatch (<metrics>)`). A database error while writing
+mismatch (`0683 parity mismatch (<metrics>)`). A database error while writing
 the core surfaces only as `could not write the shared core (SQLSTATE <code>,
 <constraint>)`: no statement parameter, credential, label or email leaves the
 migration. Fix the named legacy rows (for example disconnect a duplicate
@@ -4140,7 +4157,7 @@ account whose `id_token` names another ChatGPT account) and run the migrator
 again; nothing was committed.
 
 **5. Provision roles and start.** Run `db:provision-roles`, then start only
-binaries of this release. Runtime readiness refuses a database without the 0681
+binaries of this release. Runtime readiness refuses a database without the 0683
 receipt (`opengeni_private.subscription_codex_cutover_v1_active()`), so a new
 binary cannot run before the migration, and an older binary must never be
 restarted after it.

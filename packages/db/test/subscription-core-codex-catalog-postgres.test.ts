@@ -122,18 +122,24 @@ async function setCutover(org: Org, enabled: boolean | null): Promise<void> {
 async function sharedConnection(
   org: Org,
   label: string,
-  options: { allowedModelIds?: string[] | null } = {},
+  options: {
+    allowedModelIds?: string[] | null;
+    managedByWorkspaceId?: string;
+    allocatorEnabled?: boolean;
+  } = {},
 ): Promise<string> {
   const [row] = await shared!.admin<{ id: string }[]>`
     insert into subscription_connections (
       account_id, provider, kind, credential_encrypted, ownership, scope_kind,
-      provider_account_id, plan_type, provider_state, expires_at, allowed_model_ids, label
+      provider_account_id, plan_type, provider_state, expires_at, allowed_model_ids, label,
+      managed_by_workspace_id, allocator_enabled
     ) values (
       ${org.accountId}::uuid, 'codex', 'subscription', ${encryptedTokens(label)},
       'shared', 'organization', ${`chatgpt-${label}`}, 'pro',
       ${shared!.admin.json({ isFedramp: false })}::jsonb,
       ${new Date(Date.now() + 86_400_000).toISOString()}::timestamptz,
-      ${options.allowedModelIds ?? null}::text[], ${label}
+      ${options.allowedModelIds ?? null}::text[], ${label},
+      ${options.managedByWorkspaceId ?? null}::uuid, ${options.allocatorEnabled ?? true}
     ) returning id::text as id`;
   return row!.id;
 }
@@ -197,6 +203,100 @@ function serving(org: Org, workspaceId: string, subjectId: string | null) {
 }
 
 describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover", () => {
+  test("automatic chat readiness retains organization capacity beside a disabled local pool", async () => {
+    const org = await organization();
+    const organizationId = await sharedConnection(org, "healthy-org");
+    await sharedConnection(org, "paused-local", {
+      managedByWorkspaceId: org.sharedWorkspaceId,
+      allocatorEnabled: false,
+    });
+    expect(
+      (await serving(org, org.sharedWorkspaceId, null)).map((row) => row.connectionId),
+    ).toEqual([organizationId]);
+    expect(
+      await workspaceCodexSubscriptionActive(client!.db, settings, org.sharedWorkspaceId),
+    ).toBe(true);
+    expect(
+      await isCodexBilledTurn({
+        db: client!.db,
+        settings,
+        workspaceId: org.sharedWorkspaceId,
+        model: MODEL,
+      }),
+    ).toBe(true);
+  });
+
+  test("personal funding in a private shared-workspace session requires its exact accepted v2", async () => {
+    const org = await organization();
+    await personalConnection(org, "exact-personal");
+    await allowPersonalFallback(org, true);
+    await shared!.admin`insert into subscription_person_preferences
+      (account_id, organization_membership_id, personal_fallback_opt_in)
+      values (${org.accountId}::uuid, ${org.ownerMembershipId}::uuid, true)`;
+    const accept = (human: boolean) =>
+      withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, async () => {
+        const session = await createSession(client!.db, {
+          accountId: org.accountId,
+          workspaceId: org.sharedWorkspaceId,
+          subjectId: org.ownerSubjectId,
+          initialMessage: "private funded",
+          resources: [],
+          metadata: {},
+          model: MODEL,
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          visibility: "user_private",
+          createdBy: { kind: "subject", subjectId: org.ownerSubjectId },
+          createdByContext: {},
+        });
+        const turn = await enqueueSessionTurn(client!.db, {
+          accountId: org.accountId,
+          workspaceId: org.sharedWorkspaceId,
+          sessionId: session.id,
+          triggerEventId: crypto.randomUUID(),
+          temporalWorkflowId: `session-${session.id}`,
+          source: "user",
+          prompt: "funded",
+          resources: [],
+          tools: [],
+          model: MODEL,
+          reasoningEffort: "medium",
+          sandboxBackend: "none",
+          metadata: {},
+          initiator: human
+            ? { kind: "subject", subjectId: org.ownerSubjectId }
+            : { kind: "service", subjectId: "service:funding-fixture" },
+        });
+        return { sessionId: session.id, turnId: turn.id };
+      });
+    const accepted = await accept(true);
+    const request = {
+      db: client!.db,
+      settings,
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      model: MODEL,
+      subjectId: org.ownerSubjectId,
+    };
+    expect(await isCodexBilledTurn(request)).toBe(false);
+    expect(await serving(org, org.sharedWorkspaceId, org.ownerSubjectId)).toEqual([]);
+    expect(await isCodexBilledTurn({ ...request, acceptedTurn: accepted })).toBe(true);
+    const [stored] = await shared!
+      .admin`select subscription_authority from session_turns where id = ${accepted.turnId}::uuid`;
+    expect(stored!.subscription_authority.personal).toHaveLength(1);
+    // A service accepted in the same owner's private session receives no
+    // personal authority merely because current membership is available.
+    const service = await accept(false);
+    expect(await isCodexBilledTurn({ ...request, acceptedTurn: service })).toBe(false);
+    expect(
+      await isCodexBilledTurn({
+        ...request,
+        acceptedTurn: { ...accepted, turnId: crypto.randomUUID() },
+      }),
+    ).toBe(false);
+  });
+
   test("a core-only shared connection makes Codex ready, unrestricted and subscription-billed", async () => {
     const org = await organization();
     const connectionId = await sharedConnection(org, "shared-ready");
