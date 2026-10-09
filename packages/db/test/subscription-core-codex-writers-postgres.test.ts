@@ -101,6 +101,10 @@ async function organization(): Promise<Org> {
       values (${workspace!.id}::uuid, ${accountId}::uuid)`;
     workspaces.push(workspace!.id);
   }
+  // Migration 0680 seeds the organization settings row; the fixture writes its own.
+  await shared!.admin`
+    delete from subscription_settings
+    where account_id = ${accountId}::uuid and workspace_id is null`;
   await shared!.admin`
     insert into subscription_settings (
       account_id, rotation, providers, cross_provider_failover, fallback_order,

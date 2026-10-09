@@ -11,13 +11,9 @@ import {
   createDb,
   createWorkspaceProviderCustomModel,
   getModelConnectionAccess,
-  getCodexCredentialStatus,
   getBillingBalance,
   encryptEnvironmentValue,
-  ensureCodexRotationSettings,
-  updateCodexRotationSettings,
   updateModelConnectionAccess,
-  upsertCodexSubscriptionCredential,
   upsertWorkspaceModelPolicy,
   type DbClient,
 } from "@opengeni/db";
@@ -156,6 +152,34 @@ async function fixture(overrides: Parameters<typeof testSettings>[0] = {}) {
   return { grant, request, config, parity };
 }
 
+/**
+ * A connected Codex subscription after the drained cutover (0680 seeds every
+ * organization enabled on the shared core): an organization-scoped shared
+ * core connection. The legacy Codex tables are frozen and never read.
+ */
+async function connectCoreCodex(
+  grant: AccessGrant,
+  options: {
+    credentialEncrypted?: string;
+    expiresAt?: Date | null;
+    allowedModelIds?: string[] | null;
+  } = {},
+): Promise<string> {
+  const [row] = await shared!.admin<{ id: string }[]>`
+    insert into subscription_connections (
+      account_id, provider, kind, credential_encrypted, ownership, scope_kind,
+      provider_account_id, plan_type, provider_state, expires_at, last_refresh_at,
+      allowed_model_ids
+    ) values (
+      ${grant.accountId}::uuid, 'codex', 'subscription',
+      ${options.credentialEncrypted ?? "metadata-only-fake-secret"}, 'shared', 'organization',
+      ${crypto.randomUUID()}, 'pro', ${shared!.admin.json({ isFedramp: false })}::jsonb,
+      ${options.expiresAt?.toISOString() ?? null}::timestamptz, now(),
+      ${options.allowedModelIds ?? null}::text[]
+    ) returning id::text as id`;
+  return row!.id;
+}
+
 test("PG: disconnected Codex is never advertised or freshly creatable", async () => {
   if (!client) return;
   const f = await fixture();
@@ -256,28 +280,8 @@ test("PG: fallback reasoning comes from the admitted model, not the blocked depl
 test("PG: ready Codex model permissions and workspace policy affect list and create identically", async () => {
   if (!client || !shared) return;
   const f = await fixture();
-  const credential = await upsertCodexSubscriptionCredential(client.db, {
-    accountId: f.grant.accountId,
-    workspaceId: f.grant.workspaceId,
-    credentialEncrypted: "metadata-only-fake-secret",
-    chatgptAccountId: crypto.randomUUID(),
-    scopes: null,
-    planType: "pro",
-    isFedramp: false,
-    expiresAt: null,
-    lastRefreshAt: null,
-  });
-  await ensureCodexRotationSettings(client.db, f.grant.accountId, f.grant.workspaceId);
-  await updateCodexRotationSettings(client.db, f.grant.workspaceId, { rotationEnabled: true });
-  const codexTarget = { ...f.grant, kind: "codex" as const, connectionId: credential.id };
-  const codexAccess = await getModelConnectionAccess(client.db, codexTarget);
-  expect(codexAccess).not.toBeNull();
-  expect(
-    await updateModelConnectionAccess(client.db, codexTarget, {
-      ...codexAccess!,
-      allowedModels: ["codex/gpt-6-sol"],
-    }),
-  ).not.toBeNull();
+  // The connection's model allowlist (the core has no access-policy writer yet).
+  await connectCoreCodex(f.grant, { allowedModelIds: ["codex/gpt-6-sol"] });
   expect((await f.parity(["codex/gpt-6-astra", "codex/invented-model"])).allowedModels).toContain(
     "codex/gpt-6-sol",
   );
@@ -300,9 +304,7 @@ test("PG: an explicit Codex draft creates with zero credits without refreshing i
     environmentsEncryptionKey: encryptionKey.toString("base64"),
   });
   expect((await getBillingBalance(client.db, f.grant.accountId)).balanceMicros).toBe(0);
-  await upsertCodexSubscriptionCredential(client.db, {
-    accountId: f.grant.accountId,
-    workspaceId: f.grant.workspaceId,
+  const connectionId = await connectCoreCodex(f.grant, {
     credentialEncrypted: encryptEnvironmentValue(
       encryptionKey,
       JSON.stringify({
@@ -311,15 +313,8 @@ test("PG: an explicit Codex draft creates with zero credits without refreshing i
         id_token: "synthetic-id-token",
       }),
     ),
-    chatgptAccountId: crypto.randomUUID(),
-    scopes: null,
-    planType: "pro",
-    isFedramp: false,
     expiresAt: new Date(Date.now() + 60_000),
-    lastRefreshAt: new Date(),
   });
-  await ensureCodexRotationSettings(client.db, f.grant.accountId, f.grant.workspaceId);
-  await updateCodexRotationSettings(client.db, f.grant.workspaceId, { rotationEnabled: true });
   const refresh = spyOn(codex, "refreshCodexToken").mockRejectedValue(
     new codex.CodexReloginRequired("Synthetic refresh tokens are not provider credentials"),
   );
@@ -367,10 +362,10 @@ test("PG: an explicit Codex draft creates with zero credits without refreshing i
     });
     expect(refresh).not.toHaveBeenCalled();
     expect(models).not.toHaveBeenCalled();
-    expect(await getCodexCredentialStatus(client.db, f.grant.workspaceId)).toMatchObject({
-      connected: true,
-      status: "active",
-    });
+    const [connection] = await shared.admin<{ status: string; refresh_generation: string }[]>`
+      select status, refresh_generation::text as refresh_generation
+      from subscription_connections where id = ${connectionId}::uuid`;
+    expect(connection).toEqual({ status: "active", refresh_generation: "1" });
   } finally {
     refresh.mockRestore();
     models.mockRestore();
@@ -464,19 +459,7 @@ test("PG: database catalog changes and retired Codex definitions apply to both l
       on conflict (singleton) do update set document = excluded.document, version = deployment_model_catalog.version + 1`;
     const f = await fixture({ modelCatalogSource: "database" });
     await f.parity(["codex/fixture-hot-model", "codex/gpt-6-sol", "gpt-5.6-luna"]);
-    await upsertCodexSubscriptionCredential(client.db, {
-      accountId: f.grant.accountId,
-      workspaceId: f.grant.workspaceId,
-      credentialEncrypted: "metadata-only-fake-secret",
-      chatgptAccountId: crypto.randomUUID(),
-      scopes: null,
-      planType: "pro",
-      isFedramp: false,
-      expiresAt: null,
-      lastRefreshAt: null,
-    });
-    await ensureCodexRotationSettings(client.db, f.grant.accountId, f.grant.workspaceId);
-    await updateCodexRotationSettings(client.db, f.grant.workspaceId, { rotationEnabled: true });
+    await connectCoreCodex(f.grant);
     expect((await f.parity(["codex/gpt-6-sol"])).allowedModels).toContain(
       "codex/fixture-hot-model",
     );

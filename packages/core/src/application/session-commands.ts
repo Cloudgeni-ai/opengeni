@@ -172,6 +172,7 @@ async function assertFreshAgentCommandAllowance(
     throw new HTTPException(404, { message: "Target session not found" });
   }
   let fundedWithoutCredits = false;
+  const frozen = await frozenInitiatorForCommandActor(tx, context.workspaceId, agentActor(context));
   if (deps.settings) {
     const { settings } = await resolveWorkspaceCatalogSettings(tx, deps.settings, {
       accountId: target.accountId,
@@ -183,6 +184,8 @@ async function assertFreshAgentCommandAllowance(
       settings,
       workspaceId: context.workspaceId,
       model: target.model,
+      accountId: target.accountId,
+      subjectId: initiatingHumanForAllowance(frozen),
     });
     fundedWithoutCredits = modelFundingForAdmission(
       settings,
@@ -190,7 +193,6 @@ async function assertFreshAgentCommandAllowance(
       codexBilled,
     ).fundedWithoutCredits;
   }
-  const frozen = await frozenInitiatorForCommandActor(tx, context.workspaceId, agentActor(context));
   const refusal = await checkWorkspaceAllowance(tx, {
     accountId: target.accountId,
     workspaceId: context.workspaceId,

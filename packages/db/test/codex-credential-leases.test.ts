@@ -1840,6 +1840,10 @@ describe("credential allocator atomic Codex credential allocation", () => {
   test("pool-aware admission stays active when only a non-pointer credential is healthy", async () => {
     if (!available) return;
     const [ws] = await freshAccount();
+    // Migration 0680 seeds every organization enabled on the shared core;
+    // this covers the legacy pool, so it starts from the pre-cutover world.
+    await admin`delete from subscription_provider_cutovers
+      where account_id = ${ws!.accountId}::uuid and provider = 'codex'`;
     const activeCredential = await connectCredential(ws!, "pointer-broken");
     await connectCredential(ws!, "healthy-alternate");
     expect(await setActiveCodexCredential(dbA, ws!.workspaceId, activeCredential)).toBe(true);

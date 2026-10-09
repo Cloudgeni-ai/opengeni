@@ -1,3 +1,4 @@
+import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import AxeBuilder from "@axe-core/playwright";
@@ -350,6 +351,22 @@ beforeAll(async () => {
   shared = await acquireDatabase();
   if (!shared) {
     throw new Error("Codex quota browser E2E requires real PostgreSQL; no skip is permitted");
+  }
+  // This exercises the legacy Codex overview and redemption routes, which M3
+  // PR 4 deletes. Migration 0680 seeds every organization on the shared core;
+  // restore the pre-cutover world (no Codex row) in this dedicated database.
+  {
+    const legacyAdmin = postgres(shared.adminUrl, { max: 1 });
+    try {
+      await legacyAdmin`alter table managed_accounts disable trigger managed_accounts_subscription_codex_cutover_seed`;
+      await legacyAdmin.begin(async (tx) => {
+        await tx`alter table subscription_provider_cutovers no force row level security`;
+        await tx`delete from subscription_provider_cutovers where provider = 'codex'`;
+        await tx`alter table subscription_provider_cutovers force row level security`;
+      });
+    } finally {
+      await legacyAdmin.end();
+    }
   }
   client = createDb(shared.appUrl, { max: 16 });
   browser = await chromium.launch(

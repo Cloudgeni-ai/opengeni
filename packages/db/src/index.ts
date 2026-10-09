@@ -297,6 +297,12 @@ export type {
 } from "./codex-account-types";
 export * from "./subscription-core-codex-operations";
 export * from "./subscription-core-codex-connections";
+export * from "./subscription-core-codex-catalog";
+import {
+  listSubscriptionCoreCodexServingConnections,
+  readCodexCutoverDispositionForWorkspace,
+  subscriptionCoreCodexConnectionAllowlist,
+} from "./subscription-core-codex-catalog";
 import {
   listSubscriptionCoreCodexPersonalAccountsInTransaction,
   projectSubscriptionCoreCodexWorkspace,
@@ -21733,6 +21739,10 @@ export async function updateSessionVariableSets(
                 where codex_waiter.workspace_id = ${input.workspaceId}
                   and codex_waiter.session_id = ${input.sessionId}
                   and codex_waiter.status = 'waiting')
+              or exists (select 1 from subscription_capacity_waiters core_waiter
+                where core_waiter.workspace_id = ${input.workspaceId}::uuid
+                  and core_waiter.session_id = ${input.sessionId}::uuid
+                  and core_waiter.provider = 'codex')
               or exists (select 1 from ${schema.xaiCapacityWaiters} xai_waiter
                 where xai_waiter.workspace_id = ${input.workspaceId}
                   and xai_waiter.session_id = ${input.sessionId}
@@ -24873,6 +24883,19 @@ export async function getOrganizationCodexRotationSettings(
   });
 }
 
+/**
+ * The organization administrator check of the organization Codex routes on
+ * its own: the generic administration overview (42501 not authorized, P0002
+ * unknown organization) with no read of the legacy Codex tables, which 0680
+ * left read-only and blanked. The route reads the cutover row after this.
+ */
+export async function assertOrganizationCodexAdministrator(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string },
+): Promise<void> {
+  await withOrganizationCodexAdministrator(db, input, async () => undefined);
+}
+
 export async function setActiveOrganizationCodexCredential(
   db: Database,
   input: { organizationId: string; actorSubjectId: string; credentialId: string },
@@ -25953,8 +25976,49 @@ export async function getCodexCredentialStatus(
  * This is the SAME condition `settingsWithCodexCredential` (worker) uses to
  * decide whether to inject the synthetic codex-subscription provider, so billing
  * and provider-injection cannot drift. Metadata-only read (never the secret).
+ *
+ * Gated by the organization's Codex cutover row (M3 PR 3): without a row the
+ * legacy pool below decides, unchanged; a disabled row is maintenance (false,
+ * no legacy read); an enabled row asks the shared core whether a connection
+ * can serve new work of `context.subjectId` here (shared capacity only
+ * without a human subject). The legacy tables are frozen after 0680 and are
+ * never read for an organization with a row.
  */
 export async function workspaceCodexSubscriptionActive(
+  db: Database,
+  settings: Pick<Settings, "codexSubscriptionEnabled">,
+  workspaceId: string,
+  acceptedTurnId?: string,
+  context: { accountId?: string | null; subjectId?: string | null } = {},
+): Promise<boolean> {
+  if (!settings.codexSubscriptionEnabled) {
+    return false;
+  }
+  return await withCodexActiveReadRetry(async () => {
+    const { accountId, disposition } = await readCodexCutoverDispositionForWorkspace(
+      db,
+      workspaceId,
+      context.accountId,
+    );
+    if (disposition === "maintenance") return false;
+    if (disposition === "core") {
+      const serving = await listSubscriptionCoreCodexServingConnections(db, {
+        accountId,
+        workspaceId,
+        subjectId: context.subjectId ?? null,
+      });
+      return serving.length > 0;
+    }
+    return await readLegacyWorkspaceCodexSubscriptionActive(db, workspaceId, acceptedTurnId);
+  });
+}
+
+/**
+ * The legacy active-credential read alone, for a caller that has already
+ * established the `legacy` Codex cutover disposition (no row) for this
+ * organization. PR 4 deletes it with the legacy tables' readers.
+ */
+export async function legacyWorkspaceCodexSubscriptionActive(
   db: Database,
   settings: Pick<Settings, "codexSubscriptionEnabled">,
   workspaceId: string,
@@ -25963,6 +26027,49 @@ export async function workspaceCodexSubscriptionActive(
   if (!settings.codexSubscriptionEnabled) {
     return false;
   }
+  return await withCodexActiveReadRetry(
+    async () => await readLegacyWorkspaceCodexSubscriptionActive(db, workspaceId, acceptedTurnId),
+  );
+}
+
+async function readLegacyWorkspaceCodexSubscriptionActive(
+  db: Database,
+  workspaceId: string,
+  acceptedTurnId: string | undefined,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
+    if (acceptedTurnId) {
+      const acceptedSource = await codexSourceForTurn(
+        scopedDb,
+        workspaceId,
+        acceptedTurnId,
+        pool.source.effectiveSource,
+      );
+      pool.source.effectiveSource = acceptedSource;
+      pool.condition =
+        acceptedSource === "disabled"
+          ? null
+          : codexCredentialPoolCondition({
+              accountId: pool.source.accountId,
+              workspaceId,
+              source: acceptedSource,
+            });
+    }
+    if (!pool.condition || pool.source.effectiveSource === "disabled") return false;
+    // Provider admission is pool-aware even when rotation is disabled. The
+    // active pointer governs allocation policy, not whether the connected
+    // subscription provider exists for billing and routing.
+    const [row] = await scopedDb
+      .select({ id: schema.codexSubscriptionCredentials.id })
+      .from(schema.codexSubscriptionCredentials)
+      .where(and(pool.condition, eq(schema.codexSubscriptionCredentials.status, "active")))
+      .limit(1);
+    return Boolean(row);
+  });
+}
+
+async function withCodexActiveReadRetry(read: () => Promise<boolean>): Promise<boolean> {
   // Bounded re-read. A TRANSIENT read failure (a pooled-connection blip or a
   // lost RLS GUC — now thrown loud by withRlsContext's read-back guard rather
   // than silently returning zero rows) must never permanently decide a
@@ -25975,36 +26082,7 @@ export async function workspaceCodexSubscriptionActive(
   let lastError: unknown;
   for (let attempt = 0; attempt < CODEX_ACTIVE_READ_ATTEMPTS; attempt++) {
     try {
-      return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-        const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
-        if (acceptedTurnId) {
-          const acceptedSource = await codexSourceForTurn(
-            scopedDb,
-            workspaceId,
-            acceptedTurnId,
-            pool.source.effectiveSource,
-          );
-          pool.source.effectiveSource = acceptedSource;
-          pool.condition =
-            acceptedSource === "disabled"
-              ? null
-              : codexCredentialPoolCondition({
-                  accountId: pool.source.accountId,
-                  workspaceId,
-                  source: acceptedSource,
-                });
-        }
-        if (!pool.condition || pool.source.effectiveSource === "disabled") return false;
-        // Provider admission is pool-aware even when rotation is disabled. The
-        // active pointer governs allocation policy, not whether the connected
-        // subscription provider exists for billing and routing.
-        const [row] = await scopedDb
-          .select({ id: schema.codexSubscriptionCredentials.id })
-          .from(schema.codexSubscriptionCredentials)
-          .where(and(pool.condition, eq(schema.codexSubscriptionCredentials.status, "active")))
-          .limit(1);
-        return Boolean(row);
-      });
+      return await read();
     } catch (error) {
       lastError = error;
       if (attempt < CODEX_ACTIVE_READ_ATTEMPTS - 1) {
@@ -26049,6 +26127,13 @@ export async function isCodexBilledTurn(input: {
   settings: Pick<Settings, "codexSubscriptionEnabled">;
   workspaceId: string;
   model: string | null | undefined;
+  /** The organization, when the caller holds it (saves one lookup). */
+  accountId?: string | null;
+  /**
+   * The accepted work's causal human. On the shared core their own personal
+   * Codex connection in their Personal workspace also funds the turn.
+   */
+  subjectId?: string | null;
   /**
    * Precomputed `workspaceCodexSubscriptionActive` result (P2-b). When the caller
    * already resolved the active flag for provider injection, pass it here so the
@@ -26064,7 +26149,10 @@ export async function isCodexBilledTurn(input: {
   if (input.active !== undefined) {
     return input.active;
   }
-  return workspaceCodexSubscriptionActive(input.db, input.settings, input.workspaceId);
+  return workspaceCodexSubscriptionActive(input.db, input.settings, input.workspaceId, undefined, {
+    accountId: input.accountId ?? null,
+    subjectId: input.subjectId ?? null,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -31462,21 +31550,52 @@ export async function getWorkspaceConnectionModelRestrictions(
   authoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1,
   claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1,
 ) {
-  const [accounts, rotation] = await Promise.all([
-    listCodexAccountStatuses(db, workspaceId),
-    getCodexRotationSettings(db, workspaceId),
-  ]);
-  const selectableAccounts = rotation?.rotationEnabled
-    ? accounts
-    : accounts.filter((account) => account.id === rotation?.activeCredentialId);
   return await resolveWorkspaceConnectionModelRestrictions(
     db,
     workspaceId,
     subjectId,
-    selectableAccounts,
+    await codexAccountsForModelRestrictions(db, workspaceId, subjectId),
     authoritySnapshot,
     claudeAuthoritySnapshot,
   );
+}
+
+/**
+ * The Codex accounts whose model allowlists bound the `codex/` restriction,
+ * by the organization's Codex cutover row (M3 PR 3): the legacy selectable
+ * pool without a row; the core connections that can serve this subject's new
+ * work with an enabled row; none (every Codex model closed) while the
+ * cutover is disabled. No legacy table is read for an organization with a
+ * row.
+ */
+async function codexAccountsForModelRestrictions(
+  db: Database,
+  workspaceId: string,
+  subjectId: string,
+): Promise<
+  Array<{ status: string; allocatorEnabled: boolean; allowedModelIds?: string[] | null }>
+> {
+  const { accountId, disposition } = await readCodexCutoverDispositionForWorkspace(db, workspaceId);
+  if (disposition === "maintenance") return [];
+  if (disposition === "core") {
+    const serving = await listSubscriptionCoreCodexServingConnections(db, {
+      accountId,
+      workspaceId,
+      subjectId,
+    });
+    return serving.map((connection) => ({
+      status: "active",
+      allocatorEnabled: true,
+      allowedModelIds: subscriptionCoreCodexConnectionAllowlist(connection),
+    }));
+  }
+  const [accounts, rotation] = await Promise.all([
+    listCodexAccountStatuses(db, workspaceId),
+    getCodexRotationSettings(db, workspaceId),
+  ]);
+  return rotation?.rotationEnabled
+    ? accounts
+    : accounts.filter((account) => account.id === rotation?.activeCredentialId);
 }
 
 /**
@@ -34332,6 +34451,72 @@ export async function getSubscriptionCoreCodexSessionPointers(
     });
   }
   return pointers;
+}
+
+/**
+ * The legacy `codexCurrentSelection` of core sessions (M3 PR 3): for an
+ * active Codex turn, the live core lease of a running turn, or the session's
+ * explicit core choice while it waits for capacity; null otherwise. The same
+ * rule as `getSubscriptionCoreSessionCodexAccounts`. Never reads a legacy
+ * Codex table (the legacy lease and pin columns are frozen after 0680).
+ */
+export async function getSubscriptionCoreCodexCurrentSelections(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionIds: readonly string[] },
+): Promise<Map<string, { credentialId: string | null; waiting: boolean }>> {
+  const selections = new Map<string, { credentialId: string | null; waiting: boolean }>();
+  const ids = [...new Set(input.sessionIds)];
+  if (ids.length === 0) return selections;
+  const rows = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) =>
+      await rawRows<{
+        session_id: string;
+        status: string;
+        lease_connection_id: string | null;
+        binding_connection_id: string | null;
+        binding_choice: string | null;
+      }>(
+        tx,
+        sql`select session.id::text as session_id, turn.status,
+            lease.connection_id::text as lease_connection_id,
+            binding.connection_id::text as binding_connection_id,
+            binding.choice as binding_choice
+          from sessions session
+          join session_turns turn on turn.account_id = session.account_id
+            and turn.workspace_id = session.workspace_id and turn.session_id = session.id
+            and turn.id = session.active_turn_id
+          left join subscription_leases lease
+            on lease.account_id = turn.account_id and lease.workspace_id = turn.workspace_id
+              and lease.turn_id = turn.id and lease.provider = 'codex'
+              and lease.leased_until > clock_timestamp()
+          left join subscription_session_bindings binding
+            on binding.account_id = session.account_id
+              and binding.workspace_id = session.workspace_id
+              and binding.session_id = session.id and binding.provider = 'codex'
+          where session.account_id = ${input.accountId}::uuid
+            and session.workspace_id = ${input.workspaceId}::uuid
+            and session.id in (${sql.join(
+              ids.map((id) => sql`${id}::uuid`),
+              sql`, `,
+            )})
+            and turn.status in ('running', 'recovering', 'waiting_capacity', 'requires_action')
+            and turn.model like 'codex/%'`,
+      ),
+  );
+  for (const row of rows) {
+    const waiting = row.status === "waiting_capacity";
+    selections.set(row.session_id, {
+      waiting,
+      credentialId: waiting
+        ? row.binding_choice === "explicit"
+          ? row.binding_connection_id
+          : null
+        : row.lease_connection_id,
+    });
+  }
+  return selections;
 }
 
 /**
@@ -70044,7 +70229,7 @@ export async function getSessionGoalWithContinuation(
           ),
         )
         .limit(1);
-      const [capacityWait] = await tx
+      const [legacyCapacityWait] = await tx
         .select({ nextCheckAt: schema.codexCapacityWaiters.nextCheckAt })
         .from(schema.codexCapacityWaiters)
         .where(
@@ -70057,6 +70242,21 @@ export async function getSessionGoalWithContinuation(
           ),
         )
         .limit(1);
+      // A shared-core Codex waiter for the same goal fence (the only kind
+      // written after 0680; the legacy table is frozen).
+      const coreCapacityWait = legacyCapacityWait
+        ? null
+        : await readSubscriptionCoreCodexWaiterInTransaction(tx as unknown as Database, {
+            workspaceId,
+            sessionId,
+          });
+      const capacityWait =
+        legacyCapacityWait ??
+        (coreCapacityWait &&
+        coreCapacityWait.goalId === goal.id &&
+        coreCapacityWait.goalVersion === goal.version
+          ? { nextCheckAt: coreCapacityWait.nextCheckAt }
+          : undefined);
       const xaiCapacityWait = await getXaiCapacityWaitForSessionInTransaction(
         tx,
         workspaceId,
@@ -73039,6 +73239,13 @@ export async function materializeGoalContinuation(
             ),
           )
           .limit(1);
+        // A shared-core Codex waiter (the only kind written after 0680).
+        const coreCapacityWait = capacityWait
+          ? null
+          : await readSubscriptionCoreCodexWaiterInTransaction(tx as unknown as Database, {
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+            });
         const xaiCapacityWait = await getXaiCapacityWaitForSessionInTransaction(
           tx,
           input.workspaceId,
@@ -73049,7 +73256,7 @@ export async function materializeGoalContinuation(
           input.workspaceId,
           input.sessionId,
         );
-        if (capacityWait || xaiCapacityWait || claudeCapacityWait) {
+        if (capacityWait || coreCapacityWait || xaiCapacityWait || claudeCapacityWait) {
           return { action: "none", events: [] } as const;
         }
 
@@ -74028,12 +74235,14 @@ export async function initializeSessionStartAtomically(
           );
           let initialTurnInitiatingHumanSubjectId =
             creator.initiator.kind === "subject" ? creator.initiator.subjectId : null;
+          let causalParentSubscriptionAuthority: SubscriptionPersonalAuthorityV2 | null = null;
           if (session.parentSessionId && session.parentTurnId) {
             const [causalParentTurn] = await tx
               .select({
                 initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
                 initiatorKind: schema.sessionTurns.initiatorKind,
                 initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+                subscriptionAuthority: schema.sessionTurns.subscriptionAuthority,
               })
               .from(schema.sessionTurns)
               .where(
@@ -74053,6 +74262,7 @@ export async function initializeSessionStartAtomically(
               (causalParentTurn.initiatorKind === "subject"
                 ? causalParentTurn.initiatorSubjectId
                 : null);
+            causalParentSubscriptionAuthority = causalParentTurn.subscriptionAuthority ?? null;
           }
           if (initialPersonalConnectionDelegations.length > 0) {
             if (!initialTurnInitiatingHumanSubjectId) {
@@ -74069,9 +74279,13 @@ export async function initializeSessionStartAtomically(
           queueTailPosition += 1;
           const acceptedAt = new Date();
           // Codex v2 accepted authority (M3 PR 2a): only the owner's own
-          // initial message freezes personal authority; a child session's
-          // first turn (causal parent human) and other creators freeze none.
-          // A scheduled firing copies its task's frozen value (M3 PR 3b).
+          // initial message freezes personal authority. A scheduled firing
+          // copies its task's frozen value (M3 PR 3b). A child session's first
+          // turn takes its exact causal parent turn's immutable value (M3 PR 3,
+          // design 3.7 EP-T13), never a fresh computation: it gains nothing the
+          // parent did not hold, and the database rechecks owner, session and
+          // generation before any personal lease. A parent with no v2 value
+          // yields the empty value once the cutover is enabled.
           const initialSubscriptionAuthority =
             input.initialSubscriptionAuthority !== undefined
               ? await codexSubscriptionAuthorityV2OrEmptyInTransaction(
@@ -74080,7 +74294,17 @@ export async function initializeSessionStartAtomically(
                   input.initialSubscriptionAuthority,
                 )
               : session.parentSessionId
-                ? null
+                ? causalParentSubscriptionAuthority !== null
+                  ? causalParentSubscriptionAuthority
+                  : await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
+                      tx as unknown as Database,
+                      {
+                        accountId: session.accountId,
+                        workspaceId: input.workspaceId,
+                        sessionId: session.id,
+                        acceptingSubjectId: null,
+                      },
+                    )
                 : await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
                     tx as unknown as Database,
                     {
@@ -77334,6 +77558,13 @@ export async function claimSessionWorkForAttempt(
                   ),
                 )
                 .limit(1);
+              // A shared-core Codex waiter (the only kind written after 0680).
+              const coreWaiter = codexWaiter
+                ? null
+                : await readSubscriptionCoreCodexWaiterInTransaction(tx as unknown as Database, {
+                    workspaceId,
+                    sessionId,
+                  });
               const xaiWaiter = await getXaiCapacityWaitForSessionInTransaction(
                 tx as unknown as Database,
                 workspaceId,
@@ -77344,7 +77575,7 @@ export async function claimSessionWorkForAttempt(
                 workspaceId,
                 sessionId,
               );
-              if (codexWaiter || xaiWaiter || claudeWaiter) {
+              if (codexWaiter || coreWaiter || xaiWaiter || claudeWaiter) {
                 return { action: "unclaimed", reason: "no-work" };
               }
             }
@@ -81168,6 +81399,13 @@ export async function failSessionWorkBeforeAttemptClaim(
                   ),
                 )
                 .limit(1);
+              // A shared-core Codex waiter (the only kind written after 0680).
+              const coreWaiter = codexWaiter
+                ? null
+                : await readSubscriptionCoreCodexWaiterInTransaction(tx as unknown as Database, {
+                    workspaceId,
+                    sessionId: input.sessionId,
+                  });
               const xaiWaiter = await getXaiCapacityWaitForSessionInTransaction(
                 tx as unknown as Database,
                 workspaceId,
@@ -81178,7 +81416,7 @@ export async function failSessionWorkBeforeAttemptClaim(
                 workspaceId,
                 input.sessionId,
               );
-              if (codexWaiter || xaiWaiter || claudeWaiter) {
+              if (codexWaiter || coreWaiter || xaiWaiter || claudeWaiter) {
                 return { action: "stale", turnId: null, events: [] } as const;
               }
             }

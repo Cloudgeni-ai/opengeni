@@ -36,6 +36,8 @@ export async function agentRunAdmissionDenial(
     settings: services.settings,
     workspaceId: input.workspaceId,
     model: input.model,
+    accountId: input.accountId,
+    subjectId: input.initiatingHumanSubjectId ?? null,
   });
   const externallyBilled = modelFundingForAdmission(
     services.settings,

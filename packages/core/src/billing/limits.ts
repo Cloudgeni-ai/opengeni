@@ -110,6 +110,10 @@ export async function checkLimit(
         settings: deps.settings,
         workspaceId: input.workspaceId,
         model: input.model,
+        // On the shared Codex core the causal human's own personal
+        // connection in their Personal workspace also funds the turn.
+        accountId: input.accountId,
+        subjectId: input.initiatingHumanSubjectId ?? null,
       })
     : false;
   const { fundedWithoutCredits, countsTowardTokenCap } = modelFundingForAdmission(

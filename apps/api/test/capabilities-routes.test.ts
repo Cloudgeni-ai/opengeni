@@ -59,6 +59,12 @@ beforeAll(async () => {
   const grant = access.workspaceGrants[0]!;
   workspaceId = grant.workspaceId;
   accountId = grant.accountId;
+  // Migration 0680 seeds every organization enabled on the shared core. This
+  // suite covers the legacy Apps designation, so it starts from the
+  // pre-cutover world (no Codex cutover row).
+  await shared.admin`
+    delete from subscription_provider_cutovers
+    where account_id = ${accountId}::uuid and provider = 'codex'`;
   await shared.admin`
     update workspace_memberships
     set permissions = '["workspace:read", "workspace:admin", "connections:write", "capabilities:manage"]'::jsonb

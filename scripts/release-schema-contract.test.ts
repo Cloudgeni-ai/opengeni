@@ -82,6 +82,18 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers the drained Codex subscription-core cutover as maintenance-only", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0681_subscription_core_codex_cutover.sql",
+      ),
+    ).toMatchObject({
+      path: "0681_subscription_core_codex_cutover.sql",
+      deploymentMode: "maintenance",
+    });
+  });
+
   test("registers the subscription people-assignment read policy fix as rolling", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -317,6 +329,12 @@ describe("release schema contract", () => {
     );
     if (subscriptionCoreCodexWriters) {
       expect(subscriptionCoreCodexWriters.deploymentMode).toBe("rolling");
+    }
+    const subscriptionCoreCodexCutover = sourceContract.migrations.find(
+      (migration) => migration.path === "0681_subscription_core_codex_cutover.sql",
+    );
+    if (subscriptionCoreCodexCutover) {
+      expect(subscriptionCoreCodexCutover.deploymentMode).toBe("maintenance");
     }
     // Keep the published-history assertions below scoped to their existing
     // migration range; the new forward migration is checked explicitly above.
@@ -2227,6 +2245,7 @@ describe("release schema contract", () => {
     }
     const appendedMigrationPaths = [
       "0686_target_tool_approval_bindings.sql",
+      "0681_subscription_core_codex_cutover.sql",
       "0671_subscription_core_codex_operations.sql",
       "0688_subscription_core_codex_writers.sql",
       "0670_subscription_core_codex_apps.sql",

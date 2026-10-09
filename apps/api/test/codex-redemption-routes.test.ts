@@ -358,6 +358,11 @@ beforeAll(async () => {
     return;
   }
   admin = shared.admin;
+  // These exercise the legacy Codex redemption routes, which M3 PR 4 deletes.
+  // Migration 0680 starts every organization on the shared core; this file
+  // reproduces the pre-cutover world in its own dedicated database only.
+  await admin`alter table managed_accounts disable trigger managed_accounts_subscription_codex_cutover_seed`;
+  await admin`delete from subscription_provider_cutovers where provider = 'codex'`;
   client = createDb(shared.appUrl, { max: 16 });
 
   for (const userId of [OWNER_USER_ID, OTHER_USER_ID]) {

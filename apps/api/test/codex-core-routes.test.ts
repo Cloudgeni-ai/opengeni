@@ -857,9 +857,10 @@ function organizationAdminRequest(path: string, init: RequestInit = {}): Request
 describe("organization Codex routes with a cutover row", () => {
   function organizationCutover(disposition: "core" | "maintenance") {
     cutover(disposition);
-    // The organization administrator check (no Codex state is returned).
-    mock("getOrganizationCodexRotationSettings", async () => null);
+    // The organization administrator check, with no legacy Codex read.
+    mock("assertOrganizationCodexAdministrator", async () => undefined);
     for (const legacy of [
+      "getOrganizationCodexRotationSettings",
       "listOrganizationCodexAccountStatuses",
       "setActiveOrganizationCodexCredential",
       "updateOrganizationCodexRotationSettings",

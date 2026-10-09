@@ -339,6 +339,10 @@ describe("codex_subscription_credentials accessors", () => {
   test("workspaceCodexSubscriptionActive reflects the ACTIVE account's status", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
+    // Migration 0680 seeds every organization enabled on the shared core;
+    // this covers the legacy pool, so it starts from the pre-cutover world.
+    await admin`delete from subscription_provider_cutovers
+      where account_id = ${ws.accountId}::uuid and provider = 'codex'`;
     const enabled = { codexSubscriptionEnabled: true } as Parameters<
       typeof workspaceCodexSubscriptionActive
     >[1];

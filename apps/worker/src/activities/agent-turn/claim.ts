@@ -353,13 +353,13 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // reads no legacy Codex table at claim. For its accepted Codex turns the
   // shared core decides availability at placement, so the catalog provider is
   // installed when the cutover is enabled; a disabled cutover fails closed at
-  // placement. The row is read once, with the legacy read's bounded retry.
-  const codexPolicyTurn =
-    claimedPolicy.kind === "valid" && claimedPolicy.policy.providerId === "codex-subscription";
-  const codexActive =
-    mcpSettings.codexSubscriptionEnabled && codexPolicyTurn
-      ? claimCodexActiveFromCutover(await codexCutoverState())
-      : "read_legacy";
+  // placement. Every other turn of such an organization (another model, or a
+  // turn without a stored policy) installs the same overlay by the same rule:
+  // after 0680 the legacy tables are frozen and must not decide it. The row
+  // is read once, with the legacy read's bounded retry.
+  const codexActive = mcpSettings.codexSubscriptionEnabled
+    ? claimCodexActiveFromCutover(await codexCutoverState())
+    : "read_legacy";
   const codexSubscriptionActive =
     codexActive === "read_legacy"
       ? await workspaceCodexSubscriptionActive(db, mcpSettings, input.workspaceId, turn.id)

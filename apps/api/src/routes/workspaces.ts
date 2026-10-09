@@ -54,7 +54,7 @@ import {
   type WorkspaceMemberCandidate,
   type WorkspaceMember as WorkspaceMemberValue,
 } from "@opengeni/contracts";
-import { loadWorkspaceCodexModelAvailability } from "@opengeni/core";
+import { loadWorkspaceCodexCatalogReadiness } from "@opengeni/core";
 import {
   allWorkspacePermissions,
   getBillingBalance,
@@ -89,7 +89,7 @@ import {
   updateWorkspace,
   upsertWorkspaceMemberAsWorkspaceManager,
   upsertWorkspaceModelPolicy,
-  workspaceCodexSubscriptionActive,
+  legacyWorkspaceCodexSubscriptionActive,
   readCodexCutoverDisposition,
   listSubscriptionCoreCodexOperationCandidates,
   workspaceControlRequestLockTimeoutMs,
@@ -290,7 +290,11 @@ async function workspaceCodexRealtimeReady(
 ): Promise<boolean> {
   const disposition = await readCodexCutoverDisposition(routeDeps.db, grant.accountId, workspaceId);
   if (disposition === "legacy") {
-    return await workspaceCodexSubscriptionActive(routeDeps.db, routeDeps.settings, workspaceId);
+    return await legacyWorkspaceCodexSubscriptionActive(
+      routeDeps.db,
+      routeDeps.settings,
+      workspaceId,
+    );
   }
   if (disposition === "maintenance" || !routeDeps.settings.codexSubscriptionEnabled) return false;
   const candidates = await listSubscriptionCoreCodexOperationCandidates(routeDeps.db, {
@@ -592,8 +596,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const [
       connectionModelRestrictions,
       policy,
-      codexSubscriptionActive,
-      codexModelAvailability,
+      codexCatalog,
       xaiSubscriptionActive,
       claudePool,
       workspaceConnections,
@@ -603,8 +606,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     ] = await Promise.all([
       getWorkspaceConnectionModelRestrictions(deps.db, workspaceId, grant.subjectId),
       getWorkspaceModelPolicy(deps.db, workspaceId),
-      workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
-      loadWorkspaceCodexModelAvailability(deps.db, resolvedCatalog.settings, workspaceId),
+      // By the organization's Codex cutover row: legacy without one, the
+      // shared core for the caller when enabled, not ready while disabled.
+      loadWorkspaceCodexCatalogReadiness(
+        deps.db,
+        resolvedCatalog.settings,
+        { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+        { activeSettings: deps.settings },
+      ),
       workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
       loadWorkspaceClaudeSubscriptionReadiness(deps.db, resolvedCatalog.settings, {
         accountId: grant.accountId,
@@ -654,8 +663,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       connectionModelRestrictions,
       settings: workspaceCatalogSettings,
       policy,
-      observations: codexModelAvailability,
-      codexSubscriptionActive,
+      observations: codexCatalog.observations,
+      codexSubscriptionActive: codexCatalog.active,
       xaiSubscriptionActive,
       workspaceGatewayConnectionActive: workspaceConnectionActive("vercel_gateway"),
       workspaceGatewayCustomModels: workspaceCustomModels.vercel_gateway,

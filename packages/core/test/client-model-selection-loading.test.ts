@@ -77,7 +77,11 @@ describe("fresh model admission versus live discovery", () => {
       availability,
       balance,
       allowance,
-      spyOn(opengeniDb, "workspaceCodexSubscriptionActive").mockImplementation(async () => active),
+      // The pre-cutover world (no Codex cutover row): the legacy readers decide.
+      spyOn(opengeniDb, "readCodexCutoverDisposition").mockResolvedValue("legacy"),
+      spyOn(opengeniDb, "legacyWorkspaceCodexSubscriptionActive").mockImplementation(
+        async () => active,
+      ),
       spyOn(opengeniDb, "workspaceXaiSubscriptionActive").mockResolvedValue(false),
       spyOn(opengeniDb, "listConnectionsMetadata").mockResolvedValue([]),
       spyOn(opengeniDb, "listWorkspaceProviderCustomModelsByKind").mockResolvedValue({

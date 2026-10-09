@@ -116,6 +116,16 @@ async function fixture(connectionKind: "subscription" | "api_key" = "subscriptio
     name: "Subscription runtime fixture",
   });
   const accountId = access.workspaceGrants[0]!.accountId;
+  // Migration 0680 seeds every organization enabled on the shared core. These
+  // dormant-gate fixtures start from the pre-cutover world (no Codex row) and
+  // enable or disable the gate explicitly.
+  await shared!.admin`
+    delete from subscription_provider_cutovers
+    where account_id = ${accountId}::uuid and provider = 'codex'`;
+  // ...and its seeded organization settings row, which the fixture writes itself.
+  await shared!.admin`
+    delete from subscription_settings
+    where account_id = ${accountId}::uuid and workspace_id is null`;
   const workspaceId = access.workspaceGrants[0]!.workspaceId!;
   const subjectId = `user:${userId}`;
   const [connection] = await shared!.admin<{ id: string }[]>`
