@@ -2259,6 +2259,10 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0695_subscription_model_catalog_observations.sql",
+      "0694_inbox_skip_live_call_replies.sql",
+      "0693_inbox_full_agent_access.sql",
+      "0692_session_admin_access.sql",
       "0690_organization_model_defaults.sql",
       "0686_target_tool_approval_bindings.sql",
       "0689_subscription_core_codex_cutover.sql",

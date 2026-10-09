@@ -13979,6 +13979,16 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     renameSeed: z.string(),
     scheduledTaskId: z.string().nullable(),
     siteOrigin: z.object({ siteId: z.string().uuid(), title: z.string() }).nullable(),
+    /**
+     * Display-only model and reasoning effort for compact rows: the latest
+     * started turn's policy, or the session's stored defaults when an explicit
+     * settings change is newer or no turn has started. A row projected from a
+     * full Session (the SDK fallback for older servers) carries that session's
+     * effective model instead. Detail reads remain authoritative for the
+     * composer default; never use these fields to choose a model.
+     */
+    model: z.string().min(1).optional(),
+    reasoningEffort: ReasoningEffort.optional(),
   }),
 );
 export type SessionListEntry = z.infer<typeof SessionListEntry>;
@@ -14705,14 +14715,20 @@ export const UpdateInboxItemRequest = z
 export type UpdateInboxItemRequest = z.infer<typeof UpdateInboxItemRequest>;
 
 /**
- * Which agents may withdraw or dismiss the person's notifications. Agents never
- * answer or approve on the person's behalf, whatever this says.
+ * What agents may do in the person's inbox. Agents never answer or approve on
+ * the person's behalf, whatever this says.
  */
 export const InboxTidyPolicy = z.enum([
-  /** The session that posted an item, and the sessions above it. */
+  /** Notifications: the session that posted one, and the sessions above it. */
   "own_sessions",
-  /** Any agent acting for the person. */
+  /** Notifications: any agent acting for the person. */
   "any_agent",
+  /**
+   * Any agent acting for the person sees every open item (questions,
+   * approvals, paused goals, replies and notifications) and may snooze,
+   * unsnooze or dismiss it.
+   */
+  "full_access",
 ]);
 export type InboxTidyPolicy = z.infer<typeof InboxTidyPolicy>;
 

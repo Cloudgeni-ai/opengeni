@@ -595,18 +595,18 @@ fn parse_geometry(geometry: &str) -> (u32, u32) {
     (w, h)
 }
 
-/// Probes whether this host currently has a usable display surface (a real X11
-/// screen or an Xvfb virtual framebuffer), the value advertised as the offer's
-/// `offers_display` at enroll. Mirrors how [`Supervisor::capabilities`] derives the
-/// `desktop` capability: `probe()` does a synchronous x11rb connect, so run it on
-/// the blocking pool — a wedged X server must not stall this async enroll task.
+/// Probe the display offer independently of capture permission. A Mac awaiting
+/// Screen Recording must still offer the user explicit screen-control consent.
 async fn probe_offers_display() -> bool {
-    // On macOS, make sure the desktop grants have been requested before we probe,
-    // so a freshly-granted Mac reports its display in the enroll offer. No-op on
-    // every non-macOS / feature-off build.
     ensure_macos_desktop_grants();
-    let desktop = opengeni_agent_platform::resolve_desktop();
-    tokio::task::spawn_blocking(move || desktop.probe().is_some())
+    probe_offers_display_with_backend(opengeni_agent_platform::resolve_desktop()).await
+}
+
+async fn probe_offers_display_with_backend(
+    desktop: Box<dyn opengeni_agent_platform::DesktopBackend>,
+) -> bool {
+    // X11 discovery can block; keep all platform probes off the async loop.
+    tokio::task::spawn_blocking(move || desktop.can_offer_display())
         .await
         .unwrap_or(false)
 }
@@ -722,8 +722,7 @@ async fn enroll_command(
         .clone()
         .unwrap_or_else(supervisor::hostname_or_default);
 
-    // Probe the live display surface so a display-capable host enrolls as such
-    // (rather than the old M6 hardcode that recorded every machine headless).
+    // Offer consent based on display presence, including Macs awaiting OS grants.
     let offers_display = probe_offers_display().await;
 
     let request = EnrollmentRequest {
@@ -733,9 +732,8 @@ async fn enroll_command(
         offer: EnrollmentOffer {
             os: identity.os,
             arch: identity.arch,
-            // Whether this host currently has a probeable display (a real screen or
-            // an Xvfb virtual framebuffer) — mirrors the supervisor's `desktop`
-            // capability so the consent page only promises screen-control we can serve.
+            // Display presence allows consent during enrollment; runtime capture
+            // and input still require the OS grants and the user's approval.
             offers_display,
             // The agent does not request screen control by default (the user's
             // approve-time allow_screen_control is the authoritative consent anyway).
@@ -800,8 +798,7 @@ async fn enroll_with_token(
         .clone()
         .unwrap_or_else(supervisor::hostname_or_default);
 
-    // Probe the live display surface so a display-capable host enrolls as such
-    // (rather than the old M6 hardcode that recorded every machine headless).
+    // Offer consent based on display presence, including Macs awaiting OS grants.
     let offers_display = probe_offers_display().await;
 
     // The exchange carries the same identity fields as the device flow; the
@@ -814,9 +811,8 @@ async fn enroll_with_token(
         offer: EnrollmentOffer {
             os: identity.os,
             arch: identity.arch,
-            // Whether this host currently has a probeable display (a real screen or
-            // an Xvfb virtual framebuffer) — mirrors the supervisor's `desktop`
-            // capability so the control plane only records screen-control we can serve.
+            // Presence is independent of capture permission; the token remains
+            // authoritative for whether the user allowed screen control.
             offers_display,
             // The agent does not request screen control; the token's
             // allow_screen_control (set at mint time) is the authoritative consent.
@@ -896,4 +892,44 @@ mod anyhow_lite {
     pub type Result = std::result::Result<(), BoxError>;
     /// A handler result returning a value.
     pub type ResultOf<T> = std::result::Result<T, BoxError>;
+}
+
+#[cfg(test)]
+mod display_offer_tests {
+    use super::probe_offers_display_with_backend;
+    use opengeni_agent_platform::{CapturedFrame, DesktopBackend, NoDesktop, PlatformResult};
+    use opengeni_agent_proto::v1;
+
+    struct DisplayAwaitingPermission;
+
+    #[async_trait::async_trait]
+    impl DesktopBackend for DisplayAwaitingPermission {
+        fn probe(&self) -> Option<v1::Display> {
+            None
+        }
+
+        fn can_offer_display(&self) -> bool {
+            true
+        }
+
+        async fn capture(&self) -> PlatformResult<CapturedFrame> {
+            panic!("enrollment must not capture the screen")
+        }
+
+        async fn inject(&self, _: &v1::DesktopInput) -> PlatformResult<()> {
+            panic!("enrollment must not inject input")
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_capture_permission_does_not_hide_control_consent() {
+        let desktop = Box::new(DisplayAwaitingPermission);
+        assert!(desktop.probe().is_none());
+        assert!(probe_offers_display_with_backend(desktop).await);
+    }
+
+    #[tokio::test]
+    async fn headless_enrollment_still_does_not_offer_screen_control() {
+        assert!(!probe_offers_display_with_backend(Box::new(NoDesktop)).await);
+    }
 }

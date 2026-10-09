@@ -122,6 +122,7 @@ function randomProductionInput(seed: number): PlacementInput {
       excludedModelIds: rng.bool(0.85) ? [] : rng.subset(own),
       allowedModelIds: rng.bool(0.85) ? null : rng.subset(own),
       refreshGeneration: 1,
+      extraCreditsEnabled: rng.bool(),
       quota: randomQuota(rng, provider),
     });
   }

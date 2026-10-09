@@ -14,17 +14,23 @@ import "../src/styles.css";
 writeSessionBrowsePreferences(sessionBrowsePreferenceStorageId(subjectId, workspaceId), {
   // Sparse activity starts ungrouped so project auto-hydration cannot populate
   // additional running roots before the test uses the real Group by menu.
-  groupBy:
-    new URLSearchParams(window.location.search).get("scenario") === "sparse-active"
-      ? "none"
-      : new URLSearchParams(window.location.search).get("scenario") === "keyboard-focus"
-        ? "activity"
-        : "project",
+  groupBy: ["sparse-active", "hover"].includes(
+    new URLSearchParams(window.location.search).get("scenario") ?? "",
+  )
+    ? "none"
+    : new URLSearchParams(window.location.search).get("scenario") === "keyboard-focus"
+      ? "activity"
+      : "project",
   sortBy: "updatedAt",
   status: "active",
   showEmptyGroups: false,
 });
 Object.assign(window, { sessionSidebarQa: evidence });
+const previewTheme = new URLSearchParams(window.location.search).get("theme");
+if (previewTheme === "dark" || previewTheme === "light") {
+  document.documentElement.classList.toggle("dark", previewTheme === "dark");
+  document.documentElement.dataset.ogTheme = previewTheme;
+}
 
 const root = createRootRoute({
   component: () => (

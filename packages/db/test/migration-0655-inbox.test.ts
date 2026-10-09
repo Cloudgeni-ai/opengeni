@@ -254,6 +254,20 @@ describe("0655 inbox", () => {
       pausedGoals: true,
       replies: false,
     });
+    // Full agent access (0693) is a third policy; anything else is refused.
+    expect(await setInboxSettings(db(), { ...owner, tidyPolicy: "full_access" })).toEqual({
+      tidyPolicy: "full_access",
+      pausedGoals: true,
+      replies: false,
+    });
+    expect(await getInboxTidyPolicy(db(), owner)).toBe("full_access");
+    await expect(
+      setInboxSettings(db(), {
+        ...owner,
+        tidyPolicy: "everyone" as unknown as "full_access",
+      }),
+    ).rejects.toThrow();
+    expect(await getInboxTidyPolicy(db(), owner)).toBe("full_access");
   });
 
   test("replies keep one item per session until cleared, only when turned on (0665)", async () => {
@@ -347,6 +361,29 @@ describe("0655 inbox", () => {
     await reply("Round 6 is in");
     expect((await inbox(person)).map((item) => [item.title, item.unread])).toEqual([
       ["Round 6 is in", true],
+    ]);
+    // In a live voice call the person hears each reply, so it is not one to
+    // catch up on; once the call ends, replies come back (0694).
+    const callId = crypto.randomUUID();
+    await owned!.admin`
+      insert into session_realtime_modes (
+        id, account_id, workspace_id, session_id, operation_id, owner_subject_id,
+        browser_instance_id, owner_key_hash, model, lease_expires_at, last_heartbeat_at
+      ) values (
+        ${callId}, ${person.scope.accountId}, ${person.scope.workspaceId}, ${person.session.id},
+        ${crypto.randomUUID()}, ${person.subjectId}, 'phone', ${"a".repeat(64)},
+        'opengeni-gateway/openai/gpt-realtime-2.1', now() + interval '1 minute', now()
+      )`;
+    await reply("Heard in the call");
+    expect((await inbox(person)).map((item) => [item.title, item.unread])).toEqual([
+      ["Round 6 is in", true],
+    ]);
+    await owned!.admin`
+      update session_realtime_modes set state = 'ended', ended_at = now(),
+        end_reason = 'user_stop' where id = ${callId}`;
+    await reply("Finished after the call");
+    expect((await inbox(person)).map((item) => [item.title, item.unread])).toEqual([
+      ["Finished after the call", true],
     ]);
     // Muting the session takes its reply away and keeps new ones out, while
     // what the agent sends on purpose still arrives (0678).

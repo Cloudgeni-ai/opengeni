@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
+import * as coreApi from "@opengeni/core";
 import * as events from "@opengeni/events";
 import {
   CODEX_TRANSPORT_ERROR_HEADER,
@@ -60,6 +61,7 @@ import { CODEX_FALLBACK_MODEL_SLUGS } from "@opengeni/codex/constants";
 
 const restores: Array<{ mockRestore(): void }> = [];
 beforeEach(() => {
+  spy(coreApi, "refreshCoreCodexModelEntitlements").mockResolvedValue(undefined);
   spy(db, "isSubscriptionCoreCodexSourceDisconnected").mockResolvedValue(false);
 });
 function spy<T extends object, K extends keyof T>(target: T, key: K) {

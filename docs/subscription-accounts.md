@@ -156,29 +156,38 @@ for it until the matching requirement below is implemented:
   organization connections. Verification: pending (personal-connections).
 - **SUB-ELIG-06** Unknown or stale quota stays unknown. Missing metadata never
   manufactures exhaustion: an account with unknown quota is eligible and
-  counts as able to serve. It never ranks ahead of an account with known
-  capacity, except that a Primary-first primary keeps precedence
-  (SUB-SEL-03, D-15). Verification: pending (verification-suite).
+  counts as able to serve. Ordinary primary/spread ordering applies equally
+  to known and unknown capacity; telemetry is not a ranking preference
+  (D-29). Verification: pending (verification-suite).
 
 ### Selection
 
 - **SUB-SEL-01** Automatic selection prefers organization connections.
   Verification: pending (shared-core).
-- **SUB-SEL-02** A personal connection is selected only when its owner chose it
-  explicitly for the session, or when the owner opted in to "fall back to my
-  account when the organization pool is exhausted" (off by default).
+- **SUB-SEL-02** A connected personal account participates automatically in
+  its owner's Personal workspace. In other workspaces, private sessions need
+  an explicit account choice or permitted, per-person fallback opt-in (off by
+  default). Live ownership, organization permission and accepted-turn personal
+  authority remain required in every case (D-28).
   Verification: pending (personal-connections).
 - **SUB-SEL-03** Primary first places new work on the primary account while
   it can serve the work (unknown quota counts as able to serve,
   SUB-ELIG-06); when it cannot, failover moves to the next eligible
   account (SUB-FAIL-02). Spread distributes new sessions fairly across
-  eligible accounts. Neither mode moves a session whose cache is warm.
+  eligible accounts. Both preserve warm bindings except when an included
+  allowance can replace automatic extra-credit spending.
   Verification: pending (shared-core).
 - **SUB-SEL-04** A manual pin to an account is binding: the session waits for
   that account instead of moving. Verification: pending (shared-core).
 - **SUB-SEL-05** Selection is atomic and concurrency-safe: concurrent
   reservations cannot oversubscribe the primary account or bypass fairness.
   Verification: pending (verification-suite).
+- **SUB-CREDITS-01** Codex extra credits require connection-specific consent.
+  Automatic selection uses an eligible included allowance before paid credits,
+  including at a warm binding or configured primary. Explicit pins still bind.
+  A live provider refusal, model cooldown, health or access restriction still
+  blocks the account. When a refusal expires, the next wait deadline considers
+  credit eligibility independently of the included allowance's reset time.
 
 ### Stickiness and the prompt cache
 
@@ -437,6 +446,8 @@ by the implementer and recorded here; consequential ones are escalated.
 | D-25 | 2026-10-07 | Implementer decision: workspace overrides of per-provider and per-model settings (rotation, provider switches, fallback order) apply entry by entry, and provider switches field by field, so overriding one provider never resets another. |
 | D-26 | 2026-10-07 | Implementer decision: a provider switched off for the workspace (SUB-SET-06) and a compaction mode that ties a session to one provider (SUB-FAIL-09) restrict models exactly like the workspace model restriction of D-17. When the lock is what keeps a usable model away, the wait says so. |
 | D-27 | 2026-10-07 | Implementer decision, following SUB-STICK-02 and SUB-STICK-03: turning personal fallback off (by the owner or the organization) stops new automatic selections of personal accounts but is not a forced move. A session whose cache is warm on its owner's personal account keeps it and moves at its next re-selection point. Sharing the session (SUB-STICK-07), revoking the account or the owner leaving (SUB-STICK-03, SUB-ACCESS-06) still move it at once, and disabling personal connections (SUB-OWN-05) moves it at its next safe point. |
+| D-28 | 2026-10-09 | Supersedes D-03 for the owner’s Personal workspace: connected personal accounts participate automatically there, with organization permission and accepted authority. Funding private work elsewhere still requires explicit choice or permitted opt-in fallback. |
+| D-29 | 2026-10-09 | Supersedes the known-first portions of D-14, D-15 and D-21: unknown quota participates equally in normal rotation. Provider refusals establish cooldowns; missing telemetry does not deprioritize an account. |
 
 ### Open decisions
 

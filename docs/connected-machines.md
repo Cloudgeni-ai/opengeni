@@ -315,6 +315,11 @@ machines only. User-scoped machines require an owning human's explicit personal
 resource attachment, which a future scheduled-execution authority flow must
 freeze durably before those machines can be offered safely.
 
+On macOS, the enrollment display offer is independent of Screen Recording
+permission. A detected display keeps the existing screen-control consent option
+available while OS grants are pending. Approval does not grant macOS permissions:
+Screen Recording, Accessibility and Input Monitoring still gate capture/input.
+
 ## Discover machines + metrics
 
 `listMachines` returns the workspace fleet plus the active-sandbox pointer. Pass

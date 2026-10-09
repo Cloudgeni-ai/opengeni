@@ -975,6 +975,38 @@ describe("session pin reconciliation", () => {
     expect(order(listed)).toEqual(order(selected));
   });
 
+  test("a selected session keeps the list's waiting-on-you time only while it still needs you", () => {
+    const since = "2026-07-10T00:00:30.000Z";
+    const listed = {
+      ...session,
+      status: "requires_action",
+      requiresActionSince: since,
+      lastSequence: 10,
+    } as Session;
+    // Detail reads never carry requiresActionSince.
+    const detail = { ...listed, requiresActionSince: undefined } as Session;
+    expect(applySessionRailProjection(detail, listed).requiresActionSince).toBe(since);
+
+    // Once the open session has moved on, a stale list row cannot restore it.
+    const resumed = { ...detail, status: "running" } as Session;
+    expect(applySessionRailProjection(resumed, listed).requiresActionSince).toBeUndefined();
+
+    // A list page older than the detail may describe an earlier request
+    // (needs you -> running -> needs you again), so it is not borrowed.
+    const answeredAndAskingAgain = { ...detail, lastSequence: listed.lastSequence + 12 } as Session;
+    expect(
+      applySessionRailProjection(answeredAndAskingAgain, listed).requiresActionSince,
+    ).toBeUndefined();
+    const caughtUp = { ...listed, lastSequence: answeredAndAskingAgain.lastSequence };
+    expect(applySessionRailProjection(answeredAndAskingAgain, caughtUp).requiresActionSince).toBe(
+      since,
+    );
+
+    // A detail that already has the fact is left untouched.
+    const unchanged = { ...listed };
+    expect(applySessionRailProjection(unchanged, listed)).toBe(unchanged);
+  });
+
   test("retains display-only list fields without copying an expired channel projection", () => {
     const current = { ...session, channelId: "channel-new" } as Session;
     const retained = {

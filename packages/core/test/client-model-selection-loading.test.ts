@@ -70,6 +70,7 @@ describe("fresh model admission versus live discovery", () => {
       spyOn(opengeniDb, "workspaceClaudeSubscriptionActiveForAuthority").mockResolvedValue(false),
       restrictions,
       policy,
+      // No organization-wide model defaults: the live selections decide.
       spyOn(opengeniDb, "getOrganizationModelDefaults").mockResolvedValue(
         EMPTY_ORGANIZATION_MODEL_DEFAULTS,
       ),
@@ -81,7 +82,6 @@ describe("fresh model admission versus live discovery", () => {
       ),
       balance,
       allowance,
-
       spyOn(opengeniDb, "workspaceXaiSubscriptionActive").mockResolvedValue(false),
       spyOn(opengeniDb, "listConnectionsMetadata").mockResolvedValue([]),
       spyOn(opengeniDb, "listWorkspaceProviderCustomModelsByKind").mockResolvedValue({

@@ -32,7 +32,7 @@ await page.route("**/sample.xlsx", (route) =>
 async function open(suffix = "") {
   await page.goto(`http://127.0.0.1:4328/artifact-spreadsheet-test.html${suffix}`);
   await page.evaluate(async () => {
-    const fixturePath = "/artifact-spreadsheet-download-fixture.tsx";
+    const fixturePath = "/artifact-spreadsheet-download-test.tsx";
     await import(fixturePath);
   });
   await page.getByRole("button", { name: "Download", exact: true }).waitFor();

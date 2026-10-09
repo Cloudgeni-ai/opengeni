@@ -292,16 +292,26 @@ export function servableAgainAt(
   const capacity = connectionCapacity(input, connection);
   const cooldown = modelCooldownUntil(connection.quota, modelId, input.now);
   if (capacity.kind !== "exhausted" && cooldown === null) return undefined;
-  if (capacity.kind === "exhausted" && capacity.resetsAt === null) return null;
-  const capacityAt = capacity.kind === "exhausted" ? (capacity.resetsAt as number) : input.now;
-  return Math.max(capacityAt, cooldown ?? input.now);
+  // A refusal can expire before an exhausted allowance resets. At that
+  // point credit consent may make the account usable, even without a known
+  // allowance reset. Evaluate every observed transition using the same policy.
+  const transitions = [
+    cooldown,
+    connection.quota?.exhaustedUntil,
+    ...(connection.quota?.windows.map((window) => window.resetsAt) ?? []),
+  ]
+    .filter((at): at is number => at != null && at > input.now)
+    .sort((a, b) => a - b);
+  return transitions.find((now) => canServe({ ...input, now }, connection, modelId)) ?? null;
 }
 
-/** The owner opted in and the effective setting allows personal fallback (SUB-SEL-02, D-12). */
+/** Own Personal workspaces use connected accounts directly; elsewhere fallback requires consent. */
 export function personalFallbackActive(input: PlacementInput): boolean {
   if (input.session.ownerMembershipId === null) return false;
   return (
-    input.settings.personalFallbackAllowed &&
-    !!findPerson(input, input.session.ownerMembershipId)?.personalFallbackOptIn
+    (input.workspace.kind === "personal" &&
+      input.workspace.ownerMembershipId === input.session.ownerMembershipId) ||
+    (input.settings.personalFallbackAllowed &&
+      !!findPerson(input, input.session.ownerMembershipId)?.personalFallbackOptIn)
   );
 }

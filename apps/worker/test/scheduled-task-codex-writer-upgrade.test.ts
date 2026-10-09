@@ -29,7 +29,8 @@ test("a pre-writer personal-resource task retains its execution proof across mig
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     // The graceful-disconnect migration rewrites writer routines: defer it with
     // its prerequisite while constructing the genuine pre-writer fixture.
-    await database.admin`insert into schema_migrations(name) values (${writer}), ('0689_subscription_core_codex_cutover.sql'), (${disconnect})`;
+    await database.admin`insert into schema_migrations(name) values (${writer}),
+      ('0689_subscription_core_codex_cutover.sql'), (${disconnect})`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     const appUrl = new URL(database.ownerUrl);
