@@ -1012,6 +1012,13 @@ provider metadata. It changes when routing, wire API, wire profile, execution li
 capabilities, pricing, credential class, billing attribution, base URL, or an
 explicitly public request-metadata value changes.
 
+The automatic-compaction trigger (`autoCompactTokenLimit`) is the one execution
+limit outside the digest. It is a context-management default that workspace and
+organization compaction preferences already replace on every attempt, so
+changing a model's default compaction threshold leaves accepted turns runnable.
+A turn accepted before the trigger left the digest still verifies, as long as
+the trigger and every other executable field are unchanged.
+
 It does not include aliases, display labels, health, entitlement state, concrete
 credential IDs, keys, tokens, or secret header/query values. Rotating a secret
 within the same credential class therefore does not invalidate an accepted

@@ -233,7 +233,6 @@ describe("accepted execution policy additive capabilities", () => {
       registrySettings(additive, {}, { upstreamModelId: "other-model" }),
       registrySettings(additive, {}, { contextWindowTokens: 200_000 }),
       registrySettings(additive, {}, { effectiveContextWindowTokens: 180_000 }),
-      registrySettings(additive, {}, { autoCompactTokenLimit: 160_000 }),
       registrySettings(additive, {}, { toolOutputTruncationTokens: 9000 }),
       registrySettings(
         additive,

@@ -6603,10 +6603,19 @@ function canonicalJson(value: unknown): string {
 function definitionVersionFor(
   model: Omit<ConfiguredModel, "definitionVersion">,
   provider: ResolvedModelProvider,
-  options: { includeWireProfile?: boolean } = {},
+  options: { includeWireProfile?: boolean; includeAutoCompactTokenLimit?: boolean } = {},
 ): string {
   const requestMetadata = staticRequestMetadataForDigest(provider);
   const includeWireProfile = options.includeWireProfile ?? true;
+  // The automatic-compaction trigger is a context-management default, not
+  // executable identity: workspace and organization compaction preferences
+  // already replace it live on every attempt of an accepted turn. Freezing
+  // it made a changed default strand every in-flight turn of that model.
+  // Only the pre-exclusion compatibility digests below still include it.
+  const { autoCompactTokenLimit, ...executableLimits } = model.executionLimits;
+  const executionLimits = options.includeAutoCompactTokenLimit
+    ? { ...executableLimits, autoCompactTokenLimit }
+    : executableLimits;
   const digestInput = canonicalJson({
     schemaVersion: model.schemaVersion,
     id: model.id,
@@ -6623,7 +6632,7 @@ function definitionVersionFor(
     },
     credentialSource: model.credentialSource,
     billing: model.billing,
-    executionLimits: model.executionLimits,
+    executionLimits,
     capabilities: model.capabilities,
     // Workspace-facing free/credits classification is a separate live
     // deployment policy. Operators must drain/fence accepted turns before
@@ -6638,6 +6647,22 @@ function definitionVersionFor(
     .digest("hex")}`;
 }
 
+/**
+ * The digest a turn accepted before the compaction trigger left the
+ * definition carries. It reproduces only the current trigger value, so an
+ * accepted turn stays runnable across the release that drops the field, and
+ * every other executable field must still match exactly.
+ */
+function legacyFrozenAutoCompactDefinitionVersionFor(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+): string {
+  const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
+  return definitionVersionFor(modelWithoutVersion, provider, {
+    includeAutoCompactTokenLimit: true,
+  });
+}
+
 function legacyImplicitOpenAiDefinitionVersionFor(
   model: ConfiguredModel,
   provider: ResolvedModelProvider,
@@ -6646,6 +6671,7 @@ function legacyImplicitOpenAiDefinitionVersionFor(
   const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
   return definitionVersionFor(modelWithoutVersion, provider, {
     includeWireProfile: false,
+    includeAutoCompactTokenLimit: true,
   });
 }
 
@@ -6673,7 +6699,9 @@ function legacyCodexAstraImplicitCachingDefinitionVersionFor(
   // Recompute, rather than allowlisting an incident hash: all other current
   // fields must still reproduce the accepted digest. Do not compose this with
   // the older wire-profile compatibility or rewrite the accepted policy.
-  return definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider);
+  return definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider, {
+    includeAutoCompactTokenLimit: true,
+  });
 }
 
 function matchesAdditiveCapabilityDefinitionVersion(
@@ -6708,14 +6736,35 @@ function matchesAdditiveCapabilityDefinitionVersion(
         inputModalities: retainedInputs,
       };
       if (
-        policy.definitionVersion ===
-        definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider)
+        matchesCurrentOrPreCompactionExclusionDigest(
+          policy,
+          { ...modelWithoutVersion, capabilities },
+          provider,
+        )
       ) {
         return true;
       }
     }
   }
   return false;
+}
+
+/**
+ * Operator-change compatibility (an added capability or enabled web search)
+ * also applies to a turn accepted before the compaction trigger left the
+ * digest. This is the same single historical declaration in either digest
+ * form, never an additional tolerated change.
+ */
+function matchesCurrentOrPreCompactionExclusionDigest(
+  policy: TurnExecutionPolicyV1,
+  model: Omit<ConfiguredModel, "definitionVersion">,
+  provider: ResolvedModelProvider,
+): boolean {
+  return (
+    policy.definitionVersion === definitionVersionFor(model, provider) ||
+    policy.definitionVersion ===
+      definitionVersionFor(model, provider, { includeAutoCompactTokenLimit: true })
+  );
 }
 
 /** The one pre-enablement hosted web-search declaration an operator may upgrade from. */
@@ -6742,9 +6791,10 @@ function matchesWebSearchEnablementDefinitionVersion(
     ...model.capabilities,
     hostedTools: { ...model.capabilities.hostedTools, webSearch: webSearchPreEnablementState() },
   };
-  return (
-    policy.definitionVersion ===
-    definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider)
+  return matchesCurrentOrPreCompactionExclusionDigest(
+    policy,
+    { ...modelWithoutVersion, capabilities },
+    provider,
   );
 }
 
@@ -7607,6 +7657,7 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
           billing: parsed.billing,
         },
         resolved.provider,
+        { includeAutoCompactTokenLimit: true },
       );
   // wireProfile was added to the definition digest after policies already
   // existed in durable in-flight turns. An omitted profile meant exactly
@@ -7618,6 +7669,8 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   );
   const definitionVersionMatches =
     parsed.definitionVersion === resolved.model.definitionVersion ||
+    parsed.definitionVersion ===
+      legacyFrozenAutoCompactDefinitionVersionFor(resolved.model, resolved.provider) ||
     parsed.definitionVersion === legacyImplicitOpenAiDefinitionVersion ||
     parsed.definitionVersion ===
       legacyCodexAstraImplicitCachingDefinitionVersionFor(resolved.model, resolved.provider) ||
