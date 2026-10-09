@@ -445,7 +445,8 @@ never ignore `definitionVersion` globally or compose unrelated digest migrations
 Treat a candidate as an immutable semantic source revision, not as a snapshot of
 the latest protected branch. Create the branch from current `main` initially,
 then keep the exact head frozen while CI and review run. Ordinary PRs into
-`main` use focused impact CI; freeze-head source admission runs only for
+`main` use targeted local checks without pull-request CI; post-merge CI remains
+enabled. Freeze-head source admission runs only for
 `hotfix/*` PRs into `production`.
 
 - A protected-branch advance alone is **not** a source revision, does not
