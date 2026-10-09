@@ -355,11 +355,6 @@ For sandbox configuration work, read `references/sandbox-configuration.md`. Use 
 
 ## Tools And MCP Discovery
 
-Conversation target context is non-authoritative: inspect
-`packages/db/src/session-target.ts` and `docs/session-monitoring-mcp.md` for
-`session_target_get/set` and exact Send/Steer receipt tracking. Selection must
-never transfer voice, dispatch work, or replace live session authorization.
-
 For unified Skills work, start with `docs/design/skills-system.md`. Server-side
 file primitives and packaged guidance live in `packages/runtime/src/skill-files.ts`,
 `skill-library.ts`, and `runtime-skills.ts`; worker gateway adapters live under
@@ -383,6 +378,11 @@ For tools and MCP work, distinguish:
 - First-party MCP servers exposed by the API.
 - Built-in SDK sandbox capabilities for shell/files, and Opengeni's separate Skill catalog and reader.
 - Tools available inside the sandbox image, such as CLIs.
+
+Conversation target context is non-authoritative: inspect
+`packages/db/src/session-target.ts` and `docs/session-monitoring-mcp.md` for
+`session_target_get/set` and exact Send/Steer receipt tracking. Selection must
+never transfer voice, dispatch work, or replace live session authorization.
 
 Configured agents receive capability-gated prompt modules under
 `packages/runtime/src/agent-instructions/`; media guidance belongs to the media

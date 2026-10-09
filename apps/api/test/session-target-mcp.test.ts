@@ -266,6 +266,7 @@ test.each([false, true])(
     expect(status).toMatchObject({
       turnId: claimed.turn.id,
       turnStatus: failed ? "failed" : "completed",
+      nextAction: { arguments: { view: "results" } },
     });
     const result = await f.call(status.nextAction.tool, status.nextAction.arguments);
     expect(JSON.stringify(result)).toContain("Exact requested outcome");
@@ -273,6 +274,68 @@ test.each([false, true])(
     await expect(
       f.call("session_message_status", { sessionId: f.caller.id, updateId: sent.resource.id }),
     ).rejects.toThrow();
+  },
+);
+
+test.each(["cancelled", "superseded"] as const)(
+  "message receipt relays the exact %s reason without unrelated outcomes",
+  async (turnStatus) => {
+    const f = await fixture();
+    const type = `turn.${turnStatus}` as const;
+    const unrelated = [
+      { type: "turn.completed" as const, payload: { output: "Unrelated answer" } },
+      { type, payload: { reason: "Unrelated interruption" } },
+    ];
+    await appendSessionEvents(client.db, f.owner.workspaceId, f.target.id, unrelated);
+    const sent = await f.call("session_send_message", {
+      sessionId: f.target.id,
+      text: "Check the requested work",
+      idempotencyKey: crypto.randomUUID(),
+    });
+    const claimed = await f.claim(f.target.id);
+    const reason = `Exact requested ${turnStatus} reason`;
+    await applySessionTurnSettlement(client.db, f.owner.workspaceId, {
+      sessionId: f.target.id,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId: claimed.turn.activeAttemptId!,
+      turnStatus,
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type, payload: { reason } }],
+    });
+    await appendSessionEvents(client.db, f.owner.workspaceId, f.target.id, unrelated);
+    const status = await f.call("session_message_status", {
+      sessionId: f.target.id,
+      updateId: sent.resource.id,
+    });
+    expect(status).toMatchObject({
+      delivery: "delivered",
+      turnId: claimed.turn.id,
+      turnStatus,
+      outcome: { type },
+    });
+    expect(status.nextAction).toEqual({
+      tool: "session_events",
+      arguments: {
+        sessionId: f.target.id,
+        view: "debug",
+        includeTypes: [type],
+        payloadMode: "full",
+        after: status.outcome.sequence - 1,
+        before: status.outcome.sequence + 1,
+        limit: 1,
+      },
+    });
+    const result = await f.call(status.nextAction.tool, status.nextAction.arguments);
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0]).toMatchObject({
+      type,
+      sequence: status.outcome.sequence,
+      turnId: claimed.turn.id,
+      payload: { reason },
+    });
+    expect(JSON.stringify(result)).not.toContain("Unrelated");
   },
 );
 

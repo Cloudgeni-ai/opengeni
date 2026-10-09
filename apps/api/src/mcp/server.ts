@@ -4725,7 +4725,13 @@ function registerWorkspaceOrchestrationTools(
                 tool: "session_events",
                 arguments: {
                   sessionId,
-                  view: "results",
+                  ...(outcome.type === "turn.cancelled" || outcome.type === "turn.superseded"
+                    ? {
+                        view: "debug",
+                        includeTypes: [outcome.type],
+                        payloadMode: "full",
+                      }
+                    : { view: "results" }),
                   after: outcome.sequence - 1,
                   before: outcome.sequence + 1,
                   limit: 1,
