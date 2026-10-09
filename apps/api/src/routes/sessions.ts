@@ -6423,7 +6423,7 @@ async function withCoreCodexSessionPointers<
   if (sessions.length === 0) return sessions;
   // Never fail a session read on Codex state: a disabled cutover (maintenance)
   // shows no pointers rather than legacy ones.
-  const disposition = await readCodexCutoverDisposition(deps.db, accountId);
+  const disposition = await readCodexCutoverDisposition(deps.db, accountId, workspaceId);
   if (disposition === "legacy") return sessions;
   const pointers =
     disposition === "core"

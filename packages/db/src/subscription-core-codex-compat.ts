@@ -39,10 +39,17 @@ export type CodexCutoverDisposition = "legacy" | "core" | "maintenance";
 export async function readCodexCutoverDisposition(
   db: Database,
   accountId: string,
+  /**
+   * The caller's workspace, when it has one. The cutover row needs only the
+   * account scope, but a caller inside a shared request transaction (whose
+   * sibling queries run concurrently) must not have its workspace setting
+   * changed underneath them, so the nested scope keeps the same workspace.
+   */
+  workspaceId: string | null = null,
 ): Promise<CodexCutoverDisposition> {
   const state = await withRlsContext(
     db,
-    { accountId, workspaceId: null },
+    { accountId, workspaceId },
     async (tx) => await readSubscriptionProviderCutoverState(tx, { accountId, provider: "codex" }),
   );
   return state === "not_configured" ? "legacy" : state === "enabled" ? "core" : "maintenance";

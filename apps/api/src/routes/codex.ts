@@ -1544,7 +1544,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     // authenticate the designating human first, then use the core (or fail
     // closed for a disabled cutover). Without a row the legacy order is kept.
     const owner = await rlsContextForWorkspace(db, workspaceId);
-    if ((await readCodexCutoverDisposition(db, owner.accountId)) !== "legacy") {
+    if ((await readCodexCutoverDisposition(db, owner.accountId, workspaceId)) !== "legacy") {
       const appsHuman = await requireCodexAppsHuman(c, deps, workspaceId);
       await codexRouteDisposition(deps, appsHuman.accountId);
       return await coreCodexDesignateApps(c, deps, workspaceId, appsHuman);

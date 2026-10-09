@@ -1054,7 +1054,7 @@ export async function resolveCodexAppsDesignationForRun(
   accountId?: string,
 ): Promise<CodexAppsDesignationForRun | null> {
   const owner = accountId ?? (await rlsContextForWorkspace(db, workspaceId)).accountId;
-  const disposition = await readCodexCutoverDisposition(db, owner);
+  const disposition = await readCodexCutoverDisposition(db, owner, workspaceId);
   if (disposition === "maintenance") return null;
   if (disposition === "core") {
     const designation = await resolveSubscriptionCoreCodexAppsDesignation(db, {
