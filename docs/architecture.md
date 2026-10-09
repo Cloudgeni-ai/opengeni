@@ -1706,7 +1706,9 @@ Native macOS operations drain Cocoa pools and clear pending capture starts;
 desktop discovery is independent of semantic inspection.
 
 `ComputerBackend` supplies desktop operations behind the shared `ComputerDriver`.
-Opt-in [CUA](../packages/browserd/CUA-PILOT.md) includes Windows semantic actions; native remains default.
+[CUA](../packages/browserd/CUA-PILOT.md) is the default for macOS and explicitly
+selected isolated Linux desktops. Linux host desktops and Windows retain the
+native default; explicit backend configuration is retained.
 
 Native framed Desktop input negotiates `pointerClickContinuation`. A supported
 viewer sends its first click immediately; the real second human click may be
