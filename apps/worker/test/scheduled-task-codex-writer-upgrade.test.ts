@@ -26,7 +26,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
     // Stage the actual pre-writer ledger, including on the stacked cutover
     // branch. This is a rolling/gate-off regression, not cutover activation.
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await database.admin`insert into schema_migrations(name) values (${writer}), ('0680_subscription_core_codex_cutover.sql')`;
+    await database.admin`insert into schema_migrations(name) values (${writer}), ('0689_subscription_core_codex_cutover.sql')`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     const appUrl = new URL(database.ownerUrl);

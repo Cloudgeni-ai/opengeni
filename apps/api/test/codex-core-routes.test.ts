@@ -857,9 +857,10 @@ function organizationAdminRequest(path: string, init: RequestInit = {}): Request
 describe("organization Codex routes with a cutover row", () => {
   function organizationCutover(disposition: "core" | "maintenance") {
     cutover(disposition);
-    // The organization administrator check (no Codex state is returned).
-    mock("getOrganizationCodexRotationSettings", async () => null);
+    // The organization administrator check, with no legacy Codex read.
+    mock("assertOrganizationCodexAdministrator", async () => undefined);
     for (const legacy of [
+      "getOrganizationCodexRotationSettings",
       "listOrganizationCodexAccountStatuses",
       "setActiveOrganizationCodexCredential",
       "updateOrganizationCodexRotationSettings",
@@ -876,7 +877,10 @@ describe("organization Codex routes with a cutover row", () => {
   for (const mode of ["legacy", "core"] as const) {
     test(`organization usage keeps administrator authority outside workspace routing (${mode})`, async () => {
       cutover(mode);
-      mock("getOrganizationCodexRotationSettings", async () => null);
+      const administrator = mock("assertOrganizationCodexAdministrator", async () => undefined);
+      mock("getOrganizationCodexRotationSettings", async () => {
+        throw new Error("organization usage must not read legacy Codex rotation settings");
+      });
       const payload = {
         status: "ok" as const,
         planType: "pro",
@@ -896,6 +900,10 @@ describe("organization Codex routes with a cutover row", () => {
       const response = await app().fetch(organizationAdminRequest(path));
       expect(response.status).toBe(200);
       expect(await response.json()).toEqual({ status: "ok", usage: payload });
+      expect(administrator.mock.calls[0]![1]).toEqual({
+        organizationId: ACCOUNT,
+        actorSubjectId: "user:org-admin",
+      });
       expect(usage.mock.calls[0]![2]).toEqual({
         organizationId: ACCOUNT,
         actorSubjectId: "user:org-admin",

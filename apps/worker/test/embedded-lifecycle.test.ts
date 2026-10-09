@@ -486,6 +486,7 @@ describe("embedded worker lifecycle contract", () => {
       ],
       [{ present: true }],
       [{ present: true }],
+      [{ present: true }],
       [],
       [
         { name: "opengeni_private", owner: "opengeni_migrator", usage: true, create: false },
@@ -853,7 +854,7 @@ describe("embedded worker lifecycle contract", () => {
         "session_tenancy_additional_organization_activation_evidence",
       ],
     })();
-    expect((catalogResults[9] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
+    expect((catalogResults[10] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
       ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
       ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
     ]);
@@ -867,7 +868,11 @@ describe("embedded worker lifecycle contract", () => {
   test("embedded readiness enforces runtime receipts without a session-tenancy activation interlock", async () => {
     // Migration 0611 retired the activation startup interlock: the embedded
     // probe no longer queries session-tenancy activation at all.
-    const embeddedDb = (variableSetCutoverPresent = true, claudePoolActivationPresent = true) => {
+    const embeddedDb = (
+      variableSetCutoverPresent = true,
+      claudePoolActivationPresent = true,
+      codexCutoverActivationPresent = true,
+    ) => {
       const results: unknown[] = [
         [
           {
@@ -888,6 +893,7 @@ describe("embedded worker lifecycle contract", () => {
         ],
         [{ present: variableSetCutoverPresent }],
         [{ present: claudePoolActivationPresent }],
+        [{ present: codexCutoverActivationPresent }],
       ];
       let index = 0;
       return {
@@ -912,6 +918,9 @@ describe("embedded worker lifecycle contract", () => {
     );
     await expect(dbReadyCheck(embeddedDb(true, false), options)()).rejects.toThrow(
       /missing the Claude subscription account activation receipt/,
+    );
+    await expect(dbReadyCheck(embeddedDb(true, true, false), options)()).rejects.toThrow(
+      /missing the 0680 Codex subscription-core cutover receipt/,
     );
   });
 

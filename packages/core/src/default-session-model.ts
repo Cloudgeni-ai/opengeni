@@ -25,7 +25,6 @@ import {
   getOrganizationModelProviderCatalogForWorkspace,
   listConnectionsMetadata,
   listWorkspaceProviderCustomModelsByKind,
-  workspaceCodexSubscriptionActive,
   workspaceProviderApiKeyConnectionMetadataFromConnections,
   getBillingBalance,
   spendableCreditMicros,
@@ -46,7 +45,7 @@ import {
   type WorkspaceModelSelectionInput,
 } from "./model-catalog";
 
-import { loadWorkspaceCodexModelAvailability } from "./codex-model-availability";
+import { loadWorkspaceCodexCatalogReadiness } from "./codex-model-availability";
 
 const REASONING_EFFORT_ORDER: readonly ReasoningEffort[] = [
   "none",
@@ -434,10 +433,15 @@ export async function loadWorkspaceModelSelectionInput(
       connectionRestrictionsAndXaiReadiness(db, settings, context),
       loadWorkspaceClaudeSubscriptionReadiness(db, settings, context),
       getWorkspaceModelPolicy(db, workspaceId),
-      workspaceCodexSubscriptionActive(db, settings, workspaceId),
-      options.observeAvailability === false
-        ? Promise.resolve({})
-        : loadWorkspaceCodexModelAvailability(db, settings, workspaceId),
+      // Codex readiness and live availability by the organization's Codex
+      // cutover row: legacy without one, the shared core when enabled, not
+      // ready while disabled. Never another person's personal connection.
+      loadWorkspaceCodexCatalogReadiness(
+        db,
+        settings,
+        { accountId, workspaceId, subjectId: context.subjectId },
+        { observeAvailability: options.observeAvailability !== false },
+      ),
     ]))();
   // Transaction handles share one backend and LOCAL scope. Preserve the old
   // batch ordering there rather than introduce concurrent nested savepoints.
@@ -466,8 +470,7 @@ export async function loadWorkspaceModelSelectionInput(
     { restrictions: connectionModelRestrictions, xaiSubscriptionActive },
     claudePool,
     policy,
-    codexSubscriptionActive,
-    observations,
+    { active: codexSubscriptionActive, observations },
   ] = inputResult.value;
   const [workspaceConnections, workspaceCustomModels, organizationProviders] = catalogResult.value;
   const workspaceConnectionActive = (kind: WorkspaceCustomModelProviderKind) =>

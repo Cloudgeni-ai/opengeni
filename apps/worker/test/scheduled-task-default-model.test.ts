@@ -15,13 +15,10 @@ import {
   createXaiSubscriptionCredential,
   disconnectXaiSubscriptionCredential,
   encryptEnvironmentValue,
-  ensureCodexRotationSettings,
   ensureXaiRotationSettings,
   setInitialActiveXaiCredential,
   getScheduledTaskRunAcceptedExecution,
   listScheduledTaskRuns,
-  updateCodexRotationSettings,
-  upsertCodexSubscriptionCredential,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -197,22 +194,23 @@ describe("scheduled occurrences without a model use the resolved default", () =>
     });
 
     const key = Buffer.from(settings().environmentsEncryptionKey!, "base64");
-    await upsertCodexSubscriptionCredential(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      credentialEncrypted: encryptEnvironmentValue(
-        key,
-        JSON.stringify({ access_token: "test", refresh_token: "test", id_token: "test" }),
-      ),
-      chatgptAccountId: `scheduled-default-${grant.workspaceId}`,
-      scopes: null,
-      planType: "pro",
-      isFedramp: false,
-      expiresAt: new Date(Date.now() + 3_600_000),
-      lastRefreshAt: new Date(),
-    });
-    await ensureCodexRotationSettings(client.db, grant.accountId, grant.workspaceId);
-    await updateCodexRotationSettings(client.db, grant.workspaceId, { rotationEnabled: true });
+    // Connected Codex after the drained cutover (0680 seeds every
+    // organization enabled): a shared core connection, never the frozen
+    // legacy tables.
+    const credential = encryptEnvironmentValue(
+      key,
+      JSON.stringify({ access_token: "test", refresh_token: "test", id_token: "test" }),
+    );
+    await shared!.admin`
+      insert into subscription_connections (
+        account_id, provider, kind, credential_encrypted, ownership, scope_kind,
+        provider_account_id, plan_type, provider_state, expires_at, last_refresh_at
+      ) values (
+        ${grant.accountId}::uuid, 'codex', 'subscription', ${credential}, 'shared',
+        'organization', ${`scheduled-default-${grant.workspaceId}`}, 'pro',
+        ${shared!.admin.json({ isFedramp: false })}::jsonb,
+        ${new Date(Date.now() + 3_600_000).toISOString()}::timestamptz, now()
+      )`;
     expect(await occurrence(grant, report)).toMatchObject({
       model: "codex/gpt-6-astra",
       reasoningEffort: "high",

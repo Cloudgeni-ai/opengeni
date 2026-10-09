@@ -36,6 +36,7 @@ import {
   applyQuotaObservation,
   connectionIneligibility,
   connectionUsesExtraCredits,
+  personalFallbackActive,
   decidePlacement,
   quotaCapacity,
   type PlacementDecision,
@@ -593,6 +594,39 @@ export async function canSpendSubscriptionCoreCodexExtraCredits(
       };
       const decision = decidePlacement(input);
       return decision.kind === "run" && decision.connectionId === request.connectionId;
+    },
+  );
+  return result.status === "completed" && result.value;
+}
+
+/** Funding checks never mint personal authority or expose it to workspace readers.
+ * Temporary capacity waits remain subscription-funded; static access and model
+ * eligibility use exactly the placement world's frozen accepted authority. */
+export async function subscriptionCoreAcceptedCodexTurnIsFunded(
+  db: Database,
+  request: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    productModelId: string;
+  },
+): Promise<boolean> {
+  const identity = await readSubscriptionCoreTurnIdentity(db, request);
+  if (!identity) return false;
+  const result = await withSubscriptionCorePlacementWorld(
+    db,
+    codexPlacementWorldRequest(identity, request.productModelId, "medium", new Date()),
+    async (tx, world) => {
+      if (!(await codexCutoverEnabled(tx, identity.accountId))) return false;
+      const input = await codexPlacementInput(tx, identity, world, request.productModelId);
+      return input.connections.some(
+        (connection) =>
+          (connection.ownership.kind === "shared" || personalFallbackActive(input)) &&
+          connectionIneligibility(input, connection, request.productModelId).every(
+            (reason) => reason === "exhausted" || reason === "model_cooling_down",
+          ),
+      );
     },
   );
   return result.status === "completed" && result.value;

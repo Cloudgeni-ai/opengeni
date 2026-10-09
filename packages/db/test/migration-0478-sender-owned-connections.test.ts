@@ -21,7 +21,7 @@ const admissionRefusalsMigration = "0539_scheduled_admission_refusals.sql";
 const receiverExecutionContextMigration = "0608_receiver_execution_context.sql";
 // 0661 compiles its inbox person resolver against scheduled_tasks.owner_subject_id
 // from this cutover, and 0663-0666 replace 0661's inbox projection trigger and
-// read the paused-goal setting 0663 adds. 0677 redefines 0661's resolver.
+// read the paused-goal setting 0663 adds. 0689 redefines 0661's resolver.
 const inboxScheduleOwnerMigration = "0661_inbox_subagent_goals_and_schedules.sql";
 const inboxPausedGoalSettingMigration = "0663_inbox_paused_goal_setting.sql";
 const inboxTriggerTailMigrations = [
@@ -43,9 +43,10 @@ const withheldMigrations = [
   inboxScheduleOwnerMigration,
   inboxPausedGoalSettingMigration,
   ...inboxTriggerTailMigrations,
-  // The Codex writers read columns the withheld 0661 adds, so they run with
-  // the withheld tail, in ledger order.
+  // The Codex writers and the drained cutover read columns the withheld 0661
+  // adds, so they run with the withheld tail, in ledger order.
   "0688_subscription_core_codex_writers.sql",
+  "0689_subscription_core_codex_cutover.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

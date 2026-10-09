@@ -55,6 +55,7 @@ import {
   withSessionRlsActorContext,
   claimCodexResetRedemption,
   completeCodexResetRedemption,
+  assertOrganizationCodexAdministrator,
   clearCodexAppsCredential,
   designateCodexAppsCredential,
   disconnectAllCodexAccounts,
@@ -401,7 +402,9 @@ export async function requireOrganizationCodexHuman(
     });
   }
   try {
-    await getOrganizationCodexRotationSettings(deps.db, {
+    // The generic organization administrator check only: after 0680 the
+    // legacy organization Codex tables must not be read on this path.
+    await assertOrganizationCodexAdministrator(deps.db, {
       organizationId,
       actorSubjectId: human.subjectId,
     });

@@ -13,6 +13,7 @@ import { rawRows, type Database } from "./database";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import { buildCodexTokenResolver, type CodexAuthDeps } from "./codex-token-resolver";
 import { readCodexCutoverDisposition } from "./subscription-core-codex-compat";
+import { resolveSubscriptionConnectionId } from "./subscription-core-repository";
 
 type AdministratorScope = <T>(db: Database, use: (tx: Database) => Promise<T>) => Promise<T>;
 
@@ -29,14 +30,16 @@ export async function readOrganizationCodexUsage(
   fetchImpl: CodexFetch = fetch,
   refresh: CodexAuthDeps["refresh"] = refreshCodexToken,
 ): Promise<CodexUsagePayload> {
+  let credentialId = input.credentialId;
   const core = input.mode === "core";
   const table = core ? sql`subscription_connections` : sql`codex_subscription_credentials`;
   const version = core ? sql`refresh_generation` : sql`version`;
-  const condition = core
-    ? sql`account_id = ${input.organizationId}::uuid and id = ${input.credentialId}::uuid
+  const condition = () =>
+    core
+      ? sql`account_id = ${input.organizationId}::uuid and id = ${credentialId}::uuid
         and provider = 'codex' and kind = 'subscription' and ownership = 'shared'
         and managed_by_workspace_id is null`
-    : sql`account_id = ${input.organizationId}::uuid and id = ${input.credentialId}::uuid
+      : sql`account_id = ${input.organizationId}::uuid and id = ${credentialId}::uuid
         and organization_id = ${input.organizationId}::uuid and authority_scope = 'organization'`;
   const scoped: AdministratorScope = (targetDb, use) =>
     withAdministrator(targetDb, async (tx) => {
@@ -59,7 +62,7 @@ export async function readOrganizationCodexUsage(
             expires_at, last_refresh_at, plan_type,
             ${core ? sql`provider_account_id` : sql`chatgpt_account_id`} as provider_account_id,
             ${core ? sql`coalesce((provider_state->>'isFedramp')::boolean, false)` : sql`is_fedramp`} as is_fedramp
-          from ${table} where ${condition}
+          from ${table} where ${condition()}
         `,
         );
         const row = rows[0];
@@ -102,10 +105,10 @@ export async function readOrganizationCodexUsage(
           exhaustedRevision: 0,
         };
       }),
-    withRefreshLock: (targetDb, _scope, credentialId, use) =>
+    withRefreshLock: (targetDb, _scope, refreshCredentialId, use) =>
       scoped(targetDb, async (tx) => {
         await tx.execute(sql`set local lock_timeout = '30s'`);
-        const key = `${core ? "subscription-refresh" : "codex-refresh"}:${credentialId}`;
+        const key = `${core ? "subscription-refresh" : "codex-refresh"}:${refreshCredentialId}`;
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
         return await use(tx);
       }),
@@ -123,7 +126,7 @@ export async function readOrganizationCodexUsage(
             expires_at = ${next.expiresAt?.toISOString() ?? null}::timestamptz,
             last_refresh_at = ${next.lastRefreshAt.toISOString()}::timestamptz,
             ${version} = ${version} + 1, updated_at = clock_timestamp()
-          where ${condition} and ${version} = ${next.version}
+          where ${condition()} and ${version} = ${next.version}
           returning id
         `,
         );
@@ -136,34 +139,42 @@ export async function readOrganizationCodexUsage(
           sql`
           update ${table} set status = ${status},
             last_error = 'Sign in to ChatGPT again', updated_at = clock_timestamp()
-          where ${condition} and ${version} = ${target.version} and status = 'active'
+          where ${condition()} and ${version} = ${target.version} and status = 'active'
           returning id
         `,
         );
         return rows.length > 0;
       }),
   };
-  const resolver = buildCodexTokenResolver(
-    db,
-    settings,
-    input.organizationId,
-    input.credentialId,
-    deps,
-  );
   try {
+    if (core) {
+      // Resolve under current administrator authority, then freeze this exact
+      // identity for reads, refresh locking and generation-fenced writes.
+      const canonical = await scoped(db, (tx) =>
+        resolveSubscriptionConnectionId(tx, {
+          accountId: input.organizationId,
+          provider: "codex",
+          connectionId: input.credentialId,
+        }),
+      );
+      if (!canonical) throw new CodexReloginRequired("Sign in to ChatGPT again");
+      credentialId = canonical;
+    }
+    const resolver = buildCodexTokenResolver(
+      db,
+      settings,
+      input.organizationId,
+      credentialId,
+      deps,
+    );
     let token = await resolver.getToken();
     for (let attempt = 0; attempt < 2; attempt += 1) {
       // Recheck administration, maintenance and health before each dispatch.
-      let current = await deps.loadCredential(
-        db,
-        settings,
-        input.organizationId,
-        input.credentialId,
-      );
+      let current = await deps.loadCredential(db, settings, input.organizationId, credentialId);
       if (!current) throw new CodexReloginRequired("Sign in to ChatGPT again");
       if (current.version !== token.credentialVersion) {
         token = await resolver.getToken();
-        current = await deps.loadCredential(db, settings, input.organizationId, input.credentialId);
+        current = await deps.loadCredential(db, settings, input.organizationId, credentialId);
         if (!current || current.version !== token.credentialVersion) {
           throw new Error("Codex account changed while checking usage");
         }
@@ -175,18 +186,13 @@ export async function readOrganizationCodexUsage(
       if (result.status !== 401) return normalizeCodexUsage(result.status, result.payload);
       if (attempt === 1) {
         const marked = await deps.setStatus(db, input.organizationId, "needs_relogin", null, {
-          id: input.credentialId,
+          id: credentialId,
           version: token.credentialVersion,
         });
         if (marked) throw new CodexReloginRequired("Sign in to ChatGPT again");
         throw new Error("Codex account changed while checking usage");
       }
-      const latest = await deps.loadCredential(
-        db,
-        settings,
-        input.organizationId,
-        input.credentialId,
-      );
+      const latest = await deps.loadCredential(db, settings, input.organizationId, credentialId);
       if (!latest) throw new CodexReloginRequired("Sign in to ChatGPT again");
       // Another caller may already have replaced the rejected bearer.
       token =

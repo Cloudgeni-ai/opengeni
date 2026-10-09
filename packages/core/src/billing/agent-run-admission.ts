@@ -29,6 +29,7 @@ export async function agentRunAdmissionDenial(
     requestedAgentRuns: number;
     /** The accepted work's causal human, not the scheduler/service caller. */
     initiatingHumanSubjectId?: string | null;
+    acceptedTurn?: { sessionId: string; turnId: string };
   },
 ): Promise<AgentRunAdmissionDenial | null> {
   const codexBilled = await isCodexBilledTurn({
@@ -36,6 +37,9 @@ export async function agentRunAdmissionDenial(
     settings: services.settings,
     workspaceId: input.workspaceId,
     model: input.model,
+    accountId: input.accountId,
+    subjectId: input.initiatingHumanSubjectId ?? null,
+    ...(input.acceptedTurn ? { acceptedTurn: input.acceptedTurn } : {}),
   });
   const externallyBilled = modelFundingForAdmission(
     services.settings,

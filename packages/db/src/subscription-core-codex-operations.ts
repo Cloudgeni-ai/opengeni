@@ -588,6 +588,8 @@ export type SubscriptionCoreCodexOperationCandidate = {
   planType: string | null;
   /** The session's explicit choice (realtime only). */
   explicit: boolean;
+  /** The connection's model allowlist (null: every model). */
+  allowedModelIds: string[] | null;
 };
 
 /**
@@ -646,6 +648,7 @@ export async function listSubscriptionCoreCodexOperationCandidates(
         connectionId: account.id,
         planType: account.planType,
         explicit: account.id === explicitId,
+        allowedModelIds: account.allowedModelIds ?? null,
       }));
   });
   return access?.value ?? [];

@@ -4087,6 +4087,155 @@ DDL, converted credentials and the activation receipt together. Never restart
 a pre-cutover image after commit. Restart sign-in attempts that were pending
 during the cutover. Anthropic API-key connections are unchanged.
 
+### Codex on the shared subscription core (0689)
+
+Migration `0689_subscription_core_codex_cutover.sql` is a one-way maintenance
+cutover. It moves every organization's Codex (ChatGPT subscription) state onto
+the shared subscription core and enables the Codex cutover for every
+organization in the same transaction. Design record:
+[subscription core, PR 3](design/subscription-core-2026-10-07.md#pr-3-the-drained-codex-cutover).
+The dormant core Codex writers (rolling migration 0688, after 0679 credit consent) ship before it, so
+connect, disconnect and redemption keep working on the core once 0689
+enables the cutover.
+
+Migrated logins without a verified signed-in upstream person remain separate;
+reconnect returns `identity_unverified` (409) rather than guessing which person
+owns them. An authorized administrator can disconnect the old login and then
+connect anew. Live chat/operation leases or unresolved provider-started
+redemptions still refuse disconnect; expired leases are retired under the
+connection lock. A personal legacy alias can be disconnected only by its owner
+from their own Personal workspace. Disconnect-all followed by reconnect starts
+a higher personal-authority generation, so old frozen work does not regain it.
+Scheduled-task renames and pause/resume preserve execution digests both before
+and after authority backfill; firings consume the accepted revision's frozen
+authority, with no personal entry for a missing human authorizer.
+
+Rolling 0688 keeps owner-only writer implementations outside the previous
+binary's runtime capability inventory, in `opengeni_subscription_internal`.
+Never grant that schema or its functions to runtime roles to repair readiness.
+Old and new binaries remain compatible before 0689; after 0689, only matching
+cutover binaries may start.
+
+Duplicate personal and shared connection ceilings, and local assignment policies,
+merge the model policies of **enabled** rows only; a paused unrestricted row cannot
+widen an enabled restricted one. If every source is paused, its model union stays
+paused. This includes Personal-workspace rows with NULL stored account IDs and
+verified user-authority rows identifying the same upstream person/account. SQL
+parity independently checks the connection ceiling (`connection_model_policies`)
+as well as the local assignment union; a mismatch rolls back before activation.
+The repair preserves legitimate enabled unions and canonical credentials/aliases;
+it does not reject representable duplicates. Extra-credit opt-in carries forward only when all merged rows
+opted in, retaining the maximum consent version. A mixed opt-in is disabled and
+reported as `extra_credit_consent_conflict_disabled`; an administrator may make
+a fresh explicit decision after cutover. Live/Apps retain their existing source
+policy; automatic chat catalogs consider both eligible shared pools. Personal
+funding outside a Personal workspace requires the exact durable accepted turn,
+not a viewer's live membership. Prompt admission checks this frozen context
+inside its transaction; generic shared-workspace catalogs remain personal-free.
+
+**1. Inventory (before the window).** Record the source counts the migration
+will compare, by organization and legacy source, as the schema owner:
+
+```sql
+SELECT account_id, authority_scope, count(*) FROM codex_subscription_credentials GROUP BY 1, 2;
+SELECT account_id, count(*) FROM codex_capacity_waiters WHERE status = 'waiting' GROUP BY 1;
+SELECT account_id, count(*) FROM codex_credential_leases WHERE leased_until > now() GROUP BY 1;
+SELECT account_id, count(*) FROM codex_apps_settings WHERE credential_id IS NOT NULL GROUP BY 1;
+SELECT account_id, count(*) FROM sessions
+  WHERE codex_pinned_credential_id IS NOT NULL OR codex_last_credential_id IS NOT NULL GROUP BY 1;
+```
+
+The migrator runs the same queries inside its owner window; these are for
+your change record.
+
+**2. Stop and drain.** Stop every API, control worker and turn worker of the
+old and the new release, including idle pooled connections. Drain processes,
+not work: queued, waiting, checkpointed and scheduled work stays in the
+database and is moved by the migration. Do not cancel turns.
+
+**3. Back up.** Take a consistent database backup (or snapshot) after the drain
+and before migrating. It is the only recovery point before the one-way commit.
+
+**4. Migrate.** Run the normal TypeScript migrator (plain `psql` cannot run the
+codec stage and is refused) as the schema owner with:
+
+- `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`: the complete list of old and
+  new runtime logins (for example `["opengeni_app"]`). Any live session for a
+  listed login aborts with SQLSTATE `55000` before anything changes;
+- `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`: the existing key. Each credential is
+  decrypted and re-encrypted through the environment codec and read back
+  before the legacy copy is retired. An installation without legacy Codex
+  credentials needs no key.
+
+The migration aborts and rolls back everything (`55000`) on: a drained-check
+failure; an undecodable credential (fixed message, no material); identity or
+ownership ambiguity (the message lists content-free classes such as
+`provider_identity_mismatch`, `personal_workspace_owner_ambiguous`,
+`personal_owner_missing`, `fedramp_mismatch`, `unrepresentable_status`,
+`session_owner_ambiguous`); pre-existing core Codex state; or any parity
+mismatch (`0689 parity mismatch (<metrics>)`). A database error while writing
+the core surfaces only as `could not write the shared core (SQLSTATE <code>,
+<constraint>)`: no statement parameter, credential, label or email leaves the
+migration. Fix the named legacy rows (for example disconnect a duplicate
+account whose `id_token` names another ChatGPT account) and run the migrator
+again; nothing was committed.
+
+**5. Provision roles and start.** Run `db:provision-roles`, then start only
+binaries of this release. Runtime readiness refuses a database without the 0689
+receipt (`opengeni_private.subscription_codex_cutover_v1_active()`), so a new
+binary cannot run before the migration, and an older binary must never be
+restarted after it.
+
+**6. Validate after start.**
+
+- Runtime posture is ready on every API and worker.
+- The parity report has no mismatch:
+  `SELECT metric, account_id, legacy_count, core_count FROM
+  opengeni_private.subscription_codex_cutover_report WHERE legacy_count <>
+  core_count AND metric NOT LIKE 'disposition:%';` returns no rows. Rows named
+  `disposition:*` record accepted non-parity outcomes (for example a Personal
+  workspace's Apps designation, which cannot point at a personal connection;
+  dropped Personal-pool rotation rows; expired leases; pins the session owner
+  may not use; organization accounts whose reach over later workspaces is kept
+  by auto-assignment, `organization_reach_auto_assigned`; logins whose ChatGPT
+  person is unknown or contradictory kept as separate connections,
+  `person_identity_*_kept_separate`; two logins of one person in one pool
+  merged, `duplicate_pool_policy_merged`).
+- Every organization has `subscription_provider_cutovers (provider = 'codex',
+  enabled = true)`.
+- Spot-check a workspace's Codex accounts, source and rotation in the web UI or
+  `GET /v1/workspaces/:id/codex/status`; legacy account ids still resolve
+  through aliases.
+- Waiting Codex turns resume on their own when capacity returns (their waiter
+  ids and wake revisions were preserved); no workflow reset is needed.
+
+**Release notes (behaviour users can see).**
+
+- Different people's logins of one ChatGPT Team/Business/Enterprise workspace
+  are separate accounts on the core (legacy kept one per pool and replaced the
+  older login on reconnect). Signing in again replaces only your own login.
+- A workspace in `automatic` mode with its own accounts now also admits the
+  organization's accounts (the core treats both shared pools as eligible), and
+  accounts connected in a Personal workspace become their owner's personal
+  connections, used only for the owner's own work and as Personal-workspace
+  fallback where allowed (D-18).
+
+**Containment.** An organization administrator (or an operator acting for one)
+may set that organization's Codex cutover row `enabled = false`. That is
+fail-closed maintenance: Codex routes answer `503 subscription_core_cutover_disabled`,
+Codex turns fail with typed copy or stay parked, and nothing reads a legacy
+Codex table. The row cannot be deleted by the application role nor moved to
+another provider or organization, and every new organization is seeded
+enabled.
+
+**Fix forward.** After commit there is no down migration and no rollback image.
+Restoring the pre-migration backup discards every change made since; use it
+only if the migration itself is wrong and no traffic has been served. Otherwise
+ship a fix-forward binary and, if data needs repair, a narrowly scoped forward
+migration that is idempotent, alias-aware and parity-checked. Keep affected
+organizations switched off meanwhile. Never copy rows back to the legacy
+tables, drop aliases, reset refresh generations or clear waiters.
+
 ### Slack API pilot activation (0597)
 
 Stop every old/new API, control worker, and turn worker before applying

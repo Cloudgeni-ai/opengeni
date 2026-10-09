@@ -25,9 +25,6 @@ import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createConnection,
-  ensureCodexRotationSettings,
-  updateCodexRotationSettings,
-  upsertCodexSubscriptionCredential,
   createDb,
   createRig,
   setWorkspaceDefaultRig,
@@ -711,19 +708,17 @@ function encryptedBotCredential(settings: Settings): string {
 }
 
 async function connectModelPreferenceCodex(grant: AccessGrant) {
-  await upsertCodexSubscriptionCredential(client.db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    credentialEncrypted: "metadata-only-model-preference-fixture",
-    chatgptAccountId: `fixture-${grant.workspaceId}`,
-    scopes: null,
-    planType: "pro",
-    isFedramp: false,
-    expiresAt: null,
-    lastRefreshAt: null,
-  });
-  await ensureCodexRotationSettings(client.db, grant.accountId, grant.workspaceId);
-  await updateCodexRotationSettings(client.db, grant.workspaceId, { rotationEnabled: true });
+  // Connected Codex after the drained cutover (0680 seeds every organization
+  // enabled): a shared core connection; the legacy tables are frozen.
+  await shared!.admin`
+    insert into subscription_connections (
+      account_id, provider, kind, credential_encrypted, ownership, scope_kind,
+      provider_account_id, plan_type
+    ) values (
+      ${grant.accountId}::uuid, 'codex', 'subscription',
+      'metadata-only-model-preference-fixture', 'shared', 'organization',
+      ${`fixture-${grant.workspaceId}`}, 'pro'
+    )`;
 }
 
 async function fixture(

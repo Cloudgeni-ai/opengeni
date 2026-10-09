@@ -400,7 +400,12 @@ describe("Workspace Insights model bundle", () => {
   test("counts each fact once per source while preserving sums, including DB-accepted null sources", async () => {
     if (!shared) return;
     const entries = [
-      { source: "company_profile", items: 1, utf8Bytes: 80, estimatedTokens: 20 },
+      {
+        source: "company_profile",
+        items: 1,
+        utf8Bytes: 80,
+        estimatedTokens: 20,
+      },
       { source: null, items: 2, utf8Bytes: 40, estimatedTokens: 10 },
       { source: null, items: 3, utf8Bytes: 60, estimatedTokens: 15 },
     ];
@@ -656,7 +661,13 @@ describe("Workspace Insights model bundle", () => {
     expect(other).toHaveLength(1);
     expect(other[0]?.projects).toBe(2);
     expect(other[0]?.name).toBeNull();
-    const sum = (rows: Array<{ totalTokens: number; pricedCostMicros: number; calls: number }>) =>
+    const sum = (
+      rows: Array<{
+        totalTokens: number;
+        pricedCostMicros: number;
+        calls: number;
+      }>,
+    ) =>
       rows.reduce(
         (total, row) => ({
           totalTokens: total.totalTokens + row.totalTokens,
@@ -925,22 +936,147 @@ describe("Workspace Insights model bundle", () => {
         order by source`;
     const unchanged = await ledgerState();
 
-    const bounded = await reconcileModelCallFacts(client.db, { ...window, limit: 1 });
-    expect(bounded).toEqual({ missing: 1, repaired: 1, unrepaired: 0, truncated: true });
+    const bounded = await reconcileModelCallFacts(client.db, {
+      ...window,
+      limit: 1,
+    });
+    expect(bounded).toEqual({
+      missing: 1,
+      repaired: 1,
+      unrepaired: 0,
+      truncated: true,
+    });
 
     const first = await reconcileModelCallFacts(client.db, window);
-    expect(first).toEqual({ missing: 1, repaired: 0, unrepaired: 1, truncated: false });
+    expect(first).toEqual({
+      missing: 1,
+      repaired: 0,
+      unrepaired: 1,
+      truncated: false,
+    });
     const rebuilt = await shared.admin`
       select priced_cost_micros::text, billing_path, total_tokens::text
       from model_call_facts
       where workspace_id = ${seeded.workspaceId} and turn_id = ${calls[0]!.turnId}`;
     expect([...rebuilt]).toEqual([
-      { priced_cost_micros: "1200", billing_path: "opengeni_credits", total_tokens: "120" },
+      {
+        priced_cost_micros: "1200",
+        billing_path: "opengeni_credits",
+        total_tokens: "120",
+      },
     ]);
 
     const again = await reconcileModelCallFacts(client.db, window);
-    expect(again).toEqual({ missing: 1, repaired: 0, unrepaired: 1, truncated: false });
+    expect(again).toEqual({
+      missing: 1,
+      repaired: 0,
+      unrepaired: 1,
+      truncated: false,
+    });
     expect(await ledgerState()).toEqual(unchanged);
+  });
+
+  test("a repaired Codex fact names the attempt's canonical core connection, through its legacy alias", async () => {
+    if (!shared || !client) return;
+    const seeded = await fixture();
+    const occurredAt = new Date("2026-08-20T10:00:00.000Z");
+    const turnId = crypto.randomUUID();
+    const attemptId = crypto.randomUUID();
+    const sourceKey = `codex-repair-${crypto.randomUUID()}`;
+    const legacyId = crypto.randomUUID();
+    const [connection] = await shared.admin<{ id: string }[]>`
+      insert into subscription_connections (
+        account_id, provider, kind, credential_encrypted, ownership, scope_kind, provider_account_id
+      ) values (
+        ${seeded.accountId}, 'codex', 'subscription', 'ciphertext', 'shared', 'organization',
+        ${`chatgpt-repair-${crypto.randomUUID()}`}
+      ) returning id::text as id`;
+    await shared.admin`
+      insert into subscription_connection_aliases (account_id, provider, alias_connection_id, connection_id)
+      values (${seeded.accountId}, 'codex', ${legacyId}, ${connection!.id})`;
+    await shared.admin`
+      insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id, status,
+        position, prompt, model, reasoning_effort, latency_mode, sandbox_backend, resources, tools,
+        metadata, started_at, finished_at
+      ) values (
+        ${turnId}, ${seeded.accountId}, ${seeded.workspaceId}, ${seeded.sharedSessionId},
+        ${crypto.randomUUID()}, ${`session-${seeded.sharedSessionId}`}, 'completed', 900,
+        'codex repair fixture', 'codex/gpt-5.5', 'medium', 'standard', 'none', '[]'::jsonb,
+        '[]'::jsonb, '{}'::jsonb, ${occurredAt}, ${occurredAt}
+      )`;
+    await shared.admin.begin(async (tx) => {
+      await tx`alter table session_turn_attempts disable trigger user`;
+      await tx`
+      insert into session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation, state,
+        temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+        verified_control_revision, mcp_approval_policies, authority_epoch, authority_visibility
+      ) select
+        ${attemptId}, ${seeded.accountId}, ${seeded.workspaceId}, ${seeded.sharedSessionId}, ${turnId},
+        1, 'running', ${`session-${seeded.sharedSessionId}`}, 'fixture-run', 'fixture-activity', 0,
+        '{}'::jsonb, session.authority_epoch, session.visibility
+      from sessions session where session.id = ${seeded.sharedSessionId}`;
+      await tx`alter table session_turn_attempts enable trigger user`;
+    });
+    const sourceResourceId = `${turnId}:${sourceKey}`;
+    await shared.admin`
+      insert into usage_events (
+        account_id, workspace_id, event_type, quantity, unit, source_resource_type,
+        source_resource_id, session_id, turn_id, idempotency_key, occurred_at
+      ) values (
+        ${seeded.accountId}, ${seeded.workspaceId}, 'model.cost', 0, 'usd_micros', 'model_response',
+        ${sourceResourceId}, ${seeded.sharedSessionId}, ${turnId},
+        ${`usage:model.cost:${sourceResourceId}`}, ${occurredAt}
+      )`;
+    // A historical repair fixture: the attempt closed long ago, so the live
+    // attempt-admission triggers are bypassed only for these seeded rows.
+    await shared.admin.begin(async (tx) => {
+      await tx`alter table session_events disable trigger user`;
+      for (const [type, payload, at] of [
+        ["codex.credential.selected", { credentialId: legacyId, strategy: "spread" }, occurredAt],
+        [
+          "agent.model.usage",
+          {
+            sourceKey,
+            provider: "codex-subscription",
+            providerApi: "responses",
+            model: "codex/gpt-5.5",
+            billingPath: "external",
+            inputTokens: 10,
+            outputTokens: 2,
+          },
+          new Date(occurredAt.getTime() + 1_000),
+        ],
+      ] as const) {
+        await tx`
+        insert into session_events (
+          account_id, workspace_id, session_id, turn_id, turn_attempt_id, turn_association,
+          sequence, type, payload, occurred_at
+        ) values (
+          ${seeded.accountId}, ${seeded.workspaceId}, ${seeded.sharedSessionId}, ${turnId},
+          ${attemptId}, 'current',
+          (select coalesce(max(sequence), 0) + 1 from session_events
+            where workspace_id = ${seeded.workspaceId} and session_id = ${seeded.sharedSessionId}),
+          ${type}, ${tx.json(payload)}, ${at}
+        )`;
+      }
+      await tx`set constraints all immediate`;
+      await tx`alter table session_events enable trigger user`;
+    });
+    const result = await reconcileModelCallFacts(client.db, {
+      workspaceId: seeded.workspaceId,
+      since: new Date("2026-08-20T00:00:00.000Z"),
+      until: new Date("2026-08-21T00:00:00.000Z"),
+    });
+    expect(result).toMatchObject({ repaired: 1 });
+    const [fact] = await shared.admin`
+      select connection_id::text as connection_id, billing_path from model_call_facts
+      where turn_id = ${turnId} and source_key = ${sourceKey}`;
+    expect(fact).toEqual({
+      connection_id: connection!.id,
+      billing_path: "external",
+    });
   });
 
   test("reduces model sources from nine legacy reads to two by default and three with filtered facets", async () => {
@@ -1056,7 +1192,9 @@ describe("Workspace Insights model bundle", () => {
     const app = postgres(shared.appUrl, {
       max: 1,
       prepare: false,
-      connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+      connection: {
+        application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME,
+      },
     });
     try {
       const plan = await app.begin(async (transaction) => {

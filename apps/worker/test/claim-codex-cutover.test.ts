@@ -202,6 +202,21 @@ describe("claim-time Codex cutover", () => {
     },
   );
 
+  test.each(["enabled", "disabled"] as const)(
+    "a %s cutover row decides the Codex catalog overlay of a non-Codex turn without the frozen legacy pool",
+    async (cutover) => {
+      const result = await claimWithCutover(cutover, ordinaryPolicy);
+      expect(result.legacyActiveCalls).toBe(0);
+      expect(result.codexActive).toBe(cutover === "enabled");
+    },
+  );
+
+  test("without a cutover row a non-Codex turn keeps the legacy overlay read", async () => {
+    const result = await claimWithCutover("not_configured", ordinaryPolicy);
+    expect(result.legacyActiveCalls).toBe(1);
+    expect(result.codexActive).toBe(true);
+  });
+
   test("the claim carries the stored lease-busy chain onto the attempt", async () => {
     const startedAt = "2026-10-08T12:00:00.000Z";
     const result = await claimWithCutover("enabled", codexPolicy, {

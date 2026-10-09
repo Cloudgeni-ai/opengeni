@@ -966,7 +966,8 @@ describe("workspace model catalog route discipline", () => {
     expect(grant).toBeGreaterThanOrEqual(0);
     expect(handler).toContain('"workspace:read"');
     expect(handler.indexOf("getWorkspaceModelPolicy")).toBeGreaterThan(grant);
-    expect(handler.indexOf("workspaceCodexSubscriptionActive")).toBeGreaterThan(grant);
+    // Codex readiness follows the organization's Codex cutover row.
+    expect(handler.indexOf("loadWorkspaceCodexCatalogReadiness")).toBeGreaterThan(grant);
     expect(handler.indexOf("workspaceXaiSubscriptionActive")).toBeGreaterThan(grant);
     expect(handler).toContain("xaiSubscriptionActive,");
     expect(handler).toContain('"private, no-store"');

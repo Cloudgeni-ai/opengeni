@@ -2145,8 +2145,9 @@ BEGIN
       );
     END IF;
     -- M3 PR 3b: the writers' caller check, capability internals and the
-    -- revision-authority trigger function are owner-only (the trigger fires
-    -- without the inserting role holding EXECUTE).
+    -- revision-authority trigger function are owner-only. Migration 0680: the
+    -- cutover receipt and its owner-run trigger functions are owner-only.
+    -- Triggers fire without the caller holding EXECUTE.
     FOREACH routine_signature IN ARRAY ARRAY[
       'subscription_codex_writer_context(uuid,uuid,text)',
       'grant_subscription_codex_owner_capability(text,uuid,uuid,text,uuid)',
@@ -2156,6 +2157,23 @@ BEGIN
       IF to_regprocedure('opengeni_subscription_internal.' || routine_signature) IS NOT NULL THEN
         EXECUTE format(
           'REVOKE EXECUTE ON FUNCTION opengeni_subscription_internal.%s FROM %I',
+          routine_signature, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
+    -- The drained cutover uses private routines: no previous binary remains.
+    FOREACH routine_signature IN ARRAY ARRAY[
+      'subscription_codex_cutover_v1_active()',
+      'seed_subscription_codex_cutover()',
+      'record_subscription_codex_plan_change()',
+      'keep_subscription_codex_cutover_identity()',
+      'apply_subscription_codex_auto_assignments(uuid,uuid,boolean)',
+      'auto_assign_subscription_codex_workspace()',
+      'auto_assign_subscription_codex_personal_workspace()'
+    ] LOOP
+      IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
+        EXECUTE format(
+          'REVOKE EXECUTE ON FUNCTION opengeni_private.%s FROM %I',
           routine_signature,
           ${literal(role)}
         );

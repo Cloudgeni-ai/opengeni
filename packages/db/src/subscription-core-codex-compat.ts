@@ -17,6 +17,8 @@
 import { sql } from "drizzle-orm";
 import { auditEvents } from "./schema";
 import { withLosslessContentWriteVersion } from "./lossless-json";
+import { codexPlanKey } from "@opengeni/codex";
+import { CODEX_PLAN_ENTITLEMENT_EXCLUSION_TTL_MS } from "./codex-plan-entitlement";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
 import {
   decodeSubscriptionQuota,
@@ -135,10 +137,15 @@ function projectAccount(
     label: row.label,
     accountEmail: row.account_email,
     planType: row.plan_type,
-    planCheckedAt: null,
-    planPreviousType: null,
-    planChangedAt: null,
-    planEntitlementExclusion: null,
+    // Plan history the M3 cutover carried over (and later plan changes the
+    // connection trigger records) is adapter-owned provider state.
+    planCheckedAt: stateDate(row.provider_state?.planCheckedAt),
+    planPreviousType:
+      typeof row.provider_state?.planPreviousType === "string"
+        ? row.provider_state.planPreviousType
+        : null,
+    planChangedAt: stateDate(row.provider_state?.planChangedAt),
+    planEntitlementExclusion: planCooldownExclusion(row.plan_type, quota),
     status: row.status,
     extraCreditsEnabled: row.extra_credits_enabled,
     extraCreditsVersion: Number(row.extra_credits_version),
@@ -164,6 +171,26 @@ function projectAccount(
     exhaustedKind: quota?.exhaustedKind ?? null,
     allowedModelIds: row.allowed_model_ids,
   };
+}
+
+/**
+ * The legacy plan-entitlement projection of the core's per-model cooldowns: a
+ * proven plan refusal is a 24-hour model cooldown on the connection (design
+ * PR 2a), so each live cooldown is reported under the connection's current
+ * plan with the time it was proven.
+ */
+function planCooldownExclusion(
+  planType: string | null,
+  quota: ReturnType<typeof decodeSubscriptionQuota>,
+): NonNullable<CodexAccountStatus["planEntitlementExclusion"]> | null {
+  const models = Object.entries(quota?.modelCooldowns ?? {})
+    .filter(([, until]) => Number.isFinite(until))
+    .map(([modelId, until]) => ({
+      modelId,
+      excludedAt: new Date(until - CODEX_PLAN_ENTITLEMENT_EXCLUSION_TTL_MS),
+    }))
+    .sort((left, right) => left.modelId.localeCompare(right.modelId));
+  return models.length === 0 ? null : { planType: codexPlanKey(planType), models };
 }
 
 type EffectiveCodexSettings = {

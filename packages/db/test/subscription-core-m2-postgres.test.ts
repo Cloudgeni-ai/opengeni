@@ -42,6 +42,11 @@ async function organizationFixture() {
     email: `${userId}@example.test`,
     name: "Subscription core fixture",
   });
+  // Migration 0680 seeds every organization's settings row; these contracts
+  // write the organization row themselves.
+  await shared!.admin`
+    delete from subscription_settings
+    where account_id = ${access.workspaceGrants[0]!.accountId}::uuid and workspace_id is null`;
   return {
     accountId: access.workspaceGrants[0]!.accountId,
     workspaceId: access.workspaceGrants[0]!.workspaceId!,

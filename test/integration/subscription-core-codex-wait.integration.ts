@@ -118,6 +118,10 @@ describe.skipIf(!realDb)(
       await shared!.admin`
       insert into workspace_inference_controls (workspace_id, account_id)
       values (${workspaceId}::uuid, ${accountId}::uuid)`;
+      // Migration 0680 seeds the organization settings row; the fixture writes its own.
+      await shared!.admin`
+      delete from subscription_settings
+      where account_id = ${accountId}::uuid and workspace_id is null`;
       await shared!.admin`
       insert into subscription_settings (
         account_id, rotation, providers, cross_provider_failover, fallback_order,
@@ -128,7 +132,8 @@ describe.skipIf(!realDb)(
       )`;
       await shared!.admin`
       insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${accountId}::uuid, 'codex', true)`;
+      values (${accountId}::uuid, 'codex', true)
+      on conflict (account_id, provider) do update set enabled = true`;
       const [connectionRow] = await shared!.admin<{ id: string }[]>`
       insert into subscription_connections (
         account_id, provider, kind, credential_encrypted, ownership, scope_kind,

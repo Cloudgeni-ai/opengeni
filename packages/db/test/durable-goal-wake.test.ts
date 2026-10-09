@@ -11,6 +11,7 @@ import {
   addSessionSystemUpdate,
   addSessionSystemUpdateWithSourceMutation,
   armCodexCapacityWait,
+  armSubscriptionCoreCodexCapacityWait,
   appendSessionEventsForTurnAttempt,
   applySessionTurnSettlement,
   bootstrapWorkspace,
@@ -1962,6 +1963,67 @@ describe("durable active-goal wake", () => {
       usage: 0,
       events: 0,
     });
+  });
+
+  test("a shared-core Codex capacity wait blocks synthesis and exposes its durable retry time", async () => {
+    // After the drained cutover (0680) the core waiter is the only Codex
+    // waiter written; the legacy waiter table is frozen.
+    const ctx = await runningGoalFixture();
+    const goal = await getSessionGoalWithContinuation(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+    );
+    if (!goal) throw new Error("goal fixture was not created");
+    const armed = await armSubscriptionCoreCodexCapacityWait(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      turnId: ctx.turn.id,
+      attemptId: ctx.attemptId,
+      goalId: goal.id,
+      goalVersion: 1,
+      waitReason: "all_capacity_exhausted",
+      earliestResetAt: new Date(Date.now() + 5 * 60_000),
+      failurePayload: {
+        error: "all connected Codex subscriptions are unavailable",
+        code: "codex_usage_limit_reached",
+      },
+    });
+    expect(armed.action).toBe("waiting");
+    if (armed.action !== "waiting") throw new Error("core capacity wait was not armed");
+    const [legacy] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from codex_capacity_waiters
+      where session_id = ${ctx.session.id}::uuid`;
+    expect(legacy?.count).toBe(0);
+
+    expect(
+      (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
+        ?.continuation,
+    ).toMatchObject({
+      state: "blocked",
+      reason: "provider_backpressure",
+      nextAttemptAt: armed.waiter.nextCheckAt.toISOString(),
+    });
+    expect((await materialize(ctx)).action).toBe("none");
+    expect(await counts(ctx)).toEqual({
+      autoContinuations: 0,
+      wakeRevision: 0,
+      observedRevision: 0,
+      updates: 0,
+      usage: 0,
+      events: 0,
+    });
+    // The parked turn is not claimable while its core waiter exists.
+    const claim = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claim).toMatchObject({ action: "unclaimed", reason: "no-work" });
   });
 
   test("terminal and corrupt idle sessions refuse or repair goal work", async () => {

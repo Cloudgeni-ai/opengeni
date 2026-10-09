@@ -1701,6 +1701,291 @@ cross-workspace fence, internals not executable; the writer and fences again
 under a NOBYPASSRLS migration owner),
 `packages/db/test/subscription-core-codex-v2-carriers-postgres.test.ts` and
 `apps/api/test/codex-core-routes.test.ts`.
+##### PR 3: the drained Codex cutover
+
+PR 3 is the one-way step. Maintenance migration
+`0689_subscription_core_codex_cutover.sql` moves every organization's Codex
+state onto the core and enables the Codex cutover for every organization in
+the same transaction. It is split around a codec stage
+(`packages/db/src/codex-subscription-core-cutover.ts`, restricted by the
+runner to 0689 like 0598's Claude stage): the SQL prelude checks the drain and
+opens the owner window, the stage moves credentials, and the SQL that follows
+moves everything that references them, validates parity and restores the
+window. Plain SQL is refused before any change.
+
+Steps, as implemented:
+
+1. **Drain.** The complete old and new runtime-login list is required; any
+   live session of a listed login aborts with `55000`. A per-organization,
+   per-source inventory is taken inside the owner window before any mutation.
+   Every source that counts zero is proven empty by an RLS-immune probe
+   (`ADD CONSTRAINT ... CHECK (false) NOT VALID` then `VALIDATE`), so a FORCE-RLS
+   blind spot cannot certify an empty move. Pre-existing core Codex rows are
+   refused (the core was dormant; nothing may hide behind them). Live work in
+   a session whose owner subject and owner membership disagree aborts
+   (`session_owner_ambiguous`).
+2. **Credentials.** Each legacy secret is decrypted through the environment
+   codec, checked to be the `{access_token, refresh_token, id_token}` object,
+   canonicalized to exactly those fields, re-encrypted and read back; the
+   readability parity compares content-free digests. Duplicates group by
+   organization, upstream account (the stored ChatGPT account id,
+   cross-checked against the id_token; a row with neither is never merged),
+   the signed-in person (the id_token's ChatGPT user id, else its OIDC
+   subject) and owner (personal owner membership, or shared). Every member of
+   a ChatGPT Team/Business/Enterprise workspace shares the account id, so the
+   account id alone would merge different people's logins (and hand one
+   person's token to the other's Apps designation). Decision: merge only rows
+   that are provably the same person. Distinct people stay distinct
+   connections, each with its own credential, assignments, designations and
+   pins; the core identity (`provider_subject_id`, added by 0688, part of the
+   unique key) records the person. A row whose person is unknown, or whose
+   stored email contradicts another row of the same person, is kept as its own
+   connection (`legacy:<id>` as its person key when it shares the upstream
+   account with another row; dispositions
+   `person_identity_unknown_kept_separate`,
+   `person_identity_email_mismatch_kept_separate`): keeping both credentials
+   is a legitimate state, so it is not an abort. The healthiest row
+   (active, then error, then needs_relogin; then the freshest refresh; then
+   deterministic order) is canonical and keeps its id; every other legacy id
+   becomes an alias. Conflict classes abort before any write and carry no
+   values: `provider_identity_mismatch`, `personal_workspace_owner_ambiguous`,
+   `personal_owner_missing`, `fedramp_mismatch`, `unrepresentable_status`,
+   `unrepresentable_scope`. After parity the legacy ciphertext is blanked:
+   one secret copy.
+3. **Health, quota, policy, scope.** One policy-union implementation merges both
+   connection ceilings (personal and shared) and duplicate workspace/pool
+   assignments: only enabled rows contribute model sets when any row is enabled;
+   if all are disabled their model union remains disabled. The personal ceiling
+   is the entire policy because personal connections have no assignment-policy
+   narrowing. This also covers Personal-workspace duplicates with NULL stored
+   account IDs and a Personal-workspace row merged with a verified user-authority
+   row for the same decoded account/person. A disabled unrestricted row cannot
+   widen an enabled limited row, while multiple enabled rows retain their full
+   legitimate union. SQL parity independently reconstructs both connection
+   ceilings (`connection_model_policies`) and local assignment unions. The final
+   review found that the earlier assignment-only repair missed personal ceilings;
+   this bounded correction preserves identities, credentials and aliases rather
+   than rejecting representable groups. Extra-credit consent
+   carries only when every merged row opted in, retaining the maximum version;
+   conflicting consent fails closed to disabled with the content-free disposition
+   `extra_credit_consent_conflict_disabled`. Single-row consent is preserved.
+   Status maps 1:1; `refresh_generation` is
+   the legacy `version` (so quota observations stay fenced to the same token
+   family); usage windows become the shared quota model, an exhaustion keeps
+   its kind, a live plan-entitlement exclusion becomes a model cooldown until
+   its 24-hour expiry, and an account never observed keeps a NULL observed
+   generation (unknown, never exhausted). FedRAMP, reset-credit counts, plan
+   history and scopes move to adapter-owned `provider_state`. A Personal-
+   workspace account becomes its owner's personal connection with a new
+   `subscription_connection` resource authority (generation 1, or the
+   transferred generation of a legacy `user` row whose authority is verified
+   and active; otherwise the authority is created revoked). A live turn's
+   legacy `user` snapshot maps to personal v2 authority only when the
+   canonical row of its connection is that verified user row (its generation
+   transferred); a connection whose canonical row is a Personal-workspace row
+   starts at generation 1 and no `user` snapshot names it, so an old revoked
+   authority's generation can never coincide with a new one.
+   Decision on scope (fail closed): a shared connection is `organization`
+   scope only when its organization source has no allowlist, admits Personal
+   workspaces and carries the widest allocator/model policy of its group, so
+   every current and future workspace sees exactly that policy. Otherwise
+   every workspace the legacy rows admit today is enumerated as a `workspaces`
+   scope, and the organization source's reach over workspaces created later
+   is kept by `opengeni_private.subscription_codex_auto_assignments`
+   (disposition `organization_reach_auto_assigned`): a NULL legacy allowlist
+   assigns every new shared workspace, `allow_personal_workspaces` every new
+   Personal workspace, each with the organization source's own allocator and
+   model policy, exactly as legacy evaluated it at read time. Owner-only
+   triggers on `workspaces` (insert) and `organization_memberships` (a
+   Personal workspace assigned) apply it; a workspace first assigned as shared
+   that becomes a Personal workspace follows the Personal rule. The core
+   visibility function does not read `allow_personal_workspaces`, and changing
+   it would touch every row-security policy, so this small fail-closed
+   representation was preferred: without a row nothing is ever added, and the
+   connection keeps the legacy `allow_personal_workspaces` value. Two source
+   rows of one connection in one pool of one workspace (the same person
+   signed in twice) merge into one assignment policy that keeps the wider
+   of the two (`duplicate_pool_policy_merged`) instead of colliding. Every
+   source row writes
+   its exact `(connection, workspace, pool)` assignment policy (allocator,
+   allowlist, manager); the connection-level values are the group's union.
+   Placement now treats a shared connection with no assignment row in the
+   workspace by its management classification (organization pool unless that
+   workspace manages it), as the compatibility projection and operation
+   candidates already did; PR 1 excluded it, which would have hidden every
+   organization-scope account from chat in workspaces without a local copy.
+4. **Settings.** Every organization gets an organization settings row: its
+   rotation is the organization rotation row (on is `spread`, off is
+   `primary_first` with the active account as primary; no row is `spread`).
+   Workspace overrides: `workspace`, `organization` and `disabled` become the
+   Codex provider override (`inferenceSource` or `enabled = false`);
+   `automatic` gets no source override. The workspace rotation is mapped only
+   where the workspace pool is in effect (explicit `workspace`, or
+   `automatic` with local accounts), so a local primary keeps taking new work.
+   A Personal workspace whose account became personal gets
+   `personal_fallback_allowed = true` (unless an organization lock says no,
+   recorded) and its owner opts in to personal fallback; its rotation row has
+   no equivalent and is dropped (recorded).
+5. **Bindings.** A manual pin is `explicit` (`explicit_choice`), otherwise the
+   last (or policy) account is `automatic`, resolved through the alias map; the
+   model is the latest Codex turn's product model; `last_model_call_at` is the
+   session's latest model-call fact or unknown. An explicit pin to an
+   unhealthy or newly ineligible account survives and waits (D-24): the
+   binding/lease row guards are disabled only inside the migration
+   transaction (the owner-only, non-dispatching backfill seam; the
+   application role cannot alter triggers). Ownerless sessions and a personal
+   target that is not the session owner's own private or Personal-workspace
+   work get no binding (recorded).
+6. **Leases, waiters, authority.** Live leases keep turn, holder, generation
+   and expiry on the canonical connection; the moved legacy rows are deleted
+   and expired ones dropped (recorded). Each waiting legacy waiter moves with
+   its UUID as `waiter_id`, generation, both wake revisions, next check, reset
+   kind and time, retry count, blocked-turn generation, goal fence, last wake
+   reason and accepted-update link; the legacy row is superseded so no
+   fallback lookup can revive it. Accepted authority v2 (Codex entry only;
+   Claude and SuperGrok v1 bytes unchanged) is written on every live turn,
+   live scheduled task and its current authority revision, and pending
+   internal updates and outbox rows (new nullable, owner-immutable columns on
+   those carriers). A personal entry is written only for exact owner-caused
+   work: the stored human is the session owner, the owner membership is
+   active, and the work runs in the owner's private session or Personal
+   workspace; a v1 `user` snapshot keeps its generation only if a canonical
+   personal connection carries that active generation, and a
+   Personal-workspace account lends its one current generation. Updates and
+   outbox rows carry no stored human, so they freeze the empty value. Nothing
+   is minted from current membership alone.
+   Apps designations of shared connections move with their version; one that
+   points at an account that became personal cannot be represented
+   (designations are shared-only) and is recorded.
+   The single-use reset-credit ledger follows the canonical connection: every
+   `codex_reset_redemption_attempts` row filed under a legacy id that became
+   an alias is re-keyed to the canonical id, keeping its attempt id, upstream
+   idempotency key, status, outcome, claim and retry state. The core claim
+   keys its per-credit advisory lock, per-credit fence and ambiguous-outcome
+   recovery by (workspace, connection id, credit), so without this a legacy
+   `provider_started` attempt would be invisible to a core claim and the same
+   credit could be consumed twice. Two credit-holding attempts (open, or a
+   consumed outcome) that would meet on one (workspace, connection, credit)
+   abort the cutover; attempts of credentials disconnected earlier keep their
+   id and are recorded.
+7. **Parity.** Per organization: credentials, connections, aliases, unique
+   identities, workspace-pool policies, organization-pool admissions (every
+   workspace each organization row admits today keeps its exact policy),
+   personal connections with their authority, source modes, organization and
+   workspace rotation, session pointers and bindings, Apps designations,
+   leases, waiter ids/generations/revisions, live-turn v2 coverage and
+   reset-credit attempts (all, and open ones) on canonical ids; plus
+   enabled cutover rows for every organization and secret readability. Any
+   mismatch rolls everything back. The counts and dispositions (no values)
+   stay in `opengeni_private.subscription_codex_cutover_report`.
+8. **Window.** All 35 relations are locked, their user triggers disabled and
+   FORCE lifted by literal statements; both are restored from the captured
+   state before commit, deferred keys are validated first, and the 0667 v2
+   check is validated. The release-schema contract registers 0689 as
+   maintenance at its three sites.
+
+Activation decision. The migration writes **enabled** Codex cutover rows for
+every organization. "No row" means the legacy path (PR 1/2), and after the
+data move a legacy read would see blanked, stale tables, so leaving an
+operator switch with no rows (or disabled rows) would either reach legacy state
+or fail every preserved queued turn until an operator acted. The step-8
+sequence also says the drained migration "backfills v2 authority and activates
+the Codex cutover together". Organizations created later are seeded enabled by
+an owner trigger on `managed_accounts`, and the application role can no longer
+delete a Codex row, so "no row" is unreachable in a migrated database; the
+switch remains a containment control whose off state is the existing
+fail-closed maintenance behaviour. Runtime readiness requires the 0689
+receipt, so a binary of this release cannot start against an unmigrated
+database.
+
+No dual write. After 0689 every Codex reader and writer the earlier PRs moved
+targets the core. Also in this PR: plan-change history is recorded on the
+core (a trigger keeps the previous plan and time in `provider_state` whenever
+a writer changes a Codex connection's plan) and projected with the
+plan-entitlement cooldowns into the legacy account shape; the Insights facts
+repair attributes a rebuilt Codex fact to the canonical connection the same
+attempt recorded in `codex.credential.selected` (through aliases; a personal
+connection the workspace cannot see stays NULL); and a child agent's first
+turn copies its causal parent turn's frozen v2 value.
+
+The writers this cutover needs already exist, dormant, from PR 3b (migration
+0688, which lands first): connect start/poll and disconnect on the core with
+the redemption share lock and the `subscription-refresh:<id>` key,
+organization-level reset redemption fenced per (connection, credit) across
+workspaces (it re-files the person's own lapsed attempt that 0689 keeps in its
+legacy workspace, and refuses another workspace's open or consumed attempt),
+personal connections in the owner's views, and the v2 writers at acceptance
+for scheduled tasks and firings, internal updates and child-result notices,
+agent messages and Steer. 0689 backfills the v2 slots 0688 added for work
+accepted before it; enabling the cutover switches those writers on.
+
+Assignment-change wakes need no writer yet: no route edits workspace
+assignments (the M5 scope editor must call the core wake).
+
+Workflow compatibility. Activity and signal names and payloads are unchanged.
+`test/integration/subscription-core-codex-cutover.integration.ts` arms a wait
+through the legacy path, records the legacy peek's result, runs 0689, then
+executes the recorded arguments: the core waiter has the same id, generation
+and revision, keeps waiting while exhausted and resumes the same turn after a
+core wake. The pinned legacy capacity-wait history replays against the current
+bundle there and in the PR 2a suite.
+
+Legacy readers after the cutover (review finding, fixed here). Every reader
+that is reachable after 0689 now follows the Codex cutover disposition the
+same way (no row: legacy unchanged; disabled: not ready, no legacy read;
+enabled: core): the model catalog and its readiness, the default session
+model (session create, drafts, scheduled occurrences, `list_models`),
+`workspaceCodexSubscriptionActive`, `isCodexBilledTurn` and admission, the
+connection model restrictions, the claim overlay, the Codex connection-access
+route (core read; saving answers 409 until the M5 scope editor adds a core
+writer), the session `codexCurrentSelection`, and the goal, claim-failure,
+Variable Set and claim readers of a parked turn's waiter (they also read the
+core waiter, so a turn parked on a core waiter is not claimable). Catalog
+readiness uses chat placement's shared pools (automatic admits both local and
+organization candidates), without changing PR 2c Live/transcription's single-source
+policy, and the caller's own personal connections only in their own
+Personal workspace with personal connections and personal fallback allowed,
+read through the owner-only reader; a subjectless reader sees shared
+connections only. Live model lists come from the 0671 connection seam, cached
+per refresh generation; a personal connection's list cannot be read outside
+an accepted turn, so its models are selectable with unknown status unless a
+refusal cooldown applies. Known gap: a person's personal-fallback opt-in can
+only be read inside an accepted turn, so the catalog may show Codex ready for
+someone who has not opted in and placement then waits (0689 opts in the
+owners it migrates). The full reader/writer inventory, with each call site
+gated, unreachable or intentional, is in the PR 3 description.
+
+Personal funding in an owner-private shared-workspace session is intentionally
+not a generic workspace catalog fact. `isCodexBilledTurn` accepts an exact durable
+turn reference, re-reads its frozen v2 and uses the accepted placement world,
+including owner/human/generation and fallback checks. Service, nonowner and empty
+authority cannot borrow a live personal connection. Temporary capacity waits do
+not turn subscription-funded work into deployment-funded work. Codex initial
+turn and prompt credit admission run after authority freeze, before transaction
+commit; rejected prompts roll back, while initial-turn initialization retains
+the existing session-shell/retry lifecycle. No admission read mints authority.
+
+Review hardening (recorded with the decisions above): the live-lease parity
+compares turn, holder, generation, expiry and canonical connection against a
+snapshot taken before the move, and no legacy lease row is left behind
+(expired ones are a recorded disposition); a Codex cutover row keeps its
+organization and provider (a trigger refuses moving it to another provider,
+which would have made it deletable); every failure of the migration leaves as
+a content-free error (fixed refusal text, or the SQLSTATE and constraint
+name), never a driver error carrying statement parameters; and the Insights
+repair lookup filters by turn so the workspace/turn/type index serves it.
+
+Left to PR 4 (unreachable after 0689, safe to delete): the legacy Codex
+selector (`apps/worker/src/activities/codex-rotation.ts`, the Codex-only
+capacity, settlement and recovery branches, the fleet shadow), the legacy
+arms of `peekSessionWork`/`getCodexCapacityWait`/`reconcileCodexCapacityWait`
+and the legacy table fallback, the legacy Codex accessors in
+`packages/db/src/index.ts` (credentials, rotation, sources, pins, usage,
+leases, Apps settings, redemption authority by connector), every `legacy`
+branch behind `readCodexCutoverDisposition`/`codexRouteDisposition`, the
+"no row" disposition itself, the M1 Codex shadow world, and the tests that
+recreate the pre-cutover world to exercise them. The legacy tables stay
+read-only for forensics until M6.
 
 #### Verification plan
 

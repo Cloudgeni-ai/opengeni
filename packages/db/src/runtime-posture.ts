@@ -132,6 +132,15 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
   "drop_subscription_codex_owner_capabilities(uuid)",
   "derive_scheduled_revision_subscription_authority()",
+  // Migration 0689: the owner-only Codex cutover receipt and the trigger that
+  // seeds organizations created later onto the shared core.
+  "subscription_codex_cutover_v1_active()",
+  "seed_subscription_codex_cutover()",
+  "record_subscription_codex_plan_change()",
+  "keep_subscription_codex_cutover_identity()",
+  "apply_subscription_codex_auto_assignments(uuid, uuid, boolean)",
+  "auto_assign_subscription_codex_workspace()",
+  "auto_assign_subscription_codex_personal_workspace()",
   "read_sender_connection(uuid, uuid, uuid, text)",
   // Lifecycle fact writers (migrations 0532 and 0565): owner-run trigger
   // functions and the migration-owner backfill. Runtime roles may still hold
@@ -733,6 +742,16 @@ export const SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES = [
   "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
   "drop_subscription_codex_owner_capabilities(uuid)",
   "derive_scheduled_revision_subscription_authority()",
+  // Migration 0689: the cutover receipt and the two owner-run trigger
+  // functions. Readiness only looks the receipt up; triggers fire without
+  // the caller holding EXECUTE.
+  "subscription_codex_cutover_v1_active()",
+  "seed_subscription_codex_cutover()",
+  "record_subscription_codex_plan_change()",
+  "keep_subscription_codex_cutover_identity()",
+  "apply_subscription_codex_auto_assignments(uuid, uuid, boolean)",
+  "auto_assign_subscription_codex_workspace()",
+  "auto_assign_subscription_codex_personal_workspace()",
 ] as const;
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [
@@ -1937,6 +1956,8 @@ export type RuntimeDatabasePosture = {
   subscriptionOwnerRoutines?: RuntimeRoutinePosture[];
   sessionVariableSetAttachmentsCutoverPresent: boolean;
   claudeSubscriptionPoolActivationPresent: boolean;
+  /** Migration 0689: Codex runs on the shared subscription core. */
+  subscriptionCodexCutoverActivationPresent: boolean;
 };
 
 export class RuntimeDatabasePostureError extends Error {
@@ -2075,6 +2096,13 @@ export async function inspectRuntimeDatabasePosture(
         ) is not null as present`),
       );
       const claudeSubscriptionPoolActivationPresent = claudePoolActivationRows[0]?.present === true;
+      const codexCutoverActivationRows = resultRows<{ present: boolean }>(
+        await tx.execute(sql`select to_regprocedure(
+          'opengeni_private.subscription_codex_cutover_v1_active()'
+        ) is not null as present`),
+      );
+      const subscriptionCodexCutoverActivationPresent =
+        codexCutoverActivationRows[0]?.present === true;
 
       // Scoped/embedded topology deliberately leaves ownership and isolation to
       // the host. Prove the connection identity is coherent, but do not impose
@@ -2092,6 +2120,7 @@ export async function inspectRuntimeDatabasePosture(
           privateRoutines: [],
           sessionVariableSetAttachmentsCutoverPresent,
           claudeSubscriptionPoolActivationPresent,
+          subscriptionCodexCutoverActivationPresent,
         };
       }
 
@@ -2422,6 +2451,7 @@ export async function inspectRuntimeDatabasePosture(
         subscriptionOwnerRoutines,
         sessionVariableSetAttachmentsCutoverPresent,
         claudeSubscriptionPoolActivationPresent,
+        subscriptionCodexCutoverActivationPresent,
       };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
@@ -2451,6 +2481,11 @@ export function evaluateRuntimeDatabasePosture(
 
   if (!posture.claudeSubscriptionPoolActivationPresent)
     violations.push("database is missing the Claude subscription account activation receipt");
+
+  if (!posture.subscriptionCodexCutoverActivationPresent)
+    violations.push(
+      "database is missing the 0689 Codex subscription-core cutover receipt; run the drained migration first",
+    );
 
   if (!posture.sessionVariableSetAttachmentsCutoverPresent) {
     violations.push("database is missing the 0352 session Variable Set attachment runtime receipt");
@@ -2570,7 +2605,12 @@ export function evaluateRuntimeDatabasePosture(
       routine.name.startsWith("connect_subscription_codex_personal("),
     )
   ) {
-    const required = SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES.slice(2);
+    const required = [
+      "subscription_codex_writer_context(uuid, uuid, text)",
+      "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+      "drop_subscription_codex_owner_capabilities(uuid)",
+      "derive_scheduled_revision_subscription_authority()",
+    ];
     for (const signature of required) {
       const matches = posture.subscriptionOwnerRoutines.filter(
         (routine) => routine.name === signature,
