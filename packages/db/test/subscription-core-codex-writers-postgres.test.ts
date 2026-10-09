@@ -21,6 +21,7 @@ import {
   reserveSubscriptionCoreCodexOperationRequest,
   settleSubscriptionCoreCodexOperationRequest,
   SubscriptionCoreCodexSourceDisconnectedError,
+  SubscriptionCoreCodexRequestOutcomeUnknownError,
   SubscriptionCoreCodexLeaseLostError,
   reserveSubscriptionCoreCodexAppsRequest,
   settleSubscriptionCoreCodexAppsRequest,
@@ -298,6 +299,22 @@ async function disconnectDesignationCase() {
     .admin`select credential_encrypted, disconnected_at is not null as disconnected
     from subscription_connections where id = ${connected.id}::uuid`;
   expect(source).toEqual({ credential_encrypted: "", disconnected: true });
+  const staleTarget = {
+    accountId: org.accountId,
+    workspaceId: null,
+    subjectId: org.ownerSubjectId,
+    connectionId: connected.id,
+  };
+  expect((await setSubscriptionCoreCodexPrimary(client!.db, staleTarget)).activated).toBeNull();
+  expect(
+    (
+      await setSubscriptionCoreCodexAllocator(client!.db, {
+        ...staleTarget,
+        enabled: true,
+        expectedVersion: 1,
+      })
+    ).result,
+  ).toEqual({ kind: "not_found" });
 }
 
 /**
@@ -1100,6 +1117,29 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     await expect(
       reserveSubscriptionCoreCodexRequest(client!.db, identity, ref, request),
     ).rejects.toThrow();
+    // A previous crashed attempt cannot be replayed by a replacement merely
+    // because its lease expired. Fixture the historical admitted request.
+    const crashed = crypto.randomUUID();
+    await shared!.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`insert into subscription_operation_leases(account_id, workspace_id, operation_id,
+        attempt_id, operation_kind, session_id, turn_id, provider, connection_id, holder_id,
+        generation, leased_until, request_id, transport_attempt, request_reserved_at, request_outcome)
+        values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${crashed}::uuid,
+          ${crypto.randomUUID()}::uuid, 'model', ${session.id}::uuid, ${turn.id}::uuid,
+          'codex', ${connected.id}::uuid, 'crashed-owner', 1, now() - interval '1 hour',
+          ${crypto.randomUUID()}, 1, now() - interval '2 hours', 'reserved')`;
+    });
+    await expect(
+      reserveSubscriptionCoreCodexRequest(client!.db, identity, ref, {
+        ...request,
+        requestId: crypto.randomUUID(),
+      }),
+    ).rejects.toBeInstanceOf(SubscriptionCoreCodexRequestOutcomeUnknownError);
+    // Only explicit outcome evidence (a synthetic definitive refusal here),
+    // never timeout/expiry, releases the cross-attempt uncertainty fence.
+    await shared!.admin`update subscription_operation_leases set request_outcome = 'refused'
+      where operation_id = ${crashed}::uuid`;
     expect((await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome).toBe("removed");
     expect(await row(connected.id)).toBeNull();
     const [scrubbed] = await shared!.admin`select credential_encrypted, status, allocator_enabled,
@@ -1125,7 +1165,7 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     const [leases] = await shared!.admin`select
       (select count(*) from subscription_leases where connection_id = ${connected.id}::uuid)::int as chat,
       (select count(*) from subscription_operation_leases where connection_id = ${connected.id}::uuid)::int as operation`;
-    expect(leases).toEqual({ chat: 1, operation: 1 });
+    expect(leases).toEqual({ chat: 1, operation: 2 });
     const [unknown] = await shared!.admin`select request_outcome, request_observed_at
       from subscription_operation_leases where operation_id = ${reserved.operationId}::uuid`;
     expect(unknown).toEqual({ request_outcome: "reserved", request_observed_at: null });
@@ -1429,6 +1469,16 @@ async function personalCase(): Promise<void> {
   expect(removed.outcome).toBe("removed");
   expect(removed.connectionId).toBe(first.id);
   expect(await row(first.id)).toBeNull();
+  expect(
+    (
+      await setSubscriptionCoreCodexPrimary(client!.db, {
+        accountId: org.accountId,
+        workspaceId: member.personalWorkspaceId,
+        subjectId: member.subjectId,
+        connectionId: first.id,
+      })
+    ).activated,
+  ).toBeNull();
   const [revoked] = await shared!.admin<{ status: string }[]>`
     select status from organization_user_resource_authorities where resource_id = ${first.id}::uuid`;
   expect(revoked).toEqual({ status: "revoked" });

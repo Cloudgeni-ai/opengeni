@@ -57,6 +57,12 @@ release cannot erase these records. Normal workspace/session retention may
 remove their nonsecret history. Existing unrelated authorization revocation
 still wins: disconnect creates no override of session visibility or control.
 
+A replacement attempt cannot dispatch for a turn with an earlier `reserved`
+model request or any `unknown` model outcome. The database checks that retained
+evidence under the exact turn fence, rather than trusting a new process's empty
+in-memory tracker. Without supported provider reconciliation the outcome stays
+unresolved; expiry is never permission to replay it.
+
 Non-chat consumers use the same request seam: images, realtime negotiation,
 transcription, usage, discovery, Apps and reset redemption. A returned Response
 header is not body completion; in particular transcription must consume its

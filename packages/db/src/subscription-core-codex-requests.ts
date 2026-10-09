@@ -25,6 +25,17 @@ export class SubscriptionCoreCodexSourceDisconnectedError extends Error {
   }
 }
 
+/** A crashed/replaced attempt has no durable response or definitive refusal.
+ * This is not a retryable transport error or a new placement request.
+ */
+export class SubscriptionCoreCodexRequestOutcomeUnknownError extends Error {
+  readonly code = "subscription_core_request_outcome_unknown";
+  constructor() {
+    super("An earlier Codex request has an unresolved outcome; automatic replay is not safe");
+    this.name = "SubscriptionCoreCodexRequestOutcomeUnknownError";
+  }
+}
+
 export type SubscriptionCoreCodexRequestOutcome = "response_received" | "refused" | "unknown";
 type Request = { requestId: string; transportAttempt: number };
 type TurnRequest = Request & { attemptId: string; executionGeneration: number };
@@ -127,6 +138,28 @@ export async function reserveSubscriptionCoreCodexRequest(
 ): Promise<{ operationId: string }> {
   const scope = { kind: "turn" as const, identity };
   return inScope(db, scope, async (tx) => {
+    // Serialize admission with attempt replacement. A newer worker may neither
+    // borrow this admission nor turn an old lease's expiry into replay proof.
+    const locked = await rawRows(
+      tx,
+      sql`select id from session_turns
+      where account_id = ${identity.accountId}::uuid and workspace_id = ${identity.workspaceId}::uuid
+        and session_id = ${identity.sessionId}::uuid and id = ${identity.turnId}::uuid
+        and active_attempt_id = ${request.attemptId}::uuid and execution_generation = ${request.executionGeneration}
+        and status = 'running' for share`,
+    );
+    if (!locked.length) throw new SubscriptionCoreCodexLeaseLostError();
+    const [prior] = await rawRows<{ unresolved: boolean }>(
+      tx,
+      sql`select exists (
+      select 1 from subscription_operation_leases where account_id = ${identity.accountId}::uuid
+        and workspace_id = ${identity.workspaceId}::uuid and session_id = ${identity.sessionId}::uuid
+        and turn_id = ${identity.turnId}::uuid and provider = 'codex' and operation_kind = 'model'
+        and request_id is not null and (request_outcome = 'unknown'
+          or (request_outcome = 'reserved' and attempt_id <> ${request.attemptId}::uuid))
+    ) as unresolved`,
+    );
+    if (prior?.unresolved) throw new SubscriptionCoreCodexRequestOutcomeUnknownError();
     await lockSource(tx, identity.accountId, ref.connectionId);
     const [lease] = await rawRows<{ current: boolean }>(
       tx,

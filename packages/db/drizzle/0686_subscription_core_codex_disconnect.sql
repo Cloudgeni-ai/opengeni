@@ -64,6 +64,27 @@ RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT
 AS $body$
 BEGIN
   IF NEW.provider <> 'codex' OR NEW.connection_id IS NULL THEN RETURN NEW; END IF;
+  IF TG_TABLE_NAME = 'subscription_operation_leases' THEN
+    IF NEW.operation_kind = 'model' AND NEW.request_id IS NOT NULL THEN
+      PERFORM 1 FROM session_turns turn WHERE turn.account_id = NEW.account_id
+        AND turn.workspace_id = NEW.workspace_id AND turn.session_id = NEW.session_id
+        AND turn.id = NEW.turn_id AND turn.active_attempt_id = NEW.attempt_id
+        AND turn.execution_generation = NEW.generation AND turn.status = 'running'
+        FOR SHARE;
+      IF NOT FOUND THEN
+        RAISE EXCEPTION 'model request no longer owns its exact attempt' USING ERRCODE = '42501';
+      END IF;
+      IF EXISTS (SELECT 1 FROM subscription_operation_leases prior
+        WHERE prior.account_id = NEW.account_id AND prior.workspace_id = NEW.workspace_id
+          AND prior.session_id = NEW.session_id AND prior.turn_id = NEW.turn_id
+          AND prior.provider = 'codex' AND prior.operation_kind = 'model'
+          AND prior.request_id IS NOT NULL AND (prior.request_outcome = 'unknown'
+            OR (prior.request_outcome = 'reserved' AND prior.attempt_id <> NEW.attempt_id))) THEN
+        RAISE EXCEPTION 'prior Codex request outcome is unresolved' USING ERRCODE = '55000';
+      END IF;
+    END IF;
+  END IF;
+  -- Match the caller's turn-before-connection lock order.
   PERFORM pg_advisory_xact_lock(hashtextextended('subscription-refresh:' || NEW.connection_id::text, 0));
   IF NOT EXISTS (SELECT 1 FROM subscription_connections connection
       WHERE connection.account_id = NEW.account_id AND connection.id = NEW.connection_id
@@ -232,3 +253,17 @@ BEGIN
   EXECUTE replace(definition, anchor, anchor || ' AND connection.disconnected_at IS NULL');
 END
 $personal_projection$;
+
+DO $personal_management$
+DECLARE definition text; anchor text;
+BEGIN
+  definition := pg_get_functiondef('opengeni_private.manage_subscription_codex_personal(uuid,uuid,text,uuid,text,text,boolean,integer)'::regprocedure);
+  anchor := $old$SELECT * INTO target FROM subscription_connections WHERE id = target.id FOR UPDATE;
+        IF NOT FOUND THEN$old$;
+  IF (length(definition) - length(replace(definition, anchor, ''))) <> length(anchor) THEN
+    RAISE EXCEPTION 'personal management source changed';
+  END IF;
+  EXECUTE replace(definition, anchor, $new$SELECT * INTO target FROM subscription_connections WHERE id = target.id FOR UPDATE;
+        IF NOT FOUND OR target.disconnected_at IS NOT NULL THEN$new$);
+END
+$personal_management$;

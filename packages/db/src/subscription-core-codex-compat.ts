@@ -589,11 +589,16 @@ async function visibleSharedConnection(
     connectionId: rawId,
   });
   if (!connectionId) return null;
+  // Management must not accept a stale primary/allocator target after removal.
+  // Use the same lifecycle order as disconnect before reading its current row.
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(
+    ${`subscription-refresh:${connectionId}`}, 0))`);
   const [row] = await rawRows<{ allocator_enabled: boolean; allocator_version: number | string }>(
     tx,
     sql`select allocator_enabled, allocator_version from subscription_connections
       where account_id = ${input.accountId}::uuid and provider = 'codex' and kind = 'subscription'
         and ownership = 'shared' and id = ${connectionId}::uuid
+        and disconnected_at is null
         and (${input.workspaceId}::uuid is not null or managed_by_workspace_id is null)`,
   );
   if (!row) return null;
