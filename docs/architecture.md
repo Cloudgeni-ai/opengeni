@@ -1091,6 +1091,10 @@ worker-run through one deployment-configured search API (`web_search` /
 both the worker's tools and the API's effective-tools projection; provider
 calls are credit-billed per call when billing is active. See
 [web search](web-search.md).
+Included hosted-search evidence is projected request-locally by
+`packages/runtime/src/hosted-search-evidence.ts` before model/portable-compaction
+accounting: bounded untrusted facts, not a dependency on stored provider IDs.
+Canonical hosted items remain unchanged.
 
 Configured-router visibility never joins pending non-eager MCP preparation;
 execution joins the exact catalog. Exposed routers remain in the prefix after
