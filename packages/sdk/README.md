@@ -1124,6 +1124,25 @@ model MCP calls and Codemode. Generated declarations augment the lazy namespace
 for exact installed-tool types; canonical `{ serverId, toolName }` identity and
 the server-side catalog remain authoritative.
 
+Known calls use `POST tools/invoke` directly, with no preceding workspace
+catalog request. The API selects one exact authorized account/connector; a
+selected MCP provider may still require its own `tools/list`. Symbolic paths
+use the canonical registry projection and reject ambiguity before connecting.
+Cold calls use the current definition. `$resolve({ identity })` returns one
+entry and a `definitionDigest`; pass it as `expectedDefinitionDigest` to require
+that complete public definition before execution. Digests never grant access.
+Returned executed metadata preserves structured-output unwrapping without a
+catalog load.
+
+`$catalog()` and `$declarations()` remain explicit full discovery. For an older
+API or Site host, set `toolGatewayMode: "catalog"` explicitly on the client;
+there is no automatic downgrade or retry after an unknown invocation outcome.
+The targeted SDK caches bounded per-target metadata, shares only resolution
+loads, and retries at most once after a typed pre-execution
+`tool_definition_stale`. Explicit pins are not silently advanced. An approved
+call requires reapproval after definition drift. Operation IDs are correlation
+keys, not general idempotency for unapproved calls.
+
 ```ts
 const tools = client.tools.forWorkspace(workspaceId);
 const documents = await tools.docs.search({ query: "launch plan" });
@@ -1131,7 +1150,9 @@ const documents = await tools.docs.search({ query: "launch plan" });
 
 An approval-required call needs a server-issued capability. A trusted host
 shows its approval UI first, then asks for one token bound to the current human,
-workspace, operation id, catalog digest, exact tool identity, and arguments.
+workspace, operation id, exact tool identity, definition, executable authority,
+and arguments. Targeted approvals use a distinct version-2 binding, never a v1
+catalog digest.
 The token expires after five minutes, is stored only as a hash, and is consumed
 once by the matching call.
 
@@ -1143,7 +1164,7 @@ preflight credential and resource authorization before consuming the token.
 const operationId = crypto.randomUUID();
 const identity = { serverId: "linear", toolName: "issues_update" };
 const input = { issueId, state: "Done" };
-const approval = await tools.$approve(identity, input, { operationId });
+const approval = await tools.$approveTarget(identity, input, { operationId });
 
 await tools.$call(identity, input, {
   operationId,
@@ -1151,7 +1172,13 @@ await tools.$call(identity, input, {
 });
 ```
 
-When a call or approval request receives the typed
+The retained `$approve()` method and explicit `toolGatewayMode: "catalog"` use
+the legacy protocol described below. Tokens returned by `$approve()` on the
+same facade retain that routing; externally retained legacy tokens must pass
+`approvalBinding: "catalog"`. Never reinterpret a legacy token as a targeted
+approval.
+
+When a legacy call or approval request receives the typed
 `409 details.code = "catalog_stale"` response, the SDK refreshes the catalog,
 re-resolves the exact identity or generated namespace path, preserves the
 operation id (generating it before the first attempt when omitted), and retries
@@ -1187,6 +1214,15 @@ supplies the Site context on direct calls, and the server revalidates the active
 version and viewer's live authority. The requested set is a maximum allowlist,
 not an authority grant; ordinary gateway approval still applies. Archived Sites
 receive no tool bridge.
+
+An upgraded host advertises targeted calls to modern Site clients. Existing
+bundled Site clients retain their catalog/call protocol: the host obtains a
+bounded manifest for only that saved version's requested identities and
+translates calls using retained per-entry pins. They still make their initial
+catalog request; republishing with the modern client removes it. Unknown or
+evicted manifest digests fail before execution. Host-owned Site/version context
+and approval tokens are stripped from iframe requests. Local previews instead
+use their frozen attempt catalog and existing Codemode operation journal.
 
 Omit `firstPartyMcpTools` for the complete Opengeni tool catalog. An explicit
 `[]` exposes no broad first-party tools; attached resources and separately

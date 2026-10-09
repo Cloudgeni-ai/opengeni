@@ -2574,6 +2574,7 @@ describe("release schema contract", () => {
       "0677_local_human_inbox_recipient.sql",
       "0678_inbox_mute_session_replies.sql",
       "0679_codex_extra_credit_consent.sql",
+      "0680_target_tool_approval_bindings.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

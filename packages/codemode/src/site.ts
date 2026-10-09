@@ -1,6 +1,7 @@
 import { siteRequestHeaders } from "@opengeni/contracts/site-session-http";
 import { randomUUID } from "node:crypto";
-import { generateToolDeclarations } from "@opengeni/tool-gateway";
+import { generateToolDeclarations, digestToolGatewayDefinition } from "@opengeni/tool-gateway";
+import { ToolGatewayResolveRequest, ToolGatewayInvokeRequest } from "@opengeni/contracts";
 import { SITE_BROWSER_RUNTIME, SITE_CLIENT_SCRIPT_PATH } from "@opengeni/sdk/site-document";
 
 import { CodemodeClient, CodemodeTransportError } from "./index";
@@ -35,6 +36,53 @@ export function createCodemodeSiteRequestHandler(
         });
       }
       const active = await provide();
+      if (
+        request.method === "POST" &&
+        (pathname === `${CODEMODE_SITE_LOCAL_PATH}/resolve` ||
+          pathname === `${CODEMODE_SITE_LOCAL_PATH}/invoke`)
+      ) {
+        const invoking = pathname.endsWith("/invoke");
+        const body: unknown = await request.json().catch(() => null);
+        const parsed = (invoking ? ToolGatewayInvokeRequest : ToolGatewayResolveRequest).safeParse(
+          body,
+        );
+        if (
+          !parsed.success ||
+          parsed.data.siteArtifactId ||
+          parsed.data.siteVersionId ||
+          ("approvalToken" in parsed.data && parsed.data.approvalToken)
+        )
+          return siteError(400, "invalid_request", "Invalid Site target request");
+        const catalog = await active.catalog({ signal: request.signal });
+        const target = parsed.data.target;
+        const entries = catalog.entries.filter((entry) =>
+          "identity" in target
+            ? entry.identity.serverId === target.identity.serverId &&
+              entry.identity.toolName === target.identity.toolName
+            : entry.codemodePath.length === target.path.length &&
+              entry.codemodePath.every((part, index) => part === target.path[index]),
+        );
+        if (entries.length !== 1) return siteError(404, "tool_unavailable", "Tool unavailable");
+        const entry = entries[0]!;
+        const tool = {
+          version: 1,
+          entry,
+          definitionDigest: digestToolGatewayDefinition(catalog, entry),
+        };
+        if (!invoking) return Response.json(tool);
+        const input = ToolGatewayInvokeRequest.parse(body);
+        if (
+          input.expectedDefinitionDigest &&
+          input.expectedDefinitionDigest !== tool.definitionDigest
+        )
+          return siteError(409, "tool_definition_stale", "The tool definition changed", true);
+        request.signal.throwIfAborted();
+        const result = await active.call(entry.identity, input.arguments, {
+          operationId: input.operationId,
+          signal: request.signal,
+        });
+        return Response.json({ operationId: input.operationId, tool, result });
+      }
       if (pathname.startsWith(`${CODEMODE_SITE_LOCAL_PATH}/sdk/`)) {
         const path =
           pathname.slice(`${CODEMODE_SITE_LOCAL_PATH}/sdk`.length) + new URL(request.url).search;

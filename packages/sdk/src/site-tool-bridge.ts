@@ -4,7 +4,15 @@ import { createSharedCatalogLoader } from "./shared-catalog-loader";
 import { siteSessionPath, type SiteHttpRequest } from "./site-http";
 import type { OpenGeniSiteToolCatalog } from "./site";
 import type { OpenGeniWorkspaceTools } from "./tools";
-import type { ToolGatewayCallRequest, ToolGatewayCallResponse, ToolGatewayIdentity } from "./types";
+import type {
+  ToolGatewayCallRequest,
+  ToolGatewayCallResponse,
+  ToolGatewayIdentity,
+  ToolGatewayResolveRequest,
+  ToolGatewayResolvedTool,
+  ToolGatewayInvokeRequest,
+  ToolGatewayInvokeResponse,
+} from "./types";
 
 export type SiteToolCallRequest = ToolGatewayCallRequest & {
   siteArtifactId: string;
@@ -17,6 +25,14 @@ export type SiteToolCaller = (input: {
   signal: AbortSignal;
 }) => Promise<ToolGatewayCallResponse>;
 export type SiteToolBridge = {
+  resolve?: (
+    request: ToolGatewayResolveRequest,
+    options: { signal: AbortSignal },
+  ) => Promise<ToolGatewayResolvedTool>;
+  invoke?: (
+    request: ToolGatewayInvokeRequest,
+    options: { signal: AbortSignal },
+  ) => Promise<ToolGatewayInvokeResponse>;
   fetch?: (request: SiteHttpRequest, signal: AbortSignal) => Promise<Response>;
   catalog: (options: { signal: AbortSignal }) => Promise<OpenGeniSiteToolCatalog>;
   call: (
@@ -25,7 +41,8 @@ export type SiteToolBridge = {
   ) => Promise<ToolGatewayCallResponse>;
 };
 export type CreateSiteToolBridgeOptions = {
-  workspaceTools: Pick<OpenGeniWorkspaceTools, "$catalog">;
+  workspaceTools: Pick<OpenGeniWorkspaceTools, "$catalog"> &
+    Partial<Pick<OpenGeniWorkspaceTools, "$targetProtocol" | "$resolve" | "$invoke" | "$manifest">>;
   workspaceId: string;
 
   callTool: SiteToolCaller;
@@ -43,11 +60,71 @@ export type CreateSiteToolBridgeOptions = {
  * Recreate on actor/version change. Never take these pinned fields from HTML. */
 export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteToolBridge {
   const allowed = input.requestedTools ? new Set(input.requestedTools.map(identityKey)) : null;
+  const targeted =
+    input.workspaceTools.$targetProtocol === 1 &&
+    input.workspaceTools.$resolve &&
+    input.workspaceTools.$invoke &&
+    input.workspaceTools.$manifest;
+  const context = input.artifactId
+    ? { siteArtifactId: input.artifactId, siteVersionId: input.siteVersionId }
+    : {};
+  const manifests = new Map<string, readonly ToolGatewayResolvedTool[]>();
+  const resolve = async (
+    request: ToolGatewayResolveRequest,
+    { signal }: { signal: AbortSignal },
+  ) => {
+    if (
+      allowed &&
+      "identity" in request.target &&
+      !allowed.has(identityKey(request.target.identity))
+    )
+      throw new Error("This tool is not available to the Site");
+    const tool = await input.workspaceTools.$resolve!(request.target, { signal, ...context });
+    if (allowed && !allowed.has(identityKey(tool.entry.identity)))
+      throw new Error("This tool is not available to the Site");
+    return tool;
+  };
+  const invoke = async (request: ToolGatewayInvokeRequest, { signal }: { signal: AbortSignal }) => {
+    if (
+      allowed &&
+      "identity" in request.target &&
+      !allowed.has(identityKey(request.target.identity))
+    )
+      throw new Error("This tool is not available to the Site");
+    return await input.workspaceTools.$invoke!(
+      {
+        target: request.target,
+        operationId: request.operationId,
+        arguments: request.arguments,
+        ...(request.expectedDefinitionDigest
+          ? { expectedDefinitionDigest: request.expectedDefinitionDigest }
+          : {}),
+        ...context,
+      },
+      { signal },
+    );
+  };
   // One shared load serves every concurrent Site request (cancelled only when
   // all of them abort); a stale rejection reloads once for all requests
   // rejected on that digest.
   const projectedCatalog = createSharedCatalogLoader<OpenGeniSiteToolCatalog>(
     async (refresh, signal) => {
+      if (targeted && input.requestedTools) {
+        const manifest = await input.workspaceTools.$manifest!(
+          { identities: [...input.requestedTools], ...context },
+          { signal },
+        );
+        signal.throwIfAborted();
+        if (manifests.size >= 4) manifests.delete(manifests.keys().next().value!);
+        manifests.set(manifest.digest, manifest.tools);
+        return {
+          version: 1,
+          generation: 1,
+          digest: manifest.digest,
+          createdAt: new Date().toISOString(),
+          entries: manifest.tools.map((tool) => tool.entry),
+        };
+      }
       const current = await input.workspaceTools.$catalog({
         signal,
         ...(refresh ? { refresh } : {}),
@@ -81,6 +158,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
     return catalog;
   };
   return {
+    ...(targeted ? { resolve, invoke } : {}),
     ...(input.fetchResponse
       ? {
           fetch: async (message: SiteHttpRequest, signal: AbortSignal) => {
@@ -109,6 +187,55 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
     call: async (request, { signal }) => {
       if (allowed && !allowed.has(identityKey(request.identity)))
         throw new Error("This tool is not available to the Site");
+      if (targeted && input.requestedTools) {
+        const tool = manifests
+          .get(request.catalogDigest)
+          ?.find(
+            (candidate) => identityKey(candidate.entry.identity) === identityKey(request.identity),
+          );
+        if (!tool)
+          throw new OpenGeniApiError(
+            409,
+            JSON.stringify({
+              error: { code: "conflict", details: { code: "catalog_stale" }, retryable: true },
+            }),
+          );
+        try {
+          const response = await invoke(
+            {
+              operationId: request.operationId ?? crypto.randomUUID(),
+              target: { identity: request.identity },
+              arguments: request.arguments,
+              expectedDefinitionDigest: tool.definitionDigest,
+            },
+            { signal },
+          );
+          return {
+            operationId: response.operationId,
+            catalogDigest: request.catalogDigest,
+            result: response.result,
+          };
+        } catch (error) {
+          if (
+            error instanceof OpenGeniApiError &&
+            error.details?.code === "tool_definition_stale"
+          ) {
+            projectedCatalog.invalidate(request.catalogDigest);
+            manifests.delete(request.catalogDigest);
+            throw new OpenGeniApiError(
+              409,
+              JSON.stringify({
+                error: {
+                  code: "catalog_stale",
+                  details: { code: "catalog_stale" },
+                  retryable: true,
+                },
+              }),
+            );
+          }
+          throw error;
+        }
+      }
       let usedDigest: string | undefined;
       const call = async (staleDigest?: string) => {
         const catalog = await loadCatalog({

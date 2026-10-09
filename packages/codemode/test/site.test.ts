@@ -28,6 +28,47 @@ const catalog: AttemptToolCatalog = {
 };
 
 describe("local Site Codemode handler", () => {
+  test("targeted preview uses only the frozen attempt and rejects stale or host-only authority before execution", async () => {
+    const calls: unknown[] = [];
+    const handler = createCodemodeSiteRequestHandler({
+      catalog: async () => catalog,
+      call: async (...args: unknown[]) => {
+        calls.push(args);
+        return { content: [], structuredContent: { ok: true } };
+      },
+    } as unknown as CodemodeClient);
+    const request = (method: string, body: unknown) =>
+      handler(
+        new Request(`http://localhost/__opengeni/site-tools/${method}`, {
+          method: "POST",
+          body: JSON.stringify(body),
+        }),
+      );
+    const target = { identity: catalog.entries[0]!.identity };
+    const resolved = await (await request("resolve", { target })).json();
+    expect(resolved).toMatchObject({ version: 1, entry: catalog.entries[0] });
+    const invocation = {
+      target,
+      operationId: "66666666-6666-4666-8666-666666666666",
+      arguments: { first: 10 },
+      expectedDefinitionDigest: resolved.definitionDigest,
+    };
+    expect(
+      (await request("invoke", { ...invocation, expectedDefinitionDigest: "b".repeat(64) })).status,
+    ).toBe(409);
+    expect(
+      (await request("invoke", { ...invocation, approvalToken: `ogta_${"a".repeat(43)}` })).status,
+    ).toBe(400);
+    expect(calls).toHaveLength(0);
+    expect((await request("invoke", invocation)).status).toBe(200);
+    expect(calls).toEqual([
+      [
+        catalog.entries[0]!.identity,
+        { first: 10 },
+        expect.objectContaining({ operationId: invocation.operationId }),
+      ],
+    ]);
+  });
   test("forwards configuration and control routes for normal API authorization", async () => {
     const forwarded: string[] = [];
     const client = new CodemodeClient({

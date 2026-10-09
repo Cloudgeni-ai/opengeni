@@ -142,6 +142,7 @@ test("public Site bridge rejects another workspace before a tool call", async ()
 test("base SDK sends pinned Site calls through the actor-scoped gateway", async () => {
   let observed: { path: string; actor: string | null; body: unknown } | undefined;
   const client = new OpenGeniClient({
+    toolGatewayMode: "catalog",
     baseUrl: "https://example.invalid",
     apiKey: "synthetic",
     fetch: async (url, init) => {

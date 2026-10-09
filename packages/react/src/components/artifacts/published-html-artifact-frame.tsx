@@ -7,6 +7,8 @@ import {
   isOpenGeniSiteBridgeConnectMessage,
   isOpenGeniSiteBridgeRequestMessage,
   sanitizeOpenGeniSiteToolCallRequest,
+  sanitizeOpenGeniSiteToolInvokeRequest,
+  type OpenGeniSiteBridgeRequestMessage,
   isSiteHttpRequest,
   serveSiteHttp,
   type SiteHttpRequest,
@@ -17,6 +19,10 @@ import type {
   ToolGatewayCallRequest,
   ToolGatewayCallResponse,
   ToolGatewayDeclarationsResponse,
+  ToolGatewayResolveRequest,
+  ToolGatewayResolvedTool,
+  ToolGatewayInvokeRequest,
+  ToolGatewayInvokeResponse,
 } from "@opengeni/sdk";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { resolveSiteClientScript } from "@opengeni/sdk/site-document";
@@ -44,6 +50,14 @@ export type PublishedHtmlArtifactFrameProps = {
 };
 
 export type PublishedHtmlArtifactToolBridge = {
+  resolve?: (
+    request: ToolGatewayResolveRequest,
+    options: { signal: AbortSignal },
+  ) => Promise<ToolGatewayResolvedTool>;
+  invoke?: (
+    request: ToolGatewayInvokeRequest,
+    options: { signal: AbortSignal },
+  ) => Promise<ToolGatewayInvokeResponse>;
   fetch?: (request: SiteHttpRequest, signal: AbortSignal) => Promise<Response>;
   catalog: (options: { signal: AbortSignal }) => Promise<OpenGeniSiteToolCatalog>;
   call: (
@@ -197,6 +211,7 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
       port.postMessage({
         type: OPENGENI_SITE_BRIDGE_READY,
         version: OPENGENI_SITE_BRIDGE_VERSION,
+        ...(bridgeRef.current?.resolve && bridgeRef.current?.invoke ? { targetTools: 1 } : {}),
       });
     };
     const documentLease = new SiteBridgeDocumentLease(attachToolPort, () => requests.closeAll());
@@ -333,14 +348,24 @@ export function openGeniSiteBridgePortFromBootstrap(
 
 async function handleSiteBridgeRequest(
   bridge: PublishedHtmlArtifactToolBridge | undefined,
-  message: Parameters<typeof isOpenGeniSiteBridgeRequestMessage>[0] & {
-    method: "catalog" | "call" | "declarations";
-    requestId: string;
-    payload?: ToolGatewayCallRequest;
-  },
+  message: OpenGeniSiteBridgeRequestMessage,
   signal: AbortSignal,
-): Promise<OpenGeniSiteToolCatalog | ToolGatewayCallResponse | ToolGatewayDeclarationsResponse> {
+): Promise<
+  | OpenGeniSiteToolCatalog
+  | ToolGatewayCallResponse
+  | ToolGatewayDeclarationsResponse
+  | ToolGatewayResolvedTool
+  | ToolGatewayInvokeResponse
+> {
   if (!bridge) throw new Error("Site tool bridge is unavailable");
+  if (message.method === "resolve") {
+    if (!bridge.resolve) throw new Error("Targeted Site tools are unavailable");
+    return await bridge.resolve({ target: message.payload.target }, { signal });
+  }
+  if (message.method === "invoke") {
+    if (!bridge.invoke) throw new Error("Targeted Site tools are unavailable");
+    return await bridge.invoke(sanitizeOpenGeniSiteToolInvokeRequest(message.payload), { signal });
+  }
   if (message.method === "catalog") return await bridge.catalog({ signal });
   if (message.method === "declarations") {
     if (!bridge.declarations) throw new Error("Site tool declarations are unavailable");

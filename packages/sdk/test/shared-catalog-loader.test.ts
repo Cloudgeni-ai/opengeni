@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { createSharedCatalogLoader } from "../src/shared-catalog-loader";
 import { createSiteToolBridge } from "../src/site";
-import { OpenGeniClient } from "../src/index";
+import { OpenGeniClient as CurrentOpenGeniClient } from "../src/index";
+// This suite owns v1 full-catalog sharing. Targeted metadata has its own suite.
+class OpenGeniClient extends CurrentOpenGeniClient {
+  constructor(options: ConstructorParameters<typeof CurrentOpenGeniClient>[0]) {
+    super({ toolGatewayMode: "catalog", ...options });
+  }
+}
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "../src/types";
 import type { ToolGatewayCatalog } from "../src/types";
 

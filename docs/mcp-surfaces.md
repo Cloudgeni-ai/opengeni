@@ -114,7 +114,47 @@ capability may be replaced when catalog or provider authority changes, but a
 consumed capability leaves a durable hash-only operation tombstone: the same
 operation id cannot be approved again after execution may have started.
 
-Workspace HTTP/SDK/Site calls avoid re-preparing every connector per request.
+Known workspace HTTP/SDK calls use additive `POST tools/resolve` and
+`POST tools/invoke`. An exact identity or canonical symbolic path selects one
+authorized registry/account route before provider construction. Missing,
+unauthorized, or ambiguous targets return the same non-enumerating
+`tool_unavailable`; malformed contracts fail before preparation. There is no
+whole-catalog fallback. Cold calls use the current definition; optional
+`expectedDefinitionDigest` binds the complete public entry, account and workspace
+under a versioned hash domain. A mismatch returns `tool_definition_stale` before
+approval admission or execution. A selected MCP server may still need its own
+paginated `tools/list`; no provider revision atomicity is promised between that
+listing and its physical call.
+
+`POST tools/target-approvals` issues a version-2 binding over that definition,
+the existing executable effect digest, Site tuple and separately checked private
+authority. The shared operation namespace and consumed tombstones survive policy
+Ask-to-Allow and protocol changes. Supplied tokens cannot be silently ignored.
+Allow-only calls without approval provenance are not generally idempotent.
+Unknown dispatch outcomes never replay automatically.
+
+Only the selected provider is constructed, credentialed, connected or listed.
+Registry/account/integration inventory remains O(N) metadata; target execution
+does not imply constant-time database work. External targets skip unrelated
+model-catalog loading, while first-party handlers retain complete caller settings.
+Live grant, metadata and native credential checks run again at dispatch; no
+credential cache, sticky session or cross-replica warm-up is required.
+`opengeni_tool_target_operations_total`,
+`opengeni_tool_target_duration_seconds` and `Server-Timing: gw-target`
+measure the bounded operation labels without identities or arguments. Compare
+cold replicas at increasing connector counts separately from selected-provider
+latency and metadata assembly cost.
+
+Saved legacy Site bundles use `POST tools/manifest` (at most 256 requested
+identities) through an upgraded host, which translates retained manifest pins
+into targeted calls. Modern clients negotiate direct targeted calls; older hosts
+require explicit SDK catalog mode. Local preview keeps frozen attempt/Codemode
+authority. OAuth and explicit catalog/declarations discovery are unchanged.
+Apply rolling migration `0680_target_tool_approval_bindings.sql` before the API;
+upgrade API readers before enabling v2 writers across the fleet, then release
+the matching SDK/React host and generated Site runtime. Old clients remain v1.
+
+Legacy workspace HTTP/SDK/Site calls avoid re-preparing every connector on a warm replica.
 Each complete catalog preparation (`tools/catalog`, `tools/declarations`, or a
 complete call fallback) leaves a bounded, per-process, content-free attestation:
 the complete digest plus only the canonical digest of each entry, keyed by the

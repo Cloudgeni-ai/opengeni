@@ -117,8 +117,43 @@ const {
 } = await import("../src/workspace-tool-gateway");
 const { createWorkspaceToolGatewayCatalogAttestations } =
   await import("../src/workspace-tool-gateway-attestations");
+const {
+  invokeWorkspaceToolTarget,
+  resolveWorkspaceToolTarget,
+  resolveWorkspaceToolManifest,
+  approveWorkspaceToolTarget,
+} = await import("../src/workspace-tool-target");
+import type { TargetGatewayOptions } from "../src/workspace-tool-target";
 
 afterAll(() => mock.restore());
+
+function targetAuthorization(subject = subjectId) {
+  const grant = grantFor(subject);
+  const authorization = core.accessGrantAuthorizationFromContext(
+    {
+      subjectId: subject,
+      accountGrants: [{ accountId, subjectId: subject, permissions: [] }],
+      workspaceGrants: [grant],
+    } as unknown as Parameters<typeof core.accessGrantAuthorizationFromContext>[0],
+    grant,
+  );
+  // Trusted route fixture: the production route obtains this bit from canonical login.
+  authorization.canonicalManagedHumanSession = true;
+  return authorization;
+}
+function targetOptions(extra: TargetGatewayOptions = {}): TargetGatewayOptions {
+  return {
+    prepare: async (deps, authorization, options = {}) =>
+      await prepareWorkspaceToolGatewayForGrant(
+        deps,
+        authorization.grant,
+        options.allowedIdentities,
+        options,
+      ),
+    begin: async () => true,
+    ...extra,
+  };
+}
 
 const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -337,6 +372,255 @@ async function expectHttpStatus(promise: Promise<unknown>, status: number, code?
   expect(error?.status).toBe(status);
   if (code) expect(error?.details?.code).toBe(code);
 }
+
+describe("portable known-tool calls", () => {
+  test("cold invocation and fresh-replica preconditions need no complete catalog or sibling account", async () => {
+    const f = createFixture();
+    try {
+      const identity = f.identity(f.shared);
+      const request = { target: { identity }, operationId: crypto.randomUUID(), arguments: {} };
+      const first = await invokeWorkspaceToolTarget(
+        f.deps,
+        targetAuthorization(),
+        request,
+        targetOptions(),
+      );
+      expect(first.tool.entry.identity).toEqual(identity);
+      expect(f.unrelatedSetupRequests()).toBe(0);
+      expect(
+        f.state.resolved.every((item) => item.connectionRef.connectionId === f.shared.id),
+      ).toBe(true);
+      f.resetRequests();
+      const second = await invokeWorkspaceToolTarget(
+        f.deps,
+        targetAuthorization(),
+        {
+          ...request,
+          operationId: crypto.randomUUID(),
+          expectedDefinitionDigest: first.tool.definitionDigest,
+        },
+        targetOptions(),
+      );
+      expect(second.tool.definitionDigest).toBe(first.tool.definitionDigest);
+      expect(f.unrelatedSetupRequests()).toBe(0);
+      expect(f.grafana.calls).toHaveLength(2);
+    } finally {
+      f.close();
+    }
+  });
+  test("full-entry stale fails before approval admission and never falls back", async () => {
+    const f = createFixture();
+    let began = 0;
+    try {
+      await expectHttpStatus(
+        invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          {
+            target: { identity: f.identity(f.shared) },
+            operationId: crypto.randomUUID(),
+            arguments: {},
+            expectedDefinitionDigest: "0".repeat(64),
+          },
+          targetOptions({
+            begin: async () => {
+              began++;
+              return true;
+            },
+          }),
+        ),
+        409,
+        "tool_definition_stale",
+      );
+      expect(began).toBe(0);
+      expect(f.grafana.calls).toHaveLength(0);
+      expect(f.unrelatedSetupRequests()).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+  test("canonical, foreign, nonexistent and forged caller identities never prepare another account", async () => {
+    const f = createFixture();
+    try {
+      for (const identity of [
+        { serverId: "grafana", toolName: "query_prometheus" },
+        f.identity(f.foreign),
+        { serverId: "missing", toolName: "missing" },
+      ]) {
+        await expectHttpStatus(
+          resolveWorkspaceToolTarget(
+            f.deps,
+            targetAuthorization(),
+            { target: { identity } },
+            targetOptions(),
+          ),
+          404,
+        );
+      }
+      await expectHttpStatus(
+        resolveWorkspaceToolTarget(
+          f.deps,
+          authorizationFor(subjectId),
+          { target: { identity: f.identity(f.shared) } },
+          targetOptions(),
+        ),
+        403,
+      );
+      expect(f.grafana.requests).toHaveLength(0);
+      expect(f.unrelatedSetupRequests()).toBe(0);
+      expect(f.state.resolved).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  });
+  test("symbolic projection resolves only its exact connector and preserves first-party caller settings", async () => {
+    const f = createFixture({ firstParty: true });
+    try {
+      const identity = f.identity(f.shared);
+      const resolved = await resolveWorkspaceToolTarget(
+        f.deps,
+        targetAuthorization(),
+        { target: { identity } },
+        targetOptions(),
+      );
+      await invokeWorkspaceToolTarget(
+        f.deps,
+        targetAuthorization(),
+        {
+          target: { path: resolved.entry.codemodePath },
+          operationId: crypto.randomUUID(),
+          arguments: {},
+        },
+        targetOptions(),
+      );
+      expect(f.unrelatedSetupRequests()).toBe(0);
+      const response = await invokeWorkspaceToolTarget(
+        f.deps,
+        targetAuthorization(),
+        {
+          target: { path: ["opengeni", "sessions_list"] },
+          operationId: crypto.randomUUID(),
+          arguments: {},
+        },
+        targetOptions(),
+      );
+      expect(JSON.stringify(response.result)).toContain("unrelated_0");
+      expect(f.unrelatedSetupRequests()).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+  test("Site denial and pre-aborted requests cause zero provider preparation", async () => {
+    const f = createFixture();
+    try {
+      const request = {
+        target: { identity: f.identity(f.shared) },
+        operationId: crypto.randomUUID(),
+        arguments: {},
+        siteArtifactId: artifactId,
+        siteVersionId: versionId,
+      };
+      await expectHttpStatus(
+        invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          request,
+          targetOptions({
+            authorizeSite: async () => {
+              throw Object.assign(new Error("denied"), { status: 403 });
+            },
+          }),
+        ),
+        403,
+      );
+      const controller = new AbortController();
+      controller.abort();
+      await expect(
+        invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          request,
+          targetOptions({ signal: controller.signal }),
+        ),
+      ).rejects.toThrow();
+      expect(f.grafana.requests).toHaveLength(0);
+      expect(f.unrelatedSetupRequests()).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+  test("a bounded manifest groups duplicate target identities without unrelated connectors", async () => {
+    const f = createFixture();
+    try {
+      const identity = f.identity(f.shared);
+      const manifest = await resolveWorkspaceToolManifest(
+        f.deps,
+        targetAuthorization(),
+        { identities: [identity, identity] },
+        targetOptions(),
+      );
+      expect(manifest.tools).toHaveLength(1);
+      expect(manifest.digest).toMatch(/^[a-f0-9]{64}$/);
+      expect(f.unrelatedSetupRequests()).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+  test("authorization revocation after resolution fails closed at dispatch", async () => {
+    const f = createFixture();
+    try {
+      const identity = f.identity(f.shared);
+      await resolveWorkspaceToolTarget(
+        f.deps,
+        targetAuthorization(),
+        { target: { identity } },
+        targetOptions(),
+      );
+      f.shared.status = "revoked" as typeof f.shared.status;
+      await expectHttpStatus(
+        invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          { target: { identity }, operationId: crypto.randomUUID(), arguments: {} },
+          targetOptions(),
+        ),
+        404,
+      );
+      expect(f.grafana.calls).toHaveLength(0);
+      expect(f.unrelatedSetupRequests()).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+  test("scales through 1/10/100+ connectors with no unrelated provider I/O, even when unrelated endpoints fail", async () => {
+    for (const count of [1, 10, 101]) {
+      const f = createFixture({ unrelatedConnectors: count - 1 });
+      try {
+        for (const provider of f.unrelated) provider.close();
+        const start = performance.now();
+        await invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          {
+            target: { identity: f.identity(f.shared) },
+            operationId: crypto.randomUUID(),
+            arguments: {},
+          },
+          targetOptions(),
+        );
+        console.log(
+          `[known-tool benchmark] ${JSON.stringify({ configuredConnectors: count, wallMs: Math.round(performance.now() - start), selectedProviderRequests: f.grafana.requests.length, unrelatedProviderRequests: f.unrelatedSetupRequests(), credentialResolutions: f.state.resolved.length, metadata: "fixture inventory; not a database latency benchmark" })}`,
+        );
+        expect(f.unrelatedSetupRequests()).toBe(0);
+        expect(
+          f.state.resolved.every((item) => item.connectionRef.connectionId === f.shared.id),
+        ).toBe(true);
+      } finally {
+        f.close();
+      }
+    }
+  }, 120_000);
+});
 
 describe("target-only workspace tool calls", () => {
   test("a warm attested call connects only its target connector and echoes the caller digest", async () => {

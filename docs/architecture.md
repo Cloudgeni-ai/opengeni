@@ -1479,7 +1479,15 @@ never a retry of an existing or ambiguous operation. Submission conflicts never
 reconcile to an existing row; ambiguous failures adopt one only after exact
 scope, catalog, identity and argument comparison. Recovery never replays the
 tool ([run lifecycle](run-lifecycle.md#codemode-recovery)). The current-human
-gateway rebuilds live authority per request. HTTP calls may rebuild only the
+gateway rebuilds live authority per request. Known-tool HTTP requests use the
+additive `tools/resolve` and `tools/invoke` adapters in
+`apps/api/src/workspace-tool-target.ts`: select one authorized registry/account
+route before provider construction, then use the shared gateway's schema,
+preflight, policy and execution pipeline. Cold calls use the current definition;
+optional full-entry definition pins reject drift before approval consumption.
+The pin is not authority and requires no shared cache or previous discovery.
+Version-2 approvals share the permanent operation tombstone namespace with v1.
+Legacy HTTP calls may rebuild only the
 target identity's connector when their complete catalog digest has a
 content-free per-process attestation for the same caller scope and the live
 entry is identical; otherwise they prepare the complete catalog
@@ -1495,6 +1503,12 @@ parent intersects them with the viewer's live gateway, the API revalidates every
 call, and live approval still applies. Agent-authored versions may retain any
 identity in their exact attempt catalog. Ports are revoked on document
 navigation or replacement.
+
+Modern Site clients negotiate targeted calls with the host. Old bundled Site
+clients receive a bounded requested-identity manifest, whose retained entry
+pins translate their legacy calls without whole-workspace provider discovery.
+Local preview remains frozen-attempt Codemode, not current-human authority.
+Explicit catalog/declarations discovery and OAuth remain separate paths.
 
 HTML-only Sites and inline chat previews share the SDK bridge and renderer.
 See [embedding authority internals](embedding-authority-internals.md#inline-html-and-chat-previews)

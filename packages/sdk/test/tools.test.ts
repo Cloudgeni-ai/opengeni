@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { OpenGeniClient } from "../src/client";
+import { OpenGeniClient as CurrentOpenGeniClient } from "../src/client";
+// Retain all v1 discovery/approval regressions through the explicit compatibility mode.
+class OpenGeniClient extends CurrentOpenGeniClient {
+  constructor(options: ConstructorParameters<typeof CurrentOpenGeniClient>[0]) {
+    super({ toolGatewayMode: "catalog", ...options });
+  }
+}
 import { OpenGeniToolCallError, OpenGeniToolReapprovalRequiredError } from "../src/tools";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "../src/types";
 
