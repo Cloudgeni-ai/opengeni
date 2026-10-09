@@ -1649,8 +1649,11 @@ export function MessageTimeline({
   };
 
   // Land once on the moment an inbox item or a notification points at.
+  // Deliberately dependency-free: it retries after every commit until the
+  // target row is laid out, and the ref guard makes the state update run once
+  // per focus sequence, so it cannot chain renders.
   const focusedSequenceRef = useRef<number | null>(null);
-  // oxlint-disable-next-line react-hooks/exhaustive-deps -- Retry after every commit until the target mounts; the sequence ref prevents repeated state updates.
+  // oxlint-disable-next-line react-hooks/exhaustive-deps -- retries each commit; ref-guarded to run once
   useLayoutEffect(() => {
     if (!focusSequence || focusedSequenceRef.current === focusSequence) return;
     const index = timelineGroupIndexAtSequence(

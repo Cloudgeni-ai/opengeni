@@ -118,7 +118,6 @@ export const CLIENT_WEB_VITAL_MAX_VALUE: Readonly<Record<ClientWebVitalMetric, n
  */
 export const CLIENT_PAGES = [
   "sessions",
-  "inbox",
   "priority",
   "plugins",
   "capabilities",
@@ -138,6 +137,7 @@ export const CLIENT_PAGES = [
   "rigs",
   "playground",
   "read-only-chats",
+  "inbox",
   "home",
   "session-link",
   "identity-link",
