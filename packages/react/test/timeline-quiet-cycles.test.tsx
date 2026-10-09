@@ -3,7 +3,7 @@ import type { SessionEvent } from "@opengeni/sdk";
 import { MessageTimeline } from "../src";
 import { buildTimeline, groupTimeline, type TimelineGroup } from "../src/timeline";
 import { readableWorkStatus } from "../src/timeline/work-presentation";
-import { flush, registerDom, renderComponent } from "./render-hook";
+import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
 
@@ -272,7 +272,7 @@ describe("quiet wait cycles", () => {
         ?.querySelector<HTMLButtonElement>("[data-og-work-header]");
       expect(trigger?.textContent).toContain("2 updates over");
       expect(trigger?.getAttribute("aria-expanded")).toBe("false");
-      trigger!.click();
+      await actRun(() => trigger!.click());
       await flush(50);
       expect(trigger?.getAttribute("aria-expanded")).toBe("true");
       // Nested work rows inside the fold never become sticky outer headers.
