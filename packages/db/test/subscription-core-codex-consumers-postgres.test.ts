@@ -360,7 +360,7 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
       {
         refresh: async (refreshToken) => {
           expect(refreshToken).toBe("refresh-apps-admin");
-          return { accessToken: "access-rotated", refreshToken: "refresh-rotated", idToken: null };
+          return { accessToken: "access-rotated", refreshToken: "refresh-rotated" };
         },
       },
     );
