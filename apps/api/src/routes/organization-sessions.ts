@@ -28,6 +28,7 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { loadCodexSessionPointerProjection } from "../codex-session-pointers";
 
 /**
  * Upper bound on the workspace page reads one request performs. The
@@ -207,7 +208,14 @@ export function registerOrganizationSessionRoutes(app: Hono, deps: ApiRouteDeps)
         pinnedOffset = 0;
         continue;
       }
-      sessions.push(...page.sessions);
+      // The Codex pointers by the organization's cutover disposition, exactly
+      // as the workspace session routes show them.
+      const codexPointers = await loadCodexSessionPointerProjection(
+        deps.db,
+        workspace.id,
+        page.sessions,
+      );
+      sessions.push(...page.sessions.map(codexPointers));
       if (page.nextPinnedOffset !== null) {
         // The page ended inside this workspace's pinned prefix.
         innerCursor = null;

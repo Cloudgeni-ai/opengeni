@@ -2365,7 +2365,23 @@ for (const theme of ["light", "dark"] as const) {
         await scan("[data-og-review-details]");
         await details.getByRole("button", { name: "Back to review" }).click();
         await surface.waitFor();
-        assert.equal(await open.evaluate((element) => element === document.activeElement), true);
+        // The surface restores focus to the opener in the next animation frame,
+        // so wait for it instead of reading focus in the same frame as the render.
+        assert.equal(
+          await open.evaluate(
+            (element) =>
+              new Promise<boolean>((resolve) => {
+                const deadline = performance.now() + 5_000;
+                const check = () => {
+                  if (element === document.activeElement) resolve(true);
+                  else if (performance.now() > deadline) resolve(false);
+                  else requestAnimationFrame(check);
+                };
+                check();
+              }),
+          ),
+          true,
+        );
         if (width === 768) {
           await page.evaluate(() => {
             document.documentElement.style.zoom = "2";

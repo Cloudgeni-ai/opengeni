@@ -135,6 +135,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/storage",
   ],
   "test/integration/db.integration.ts": ["@opengeni/db"],
+  "test/integration/subscription-core-codex-wait.integration.ts": [
+    "@opengeni/worker-bundle",
+    "@opengeni/db",
+    "@opengeni/events",
+    "@opengeni/testing",
+  ],
   "test/integration/durable-queue-control.integration.ts": [
     "@opengeni/api-router",
     "@opengeni/worker-bundle",

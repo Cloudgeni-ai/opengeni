@@ -106,7 +106,8 @@ export function renderRuntimeMechanics(context: AgentPromptContext): string {
     "## Tool discovery",
     sentences(
       "Deferred tool schemas are omitted from the first request; absence there does not prove a tool is unavailable.",
-      "When deferred tools are attached, use `tool_search` for one focused capability at a time; broad searches with small limits can omit a relevant tool.",
+      "A tool found with `tool_search` stays callable by its exact name for the rest of the session; search again only if its input schema is no longer in context.",
+      "When you need several capabilities, search for them in parallel `tool_search` calls in the same response, or load known exact names together with `names`; broad searches with small limits can omit a relevant tool.",
       "If a search misses, use `tool_list` and follow `nextCursor` until the relevant authorized names are covered, then load exact names with `tool_search`.",
       "`namePrefix` is a literal tool-name prefix, not a capability keyword; an empty filtered page does not prove the capability is unavailable.",
       "Discovery never grants authority, and remembered tool names must still resolve against the current authorized catalog.",

@@ -110,6 +110,9 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     // triggers or backfill; remove them before the real ordered 0608 replay.
     await owner`ALTER TABLE sessions ADD COLUMN execution_context_turn_id uuid`;
     await owner`ALTER TABLE session_turns ADD COLUMN execution_context_turn_id uuid`;
+    // The current turn adapter also projects the later M3 authority snapshot;
+    // keep this historical fixture's staged schema compatible while seeding.
+    await owner`ALTER TABLE session_turns ADD COLUMN subscription_authority jsonb`;
     // Renumbering the independent nullable agent-config column after this
     // repair must not break current session writers used to seed legacy rows.
     // Apply those adapter prerequisites early; allowance/collaborator repairs
@@ -308,6 +311,7 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     await owner.unsafe("DROP POLICY attribution_expected_planned_visibility ON usage_events");
     await owner`ALTER TABLE sessions DROP COLUMN execution_context_turn_id`;
     await owner`ALTER TABLE session_turns DROP COLUMN execution_context_turn_id`;
+    await owner`ALTER TABLE session_turns DROP COLUMN subscription_authority`;
     for (const name of planningSuffix)
       await owner`delete from schema_migrations where name=${name}`;
     await migrate(owned.ownerUrl);

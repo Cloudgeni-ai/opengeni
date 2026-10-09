@@ -1,8 +1,10 @@
 // The person's inbox, shared by the rail entry and the Inbox page. One poll
 // (30 s, faster while the page is open, and on focus) keeps both in step;
 // any action refreshes immediately.
+import { accessContextHasInbox } from "@opengeni/contracts";
 import type { InboxItem, ListInboxResponse, OpenGeniClient } from "@opengeni/sdk";
-import { useCallback, useEffect, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { toast } from "sonner";
 
 import { useAppContext } from "@/context";
 
@@ -18,13 +20,12 @@ const EMPTY: InboxState = { data: null, error: null, loading: true };
 const NO_INBOX: InboxState = { data: null, error: null, loading: false };
 
 /**
- * Only a signed-in person has an inbox (the API refuses keys, services and
- * development subjects), so nothing polls it for anyone else.
+ * Only a person has an inbox: a signed-in person, or a local install's one
+ * built-in human. The API refuses keys, services, agents and other development
+ * subjects, so nothing polls it for anyone else.
  */
-export function hasInbox(
-  context: { subjectId: string; credential?: unknown } | null | undefined,
-): boolean {
-  return Boolean(context?.subjectId.startsWith("user:") && !context.credential);
+export function hasInbox(context: Parameters<typeof accessContextHasInbox>[0]): boolean {
+  return accessContextHasInbox(context);
 }
 
 export class InboxStore {
@@ -155,4 +156,97 @@ export function inboxAttentionCount(data: ListInboxResponse | null): number {
       (item.snoozedUntil === null || Date.parse(item.snoozedUntil) <= now) &&
       (isNeedsYouKind(item.kind) || item.unread),
   ).length;
+}
+
+/**
+ * Looking at a session reads its replies and agent notes in the inbox (they
+ * stay until cleared): on opening it and on leaving it, so a reply that
+ * arrived while it was open is read too. Needs-you items are untouched.
+ */
+export function useReadSessionInbox(sessionId: string) {
+  const context = useAppContext();
+  const personal = hasInbox(context.accessContext);
+  const client = context.client;
+  useEffect(() => {
+    if (!personal) return;
+    const store = storeFor(client);
+    const read = async () => {
+      const data = await client.listInbox().catch(() => null);
+      const unread = (data?.items ?? []).filter(
+        (item) =>
+          item.sessionId === sessionId &&
+          item.unread &&
+          (item.kind === "reply" || item.kind === "notification"),
+      );
+      if (unread.length === 0) return;
+      await Promise.all(
+        unread.map((item) =>
+          client.updateInboxItem(item.id, { seen: true }).catch(() => undefined),
+        ),
+      );
+      store.patchItems((items) =>
+        items.map((item) =>
+          unread.some((each) => each.id === item.id) ? { ...item, unread: false } : item,
+        ),
+      );
+    };
+    void read();
+    return () => void read();
+  }, [client, personal, sessionId]);
+}
+
+export type SessionRepliesMute = { muted: boolean; busy: boolean; toggle: () => void };
+
+/**
+ * The signed-in person's mute on a top-level session's replies. Null when it
+ * does not apply (a sub-agent, no inbox) or the server cannot say, so the
+ * menu offers it only where it works.
+ */
+export function useSessionRepliesMute(session: {
+  workspaceId: string;
+  id: string;
+  parentSessionId: string | null;
+}): SessionRepliesMute | null {
+  const context = useAppContext();
+  const client = context.client;
+  const applies = hasInbox(context.accessContext) && session.parentSessionId === null;
+  const [muted, setMuted] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    setMuted(null);
+    if (!applies) return;
+    let current = true;
+    client
+      .getSessionInboxMute(session.workspaceId, session.id)
+      .then((value) => {
+        if (current) setMuted(value.repliesMuted);
+      })
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [applies, client, session.id, session.workspaceId]);
+  const toggle = useCallback(() => {
+    if (muted === null || busy) return;
+    const next = !muted;
+    setBusy(true);
+    client
+      .setSessionInboxMute(session.workspaceId, session.id, { repliesMuted: next })
+      .then((value) => {
+        setMuted(value.repliesMuted);
+        void storeFor(client).refresh();
+        toast.success(
+          value.repliesMuted
+            ? "Replies muted. Notifications and questions still reach you."
+            : "Replies unmuted.",
+        );
+      })
+      .catch((error: unknown) => {
+        toast.error(next ? "Couldn't mute replies." : "Couldn't unmute replies.", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => setBusy(false));
+  }, [busy, client, muted, session.id, session.workspaceId]);
+  return applies && muted !== null ? { muted, busy, toggle } : null;
 }

@@ -84,7 +84,13 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     return c.json(
       CapabilityCatalogResponse.parse(
-        await buildCapabilityCatalog({ db, workspaceId, settings, subjectId: grant.subjectId }),
+        await buildCapabilityCatalog({
+          db,
+          workspaceId,
+          settings,
+          subjectId: grant.subjectId,
+          accountId: grant.accountId,
+        }),
       ),
     );
   });

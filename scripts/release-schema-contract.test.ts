@@ -107,6 +107,30 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers the stranded completed-turn tool receipt cleanup as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0673_delete_stranded_completed_turn_tool_receipts.sql",
+      ),
+    ).toMatchObject({
+      path: "0673_delete_stranded_completed_turn_tool_receipts.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers the local install inbox recipient as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0677_local_human_inbox_recipient.sql",
+      ),
+    ).toMatchObject({
+      path: "0677_local_human_inbox_recipient.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("checks complete ledger metadata against migration files", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     const sourceMigrationPaths = (
@@ -230,9 +254,39 @@ describe("release schema contract", () => {
     const failedSessionVariableSetAttach = sourceContract.migrations.find(
       (migration) => migration.path === "0514_failed_session_variable_set_attach.sql",
     );
+    const subscriptionAuthorityRefreshContract = sourceContract.migrations.find(
+      (migration) => migration.path === "0667_subscription_authority_refresh_contract.sql",
+    );
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(sourceContract.migrations.at(-1)?.path ?? null);
       expect(failedSessionVariableSetAttach.deploymentMode).toBe("rolling");
+    }
+    if (subscriptionAuthorityRefreshContract) {
+      expect(subscriptionAuthorityRefreshContract.deploymentMode).toBe("rolling");
+    }
+    const subscriptionCoreCodexChatAuthority = sourceContract.migrations.find(
+      (migration) => migration.path === "0668_subscription_core_codex_chat_authority.sql",
+    );
+    if (subscriptionCoreCodexChatAuthority) {
+      expect(subscriptionCoreCodexChatAuthority.deploymentMode).toBe("rolling");
+    }
+    const subscriptionCoreCodexWaits = sourceContract.migrations.find(
+      (migration) => migration.path === "0669_subscription_core_codex_waits.sql",
+    );
+    if (subscriptionCoreCodexWaits) {
+      expect(subscriptionCoreCodexWaits.deploymentMode).toBe("rolling");
+    }
+    const subscriptionCoreCodexApps = sourceContract.migrations.find(
+      (migration) => migration.path === "0670_subscription_core_codex_apps.sql",
+    );
+    if (subscriptionCoreCodexApps) {
+      expect(subscriptionCoreCodexApps.deploymentMode).toBe("rolling");
+    }
+    const subscriptionCoreCodexOperations = sourceContract.migrations.find(
+      (migration) => migration.path === "0671_subscription_core_codex_operations.sql",
+    );
+    if (subscriptionCoreCodexOperations) {
+      expect(subscriptionCoreCodexOperations.deploymentMode).toBe("rolling");
     }
     // Keep the published-history assertions below scoped to their existing
     // migration range; the new forward migration is checked explicitly above.
@@ -2142,6 +2196,11 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0671_subscription_core_codex_operations.sql",
+      "0670_subscription_core_codex_apps.sql",
+      "0669_subscription_core_codex_waits.sql",
+      "0668_subscription_core_codex_chat_authority.sql",
+      "0667_subscription_authority_refresh_contract.sql",
       "0647_slack_bot_branding.sql",
       // Exclusion membership is unordered; keep this addition away from the shared tail.
       "0640_knowledge_entry_created_since.sql",
@@ -2507,6 +2566,13 @@ describe("release schema contract", () => {
       "0664_inbox_rich_notifications.sql",
       "0665_inbox_replies.sql",
       "0666_inbox_reply_current_turn.sql",
+      "0672_sandbox_checkpoint_staleness.sql",
+      "0673_delete_stranded_completed_turn_tool_receipts.sql",
+      "0674_inbox_reply_hands_back.sql",
+      "0675_inbox_subagent_turn_push.sql",
+      "0676_sandbox_deadline_forced_capture.sql",
+      "0677_local_human_inbox_recipient.sql",
+      "0678_inbox_mute_session_replies.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

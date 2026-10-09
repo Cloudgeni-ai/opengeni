@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import * as opengeniDb from "@opengeni/db";
 import type { CodexUsagePayload } from "@opengeni/codex";
@@ -118,6 +118,12 @@ function payload(
   };
 }
 
+// These organizations have no Codex cutover row: the legacy routes run.
+// (The core-disposition routes are covered in codex-core-routes.test.ts.)
+beforeEach(() => {
+  const cutover = spyOn(opengeniDb, "readCodexCutoverDisposition").mockResolvedValue("legacy");
+  restores.push(() => cutover.mockRestore());
+});
 const restores: Array<() => void> = [];
 afterEach(() => {
   while (restores.length) restores.pop()!();

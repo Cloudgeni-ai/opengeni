@@ -72,6 +72,7 @@ import {
   codexPlanEntitlementFailurePayload,
   codexRequestRejectedFailurePayload,
 } from "./codex-plan-entitlement";
+import { SubscriptionCoreCodexTurnError } from "./codex-core-errors";
 import {
   classifyXaiSubscriptionStreamingTerminalError,
   classifyXaiSubscriptionStreamIdleTimeoutError,
@@ -1913,6 +1914,10 @@ function baseAgentRunFailurePayload(
   // and records a precise payload. These branches keep any other path from
   // surfacing the SDK's raw "400 status code (no body)" text.
   if (error instanceof CodexPlanEntitlementError) {
+    return error.payload;
+  }
+  // Shared subscription core placement outcomes carry their own typed copy.
+  if (error instanceof SubscriptionCoreCodexTurnError) {
     return error.payload;
   }
   const entitlementRejection = classifyCodexEntitlementRejection(error);

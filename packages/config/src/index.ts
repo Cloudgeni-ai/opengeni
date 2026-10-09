@@ -5115,6 +5115,35 @@ export function effectiveSandboxDrainSnapshotTimeoutMs(
   return settings.sandboxDrainSnapshotTimeoutMs ?? settings.sandboxSnapshotTimeoutMs;
 }
 
+/**
+ * How long before a finite provider deadline the deadline save stops waiting
+ * for an orderly shutdown and becomes mandatory. Past this point the
+ * reaper captures and terminates the box around anything that cannot finish in
+ * time (pending owner quiescence, sibling attempts that do not hold the box,
+ * in-flight requests whose holders are gone, commands that ignored their stop
+ * request) instead of letting the provider kill it uncaptured. It leaves the
+ * legacy command stop grace, the full drain capture budget and two reaper
+ * periods before the deadline, and never exceeds the rotation lead.
+ */
+export function sandboxDeadlineMandatoryCaptureLeadMs(
+  settings: Pick<
+    Settings,
+    | "sandboxRotationLeadMs"
+    | "sandboxSnapshotTimeoutMs"
+    | "sandboxDrainSnapshotTimeoutMs"
+    | "sandboxLeaseReaperPeriodMs"
+  >,
+): number {
+  return Math.min(
+    settings.sandboxRotationLeadMs,
+    SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS +
+      sandboxArchiveCaptureTimeoutMs({
+        sandboxSnapshotTimeoutMs: effectiveSandboxDrainSnapshotTimeoutMs(settings),
+      }) +
+      2 * settings.sandboxLeaseReaperPeriodMs,
+  );
+}
+
 export function sandboxLifecycleTransitionWaitMs(
   settings: Pick<
     Settings,

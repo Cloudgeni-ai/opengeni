@@ -1,7 +1,11 @@
 import type { TurnHeartbeatDetails } from "../../op-journal";
 import type { Settings } from "@opengeni/config";
 import type { CodexUsageHeaderSnapshot } from "@opengeni/codex";
-import type { AppendEventInput, ApplySessionTurnSettlementInput } from "@opengeni/db";
+import type {
+  AppendEventInput,
+  ApplySessionTurnSettlementInput,
+  SubscriptionCoreTurnIdentity,
+} from "@opengeni/db";
 import type {
   CodexCredentialPolicySnapshotV1,
   ModelContextContributionSummary,
@@ -78,6 +82,8 @@ export type AttemptIdentityState = {
   /** Public display labels of the accepted model route, for recovery copy only. */
   modelRoutePresentation?: { model: string; modelLabel: string; providerLabel: string };
   claudeAuthRecovery?: { credentialId: string; credentialVersion: number } | undefined;
+  /** The stored shared-core lease-busy chain this turn's previous attempt recorded. */
+  subscriptionLeaseBusy?: { startedAt: number; executionGeneration: number } | undefined;
   modelRequestStarted: boolean;
   redispatchesAtDispatch: number;
   // Held for same-turn recovery: an approval-decision rerun must re-enter
@@ -156,6 +162,8 @@ export type EventingState = {
   settle: TurnSettleFn | null;
   turnStartedPublished: boolean;
   stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
+  /** Set by the stream attempt: refuses a wait that would leave a person unanswered. */
+  inputWaitReplyGuard: (() => Promise<string | null>) | null;
   modelRunSettings: Settings;
   firstModelRequestPreparationStartedAt: number | null;
   firstModelRequestPreparationRecorded: boolean;
@@ -177,6 +185,15 @@ export type WorkspaceRefState = {
   rigVersionId: string;
 };
 
+/** A Codex chat turn running on the shared subscription core. */
+export type CodexSubscriptionCoreTurn = {
+  identity: SubscriptionCoreTurnIdentity;
+  connectionId: string;
+  /** Refresh generation of the connection when it was placed. */
+  placedRefreshGeneration: number;
+  personal: boolean;
+};
+
 export type ProviderTurnState = {
   // The Codex account this turn runs on (pin > workspace active), resolved once
   // a codex-billed turn is confirmed and threaded into the token resolver.
@@ -192,6 +209,14 @@ export type ProviderTurnState = {
   codexProductModelId?: string | null;
   /** Accepted Codex allocator policy captured with the first durable lease. */
   codexPolicySnapshot: CodexCredentialPolicySnapshotV1 | null;
+  /**
+   * Set only when this Codex turn was placed by the shared subscription core
+   * (the account's Codex cutover is enabled). `effectiveCodexCredentialId` is
+   * then a core connection id: legacy Codex tables must never receive it.
+   */
+  codexSubscriptionCore: CodexSubscriptionCoreTurn | null;
+  /** Epoch ms of the latest Codex model call that produced a response. */
+  lastCodexResponseCompletedAt?: number | null;
   effectiveClaudeCredentialId: string | null;
   effectiveClaudeCredentialVersion: number | null;
   claudeUpstreamModelId: string | null;
@@ -308,6 +333,7 @@ export function createTurnContext(input: {
       settle: null,
       turnStartedPublished: false,
       stream: undefined,
+      inputWaitReplyGuard: null,
       modelRunSettings: input.settings,
       firstModelRequestPreparationStartedAt: null,
       firstModelRequestPreparationRecorded: false,
@@ -327,6 +353,8 @@ export function createTurnContext(input: {
       effectiveCodexCredentialVersion: null,
       codexCredentialFailoverLimit: 1,
       codexPolicySnapshot: null,
+      codexSubscriptionCore: null,
+      lastCodexResponseCompletedAt: null,
       effectiveClaudeCredentialId: null,
       effectiveClaudeCredentialVersion: null,
       claudeUpstreamModelId: null,

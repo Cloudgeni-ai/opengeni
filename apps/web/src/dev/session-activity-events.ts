@@ -42,7 +42,7 @@ export function activityEvents(): SessionEvent[] {
     members: [
       member(
         "background_command_result",
-        "bun test: result unavailable. Its exit status could not be confirmed.",
+        "`bun test` is no longer running because its sandbox was shut down or lost; whether it finished is unknown. Check its effects before running it again.",
       ),
       member("agent_message", "The keyboard review is complete."),
     ],

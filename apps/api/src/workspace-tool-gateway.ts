@@ -37,7 +37,8 @@ import {
   isVerifiedOrganizationServiceAuthorization,
   externalContinuationCommitAuthorizer,
   requireResolvedAccessGrantAuthorization,
-  resolveCodexAppsCredentialIdForRun,
+  codexAppsRequestAuthForDesignation,
+  resolveCodexAppsDesignationForRun,
   resolveWorkspaceCatalogSettings,
   settingsWithEnabledCapabilityMcpServers,
   type AccessGrantAuthorization,
@@ -49,7 +50,6 @@ import {
   lockActiveExternalOrganizationKeyAuthority,
   withAccountRls,
   requireWorkspace,
-  codexAppsRequestAuth,
   consumeToolGatewayApproval,
   getWorkspaceArtifactContentRef,
   issueToolGatewayApproval,
@@ -501,6 +501,15 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     },
   );
   let integrations: readonly ApiIntegrationRuntime[] = [];
+  // One designation read serves the catalog overlay and the Apps request
+  // authentication below (every Apps request is rechecked by the database).
+  let codexAppsDesignationRead: ReturnType<typeof resolveCodexAppsDesignationForRun> | null = null;
+  const codexAppsDesignationForGrant = () =>
+    (codexAppsDesignationRead ??= resolveCodexAppsDesignationForRun(
+      routeDeps.db,
+      grant.workspaceId,
+      { accountId: grant.accountId },
+    ));
   const settings = await settingsWithEnabledCapabilityMcpServers(
     routeDeps.db,
     grant.workspaceId,
@@ -510,6 +519,9 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       onResolvedApiIntegrations: (resolved) => {
         integrations = resolved;
       },
+      ...(resolvedCatalog.settings.codexConnectedAppsEnabled
+        ? { codexApps: codexAppsDesignationForGrant() }
+        : {}),
     },
   );
   // Transport admission has already verified the current caller. A service
@@ -597,14 +609,19 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
         ...(input.connectionRef.subjectScope === "subject" ? { subjectId: grant.subjectId } : {}),
       }),
   });
-  const codexAppsCredentialId = gatewayServerIds.has("codex_apps")
-    ? await resolveCodexAppsCredentialIdForRun(routeDeps.db, grant.workspaceId)
+  // Legacy designation without a Codex cutover row; the core designation
+  // (rechecked by the database on every request) with an enabled cutover;
+  // none with a disabled cutover.
+  const codexAppsDesignation = gatewayServerIds.has("codex_apps")
+    ? await codexAppsDesignationForGrant()
     : null;
-  const codexAppsAuth = codexAppsCredentialId
-    ? codexAppsRequestAuth(routeDeps.db, settings, {
-        workspaceId: grant.workspaceId,
-        credentialId: codexAppsCredentialId,
-      })
+  const codexAppsAuth = codexAppsDesignation
+    ? codexAppsRequestAuthForDesignation(
+        routeDeps.db,
+        settings,
+        grant.workspaceId,
+        codexAppsDesignation,
+      )
     : undefined;
   const localMcpServers = [...firstPartyServers, ...apiIntegrationServers];
   const policyTargets = new Map(

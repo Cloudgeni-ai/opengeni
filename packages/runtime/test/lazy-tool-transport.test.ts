@@ -2048,12 +2048,12 @@ describe("OpenAI/Azure native client tool search", () => {
           return JSON.stringify({ ok: true, updated: true, title: requestedTitle });
         },
       }) as unknown as Tool;
-      const goal = firstPartyTool("opengeni__goal_set", "Set a durable session goal");
+      const child = firstPartyTool("opengeni__session_create", "Create a child agent session");
       const agent = new Agent({
         name: "title-promotion-test",
         instructions: "Title the session.",
         model: "scripted",
-        tools: [titleTool, goal],
+        tools: [titleTool, child],
       });
       const loadAllTools = agent.getAllTools.bind(agent);
       agent.getAllTools = async (runContext) =>
@@ -2098,8 +2098,10 @@ describe("OpenAI/Azure native client tool search", () => {
         runtime.search({ query: "set the session title" }).map((candidate) => candidate.name),
       ).not.toContain("opengeni__set_session_title");
       expect(
-        runtime.search({ query: "set a durable session goal" }).map((candidate) => candidate.name),
-      ).toEqual(["opengeni__goal_set"]);
+        runtime
+          .search({ query: "create a child agent session" })
+          .map((candidate) => candidate.name),
+      ).toEqual(["opengeni__session_create"]);
     }
   });
 

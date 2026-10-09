@@ -264,6 +264,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       turnAttemptId: input.attemptId,
       servingCredentialId: providerTurn.effectiveCodexCredentialId,
       priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
+      subscriptionConnectionId: providerTurn.codexSubscriptionCore?.connectionId ?? null,
       emittedSourceKeys: emittedModelUsageSourceKeys,
       renewLease: () => leases.renewServing("model_usage"),
       leaseLost: leases.servingLost,

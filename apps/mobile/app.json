@@ -39,7 +39,7 @@
         {
           "cameraPermission": "Opengeni uses the camera so you can take a photo and send it to your agent.",
           "photosPermission": "Opengeni lets you pick photos to send to your agent.",
-          "microphonePermission": false
+          "microphonePermission": "Opengeni uses the microphone for voice calls with your agent and to dictate your messages."
         }
       ],
       [

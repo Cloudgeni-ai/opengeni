@@ -74,6 +74,7 @@ export {
 } from "./modal-native-live-origin";
 export { SubscriptionAccountChangedError } from "./subscription-account-conflict";
 export {
+  abandonSubscriptionCapacityWakeDelivery,
   acquireSubscriptionOperationLease,
   acquireSubscriptionTurnLease,
   assertSubscriptionTurnLeaseCurrent,
@@ -86,6 +87,8 @@ export {
   listDueSubscriptionCapacityWaiters,
   markSubscriptionCapacityWakeDelivered,
   observeSubscriptionCapacityWaiterWake,
+  persistSubscriptionCodexRefresh,
+  persistSubscriptionCodexRefreshWithPlan,
   readSubscriptionEffectiveSettings,
   readSubscriptionProviderCutoverState,
   readSubscriptionSessionBinding,
@@ -94,6 +97,7 @@ export {
   releaseSubscriptionTurnLease,
   renewSubscriptionOperationLease,
   renewSubscriptionTurnLease,
+  retrySubscriptionCapacityWakeDelivery,
   upsertSubscriptionCapacityWaiter,
   wakeSubscriptionCapacityWaiter,
   writeSubscriptionSessionBinding,
@@ -126,7 +130,10 @@ export {
   type SubscriptionCorePlacementWorldRequest,
   type SubscriptionCorePlacementWorldResult,
 } from "./subscription-core-placement-world";
-import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
+import type {
+  GoalAdmissionPausedReason,
+  SubscriptionPersonalAuthorityV2,
+} from "@opengeni/contracts";
 import {
   claudeSubscriptionAccountRepository,
   claudeSubscriptionTables,
@@ -265,10 +272,31 @@ import {
   mergeCodexPlanEntitlementExclusion,
   readCodexPlanEntitlementExclusion,
   serializeCodexPlanEntitlementExclusion,
-  type CodexPlanEntitlementExclusion,
 } from "./codex-plan-entitlement";
 export * from "./codex-plan-entitlement";
 export * from "./legacy-subscription-world";
+export * from "./subscription-core-codex";
+export * from "./subscription-core-codex-apps";
+export * from "./subscription-core-codex-compat";
+import type {
+  CodexAccountStatus,
+  CodexRotationSettings,
+  EffectiveCodexSubscriptionSource,
+  WorkspaceCodexSubscriptionMode,
+  WorkspaceCodexSubscriptionSource,
+} from "./codex-account-types";
+export type {
+  CodexAccountStatus,
+  CodexRotationSettings,
+  EffectiveCodexSubscriptionSource,
+  WorkspaceCodexSubscriptionMode,
+  WorkspaceCodexSubscriptionSource,
+} from "./codex-account-types";
+export * from "./subscription-core-codex-operations";
+import {
+  projectSubscriptionCoreCodexWorkspace,
+  type SubscriptionCoreCodexWake,
+} from "./subscription-core-codex-compat";
 export * from "./scheduled-task-access";
 export { buildSlackApiRateLimiter } from "./slack-api-rate-limits";
 export * from "./scheduled-human-wait";
@@ -294,9 +322,18 @@ import { scanSessionMessages } from "./session-message-search";
 import { withDatabaseStatementTimeout } from "./database";
 import {
   subscriptionPoolWorkerSubject,
+  withPoolWakeServiceScopeInTransaction,
   withSubscriptionPoolSessionAccess,
   withTemporaryPoolSessionAccessInTransaction,
 } from "./subscription-session-access";
+import {
+  readSubscriptionProviderCutoverState as readCoreProviderCutoverState,
+  readSubscriptionSessionBinding as readCoreSessionBinding,
+  resolveSubscriptionConnectionId as resolveCoreConnectionId,
+  writeSubscriptionSessionBinding as writeCoreSessionBinding,
+} from "./subscription-core-repository";
+import { codexSubscriptionAuthorityV2ForAcceptanceInTransaction } from "./subscription-core-acceptance-authority";
+export { codexSubscriptionAuthorityV2ForAcceptanceInTransaction } from "./subscription-core-acceptance-authority";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./scheduled-slack-bot-messages";
@@ -762,6 +799,7 @@ import {
 } from "./capability-components";
 import {
   closePendingSessionToolCallsInTransaction,
+  consumeSettledPendingToolCallsForCompletedTurnInTransaction,
   settleInterruptedCodemodeCallsInTransaction,
   historyCallId,
   historyItemType,
@@ -5656,6 +5694,11 @@ export async function recordModelCallFact(
     reasoningTokens?: number | null;
     totalTokens?: number | null;
     occurredAt?: Date;
+    /**
+     * The shared-core subscription connection that served the call (core
+     * Codex turns). Legacy and non-subscription calls leave it NULL.
+     */
+    connectionId?: string | null;
   },
 ): Promise<ModelCallFact> {
   if (input.pricedCostMicros < 0 || !Number.isSafeInteger(input.pricedCostMicros)) {
@@ -5765,6 +5808,7 @@ export async function recordModelCallFact(
           listOutputCostMicros: classes?.output ?? null,
           listCostIsApprox: classes == null ? null : (input.listByClassApprox ?? false),
           contextContributions,
+          connectionId: input.connectionId ?? null,
           occurredAt,
         })
         .onConflictDoUpdate({
@@ -5788,6 +5832,7 @@ export async function recordModelCallFact(
             listOutputCostMicros: sql`coalesce(${schema.modelCallFacts.listOutputCostMicros}, excluded.list_output_cost_micros)`,
             listCostIsApprox: sql`coalesce(${schema.modelCallFacts.listCostIsApprox}, excluded.list_cost_is_approx)`,
             contextContributions: sql`coalesce(${schema.modelCallFacts.contextContributions}, excluded.context_contributions)`,
+            connectionId: sql`coalesce(${schema.modelCallFacts.connectionId}, excluded.connection_id)`,
           },
         })
         .returning();
@@ -10454,6 +10499,14 @@ function skillSourceFromManifest(
   const source = manifestValue.source;
   if (source === "library" || source === "github" || source === "skills_sh") {
     return source;
+  }
+  // Migration 0482 removed Packs but deliberately kept Skills that another
+  // owner still holds. Their immutable plugin versions still record "pack".
+  // Those Skills carried inline, Opengeni-managed content with no external
+  // origin to re-import from, which "library" is the only public source to
+  // express. Rejecting them failed every catalog read and turn in the workspace.
+  if (source === "pack") {
+    return "library";
   }
   throw new Error(`Installed Skill ${capabilityId} has invalid immutable source metadata`);
 }
@@ -23985,23 +24038,6 @@ export type WorkspaceEnvironmentForRun = VariableSetForRun;
 // `getCodexCredentialStatus` returns metadata only (never the secret column).
 // ---------------------------------------------------------------------------
 
-export type WorkspaceCodexSubscriptionMode =
-  | "automatic"
-  | "workspace"
-  | "organization"
-  | "disabled";
-export type EffectiveCodexSubscriptionSource = "workspace" | "organization" | "disabled";
-
-export type WorkspaceCodexSubscriptionSource = {
-  accountId: string;
-  workspaceId: string;
-  workspaceKind: "personal" | "shared";
-  mode: WorkspaceCodexSubscriptionMode;
-  effectiveSource: EffectiveCodexSubscriptionSource;
-  workspaceAvailable: boolean;
-  organizationAvailable: boolean;
-};
-
 const workspaceCodexOrganizationInheritanceAvailable = new Map<string, boolean>();
 
 function rememberWorkspaceCodexOrganizationInheritance(
@@ -25431,12 +25467,10 @@ export async function loadCodexCredentialForRun(
         refreshToken: parsed.refresh_token,
         idToken: parsed.id_token,
       };
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `failed to decrypt codex credential for workspace ${workspaceId}: ${reason}`,
-        { cause: error },
-      );
+    } catch {
+      // Fixed text and no cause: a JSON.parse message quotes the plaintext
+      // token it failed on, and runtimes print a cause with the error.
+      throw new Error(`failed to decrypt codex credential for workspace ${workspaceId}`);
     }
     return {
       id: row.id,
@@ -25937,48 +25971,6 @@ export async function isCodexBilledTurn(input: {
 // ---------------------------------------------------------------------------
 // Multi-account (P1) metadata accessors. All metadata-only — NEVER decrypt.
 // ---------------------------------------------------------------------------
-
-export type CodexAccountStatus = {
-  allowedModelIds?: string[] | null;
-  id: string;
-  source: Exclude<EffectiveCodexSubscriptionSource, "disabled">;
-  chatgptAccountId: string | null;
-  label: string | null;
-  accountEmail: string | null;
-  planType: string | null;
-  /** Last provider plan observation; absent on pre-plan-tracking fixtures. */
-  planCheckedAt?: Date | null;
-  /** Plan before the most recent observed plan change, and when it was seen. */
-  planPreviousType?: string | null;
-  planChangedAt?: Date | null;
-  /** Models the current plan was proven not to include (see codex-plan-entitlement). */
-  planEntitlementExclusion?: CodexPlanEntitlementExclusion | null;
-  status: string; // active | needs_relogin | error
-  /** New automatic allocations only; health/refresh and existing turns remain independent. */
-  allocatorEnabled: boolean;
-  allocatorVersion: number;
-  allocatorUpdatedBySubjectId: string | null;
-  allocatorUpdatedAt: Date | null;
-  resetCreditAvailableCount: number | null;
-  resetCreditsCheckedAt: Date | null;
-  connectedBySubjectId: string | null;
-  isActive: boolean;
-  expiresAt: Date | null;
-  lastRefreshAt: Date | null;
-  lastError: string | null;
-  // P2 cached usage (plaintext metadata; rides along on this metadata-only read
-  // with ZERO provider calls and ZERO decrypts). null until the first refresh.
-  primaryUsedPercent: number | null;
-  primaryResetAt: Date | null;
-  secondaryUsedPercent: number | null;
-  secondaryResetAt: Date | null;
-  usageCheckedAt: Date | null;
-  // P3 rotation cooldown: when set and in the future, this account is cooling-down
-  // (rotated-off after a usage cap) and the engine skips it. null ⇒ not cooling.
-  exhaustedUntil: Date | null;
-  /** Typed provider-refusal provenance; null for legacy/cleared cooldowns. */
-  exhaustedKind: CodexCredentialCooldownKind | null;
-};
 
 /**
  * A metadata-only scheduling candidate observed while the workspace's rotation
@@ -28324,6 +28316,1170 @@ export async function reconcileCodexCapacityWait<
 }
 
 // ---------------------------------------------------------------------------
+// Durable Codex capacity waits on the shared subscription core (M3 PR 2a).
+//
+// The waiter row lives in subscription_capacity_waiters (one per session) and
+// exists only while the blocked turn waits: resuming or superseding deletes
+// it, so a stale timer or signal carrying an older waiter id finds nothing.
+// Workflow activity names, signal names and argument shapes are unchanged:
+// a core waiter is addressed by the same { waiterId, generation, nextCheckAt,
+// wakeRevision } reference as a legacy Codex waiter, and the activities look
+// the waiter id up in the core table first, then in the legacy table.
+// ---------------------------------------------------------------------------
+
+export type SubscriptionCoreCodexCapacityWait = {
+  waiterId: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  blockedTurnId: string;
+  blockedTurnGeneration: number | null;
+  generation: number;
+  wakeRevision: number;
+  observedWakeRevision: number;
+  waitReason: string;
+  resetKind: string | null;
+  refreshAttempt: number;
+  earliestResetAt: Date | null;
+  nextCheckAt: Date;
+  goalId: string | null;
+  goalVersion: number | null;
+  lastWakeReason: string | null;
+  /**
+   * False when the row no longer belongs to the session's active turn in
+   * `waiting_capacity` (a Steer, Cancel or other transition left it behind).
+   * Only lookups compute it; rows returned by arm/reconcile are live.
+   */
+  blockedTurnLive?: boolean;
+};
+
+type SubscriptionCoreCodexWaiterRow = {
+  waiter_id: string;
+  account_id: string;
+  workspace_id: string;
+  session_id: string;
+  turn_id: string;
+  blocked_turn_generation: number | string | null;
+  generation: number | string;
+  wake_revision: number | string;
+  observed_wake_revision: number | string;
+  wait_reason: string;
+  reset_kind: string | null;
+  refresh_attempt: number | string;
+  earliest_reset_at: Date | string | null;
+  next_check_at: Date | string | null;
+  goal_id: string | null;
+  goal_version: number | string | null;
+  last_wake_reason: string | null;
+  updated_at: Date | string;
+  blocked_turn_live?: boolean | null;
+};
+
+const SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS = sql.raw(`waiter_id::text as waiter_id,
+  account_id::text as account_id, workspace_id::text as workspace_id,
+  session_id::text as session_id, turn_id::text as turn_id, blocked_turn_generation,
+  generation, wake_revision, observed_wake_revision, wait_reason, reset_kind,
+  refresh_attempt, earliest_reset_at, next_check_at, goal_id::text as goal_id,
+  goal_version, last_wake_reason, updated_at`);
+
+function mapSubscriptionCoreCodexWaiter(
+  row: SubscriptionCoreCodexWaiterRow,
+): SubscriptionCoreCodexCapacityWait {
+  return {
+    waiterId: row.waiter_id,
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    sessionId: row.session_id,
+    blockedTurnId: row.turn_id,
+    blockedTurnGeneration:
+      row.blocked_turn_generation === null ? null : Number(row.blocked_turn_generation),
+    generation: Number(row.generation),
+    wakeRevision: Number(row.wake_revision),
+    observedWakeRevision: Number(row.observed_wake_revision),
+    waitReason: row.wait_reason,
+    resetKind: row.reset_kind,
+    refreshAttempt: Number(row.refresh_attempt),
+    earliestResetAt: row.earliest_reset_at === null ? null : new Date(row.earliest_reset_at),
+    nextCheckAt: new Date(row.next_check_at ?? row.updated_at),
+    goalId: row.goal_id,
+    goalVersion: row.goal_version === null ? null : Number(row.goal_version),
+    lastWakeReason: row.last_wake_reason,
+    ...(row.blocked_turn_live === undefined || row.blocked_turn_live === null
+      ? {}
+      : { blockedTurnLive: row.blocked_turn_live }),
+  };
+}
+
+/**
+ * The workflow reference for a core waiter, in the legacy Codex shape. An
+ * unobserved wake revision (a capacity change whose signal may have been
+ * lost, or that landed across continue-as-new) becomes an immediate check,
+ * and so does a row that no longer belongs to the session's active waiting
+ * turn: the reconcile then supersedes and deletes it instead of the workflow
+ * sleeping on it until its next check.
+ */
+export function subscriptionCoreCodexCapacityWaitRef(wait: SubscriptionCoreCodexCapacityWait): {
+  waiterId: string;
+  generation: number;
+  nextCheckAt: string;
+  wakeRevision: number;
+} {
+  return {
+    waiterId: wait.waiterId,
+    generation: wait.generation,
+    nextCheckAt:
+      wait.wakeRevision > wait.observedWakeRevision || wait.blockedTurnLive === false
+        ? new Date(0).toISOString()
+        : wait.nextCheckAt.toISOString(),
+    wakeRevision: wait.wakeRevision,
+  };
+}
+
+async function readSubscriptionCoreCodexWaiterInTransaction(
+  tx: Database,
+  input: { workspaceId: string; sessionId: string; waiterId?: string; forUpdate?: boolean },
+): Promise<SubscriptionCoreCodexCapacityWait | null> {
+  const [row] = await rawRows<SubscriptionCoreCodexWaiterRow>(
+    tx,
+    sql`select ${SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS},
+        exists (
+          select 1 from sessions s
+          join session_turns t on t.workspace_id = s.workspace_id and t.id = s.active_turn_id
+          where s.workspace_id = w.workspace_id and s.id = w.session_id
+            and s.active_turn_id = w.turn_id and s.status = 'waiting_capacity'
+            and t.status = 'waiting_capacity'
+        ) as blocked_turn_live
+      from subscription_capacity_waiters w
+      where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
+        and provider = 'codex'
+        ${input.waiterId ? sql`and waiter_id = ${input.waiterId}::uuid` : sql``}
+      ${input.forUpdate ? sql`for update` : sql``}`,
+  );
+  return row ? mapSubscriptionCoreCodexWaiter(row) : null;
+}
+
+/** The session's waiting core Codex waiter, if any (workflow peek and recovery). */
+export async function getSubscriptionCoreCodexCapacityWaitForSession(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SubscriptionCoreCodexCapacityWait | null> {
+  return await withWorkspaceRls(db, workspaceId, (scopedDb) =>
+    readSubscriptionCoreCodexWaiterInTransaction(scopedDb, { workspaceId, sessionId }),
+  );
+}
+
+/** Same lookup by the exact waiter id a workflow history recorded. */
+export async function getSubscriptionCoreCodexCapacityWaitById(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; waiterId: string },
+): Promise<SubscriptionCoreCodexCapacityWait | null> {
+  return await withWorkspaceRls(db, input.workspaceId, (scopedDb) =>
+    readSubscriptionCoreCodexWaiterInTransaction(scopedDb, input),
+  );
+}
+
+/**
+ * When a core waiter checks again: at the earliest known reset when there is
+ * one (authoritative), else at a quarantine's end when sooner than the bounded
+ * control-plane backoff (no provider call is made at a check, only placement).
+ */
+export function subscriptionCoreCodexNextCheckAt(input: {
+  earliestResetAt: Date | null;
+  healthRetryAt: Date | null;
+  refreshAttempt: number;
+  now: Date;
+}): { nextCheckAt: Date; resetKind: "authoritative" | "mutation_only" } {
+  const { now } = input;
+  if (input.earliestResetAt && input.earliestResetAt.getTime() > now.getTime()) {
+    return { nextCheckAt: input.earliestResetAt, resetKind: "authoritative" };
+  }
+  const backoff = now.getTime() + codexCapacityRefreshBackoffMs(input.refreshAttempt);
+  const retryAt = input.healthRetryAt?.getTime();
+  return {
+    nextCheckAt: new Date(
+      retryAt !== undefined && retryAt > now.getTime() ? Math.min(retryAt, backoff) : backoff,
+    ),
+    resetKind: "mutation_only",
+  };
+}
+
+export type ArmSubscriptionCoreCodexCapacityWaitResult =
+  | { action: "waiting"; waiter: SubscriptionCoreCodexCapacityWait; events: SessionEvent[] }
+  | { action: "stopped"; sessionStatus: "queued" | "failed"; events: SessionEvent[] }
+  | { action: "stale"; events: SessionEvent[] };
+
+/**
+ * Atomically close one attempt whose core placement said wait and park the
+ * same logical turn on the session's core waiter. Same lock order and
+ * boundary as the legacy Codex arm: workspace control -> workspace -> session
+ * -> exact turn -> exact attempt -> optional goal -> live core lease (when a
+ * reactive failure owns one) -> waiter. The waiting turn/session pointers,
+ * durable events, exact lease release and waiter generation commit together.
+ */
+export async function armSubscriptionCoreCodexCapacityWait(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    goalId?: string | null;
+    goalVersion?: number | null;
+    waitReason: string;
+    earliestResetAt: Date | null;
+    healthRetryAt?: Date | null;
+    failurePayload: Record<string, unknown>;
+    /** The live core lease a reactive refusal still holds; released atomically. */
+    leaseFence?: { connectionId: string; holderId: string; generation: number };
+    now?: Date;
+  },
+): Promise<ArmSubscriptionCoreCodexCapacityWaitResult> {
+  const now = input.now ?? new Date();
+  const goalId = input.goalId ?? null;
+  const goalVersion = input.goalVersion ?? null;
+  if (
+    (goalId === null) !== (goalVersion === null) ||
+    (goalVersion !== null && (!Number.isSafeInteger(goalVersion) || goalVersion < 1))
+  ) {
+    throw new Error("Core Codex capacity goal fence must be absent or contain a positive version");
+  }
+  if (!/^[a-z][a-z0-9_]{0,127}$/.test(input.waitReason)) {
+    throw new Error("Core Codex wait reason must be a bounded identifier");
+  }
+  return await retrySessionActivityRls(
+    db,
+    input.workspaceId,
+    {
+      stage: "session_lifecycle_outbox.arm_subscription_core_codex_capacity_wait",
+      eventTypes: ["codex.capacity.waiting", "turn.failed", "session.status.changed"],
+      maxAttempts: 3,
+    },
+    async (scopedDb) =>
+      await withSessionActivitySavepoint(scopedDb, async (tx) => {
+        const cutover = await readCoreProviderCutoverState(tx, {
+          accountId: input.accountId,
+          provider: "codex",
+        });
+        if (cutover !== "enabled") return { action: "stale", events: [] } as const;
+        const locks = await lockChildLifecycleOutboxWriteRowsTx(tx, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          attemptId: input.attemptId,
+        });
+        const session = locks.session;
+        const turn = locks.turns[0];
+        const attempt = locks.attempts[0];
+        const effectiveControl = session
+          ? await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+              workspaceControl: locks.control ?? undefined,
+            })
+          : null;
+        const [goal] = goalId
+          ? await tx
+              .select()
+              .from(schema.sessionGoals)
+              .where(
+                and(
+                  eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                  eq(schema.sessionGoals.id, goalId),
+                  eq(schema.sessionGoals.sessionId, input.sessionId),
+                ),
+              )
+              .for("update")
+              .limit(1)
+          : [];
+        const leaseRows = input.leaseFence
+          ? await rawRows<{ holder_id: string; generation: number | string }>(
+              tx,
+              sql`select holder_id, generation from subscription_leases
+                where account_id = ${input.accountId}::uuid
+                  and workspace_id = ${input.workspaceId}::uuid
+                  and session_id = ${input.sessionId}::uuid
+                  and turn_id = ${input.turnId}::uuid and provider = 'codex'
+                  and connection_id = ${input.leaseFence.connectionId}::uuid
+                  and leased_until > clock_timestamp()
+                for update`,
+            )
+          : [];
+        const existing = await readSubscriptionCoreCodexWaiterInTransaction(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          forUpdate: true,
+        });
+        const exactRowsMatch =
+          session?.accountId === input.accountId &&
+          turn?.accountId === input.accountId &&
+          turn?.sessionId === input.sessionId &&
+          attempt?.accountId === input.accountId &&
+          attempt?.sessionId === input.sessionId &&
+          attempt?.turnId === input.turnId &&
+          attempt?.executionGeneration === turn?.executionGeneration;
+        if (!exactRowsMatch) return { action: "stale", events: [] } as const;
+        if (
+          existing &&
+          existing.blockedTurnId === input.turnId &&
+          existing.blockedTurnGeneration === turn?.executionGeneration &&
+          turn?.status === "waiting_capacity" &&
+          session?.status === "waiting_capacity" &&
+          session.activeTurnId === input.turnId
+        ) {
+          return { action: "waiting", waiter: existing, events: [] } as const;
+        }
+        const lease = leaseRows[0];
+        const leaseFenceValid =
+          !input.leaseFence ||
+          (lease?.holder_id === input.leaseFence.holderId &&
+            Number(lease.generation) === input.leaseFence.generation);
+        if (
+          !session ||
+          !turn ||
+          effectiveControl?.state !== "active" ||
+          effectiveControl.settlement !== null ||
+          session.activeTurnId !== input.turnId ||
+          session.status !== "running" ||
+          (goalId !== null &&
+            (!goal || goal.status !== "active" || goal.version !== goalVersion)) ||
+          turn.status !== "running" ||
+          turn.activeAttemptId !== input.attemptId ||
+          !leaseFenceValid
+        ) {
+          return { action: "stale", events: [] } as const;
+        }
+
+        // A resumed attempt that lands straight back on unavailable capacity
+        // without completing a model call is a false resumption; the same
+        // bounded budget and persisted backoff as the legacy Codex wait apply.
+        const recovery = readCodexCapacityRecovery(turn.metadata);
+        const falseResumption =
+          recovery.resumeGeneration !== null &&
+          recovery.resumeGeneration <= turn.executionGeneration;
+        const falseResumptions = recovery.falseResumptions + (falseResumption ? 1 : 0);
+        const stopped = falseResumptions >= CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT;
+        const retryNotBefore =
+          falseResumption && !stopped
+            ? new Date(
+                now.getTime() + codexFalseResumptionBackoffMs(falseResumptions),
+              ).toISOString()
+            : recovery.retryNotBefore;
+        const recoveryMetadata = {
+          ...metadataWithoutTurnDispatchAttempt(turn.metadata),
+          [CODEX_CAPACITY_RECOVERY_KEY]: {
+            falseResumptions,
+            resumeGeneration: null,
+            retryNotBefore,
+          },
+        };
+        const [waitingPrompt] = stopped
+          ? await tx
+              .select({ id: schema.sessionTurns.id })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                  eq(schema.sessionTurns.sessionId, input.sessionId),
+                  eq(schema.sessionTurns.status, "queued"),
+                  inArray(schema.sessionTurns.source, ["user", "api"]),
+                ),
+              )
+              .limit(1)
+          : [];
+        const sessionStatus = stopped ? (waitingPrompt ? "queued" : "failed") : "waiting_capacity";
+        await closeSessionTurnAttemptInTransaction(tx, {
+          id: input.attemptId,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: turn.executionGeneration,
+          outcome: stopped ? "failed" : "waiting_capacity",
+          closedAt: now,
+        });
+
+        const scheduled = subscriptionCoreCodexNextCheckAt({
+          earliestResetAt: input.earliestResetAt,
+          healthRetryAt: input.healthRetryAt ?? null,
+          refreshAttempt: 0,
+          now,
+        });
+        const nextCheckAt = new Date(
+          Math.max(
+            scheduled.nextCheckAt.getTime(),
+            retryNotBefore ? Date.parse(retryNotBefore) : 0,
+          ),
+        );
+        let waiter: SubscriptionCoreCodexCapacityWait | null = null;
+        if (stopped) {
+          await tx.execute(sql`delete from subscription_capacity_waiters
+            where workspace_id = ${input.workspaceId}::uuid
+              and session_id = ${input.sessionId}::uuid and provider = 'codex'`);
+        } else {
+          // Arming follows a placement evaluation, so this generation has
+          // already observed its own initial revision; only a later capacity
+          // change creates pending wake work.
+          const generation = (existing?.generation ?? 0) + 1;
+          const wakeRevision = (existing?.wakeRevision ?? 0) + 1;
+          const [row] = await rawRows<SubscriptionCoreCodexWaiterRow>(
+            tx,
+            sql`insert into subscription_capacity_waiters (
+                account_id, workspace_id, session_id, turn_id, provider, wait_reason,
+                policy_hash, reset_kind, refresh_attempt, resumed_update_id, earliest_reset_at,
+                generation, wake_revision, observed_wake_revision, next_check_at,
+                blocked_turn_generation, goal_id, goal_version, last_wake_reason, updated_at
+              ) values (
+                ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid,
+                ${input.turnId}::uuid, 'codex', ${input.waitReason}, null,
+                ${scheduled.resetKind}, 0, null,
+                ${input.earliestResetAt?.toISOString() ?? null}::timestamptz,
+                ${generation}, ${wakeRevision}, ${wakeRevision},
+                ${nextCheckAt.toISOString()}::timestamptz, ${turn.executionGeneration},
+                ${goalId}::uuid, ${goalVersion}, 'capacity_wait_armed',
+                ${now.toISOString()}::timestamptz
+              )
+              on conflict (workspace_id, session_id) do update
+                set turn_id = excluded.turn_id, provider = excluded.provider,
+                    wait_reason = excluded.wait_reason, policy_hash = null,
+                    reset_kind = excluded.reset_kind, refresh_attempt = 0,
+                    resumed_update_id = null, earliest_reset_at = excluded.earliest_reset_at,
+                    generation = excluded.generation, wake_revision = excluded.wake_revision,
+                    observed_wake_revision = excluded.observed_wake_revision,
+                    next_check_at = excluded.next_check_at,
+                    blocked_turn_generation = excluded.blocked_turn_generation,
+                    goal_id = excluded.goal_id, goal_version = excluded.goal_version,
+                    last_wake_reason = excluded.last_wake_reason,
+                    updated_at = excluded.updated_at
+                where subscription_capacity_waiters.account_id = excluded.account_id
+              returning ${SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS}`,
+          );
+          if (!row) throw new Error("Core Codex capacity wait arm returned no waiter row");
+          waiter = mapSubscriptionCoreCodexWaiter(row);
+        }
+
+        let sequence = session.lastSequence;
+        const closedTools = await closePendingSessionToolCallsInTransaction(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          reason: "codex_capacity_wait",
+          sequence,
+          now,
+          preserveInterruptionRows: !stopped,
+        });
+        sequence = closedTools.sequence;
+        const inserted = await tx
+          .insert(schema.sessionEvents)
+          .values(
+            withLosslessContentWriteVersion(
+              [
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: ++sequence,
+                  type: stopped ? "turn.failed" : "codex.capacity.waiting",
+                  payload: {
+                    ...input.failurePayload,
+                    recovery: "codex_capacity",
+                    retryable: true,
+                    rotated: true,
+                    waiterId: waiter?.waiterId ?? existing?.waiterId ?? null,
+                    generation: waiter?.generation ?? existing?.generation ?? null,
+                    goalId,
+                    goalVersion,
+                    blockedTurnGeneration: turn.executionGeneration,
+                    policyHash: null,
+                    resetKind: scheduled.resetKind,
+                    earliestResetAt: input.earliestResetAt?.toISOString() ?? null,
+                    nextCheckAt: nextCheckAt.toISOString(),
+                    falseResumptions,
+                    ...(stopped
+                      ? {
+                          error:
+                            "Automatic capacity recovery stopped after 10 resumptions returned immediately to unavailable capacity. Use Retry or send Continue after checking subscription capacity.",
+                          code: "codex_capacity_recovery_exhausted",
+                          recovery: "user_message",
+                          recoveryExhausted: true,
+                          retryable: false,
+                          rotated: false,
+                        }
+                      : {}),
+                  },
+                  turnId: input.turnId,
+                  turnGeneration: turn.executionGeneration,
+                  turnAttemptId: input.attemptId,
+                  turnAssociation: "current",
+                  occurredAt: now,
+                },
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: ++sequence,
+                  type: "session.status.changed",
+                  payload: {
+                    status: sessionStatus,
+                    reason: stopped ? "codex_capacity_recovery_exhausted" : "codex_capacity",
+                  },
+                  turnId: input.turnId,
+                  turnGeneration: turn.executionGeneration,
+                  turnAttemptId: input.attemptId,
+                  turnAssociation: "current",
+                  occurredAt: now,
+                },
+              ],
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
+          .returning();
+        const [waitingTurn] = await tx
+          .update(schema.sessionTurns)
+          .set({
+            status: stopped ? "failed" : "waiting_capacity",
+            activeAttemptId: null,
+            metadata: recoveryMetadata,
+            version: turn.version + 1,
+            finishedAt: stopped ? now : null,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.id, input.turnId),
+              eq(schema.sessionTurns.status, "running"),
+              eq(schema.sessionTurns.activeAttemptId, input.attemptId),
+            ),
+          )
+          .returning({ id: schema.sessionTurns.id });
+        if (!waitingTurn) throw new Error("Core Codex capacity blocked turn changed during arm");
+        const [waitingSession] = await tx
+          .update(schema.sessions)
+          .set({
+            status: sessionStatus,
+            activeTurnId: stopped ? null : input.turnId,
+            lastSequence: sequence,
+            ...(stopped ? { queueVersion: session.queueVersion + 1 } : {}),
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+              eq(schema.sessions.status, "running"),
+              eq(schema.sessions.activeTurnId, input.turnId),
+            ),
+          )
+          .returning({ id: schema.sessions.id });
+        if (!waitingSession) throw new Error("Core Codex capacity session changed during arm");
+        if (stopped) {
+          await cancelTurnInteractionInterventionsInTransaction(tx, input);
+          await settleSessionMaintenanceInTransaction(tx, input);
+          const terminalEvent = inserted[0]!;
+          await projectSessionRealtimeDelegationTerminalInTransaction(tx, {
+            ...input,
+            turnStatus: "failed",
+            terminalEvent: {
+              id: terminalEvent.id,
+              type: "turn.failed",
+              payload: sessionEventPayloadRecord(
+                terminalEvent.payload,
+                terminalEvent.payloadCodecVersion,
+              ),
+            },
+            now,
+          });
+          await enqueueFailedChildOutboxForTurnTx(tx, input.workspaceId, session, turn);
+          await tx
+            .update(schema.sessionGoals)
+            .set({ continuationSuppressedTurnId: turn.id, updatedAt: now })
+            .where(
+              and(
+                eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                eq(schema.sessionGoals.sessionId, input.sessionId),
+                eq(schema.sessionGoals.status, "active"),
+              ),
+            );
+        } else {
+          await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
+            turnId: input.turnId,
+            waiterId: waiter!.waiterId,
+            provider: "codex",
+            nextCheckAt,
+          });
+        }
+        if (input.leaseFence) {
+          await tx.execute(sql`delete from subscription_leases
+            where account_id = ${input.accountId}::uuid
+              and workspace_id = ${input.workspaceId}::uuid
+              and session_id = ${input.sessionId}::uuid
+              and turn_id = ${input.turnId}::uuid and provider = 'codex'
+              and connection_id = ${input.leaseFence.connectionId}::uuid
+              and holder_id = ${input.leaseFence.holderId}
+              and generation = ${input.leaseFence.generation}`);
+        }
+        const events = [...closedTools.events, ...inserted.map(mapEvent)];
+        if (stopped) {
+          return {
+            action: "stopped",
+            sessionStatus: waitingPrompt ? "queued" : "failed",
+            events,
+          } as const;
+        }
+        return { action: "waiting", waiter: waiter!, events } as const;
+      }),
+  );
+}
+
+/** What core placement says about a blocked turn, evaluated before the reconcile transaction. */
+export type SubscriptionCoreCodexWaitEvaluation =
+  | { kind: "run" }
+  | {
+      kind: "wait";
+      waitReason: string;
+      earliestResetAt: Date | null;
+      healthRetryAt: Date | null;
+    }
+  /** The accepted turn can no longer use the core under its frozen authority. */
+  | { kind: "revoked" }
+  /** The cutover is switched off: keep the work parked (maintenance), check later. */
+  | { kind: "paused" };
+
+export type ReconcileSubscriptionCoreCodexCapacityWaitResult =
+  | { action: "waiting"; waiter: SubscriptionCoreCodexCapacityWait; events: SessionEvent[] }
+  | { action: "resumed" | "superseded"; events: SessionEvent[] }
+  | { action: "paused" | "stale"; events: SessionEvent[] };
+
+/**
+ * Row-lock and settle one core waiter after the caller evaluated placement
+ * for its blocked turn (without leasing). Resuming makes the exact blocked
+ * turn `recovering` and deletes the waiter; waiting acknowledges only the
+ * wake revision the evaluation actually observed, so a capacity change that
+ * lands during the evaluation is checked again immediately. Pause leaves the
+ * waiter untouched; a changed goal, turn or session supersedes it without
+ * inference, as for the legacy Codex waiter.
+ */
+export async function reconcileSubscriptionCoreCodexCapacityWait(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    waiterId: string;
+    generation: number;
+    /** The waiter's wake revision when the evaluation started. */
+    evaluatedWakeRevision: number;
+    evaluation: SubscriptionCoreCodexWaitEvaluation;
+    now?: Date;
+  },
+): Promise<ReconcileSubscriptionCoreCodexCapacityWaitResult> {
+  const now = input.now ?? new Date();
+  return await withSessionActivityRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await withSessionActivitySavepoint(scopedDb, async (tx) => {
+        const prefix = await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+        });
+        const waiterRead = await readSubscriptionCoreCodexWaiterInTransaction(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          waiterId: input.waiterId,
+        });
+        if (!waiterRead || waiterRead.generation !== input.generation) {
+          return { action: "stale", events: [] } as const;
+        }
+        const locks = await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "already_locked",
+          workspaceLock: "already_locked",
+          sessionIds: [input.sessionId],
+          turnIds: [waiterRead.blockedTurnId],
+        });
+        const session = locks.sessions[0];
+        const blockedTurn = locks.turns[0];
+        const effectiveControl = session
+          ? await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+              workspaceControl: prefix.control ?? undefined,
+            })
+          : null;
+        const [goal] = waiterRead.goalId
+          ? await tx
+              .select()
+              .from(schema.sessionGoals)
+              .where(
+                and(
+                  eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                  eq(schema.sessionGoals.id, waiterRead.goalId),
+                  eq(schema.sessionGoals.sessionId, input.sessionId),
+                ),
+              )
+              .for("update")
+              .limit(1)
+          : [];
+        const waiter = await readSubscriptionCoreCodexWaiterInTransaction(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          waiterId: input.waiterId,
+          forUpdate: true,
+        });
+        if (
+          !session ||
+          !blockedTurn ||
+          !waiter ||
+          session.accountId !== input.accountId ||
+          blockedTurn.accountId !== input.accountId ||
+          blockedTurn.sessionId !== input.sessionId ||
+          waiter.accountId !== input.accountId ||
+          waiter.blockedTurnId !== blockedTurn.id ||
+          waiter.generation !== input.generation
+        ) {
+          return { action: "stale", events: [] } as const;
+        }
+        if (effectiveControl?.state !== "active" || effectiveControl.settlement !== null) {
+          return { action: "paused", events: [] } as const;
+        }
+
+        let supersedeReason: string | null = null;
+        if (session.status === "cancelled") supersedeReason = "session_cancelled";
+        else if (
+          waiter.goalId !== null &&
+          (!goal || goal.status !== "active" || goal.version !== waiter.goalVersion)
+        ) {
+          supersedeReason = "goal_changed";
+        } else if (session.activeTurnId !== blockedTurn.id) {
+          supersedeReason = "active_turn_changed";
+        } else if (session.status !== "waiting_capacity") {
+          supersedeReason = "session_not_waiting_capacity";
+        } else if (
+          blockedTurn.status !== "waiting_capacity" ||
+          blockedTurn.activeAttemptId !== null ||
+          blockedTurn.executionGeneration !== waiter.blockedTurnGeneration
+        ) {
+          supersedeReason = "blocked_turn_changed";
+        } else if (input.evaluation.kind === "revoked") {
+          supersedeReason = "subscription_access_revoked";
+        }
+        if (supersedeReason) {
+          return await supersedeSubscriptionCoreCodexCapacityWaitInTransaction(tx, {
+            session,
+            blockedTurn,
+            waiter,
+            reason: supersedeReason,
+            now,
+          });
+        }
+
+        // Only the revision the evaluation saw is acknowledged.
+        const observed = Math.min(waiter.wakeRevision, input.evaluatedWakeRevision);
+        const recovery = readCodexCapacityRecovery(blockedTurn.metadata);
+        const evaluation = input.evaluation;
+        if (
+          evaluation.kind !== "run" ||
+          (recovery.retryNotBefore && Date.parse(recovery.retryNotBefore) > now.getTime())
+        ) {
+          const waitEvaluation =
+            evaluation.kind === "wait"
+              ? evaluation
+              : {
+                  kind: "wait" as const,
+                  waitReason: waiter.waitReason,
+                  earliestResetAt: null,
+                  healthRetryAt: null,
+                };
+          const authoritative =
+            waitEvaluation.earliestResetAt !== null &&
+            waitEvaluation.earliestResetAt.getTime() > now.getTime();
+          const refreshAttempt = authoritative ? 0 : waiter.refreshAttempt + 1;
+          const scheduled = subscriptionCoreCodexNextCheckAt({
+            earliestResetAt: waitEvaluation.earliestResetAt,
+            healthRetryAt: waitEvaluation.healthRetryAt,
+            refreshAttempt,
+            now,
+          });
+          // Capacity changes can prompt a recheck but never bypass a persisted
+          // false-resumption delay.
+          const nextCheckAt = new Date(
+            Math.max(
+              scheduled.nextCheckAt.getTime(),
+              recovery.retryNotBefore ? Date.parse(recovery.retryNotBefore) : 0,
+            ),
+          );
+          const [row] = await rawRows<SubscriptionCoreCodexWaiterRow>(
+            tx,
+            sql`update subscription_capacity_waiters
+              set wait_reason = ${waitEvaluation.waitReason},
+                  earliest_reset_at = ${waitEvaluation.earliestResetAt?.toISOString() ?? null}::timestamptz,
+                  next_check_at = ${nextCheckAt.toISOString()}::timestamptz,
+                  reset_kind = ${scheduled.resetKind},
+                  refresh_attempt = ${refreshAttempt},
+                  observed_wake_revision = greatest(observed_wake_revision, ${observed}),
+                  updated_at = ${now.toISOString()}::timestamptz
+              where workspace_id = ${input.workspaceId}::uuid
+                and session_id = ${input.sessionId}::uuid
+                and waiter_id = ${waiter.waiterId}::uuid and generation = ${waiter.generation}
+              returning ${SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS}`,
+          );
+          if (!row) return { action: "stale", events: [] } as const;
+          return {
+            action: "waiting",
+            waiter: mapSubscriptionCoreCodexWaiter(row),
+            events: [],
+          } as const;
+        }
+
+        const events = await tx
+          .insert(schema.sessionEvents)
+          .values(
+            withLosslessContentWriteVersion(
+              [
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: session.lastSequence + 1,
+                  type: "codex.capacity.resumed",
+                  payload: {
+                    waiterId: waiter.waiterId,
+                    generation: waiter.generation,
+                    wakeRevision: waiter.wakeRevision,
+                    goalId: waiter.goalId,
+                    goalVersion: waiter.goalVersion,
+                    blockedTurnGeneration: waiter.blockedTurnGeneration,
+                    policyHash: null,
+                    diagnostic: null,
+                  },
+                  turnId: blockedTurn.id,
+                  turnGeneration: blockedTurn.executionGeneration,
+                  turnAssociation: "current",
+                  occurredAt: now,
+                },
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: session.lastSequence + 2,
+                  type: "session.status.changed",
+                  payload: { status: "recovering", reason: "codex_capacity" },
+                  turnId: blockedTurn.id,
+                  turnGeneration: blockedTurn.executionGeneration,
+                  turnAssociation: "current",
+                  occurredAt: now,
+                },
+              ],
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
+          .returning();
+        const deleted = await rawRows<{ waiter_id: string }>(
+          tx,
+          sql`delete from subscription_capacity_waiters
+            where workspace_id = ${input.workspaceId}::uuid
+              and session_id = ${input.sessionId}::uuid
+              and waiter_id = ${waiter.waiterId}::uuid and generation = ${waiter.generation}
+            returning waiter_id::text as waiter_id`,
+        );
+        if (deleted.length !== 1) throw new Error("Core Codex waiter changed during atomic resume");
+        const [recoveringTurn] = await tx
+          .update(schema.sessionTurns)
+          .set({
+            status: "recovering",
+            activeAttemptId: null,
+            metadata: {
+              ...metadataWithoutTurnDispatchAttempt(blockedTurn.metadata),
+              [CODEX_CAPACITY_RECOVERY_KEY]: {
+                ...recovery,
+                resumeGeneration: blockedTurn.executionGeneration + 1,
+              },
+            },
+            version: blockedTurn.version + 1,
+            finishedAt: null,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.id, blockedTurn.id),
+              eq(schema.sessionTurns.status, "waiting_capacity"),
+              isNull(schema.sessionTurns.activeAttemptId),
+              eq(schema.sessionTurns.executionGeneration, waiter.blockedTurnGeneration ?? -1),
+            ),
+          )
+          .returning({ id: schema.sessionTurns.id });
+        if (!recoveringTurn) {
+          throw new Error("Core Codex capacity blocked turn changed during atomic resume");
+        }
+        const [recoveringSession] = await tx
+          .update(schema.sessions)
+          .set({
+            status: "recovering",
+            activeTurnId: blockedTurn.id,
+            lastSequence: session.lastSequence + 2,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+              eq(schema.sessions.status, "waiting_capacity"),
+              eq(schema.sessions.activeTurnId, blockedTurn.id),
+            ),
+          )
+          .returning({ id: schema.sessions.id });
+        if (!recoveringSession) {
+          throw new Error("Core Codex capacity session changed during atomic resume");
+        }
+        return { action: "resumed", events: events.map(mapEvent) } as const;
+      }),
+  );
+}
+
+async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
+  tx: SessionActivityDatabase,
+  input: {
+    session: typeof schema.sessions.$inferSelect;
+    blockedTurn: typeof schema.sessionTurns.$inferSelect;
+    waiter: SubscriptionCoreCodexCapacityWait;
+    reason: string;
+    now: Date;
+  },
+): Promise<{ action: "superseded"; events: SessionEvent[] }> {
+  const deleted = await rawRows<{ waiter_id: string }>(
+    tx,
+    sql`delete from subscription_capacity_waiters
+      where workspace_id = ${input.session.workspaceId}::uuid
+        and session_id = ${input.session.id}::uuid
+        and waiter_id = ${input.waiter.waiterId}::uuid and generation = ${input.waiter.generation}
+      returning waiter_id::text as waiter_id`,
+  );
+  if (deleted.length !== 1) return { action: "superseded", events: [] };
+  const turnWasCurrent = input.session.activeTurnId === input.blockedTurn.id;
+  const terminalTurnStatus = input.session.status === "cancelled" ? "cancelled" : "superseded";
+  if (input.blockedTurn.status === "waiting_capacity") {
+    const [supersededTurn] = await tx
+      .update(schema.sessionTurns)
+      .set({
+        status: terminalTurnStatus,
+        activeAttemptId: null,
+        cancelledBy: "codex_capacity_reconcile",
+        cancelReason: input.reason,
+        version: input.blockedTurn.version + 1,
+        finishedAt: input.now,
+        updatedAt: input.now,
+      })
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
+          eq(schema.sessionTurns.id, input.blockedTurn.id),
+          eq(schema.sessionTurns.status, "waiting_capacity"),
+          isNull(schema.sessionTurns.activeAttemptId),
+          eq(schema.sessionTurns.executionGeneration, input.waiter.blockedTurnGeneration ?? -1),
+        ),
+      )
+      .returning({ id: schema.sessionTurns.id });
+    if (!supersededTurn) {
+      throw new Error("Core Codex capacity blocked turn changed during atomic supersession");
+    }
+  }
+  const [queued] = turnWasCurrent
+    ? await tx
+        .select({ id: schema.sessionTurns.id })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
+            eq(schema.sessionTurns.sessionId, input.session.id),
+            eq(schema.sessionTurns.status, "queued"),
+          ),
+        )
+        .limit(1)
+    : [];
+  const nextSessionStatus =
+    input.session.status === "cancelled" ? "cancelled" : queued ? "queued" : "idle";
+  const eventValues: SessionEventInsertWithPayload[] = [
+    {
+      accountId: input.session.accountId,
+      workspaceId: input.session.workspaceId,
+      sessionId: input.session.id,
+      sequence: input.session.lastSequence + 1,
+      type: "codex.capacity.superseded",
+      payload: {
+        waiterId: input.waiter.waiterId,
+        generation: input.waiter.generation,
+        reason: input.reason,
+      },
+      turnId: input.blockedTurn.id,
+      turnGeneration: input.blockedTurn.executionGeneration,
+      ...(turnWasCurrent ? { turnAssociation: "current" } : {}),
+      occurredAt: input.now,
+    },
+  ];
+  if (turnWasCurrent && input.session.status !== nextSessionStatus) {
+    eventValues.push({
+      accountId: input.session.accountId,
+      workspaceId: input.session.workspaceId,
+      sessionId: input.session.id,
+      sequence: input.session.lastSequence + 2,
+      type: "session.status.changed",
+      payload: { status: nextSessionStatus, reason: input.reason },
+      turnId: input.blockedTurn.id,
+      turnGeneration: input.blockedTurn.executionGeneration,
+      turnAssociation: "current",
+      occurredAt: input.now,
+    });
+  }
+  const inserted = await tx
+    .insert(schema.sessionEvents)
+    .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
+    .returning();
+  const [updatedSession] = await tx
+    .update(schema.sessions)
+    .set({
+      ...(turnWasCurrent ? { status: nextSessionStatus, activeTurnId: null } : {}),
+      lastSequence: input.session.lastSequence + inserted.length,
+      updatedAt: input.now,
+    })
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, input.session.workspaceId),
+        eq(schema.sessions.id, input.session.id),
+        ...(turnWasCurrent ? [eq(schema.sessions.activeTurnId, input.blockedTurn.id)] : []),
+      ),
+    )
+    .returning({ id: schema.sessions.id });
+  if (!updatedSession) throw new Error("Core Codex capacity session changed during supersession");
+  return { action: "superseded", events: inserted.map(mapEvent) };
+}
+
+/**
+ * The trusted empty-subject worker scope the provider-neutral wake outbox
+ * requires (its own RLS policy), for exactly one account and workspace, even
+ * when the caller runs under a turn's ambient session actor.
+ */
+export async function withSubscriptionCapacityWakeOutboxScope<T>(
+  db: Database,
+  scope: { accountId: string; workspaceId: string },
+  operation: (tx: Database) => Promise<T>,
+): Promise<T> {
+  return await withRlsContext(db, scope, (tx) =>
+    withPoolWakeServiceScopeInTransaction(tx, () => operation(tx)),
+  );
+}
+
+/** One workspace whose core waiters were woken; deliver its outbox after commit. */
+export type SubscriptionCoreCodexWakeScope = { accountId: string; workspaceId: string };
+
+/**
+ * Capacity changed for the account's Codex pool (a quota exhaustion ended, a
+ * quarantine cleared, a plan changed, a binding or assignment changed):
+ * advance every waiting core Codex waiter's wake revision, record the typed
+ * wake in the provider-neutral outbox and the generic session workflow wake
+ * in the same transaction. Wakes only request re-evaluation; each waiter
+ * re-places under its own accepted turn. Runs in the trusted empty-subject
+ * worker scope per workspace (the outbox's own policy), never through legacy
+ * active pointers. Returns the workspaces whose outbox the caller should
+ * drain after commit.
+ */
+export async function wakeSubscriptionCoreCodexCapacityWaiters(
+  db: Database,
+  input: {
+    accountId: string;
+    reason: string;
+    workspaceIds?: readonly string[];
+    /**
+     * Wake only these sessions' waiters (for example a session pin, which
+     * changes nothing another session can place on). Requires exactly one
+     * workspace in `workspaceIds`.
+     */
+    sessionIds?: readonly string[];
+  },
+): Promise<SubscriptionCoreCodexWakeScope[]> {
+  if (!/^[a-z][a-z0-9_]{0,127}$/.test(input.reason))
+    throw new Error("Core Codex wake reason must be a bounded identifier");
+  if (input.sessionIds !== undefined && input.workspaceIds?.length !== 1)
+    throw new Error("A session-scoped core Codex wake names exactly one workspace");
+  const sessionIds = input.sessionIds ? [...new Set(input.sessionIds)] : null;
+  if (sessionIds !== null && sessionIds.length === 0) return [];
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: null }, async (tx) =>
+    withPoolWakeServiceScopeInTransaction(tx, async () => {
+      const cutover = await readCoreProviderCutoverState(tx, {
+        accountId: input.accountId,
+        provider: "codex",
+      });
+      if (cutover !== "enabled") return [];
+      const workspaceIds =
+        input.workspaceIds ??
+        (
+          await rawRows<{ workspace_id: string }>(
+            tx,
+            sql`select workspace_id::text as workspace_id
+              from list_organization_codex_workspace_ids(${input.accountId}::uuid)
+              order by workspace_id`,
+          )
+        ).map((row) => row.workspace_id);
+      const touched: SubscriptionCoreCodexWakeScope[] = [];
+      for (const workspaceId of workspaceIds) {
+        await setRlsContext(tx, { accountId: input.accountId, workspaceId });
+        await tx.execute(
+          sql`select set_config('opengeni.subject_id', '', true), set_config('opengeni.initiating_human_subject_id', '', true)`,
+        );
+        await tx.execute(
+          sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${workspaceId}`}, 0))`,
+        );
+        const woken = await rawRows<{
+          session_id: string;
+          waiter_id: string;
+          generation: number | string;
+          wake_revision: number | string;
+        }>(
+          tx,
+          sql`update subscription_capacity_waiters
+            set wake_revision = wake_revision + 1, last_wake_reason = ${input.reason},
+                updated_at = clock_timestamp()
+            where account_id = ${input.accountId}::uuid
+              and workspace_id = ${workspaceId}::uuid and provider = 'codex'
+              ${
+                sessionIds === null
+                  ? sql``
+                  : sql`and session_id in (${sql.join(
+                      sessionIds.map((id) => sql`${id}::uuid`),
+                      sql`, `,
+                    )})`
+              }
+            returning session_id::text as session_id, waiter_id::text as waiter_id,
+              generation, wake_revision`,
+        );
+        for (const row of woken) {
+          await tx.execute(sql`insert into subscription_capacity_wake_outbox (
+              account_id, workspace_id, session_id, waiter_id, generation, wake_revision
+            ) values (
+              ${input.accountId}::uuid, ${workspaceId}::uuid, ${row.session_id}::uuid,
+              ${row.waiter_id}::uuid, ${Number(row.generation)}, ${Number(row.wake_revision)}
+            ) on conflict (account_id, waiter_id, generation, wake_revision) do nothing`);
+          // The generic durable wake is the crash-safe backstop: the global
+          // dispatcher delivers it even if this outbox row's typed signal is
+          // never sent.
+          await enqueueSessionWorkflowWakeInTransaction(tx, {
+            accountId: input.accountId,
+            workspaceId,
+            sessionId: row.session_id,
+            temporalWorkflowId: `session-${row.session_id}`,
+            reason: "subscription_capacity",
+          });
+        }
+        if (woken.length > 0) touched.push({ accountId: input.accountId, workspaceId });
+      }
+      await setRlsContext(tx, { accountId: input.accountId, workspaceId: null });
+      return touched;
+    }),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Durable xAI subscription capacity wait / wake state machine.
 // ---------------------------------------------------------------------------
 
@@ -30598,6 +31754,42 @@ export async function listCodexResetRedemptionRecoveries(
   );
 }
 
+/**
+ * Who may redeem a credential's reset credits, read (and share-locked
+ * against disconnect or credential replacement) inside the ledger
+ * transaction. `null` is an unknown credential in this workspace. The legacy
+ * rule is the human who connected it; the shared core supplies its own
+ * section 6.3 authority (M3 PR 2c).
+ */
+export type CodexResetRedemptionCredentialAuthority = (
+  tx: Database,
+  input: { accountId: string; workspaceId: string; credentialId: string; subjectId: string },
+) => Promise<{ status: string; owned: boolean } | null>;
+
+export async function legacyCodexResetRedemptionAuthority(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; credentialId: string; subjectId: string },
+): Promise<{ status: string; owned: boolean } | null> {
+  const [credential] = await tx
+    .select({
+      connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
+      status: schema.codexSubscriptionCredentials.status,
+    })
+    .from(schema.codexSubscriptionCredentials)
+    .where(
+      and(
+        eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
+        eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
+        eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+      ),
+    )
+    .for("share")
+    .limit(1);
+  return credential
+    ? { status: credential.status, owned: credential.connectedBySubjectId === input.subjectId }
+    : null;
+}
+
 export type AdoptCodexResetRedemptionResult =
   | { kind: "current" | "adopted"; attempt: CodexResetRedemptionAttempt }
   | { kind: "in_progress" }
@@ -30617,27 +31809,16 @@ export async function adoptCodexResetRedemptionAttempt(
     subjectId: string;
     browserSessionHash: string;
   },
+  authority: CodexResetRedemptionCredentialAuthority = legacyCodexResetRedemptionAuthority,
 ): Promise<AdoptCodexResetRedemptionResult> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        const [credential] = await tx
-          .select({
-            connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
-          })
-          .from(schema.codexSubscriptionCredentials)
-          .where(
-            and(
-              eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-              eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
-            ),
-          )
-          .for("share")
-          .limit(1);
+        const credential = await authority(tx as unknown as Database, input);
         if (!credential) return { kind: "not_found" } as const;
-        if (credential.connectedBySubjectId !== input.subjectId) {
+        if (!credential.owned) {
           return { kind: "forbidden" } as const;
         }
         const [attempt] = await tx
@@ -30723,6 +31904,7 @@ export async function claimCodexResetRedemption(
     claimHolderId: string;
     claimTtlMs?: number;
   },
+  authority: CodexResetRedemptionCredentialAuthority = legacyCodexResetRedemptionAuthority,
 ): Promise<ClaimCodexResetRedemptionResult> {
   const claimTtlMs = input.claimTtlMs ?? 60_000;
   if (!Number.isFinite(claimTtlMs) || claimTtlMs <= 0) {
@@ -30748,21 +31930,7 @@ export async function claimCodexResetRedemption(
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`codex-reset-credit:${input.workspaceId}:${input.credentialId}:${input.creditId}`}, 0))`,
         );
-        const [credential] = await tx
-          .select({
-            connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
-            status: schema.codexSubscriptionCredentials.status,
-          })
-          .from(schema.codexSubscriptionCredentials)
-          .where(
-            and(
-              eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
-              eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
-              eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-            ),
-          )
-          .for("share")
-          .limit(1);
+        const credential = await authority(tx as unknown as Database, input);
         if (!credential) return { kind: "not_found" } as const;
         const [existing] = await tx
           .select()
@@ -30786,7 +31954,7 @@ export async function claimCodexResetRedemption(
           ) {
             return { kind: "conflict" } as const;
           }
-          if (credential.connectedBySubjectId !== input.subjectId) {
+          if (!credential.owned) {
             return { kind: "forbidden" } as const;
           }
           const mapped = mapCodexResetRedemptionAttempt(existing);
@@ -30828,7 +31996,7 @@ export async function claimCodexResetRedemption(
 
         // Authorize before looking up credit-attempt state so a non-owner cannot
         // distinguish an unused provider credit from one with an existing attempt.
-        if (credential.status !== "active" || credential.connectedBySubjectId !== input.subjectId) {
+        if (credential.status !== "active" || !credential.owned) {
           return { kind: "forbidden" } as const;
         }
 
@@ -30929,6 +32097,7 @@ export async function fenceCodexResetRedemptionSend(
     browserSessionHash: string;
     sendLeaseMs?: number;
   },
+  authority: CodexResetRedemptionCredentialAuthority = legacyCodexResetRedemptionAuthority,
 ): Promise<FenceCodexResetRedemptionSendResult> {
   const sendLeaseMs = input.sendLeaseMs ?? 30_000;
   if (!Number.isFinite(sendLeaseMs) || sendLeaseMs <= 10_000) {
@@ -30939,21 +32108,7 @@ export async function fenceCodexResetRedemptionSend(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        const [credential] = await tx
-          .select({
-            connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
-            status: schema.codexSubscriptionCredentials.status,
-          })
-          .from(schema.codexSubscriptionCredentials)
-          .where(
-            and(
-              eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
-              eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
-              eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-            ),
-          )
-          .for("share")
-          .limit(1);
+        const credential = await authority(tx as unknown as Database, input);
         const [attempt] = await tx
           .select()
           .from(schema.codexResetRedemptionAttempts)
@@ -30990,11 +32145,7 @@ export async function fenceCodexResetRedemptionSend(
         let reason: CodexResetRedemptionSendNotReadyReason;
         if (!liveness?.claim_live) reason = "claim_expired";
         else if (!liveness.confirmation_live) reason = "confirmation_expired";
-        else if (
-          !credential ||
-          credential.status !== "active" ||
-          credential.connectedBySubjectId !== input.subjectId
-        ) {
+        else if (!credential || credential.status !== "active" || !credential.owned) {
           reason = "credential_unavailable";
         } else {
           const [ready] = await tx
@@ -31212,6 +32363,208 @@ export async function completeCodexResetRedemption(
         changed: restoresCapacity,
       };
     },
+  );
+}
+
+/**
+ * Section 6.3 reset-credit authority on the shared core (M3 PR 2c): the
+ * database decides, inside the ledger transaction, whether the RLS subject is
+ * an organization administrator or an administrator of the workspace that
+ * manages this shared Codex connection, and share-locks the connection
+ * against disconnect or credential replacement. Nothing without an enabled
+ * Codex cutover.
+ */
+export const subscriptionCoreCodexResetAuthority: CodexResetRedemptionCredentialAuthority = async (
+  tx,
+  input,
+) => {
+  const [row] = await rawRows<{ status: string; authorized: boolean }>(
+    tx,
+    sql`select status, authorized from opengeni_private.subscription_codex_reset_authority(
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.credentialId}::uuid,
+      ${input.subjectId}
+    )`,
+  );
+  return row ? { status: row.status, owned: row.authorized === true } : null;
+};
+
+/**
+ * Persist the exact provider outcome of a core redemption with its audit
+ * record. A credit that restores capacity clears the connection's stored
+ * exhaustion only when it was observed with the connection's current
+ * refresh generation (an observation of an older credential is left for the
+ * generation fence to discard), and returns a core wake for the caller to
+ * deliver after commit. The legacy credential columns and outbox are never
+ * touched.
+ */
+export async function completeSubscriptionCoreCodexResetRedemption(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    attemptId: string;
+    claimHolderId: string;
+    outcome: CodexResetRedemptionOutcome;
+  },
+): Promise<{
+  attempt: CodexResetRedemptionAttempt | null;
+  wake: SubscriptionCoreCodexWake | null;
+}> {
+  if (!CODEX_RESET_REDEMPTION_OUTCOMES.includes(input.outcome)) {
+    throw new Error("Unknown Codex redemption outcome");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`codex-reset-attempt:${input.attemptId}`}, 0))`,
+        );
+        const [current] = await tx
+          .select()
+          .from(schema.codexResetRedemptionAttempts)
+          .where(
+            and(
+              eq(schema.codexResetRedemptionAttempts.accountId, input.accountId),
+              eq(schema.codexResetRedemptionAttempts.workspaceId, input.workspaceId),
+              eq(schema.codexResetRedemptionAttempts.id, input.attemptId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!current) return { attempt: null, wake: null };
+        if (current.status === "completed") {
+          return { attempt: mapCodexResetRedemptionAttempt(current), wake: null };
+        }
+        if (
+          current.status !== "provider_started" ||
+          current.claimHolderId !== input.claimHolderId
+        ) {
+          return { attempt: null, wake: null };
+        }
+        const completedAt = new Date();
+        const [completed] = await tx
+          .update(schema.codexResetRedemptionAttempts)
+          .set({
+            status: "completed",
+            outcome: input.outcome,
+            completedAt,
+            claimHolderId: null,
+            claimExpiresAt: null,
+            lastFailureKind: null,
+            updatedAt: completedAt,
+          })
+          .where(
+            and(
+              eq(schema.codexResetRedemptionAttempts.accountId, input.accountId),
+              eq(schema.codexResetRedemptionAttempts.workspaceId, input.workspaceId),
+              eq(schema.codexResetRedemptionAttempts.id, input.attemptId),
+            ),
+          )
+          .returning();
+        if (!completed) throw new Error("Codex redemption completion returned no row");
+        const restoresCapacity = input.outcome === "reset" || input.outcome === "alreadyRedeemed";
+        if (restoresCapacity) {
+          await tx.execute(sql`
+            update subscription_connection_quota quota
+            set quota = quota.quota || '{"exhaustedUntil": null, "exhaustedKind": null}'::jsonb,
+                revision = quota.revision + 1,
+                updated_at = clock_timestamp()
+            from subscription_connections connection
+            where quota.account_id = ${input.accountId}::uuid
+              and quota.connection_id = ${current.credentialId}::uuid
+              and connection.account_id = quota.account_id
+              and connection.id = quota.connection_id
+              and connection.provider = 'codex'
+              and quota.observed_refresh_generation = connection.refresh_generation
+              and quota.quota->>'exhaustedUntil' is not null`);
+        }
+        await tx.insert(schema.auditEvents).values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: current.subjectId,
+              action: "codex.reset_credit.redemption.completed",
+              targetType: "codex_reset_redemption_attempt",
+              targetId: input.attemptId,
+              metadata: { outcome: input.outcome },
+            },
+            "metadata",
+            "metadataCodecVersion",
+          ),
+        );
+        return {
+          attempt: mapCodexResetRedemptionAttempt(completed),
+          // A successful or already-applied reset can make waiters eligible
+          // even when no exhaustion was stored.
+          wake: restoresCapacity
+            ? { accountId: input.accountId, reason: "codex_reset_credit_redeemed" }
+            : null,
+        };
+      }),
+  );
+}
+
+/**
+ * The owner's durable ambiguous/completed core redemptions in this
+ * workspace, limited to connections the same person may still redeem on
+ * (the section 6.3 authority, read in the same transaction).
+ */
+export async function listSubscriptionCoreCodexResetRedemptionRecoveries(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<CodexResetRedemptionRecovery[]> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .select()
+        .from(schema.codexResetRedemptionAttempts)
+        .where(
+          and(
+            eq(schema.codexResetRedemptionAttempts.workspaceId, input.workspaceId),
+            eq(schema.codexResetRedemptionAttempts.subjectId, input.subjectId),
+            inArray(schema.codexResetRedemptionAttempts.status, ["provider_started", "completed"]),
+          ),
+        )
+        .orderBy(desc(schema.codexResetRedemptionAttempts.createdAt));
+      const allowed = new Map<string, boolean>();
+      for (const credentialId of new Set(rows.map((row) => row.credentialId))) {
+        const authority = await subscriptionCoreCodexResetAuthority(scopedDb, {
+          ...input,
+          credentialId,
+        });
+        allowed.set(credentialId, authority?.owned === true);
+      }
+      return rows
+        .filter((row) => allowed.get(row.credentialId) === true)
+        .map((row) => ({
+          attemptId: row.id,
+          credentialId: row.credentialId,
+          creditId: row.creditId,
+          status: row.status as "provider_started" | "completed",
+          outcome: row.outcome as CodexResetRedemptionOutcome | null,
+          providerStartedAt: codexMetadataDate(row.providerStartedAt),
+          completedAt: codexMetadataDate(row.completedAt),
+          createdAt: codexMetadataDate(row.createdAt)!,
+          updatedAt: codexMetadataDate(row.updatedAt)!,
+        }));
+    },
+  );
+}
+
+/** Per-connection redemption authority for the caller, read outside the ledger. */
+export async function readSubscriptionCoreCodexResetAuthority(
+  db: Database,
+  input: { accountId: string; workspaceId: string; credentialId: string; subjectId: string },
+): Promise<{ status: string; owned: boolean } | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => await subscriptionCoreCodexResetAuthority(tx, input),
   );
 }
 
@@ -31453,13 +32806,6 @@ async function mutateCodexAccountUsage(
     },
   );
 }
-
-export type CodexRotationSettings = {
-  activeCredentialId: string | null;
-  /** False keeps new allocations on the active account; true permits pool failover. */
-  rotationEnabled: boolean;
-  rotationStrategy: string; // P1: 'most_remaining' (unused)
-};
 
 /**
  * Per-workspace model/provider availability policy. NULL fields = unrestricted
@@ -32243,6 +33589,439 @@ export async function recordSessionCodexSelectionForTurnAttempt(
     if (!appended.accepted) throw new CodexCredentialLeaseAttemptFencedError();
     return { events: appended.events, diagnostics };
   });
+}
+
+/**
+ * The core counterpart of `recordSessionCodexSelectionForTurnAttempt`: the
+ * same attempt-fenced, idempotent `codex.credential.selected` (and
+ * `codex.account.switched`) events, but the previous account comes from the
+ * session's core binding and the legacy `sessions.codex_last_credential_id`
+ * pointer is never written with a core connection id.
+ */
+export async function recordSubscriptionCoreCodexSelectionForTurnAttempt(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    credentialId: string;
+    previousCredentialId: string | null;
+    strategy: string;
+    reusedLease: boolean;
+    pinnedCredentialId: string | null;
+    eligibleCount: number;
+    connectedCount: number;
+  },
+): Promise<{ events: SessionEvent[]; diagnostics: ReturnType<typeof codexSelectionDiagnostics> }> {
+  return await withWorkspaceSessionEventActivityRls(db, input.workspaceId, true, async (tx) => {
+    const fence = await lockTurnAttemptWriteFenceTx(tx, {
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      executionGeneration: input.executionGeneration,
+      attemptId: input.attemptId,
+      sessionLock: "no_key_update",
+    });
+    if (!fence.allowed || !fence.session) throw new CodexCredentialLeaseAttemptFencedError();
+    const key = `opengeni:codex-selection:${input.attemptId}`;
+    const prior = await tx
+      .select()
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          inArray(schema.sessionEvents.clientEventId, [key, `${key}:switch`]),
+        ),
+      )
+      .orderBy(asc(schema.sessionEvents.sequence));
+    if (prior.length) {
+      const receipt = prior.find((event) => event.type === "codex.credential.selected");
+      if (!receipt) throw new Error("Codex selection receipt missing");
+      const payload = sessionEventPayloadRecord(receipt.payload, receipt.payloadCodecVersion);
+      if (payload.credentialId !== input.credentialId)
+        throw new Error("An attempt cannot record two different Codex selections");
+      return {
+        events: prior.map(mapEvent),
+        diagnostics: {
+          transition: payload.transition,
+          source: payload.source,
+          reason: payload.reason,
+        } as ReturnType<typeof codexSelectionDiagnostics>,
+      };
+    }
+    const previousCredentialId = input.previousCredentialId;
+    const diagnostics = codexSelectionDiagnostics({
+      ...input,
+      pinSource: input.pinnedCredentialId ? "manual" : null,
+    });
+    const events: AppendEventInput[] = [];
+    if (previousCredentialId !== null && previousCredentialId !== input.credentialId) {
+      events.push({
+        type: "codex.account.switched",
+        clientEventId: `${key}:switch`,
+        payload: {
+          fromAccountId: previousCredentialId,
+          toAccountId: input.credentialId,
+          reason: diagnostics.source === "manual_pin" ? "manual" : "rotation",
+        },
+      });
+    }
+    events.push({
+      type: "codex.credential.selected",
+      clientEventId: key,
+      payload: {
+        credentialId: input.credentialId,
+        strategy: input.strategy,
+        ...diagnostics,
+        previousCredentialId,
+        eligibleCount: input.eligibleCount,
+        connectedCount: input.connectedCount,
+        reused: input.reusedLease,
+      },
+    });
+    const appended = await appendSessionEventsForTurnAttempt(
+      tx,
+      input.workspaceId,
+      input.sessionId,
+      input.turnId,
+      input.executionGeneration,
+      input.attemptId,
+      events,
+    );
+    if (!appended.accepted) throw new CodexCredentialLeaseAttemptFencedError();
+    return { events: appended.events, diagnostics };
+  });
+}
+
+/**
+ * The session Codex projection (`GET .../sessions/:id/codex-accounts`) for an
+ * organization whose Codex cutover is enabled: the same shape as
+ * `getSessionCodexAccounts`, projected from the session's core binding, the
+ * active turn's core lease and the workspace's core account pool. The
+ * "Running on" account of a running turn is its live core lease; a waiting
+ * turn shows only an explicit choice. Never reads a legacy Codex table.
+ */
+export async function getSubscriptionCoreSessionCodexAccounts(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+) {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => {
+      const [session] = await tx
+        .select({
+          id: schema.sessions.id,
+          activeTurnId: schema.sessions.activeTurnId,
+        })
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        )
+        .limit(1);
+      if (!session) return null;
+      const projection = await projectSubscriptionCoreCodexWorkspace(tx, input);
+      const binding = await readCoreSessionBinding(tx, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      });
+      const codexBinding = binding?.provider === "codex" ? binding : null;
+      const [turn] = session.activeTurnId
+        ? await rawRows<{ id: string; status: string; connection_id: string | null }>(
+            tx,
+            sql`select turn.id::text as id, turn.status, lease.connection_id::text as connection_id
+              from session_turns turn
+              left join subscription_leases lease
+                on lease.account_id = turn.account_id and lease.workspace_id = turn.workspace_id
+                  and lease.turn_id = turn.id and lease.provider = 'codex'
+                  and lease.leased_until > clock_timestamp()
+              where turn.account_id = ${input.accountId}::uuid
+                and turn.workspace_id = ${input.workspaceId}::uuid
+                and turn.session_id = ${input.sessionId}::uuid
+                and turn.id = ${session.activeTurnId}::uuid
+                and turn.status in ('running', 'recovering', 'waiting_capacity', 'requires_action')
+                and turn.model like 'codex/%'
+              limit 1`,
+          )
+        : [];
+      const waiting = turn?.status === "waiting_capacity";
+      const pinnedAccountId =
+        codexBinding?.choice === "explicit" ? codexBinding.connectionId : null;
+      const currentSelection = turn
+        ? { waiting, credentialId: waiting ? pinnedAccountId : turn.connection_id }
+        : null;
+      return {
+        accounts: projection.accounts,
+        rotation: projection.rotation,
+        currentSelection,
+        currentAccount:
+          projection.accounts.find((account) => account.id === currentSelection?.credentialId) ??
+          null,
+        pinnedAccountId,
+        lastAccountId: codexBinding?.connectionId ?? null,
+      };
+    },
+  );
+}
+
+/**
+ * The legacy session pointers (`codexPinnedCredentialId`,
+ * `codexLastCredentialId`) of core sessions, projected from their bindings.
+ * A core session without a Codex binding projects nulls: the legacy columns
+ * are never written with core ids and are not shown after the cutover.
+ */
+export async function getSubscriptionCoreCodexSessionPointers(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionIds: readonly string[] },
+): Promise<Map<string, { pinnedCredentialId: string | null; lastCredentialId: string | null }>> {
+  const pointers = new Map<
+    string,
+    { pinnedCredentialId: string | null; lastCredentialId: string | null }
+  >();
+  const ids = [...new Set(input.sessionIds)];
+  for (const id of ids) pointers.set(id, { pinnedCredentialId: null, lastCredentialId: null });
+  if (ids.length === 0) return pointers;
+  const rows = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) =>
+      await rawRows<{ session_id: string; connection_id: string | null; choice: string }>(
+        tx,
+        sql`select session_id::text as session_id, connection_id::text as connection_id, choice
+          from subscription_session_bindings
+          where account_id = ${input.accountId}::uuid
+            and workspace_id = ${input.workspaceId}::uuid and provider = 'codex'
+            and session_id in (${sql.join(
+              ids.map((id) => sql`${id}::uuid`),
+              sql`, `,
+            )})`,
+      ),
+  );
+  for (const row of rows) {
+    pointers.set(row.session_id, {
+      pinnedCredentialId: row.choice === "explicit" ? row.connection_id : null,
+      lastCredentialId: row.connection_id,
+    });
+  }
+  return pointers;
+}
+
+/**
+ * Explicit session account choice on the core: a uuid makes the session's
+ * binding `explicit` on that connection; `null` ("auto") returns it to
+ * automatic placement. The binding guard enforces that the connection is
+ * active and eligible for this session (personal connections only in their
+ * owner's own session). Emits the legacy `codex.account.selection.changed`
+ * receipt. A waiting turn re-places at its next check, which the returned
+ * wake triggers; a running attempt keeps its account.
+ */
+export async function pinSubscriptionCoreSessionCodexAccount(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    connectionId: string | null;
+    subjectId: string;
+  },
+): Promise<{
+  result: { changed: boolean; appliedTo: "waiting_turn" | "next_turn"; events: SessionEvent[] };
+  wake: SubscriptionCoreCodexWake | null;
+}> {
+  return await withWorkspaceSubjectSessionActivityRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (scopedDb) => {
+      const tx = scopedDb as unknown as Database;
+      // The binding guard authorizes the choosing human.
+      await tx.execute(
+        sql`select set_config('opengeni.initiating_human_subject_id', ${input.subjectId}, true)`,
+      );
+      // The legacy pin's lock contract: a preference change admits no
+      // inference (waiter reconciliation rechecks Pause), so the canonical
+      // session-events lock is taken without the workspace control prefix.
+      const locks = await lockSessionEventWriteRows(tx, {
+        workspaceId: input.workspaceId,
+        controlLock: "none",
+        sessionIds: [input.sessionId],
+        sessionLock: "no_key_update",
+      });
+      const session = locks.sessions.find((row) => row.id === input.sessionId);
+      const unchanged = {
+        result: { changed: false, appliedTo: "next_turn" as const, events: [] },
+        wake: null,
+      };
+      if (!session || session.accountId !== input.accountId) return unchanged;
+      // Lock the binding: a running turn's placement or cache-warmth touch
+      // (`writeSubscriptionSessionBinding`, `touchSubscriptionCoreCodexBinding`)
+      // advances its version, and an unlocked read would lose the version
+      // compare-and-swap below to it and report the choice as not found.
+      const [lockedBinding] = await rawRows<{ choice: string; version: number | string }>(
+        tx,
+        sql`select choice, version from subscription_session_bindings
+          where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
+          for update`,
+      );
+      const binding = lockedBinding
+        ? { choice: lockedBinding.choice, version: Number(lockedBinding.version) }
+        : null;
+      let connectionId: string | null = null;
+      if (input.connectionId !== null) {
+        // Canonical or visible alias; otherwise the raw id, which the binding
+        // guard alone judges (a personal connection is invisible here until
+        // the guard grants this exact session's owner access to it).
+        connectionId =
+          (await resolveCoreConnectionId(tx, {
+            accountId: input.accountId,
+            provider: "codex",
+            connectionId: input.connectionId,
+          })) ?? input.connectionId;
+      }
+      try {
+        const written = await tx.transaction(async (savepoint) => {
+          const scoped = savepoint as unknown as Database;
+          if (connectionId === null) {
+            if (!binding || binding.choice !== "explicit") return true;
+            // Leave connection_id alone: only the choice changes, so the
+            // connection guard (which needs an active connection) is not run.
+            const rows = await rawRows<{ version: number | string }>(
+              scoped,
+              sql`update subscription_session_bindings
+                set choice = 'automatic', version = version + 1
+                where workspace_id = ${input.workspaceId}::uuid
+                  and session_id = ${input.sessionId}::uuid and version = ${binding.version}
+                returning version`,
+            );
+            return rows.length > 0;
+          }
+          if (binding) {
+            const rows = await rawRows<{ version: number | string }>(
+              scoped,
+              sql`update subscription_session_bindings
+                set provider = 'codex', connection_id = ${connectionId}::uuid,
+                    choice = 'explicit', last_switch_reason = 'explicit_choice',
+                    version = version + 1
+                where workspace_id = ${input.workspaceId}::uuid
+                  and session_id = ${input.sessionId}::uuid and version = ${binding.version}
+                returning version`,
+            );
+            return rows.length > 0;
+          }
+          const version = await writeCoreSessionBinding(scoped, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            provider: "codex",
+            connectionId,
+            modelId: session.model,
+            choice: "explicit",
+            onlyThisModel: false,
+            lastModelCallAt: null,
+            lastSwitchReason: "explicit_choice",
+          });
+          return version !== null;
+        });
+        if (!written) return unchanged;
+      } catch (error) {
+        const code =
+          (error as { code?: unknown } | null)?.code ??
+          (error as { cause?: { code?: unknown } } | null)?.cause?.code;
+        // The guard refuses a connection this session may not use.
+        if (code === "42501") return unchanged;
+        throw error;
+      }
+      const appliedTo: "waiting_turn" | "next_turn" =
+        session.status === "waiting_capacity" && session.activeTurnId
+          ? "waiting_turn"
+          : "next_turn";
+      const inserted = await tx
+        .insert(schema.sessionEvents)
+        .values(
+          withLosslessContentWriteVersion(
+            [
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                sequence: session.lastSequence + 1,
+                type: "codex.account.selection.changed",
+                payload: {
+                  credentialId: connectionId,
+                  appliedTo,
+                  turnId: appliedTo === "waiting_turn" ? session.activeTurnId : null,
+                  subjectId: input.subjectId,
+                },
+                occurredAt: new Date(),
+              },
+            ],
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
+        .returning();
+      await tx
+        .update(schema.sessions)
+        .set({ lastSequence: session.lastSequence + 1, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        );
+      return {
+        result: { changed: true, appliedTo, events: inserted.map(mapEvent) },
+        // Legacy woke only this session: a pin changes nothing another
+        // session's waiter can place on.
+        wake: {
+          accountId: input.accountId,
+          reason: "core_codex_session_pin_changed",
+          workspaceIds: [input.workspaceId],
+          sessionIds: [input.sessionId],
+        },
+      };
+    },
+  );
+}
+
+/**
+ * Deliver a core Codex wake after the mutation that caused it committed. A
+ * failed wake never fails the committed change: every core waiter also has
+ * its own bounded recheck, so the change is observed at the latest then. The
+ * failure is logged (identifiers and error class only).
+ */
+export async function deliverSubscriptionCoreCodexWake(
+  db: Database,
+  wake: SubscriptionCoreCodexWake | null,
+): Promise<void> {
+  if (!wake) return;
+  try {
+    await wakeSubscriptionCoreCodexCapacityWaiters(db, {
+      accountId: wake.accountId,
+      reason: wake.reason,
+      ...(wake.workspaceIds ? { workspaceIds: wake.workspaceIds } : {}),
+      ...(wake.sessionIds ? { sessionIds: wake.sessionIds } : {}),
+    });
+  } catch (error) {
+    // Bounded waiter recheck is the backstop (see above).
+    console.warn("core Codex wake delivery failed; waiters recheck on their own timer", {
+      accountId: wake.accountId,
+      reason: wake.reason,
+      workspaceIds: wake.workspaceIds ?? null,
+      sessionIds: wake.sessionIds ?? null,
+      error: error instanceof Error ? error.name : typeof error,
+      code:
+        (error as { code?: unknown } | null)?.code ??
+        (error as { cause?: { code?: unknown } } | null)?.cause?.code ??
+        null,
+    });
+  }
 }
 
 export async function recordSessionActiveCodexCredential(
@@ -46498,6 +48277,7 @@ type LeaseRow = {
   archive_capture_remaining_ms?: number | string | null;
   archive_capture_published_at: Date | string | null;
   archive_capture_concurrent_capture_id?: string | null;
+  deadline_forced_admission_ids?: string[] | null;
   reaper_hold_id: string | null;
   reaper_hold_until: Date | string | null;
   reaper_hold_reason: string | null;
@@ -55145,6 +56925,7 @@ async function settledCommandOwnerMatchesTx(
 export type CommandContainmentInspection =
   | "idle_enrolled"
   | "deadline_enrolled"
+  | "forced_deadline_enrolled"
   | "quiescence_enrolled"
   | "resumed_enrolled"
   | "not_eligible"
@@ -55153,7 +56934,7 @@ export type CommandContainmentInspection =
 export type CommandContainmentEnrollment = ReapDrainable & {
   /** `idle`/`deadline`/`quiescence` newly enrolled this call; `resumed` continues an
    * existing enrollment whose drain has not committed yet. */
-  mode: "idle" | "deadline" | "quiescence" | "resumed";
+  mode: "idle" | "deadline" | "forced_deadline" | "quiescence" | "resumed";
 };
 
 /** Whole-group "unused" from durable facts only. Every session of the group,
@@ -55381,6 +57162,10 @@ export async function enrollRetainedCommandContainment(
     sandboxGroupId: string;
     /** Omit to evaluate only the provider-deadline rule. */
     idleCommandContainmentMs?: number | undefined;
+    /** Inside this window before the provider deadline the deadline save is
+     * mandatory (see `sandboxDeadlineMandatoryCaptureLeadMs`). Omit to keep
+     * only the orderly deadline rule. */
+    deadlineMandatoryCaptureLeadMs?: number | undefined;
     /** Internal recovery authority: caller verified exact Temporal settlement. */
     settledOwner?: SettledCommandOwner;
   },
@@ -55483,22 +57268,35 @@ export async function enrollRetainedCommandContainment(
       order by process.id for update of process
     `,
     );
-    const admissions = await rawRows<{ id: string; orphaned: boolean }>(
+    const admissions = await rawRows<{ id: string; orphaned: boolean; exact: boolean }>(
       tx,
       sql`
       select admission.id,
         (admission.lease_epoch = ${initial.leaseEpoch}
           and admission.provider_instance_id = ${initial.instanceId}
-          and ${crashedWorkerOrphanAdmissionSql(sql`admission`)}) as orphaned
+          and ${crashedWorkerOrphanAdmissionSql(sql`admission`)}) as orphaned,
+        (admission.lease_epoch = ${initial.leaseEpoch}
+          and admission.provider_instance_id = ${initial.instanceId}) as exact
       from sandbox_workspace_mutation_admissions admission
       where admission.lease_id = ${initial.id} and admission.settled_at is null
       order by admission.id for update of admission
     `,
     );
-    const rows = await tx.execute<LeaseRow>(sql`
-      select * from sandbox_leases where id = ${initial.id} for update
+    const rows = await tx.execute<LeaseRow & { deadline_mandatory: boolean }>(sql`
+      select *,
+        (rotation_requested_at is not null
+          and ${input.deadlineMandatoryCaptureLeadMs ?? null}::bigint is not null
+          and provider_deadline_at is not null
+          and provider_deadline_at <= now() +
+            (${input.deadlineMandatoryCaptureLeadMs ?? null}::bigint * interval '1 millisecond'))
+          as deadline_mandatory
+      from sandbox_leases where id = ${initial.id} for update
     `);
     const lease = rows[0];
+    // Close to the provider deadline the save is mandatory: an orderly
+    // shutdown can no longer finish in time, and waiting means the provider
+    // kills the box uncaptured.
+    const mandatory = lease?.deadline_mandatory === true;
     if (
       !lease ||
       Number(lease.lease_epoch) !== initial.leaseEpoch ||
@@ -55523,7 +57321,21 @@ export async function enrollRetainedCommandContainment(
     const pointInTime = leaseCaptureIsPointInTime(initial.backend, initial.resumeState);
     const writerMode = pointInTime ? ("containment" as const) : ("physical" as const);
     const parents = new Set(processes.map((p) => p.parent_admission_id));
-    if (admissions.some((a) => !parents.has(a.id) && !(pointInTime && a.orphaned))) return null;
+    // A tolerated orphan is captured around only by a point-in-time drain.
+    const tolerated = (a: { id: string; orphaned: boolean }) =>
+      parents.has(a.id) || (pointInTime && a.orphaned);
+    // A mandatory deadline save captures around every other request still
+    // open on this exact box (a stdin write in flight, a request whose owner
+    // vanished, an orphan under a tar-style capture) and settles it with the
+    // box after termination. Requests on an older epoch or instance do not
+    // touch this box's capture.
+    const forced = mandatory
+      ? admissions.filter((a) => a.exact && !tolerated(a)).map((a) => a.id)
+      : [];
+    if (
+      admissions.some((a) => !tolerated(a) && !(mandatory && (forced.includes(a.id) || !a.exact)))
+    )
+      return null;
     const holders = await rawRows<{ kind: string; holder_id: string }>(
       tx,
       sql`
@@ -55544,8 +57356,14 @@ export async function enrollRetainedCommandContainment(
     };
     if (enrolled) return { ...target, mode: "resumed" };
     if (lease.archive_capture_id !== null) return null;
-    let mode: "idle" | "deadline" | "quiescence" | null = null;
-    if (
+    let mode: "idle" | "deadline" | "forced_deadline" | "quiescence" | null = null;
+    if (mandatory) {
+      // No stop grace, owner quiescence or sibling activity can be waited for
+      // any longer. Holders were checked above: a live turn, viewer or direct
+      // request on the box still blocks, and supervised commands keep their
+      // separate proof gate.
+      mode = "forced_deadline";
+    } else if (
       input.settledOwner !== undefined &&
       processes.every(
         (p) =>
@@ -55581,10 +57399,11 @@ export async function enrollRetainedCommandContainment(
     if (!mode) return null;
     await tx.execute(sql`
       update sandbox_leases set unobservable_command_drain_ids = ${`{${ids.join(",")}}`}::uuid[],
+        deadline_forced_admission_ids = ${forced.length ? `{${forced.join(",")}}` : null}::uuid[],
         command_containment_reason = ${
           mode === "quiescence"
             ? QUIESCENCE_COMMAND_CONTAINMENT_REASON
-            : mode === "deadline"
+            : mode === "deadline" || mode === "forced_deadline"
               ? DEADLINE_COMMAND_CONTAINMENT_REASON
               : IDLE_COMMAND_CONTAINMENT_REASON
         },
@@ -55616,6 +57435,8 @@ export async function reapStaleLeaseHoldersGlobal(
     /** Whole-group idle window for legacy retained-command containment.
      * Omitted: only the provider-deadline rule may enroll commands. */
     idleCommandContainmentMs?: number | undefined;
+    /** Mandatory pre-deadline save window (sandboxDeadlineMandatoryCaptureLeadMs). */
+    deadlineMandatoryCaptureLeadMs?: number | undefined;
     onCommandContainment?: (outcome: CommandContainmentInspection) => void;
     onCommandContainmentError?: (error: unknown) => void;
   },
@@ -55691,6 +57512,9 @@ export async function reapStaleLeaseHoldersGlobal(
       ...(input.idleCommandContainmentMs === undefined
         ? {}
         : { idleCommandContainmentMs: input.idleCommandContainmentMs }),
+      ...(input.deadlineMandatoryCaptureLeadMs === undefined
+        ? {}
+        : { deadlineMandatoryCaptureLeadMs: input.deadlineMandatoryCaptureLeadMs }),
     }).catch((error: unknown) => {
       reportContainmentError(error);
       input.onCommandContainment?.("inspection_failed");
@@ -56152,6 +57976,7 @@ export async function confirmDrainCold(
         const blockerScope =
           (input.providerMissingBeforeCapture ||
             observed.unobservable_command_drain_ids?.length ||
+            observed.deadline_forced_admission_ids?.length ||
             orphanedRequests[0]?.present === true) &&
           observed.instance_id
             ? {
@@ -59724,6 +61549,7 @@ export async function readWorkspaceArchiveCapturePreflight(
                   and process.lease_epoch = lease.lease_epoch
                   and process.provider_instance_id = lease.instance_id)
               and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
+              and not (admission.id = any(coalesce(lease.deadline_forced_admission_ids, '{}'::uuid[])))
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         limit 1
@@ -60066,6 +61892,11 @@ export async function claimWorkspaceArchiveCapture(
      * request. Tar-style captures read files one by one from a
      * running box and keep both as blockers. */
     pointInTimeCapture?: boolean;
+    /** Draining only: inside this window before a requested provider-deadline
+     * rotation's deadline the save is mandatory. Requests still open on the
+     * exact box are recorded in deadline_forced_admission_ids, captured
+     * around, and settled with the box after termination. */
+    deadlineMandatoryCaptureLeadMs?: number;
   },
 ): Promise<ClaimWorkspaceArchiveCaptureResult> {
   if (
@@ -60278,9 +62109,9 @@ export async function claimWorkspaceArchiveCapture(
       if ((holderCounts[0]?.total ?? 0) !== expectedHolderCount) {
         return { status: "holder_in_progress" as const };
       }
-      const unsettled = await scopedDb.execute<{ present: boolean }>(sql`
-        select exists (
-          select 1
+      const forcedAdmissionIds = row.deadline_forced_admission_ids ?? [];
+      const unsettled = await scopedDb.execute<{ id: string }>(sql`
+          select admission.id
           from sandbox_workspace_mutation_admissions admission
           left join session_turn_attempts attempt
             on attempt.account_id = admission.account_id
@@ -60313,11 +62144,43 @@ export async function claimWorkspaceArchiveCapture(
                 ? sql`and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}`
                 : sql``
             }
+            ${
+              input.warmAttempt === undefined
+                ? sql`and not (admission.id = any(${`{${forcedAdmissionIds.join(",")}}`}::uuid[]))`
+                : sql``
+            }
             and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
-        ) as present
+          order by admission.id
       `);
-      if (unsettled[0]?.present) {
-        return { status: "mutation_in_progress" as const };
+      if (unsettled.length > 0) {
+        // Any requested rotation counts: an earlier operator rotation keeps the
+        // due provider-deadline rotation from being stamped separately.
+        const lead = input.deadlineMandatoryCaptureLeadMs;
+        const [deadline] =
+          input.liveness === "draining" && lead !== undefined && Number.isSafeInteger(lead)
+            ? await scopedDb.execute<{ mandatory: boolean }>(sql`
+                select (
+                  ${row.rotation_requested_at !== null}
+                  and ${row.provider_deadline_at ?? null}::timestamptz is not null
+                  and ${row.provider_deadline_at ?? null}::timestamptz
+                    <= now() + (${lead}::bigint * interval '1 millisecond')
+                ) as mandatory
+              `)
+            : [];
+        if (deadline?.mandatory !== true) {
+          return { status: "mutation_in_progress" as const };
+        }
+        // Mandatory pre-deadline save: no holder is left on the box (checked
+        // above), so these requests cannot finish into a capture in time.
+        // Record exactly them; publication excludes them, and the cold commit
+        // settles them only after the box is terminated.
+        await scopedDb.execute(sql`
+          update sandbox_leases set deadline_forced_admission_ids = ${`{${[
+            ...forcedAdmissionIds,
+            ...unsettled.map((admission: { id: string }) => admission.id),
+          ].join(",")}}`}::uuid[], updated_at = now()
+          where id = ${row.id}
+        `);
       }
       const [concurrentCommands] = aroundCommands
         ? await scopedDb.execute<{ present: boolean }>(sql`
@@ -60597,6 +62460,7 @@ export async function replaceWorkspaceArchiveCaptureAfterProof(
                   and process.lease_epoch = lease.lease_epoch
                   and process.provider_instance_id = lease.instance_id)
               and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
+              and not (admission.id = any(coalesce(lease.deadline_forced_admission_ids, '{}'::uuid[])))
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         returning lease.*
@@ -61084,6 +62948,33 @@ export async function readSandboxRotationBacklog(db: Database): Promise<SandboxR
   };
 }
 
+export type SandboxCheckpointStaleness = {
+  /** Live Modal boxes holding a write their last checkpoint did not capture. */
+  dirty: number;
+  stale4h: number;
+  stale12h: number;
+  /** Age of the oldest such write (clamped to box creation), seconds. */
+  maxAgeSeconds: number;
+};
+
+/** Content-free fleet signal: how long live boxes have held unsaved changes. */
+export async function readSandboxCheckpointStaleness(
+  db: Database,
+): Promise<SandboxCheckpointStaleness> {
+  const [row] = await rawRows<{
+    dirty: number | string;
+    stale_4h: number | string;
+    stale_12h: number | string;
+    max_age_seconds: number | string;
+  }>(db, sql`select * from opengeni_private.sandbox_checkpoint_staleness()`);
+  return {
+    dirty: Number(row?.dirty ?? 0),
+    stale4h: Number(row?.stale_4h ?? 0),
+    stale12h: Number(row?.stale_12h ?? 0),
+    maxAgeSeconds: Number(row?.max_age_seconds ?? 0),
+  };
+}
+
 /** Content-free, cross-workspace operator signal reconstructed from committed
  * audit receipts. Unlike process-local counters, a worker crash after commit
  * cannot erase this short-lived warning window. */
@@ -61535,12 +63426,18 @@ export async function persistDrainSnapshot(
              and attempt.execution_generation = admission.execution_generation
              and admission.actor_kind = 'turn'
             where admission.lease_id = lease.id
+              -- Only requests on this exact box can race its capture; an open
+              -- request left on an older epoch or instance must not refuse
+              -- every later publication.
+              and admission.lease_epoch = lease.lease_epoch
+              and admission.provider_instance_id = lease.instance_id
               and admission.workspace_generation <= ${input.expectedWorkspaceGeneration}
               and admission.settled_at is null
               and not exists(select 1 from sandbox_retained_processes process
                 where process.id = any(lease.unobservable_command_drain_ids)
                   and process.parent_admission_id = admission.id and process.lease_id = lease.id)
               and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
+              and not (admission.id = any(coalesce(lease.deadline_forced_admission_ids, '{}'::uuid[])))
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           ) as unsettled_mutation
         from sandbox_leases as lease
@@ -62043,6 +63940,7 @@ async function foldWorkspaceArchiveOntoLease(
               : sql``
           }
           and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
+          and not (admission.id = any(coalesce(lease.deadline_forced_admission_ids, '{}'::uuid[])))
           and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
       )
     returning lease.id
@@ -71255,6 +73153,20 @@ export async function initializeSessionStartAtomically(
           }
           queueTailPosition += 1;
           const acceptedAt = new Date();
+          // Codex v2 accepted authority (M3 PR 2a): only the owner's own
+          // initial message freezes personal authority; a child session's
+          // first turn (causal parent human) and other creators freeze none.
+          const initialSubscriptionAuthority = session.parentSessionId
+            ? null
+            : await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
+                tx as unknown as Database,
+                {
+                  accountId: session.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: session.id,
+                  acceptingSubjectId: initialTurnInitiatingHumanSubjectId,
+                },
+              );
           [turn] = await tx
             .insert(schema.sessionTurns)
             .values(
@@ -71294,6 +73206,7 @@ export async function initializeSessionStartAtomically(
                     session.initialXaiProviderAccountAuthoritySnapshot,
                   claudeProviderAccountAuthoritySnapshot:
                     session.initialClaudeProviderAccountAuthoritySnapshot,
+                  subscriptionAuthority: initialSubscriptionAuthority,
                   createdAt: acceptedAt,
                   updatedAt: acceptedAt,
                 },
@@ -74770,6 +76683,11 @@ export async function claimSessionWorkForAttempt(
                     claudeProviderAccountAuthoritySnapshot:
                       latestStarted?.claudeProviderAccountAuthoritySnapshot ??
                       sharedCompactionPool!.claude,
+                    // The immutable v2 accepted authority of the turn this
+                    // compacts after (NULL without a Codex cutover, so the
+                    // legacy path is unchanged). A session with no started
+                    // turn has none: shared capacity only.
+                    subscriptionAuthority: latestStarted?.subscriptionAuthority ?? null,
                     startedAt: now,
                     createdAt: now,
                     updatedAt: now,
@@ -75438,6 +77356,37 @@ export async function claimSessionWorkForAttempt(
                   continuationCodexPolicy.policy,
                 )
               : baseInternalTurnMetadata;
+          // Codex v2 accepted authority (M3 PR 2a): a pure goal continuation
+          // inherits the exact causal turn's frozen value when that turn's
+          // human is this turn's human; every other internal update (agent
+          // messages, Steer, batched notices, child results, schedules)
+          // freezes none, so it runs on shared capacity only.
+          const goalCausalTurnId = pureGoalUpdate
+            ? systemUpdateCausalHumanTurnId(pureGoalUpdate)
+            : null;
+          let internalSubscriptionAuthority: SubscriptionPersonalAuthorityV2 | null = null;
+          if (goalCausalTurnId && initiatingHumanSubjectId) {
+            const [goalCausalTurn] = await tx
+              .select({
+                subscriptionAuthority: schema.sessionTurns.subscriptionAuthority,
+                initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+              })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, workspaceId),
+                  eq(schema.sessionTurns.sessionId, sessionId),
+                  eq(schema.sessionTurns.id, goalCausalTurnId),
+                ),
+              )
+              .limit(1);
+            if (
+              goalCausalTurn?.subscriptionAuthority != null &&
+              goalCausalTurn.initiatingHumanSubjectId === initiatingHumanSubjectId
+            ) {
+              internalSubscriptionAuthority = goalCausalTurn.subscriptionAuthority;
+            }
+          }
           await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
           const [internalTurn] = await tx
             .insert(schema.sessionTurns)
@@ -75481,6 +77430,7 @@ export async function claimSessionWorkForAttempt(
                   scheduledTaskRunId,
                   xaiProviderAccountAuthoritySnapshot: internalXaiAuthority.snapshot,
                   claudeProviderAccountAuthoritySnapshot: internalClaudeAuthority.snapshot,
+                  subscriptionAuthority: internalSubscriptionAuthority,
                   startedAt: now,
                   createdAt: now,
                   updatedAt: now,
@@ -77316,6 +79266,22 @@ export async function peekSessionWork(
     }
 
     if (session.admissionBlock) return { kind: "admission-blocked" };
+
+    // A core Codex waiter (M3) is the only waiter written after the Codex
+    // cutover; it keeps the legacy Codex reference shape, so the workflow
+    // waits on it exactly as on a legacy waiter. A row that no longer belongs
+    // to the session's active waiting turn becomes an immediate check, whose
+    // reconcile deletes it, rather than a sleep until its next check.
+    const coreCapacityWait = await readSubscriptionCoreCodexWaiterInTransaction(scopedDb, {
+      workspaceId,
+      sessionId,
+    });
+    if (coreCapacityWait) {
+      return {
+        kind: "capacity-wait",
+        ref: subscriptionCoreCodexCapacityWaitRef(coreCapacityWait),
+      };
+    }
 
     const [capacityWait] = await scopedDb
       .select()
@@ -80949,6 +82915,14 @@ export async function applySessionTurnSettlement(
           reason: "turn_completed",
           now,
         });
+        await consumeSettledPendingToolCallsForCompletedTurnInTransaction(
+          tx as unknown as Database,
+          {
+            workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+          },
+        );
       }
       const terminalHumanInputRows = ["completed", "failed", "cancelled", "superseded"].includes(
         input.turnStatus,
@@ -82118,6 +84092,12 @@ export type RequestSessionTurnRecoveryInput = {
   providerRecoveryCount?: number;
   /** One rejected-token renewal per serving account generation on this turn. */
   claudeAuthRecovery?: { credentialId: string; credentialVersion: number };
+  /**
+   * The consecutive shared-core lease-busy chain this recovery continues: when
+   * it started and the execution generation that recorded it. The worker
+   * bounds the chain; the database only stores it on the turn.
+   */
+  subscriptionLeaseBusy?: { startedAt: string; executionGeneration: number };
   fromStatuses?: SessionTurnStatus[];
   providerArtifactInvalidation?: {
     historyItemIds: string[];
@@ -82158,6 +84138,13 @@ export async function requestSessionTurnRecovery(
       input.claudeAuthRecovery.credentialVersion < 1)
   )
     throw new Error("Invalid Claude authentication recovery identity");
+  if (
+    input.subscriptionLeaseBusy &&
+    (!Number.isFinite(Date.parse(input.subscriptionLeaseBusy.startedAt)) ||
+      !Number.isSafeInteger(input.subscriptionLeaseBusy.executionGeneration) ||
+      input.subscriptionLeaseBusy.executionGeneration < 1)
+  )
+    throw new Error("Invalid subscription lease-busy recovery chain");
   const fromStatuses = input.fromStatuses ?? ["running", "requires_action"];
   return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
@@ -82406,6 +84393,14 @@ export async function requestSessionTurnRecovery(
           metadata: {
             ...recoveryTurnMetadata(turn.metadata, input.sandboxLifecycleWait),
             ...(input.claudeAuthRecovery ? { claudeAuthRecovery: input.claudeAuthRecovery } : {}),
+            ...(input.subscriptionLeaseBusy
+              ? {
+                  subscriptionLeaseBusy: {
+                    startedAt: input.subscriptionLeaseBusy.startedAt,
+                    executionGeneration: input.subscriptionLeaseBusy.executionGeneration,
+                  },
+                }
+              : {}),
             ...(input.sandboxSetupOutcomeUnknown
               ? {
                   [SANDBOX_SETUP_OUTCOME_UNKNOWN_METADATA_KEY]: {
@@ -85554,6 +87549,13 @@ async function backgroundCommandCausalAuthorityTx(
     : null;
 }
 
+/** Loss reasons that mean the whole sandbox box is gone, not just one exec. */
+const SANDBOX_GONE_COMMAND_REASONS: ReadonlySet<string> = new Set([
+  "provider_instance_lost",
+  "provider_instance_not_found",
+  "provider_instance_terminated",
+]);
+
 function backgroundCommandTerminalMutation(input: {
   accountId: string;
   workspaceId: string;
@@ -85682,11 +87684,13 @@ function backgroundCommandTerminalMutation(input: {
           ? `\`${commandLabel}\` was stopped because nobody used this session${idleMinutes ? ` for ${idleMinutes} minute${idleMinutes === 1 ? "" : "s"}` : ""} and nothing was waiting on it; the workspace was saved. Restart it if you still need it.`
           : command.state === "lost" && reason === DEADLINE_COMMAND_CONTAINMENT_REASON
             ? `\`${commandLabel}\` was stopped because the sandbox reached its maximum lifetime; the workspace was saved. Restart it if you still need it.`
-            : command.state === "lost"
-              ? `${commandLabel}: result unavailable. Its exit status could not be confirmed.`
-              : command.exitCode === 0
-                ? `${commandLabel}: completed successfully.`
-                : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
+            : command.state === "lost" && SANDBOX_GONE_COMMAND_REASONS.has(reason)
+              ? `\`${commandLabel}\` is no longer running because its sandbox was shut down or lost; whether it finished is unknown. Check its effects before running it again.`
+              : command.state === "lost"
+                ? `${commandLabel}: result unavailable. Its exit status could not be confirmed.`
+                : command.exitCode === 0
+                  ? `${commandLabel}: completed successfully.`
+                  : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
       const payload = {
         type: "background_command_result" as const,
         commandId: command.id,

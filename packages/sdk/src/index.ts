@@ -883,6 +883,7 @@ export type {
   InboxItemLink,
   InboxItemKind,
   InboxSettings,
+  SessionInboxMute,
   InboxTidyPolicy,
   ListInboxResponse,
   UpdateInboxItemInput,

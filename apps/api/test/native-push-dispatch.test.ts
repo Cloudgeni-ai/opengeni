@@ -79,12 +79,17 @@ describe("native push presentation", () => {
     ).toEqual({ title: "Release is out" });
   });
 
-  test("only questions, approvals and time-sensitive notifications break through Focus", () => {
-    expect(nativePushInterruptionLevel(payload)).toBe("time-sensitive");
+  test("only notifications the agent marked time-sensitive break through Focus", () => {
+    expect(nativePushInterruptionLevel(payload)).toBe("active");
     expect(nativePushInterruptionLevel({ ...payload, rule: "agent" })).toBe("active");
+    expect(nativePushInterruptionLevel({ ...payload, rule: "agent", urgency: "normal" })).toBe(
+      "active",
+    );
     expect(
       nativePushInterruptionLevel({ ...payload, rule: "agent", urgency: "time_sensitive" }),
     ).toBe("time-sensitive");
+    // Urgency only counts on an agent notification.
+    expect(nativePushInterruptionLevel({ ...payload, urgency: "time_sensitive" })).toBe("active");
     expect(nativePushInterruptionLevel({ ...payload, rule: "reply_ready" })).toBe("active");
   });
 

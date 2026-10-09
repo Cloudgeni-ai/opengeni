@@ -14,7 +14,17 @@ import {
   type CodexRealtimeCallInput,
 } from "@opengeni/codex";
 import {
+  acquireSubscriptionCoreCodexOperationLease,
   buildCodexTokenResolver,
+  buildSubscriptionCoreCodexConnectionTokenResolver,
+  listSubscriptionCoreCodexOperationCandidates,
+  readCodexCutoverDisposition,
+  readSubscriptionCoreSessionOwner,
+  releaseSubscriptionCoreCodexOperationLease,
+  renewSubscriptionCoreCodexOperationLease,
+  subscriptionCoreCodexPlanHasVoice,
+  type SubscriptionCoreCodexOperationLeaseRef,
+  type SubscriptionCoreCodexOperationScope,
   getActiveSessionHistoryItems,
   getCodexCredentialStatus,
   getSessionRealtimeContinuityEntries,
@@ -272,16 +282,156 @@ function hasVoice(account: { planType: string | null }): boolean {
   return codexPlanKey(account.planType) !== "free";
 }
 
+async function loadRealtimeInitialItems(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<CodexRealtimeInitialItem[]> {
+  const [history, continuity] = await Promise.all([
+    getActiveSessionHistoryItems(db, workspaceId, sessionId),
+    getSessionRealtimeContinuityEntries(db, workspaceId, sessionId),
+  ]);
+  return projectSessionRealtimeInitialItems(history, continuity);
+}
+
+async function createRealtimeCall(
+  fetchImpl: CodexFetch,
+  auth: CodexAuthHeaders,
+  callInput: CodexRealtimeCallInput,
+  options: { signal?: AbortSignal | undefined },
+): Promise<CodexRealtimeProviderAnswer> {
+  const providerConfig = await fetchCodexRealtimeProviderConfig(auth, fetchImpl, options);
+  return await createCodexRealtimeCall(auth, callInput, fetchImpl, {
+    ...options,
+    providerConfig,
+  });
+}
+
+/**
+ * Codex realtime on the shared subscription core (M3 PR 2c, EP-N05..N07):
+ * each call resolves the session's recorded owner, places one shared
+ * organization- or workspace-scoped connection (the session's explicit
+ * choice first, then the effective primary, preferring a plan with voice),
+ * and holds its own `realtime` operation lease (session-bound, no turn)
+ * through negotiation, with refresh under the per-connection lock. The chat
+ * binding is never written; the client protocol and HTTP error translation
+ * are the legacy broker's.
+ */
+export async function brokerSessionCoreCodexRealtime(
+  db: Database,
+  settings: Settings,
+  context: { accountId: string; workspaceId: string; sessionId: string },
+  input: Omit<CodexRealtimeBrokerInput, "sessionId">,
+  fetchImpl: CodexFetch = fetch,
+): Promise<CodexRealtimeProviderAnswer> {
+  if (!settings.codexSubscriptionEnabled) {
+    throw new CodexRealtimeBrokerError(
+      "subscription_disabled",
+      "Connected Codex subscription realtime is disabled",
+    );
+  }
+  const owner = await readSubscriptionCoreSessionOwner(db, context);
+  if (!owner) {
+    throw new CodexRealtimeBrokerError(
+      "credential_unavailable",
+      "Session is unavailable for Codex realtime",
+    );
+  }
+  const scope: SubscriptionCoreCodexOperationScope = {
+    kind: "session",
+    ...context,
+    sessionOwnerSubjectId: owner.ownerSubjectId,
+  };
+  const candidates = await listSubscriptionCoreCodexOperationCandidates(db, scope);
+  // A turn may run on a plan without voice; a call takes a connection that
+  // has it whenever one exists (legacy parity).
+  const ordered = [
+    ...candidates.filter((candidate) => subscriptionCoreCodexPlanHasVoice(candidate.planType)),
+    ...candidates.filter((candidate) => !subscriptionCoreCodexPlanHasVoice(candidate.planType)),
+  ];
+  const operationId = crypto.randomUUID();
+  const attemptId = crypto.randomUUID();
+  for (const candidate of ordered) {
+    const ref: SubscriptionCoreCodexOperationLeaseRef = {
+      operationId,
+      attemptId,
+      operationKind: "realtime",
+      connectionId: candidate.connectionId,
+      holderId: `realtime:${context.sessionId}`,
+      generation: 1,
+    };
+    const lease = await acquireSubscriptionCoreCodexOperationLease(db, scope, ref);
+    if (lease.kind !== "acquired") continue;
+    try {
+      const resolver = buildSubscriptionCoreCodexConnectionTokenResolver(
+        db,
+        settings,
+        scope,
+        candidate.connectionId,
+        ref,
+      );
+      return await brokerSessionCodexRealtime(
+        {
+          enabled: true,
+          loadSelection: async () => ({
+            pinnedCredentialId: null,
+            activeCredentialId: candidate.connectionId,
+            connectedCredentialIds: new Set([candidate.connectionId]),
+          }),
+          loadInitialItems: () =>
+            loadRealtimeInitialItems(db, context.workspaceId, context.sessionId),
+          tokenResolver: () => resolver,
+          createCall: async (auth, callInput, options) => {
+            // Pre-dispatch fence on the exact operation lease.
+            if (!(await renewSubscriptionCoreCodexOperationLease(db, scope, ref))) {
+              throw new CodexRealtimeBrokerError(
+                "credential_unavailable",
+                "Codex subscription credential is unavailable",
+              );
+            }
+            return await createRealtimeCall(fetchImpl, auth, callInput, options);
+          },
+        },
+        { ...input, sessionId: context.sessionId },
+      );
+    } finally {
+      await releaseSubscriptionCoreCodexOperationLease(db, scope, ref).catch(() => false);
+    }
+  }
+  throw new CodexRealtimeBrokerError(
+    "credential_unavailable",
+    "No connected Codex subscription is available for this session",
+  );
+}
+
 /** Bind the pure broker to Opengeni's encrypted DB credential lifecycle. */
 export function buildSessionCodexRealtimeBroker(
   db: Database,
   settings: Settings,
-  workspaceId: string,
-  sessionId: string,
+  context: { accountId: string; workspaceId: string; sessionId: string },
   fetchImpl: CodexFetch = fetch,
 ): (input: Omit<CodexRealtimeBrokerInput, "sessionId">) => Promise<CodexRealtimeProviderAnswer> {
-  return async (input) =>
-    await brokerSessionCodexRealtime(
+  const { accountId, workspaceId, sessionId } = context;
+  return async (input) => {
+    // The account is required: without it a disabled cutover could not fail closed.
+    const disposition = await readCodexCutoverDisposition(db, accountId, workspaceId);
+    if (disposition === "maintenance") {
+      // A disabled cutover row is maintenance: fail closed, no legacy read.
+      throw new CodexRealtimeBrokerError(
+        "subscription_disabled",
+        "Connected Codex subscription realtime is disabled",
+      );
+    }
+    if (disposition === "core") {
+      return await brokerSessionCoreCodexRealtime(
+        db,
+        settings,
+        { accountId, workspaceId, sessionId },
+        input,
+        fetchImpl,
+      );
+    }
+    return await brokerSessionCodexRealtime(
       {
         enabled: settings.codexSubscriptionEnabled,
         loadSelection: async () => {
@@ -328,6 +478,7 @@ export function buildSessionCodexRealtimeBroker(
       },
       { ...input, sessionId },
     );
+  };
 }
 
 function credentialError(error: unknown): CodexRealtimeBrokerError {
@@ -344,6 +495,8 @@ function credentialError(error: unknown): CodexRealtimeBrokerError {
 }
 
 function brokerProviderError(error: unknown): CodexRealtimeBrokerError {
+  // A core pre-dispatch fence refusal is already typed (legacy calls never raise one).
+  if (error instanceof CodexRealtimeBrokerError) return error;
   if (!(error instanceof CodexRealtimeError)) {
     return new CodexRealtimeBrokerError("network_error", "Codex realtime provider request failed");
   }

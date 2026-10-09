@@ -17,6 +17,7 @@ import {
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
   codexAppsRequestAuth,
+  subscriptionCoreCodexAppsRequestAuth,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -180,6 +181,7 @@ export type PrepareTurnToolRuntimeDeps = {
   capabilitySettings: ClaimTurnOk["capabilitySettings"];
   installedApiIntegrations: ClaimTurnOk["installedApiIntegrations"];
   codexAppsCredentialId: ClaimTurnOk["codexAppsCredentialId"];
+  codexAppsCoreConnectionId?: ClaimTurnOk["codexAppsCoreConnectionId"];
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
   trigger: ClaimTurnOk["trigger"];
   runSettings: GovernanceModelOk["runSettings"];
@@ -408,6 +410,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     session,
     installedApiIntegrations,
     codexAppsCredentialId,
+    codexAppsCoreConnectionId,
     turnExecutionPolicy,
     trigger,
     runSettings: canonicalRunSettings,
@@ -563,12 +566,20 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     resolveCredential,
   });
   const localMcpServers = [...apiIntegrationMcpServers, ...githubRestMcp.localMcpServers];
-  const codexAppsAuth = codexAppsCredentialId
-    ? codexAppsRequestAuth(db, runSettings, {
+  // A core designation (enabled Codex cutover) and a legacy one are mutually
+  // exclusive: claim resolves at most one of them.
+  const codexAppsAuth = codexAppsCoreConnectionId
+    ? subscriptionCoreCodexAppsRequestAuth(db, runSettings, {
+        accountId: input.accountId,
         workspaceId: input.workspaceId,
-        credentialId: codexAppsCredentialId,
+        connectionId: codexAppsCoreConnectionId,
       })
-    : undefined;
+    : codexAppsCredentialId
+      ? codexAppsRequestAuth(db, runSettings, {
+          workspaceId: input.workspaceId,
+          credentialId: codexAppsCredentialId,
+        })
+      : undefined;
   const linkedAuthority = await getExternalLinkTurnAuthorization(
     db,
     {
@@ -1080,6 +1091,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     eventing.preparedTools = await waitForTurnOperation(
       runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {
         ...(credentialRestriction ? { credentialRestriction } : {}),
+        inputWaitReplyGuard: async () => (await eventing.inputWaitReplyGuard?.()) ?? null,
         mcpAccountLabels: accountRoutes.accountLabels,
         accountId: input.accountId,
         workspaceId: input.workspaceId,

@@ -241,6 +241,8 @@ export async function processModelResponseTerminalEvent(input: {
   creditPolicyRevision?: number | undefined;
   servingCredentialId: string | null;
   priorSessionCredentialId: string | null;
+  /** The shared-core subscription connection that served the call (billing attribution). */
+  subscriptionConnectionId?: string | null;
   emittedSourceKeys: Set<string>;
   renewLease: () => Promise<void>;
   leaseLost: () => boolean;
@@ -357,6 +359,7 @@ export async function processModelResponseTerminalEvent(input: {
           providerApi: input.providerApi,
           model: input.model,
           billing,
+          subscriptionConnectionId: input.subscriptionConnectionId ?? null,
           ...(input.contextContributions !== undefined
             ? { contextContributions: input.contextContributions }
             : {}),
@@ -426,6 +429,8 @@ export async function processCompactionModelUsageEvent(input: {
   creditPolicyRevision?: number | undefined;
   servingCredentialId: string | null;
   priorSessionCredentialId: string | null;
+  /** The shared-core subscription connection that served the call (billing attribution). */
+  subscriptionConnectionId?: string | null;
   emittedSourceKeys: Set<string>;
   renewLease: () => Promise<void>;
   leaseLost: () => boolean;
@@ -515,6 +520,7 @@ export async function processCompactionModelUsageEvent(input: {
           providerApi: input.providerApi,
           model: input.model,
           billing,
+          subscriptionConnectionId: input.subscriptionConnectionId ?? null,
           ...(input.contextContributions !== undefined
             ? { contextContributions: input.contextContributions }
             : {}),
@@ -1024,6 +1030,12 @@ export function recordAuthoritativeModelUsageMetrics(input: {
   }
 }
 
+function isForeignKeyViolation(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  const causeCode = (error as { cause?: { code?: unknown } } | null)?.cause?.code;
+  return code === "23503" || causeCode === "23503";
+}
+
 /** Soft-fail Insights fact write — never throws into the billing/emit path. */
 export async function recordAuthoritativeModelCallFact(input: {
   db: ActivityServices["db"];
@@ -1038,11 +1050,14 @@ export async function recordAuthoritativeModelCallFact(input: {
   providerApi: ModelProviderApi;
   model: string;
   billing: ModelUsageBillingRecord;
+  /** The shared-core subscription connection that served the call, if any. */
+  subscriptionConnectionId?: string | null;
   contextContributions?: readonly ModelContextContributionSummary[] | null;
 }): Promise<void> {
   try {
     const telemetry = input.billing.normalizedUsage.telemetry;
-    await recordModelCallFact(input.db, {
+    const fact = (connectionId: string | null) => ({
+      connectionId,
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
@@ -1069,6 +1084,14 @@ export async function recordAuthoritativeModelCallFact(input: {
         ? { contextContributions: input.contextContributions }
         : {}),
     });
+    try {
+      await recordModelCallFact(input.db, fact(input.subscriptionConnectionId ?? null));
+    } catch (error) {
+      // The served connection was deleted mid-turn: keep the usage fact and
+      // drop only its attribution, never the whole fact.
+      if (!input.subscriptionConnectionId || !isForeignKeyViolation(error)) throw error;
+      await recordModelCallFact(input.db, fact(null));
+    }
   } catch (error) {
     input.observability.warn("model call fact persist failed", {
       ...safeErrorDiagnostic(error),

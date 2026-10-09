@@ -951,8 +951,11 @@ and partial response for a later drain. Rejection never proves quiescence or
 permits numeric-PID fallback or another possibly dispatched helper Start.
 
 Fresh progressive-disclosure attempts complete only session-marked eager MCP
-connection and schema admission before inference. All non-eager MCPs—strict or
-optional—connect/list concurrently with the first provider request. A plain
+connection and schema admission before inference, plus the first-party
+`opengeni` server when it can list an authorized harness control tool (goal
+lifecycle, `command_read`, `command_wait`, `wait_for_input`; only those exact
+schemas become first-request visible). All other non-eager MCPs, strict or
+optional, connect/list concurrently with the first provider request. A plain
 terminal model response does not join that background work. Configured agents
 decide router visibility from authorized pending server identities without
 joining preparation. Once exposed, that router stays in the request tool prefix
@@ -1518,7 +1521,11 @@ trigger, including a result already consumed before worker loss. Capacity waits,
 recoverable pause/maintenance, provider failover, graceful shutdown, and worker
 death all follow that rule. Terminal failure/cancellation and superseding Steer
 close the entire turn ledger. Recovery never reconstructs this authority from
-history or `agent_run_states`.
+history or `agent_run_states`. Successful completion consumes every receipt
+of the turn whose attempt has settled (closed, and quiesced or never
+interrupted), deleting only ledger rows without new history or events: a
+completed turn owns no live tool call. Rolling migration 0673 removed
+receipts that earlier releases left on completed turns with settled attempts.
 
 For MCP, the runtime reads the complete provider `CallToolResult` through the
 SDK's `callToolResult` seam and carries a private duplicate only until the exact
@@ -2864,6 +2871,21 @@ UUID, parent admission, process holder, lease/group, provider backend/instance,
 lease epoch, route target/epoch, and provider session; exact replays are
 idempotent and cannot touch a successor. This reconciliation never calls a
 provider terminate/kill API and never captures or rotates a workspace snapshot.
+When a probe of a command on the lease's exact current warm box resumes that box
+and the provider answers NotFound, the box itself is gone, not just the command.
+The reconciler then retires the whole box in one transaction through
+the same `markWarmLeaseInstanceLost` path routing uses: every active command,
+open request, PTY and process holder of that exact epoch and instance is settled,
+the lease goes cold with loss evidence, lifecycle waiters (including a turn
+parked behind the rotation) are woken, and the other commands of that box in the
+same batch are not probed again (any of them a closed turn never adopted first
+gets its session background record, so the agent hears about it). Before, each command needed its own probe, at
+most 20 per sweep, so 35 commands took 11 extra minutes. A lease already
+draining is left to its drain, whose capture finds the box missing and settles
+the same set. Their agent notices say the command "is no longer running because its
+sandbox was shut down or lost; whether it finished is unknown" and to check its
+effects before running it again, instead of the generic "result unavailable".
+The session's Incoming panel shows several such results as one row.
 Repeated Modal binding-missing or binding-mismatch observations enter a durable
 24-hour reconciliation quarantine after five claimed probes. Quarantine is
 only backoff: the process remains active, retains every blocker, carries no
@@ -3173,6 +3195,37 @@ same terminal event and notice. Supervised commands keep their separate proof
 gate. A prior explicit stop remains immutable; deadline intent starts its own
 grace. The two-minute grace applies only to provider-deadline rotation; any
 lease may still meet the idle rule above.
+
+**The pre-deadline save is mandatory.** The orderly backstop above
+can wait forever: a command whose stop request or reconciliation never ran, an
+owner whose quiescence receipt is still pending, a sibling attempt that holds no
+holder, or a request whose owner vanished each refused enrollment (and an open
+request refused the zero-holder drain's capture) until the provider killed the
+box uncaptured. Inside `sandboxDeadlineMandatoryCaptureLeadMs` before the
+stamped provider deadline of a lease with any requested rotation (an earlier
+operator rotation keeps the due deadline rotation from being stamped separately) (the
+legacy command stop grace, the full drain capture budget and two reaper periods,
+never more than the rotation lead; about 13 minutes with a 10-minute
+drain capture budget), the save no longer waits for any of that. Enrollment then needs
+only that every holder is a process holder of an active, unsupervised process
+on the exact box route (a live turn, viewer, direct request or interaction still
+owns the box, supervised commands keep their separate proof gate, and an
+operator reaper hold still pauses it), and records
+mode `forced_deadline` (`opengeni_sandbox_command_containment_total` outcome
+`forced_deadline_enrolled`; the reason stays `provider_deadline_containment`).
+A zero-holder drain claim in the same window does the same for its open
+requests. Every request still open on the exact box is recorded in
+`sandbox_leases.deadline_forced_admission_ids` (migration 0676), which drain
+publication excludes like enrolled command parents; the cold commit rejects
+exactly those requests only after the box was terminated, and a trigger clears
+the set on a new epoch or instance and on cold. Drain publication also ignores
+open requests left on an older epoch or instance of the lease, which cannot race
+this box's capture. A command that exited but was never reconciled settles as
+contained rather than with its exit code. A file being written
+at that instant may be saved half-written, and unlike a warm checkpoint this
+also applies to tar-style captures, which then read files one by one while such
+a request may still run; the box would otherwise die with everything since the
+last checkpoint.
 
 Historical containment cannot reconstruct an execution ID the old adapter never
 retained. A command whose owner cannot recover its terminal receipt remains a visible capture blocker;

@@ -327,6 +327,7 @@ import type {
   NativeAppToken,
   InboxItem,
   InboxSettings,
+  SessionInboxMute,
   ListInboxResponse,
   UpdateInboxItemInput,
   NativePushDevice,
@@ -9015,6 +9016,30 @@ export class OpenGeniClient {
 
   async updateInboxSettings(input: InboxSettings): Promise<InboxSettings> {
     return await this.requestJson<InboxSettings>("PUT", "/v1/inbox/settings", input);
+  }
+
+  /** Whether the signed-in person muted this session's replies. */
+  async getSessionInboxMute(workspaceId: string, sessionId: string): Promise<SessionInboxMute> {
+    return await this.requestJson<SessionInboxMute>(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/inbox-mute`,
+    );
+  }
+
+  /**
+   * Mute or unmute this session's replies for the signed-in person. Its
+   * notifications, questions and approvals still arrive.
+   */
+  async setSessionInboxMute(
+    workspaceId: string,
+    sessionId: string,
+    input: SessionInboxMute,
+  ): Promise<SessionInboxMute> {
+    return await this.requestJson<SessionInboxMute>(
+      "PUT",
+      `${sessionPath(workspaceId, sessionId)}/inbox-mute`,
+      input,
+    );
   }
 
   // --- Native app sign-in ------------------------------------------------------------------------

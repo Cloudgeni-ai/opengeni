@@ -173,6 +173,12 @@ import {
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import {
+  HARNESS_CONTROL_FIRST_PARTY_TOOLS,
+  HARNESS_CONTROL_MCP_SERVER_ID,
+  isHarnessControlMcpToolName,
+} from "./codex-tool-search";
+import { deriveAgentPromptToolAvailability } from "./agent-instructions/tool-availability";
+import {
   GMAIL_REST_MCP_BRIDGE_ADAPTER,
   gmailRestResultOutcome,
   isOfficialGmailMcpConfig,
@@ -385,7 +391,7 @@ import {
   managedCodemodeClientDirectory,
 } from "./sandbox/codemode-client";
 import { InputWaitYield, type InputWaitYieldStream } from "./input-wait-yield";
-export { InputWaitYield } from "./input-wait-yield";
+export { InputWaitYield, modelResponseHasVisibleText } from "./input-wait-yield";
 import {
   createTurnToolCancellationController,
   TurnSandboxCommandCancelledError,
@@ -3300,8 +3306,8 @@ export function buildOpenGeniAgent(
  * exact MCP objects may finish materializing after the first request begins.
  * A remembered authorized name binds through resolveMissingFunctionTool after
  * that catalog is ready. Classification is origin, not transport: the same
- * always-visible base set and eager MCP tools are in the first request on
- * every path. Generic providers add stable ordinary tool_search/tool_invoke
+ * always-visible base set, eager MCP tools, and authorized first-party harness
+ * control tools are in the first request on every path. Generic providers add stable ordinary tool_search/tool_invoke
  * schemas; a valid dispatcher call is renamed to the real tool and bound by
  * the same hook before approval and execution.
  */
@@ -4360,6 +4366,12 @@ export type ToolPreparationPhaseMeasurement = {
 };
 
 export type PrepareToolsOptions = {
+  /**
+   * Consulted before `wait_for_input` registers a wait. A returned message is
+   * given to the model as a tool error instead of waiting, for example when the
+   * wait would end a person's turn without any visible reply.
+   */
+  inputWaitReplyGuard?: () => Promise<string | null>;
   /** Frozen, explicitly selected account labels keyed by execution route, not provider. */
   mcpAccountLabels?: ReadonlyMap<string, string>;
   /** Opt-in exact-attempt persistence; absence preserves ordinary MCP execution. */
@@ -4733,7 +4745,7 @@ export async function prepareAgentTools(
   tools: ToolRef[],
   options: PrepareToolsOptions = {},
 ): Promise<PreparedAgentTools> {
-  const inputWaitYield = new InputWaitYield();
+  const inputWaitYield = new InputWaitYield(options.inputWaitReplyGuard);
   // One live Set per prepared tool environment, shared with the codex_apps
   // sanitizing fetch and the current turn's tool_search description.
   const codexConnectorNamespaces = options.deferredCodexConnectorNamespaces ?? new Set<string>();
@@ -4799,6 +4811,19 @@ export async function prepareAgentTools(
     ),
   );
   const aggregateToolBudget = new McpAggregateToolListBudget();
+  // The harness control tools (goal lifecycle, command polling,
+  // wait_for_input) are visible in the first request when authorized, so the
+  // first-party server that lists them must join the first-request barrier
+  // whenever the attempt could list one. Otherwise the tool block would gain
+  // them mid-turn when background preparation settles and break the cached
+  // prefix. Its other tools stay deferred behind search.
+  const harnessControlAvailability = deriveAgentPromptToolAvailability({
+    selectedFirstPartyTools: options.firstPartyTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS,
+    firstPartyPermissions: options.firstPartyPermissions,
+  });
+  const harnessControlToolsPossible = HARNESS_CONTROL_FIRST_PARTY_TOOLS.some(
+    (name) => !harnessControlAvailability.unavailable.includes(name),
+  );
   // Codex Apps retains its sanitizer-specific Bun fetch path. Ordinary MCP
   // traffic uses @opengeni/network's explicit undici.request() adapter under
   // Bun so the vetted DNS answer remains the actual connection destination.
@@ -4861,6 +4886,7 @@ export async function prepareAgentTools(
             bestEffort: optional || Boolean(config.connectionRef),
             optional,
             eager: tool.eager === true,
+            joinsFirstRequestBarrier: tool.eager === true,
             timeoutMs: config.timeoutMs,
           };
         }
@@ -5047,6 +5073,11 @@ export async function prepareAgentTools(
           bestEffort,
           optional,
           eager: tool.eager === true,
+          joinsFirstRequestBarrier:
+            tool.eager === true ||
+            (firstParty &&
+              config.id === HARNESS_CONTROL_MCP_SERVER_ID &&
+              harnessControlToolsPossible),
           timeoutMs: config.timeoutMs,
         };
       }),
@@ -5056,13 +5087,13 @@ export async function prepareAgentTools(
   // explicit eager hint may make them available sooner, but when progressive
   // disclosure is active their connect/list work joins the same shared
   // preparation promise as every other deferred server. Required eager MCPs
-  // retain their fail-closed pre-inference contract.
-  const eagerEntries = deferNonEager
-    ? servers.filter((entry) => entry.eager && !entry.bestEffort)
-    : servers;
-  const deferredEntries = deferNonEager
-    ? servers.filter((entry) => !entry.eager || entry.bestEffort)
-    : [];
+  // retain their fail-closed pre-inference contract. The first-party server
+  // that lists the always-visible harness control tools also joins, so their
+  // schemas are in the first request; its other schemas stay deferred.
+  const joinsBarrier = (entry: (typeof servers)[number]): boolean =>
+    entry.eager ? !entry.bestEffort : entry.joinsFirstRequestBarrier;
+  const eagerEntries = deferNonEager ? servers.filter(joinsBarrier) : servers;
+  const deferredEntries = deferNonEager ? servers.filter((entry) => !joinsBarrier(entry)) : [];
   const eagerRequiredEntries = eagerEntries.filter((entry) => !entry.bestEffort);
   const eagerBestEffortEntries = eagerEntries.filter((entry) => entry.bestEffort);
   const deferredRequiredEntries = deferredEntries.filter((entry) => !entry.bestEffort);
@@ -7907,6 +7938,7 @@ export class PrefixedMcpServer implements MCPServer {
   private readonly bestEffort: boolean;
   private loggedListToolsFailure = false;
   private listedToolSchemaTokens = 0;
+  private alwaysVisibleToolSchemaTokens = 0;
   private frozenTools: Promise<RuntimeMcpTool[]> | null = null;
   private readonly originalToolNames = new Map<string, string>();
   private readonly displayMetadata = new Map<string, ToolDisplayMetadata>();
@@ -8161,6 +8193,11 @@ export class PrefixedMcpServer implements MCPServer {
       const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, exposed) ??
         assertMcpToolListWithinBounds(exposed)) as RuntimeMcpTool[];
       this.listedToolSchemaTokens = estimateSerializedValueTokens(bounded);
+      const alwaysVisible = bounded.filter((tool) =>
+        isHarnessControlMcpToolName(this.registryId, tool.name),
+      );
+      this.alwaysVisibleToolSchemaTokens =
+        alwaysVisible.length > 0 ? estimateSerializedValueTokens(alwaysVisible) : 0;
       return bounded;
     } catch (error) {
       // A REQUIRED server's tools/list failure is fatal (fail-loud default): the
@@ -8196,7 +8233,11 @@ export class PrefixedMcpServer implements MCPServer {
 
   /** Latest exact tools/list projection used to build the model request. */
   modelToolSchemaTokens(): number {
-    return this.modelToolSchemaAccountingDeferred ? 0 : this.listedToolSchemaTokens;
+    // Harness control tools stay in the request even when the rest of this
+    // server's schemas are deferred behind search.
+    return this.modelToolSchemaAccountingDeferred
+      ? this.alwaysVisibleToolSchemaTokens
+      : this.listedToolSchemaTokens;
   }
 
   /**
@@ -8294,6 +8335,17 @@ export class PrefixedMcpServer implements MCPServer {
     };
     const operationId =
       meta && typeof meta.opengeniOperationId === "string" ? meta.opengeniOperationId : undefined;
+    // A wait that would end a person's turn without a visible reply is refused
+    // before admission, so the model answers first and nothing remote changes.
+    if (unprefixed === "wait_for_input") {
+      const refusal = await this.inputWaitYield?.replyRefusal();
+      if (refusal) {
+        return boundedMcpToolResult({
+          isError: true,
+          content: [{ type: "text", text: refusal }],
+        });
+      }
+    }
     // Admission must precede the physical remote call, not merely observe its
     // result: model dispatch and terminal settlement drain this reservation.
     const completeWait =

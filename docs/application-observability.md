@@ -115,6 +115,64 @@ every turn heartbeat, so a sustained blocker increments it repeatedly. An attemp
 that is not due yet or whose archive already covers the current generation is not
 counted.
 
+`opengeni_sandbox_checkpoint_staleness{kind}` (`dirty`, `stale_4h`,
+`stale_12h`) and `opengeni_sandbox_checkpoint_age_max_seconds` are a fresh,
+content-free reaper inventory (`opengeni_private.sandbox_checkpoint_staleness()`,
+migration 0672) of live Modal sandboxes with a write their last checkpoint did
+not capture: a mutation admission on that exact box newer than the archive
+generation, or a write still open (or settled) after the checkpoint. A
+generation bump with no write behind it, such as a fresh or restored box, does
+not count. Age runs from the first uncaptured write, clamped to the box's
+creation. `OpenGeniSandboxCheckpointStale` warns when any box has held such a
+write for more than 12 hours, half the default provider lifetime: an unplanned
+provider loss would lose it. Boxes kept warm while idle (an open tab after a
+short turn, or a turn held on `wait_for_input` with a running command) are not
+checkpointed between turns and can raise it too.
+
+To find the leases behind the alert, run this as a role that bypasses row-level
+security (a superuser or a `BYPASSRLS` role); under forced row-level security an
+ordinary role silently sees no rows. It ages boxes the way the inventory does,
+except that it checks every captured write for a settlement after the
+checkpoint, not only the latest:
+
+```sql
+with live as (
+  select lease.id, lease.workspace_id, lease.sandbox_group_id, lease.liveness,
+    lease.instance_id,
+    coalesce(lease.archive_generation, 0) as archived_generation,
+    coalesce(lease.provider_created_at, lease.created_at) as box_created_at,
+    opengeni_private.sandbox_checkpoint_staleness_at(
+      lease.resume_state #>> '{sessionState,workspaceArchiveAt}') as checkpoint_at
+  from sandbox_leases lease
+  where lease.backend = 'modal' and lease.liveness in ('warm', 'draining')
+    and lease.instance_id is not null
+), evidence as (
+  select live.id, live.workspace_id, live.sandbox_group_id, live.liveness,
+    live.box_created_at, live.checkpoint_at,
+    min(admission.admitted_at) filter (
+      where admission.workspace_generation > live.archived_generation
+    ) as newer_write_at,
+    bool_or(admission.workspace_generation <= live.archived_generation
+      and (admission.settled_at is null
+        or admission.settled_at > live.checkpoint_at)) as spanning_write
+  from live
+  join sandbox_workspace_mutation_admissions admission
+    on admission.lease_id = live.id
+   and admission.provider_instance_id = live.instance_id
+  group by live.id, live.workspace_id, live.sandbox_group_id, live.liveness,
+    live.box_created_at, live.checkpoint_at
+)
+select id, workspace_id, sandbox_group_id, liveness,
+  greatest(
+    least(newer_write_at,
+      case when spanning_write then coalesce(checkpoint_at, box_created_at) end),
+    box_created_at) as unsaved_since
+from evidence
+where newer_write_at is not null or spanning_write
+order by unsaved_since
+limit 20;
+```
+
 Consistent workspace capture intentionally fences new writing operations; a
 shell command is conservatively a potential writer even when its text looks
 read-only. Capture waits must not be removed by bypassing that fence or by
@@ -214,11 +272,11 @@ The same route admits closed operational signals, discriminated by a `signal`
 field. A body without `signal` is an error report as above; an older API refuses
 a signal body as `invalid`, so the extension is backward compatible.
 
-| `signal` | Series | Labels (closed values) |
-| --- | --- | --- |
-| `request_failure` | `opengeni_client_request_failures_total` (counter) | `action`: `create_session`, `send_message` (includes sends the server queues), `steer_message`, `composer_submit`, `retry_turn`, `connect_integration`, `connect_model`, `checkout_start`; `reason`: `network`, `timeout`, `offline` |
-| `stream` | `opengeni_client_stream_events_total` (counter) | `stream`: `session`, `workspace`; `event`: `reconnect`, `reconnect_exhausted`, `long_disconnect` |
-| `web_vital` | `opengeni_client_web_vital` (histogram: `_bucket`, `_sum`, `_count`) | `metric`: `lcp`, `inp`, `ttfb` (seconds), `cls` (unitless score); `page`: the closed journey page label (`sessions`, `home`, `other`, ...) |
+| `signal`          | Series                                                               | Labels (closed values)                                                                                                                                                                                                               |
+| ----------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `request_failure` | `opengeni_client_request_failures_total` (counter)                   | `action`: `create_session`, `send_message` (includes sends the server queues), `steer_message`, `composer_submit`, `retry_turn`, `connect_integration`, `connect_model`, `checkout_start`; `reason`: `network`, `timeout`, `offline` |
+| `stream`          | `opengeni_client_stream_events_total` (counter)                      | `stream`: `session`, `workspace`; `event`: `reconnect`, `reconnect_exhausted`, `long_disconnect`                                                                                                                                     |
+| `web_vital`       | `opengeni_client_web_vital` (histogram: `_bucket`, `_sum`, `_count`) | `metric`: `lcp`, `inp`, `ttfb` (seconds), `cls` (unitless score); `page`: the closed journey page label (`sessions`, `home`, `other`, ...)                                                                                           |
 
 Both counters are published at zero for every label pair on API start, and a
 rate-limited signal is counted in

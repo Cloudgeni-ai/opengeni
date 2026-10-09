@@ -14579,6 +14579,58 @@ export const InboxSettings = z.object({
 });
 export type InboxSettings = z.infer<typeof InboxSettings>;
 
+/** The fixed subject of a local install's one built-in human (`productAccessMode` local). */
+export const LOCAL_HUMAN_SUBJECT_ID = "dev";
+
+type InboxAccessContextShape = {
+  mode?: string | undefined;
+  subjectId: string;
+  credential?: unknown;
+  workspaceGrants?:
+    | ReadonlyArray<{
+        principalKind?: string | undefined;
+        metadata?: { delegated?: unknown } | null | undefined;
+        serviceInitiator?: unknown;
+      }>
+    | undefined;
+};
+
+/**
+ * Who has an inbox: a signed-in person (`user:`), or the one human of a local
+ * install. API keys, services, configured or development subjects and agents
+ * act through sessions and have none. This is the shape the web uses to show
+ * the Inbox; the API also checks provenance (only its own local bootstrap
+ * produces the local human, see `inboxSubjectForContext` in `@opengeni/core`).
+ */
+export function accessContextHasInbox(
+  context: InboxAccessContextShape | null | undefined,
+): boolean {
+  if (!context || context.credential) return false;
+  if (context.subjectId.startsWith("user:")) return true;
+  const grants = context.workspaceGrants ?? [];
+  return (
+    context.mode === "local" &&
+    context.subjectId === LOCAL_HUMAN_SUBJECT_ID &&
+    grants.length > 0 &&
+    grants.every(
+      (grant) =>
+        grant.principalKind === "human_session" &&
+        grant.metadata?.delegated !== true &&
+        !grant.serviceInitiator,
+    )
+  );
+}
+
+/**
+ * The signed-in person's mute on one session. Muted replies neither reach the
+ * inbox nor alert the phone; the agent's notifications, questions and
+ * approvals still do.
+ */
+export const SessionInboxMute = z.object({
+  repliesMuted: z.boolean(),
+});
+export type SessionInboxMute = z.infer<typeof SessionInboxMute>;
+
 export const ToolAuthNeededPayload = z
   .object({
     serverId: z.string().min(1),

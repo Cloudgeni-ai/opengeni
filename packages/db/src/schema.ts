@@ -29,6 +29,7 @@ import type {
   SessionGoalMutationPolicy,
   SessionGoalSnapshot,
   SlackUserLinkAccessRequest,
+  SubscriptionPersonalAuthorityV2,
   TimelineAnnotation,
   ToolGatewayIdentity,
   UserResourceDelegation,
@@ -7195,6 +7196,11 @@ export const sessionTurns = pgTable(
       .$type<ClaudeProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
+    // Additive M3 v2 slot. v1 remains the authority source until the drained
+    // Codex cutover migration backfills and activates this value.
+    subscriptionAuthority: jsonb(
+      "subscription_authority",
+    ).$type<SubscriptionPersonalAuthorityV2 | null>(),
     cancelledBy: text("cancelled_by"),
     cancelReason: text("cancel_reason"),
     // Leftover unused counter from the removed per-turn Codemode call cap
@@ -9906,6 +9912,9 @@ export const sandboxLeases = pgTable(
     // The exact warm capture claim that ran around active background commands
     // (migration 0659). Equal to archive_capture_id only for that claim.
     archiveCaptureConcurrentCaptureId: uuid("archive_capture_concurrent_capture_id"),
+    // Exact admissions a mandatory pre-deadline save may capture around and
+    // settle after termination (migration 0676).
+    deadlineForcedAdmissionIds: uuid("deadline_forced_admission_ids").array(),
     // Bounded operator preservation gate. Unlike rotation/capture, this blocks
     // only reaper teardown: a user may still re-arm a resumable draining lease.
     // The exact id makes renewal/release ownership explicit and race-safe.

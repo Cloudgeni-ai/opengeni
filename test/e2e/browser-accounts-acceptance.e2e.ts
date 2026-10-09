@@ -457,6 +457,8 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
         pathname === "/v1/auth/session-set" ||
         pathname === "/v1/workspaces" ||
         pathname === "/v1/organization-invitations" ||
+        // The person's own inbox; a session page reads it again as it unmounts.
+        pathname === "/v1/inbox" ||
         (pathname === "/v1/billing" &&
           /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
             requestUrl.searchParams.get("accountId") ?? "",

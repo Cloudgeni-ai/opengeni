@@ -16,6 +16,8 @@ import {
   RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
+  SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES,
+  SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES,
   SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES,
   ARTIFACT_PIN_RUNTIME_ROUTINES,
   SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES,
@@ -544,6 +546,18 @@ function safePosture(): RuntimeDatabasePosture {
       })),
     ],
     privateRoutines: [
+      ...SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES.map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: [
+          name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)"
+            ? "search_path=pg_catalog, opengeni_private, pg_temp"
+            : "search_path=pg_catalog, public, opengeni_private, pg_temp",
+        ],
+      })),
       {
         name: "update_organization_integration_policy(uuid, text, jsonb)",
         owner: "opengeni_migrator",
@@ -607,6 +621,61 @@ function safePosture(): RuntimeDatabasePosture {
 }
 
 describe("runtime database posture evaluator", () => {
+  test("rejects a runtime role that can execute an owner-only M3 helper", () => {
+    for (const name of SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES) {
+      const revoked = safePosture();
+      revoked.privateRoutines.push({
+        name,
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+      });
+      expect(evaluateRuntimeDatabasePosture(revoked, options)).toEqual([]);
+      for (const unsafe of [{ execute: true }, { publicExecute: true }]) {
+        const posture = safePosture();
+        posture.privateRoutines.push({
+          name,
+          owner: "opengeni_migrator",
+          execute: false,
+          publicExecute: false,
+          securityDefiner: true,
+          configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+          ...unsafe,
+        });
+        expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+          `subscription M3 owner-only private routine ${name} is executable`,
+        );
+      }
+    }
+  });
+
+  test("requires exact private M3 precursor capabilities and hardened ownership/ACL/search path", () => {
+    expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
+    for (const name of SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES) {
+      const missing = safePosture();
+      missing.privateRoutines = missing.privateRoutines.filter((routine) => routine.name !== name);
+      expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+        `subscription M3 precursor private routine ${name} is missing or unsafe`,
+      );
+
+      for (const unsafe of [
+        { execute: false },
+        { publicExecute: true },
+        { securityDefiner: false },
+        { owner: "opengeni_app" },
+        { configuration: ["search_path=public"] },
+      ]) {
+        const posture = safePosture();
+        Object.assign(posture.privateRoutines.find((routine) => routine.name === name)!, unsafe);
+        expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+          `subscription M3 precursor private routine ${name} is missing or unsafe`,
+        );
+      }
+    }
+  });
+
   test("requires the individual Claude account activation before starting a runtime", () => {
     const posture = safePosture();
     posture.claudeSubscriptionPoolActivationPresent = false;
@@ -1582,10 +1651,34 @@ describe("runtime database posture evaluator", () => {
       { ...posture.schemas[0]!, name: "tenantx" },
       { ...posture.schemas[0]!, name: "Tenant Space" },
     );
+    for (const privateRoutine of posture.privateRoutines) {
+      if (
+        (SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES as readonly string[]).includes(
+          privateRoutine.name,
+        ) &&
+        privateRoutine.name !== "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)"
+      ) {
+        privateRoutine.configuration = [
+          "search_path=pg_catalog, tenantx, opengeni_private, pg_temp",
+        ];
+      }
+    }
     routine.configuration = ["search_path=pg_catalog, tenantx, pg_temp"];
     expect(
       evaluateRuntimeDatabasePosture(posture, { ...options, targetSchema: "tenantx" }),
     ).toEqual([]);
+    for (const privateRoutine of posture.privateRoutines) {
+      if (
+        (SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES as readonly string[]).includes(
+          privateRoutine.name,
+        ) &&
+        privateRoutine.name !== "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)"
+      ) {
+        privateRoutine.configuration = [
+          'search_path=pg_catalog, "Tenant Space", opengeni_private, pg_temp',
+        ];
+      }
+    }
     routine.configuration = ['search_path=pg_catalog, "Tenant Space", pg_temp'];
     expect(
       evaluateRuntimeDatabasePosture(posture, { ...options, targetSchema: "Tenant Space" }),
@@ -1933,7 +2026,10 @@ describe("runtime database posture evaluator", () => {
         routine.name.includes("scoped_enrollment") ||
         routine.name.includes("scoped_sandbox") ||
         routine.name.includes("scoped_machine_dependent_sessions") ||
-        routine.name.includes("personal_machine")
+        routine.name.includes("personal_machine") ||
+        routine.name.includes("subscription_codex_refresh") ||
+        routine.name.includes("authorize_subscription_ownerless_session_access") ||
+        routine.name.includes("authorize_subscription_personal_placement_access")
       ) {
         routine.owner = "pg_database_owner";
       }
@@ -1957,6 +2053,15 @@ describe("runtime database posture evaluator", () => {
   test("keeps dedicated-schema same-owner authority accepted", () => {
     const posture = safePosture();
     posture.schemas[0]!.name = "tenantx";
+    for (const routine of posture.privateRoutines) {
+      if (
+        (SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES as readonly string[]).includes(routine.name)
+      ) {
+        if (routine.name !== "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)") {
+          routine.configuration = ["search_path=pg_catalog, tenantx, opengeni_private, pg_temp"];
+        }
+      }
+    }
 
     expect(
       evaluateRuntimeDatabasePosture(posture, {

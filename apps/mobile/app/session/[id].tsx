@@ -30,6 +30,7 @@ import {
   useOutsideCallPreferences,
 } from "@/call-preferences";
 import { copyText } from "@/clipboard";
+import { markSessionInboxRead, useSessionRepliesMute } from "@/notifications";
 import { useSessionComputeLabel } from "@/compute-label";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
 import { ComposerPlusMenu } from "@/new-session-options";
@@ -41,6 +42,8 @@ import { openOnWeb, webPaths } from "@/web-links";
 const CALL_PIN_ACTION = "opengeni.take-calls-here";
 /** The session menu item that opens this conversation in the web app. */
 const OPEN_ON_WEB_ACTION = "opengeni.open-on-web";
+/** The session menu item that mutes or unmutes this session's replies for the person. */
+const MUTE_REPLIES_ACTION = "opengeni.mute-replies";
 
 export default function SessionScreen() {
   const { id, at } = useLocalSearchParams<{ id: string; at?: string }>();
@@ -76,6 +79,14 @@ function LiveSession(props: {
 }) {
   const theme = useNativeTimelineTheme();
   const insets = useSafeAreaInsets();
+  // Reading the session reads its replies in the inbox, on arrival and on leaving.
+  const { client: inboxClient, sessionId: readSessionId } = props;
+  useFocusEffect(
+    useCallback(() => {
+      void markSessionInboxRead(inboxClient, readSessionId);
+      return () => void markSessionInboxRead(inboxClient, readSessionId);
+    }, [inboxClient, readSessionId]),
+  );
   useEffect(() => {
     rememberOpenedSession({ workspaceId: props.workspaceId, sessionId: props.sessionId });
   }, [props.workspaceId, props.sessionId]);
@@ -158,6 +169,12 @@ function LiveSession(props: {
   const takesCalls =
     callPreferences.target === "pinned" && callPreferences.pinned?.sessionId === props.sessionId;
   const workspaceId = props.workspaceId;
+  const repliesMute = useSessionRepliesMute(
+    props.client,
+    props.workspaceId,
+    props.sessionId,
+    session ? session.parentSessionId === null : false,
+  );
   const headerTitle = useCallback(
     () => (
       <AppThemeProvider>
@@ -219,6 +236,17 @@ function LiveSession(props: {
                         ? "phone.down"
                         : "phone.arrow.down.left") as MenuAction["image"],
                     },
+                    ...(repliesMute
+                      ? [
+                          {
+                            id: MUTE_REPLIES_ACTION,
+                            title: repliesMute.muted ? "Unmute replies" : "Mute replies",
+                            image: (repliesMute.muted
+                              ? "bell"
+                              : "bell.slash") as MenuAction["image"],
+                          },
+                        ]
+                      : []),
                     ...actions.map((action) => ({
                       id: action.key,
                       title: action.label,
@@ -241,6 +269,15 @@ function LiveSession(props: {
                         pinCallSession({ workspaceId, sessionId: props.sessionId, title });
                       return;
                     }
+                    if (nativeEvent.event === MUTE_REPLIES_ACTION) {
+                      void Haptics.selectionAsync();
+                      void repliesMute?.toggle().then((muted) => {
+                        if (muted === null) {
+                          void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+                        }
+                      });
+                      return;
+                    }
                     actions.find((action) => action.key === nativeEvent.event)?.onPress();
                   }}
                 >
@@ -257,6 +294,7 @@ function LiveSession(props: {
       props.client,
       props.sessionId,
       refreshSession,
+      repliesMute,
       session,
       takesCalls,
       theme.colors.fg,

@@ -517,6 +517,11 @@ describe("Codex capacity availability diagnostics", () => {
     const getWait = spyOn(opengeniDb, "getCodexCapacityWaitForSession").mockResolvedValue(
       waiter as never,
     );
+    // Not a core waiter id: the activity falls back to the legacy Codex waiter.
+    const coreWait = spyOn(
+      opengeniDb,
+      "getSubscriptionCoreCodexCapacityWaitById",
+    ).mockResolvedValue(null);
     const refresh = spyOn(opengeniDb, "fetchCodexUsageForAccount");
     const reconcile = spyOn(opengeniDb, "reconcileCodexCapacityWait").mockResolvedValue({
       action: "waiting",
@@ -549,8 +554,10 @@ describe("Codex capacity availability diagnostics", () => {
         expect.objectContaining({ boundedRefreshAttempted: false }),
         expect.any(Function),
       );
+      expect(coreWait).toHaveBeenCalledTimes(1);
     } finally {
       getWait.mockRestore();
+      coreWait.mockRestore();
       refresh.mockRestore();
       reconcile.mockRestore();
     }

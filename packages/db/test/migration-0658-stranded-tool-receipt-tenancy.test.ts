@@ -125,6 +125,25 @@ async function receiptCount(f: Fixture): Promise<number> {
   return row!.count;
 }
 
+// Completed settlement now consumes settled receipts (migration 0673), so a
+// stranded receipt only exists as data left behind by earlier releases.
+// Snapshot the receipts before settlement and restore them afterwards to
+// reproduce that legacy state.
+async function snapshotReceipts(f: Fixture): Promise<string[]> {
+  const rows = await shared.admin<Array<{ row: string }>>`
+    select to_jsonb(p)::text as row from session_pending_tool_calls p
+    where session_id = ${f.sessionId}`;
+  return rows.map((r) => r.row);
+}
+
+async function restoreStrandedReceipts(rows: string[]): Promise<void> {
+  for (const row of rows) {
+    await shared.admin`insert into session_pending_tool_calls
+      select * from jsonb_populate_record(null::session_pending_tool_calls, (${row}::text)::jsonb)
+      on conflict do nothing`;
+  }
+}
+
 function transition(f: Fixture) {
   return transitionSessionVisibility(client.db, {
     workspaceId: f.workspaceId,
@@ -198,6 +217,7 @@ describe("tenancy quiescence and stranded tool receipts", () => {
         ],
       }),
     ).toBe(true);
+    const stranded = await snapshotReceipts(f);
     await applySessionTurnSettlement(client.db, f.workspaceId, {
       sessionId: f.sessionId,
       turnId: f.turn.id,
@@ -211,8 +231,9 @@ describe("tenancy quiescence and stranded tool receipts", () => {
         { type: "session.status.changed", payload: { status: "idle" } },
       ],
     });
-    // Completion does not consume the receipt, so it is stranded: nothing can
-    // resume it and the user has nothing to resolve.
+    // Before migration 0673 completion left the receipt behind, stranded:
+    // nothing can resume it and the user has nothing to resolve.
+    await restoreStrandedReceipts(stranded);
     expect(await receiptCount(f)).toBe(1);
 
     expect(
@@ -258,6 +279,7 @@ describe("tenancy quiescence and stranded tool receipts", () => {
       callType: "function_call",
       callItem: { type: "function_call", callId, name: "exec_command", arguments: "{}" },
     });
+    const stranded = await snapshotReceipts(f);
     await applySessionTurnSettlement(client.db, f.workspaceId, {
       sessionId: f.sessionId,
       turnId: f.turn.id,
@@ -271,6 +293,7 @@ describe("tenancy quiescence and stranded tool receipts", () => {
         { type: "session.status.changed", payload: { status: "idle" } },
       ],
     });
+    await restoreStrandedReceipts(stranded);
     expect(await receiptCount(f)).toBe(1);
     // A settled interruption whose physical quiescence receipt is still
     // missing: the attempt may still own tool effects, so the receipt is live.

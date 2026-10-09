@@ -12,6 +12,15 @@ import {
 } from "../mcp-oauth";
 
 const githubConnectPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/connect$/;
+// The Connected Machine agent's own protocol. A machine never holds the
+// deployment key; each route authenticates its own enroll token, device code,
+// or signed install-key proof, and is rate limited by its route.
+const connectedMachineProtocolPaths = new Set([
+  "/v1/enrollments/token/exchange",
+  "/v1/enrollments/device/start",
+  "/v1/enrollments/device/poll",
+  "/v1/enrollments/renew",
+]);
 const githubInstallationLinkPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/installations$/;
 const prReviewGithubBrowserPathPattern =
   /^\/v1\/workspaces\/[^/]+\/pr-review\/github\/(?:connect|installations\/select|installations\/[^/]+\/configure)$/;
@@ -138,6 +147,11 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   // minisign pub + the release-binary redirects). Reached by a fresh machine
   // with no credentials; the bodies carry no secrets.
   if (installExactPaths.has(path) || isInstallRedirectPath(path)) {
+    return true;
+  }
+  // Without this a key-protected deployment could never enroll or renew a
+  // machine. Human approval and lookup stay behind the key.
+  if (c.req.method === "POST" && connectedMachineProtocolPaths.has(path)) {
     return true;
   }
   if (
