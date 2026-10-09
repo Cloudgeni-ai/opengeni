@@ -18,6 +18,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./server-native-artifact": {
+      "types": "./src/server-native-artifact.ts",
+      "default": "./src/server-native-artifact.ts"
+    },
     "./server-source-identity": {
       "types": "./src/server-source-identity.ts",
       "default": "./src/server-source-identity.ts"

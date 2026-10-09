@@ -1,4 +1,14 @@
 ARG BUN_VERSION=1.4.0
+
+# Independently produces the same static artifact as desktop.Dockerfile from
+# the same input path and shared fixed build flags. Server roles only read it.
+FROM debian:bookworm-slim AS native-command-artifact-build
+RUN apt-get update && apt-get install -y --no-install-recommends musl-tools binutils \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY agent/native/command-supervisor/supervisor.c agent/native/command-supervisor/build-static.sh ./
+RUN sh build-static.sh /src/supervisor.c /out
+
 # Share the frozen-install inputs without tying them to a CPU architecture.
 FROM scratch AS workspace-manifests
 
@@ -81,6 +91,11 @@ RUN case "$OPENGENI_SOURCE_SHA" in \
   && install -d -o root -g root -m 0555 /opt/opengeni \
   && printf '%s' "$OPENGENI_SOURCE_SHA" > /opt/opengeni/source-sha \
   && chmod 0444 /opt/opengeni/source-sha
+COPY --from=native-command-artifact-build --chown=root:root /out/opengeni-command-supervisor /opt/opengeni/native-command-supervisor.elf
+COPY --from=native-command-artifact-build --chown=root:root /out/supervisor.c /opt/opengeni/native-command-supervisor.c
+COPY --from=native-command-artifact-build --chown=root:root /out/artifact.json /opt/opengeni/native-command-artifact.json
+RUN bun -e 'const p="/opt/opengeni/native-command-artifact.json";const m=await Bun.file(p).json();const sourceSha=await Bun.file("/opt/opengeni/source-sha").text();await Bun.write(p,JSON.stringify({...m,sourceSha})+"\n")' \
+  && chmod 0444 /opt/opengeni/native-command-supervisor.elf /opt/opengeni/native-command-supervisor.c /opt/opengeni/native-command-artifact.json
 RUN install -d -o bun -g bun -m 0755 /workspace
 USER bun
 

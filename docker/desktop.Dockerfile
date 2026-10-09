@@ -32,6 +32,15 @@ FROM scratch AS chrome-assets
 
 ADD --checksum=sha256:bfb6e6d345055eb481a50db423256fa2732ce010f785a56c327e213a638efdef https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_151.0.7922.108-1_amd64.deb /google-chrome-stable.deb
 
+# Identical source path/toolchain/flags to the API/worker artifact build. No
+# guest interpreter or dynamic loader is required by the resulting supervisor.
+FROM debian:bookworm-slim AS native-command-artifact-build
+RUN apt-get update && apt-get install -y --no-install-recommends musl-tools binutils \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY agent/native/command-supervisor/supervisor.c agent/native/command-supervisor/build-static.sh ./
+RUN sh build-static.sh /src/supervisor.c /out
+
 FROM rust:1.82-bookworm AS computer-native-build
 
 RUN apt-get update && apt-get install -y --no-install-recommends bash-builtins \
@@ -51,8 +60,7 @@ RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/carg
     mkdir -p /out; \
     install -m 0755 target/release/opengeni-computer-native /out/opengeni-computer-native
 
-RUN cc -O2 -std=c11 -Wall -Wextra -Werror \
-      native/command-supervisor/supervisor.c -o /out/opengeni-command-supervisor
+COPY --from=native-command-artifact-build /out/opengeni-command-supervisor /out/opengeni-command-supervisor
 
 RUN cc -std=c11 -O2 -Wall -Wextra -Werror -fPIC -shared -Wl,-z,noexecstack \
       -I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins \

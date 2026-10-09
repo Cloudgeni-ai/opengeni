@@ -55,6 +55,20 @@ static void deny_syscall(int nr) {
         prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program)) exit(91);
 }
 
+static void deny_executable_memfd(void) {
+    struct sock_filter instructions[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_memfd_create, 0, 3),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[1])),
+        BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, 0x10U, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (unsigned int)EACCES),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+    struct sock_fprog program = {.len = 6, .filter = instructions};
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) ||
+        prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program)) exit(91);
+}
+
 static int stale_pidfd(void) {
     pid_t child = fork();
     if (child == 0) _exit(0);
@@ -88,11 +102,18 @@ int main(int argc, char **argv) {
         return 83;
     }
     if (!strncmp(mode, "deny-", 5)) {
+        if (!strcmp(mode, "deny-memfd-exec")) {
+            deny_executable_memfd();
+            execvp(argv[2], &argv[2]);
+            return 84;
+        }
         int nr = !strcmp(mode, "deny-pidfd") ? SYS_pidfd_open :
             !strcmp(mode, "deny-send") ? SYS_pidfd_send_signal :
             !strcmp(mode, "deny-wait") ? SYS_waitid :
             !strcmp(mode, "deny-tty") ? SYS_ioctl :
-            !strcmp(mode, "deny-setpgid") ? SYS_setpgid : SYS_prctl;
+            !strcmp(mode, "deny-setpgid") ? SYS_setpgid :
+            !strcmp(mode, "deny-memfd") ? SYS_memfd_create :
+            !strcmp(mode, "deny-seals") ? SYS_fcntl : SYS_prctl;
         deny_syscall(nr);
         execvp(argv[2], &argv[2]);
         return 84;
