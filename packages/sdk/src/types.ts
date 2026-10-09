@@ -188,6 +188,54 @@ export type ToolGatewayCallResponse = {
   result: ToolGatewayResult;
 };
 
+export type ToolGatewayTarget = { identity: ToolGatewayIdentity } | { path: string[] };
+export type ToolGatewayResolvedTool = {
+  version: 1;
+  definitionDigest: string;
+  entry: ToolGatewayCatalogEntry;
+};
+export type ToolGatewayResolveRequest = {
+  target: ToolGatewayTarget;
+  siteArtifactId?: string;
+  siteVersionId?: string;
+};
+export type ToolGatewayInvokeRequest = ToolGatewayResolveRequest & {
+  operationId: string;
+  arguments: Record<string, unknown>;
+  expectedDefinitionDigest?: string;
+  approvalToken?: string;
+};
+export type ToolGatewayInvokeResponse = {
+  operationId: string;
+  tool: ToolGatewayResolvedTool;
+  result: ToolGatewayResult;
+};
+export type ToolGatewayTargetApprovalRequest = {
+  identity: ToolGatewayIdentity;
+  operationId: string;
+  arguments: Record<string, unknown>;
+  expectedDefinitionDigest: string;
+  siteArtifactId?: string;
+  siteVersionId?: string;
+};
+export type ToolGatewayTargetApprovalResponse = {
+  bindingVersion: 2;
+  operationId: string;
+  tool: ToolGatewayResolvedTool;
+  approvalToken: string;
+  expiresAt: string;
+};
+export type ToolGatewayManifestRequest = {
+  identities: ToolGatewayIdentity[];
+  siteArtifactId?: string;
+  siteVersionId?: string;
+};
+export type ToolGatewayManifestResponse = {
+  version: 1;
+  digest: string;
+  tools: ToolGatewayResolvedTool[];
+};
+
 export type ToolGatewayDeclarationsResponse = {
   catalogDigest: string;
   moduleSpecifier: string;

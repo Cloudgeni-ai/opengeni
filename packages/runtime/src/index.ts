@@ -4366,6 +4366,10 @@ export type ToolPreparationPhaseMeasurement = {
 };
 
 export type PrepareToolsOptions = {
+  /** Current-caller request lifetime; does not change attempt-owned lifetimes. */
+  requestSignal?: AbortSignal;
+  /** Current-caller live selected-target fence, before every physical MCP request. */
+  authorizeProviderRequest?: () => Promise<void>;
   /**
    * Consulted before `wait_for_input` registers a wait. A returned message is
    * given to the model as a tool error instead of waiting, for example when the
@@ -4909,7 +4913,18 @@ export async function prepareAgentTools(
           },
         );
         const guardedFetch: typeof guardedTransport = async (input, init) => {
-          const requestInit = options.runMcpCredentials?.requestInit(config, input, init) ?? init;
+          options.requestSignal?.throwIfAborted();
+          await options.authorizeProviderRequest?.();
+          options.requestSignal?.throwIfAborted();
+          const initial = options.runMcpCredentials?.requestInit(config, input, init) ?? init;
+          const requestInit = options.requestSignal
+            ? {
+                ...initial,
+                signal: initial?.signal
+                  ? AbortSignal.any([initial.signal, options.requestSignal])
+                  : options.requestSignal,
+              }
+            : initial;
           let response: Response;
           try {
             response = await guardedTransport(input, requestInit);
@@ -5984,6 +5999,9 @@ async function prepareToolGatewayDefinitionsFromServers(
                 {
                   ...(context.signal ? { signal: context.signal } : {}),
                   maxResultBytes: MCP_MAX_RESPONSE_BYTES,
+                  ...(context.transportMeta?.targetedCall === true
+                    ? { propagateInvocationErrors: true }
+                    : {}),
                 },
               );
             const recovery = configuredMcpOperationRecovery(server, toolName);
@@ -8303,6 +8321,7 @@ export class PrefixedMcpServer implements MCPServer {
     meta?: Record<string, unknown> | null,
     options?: {
       signal?: AbortSignal;
+      propagateInvocationErrors?: boolean;
       /**
        * Exact-result bound for a successful provider result. A direct SDK call
        * hands the result straight to the model, so it keeps the 1 MiB model cap.
@@ -8490,7 +8509,7 @@ export class PrefixedMcpServer implements MCPServer {
       // still fails the turn. For auth cases the actionable tool.auth_needed was
       // already published upstream by the connection-broker fetch before the
       // throw, so degrading here never silences it.
-      if (this.bestEffort) {
+      if (this.bestEffort && !options?.propagateInvocationErrors) {
         console.warn(
           "[mcp] best-effort server tool call failed; returning an unavailable result for this turn",
           mcpErrorFields(error, "mcp_tool_call_failed", this.registryId),

@@ -68,7 +68,7 @@ describe("Opengeni Site client", () => {
       if (url.endsWith("/catalog")) return Response.json(catalog);
       return Response.json({
         operationId: "00000000-0000-4000-8000-000000000003",
-        catalogDigest: catalog.digest,
+        tool: { version: 1, definitionDigest: catalog.digest, entry: catalog.entries[0] },
         result: {
           content: [],
           structuredContent: { documents: [{ id: "document-1" }] },
@@ -80,13 +80,9 @@ describe("Opengeni Site client", () => {
     expect(await client.tools.docs!.search!({ query: "roadmap" })).toEqual({
       documents: [{ id: "document-1" }],
     });
-    expect(requests.map(({ url }) => url)).toEqual([
-      "/__opengeni/site-tools/catalog",
-      "/__opengeni/site-tools/calls",
-    ]);
-    expect(requests[1]?.body).toMatchObject({
-      catalogDigest: catalog.digest,
-      identity: { serverId: "docs", toolName: "search" },
+    expect(requests.map(({ url }) => url)).toEqual(["/__opengeni/site-tools/invoke"]);
+    expect(requests[0]?.body).toMatchObject({
+      target: { path: ["docs", "search"] },
       arguments: { query: "roadmap" },
     });
     client.close();
@@ -126,7 +122,11 @@ describe("Opengeni Site client", () => {
         result: { content: [], structuredContent: { ok: true } },
       });
     }) as typeof fetch;
-    const client = createOpenGeniSiteClient({ siteWindow, fetch: fetchImpl });
+    const client = createOpenGeniSiteClient({
+      siteWindow,
+      fetch: fetchImpl,
+      toolGatewayMode: "catalog",
+    });
 
     expect(await client.tools.docs!.search!({ query: "roadmap" })).toEqual({
       ok: true,
@@ -162,7 +162,7 @@ describe("Opengeni Site client", () => {
               ? catalog
               : {
                   operationId: "00000000-0000-4000-8000-000000000003",
-                  catalogDigest: catalog.digest,
+                  tool: { version: 1, definitionDigest: catalog.digest, entry: catalog.entries[0] },
                   result: {
                     content: [{ type: "text", text: "Found one document" }],
                     structuredContent: { documents: [{ id: "document-1" }] },
@@ -174,6 +174,7 @@ describe("Opengeni Site client", () => {
       port.postMessage({
         type: OPENGENI_SITE_BRIDGE_READY,
         version: OPENGENI_SITE_BRIDGE_VERSION,
+        targetTools: 1,
       });
     });
     bootstrap.port1.start();
@@ -188,21 +189,20 @@ describe("Opengeni Site client", () => {
     expect(await client.tools["docs"]!["search"]!({ query: "roadmap" })).toEqual({
       documents: [{ id: "document-1" }],
     });
-    expect(calls.map((call) => call.method)).toEqual(["catalog", "call"]);
+    expect(calls.map((call) => call.method)).toEqual(["catalog", "invoke"]);
     expect(calls[1]).toMatchObject({
       payload: {
-        catalogDigest: catalog.digest,
-        identity: { serverId: "docs", toolName: "search" },
+        target: { path: ["docs", "search"] },
         arguments: { query: "roadmap" },
       },
     });
-    expect(calls[1]?.method === "call" ? calls[1].payload : null).not.toHaveProperty(
+    expect(calls[1]?.method === "invoke" ? calls[1].payload : null).not.toHaveProperty(
       "approvalToken",
     );
-    expect(calls[1]?.method === "call" ? calls[1].payload : null).not.toHaveProperty(
+    expect(calls[1]?.method === "invoke" ? calls[1].payload : null).not.toHaveProperty(
       "siteVersionId",
     );
-    expect(calls[1]?.method === "call" ? calls[1].payload : null).not.toHaveProperty(
+    expect(calls[1]?.method === "invoke" ? calls[1].payload : null).not.toHaveProperty(
       "siteArtifactId",
     );
     await expect(
@@ -320,6 +320,7 @@ describe("Opengeni Site client", () => {
       port.postMessage({
         type: OPENGENI_SITE_BRIDGE_READY,
         version: OPENGENI_SITE_BRIDGE_VERSION,
+        targetTools: 1,
       });
     });
     bootstrap.port1.start();

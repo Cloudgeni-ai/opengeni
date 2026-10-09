@@ -797,6 +797,8 @@ export type WorkspaceControlEventPage = {
 };
 
 export type OpenGeniClientOptions = {
+  /** Explicit compatibility for an API predating targeted tool calls. No automatic downgrade. */
+  toolGatewayMode?: "target" | "catalog";
   /** Base URL of the Opengeni API, e.g. `https://api.example.com`. */
   baseUrl: string;
   /** Opengeni API key, sent as `Authorization: Bearer <apiKey>`. */
@@ -1024,6 +1026,8 @@ function createLazyToolsFacade(transport: OpenGeniToolTransport): OpenGeniToolsF
         );
       return new Proxy(Object.create(null) as OpenGeniWorkspaceTools, {
         get: (_target, property) => {
+          if (property === "$targetProtocol")
+            return transport.toolGatewayMode === "catalog" ? undefined : 1;
           if (property === "then") return undefined;
           if (typeof property !== "string") return undefined;
           return node([property]);
@@ -1034,6 +1038,9 @@ function createLazyToolsFacade(transport: OpenGeniToolTransport): OpenGeniToolsF
 }
 
 export class OpenGeniClient {
+  get toolGatewayMode(): "target" | "catalog" {
+    return this.options.toolGatewayMode ?? "target";
+  }
   protected externalActorHeader?: string;
   protected serviceInitiatorHeader?: string | undefined;
   protected serviceContextHeader?: string | undefined;

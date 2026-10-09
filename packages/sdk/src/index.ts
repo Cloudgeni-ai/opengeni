@@ -204,6 +204,15 @@ export type {
 } from "./site";
 export type {
   ToolGatewayCallRequest,
+  ToolGatewayTarget,
+  ToolGatewayResolveRequest,
+  ToolGatewayResolvedTool,
+  ToolGatewayInvokeRequest,
+  ToolGatewayInvokeResponse,
+  ToolGatewayTargetApprovalRequest,
+  ToolGatewayTargetApprovalResponse,
+  ToolGatewayManifestRequest,
+  ToolGatewayManifestResponse,
   ToolGatewayCallResponse,
   ToolGatewayApprovalRequest,
   ToolGatewayApprovalResponse,
