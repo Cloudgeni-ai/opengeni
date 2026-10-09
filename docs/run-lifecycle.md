@@ -3166,8 +3166,11 @@ workspace control fence and the process -> admission -> lease row locks:
   ordinary window the box is saved and stopped, the wait and the pending request
   survive, and the box resumes on demand when the answer, the timeout or other
   input starts the next turn. The containment notice itself never wakes the
-  session, not even under a held wait: it stays pending and is delivered with
-  that next turn (`passiveCommandNoticeSql`). Waking would end the wait for the
+  session, not even under a held wait, and never starts a turn alone when the
+  input that opened a claim is rejected: it stays pending and is delivered with
+  the next turn whose causal authority it can share, normally the wait's
+  timeout or the person's answer (`passiveCommandNoticeSql`,
+  `isPassiveCommandNotice`). Waking would end the wait for the
   person, spend a model turn, and invite the agent to restart the stopped server
   every window. A pending approval resolved after containment resumes on a
   restored box without the command, and the notice tells the agent why;
@@ -3178,8 +3181,9 @@ workspace control fence and the process -> admission -> lease row locks:
   working keeps its box whether or not anything waits on it, and one that
   printed nothing for the whole window is idle. Only each command's newest output
   row is read. A command whose observation is quarantined, or a window shorter
-  than the reconciler's backoff, can look silent while it still runs. A busy command whose output goes only to a file looks idle and is
-  contained; the agent receives the notice and can restart it. Only exact
+  than the reconciler's backoff, can look silent while it still runs. A busy
+  command whose output goes only to a file looks idle and is contained; the
+  agent receives the notice and can restart it. Only exact
   enrollment reads `session_events` (under the caller's tenant RLS); the
   inventory stays wider so that this hot table needs no owner read policy, and a
   busy lease is stamped and rotated behind the other candidates;

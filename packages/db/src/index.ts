@@ -76224,9 +76224,13 @@ export async function claimSessionWorkForAttempt(
             }
             validUpdates.push(update);
           }
+          // Command results alone start a turn only under a held wait, and an
+          // idle-containment notice never does: when every input that opened
+          // the claim was rejected above, the notice waits for the next turn.
           if (
-            options.commandOnlyMayRun === false &&
-            validUpdates.every((update) => update.kind === "background_command_result")
+            validUpdates.every((update) => update.kind === "background_command_result") &&
+            (options.commandOnlyMayRun === false ||
+              (options.commandOnlyMayRun === true && validUpdates.every(isPassiveCommandNotice)))
           ) {
             validUpdates.length = 0;
           }
@@ -79811,7 +79815,17 @@ async function queuedSteerHasUnquiescedPredecessor(
  * input or the wait's timeout starts. */
 function passiveCommandNoticeSql() {
   return sql<boolean>`(${schema.sessionSystemUpdates.kind} = 'background_command_result'
+    and ${schema.sessionSystemUpdates.payload} ->> 'state' = 'lost'
     and ${schema.sessionSystemUpdates.payload} ->> 'reason' = ${IDLE_COMMAND_CONTAINMENT_REASON})`;
+}
+
+/** The in-memory twin of `passiveCommandNoticeSql`, for updates already read. */
+function isPassiveCommandNotice(update: { kind: string; payload: Record<string, unknown> }) {
+  return (
+    update.kind === "background_command_result" &&
+    update.payload.state === "lost" &&
+    update.payload.reason === IDLE_COMMAND_CONTAINMENT_REASON
+  );
 }
 
 /** Read durable session state without reserving a turn-worker slot or mutating it. */

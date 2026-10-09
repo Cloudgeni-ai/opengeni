@@ -26,6 +26,7 @@ import {
   retainWorkspaceMutationProcess,
   SandboxWorkspaceMutationFencedError,
   settleRetainedProcess,
+  settleSessionInputWait,
   type CommandContainmentInspection,
   type Database,
   type DbClient,
@@ -1300,25 +1301,55 @@ describe("idle command containment", () => {
       const [notice] = await admin<{ state: string }[]>`select state from session_system_updates
         where session_id = ${fixture.attempt.sessionId} and kind = 'background_command_result'`;
       expect(notice!.state).toBe("pending");
-      // The next input that does start a turn carries the notice with it.
+      const claimNext = async () =>
+        await claimSessionWorkForAttempt(db, fixture.workspaceId, {
+          sessionId: fixture.attempt.sessionId,
+          workflowId: `session-${fixture.attempt.sessionId}`,
+          workflowRunId: crypto.randomUUID(),
+          attemptId: crypto.randomUUID(),
+          dispatchId: `containment-${crypto.randomUUID()}`,
+          trigger: { kind: "next" },
+        });
+      // An input that opens the claim but is then rejected as malformed does
+      // not leave the notice to start a turn on its own.
       await admin`insert into session_system_updates (
           account_id, workspace_id, session_id, kind, source_id, dedupe_key, summary, payload
         ) values (${fixture.accountId}, ${fixture.workspaceId}, ${fixture.attempt.sessionId},
           'agent_message', ${crypto.randomUUID()}, ${`containment-${crypto.randomUUID()}`},
-          'the review is done', ${admin.json({ type: "agent_message" })})`;
-      const next = await claimSessionWorkForAttempt(db, fixture.workspaceId, {
-        sessionId: fixture.attempt.sessionId,
-        workflowId: `session-${fixture.attempt.sessionId}`,
-        workflowRunId: crypto.randomUUID(),
-        attemptId: crypto.randomUUID(),
-        dispatchId: `containment-${crypto.randomUUID()}`,
-        trigger: { kind: "next" },
-      });
-      expect(next.action).toBe("claimed");
-      const [delivered] = await admin<{ delivered_turn_id: string | null }[]>`
-        select delivered_turn_id from session_system_updates
+          'malformed', ${admin.json({ type: "agent_message" })})`;
+      const rejected = await claimNext();
+      expect(rejected.action).not.toBe("claimed");
+      const [stillPending] = await admin<
+        { state: string }[]
+      >`select state from session_system_updates
         where session_id = ${fixture.attempt.sessionId} and kind = 'background_command_result'`;
-      expect(delivered!.delivered_turn_id).toBe(next.action === "claimed" ? next.turn.id : null);
+      expect(stillPending!.state).toBe("pending");
+      // The wait's own timeout starts the next turn, and the notice rides
+      // along with it.
+      await admin`update sessions set input_wait_until = now() - interval '1 second'
+        where id = ${fixture.attempt.sessionId}`;
+      expect(
+        await settleSessionInputWait(db, {
+          accountId: fixture.accountId,
+          workspaceId: fixture.workspaceId,
+          sessionId: fixture.attempt.sessionId,
+          waitTurnId: fixture.attempt.turnId,
+          disposition: "timeout",
+        }),
+      ).toMatchObject({ action: "timeout" });
+      const next = await claimNext();
+      expect(next.action).toBe("claimed");
+      const turnId = next.action === "claimed" ? next.turn.id : null;
+      const delivered = await admin<
+        { kind: string; state: string; delivered_turn_id: string | null }[]
+      >`select kind, state, delivered_turn_id from session_system_updates
+        where session_id = ${fixture.attempt.sessionId}
+          and kind in ('background_command_result', 'session_wait_timeout')
+        order by kind`;
+      expect(delivered).toEqual([
+        { kind: "background_command_result", state: "delivered", delivered_turn_id: turnId },
+        { kind: "session_wait_timeout", state: "delivered", delivered_turn_id: turnId },
+      ]);
     }
     // Unclaimed machine input that will start a turn (here an agent message).
     {
