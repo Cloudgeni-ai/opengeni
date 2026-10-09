@@ -79,7 +79,12 @@ export type UseTurnQueueResult = {
   /** Atomically withdraw a waiting prompt into the private durable composer draft. */
   editTurn: (
     turnId: string,
-    options: { expectedDraftRevision: number; replaceDraft: boolean },
+    options: {
+      expectedDraftRevision: number;
+      replaceDraft: boolean;
+      /** A null result alone is not proof that a dispatched Edit did not commit. */
+      onFailure?: ((outcomeUnknown: boolean) => void) | undefined;
+    },
   ) => Promise<ComposerDraft | null>;
   /** Advance the same durable waiting prompt; no duplicate prompt is created. */
   steerTurn: (turnId: string) => Promise<boolean>;
@@ -269,25 +274,32 @@ export function useTurnQueue(
         turn: SessionTurn,
         clientEventId: string,
       ) => Promise<SessionQueueMutationResponse>,
+      onFailure?: (outcomeUnknown: boolean) => void,
     ): Promise<SessionQueueMutationResponse | null> => {
       const ownedTargetKey = targetKey;
       if (!sessionId || targetKeyRef.current !== ownedTargetKey || pendingRef.current[turnId]) {
+        onFailure?.(false);
         return null;
       }
       const current = snapshotRef.current;
       const turn = current?.items.find((candidate) => candidate.id === turnId);
-      if (!current || !turn) return null;
+      if (!current || !turn) {
+        onFailure?.(false);
+        return null;
+      }
       pendingRef.current = { ...pendingRef.current, [turnId]: kind };
       setStateTargetKey(ownedTargetKey);
       setPendingByTurn(pendingRef.current);
       setMutationError(null);
       const clientEventId = operationKey();
+      let earlierOutcomeUnknown = false;
       try {
         let result: SessionQueueMutationResponse;
         try {
           result = await command(current, turn, clientEventId);
         } catch (cause) {
           if (!isOutcomeUnknownError(cause)) throw cause;
+          earlierOutcomeUnknown = true;
           // Same-key replay is a fact check against the durable receipt. It
           // cannot duplicate the command even if the first response was lost.
           result = await command(current, turn, clientEventId);
@@ -296,6 +308,16 @@ export function useTurnQueue(
         acceptSnapshot(ownedTargetKey, result.snapshot);
         return result;
       } catch (cause) {
+        // A definite refusal of the replay cannot prove that an earlier
+        // uncertain request is not still committing. Preserve that uncertainty.
+        onFailure?.(
+          earlierOutcomeUnknown ||
+            !(
+              typeof cause === "object" &&
+              cause !== null &&
+              (cause as { outcomeUnknown?: unknown }).outcomeUnknown === false
+            ),
+        );
         if (targetKeyRef.current === ownedTargetKey) {
           setMutationError(asError(cause));
           await load();
@@ -330,15 +352,23 @@ export function useTurnQueue(
   const editTurn = useCallback(
     async (
       turnId: string,
-      edit: { expectedDraftRevision: number; replaceDraft: boolean },
+      edit: {
+        expectedDraftRevision: number;
+        replaceDraft: boolean;
+        onFailure?: ((outcomeUnknown: boolean) => void) | undefined;
+      },
     ): Promise<ComposerDraft | null> => {
-      const result = await mutate(turnId, "edit", (_current, turn, clientEventId) =>
-        client.editQueueItem(workspaceId, sessionId!, turnId, {
-          clientEventId,
-          expectedTurnVersion: turn.version,
-          expectedDraftRevision: edit.expectedDraftRevision,
-          replaceDraft: edit.replaceDraft,
-        }),
+      const result = await mutate(
+        turnId,
+        "edit",
+        (_current, turn, clientEventId) =>
+          client.editQueueItem(workspaceId, sessionId!, turnId, {
+            clientEventId,
+            expectedTurnVersion: turn.version,
+            expectedDraftRevision: edit.expectedDraftRevision,
+            replaceDraft: edit.replaceDraft,
+          }),
+        edit.onFailure,
       );
       return result?.draft ?? null;
     },

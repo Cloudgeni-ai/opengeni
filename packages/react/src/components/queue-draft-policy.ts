@@ -23,17 +23,30 @@ export async function checkoutQueueDraft(
   replaceDraft: boolean,
 ): Promise<boolean> {
   if (composer.draftPersistence === "disabled") return false;
-  const completeCheckout = composer.prepareDraftCheckout?.();
+  const completeCheckout = composer.prepareDraftCheckout?.(turnId);
+  if (completeCheckout === null) return false;
   let restored: ComposerDraft | null = null;
+  let outcomeUnknown = true;
   try {
     restored = await queue.editTurn(turnId, {
       expectedDraftRevision: composer.draftRevision,
       replaceDraft,
+      onFailure: (unknown) => {
+        outcomeUnknown = unknown;
+      },
     });
     return restored !== null;
+  } catch (cause) {
+    outcomeUnknown = !(
+      typeof cause === "object" &&
+      cause !== null &&
+      (cause as { outcomeUnknown?: unknown }).outcomeUnknown === false
+    );
+    throw cause;
   } finally {
-    // Complete on every outcome so a failed checkout cannot strand autosave.
-    if (completeCheckout) completeCheckout(restored);
+    // Null is not non-commit proof. Native completion reconciles observed
+    // checkout truth or keeps an explicit, recoverable write fence.
+    if (completeCheckout) completeCheckout(restored, outcomeUnknown);
     else if (restored) composer.applyDraft(restored);
   }
 }

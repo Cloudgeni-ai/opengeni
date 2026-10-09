@@ -92,11 +92,13 @@ export type ComposerDelivery = Pick<
 export type ComposerDraftState = Pick<
   ComposerState,
   | "draftConflict"
+  | "draftCheckoutBlocked"
   | "draftSaving"
   | "resolveDraftConflict"
   | "restoredResources"
   | "removeRestoredResource"
->;
+> &
+  Partial<Pick<ComposerState, "reloadDraft">>;
 
 export type ComposerControlState = Pick<
   ComposerState,
@@ -680,6 +682,8 @@ export function useChatComposerController({
     clearError: delivery.clearError,
     hasDraftState: draft !== undefined,
     draftConflict: draft?.draftConflict ?? null,
+    draftCheckoutBlocked: draft?.draftCheckoutBlocked ?? false,
+    reloadDraft: draft?.reloadDraft,
     draftSaving: draft?.draftSaving ?? false,
     restoredResources: draft?.restoredResources ?? [],
     removeRestoredResource: draft?.removeRestoredResource,
@@ -1415,7 +1419,18 @@ export function Status() {
           </motion.p>
         ) : null}
       </AnimatePresence>
-      {controller.draftConflict ? (
+      {controller.draftCheckoutBlocked ? (
+        <div className="mt-1.5 flex flex-wrap items-center gap-2 px-1 text-og-xs text-og-status-failed">
+          <span className="min-w-0 flex-1">{controller.messages.queueCheckoutUnconfirmed}</span>
+          <button
+            type="button"
+            className="underline underline-offset-2"
+            onClick={() => void controller.reloadDraft?.()}
+          >
+            {controller.messages.retryDraftSync}
+          </button>
+        </div>
+      ) : controller.draftConflict ? (
         <div className="mt-1.5 flex flex-wrap items-center gap-2 px-1 text-og-xs text-og-status-failed">
           <span className="min-w-0 flex-1">{controller.messages.draftConflict}</span>
           <button
@@ -1447,7 +1462,13 @@ function ComposerAnnouncements() {
           {controller.activeNotice.message}
         </p>
       ) : null}
-      {controller.draftConflict ? <p role="alert">{controller.messages.draftConflict}</p> : null}
+      {controller.draftConflict ? (
+        <p role="alert">
+          {controller.draftCheckoutBlocked
+            ? controller.messages.queueCheckoutUnconfirmed
+            : controller.messages.draftConflict}
+        </p>
+      ) : null}
     </div>
   );
 }

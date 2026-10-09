@@ -918,14 +918,24 @@ state remains application-owned; durable draft and session state remain in
   owned by that actor/session draft; policy is `null` until hydration completes.
   `ChatComposer` accepts the same `queue` to recall its latest editable prompt
   with Arrow Up from an empty composer. Custom queue-checkout hosts can capture
-  `composer.prepareDraftCheckout?.()` before awaiting `queue.editTurn` and
+  `composer.prepareDraftCheckout?.(turnId)` before awaiting `queue.editTurn` and
   complete that callback with its receipt, or `null` on failure (including thrown
-  errors). Without the optional callback, apply a non-null receipt with
+  errors). A null preparation means another checkout still owns the draft:
+  do not dispatch another Edit. Pass `false` as the completion's second argument
+  only with definitive non-commit proof; native `queue.editTurn` reports this
+  through its optional `onFailure` callback. Null alone is uncertain. Without
+  the optional callback, apply a non-null receipt with
   `composer.applyDraft`. Native checkout suspends draft writes until completion,
   then adopts the exact server revision while preserving intervening local
   notes, resources, text and policy changes for autosave; new free text is
   appended to the checked-out prompt. Custom `ComposerState` implementations
   without this optional callback retain their own `applyDraft` behavior.
+  When receipt recovery fails, an observed newer draft from the same source turn
+  can settle checkout without losing local changes. Otherwise native checkout
+  keeps autosave and Send/Steer fenced, shows one Retry draft sync action, and
+  reconciles through existing draft reads. An unchanged or failed read does not
+  release that fence: an uncertain Edit may still commit later. Reads and even
+  normal conflict-resolution calls cannot force destructive writes in this state.
   `sendExtras` (object or function evaluated at send time) is only for
   non-policy per-message fields such as live attachment resources and connection
   authority. Disabling durable draft persistence requires an explicit
