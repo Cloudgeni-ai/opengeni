@@ -107,6 +107,18 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers the stranded completed-turn tool receipt cleanup as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0673_delete_stranded_completed_turn_tool_receipts.sql",
+      ),
+    ).toMatchObject({
+      path: "0673_delete_stranded_completed_turn_tool_receipts.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("checks complete ledger metadata against migration files", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     const sourceMigrationPaths = (
@@ -2543,6 +2555,7 @@ describe("release schema contract", () => {
       "0665_inbox_replies.sql",
       "0666_inbox_reply_current_turn.sql",
       "0672_sandbox_checkpoint_staleness.sql",
+      "0673_delete_stranded_completed_turn_tool_receipts.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
