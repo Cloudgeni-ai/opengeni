@@ -114,6 +114,8 @@ pub fn canonical_hello() -> v1::Hello {
             operation_resource_policy: false,
             operation_cpu_quota: false,
             transactional_fs_write: false,
+            credential_renew: false,
+            mac_permissions: None,
         }),
         update_channel: "stable".to_string(),
         resume_token: "resume-token-1".to_string(),

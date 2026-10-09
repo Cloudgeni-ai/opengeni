@@ -442,6 +442,9 @@ import type {
   MachineOperationPolicy,
   UpdateMachineOperationPolicyRequest,
   UpdateMachineAgentResponse,
+  EnableMachineScreenControlResponse,
+  OpenMachinePrivacySettingsRequest,
+  OpenMachinePrivacySettingsResponse,
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
   ListWorkspaceMembersResponse,
@@ -2301,6 +2304,33 @@ export class OpenGeniClient {
     return await this.requestJson<UpdateMachineAgentResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/update`,
+    );
+  }
+
+  /** Turn screen control on for one connected machine, in place: the consent is
+   * recorded and the live agent refreshes its own credentials. Safe to repeat. */
+  async enableMachineScreenControl(
+    workspaceId: string,
+    enrollmentId: string,
+  ): Promise<EnableMachineScreenControlResponse> {
+    return await this.requestJson<EnableMachineScreenControlResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/screen-control`,
+      {},
+    );
+  }
+
+  /** Open one macOS Privacy & Security pane on a connected Mac, so the person
+   * only has to flip the permission for OpenGeni. */
+  async openMachinePrivacySettings(
+    workspaceId: string,
+    enrollmentId: string,
+    input: OpenMachinePrivacySettingsRequest,
+  ): Promise<OpenMachinePrivacySettingsResponse> {
+    return await this.requestJson<OpenMachinePrivacySettingsResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/privacy-settings`,
+      input,
     );
   }
 

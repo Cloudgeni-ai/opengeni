@@ -61501,10 +61501,18 @@ export async function setEnrollmentDisplayState(
     desktopUnavailableReason: string | null;
     /** Live snapshots update the desktop bit without rewriting release/update metadata. */
     runtimeDesktop?: boolean;
+    /** Live macOS permission snapshot, merged into the runtime capabilities. */
+    macPermissions?: EnrollmentMacPermissions;
     /** When present, fence the update to the exact still-live runner. */
     connectionInstanceId?: string;
   },
 ): Promise<{ updated: boolean }> {
+  const runtime: Record<string, boolean> = {
+    ...(input.runtimeDesktop !== undefined ? { desktop: input.runtimeDesktop } : {}),
+    ...(input.macPermissions ? enrollmentMacPermissionCapabilities(input.macPermissions) : {}),
+  };
+  const runtimeJson = JSON.stringify(runtime);
+  const mergeRuntime = Object.keys(runtime).length > 0;
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -61514,10 +61522,10 @@ export async function setEnrollmentDisplayState(
         .set({
           hasDisplay: input.hasDisplay,
           desktopUnavailableReason: input.desktopUnavailableReason,
-          ...(input.runtimeDesktop !== undefined
+          ...(mergeRuntime
             ? {
                 agentCapabilities: sql`coalesce(${schema.enrollments.agentCapabilities}, '{}'::jsonb)
-                  || jsonb_build_object('desktop', ${input.runtimeDesktop}::boolean)`,
+                  || ${runtimeJson}::jsonb`,
               }
             : {}),
           updatedAt: new Date(),
@@ -61539,9 +61547,9 @@ export async function setEnrollmentDisplayState(
             or(
               ne(schema.enrollments.hasDisplay, input.hasDisplay),
               sql`${schema.enrollments.desktopUnavailableReason} IS DISTINCT FROM ${input.desktopUnavailableReason}`,
-              ...(input.runtimeDesktop !== undefined
+              ...(mergeRuntime
                 ? [
-                    sql`${schema.enrollments.agentCapabilities}->'desktop' IS DISTINCT FROM to_jsonb(${input.runtimeDesktop}::boolean)`,
+                    sql`not (coalesce(${schema.enrollments.agentCapabilities}, '{}'::jsonb) @> ${runtimeJson}::jsonb)`,
                   ]
                 : []),
             ),
@@ -61549,6 +61557,106 @@ export async function setEnrollmentDisplayState(
         )
         .returning({ id: schema.enrollments.id });
       return { updated: rows.length > 0 };
+    },
+  );
+}
+
+/** The three macOS desktop permissions a Mac agent reports. */
+export type EnrollmentMacPermissions = {
+  screenRecording: boolean;
+  accessibility: boolean;
+  inputMonitoring: boolean;
+};
+
+const MAC_PERMISSION_CAPABILITY_KEYS = {
+  screenRecording: "macScreenRecording",
+  accessibility: "macAccessibility",
+  inputMonitoring: "macInputMonitoring",
+} as const;
+
+/** Runtime-capability keys under which a Mac's permission snapshot is stored. */
+export function enrollmentMacPermissionCapabilities(
+  permissions: EnrollmentMacPermissions,
+): Record<string, boolean> {
+  return {
+    [MAC_PERMISSION_CAPABILITY_KEYS.screenRecording]: permissions.screenRecording,
+    [MAC_PERMISSION_CAPABILITY_KEYS.accessibility]: permissions.accessibility,
+    [MAC_PERMISSION_CAPABILITY_KEYS.inputMonitoring]: permissions.inputMonitoring,
+  };
+}
+
+/** The stored Mac permission snapshot, or null when the agent never reported one. */
+export function enrollmentMacPermissions(
+  capabilities: Record<string, boolean> | null | undefined,
+): EnrollmentMacPermissions | null {
+  const read = (key: string) => capabilities?.[key];
+  const screenRecording = read(MAC_PERMISSION_CAPABILITY_KEYS.screenRecording);
+  const accessibility = read(MAC_PERMISSION_CAPABILITY_KEYS.accessibility);
+  const inputMonitoring = read(MAC_PERMISSION_CAPABILITY_KEYS.inputMonitoring);
+  if (
+    typeof screenRecording !== "boolean" ||
+    typeof accessibility !== "boolean" ||
+    typeof inputMonitoring !== "boolean"
+  ) {
+    return null;
+  }
+  return { screenRecording, accessibility, inputMonitoring };
+}
+
+/**
+ * Allow screen control on one active enrollment, in place: same id, scope,
+ * owner and credential generation. The machine's next credential renewal (the
+ * control plane requests one immediately when it is online) carries the
+ * consent. Only the screen-control bit changes, and the change is audited with
+ * the actor (a person or an agent attempt acting for one). `active` is false
+ * when the enrollment is gone or no longer active.
+ */
+export async function allowEnrollmentScreenControl(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+    subjectId: string | null;
+    sessionId?: string | null;
+    attemptId?: string | null;
+  },
+): Promise<{ updated: boolean; active: boolean }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const target = and(
+        eq(schema.enrollments.workspaceId, input.workspaceId),
+        eq(schema.enrollments.id, input.enrollmentId),
+        eq(schema.enrollments.status, "active"),
+      );
+      const rows = await scopedDb
+        .update(schema.enrollments)
+        .set({ allowScreenControl: true, updatedAt: new Date() })
+        .where(and(target, eq(schema.enrollments.allowScreenControl, false)))
+        .returning({ id: schema.enrollments.id });
+      if (rows.length === 0) {
+        const [current] = await scopedDb
+          .select({ id: schema.enrollments.id })
+          .from(schema.enrollments)
+          .where(target)
+          .limit(1);
+        return { updated: false, active: current !== undefined };
+      }
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        action: "connected_machine.screen_control.allowed",
+        targetType: "enrollment",
+        targetId: input.enrollmentId,
+        metadata: {
+          ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+          ...(input.attemptId ? { attemptId: input.attemptId } : {}),
+        },
+      });
+      return { updated: true, active: true };
     },
   );
 }

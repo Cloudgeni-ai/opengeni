@@ -40,7 +40,7 @@ afterAll(async () => {
 }, 180_000);
 const fixture = (human = true) => ownerlessRefreshFixture({ admin: shared.admin, client }, human);
 
-describe.skipIf(!real)("ownerless shared Codex refresh after 0699", () => {
+describe.skipIf(!real)("ownerless shared Codex refresh after 0700", () => {
   for (const human of [false, true]) {
     test(`${human ? "person" : "service"}-initiated ownerless refresh persists once without personal authority`, async () => {
       const state = await fixture(human);

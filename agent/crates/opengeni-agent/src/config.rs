@@ -405,6 +405,31 @@ fn validate_connection(path: &Path, connection: &StoredConnection) -> Result<(),
     Ok(())
 }
 
+/// Reads one connection file by its id, without legacy migration. `None` when
+/// that connection no longer exists (disconnected or replaced).
+pub fn load_connection(connection_id: &str) -> Result<Option<StoredConnection>, ConfigError> {
+    if connection_id.is_empty()
+        || !connection_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Ok(None);
+    }
+    let path = connections_dir()?.join(format!("{connection_id}.json"));
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(ConfigError::io(&path, error)),
+    };
+    let connection: StoredConnection =
+        serde_json::from_slice(&bytes).map_err(|source| ConfigError::Parse {
+            path: path.clone(),
+            source,
+        })?;
+    validate_connection(&path, &connection)?;
+    Ok(Some(connection))
+}
+
 /// Finds one configured deployment/workspace connection.
 pub fn find_connection(
     api_url: &str,
@@ -653,7 +678,7 @@ fn restrict_permissions(_path: &Path) -> Result<(), ConfigError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::{Mutex, MutexGuard};
 
@@ -667,7 +692,7 @@ mod tests {
     /// Points the config dir at a fresh temp dir for the duration of the test,
     /// returning both the env-serialization guard and the temp-dir guard so they
     /// outlive the test body.
-    fn with_temp_config() -> (MutexGuard<'static, ()>, tempfile::TempDir) {
+    pub(crate) fn with_temp_config() -> (MutexGuard<'static, ()>, tempfile::TempDir) {
         let lock = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);

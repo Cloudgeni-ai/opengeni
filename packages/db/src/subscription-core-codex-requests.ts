@@ -172,12 +172,13 @@ async function reserveTurnRequest(
         and status = 'running' for share`,
     );
     if (!locked.length) throw new SubscriptionCoreCodexLeaseLostError();
-    // The fence blocks automatic replay inside one execution: a replacement
-    // attempt after a worker loss, or a resumed generation (approval or
-    // capacity), never treats an ambiguous earlier request as settled. A
-    // failed turn reruns only through an explicit Retry, which claims a new
-    // generation; requests whose earlier-generation attempt closed as failed
-    // were already surfaced as that failure and do not block the retry.
+    // The fence blocks replay of an ambiguous request: a resumed generation
+    // (approval or capacity) or an attempt without a closed record never
+    // treats an earlier unresolved request as settled. An earlier-generation
+    // attempt that closed as failed (rerun only through an explicit Retry) or
+    // as recoverable (worker shutdown, worker loss, lost lease) can no longer
+    // write, so its response is never consumed and does not block the new
+    // generation. The request rows keep their outcome.
     const [prior] = await rawRows<{ unresolved: boolean }>(
       tx,
       sql`select exists (
@@ -196,7 +197,8 @@ async function reserveTurnRequest(
             and attempt.session_id = request.session_id and attempt.turn_id = request.turn_id
             and attempt.id = request.attempt_id
             and attempt.execution_generation < ${request.executionGeneration}
-            and attempt.state = 'closed' and attempt.outcome = 'failed')
+            and attempt.state = 'closed'
+            and attempt.outcome in ('failed', 'interrupted_recoverable', 'lease_lost_recoverable'))
     ) as unresolved`,
     );
     if (operationKind === "model" && prior?.unresolved)

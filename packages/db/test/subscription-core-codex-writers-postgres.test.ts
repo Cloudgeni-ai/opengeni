@@ -1459,6 +1459,26 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     ).rejects.toBeInstanceOf(SubscriptionCoreCodexRequestOutcomeUnknownError);
     await shared!.admin`update subscription_operation_leases set request_outcome = 'refused'
       where operation_id = ${pausedEarlier}::uuid`;
+    // Worker shutdown, worker loss and a lost lease close the attempt as
+    // recoverable and dispatch a replacement in a new generation. The closed
+    // attempt is fenced from writing, so its ambiguous response can never be
+    // consumed: the replacement's new request is not a replay and must not
+    // fail the turn. The earlier request keeps its unknown outcome.
+    for (const outcome of ["interrupted_recoverable", "lease_lost_recoverable"]) {
+      const interrupted = await earlierAttempt(outcome);
+      const afterRecovery = await reserveSubscriptionCoreCodexRequest(client!.db, identity, ref, {
+        ...request,
+        requestId: crypto.randomUUID(),
+      }).then(
+        () => "admitted",
+        (error: unknown) => String((error as { cause?: unknown } | null)?.cause ?? error),
+      );
+      expect({ outcome, afterRecovery }).toEqual({ outcome, afterRecovery: "admitted" });
+      const [unchanged] = await shared!
+        .admin`select request_outcome from subscription_operation_leases
+        where operation_id = ${interrupted}::uuid`;
+      expect(unchanged).toMatchObject({ request_outcome: "unknown" });
+    }
     expect((await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome).toBe("removed");
     expect(await row(connected.id)).toBeNull();
     const [scrubbed] = await shared!.admin`select credential_encrypted, status, allocator_enabled,
@@ -1484,9 +1504,10 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     const [leases] = await shared!.admin`select
       (select count(*) from subscription_leases where connection_id = ${connected.id}::uuid)::int as chat,
       (select count(*) from subscription_operation_leases where connection_id = ${connected.id}::uuid)::int as operation`;
-    // Three request records plus the two earlier-generation fixtures and the
-    // admitted retry request above; disconnect deletes none of them.
-    expect(leases).toEqual({ chat: 1, operation: 6 });
+    // Three request records, the four earlier-generation fixtures, the admitted
+    // retry request and the two admitted recovery requests above; disconnect
+    // deletes none of them.
+    expect(leases).toEqual({ chat: 1, operation: 10 });
     const [unknown] = await shared!.admin`select request_outcome, request_observed_at
       from subscription_operation_leases where operation_id = ${reserved.operationId}::uuid`;
     expect(unknown).toEqual({

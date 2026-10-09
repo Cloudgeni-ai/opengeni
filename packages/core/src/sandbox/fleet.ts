@@ -827,7 +827,7 @@ export type RunOnOptions = {
 };
 
 function runOnOperationAdmission(
-  services: FleetServices,
+  services: Pick<FleetServices, "settings" | "bus">,
   enrollment: EnrollmentRecord | null,
 ): SelfhostedOperationAdmission | null {
   if (!enrollment?.connectionInstanceId || !enrollment.workspaceRoot) return null;
@@ -954,6 +954,56 @@ export async function executeRunOnSelfhostedMachine(
     // release replay/output retention instead of waiting for TTL cleanup.
     await session.finalizeOpStreamOps().catch(() => undefined);
   }
+}
+
+/**
+ * Run one short command on a specific enrolled machine for an action a person
+ * or agent took outside a session's routing (opening a macOS settings pane).
+ * The caller has already authorized the actor for this enrollment; `access` is
+ * the same scope the caller used to read it. `execTimeoutMs` bounds the command.
+ */
+export async function runOnEnrollmentDirect(
+  services: Pick<FleetServices, "db" | "settings" | "bus">,
+  input: {
+    access: string | { accountId: string; workspaceId: string; subjectId: string };
+    enrollmentId: string;
+    /** Display label for results (machine name or sandbox id). */
+    target: string;
+    cmd: string;
+    execTimeoutMs: number;
+  },
+): Promise<RunOnResult> {
+  const live = await getLiveEnrollmentConnection(services.db, input.access, input.enrollmentId);
+  if (!live || live.status !== "active" || !live.connectionInstanceId || !live.workspaceRoot) {
+    return { target: input.target, kind: "exec", ok: false, reason: "machine is not connected" };
+  }
+  return await executeRunOnSelfhostedMachine(
+    {
+      workspaceId: live.workspaceId,
+      agentId: input.enrollmentId,
+      connectionInstanceId: live.connectionInstanceId,
+      workspaceRoot: live.workspaceRoot,
+      controlRpc: controlRpc(services.bus),
+      relay: relayConfigFromSettings(services.settings),
+      controlTimeoutMs: services.settings.sandboxSelfhostedControlTimeoutMs,
+      execTimeoutMs: input.execTimeoutMs,
+      operationResourcePolicy: live.operationPolicy,
+      operationResourcePolicySupported: live.agentCapabilities.operationResourcePolicy === true,
+      operationCpuQuotaSupported: live.agentCapabilities.operationCpuQuota === true,
+      resolveOperationAdmission: async () => {
+        try {
+          return runOnOperationAdmission(
+            services,
+            await getLiveEnrollmentConnection(services.db, input.access, input.enrollmentId),
+          );
+        } catch {
+          return null;
+        }
+      },
+    },
+    input.target,
+    { kind: "exec", cmd: input.cmd },
+  );
 }
 
 /**

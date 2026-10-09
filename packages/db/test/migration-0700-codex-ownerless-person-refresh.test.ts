@@ -12,7 +12,7 @@ import {
   ownerlessRefreshSettings,
 } from "./fixtures/ownerless-codex-refresh";
 
-const migration = "0699_codex_ownerless_person_refresh.sql";
+const migration = "0700_codex_ownerless_person_refresh.sql";
 const signature =
   "opengeni_private.begin_subscription_codex_refresh(uuid,uuid,uuid,uuid,text,text,uuid,text,bigint)";
 const oldGuard =
@@ -20,7 +20,7 @@ const oldGuard =
 const newGuard = "authorized := opengeni_private.authorize_subscription_ownerless_session_access(";
 
 test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
-  "0699 rolls forward under the non-bypass owner, keeps live app readiness/posture and repairs only the ownerless refresh guard",
+  "0700 rolls forward under the non-bypass owner, keeps live app readiness/posture and repairs only the ownerless refresh guard",
   async () => {
     const database = await acquireOwnerMigratedTestDatabase("ownerless-refresh-0699-upgrade");
     if (!database) throw new Error("Real PostgreSQL required");

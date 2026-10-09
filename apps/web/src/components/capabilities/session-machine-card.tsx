@@ -8,11 +8,12 @@ import {
   CheckIcon,
   LaptopIcon,
   Loader2Icon,
+  MonitorIcon,
   PlusIcon,
   PuzzleIcon,
   ServerIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { apiBaseUrl } from "@/api";
 import { MachineConnectCommand } from "@/components/machines/machine-connect-command";
@@ -396,6 +397,16 @@ export function SessionMachineCapabilityCard({
                   </RowList>
                 ) : null}
                 {chromeMachine ? (
+                  <ScreenControlStep
+                    key={chromeMachine.sandboxId}
+                    machine={chromeMachine}
+                    workspaceId={workspaceId}
+                    canManage={fleet.canManage}
+                    refresh={fleet.refresh}
+                    onReconnect={openSetup}
+                  />
+                ) : null}
+                {chromeMachine ? (
                   <ChromeStep chrome={chrome} machineName={machineDisplayName(chromeMachine)} />
                 ) : null}
                 {connectAnother ? (
@@ -560,6 +571,248 @@ function useAttachedChrome(workspaceId: string, enrollmentId: string | null): Ch
 
   const watch = useCallback(() => setWatchSince(Date.now()), []);
   return { connected, watch };
+}
+
+/** How long to keep checking for the new consent, or a granted Mac permission. */
+const SCREEN_CONTROL_WATCH_MS = 90_000;
+const MAC_PERMISSION_WATCH_MS = 3 * 60_000;
+const SCREEN_CONTROL_POLL_MS = 3_000;
+
+type MacPermissionPane = "screen_recording" | "accessibility" | "input_monitoring";
+type MacPermissions = NonNullable<NonNullable<MachineView["runtime"]>["macPermissions"]>;
+
+/** The order the agent needs them in: seeing the screen first, then input. */
+const MAC_PERMISSIONS: ReadonlyArray<{
+  pane: MacPermissionPane;
+  key: keyof MacPermissions;
+  label: string;
+}> = [
+  { pane: "screen_recording", key: "screenRecording", label: "Screen Recording" },
+  { pane: "accessibility", key: "accessibility", label: "Accessibility" },
+  { pane: "input_monitoring", key: "inputMonitoring", label: "Input Monitoring" },
+];
+
+function isOnline(machine: MachineView): boolean {
+  return (
+    machine.state === "online" ||
+    machine.state === "consent_required" ||
+    machine.state === "display_unavailable"
+  );
+}
+
+/**
+ * Screen control for the machine with a screen. Turning it on changes this
+ * machine in place (agents can do the same themselves); the step then follows
+ * what the machine reports: the agent's own consent, then on a Mac each of the
+ * three OS permissions, one System Settings pane at a time.
+ */
+function ScreenControlStep({
+  machine,
+  workspaceId,
+  canManage,
+  refresh,
+  onReconnect,
+}: {
+  machine: MachineView;
+  workspaceId: string;
+  canManage: boolean;
+  refresh: () => Promise<void>;
+  /** Open the connect command, for a connection too old to change in place. */
+  onReconnect: () => void;
+}) {
+  const { client } = useAppContext();
+  const stepRef = useRef<HTMLDivElement>(null);
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [opened, setOpened] = useState<MacPermissionPane | null>(null);
+  const [watchUntil, setWatchUntil] = useState(0);
+  const [stalled, setStalled] = useState(false);
+  const [reconnect, setReconnect] = useState(false);
+
+  const online = isOnline(machine);
+  const runtime = machine.runtime;
+  const allowed = machine.allowScreenControl;
+  // Older reports cannot say whether the agent holds the consent; trust the row.
+  const applied = allowed && (runtime?.capabilities.screenControl ?? true);
+  const renewable = runtime?.capabilities.credentialRenew === true;
+  const mac = machine.os === "macos";
+  const permissions = mac ? (runtime?.macPermissions ?? null) : null;
+  const reason = machine.desktopUnavailableReason?.trim() || null;
+  const missing = permissions
+    ? (MAC_PERMISSIONS.find((step) => !permissions[step.key]) ?? null)
+    : mac && reason !== null && /screen recording/i.test(reason)
+      ? MAC_PERMISSIONS[0]!
+      : null;
+  const updating = runtime?.versionState === "updating";
+  const waiting =
+    (allowed && !applied && online && (renewable || updating) && !reconnect) || opened !== null;
+
+  // Also when the card opens on a change already underway (a reload, or an
+  // agent turned it on): watch for a while, then offer Try again.
+  useEffect(() => {
+    if (waiting && watchUntil === 0) setWatchUntil(Date.now() + SCREEN_CONTROL_WATCH_MS);
+  }, [waiting, watchUntil]);
+
+  // Re-read the machine while a change is on its way, for a bounded time.
+  useEffect(() => {
+    if (!waiting || watchUntil === 0) return;
+    const timer = window.setInterval(() => {
+      if (Date.now() > watchUntil) {
+        window.clearInterval(timer);
+        setStalled(true);
+        return;
+      }
+      void refreshRef.current().catch(() => {});
+    }, SCREEN_CONTROL_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [waiting, watchUntil]);
+
+  async function turnOn() {
+    if (busy || !machine.enrollmentId) return;
+    setBusy(true);
+    setNote(null);
+    setStalled(false);
+    try {
+      const result = await client.enableMachineScreenControl(workspaceId, machine.enrollmentId);
+      if (result.reason === "renewal_failed") setNote(result.message);
+      setReconnect(result.reason === "reconnect_required");
+      setWatchUntil(Date.now() + SCREEN_CONTROL_WATCH_MS);
+      await refreshRef.current().catch(() => {});
+    } catch (failure) {
+      setNote(
+        failure instanceof OpenGeniApiError && failure.status === 403
+          ? "Only an organization admin can turn this on."
+          : userErrorText(failure, "Try again."),
+      );
+    } finally {
+      setBusy(false);
+      focusIfIdle(stepRef.current);
+    }
+  }
+
+  async function updateAgent() {
+    if (busy || !machine.enrollmentId) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      await client.updateMachineAgent(workspaceId, machine.enrollmentId);
+      setStalled(false);
+      setWatchUntil(Date.now() + MAC_PERMISSION_WATCH_MS);
+      await refreshRef.current().catch(() => {});
+    } catch (failure) {
+      setNote(userErrorText(failure, "Try again."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openPane(pane: MacPermissionPane) {
+    if (busy || !machine.enrollmentId) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      const result = await client.openMachinePrivacySettings(workspaceId, machine.enrollmentId, {
+        pane,
+      });
+      if (result.opened) {
+        setOpened(pane);
+        setStalled(false);
+        setWatchUntil(Date.now() + MAC_PERMISSION_WATCH_MS);
+      } else {
+        setNote(result.message);
+      }
+    } catch (failure) {
+      setNote(userErrorText(failure, "Try again."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const button = (label: string, onClick: () => void) => (
+    <RowButton aria-disabled={busy || undefined} aria-busy={busy || undefined} onClick={onClick}>
+      {busy ? <Loader2Icon aria-hidden className="animate-spin" /> : null}
+      {label}
+    </RowButton>
+  );
+  const done = (
+    <span className="inline-flex items-center gap-1 text-xs font-medium text-status-idle">
+      <CheckIcon aria-hidden className="size-3.5" />
+      On
+    </span>
+  );
+
+  // The row stays one short line like its neighbours; anything the person has
+  // to do on the machine goes in the wrapping line under it.
+  let description: string;
+  let hint: string | null = null;
+  let control: ReactNode = null;
+  if (!allowed) {
+    description = canManage
+      ? "Let agents see and use this screen"
+      : "Ask a workspace admin to turn it on";
+    if (canManage) control = button(busy ? "Turning on…" : "Turn on", () => void turnOn());
+  } else if (!applied) {
+    // The step only shows for a reachable machine.
+    if (reconnect) {
+      description = "Needs a fresh connection";
+      hint = "Run the connect command on this machine again, with screen control on.";
+      if (canManage) control = button("Connect again", onReconnect);
+    } else if (updating) {
+      description = "Updating the agent…";
+    } else if (!renewable) {
+      description = "Waiting for an agent update";
+      hint = "It turns on by itself once this machine's agent is updated.";
+      if (canManage && !runtime?.updateBlockedReason) {
+        control = button(busy ? "Updating…" : "Update agent", () => void updateAgent());
+      }
+    } else if (stalled || note) {
+      description = "Not on yet";
+      if (canManage) control = button(busy ? "Trying…" : "Try again", () => void turnOn());
+    } else {
+      description = "Turning on…";
+    }
+  } else if (missing) {
+    const shown = opened === missing.pane;
+    // The row stays short at any width; the hint names the permission.
+    description = "Mac permission needed";
+    hint = shown
+      ? `On the Mac, switch on OpenGeni under ${missing.label}.${
+          missing.pane === "screen_recording" ? " Choose Quit & Reopen if macOS asks." : ""
+        }`
+      : `Allow ${missing.label} for OpenGeni on this Mac.`;
+    if (canManage && online) {
+      control = button(shown ? "Open again" : "Open settings", () => void openPane(missing.pane));
+    }
+  } else if (reason) {
+    description = reason;
+  } else {
+    description = "Agents can see and use this screen";
+    control = done;
+  }
+  const notice = note ?? hint;
+
+  return (
+    <div data-slot="screen-control" ref={stepRef} tabIndex={-1} className="space-y-2 outline-none">
+      <RowList label="Screen control" flush>
+        <ListRow
+          leading={<LogoTile icon={<MonitorIcon />} />}
+          title="Screen control"
+          description={description}
+          control={control}
+        />
+      </RowList>
+      <span className="sr-only" aria-live="polite">
+        {notice ? `${description}. ${notice}` : description}
+      </span>
+      {notice ? (
+        <Notice tone="waiting" className="text-xs">
+          {notice}
+        </Notice>
+      ) : null}
+    </div>
+  );
 }
 
 function ChromeStep({ chrome, machineName }: { chrome: ChromeState; machineName: string }) {
