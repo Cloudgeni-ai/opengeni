@@ -1701,7 +1701,9 @@ export class BrowserControlServer {
       let sent = 0;
       for await (const frame of subscription) {
         if (data.closed) break;
-        if (socket.send(encodeBrowserFrameMessage(frame), false) < 0) {
+        // Bun returns -1 when it queued the frame under backpressure. The
+        // socket's 32 MiB backpressure limit bounds a genuinely slow viewer.
+        if (socket.send(encodeBrowserFrameMessage(frame), false) === 0) {
           socket.close(1013, "frame consumer is too slow");
           break;
         }
@@ -1757,7 +1759,9 @@ export class BrowserControlServer {
       data.subscription = subscription;
       for await (const frame of subscription) {
         if (data.closed) break;
-        if (socket.send(encodeComputerFrameMessage(frame), false) < 0) {
+        // A -1 frame is queued, not dropped. Keep the producer alive so the
+        // relay can receive it when the socket drains.
+        if (socket.send(encodeComputerFrameMessage(frame), false) === 0) {
           socket.close(1013, "frame consumer is too slow");
           break;
         }
