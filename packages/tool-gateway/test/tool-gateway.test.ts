@@ -454,6 +454,27 @@ describe("ToolGateway argument validation errors", () => {
     return error as ToolGatewayInputValidationError;
   }
 
+  test("enforces remote patterns that are invalid in Unicode mode instead of failing the catalog", async () => {
+    // Patterns from remote servers: valid ECMAScript, but `\-` and `\#` outside
+    // a class are invalid in Unicode mode. One that no syntax accepts, too.
+    const { callModel, executed } = gatewayFor({
+      type: "object",
+      properties: {
+        date: { type: "string", pattern: "^\\d{4}\\-\\d{2}$" },
+        tag: { type: "string", pattern: "^\\#\\w+$" },
+        note: { type: "string", pattern: "(" },
+      },
+      patternProperties: { "^x\\-": { type: "number" } },
+    });
+    const valid = { date: "2026-10", tag: "#groceries", note: "anything", "x-count": 2 };
+    await expect(callModel(valid)).resolves.toMatchObject({
+      content: [{ type: "text", text: "ok" }],
+    });
+    expect(executed).toEqual([valid]);
+    const error = await rejection(callModel({ date: "October", "x-count": "two" }));
+    expect(error.issues.map((issue) => issue.path)).toEqual(["date", "x-count"]);
+  });
+
   test("names every missing required property and executes the corrected call", async () => {
     const { callModel, executed } = gatewayFor(execSchema);
     const error = await rejection(callModel({ command: "search project-get" }));
