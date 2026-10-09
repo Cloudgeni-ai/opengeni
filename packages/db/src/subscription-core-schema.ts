@@ -338,7 +338,8 @@ export const subscriptionOperationLeases = pgTable(
       .where(sql`${table.sessionId} is not null`),
     operationKindValid: check(
       "subscription_operation_leases_kind_chk",
-      sql`${table.operationKind} in ('image', 'realtime', 'transcription', 'model', 'credential_request', 'apps')`,
+      sql`${table.operationKind} in ('image', 'realtime', 'transcription', 'model', 'credential_request', 'apps')
+        and (${table.operationKind} in ('image', 'realtime', 'transcription') or ${table.provider} = 'codex')`,
     ),
     requestIdentity: uniqueIndex("subscription_operation_request_identity_uq")
       .on(table.accountId, table.requestId, table.transportAttempt)

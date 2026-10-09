@@ -1,16 +1,13 @@
 /**
  * Pre-fix characterization for graceful disconnect. These assertions deliberately
- * describe the legacy defects, NOT the desired drain contract. Replace the two
- * defect assertions with the design's positive drain assertions when the stable
- * shared-core operation/settlement seam is integrated. Fake credentials only.
+ * describe the legacy defects, NOT the desired drain contract. This deliberately
+ * pre-cutover fixture complements the positive shared-core request/drain tests;
+ * it must not run those historical assertions on the cut-over runtime. Fake credentials only.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { sql } from "drizzle-orm";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import postgres from "postgres";
+import { acquireBlankTestDatabase, testSettings, type SharedTestDatabase } from "@opengeni/testing";
 import {
   createDb,
   createSession,
@@ -22,6 +19,8 @@ import {
   withSessionActivityRlsContext,
   type DbClient,
 } from "../src";
+import { migrate } from "../src/migrate";
+import { provisionRoles } from "../src/provision-roles";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
@@ -129,8 +128,32 @@ const describeRealDatabase =
 
 describeRealDatabase("legacy Codex disconnect: known pre-fix behavior", () => {
   beforeAll(async () => {
-    shared = await acquireSharedTestDatabase("codex-disconnect-characterization");
-    if (!shared) throw new Error("Disconnect characterization requires real PostgreSQL");
+    const owned = await acquireBlankTestDatabase("codex-disconnect-characterization");
+    if (!owned) throw new Error("Disconnect characterization requires real PostgreSQL");
+    const appUrl = new URL(owned.databaseUrl);
+    appUrl.username = "opengeni_app";
+    appUrl.password = owned.appPassword;
+    shared = {
+      admin: postgres(owned.databaseUrl, { max: 4 }),
+      adminUrl: owned.databaseUrl,
+      appUrl: appUrl.toString(),
+      release: async () => {
+        await shared!.admin.end();
+        await owned.release();
+      },
+    };
+    const owner = postgres(owned.databaseUrl, { max: 1 });
+    try {
+      // This is a historical protocol fixture, not a supported rollback path.
+      // Preserve the original superuser-owned migration baseline here; the
+      // positive core suite separately exercises the NOBYPASSRLS owner posture.
+      await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
+      await owner`insert into schema_migrations(name) values ('0685_subscription_core_codex_cutover.sql')`;
+      await migrate(owned.databaseUrl);
+      await provisionRoles(owned.databaseUrl, { appPassword: owned.appPassword });
+    } finally {
+      await owner.end();
+    }
     client = createDb(shared.appUrl, { max: 4 });
   }, 180_000);
 

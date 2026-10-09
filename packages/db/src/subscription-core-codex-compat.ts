@@ -319,11 +319,16 @@ export async function projectSubscriptionCoreCodexWorkspace(
       : workspaceAvailable
         ? "workspace"
         : "organization";
-  const primaryConnectionId = await readPrimaryConnectionId(
+  let primaryConnectionId = await readPrimaryConnectionId(
     tx,
     input.accountId,
     settings.rotationSource === "workspace" ? input.workspaceId : null,
   );
+  // Shared rows were already filtered for lifecycle and workspace scope above.
+  // Personal primaries are checked only after the owner-only reader joins.
+  if (workspaceKind === "shared" && !rows.some((row) => row.id === primaryConnectionId)) {
+    primaryConnectionId = null;
+  }
   // Only the effective pool is listed (legacy parity): nothing while Codex is
   // disabled here, only workspace-classified connections for the workspace
   // source and only organization-classified ones for the organization

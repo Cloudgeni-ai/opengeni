@@ -25,6 +25,7 @@ import {
   SubscriptionCoreCodexLeaseLostError,
   reserveSubscriptionCoreCodexAppsRequest,
   settleSubscriptionCoreCodexAppsRequest,
+  designateSubscriptionCoreCodexApps,
   enqueueSessionTurn,
   ensureManagedAccessForUser,
   fenceSubscriptionCoreCodexResetCredit,
@@ -341,6 +342,127 @@ async function insertLease(input: {
 }
 
 describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
+  test("Codex Apps admission does not grant actorless Claude or xAI operation authority", async () => {
+    const org = await organization();
+    for (const provider of ["claude", "xai"]) {
+      const [source] = await shared!.admin<{ id: string }[]>`insert into subscription_connections(
+        account_id, provider, credential_encrypted, ownership, scope_kind)
+        values (${org.accountId}::uuid, ${provider}, 'synthetic-nonsecret', 'shared', 'organization') returning id::text as id`;
+      await expect(
+        withRlsContext(
+          client!.db,
+          { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+          async (tx) => {
+            await tx.execute(sql`select set_config('opengeni.subject_id', '', true),
+          set_config('opengeni.initiating_human_subject_id', '', true)`);
+            await tx.execute(sql`insert into subscription_operation_leases(account_id, workspace_id,
+          operation_id, attempt_id, operation_kind, provider, connection_id, holder_id, generation, leased_until)
+          values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${crypto.randomUUID()}::uuid,
+            ${crypto.randomUUID()}::uuid, 'apps', ${provider}, ${source!.id}::uuid, 'actorless', 1,
+            now() + interval '1 minute')`);
+          },
+        ),
+      ).rejects.toThrow();
+    }
+  });
+
+  test("shared-workspace projection clears disconnected local and inherited organization primaries", async () => {
+    for (const organizationScope of [false, true]) {
+      const org = await organization();
+      await setCutover(org.accountId, true);
+      const workspaceId = organizationScope ? null : org.sharedWorkspaceId;
+      const connected = await connect(org, org.ownerSubjectId, workspaceId, "primary-drain");
+      if (connected.kind !== "connected") throw new Error("connect failed");
+      await setSubscriptionCoreCodexPrimary(client!.db, {
+        accountId: org.accountId,
+        workspaceId,
+        subjectId: org.ownerSubjectId,
+        connectionId: connected.id,
+      });
+      const projection = () =>
+        getSubscriptionCoreCodexWorkspaceProjection(client!.db, {
+          accountId: org.accountId,
+          workspaceId: org.sharedWorkspaceId,
+          viewerSubjectId: org.ownerSubjectId,
+        });
+      expect((await projection()).rotation.activeCredentialId).toBe(connected.id);
+      expect((await disconnect(org, org.ownerSubjectId, workspaceId, connected.id)).outcome).toBe(
+        "removed",
+      );
+      const removed = await projection();
+      expect(removed.rotation.activeCredentialId).toBeNull();
+      expect(removed.accounts.some((account) => account.id === connected.id)).toBe(false);
+    }
+  });
+
+  test("Apps designation versus disconnect is serialized in both lock orders", async () => {
+    for (const first of ["designate", "disconnect"] as const) {
+      const org = await organization();
+      await setCutover(org.accountId, true);
+      const connected = await connect(org, org.ownerSubjectId, null, `designation-race-${first}`);
+      if (connected.kind !== "connected") throw new Error("connect failed");
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const designate = (db = client!.db) =>
+        designateSubscriptionCoreCodexApps(db, {
+          accountId: org.accountId,
+          workspaceId: org.sharedWorkspaceId,
+          subjectId: org.ownerSubjectId,
+          connectionId: connected.id,
+          expectedVersion: 0,
+        });
+      const remove = (db = client!.db) =>
+        disconnectSubscriptionCoreCodexConnection(db, {
+          accountId: org.accountId,
+          workspaceId: null,
+          subjectId: org.ownerSubjectId,
+          connectionId: connected.id,
+        });
+      const holding = withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+        withRlsContext(
+          client!.db,
+          {
+            accountId: org.accountId,
+            workspaceId: first === "designate" ? org.sharedWorkspaceId : null,
+          },
+          async (tx) => {
+            if (first === "designate")
+              expect(await designate(tx)).toMatchObject({ kind: "updated" });
+            else expect(await remove(tx)).toMatchObject({ outcome: "removed" });
+            entered.resolve();
+            await release.promise;
+          },
+        ),
+      );
+      void holding.catch(entered.reject);
+      await entered.promise;
+      const waiting = withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, async () =>
+        first === "designate" ? await remove() : await designate(),
+      );
+      for (let tries = 0; tries < 100; tries++) {
+        const [locks] = await shared!.admin`select count(*)::int as pending from pg_locks
+          where locktype = 'advisory' and not granted and database = (select oid from pg_database where datname = current_database())`;
+        if (locks!.pending > 0) break;
+        if (tries === 99) {
+          release.resolve();
+          throw new Error("designation did not contend on source lock");
+        }
+        await Bun.sleep(5);
+      }
+      release.resolve();
+      await holding;
+      const result = await waiting;
+      if (first === "designate") expect(result).toMatchObject({ outcome: "removed" });
+      else expect(result).toMatchObject({ kind: "forbidden" });
+      expect(
+        Array.from(
+          await shared!.admin`select connection_id from subscription_apps_designations
+        where account_id = ${org.accountId}::uuid`,
+        ),
+      ).toEqual([]);
+    }
+  });
+
   test(
     "disconnect clears the exact Apps designation in another workspace",
     disconnectDesignationCase,

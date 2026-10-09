@@ -38,7 +38,8 @@ BEGIN
       AND pg_get_constraintdef(oid) LIKE '%operation_kind%'
   LOOP EXECUTE format('ALTER TABLE subscription_operation_leases DROP CONSTRAINT %I', item.conname); END LOOP;
   ALTER TABLE subscription_operation_leases ADD CONSTRAINT subscription_operation_leases_kind_chk
-    CHECK (operation_kind IN ('image', 'realtime', 'transcription', 'model', 'credential_request', 'apps'));
+    CHECK (operation_kind IN ('image', 'realtime', 'transcription', 'model', 'credential_request', 'apps')
+      AND (operation_kind IN ('image', 'realtime', 'transcription') OR provider = 'codex'));
   ALTER TABLE subscription_operation_leases ADD CONSTRAINT subscription_operation_leases_reference_chk
     CHECK ((turn_id IS NULL OR session_id IS NOT NULL)
       AND (session_id IS NOT NULL OR (turn_id IS NULL AND operation_kind IN ('transcription', 'credential_request', 'apps')))
@@ -51,6 +52,7 @@ BEGIN
     RAISE EXCEPTION 'operation authority source changed';
   END IF;
   EXECUTE replace(definition, anchor, $new$IF NEW.operation_kind NOT IN ('transcription', 'credential_request', 'apps')
+          OR (NEW.operation_kind = 'apps' AND NEW.provider <> 'codex')
           OR (NEW.operation_kind <> 'apps' AND (
             nullif(current_setting('opengeni.subject_id', true), '') IS NULL
             OR nullif(current_setting('opengeni.initiating_human_subject_id', true), '') IS NULL))$new$);
@@ -112,6 +114,28 @@ CREATE TRIGGER zz_subscription_operation_disconnect_admission
 CREATE TRIGGER zz_subscription_binding_disconnect_admission
   BEFORE INSERT OR UPDATE OF connection_id ON subscription_session_bindings
   FOR EACH ROW EXECUTE FUNCTION opengeni_private.guard_subscription_disconnect_admission();
+
+-- The designation writer holds its workspace Apps lock before this source
+-- lock, matching request admission. Retaining history must not let a checked
+-- but not-yet-committed designation survive removal of its source.
+CREATE FUNCTION opengeni_private.guard_subscription_designation_disconnect()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT
+AS $body$
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('subscription-refresh:' || NEW.connection_id::text, 0));
+  IF NOT EXISTS (SELECT 1 FROM subscription_connections connection
+    WHERE connection.account_id = NEW.account_id AND connection.id = NEW.connection_id
+      AND connection.provider = 'codex' AND connection.disconnected_at IS NULL
+      AND connection.status = 'active') THEN
+    RAISE EXCEPTION 'Apps designation source is no longer available' USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END
+$body$;
+REVOKE ALL ON FUNCTION opengeni_private.guard_subscription_designation_disconnect() FROM PUBLIC;
+CREATE TRIGGER subscription_designation_disconnect_admission
+  BEFORE INSERT OR UPDATE OF connection_id ON subscription_apps_designations
+  FOR EACH ROW EXECUTE FUNCTION opengeni_private.guard_subscription_designation_disconnect();
 
 CREATE FUNCTION opengeni_private.guard_subscription_disconnect_history()
 RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog
