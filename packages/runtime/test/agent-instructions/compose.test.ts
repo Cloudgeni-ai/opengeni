@@ -183,6 +183,17 @@ describe("modular composer: module selection (AC12)", () => {
     });
   }
 
+  test("standing session attachments are not presented as new input", () => {
+    const composed = compose(allAgentCapabilities(), {
+      ...NO_RESOURCES,
+      managedSandbox: true,
+      attachments: true,
+    }).composed;
+    expect(composed).toContain(
+      "Files attached to the session stay mounted on every turn and may be old; treat one as part of the current request only when the latest message refers to it.",
+    );
+  });
+
   test("background-command guidance needs a sandbox or Connected Machine", () => {
     for (const capabilities of [allAgentCapabilities(), noneAgentCapabilities()]) {
       const detached = compose(capabilities, NO_RESOURCES).composed;
