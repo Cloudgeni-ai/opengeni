@@ -212,18 +212,18 @@ export function createCodexSubscriptionTranscriptionProvider(input: {
       mimeType,
       filename,
       workspaceId,
-      accountId,
+      accountId: organizationId,
       subjectId,
       requestId,
       signal,
     }) {
-      const disposition = await readCodexCutoverDisposition(input.db, accountId);
+      const disposition = await readCodexCutoverDisposition(input.db, organizationId);
       if (disposition === "maintenance") throw coreTranscriptionUnavailable();
       if (disposition === "core") {
         const response = await transcribeOnCore(
           { settings: input.settings, db: input.db, fetch: fetchImpl },
           {
-            accountId,
+            accountId: organizationId,
             workspaceId,
             subjectId,
             requestId,

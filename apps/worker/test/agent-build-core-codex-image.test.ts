@@ -14,7 +14,7 @@ afterEach(() => {
 
 // Execute the production builder with a mocked database and capture the
 // options it hands to the runtime; only the media image option is asserted.
-async function capturedImageGeneration(coreCodex: boolean) {
+async function capturedImageGeneration(coreCodex: boolean, coreLeaseGeneration: number | null = 1) {
   const settings: Settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
   const context = createTurnContext({ settings, cancellationRequestedAt: null });
   context.eventing.preparedTools = await prepareAgentTools(settings, [], {
@@ -114,6 +114,7 @@ async function capturedImageGeneration(coreCodex: boolean) {
     postToolPreparationStartedAt: performance.now(),
     trigger: { type: "user.message", payload: {} } as BuildTurnAgentDeps["trigger"],
   };
+  (deps as { leases?: unknown }).leases = { codex: { generation: coreLeaseGeneration } };
   await buildTurnAgent(deps as BuildTurnAgentDeps);
   expect(options).toHaveLength(1);
   return options[0]?.imageGeneration;
@@ -123,6 +124,10 @@ test("a legacy Codex turn funds image generation through its leased account", as
   expect(await capturedImageGeneration(false)).toMatchObject({ kind: "provider_adapter" });
 });
 
-test("a Codex turn placed by the shared core exposes no legacy-funded image tool", async () => {
-  expect(await capturedImageGeneration(true)).toBeUndefined();
+test("a Codex turn placed by the shared core funds image generation through core operation leases", async () => {
+  expect(await capturedImageGeneration(true)).toMatchObject({ kind: "provider_adapter" });
+});
+
+test("a core Codex turn without a held lease generation exposes no image tool", async () => {
+  expect(await capturedImageGeneration(true, null)).toBeUndefined();
 });

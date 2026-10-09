@@ -495,6 +495,8 @@ function credentialError(error: unknown): CodexRealtimeBrokerError {
 }
 
 function brokerProviderError(error: unknown): CodexRealtimeBrokerError {
+  // A core pre-dispatch fence refusal is already typed (legacy calls never raise one).
+  if (error instanceof CodexRealtimeBrokerError) return error;
   if (!(error instanceof CodexRealtimeError)) {
     return new CodexRealtimeBrokerError("network_error", "Codex realtime provider request failed");
   }

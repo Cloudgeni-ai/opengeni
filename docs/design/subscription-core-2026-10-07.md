@@ -1278,8 +1278,9 @@ nothing unless the account's Codex cutover is enabled.
   own bounded recheck, 1 minute doubling to 15) and is logged.
 - **Not served on the core yet** (typed `409 conflict` with
   `details.reason = subscription_core_route_unsupported`, no legacy state
-  read): live usage reads and refresh, the overview, reset-credit
-  prepare/redeem (PR 2c); connect start/poll, disconnect one or all (PR 3).
+  read): live usage reads and refresh (served by PR 2c), the overview and
+  reset-credit prepare/redeem (left to PR 3 by PR 2c); connect start/poll,
+  disconnect one or all (PR 3).
 
 Known gaps after PR 2b: personal connections are not listed in any account
 pool view (their rows are visible only inside the owner's exact accepted
@@ -1287,6 +1288,146 @@ turn), so a private session running on one shows its id in
 `currentSelection` but a null `currentAccount`; plan-entitlement cooldowns
 are not projected into `planExcludedModels`; the projections do not show the
 legacy plan-change history.
+
+##### PR 2c: compaction, media, transcription, realtime, usage and billing attribution (dormant)
+
+PR 2c (stacked on PR 2b) moves the remaining Codex consumers that need a
+connection-level credential outside the chat-turn lease. Everything is
+reached only with a Codex cutover row; without one the legacy code runs
+unchanged after at most one extra cutover-row read (transcription
+availability without an account in its context also reads the workspace row
+to find the account). A disabled row is maintenance: these consumers fail
+closed and read no legacy Codex table. Migration 0671 is rolling: one widened
+capability CHECK on the transaction-local capability table, `SECURITY
+DEFINER` routines that return nothing unless the account's Codex cutover is
+enabled, and one added branch in the operation-lease guard.
+
+- **Connection-level credential seam (0671).**
+  `read_subscription_codex_connection_credential` and
+  `begin/persist/fail_subscription_codex_connection_refresh` read and rotate
+  one Codex subscription connection for an explicit account/workspace
+  context. With an operation id they require the caller's exact live
+  `subscription_operation_leases` row (operation, attempt, holder,
+  generation, connection), read under the caller's own row-level security;
+  a stale generation, holder or attempt can neither read, renew, refresh nor
+  release. A turn-bound operation sees the connection through that exact
+  accepted turn's visibility (a personal connection only under the turn's
+  frozen v2 entry); a session-bound or sessionless operation, and a read
+  without an operation (usage), are limited to shared organization- or
+  workspace-scoped connections in the workspace's scope. Refresh takes the
+  same advisory key as chat and Apps refresh (`subscription-refresh:<id>`),
+  persists only under the refresh-generation compare-and-swap through the
+  existing one-statement `codex_refresh_write` capability (minted in the
+  workspace-only form 0670 added), and marks `needs_relogin` on a permanent
+  OAuth refusal. Like the Apps seam it does not persist the plan carried by
+  a rotated id_token (chat refresh does).
+- **Compaction turns (EP-T16).** A core compaction turn places, leases,
+  refreshes and settles exactly like a chat turn; the fail-closed branch is
+  gone. The born-running compaction turn copies the immutable v2
+  `subscription_authority` of the turn it compacts after (NULL without a
+  cutover, so legacy is a no-op; a session with no started turn gets none).
+  An existing `remote_v2` session keeps its Codex model lock because PR 1
+  placement uses only the accepted model with cross-provider failover off.
+  Decision: a core placement wait does not park compaction on a capacity
+  waiter. As on the legacy path, the compaction turn is cancelled with
+  `requestPreserved: true`, reason `subscription_capacity_unavailable` and
+  the wait reason, and the session goes idle until its next work. The rest
+  of the compaction path (remote compaction, history sanitization, usage)
+  already ran on the core bearer and reads no legacy table; the serving
+  credential id it passes is the core connection id, used only for the
+  content-free account hash.
+- **Image operations (EP-T17, EP-N08..N10).** A core turn exposes the Codex
+  image tool again. Placement is the strictest available: the turn's own
+  live chat connection, under the turn's accepted authority. Each call holds
+  its own `image` operation lease keyed by the ledger's turn/tool-call
+  operation id (stable across retries), holder `image:<attempt>:<call>` and
+  the turn's execution generation, and renews it as the pre-dispatch fence.
+  The lease is taken inside the ledger's `provider_started` window, so a
+  lease that cannot be taken (busy, refused, cutover off) is a verified
+  pre-dispatch rejection that returns the ledger row to `prepared`; nothing
+  is reissued after an uncertain upstream write. The chat-turn lease and the
+  session binding are never read or written, so concurrent image calls do
+  not contend with the chat turn or each other. Video (EP-N11..N14): no
+  Codex video adapter exists and no video path reads Codex state, so nothing
+  changes.
+- **Transcription (EP-N01..N04).** On the core the Codex provider is a
+  sessionless operation for the authenticated caller with an explicit
+  account/workspace context: candidates are the workspace's shared
+  organization- or workspace-scoped connections that are active, allocatable
+  and in the effective inference pool, primary first. Each request takes a
+  `transcription` operation lease (generation 1, holder
+  `transcription:<request id>`), renews it before each upstream request and
+  releases it afterwards; a 401 permits one forced refresh and retry, as on
+  the legacy path. Decision: personal connections are refused for
+  transcription (the M2 guard already requires an exact turn for personal
+  operation leases, and no frozen owner authority exists for a sessionless
+  request); a people-scoped shared connection is refused for the same
+  reason. Provider ordering selects the initial provider only: once the
+  core provider is selected, every failure is `fallbackSafe: false`, so the
+  audio is never retried through another provider. Subscription
+  transcription stays non-chargeable (the provider has no deployment
+  funding). Availability is "a candidate exists"; maintenance reports
+  unavailable.
+- **Realtime (EP-N05..N07, EP-S17).** Each realtime negotiation resolves the
+  session's recorded owner (never the viewer), places one shared
+  organization- or workspace-scoped connection (the session binding's
+  explicit choice first, then the effective primary, then pool order,
+  preferring a plan with voice), and holds a `realtime` operation lease
+  (session-bound, no turn) through negotiation, with the operation renewal
+  as its pre-dispatch fence and refresh under the per-connection lock. The
+  broker, client protocol and HTTP error translation are the legacy ones; a
+  fence refusal surfaces as `credential_unavailable`; maintenance as
+  `subscription_disabled`. The chat binding is never written. Decision:
+  realtime uses shared capacity only, also for an owned session (the guard
+  admits personal connections only for an exact turn). 0671 adds one guard
+  branch so an ownerless session's realtime operation (no turn, no
+  initiating human) may lease shared organization- or workspace-scoped
+  capacity, matching ownerless turns; an ownerless session cannot borrow a
+  person's context. Catalog readiness for Codex Live on the core is "a
+  candidate exists in this workspace"; maintenance is not ready.
+- **Usage (EP-N21..N23).** Live usage (`GET .../codex/usage`, the effective
+  primary), per-account usage (by canonical id or legacy alias) and the
+  batched refresh run through the connection seam with the caller's
+  explicit organization/workspace context, read `/wham/usage`, and record the
+  windows as a quota observation fenced on the refresh generation of the
+  bearer that read them (`applyQuotaObservation`; an older generation does
+  not apply). An observation that ends a stored exhaustion wakes the
+  account's core waiters through PR 2a's wake. Response shapes and 404 copy
+  are the legacy ones. Plan and reset-credit summaries in the usage body are
+  returned but not persisted on the connection.
+- **Billing attribution (EP-N19..N20).** `recordModelCallFact` takes an
+  optional `connectionId`, written (and coalesced on conflict) into
+  `model_call_facts.connection_id`. Core Codex turns pass the leased core
+  connection for streamed responses, the aggregate fallback, compaction
+  summaries and session titles; legacy and non-subscription calls leave it
+  NULL. The subscription-use billing bypass is unchanged.
+
+Still answered with the typed 409 on the core, and left to PR 3 with the
+reason:
+
+- **Reset credits (EP-N18) and the overview (EP-N21).** The legacy
+  redemption ledger `codex_reset_redemption_attempts` has no foreign key on
+  `credential_id`, so it can hold core connection ids (and, because the
+  drained migration keeps legacy ids as canonical where possible, ambiguous
+  `provider_started` attempts carry over with their upstream idempotency
+  key). Every ledger function (claim, adopt, send fence, complete, release,
+  abandon, recoveries) authorizes against the legacy
+  `codex_subscription_credentials.connected_by_subject_id`, and completion
+  clears the legacy exhaustion and writes the legacy capacity outbox. PR 3
+  must add core variants of those functions over the same table that
+  authorize by §6.3 (organization administrator, or a workspace
+  administrator of the connection's managing workspace; same-origin managed
+  browser only, refusing bearer, MCP/service, scheduled and agent-acting-as-
+  person callers), read the secret through the connection seam above, take
+  `FOR SHARE` (or the refresh advisory key) on the connection against
+  disconnect, clear the core quota exhaustion under the refresh-generation
+  fence on a `reset`/`alreadyRedeemed` outcome and wake through the core,
+  and keep the routes, payloads, HMAC confirmation and single-use fences.
+  The overview depends on the same redemption access projection.
+- **Connect start/poll and disconnect (one or all)** stay PR 3, as in PR 2b.
+- **Facts repair.** The Insights repair that recreates a missing model-call
+  fact from its usage event does not know the connection; a repaired fact
+  has a NULL `connection_id`.
 
 #### Verification plan
 

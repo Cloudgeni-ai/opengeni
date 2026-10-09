@@ -23,30 +23,34 @@ import {
   executeImageGenerationOperation,
   imageGenerationOperationIdentity,
   imageProviderBindingHash,
+  type ImageGenerationOperationPorts,
 } from "./image-generation-operation";
 import type { ResolvedImageGenerationReference } from "./image-generation-references";
 
 /** Execute the same standalone subscription image path used by Codex clients. */
-export async function executeCodexImageGeneration(input: {
-  db: Database;
-  objectStorage: ObjectStorage | null;
-  accountId: string;
-  workspaceId: string;
-  sessionId: string;
-  turnId: string;
-  attemptId: string;
-  toolCallId: string;
-  prompt: string;
-  references?: readonly ResolvedImageGenerationReference[];
-  credentialId: string;
-  codexContext: Pick<
-    CodexRequestContext,
-    "clientVersion" | "getToken" | "refresh" | "beforeProviderDispatch"
-  >;
-  abortSignal?: AbortSignal;
-  /** Core turns only: the per-operation lease held around the provider call. */
-  operationLease?: { acquire(): Promise<void>; release(): Promise<void> };
-}): Promise<GeneratedImageReceipt> {
+export async function executeCodexImageGeneration(
+  input: {
+    db: Database;
+    objectStorage: ObjectStorage | null;
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    toolCallId: string;
+    prompt: string;
+    references?: readonly ResolvedImageGenerationReference[];
+    credentialId: string;
+    codexContext: Pick<
+      CodexRequestContext,
+      "clientVersion" | "getToken" | "refresh" | "beforeProviderDispatch"
+    >;
+    abortSignal?: AbortSignal;
+    /** Core turns only: the per-operation lease held around the provider call. */
+    operationLease?: { acquire(): Promise<void>; release(): Promise<void> };
+  },
+  ports?: ImageGenerationOperationPorts,
+): Promise<GeneratedImageReceipt> {
   const providerBindingHash = imageProviderBindingHash(CODEX_PROVIDER_ID, input.credentialId);
   let providerDispatchAdmitted = false;
   const codexContext: Pick<
@@ -59,38 +63,41 @@ export async function executeCodexImageGeneration(input: {
       providerDispatchAdmitted = true;
     },
   };
-  return await executeImageGenerationOperation({
-    ...input,
-    providerId: CODEX_PROVIDER_ID,
-    providerBindingHash,
-    modelId: CODEX_IMAGE_MODEL,
-    ...(input.references ? { referenceDigests: input.references } : {}),
-    isProviderDispatchRejected: (error) =>
-      !providerDispatchAdmitted && error instanceof CodexCredentialLeaseLostError,
-    generate: async () => {
-      // A lease that cannot be taken is a verified pre-dispatch rejection:
-      // the ledger returns to `prepared` and nothing reached the provider.
-      await input.operationLease?.acquire();
-      let generated: Awaited<ReturnType<typeof generateCodexSubscriptionImage>>;
-      try {
-        generated = await generateCodexSubscriptionImage({
-          prompt: input.prompt,
-          ...(input.references ? { references: input.references } : {}),
-          turnId: input.turnId,
-          context: codexContext,
-          ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
-        });
-      } finally {
-        await input.operationLease?.release().catch(() => undefined);
-      }
-      return {
-        toolCallId: input.toolCallId,
-        providerItemId: null,
-        bytes: generated.bytes,
-        declaredMediaType: generated.declaredMediaType,
-      };
+  return await executeImageGenerationOperation(
+    {
+      ...input,
+      providerId: CODEX_PROVIDER_ID,
+      providerBindingHash,
+      modelId: CODEX_IMAGE_MODEL,
+      ...(input.references ? { referenceDigests: input.references } : {}),
+      isProviderDispatchRejected: (error) =>
+        !providerDispatchAdmitted && error instanceof CodexCredentialLeaseLostError,
+      generate: async () => {
+        // A lease that cannot be taken is a verified pre-dispatch rejection:
+        // the ledger returns to `prepared` and nothing reached the provider.
+        await input.operationLease?.acquire();
+        let generated: Awaited<ReturnType<typeof generateCodexSubscriptionImage>>;
+        try {
+          generated = await generateCodexSubscriptionImage({
+            prompt: input.prompt,
+            ...(input.references ? { references: input.references } : {}),
+            turnId: input.turnId,
+            context: codexContext,
+            ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+          });
+        } finally {
+          await input.operationLease?.release().catch(() => undefined);
+        }
+        return {
+          toolCallId: input.toolCallId,
+          providerItemId: null,
+          bytes: generated.bytes,
+          declaredMediaType: generated.declaredMediaType,
+        };
+      },
     },
-  });
+    ...(ports ? [ports] : []),
+  );
 }
 
 /**
@@ -116,6 +123,7 @@ export async function executeCoreCodexImageGeneration(
       renew?: typeof renewSubscriptionCoreCodexOperationLease;
       release?: typeof releaseSubscriptionCoreCodexOperationLease;
       resolver?: typeof buildSubscriptionCoreCodexConnectionTokenResolver;
+      ports?: ImageGenerationOperationPorts;
     };
   },
 ): Promise<GeneratedImageReceipt> {
@@ -154,26 +162,30 @@ export async function executeCoreCodexImageGeneration(
     }
     throw error;
   };
-  return await executeCodexImageGeneration({
-    ...input,
-    credentialId: input.core.connectionId,
-    codexContext: {
-      clientVersion: input.clientVersion,
-      getToken: () => resolver.getToken().catch(unavailable),
-      refresh: () => resolver.refresh().catch(unavailable),
-      beforeProviderDispatch: async () => {
-        if (!(await renew(input.db, scope, ref)))
-          throw new CodexCredentialLeaseLostError("not_found");
+  const { deps: _deps, settings: _settings, core: _core, ...operationInput } = input;
+  return await executeCodexImageGeneration(
+    {
+      ...operationInput,
+      credentialId: input.core.connectionId,
+      codexContext: {
+        clientVersion: input.clientVersion,
+        getToken: () => resolver.getToken().catch(unavailable),
+        refresh: () => resolver.refresh().catch(unavailable),
+        beforeProviderDispatch: async () => {
+          if (!(await renew(input.db, scope, ref)))
+            throw new CodexCredentialLeaseLostError("not_found");
+        },
+      },
+      operationLease: {
+        acquire: async () => {
+          const lease = await acquire(input.db, scope, ref);
+          if (lease.kind !== "acquired") throw new CodexCredentialLeaseLostError("not_found");
+        },
+        release: async () => {
+          await release(input.db, scope, ref);
+        },
       },
     },
-    operationLease: {
-      acquire: async () => {
-        const lease = await acquire(input.db, scope, ref);
-        if (lease.kind !== "acquired") throw new CodexCredentialLeaseLostError("not_found");
-      },
-      release: async () => {
-        await release(input.db, scope, ref);
-      },
-    },
-  });
+    input.deps?.ports,
+  );
 }
