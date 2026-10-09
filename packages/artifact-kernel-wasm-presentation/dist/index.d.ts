@@ -3,8 +3,8 @@ export type ArtifactKernelRuntimeIdentity = Readonly<{
   target: "wasm-web";
   modality: "presentation";
   packageName: "@opengeni/artifact-kernel-wasm-presentation";
-  packageVersion: "1.4.4";
-  artifactToolVersion: "1.4.4";
+  packageVersion: "1.5.0";
+  artifactToolVersion: "1.5.0";
   buildIdentity: "opengeni-artifact-kernel/0.1.0;abi=1;command=2;query=1;snapshot=2;collaboration-snapshot=2;committed-transaction=2;spreadsheet-model=2;document-snapshot=1;document-command=1;document-query=1;presentation-snapshot=1;presentation-command=1;presentation-query=1;text-layout-fonts=1;text-layout-request=1;text-layout-response=1;render-tile=1;render-patch=1;source=3a0d75aa95c4cac8af9d49e1b8ff74fe164708fd8f0bce009be5adf9c3ef20e0;toolchain=1367261bf04dd2fc4b2c6aa0ef397c21659ee1c973a9d98dcb8d84b46d68b06f";
   kernelVersion: "opengeni-artifact-kernel/0.1.0;abi=1;command=2;query=1;snapshot=2;collaboration-snapshot=2;committed-transaction=2;spreadsheet-model=2;document-snapshot=1;document-command=1;document-query=1;presentation-snapshot=1;presentation-command=1;presentation-query=1;text-layout-fonts=1;text-layout-request=1;text-layout-response=1;render-tile=1;render-patch=1;source=3a0d75aa95c4cac8af9d49e1b8ff74fe164708fd8f0bce009be5adf9c3ef20e0;toolchain=1367261bf04dd2fc4b2c6aa0ef397c21659ee1c973a9d98dcb8d84b46d68b06f";
   abiVersion: 1;

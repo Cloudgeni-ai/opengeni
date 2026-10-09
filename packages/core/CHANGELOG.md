@@ -1,5 +1,100 @@
 # @opengeni/core
 
+## 1.5.0
+
+### Minor Changes
+
+- 63bf721: Prepare a complete personal or workspace MCP connection once, with non-secret headers and protected secret-field mappings. People enter only the missing key in the conversation card; authorized agents that already have credentials use the same native Connect verification and storage lifecycle without another confirmation card.
+
+  Connection, installation and receipt writes are atomic. Exact retries do not repeat verification or create duplicate accounts. The agent path intersects frozen attempt permissions with live ownership, selection, policy and execution fences, and never makes new tools available inside an already accepted attempt. Existing OAuth and explicit account selections remain separate and unchanged.
+
+  Deploy matching API and worker packages before using direct agent setup. Historical attempt catalogs without the frozen permission snapshot do not gain new setup authority.
+
+### Patch Changes
+
+- b194e31: Agent capability catalog search now tolerates near spellings, so "Wispr" or "Wisprflow" finds a custom MCP named "Whisprflow". Typo-only hits rank below exact, prefix and substring hits and carry `approximate: true`. Custom catalog entries without a provider domain are also matched by their endpoint's registrable domain (for example `api.wisprflow.ai` matches `wisprflow.ai`). When nothing matches, `capability_catalog_search` returns the closest catalog names as labelled `suggestions` instead of a bare empty result, so the agent does not conclude an existing integration is missing.
+- ce7b403: Track built-in tool default inheritance independently of connector selection. New sessions and explicit resets follow current workspace defaults on the next attempt, while explicit lists, exclusions, deployment ceilings, capability restrictions, and frozen catalogs remain authoritative. A rolling migration adopts default intent only for older root sessions whose latest retained policy event proves a full reset and still matches their stored selection; ambiguous legacy selections remain pinned.
+- 0c6f5c4: Require verified human identity for personal Inbox access and include session mute methods in the browser SDK.
+- 6313dd8: Local installs have an Inbox. A local install's one human (the fixed `dev` subject of the built-in local organization) now gets its agents' questions, approvals, paused goals and notifications in the Inbox and can answer them there, as a signed-in person can. Only that human qualifies: the local bootstrap must have produced the request's access, as a keyless, non-delegated human session. API keys, services, agents, delegated bearers that name `dev`, and `dev` in any other organization still have no inbox. Phone pushes stay for signed-in people, because a push device is registered only by a native-app sign-in that local installs do not have.
+- 6960770: Opper is a first-class model provider with the same three rails as OpenRouter and Vercel AI Gateway. `OPENGENI_OPPER_API_KEY` adds reviewed EU-pinned `opper/vertexai/gemini-3.8-flash-eu` and `opper/aws/claude-sonnet-4-6-eu` routes billed in Opengeni credits at the exact Opper-reported cost +5% (reviewed list price as fallback); workspace admins can connect their own Opper key (`workspace-opper/…`, billed to their Opper account) and add exact custom Opper ids; organization owners can connect Opper once for every shared workspace (`organization-opper/…`). The SDK adds `listWorkspaceOpperCustomModels`, `createWorkspaceOpperCustomModel`, `deleteWorkspaceOpperCustomModel`, `ModelConnectionAccessKind`, and `"opper"` as an organization model provider kind. Opper management keys (`op-mak-…`) are rejected with an explanation. Deployment catalog documents accept a reviewed `opperModels` list. Host `OPENGENI_MODEL_PROVIDERS_JSON` can no longer use the reserved `opper`, `workspace-opper`, or `organization-opper` provider ids; move a hand-written Opper registry entry to `OPENGENI_OPPER_API_KEY`. Rolling migration `0636_opper_model_providers.sql` widens the provider-kind, lifecycle-fact, and analytics allow-lists.
+- a4f19c2: Organization owners and admins can now remove their own access to a shared workspace from the organization settings, the same way they already grant or change it, including workspaces an organization API key created for an embedded tenant. They can also list, add, change, and remove members from any shared workspace's own Members page, whether or not they hold a role in that workspace. The organization Workspaces list and each person's Workspace access editor gain a name search for organizations with many shared workspaces.
+- 7f257db: Forward the live Connected Machine transactional-write capability to one-off `run_on` operations so large writes use bounded, verified transfers. Preserve per-request authority checks, connection fencing, and legacy-agent behavior without replaying uncertain writes.
+- bc1f47f: Read only target session identity during authorization instead of expanding chat content and controls. Preserve the late visibility check, account matching, and request-scoped read reuse.
+- Updated dependencies [e03f1ff]
+- Updated dependencies [12bcb8e]
+- Updated dependencies [14a9340]
+- Updated dependencies [608e907]
+- Updated dependencies [0380bc5]
+- Updated dependencies [7ae7683]
+- Updated dependencies [931ac51]
+- Updated dependencies [8df9e66]
+- Updated dependencies [4cccd33]
+- Updated dependencies [91c7c0e]
+- Updated dependencies [e8a3d83]
+- Updated dependencies [6372501]
+- Updated dependencies [4532435]
+- Updated dependencies [851cbdc]
+- Updated dependencies [21d64c1]
+- Updated dependencies [5b31ec7]
+- Updated dependencies [129ead3]
+- Updated dependencies [ce7b403]
+- Updated dependencies [7ae7683]
+- Updated dependencies [2becf01]
+- Updated dependencies [3e00c37]
+- Updated dependencies [334c470]
+- Updated dependencies [f7d53b2]
+- Updated dependencies [e29b641]
+- Updated dependencies [c13d080]
+- Updated dependencies [061ae01]
+- Updated dependencies [6313dd8]
+- Updated dependencies [c502add]
+- Updated dependencies [0001298]
+- Updated dependencies [c43f174]
+- Updated dependencies [d15e8e9]
+- Updated dependencies [0152516]
+- Updated dependencies [560acdd]
+- Updated dependencies [906d3c2]
+- Updated dependencies [38b1ba1]
+- Updated dependencies [1da17d9]
+- Updated dependencies [6960770]
+- Updated dependencies [a4f19c2]
+- Updated dependencies [55eb9b0]
+- Updated dependencies [32851ac]
+- Updated dependencies [a15f487]
+- Updated dependencies [63bf721]
+- Updated dependencies [83af41e]
+- Updated dependencies [1489689]
+- Updated dependencies [78c28ca]
+- Updated dependencies [71c42bf]
+- Updated dependencies [a9f5b24]
+- Updated dependencies [a390b9e]
+- Updated dependencies [10624f7]
+- Updated dependencies [70332a4]
+- Updated dependencies [feb1737]
+- Updated dependencies [7926f10]
+- Updated dependencies [1041a61]
+- Updated dependencies [132684f]
+- Updated dependencies [bc1f47f]
+- Updated dependencies [3179009]
+- Updated dependencies [ce61681]
+- Updated dependencies [1727b17]
+- Updated dependencies [a34d8f5]
+- Updated dependencies [e712954]
+- Updated dependencies [7bf1a02]
+- Updated dependencies [dd82a5c]
+- Updated dependencies [d7b947e]
+  - @opengeni/contracts@1.5.0
+  - @opengeni/runtime@1.5.0
+  - @opengeni/db@1.5.0
+  - @opengeni/config@1.5.0
+  - @opengeni/codex@1.5.0
+  - @opengeni/events@1.5.0
+  - @opengeni/observability@1.5.0
+  - @opengeni/capabilities@1.5.0
+  - @opengeni/documents@1.5.0
+  - @opengeni/storage@1.5.0
+  - @opengeni/network@1.5.0
+
 ## 1.4.4
 
 ### Patch Changes

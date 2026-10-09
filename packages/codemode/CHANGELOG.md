@@ -1,5 +1,42 @@
 # @opengeni/codemode
 
+## 1.5.0
+
+### Minor Changes
+
+- 63bf721: Prepare a complete personal or workspace MCP connection once, with non-secret headers and protected secret-field mappings. People enter only the missing key in the conversation card; authorized agents that already have credentials use the same native Connect verification and storage lifecycle without another confirmation card.
+
+  Connection, installation and receipt writes are atomic. Exact retries do not repeat verification or create duplicate accounts. The agent path intersects frozen attempt permissions with live ownership, selection, policy and execution fences, and never makes new tools available inside an already accepted attempt. Existing OAuth and explicit account selections remain separate and unchanged.
+
+  Deploy matching API and worker packages before using direct agent setup. Historical attempt catalogs without the frozen permission snapshot do not gain new setup authority.
+
+### Patch Changes
+
+- Updated dependencies [e03f1ff]
+- Updated dependencies [4532435]
+- Updated dependencies [851cbdc]
+- Updated dependencies [8017d94]
+- Updated dependencies [ce7b403]
+- Updated dependencies [121f6ed]
+- Updated dependencies [334c470]
+- Updated dependencies [f7d53b2]
+- Updated dependencies [0c6f5c4]
+- Updated dependencies [c13d080]
+- Updated dependencies [061ae01]
+- Updated dependencies [6313dd8]
+- Updated dependencies [38b1ba1]
+- Updated dependencies [6960770]
+- Updated dependencies [63bf721]
+- Updated dependencies [71c42bf]
+- Updated dependencies [a390b9e]
+- Updated dependencies [7852cda]
+- Updated dependencies [a51c96e]
+- Updated dependencies [7f3f19f]
+- Updated dependencies [7bf1a02]
+  - @opengeni/contracts@1.5.0
+  - @opengeni/sdk@1.5.0
+  - @opengeni/tool-gateway@1.5.0
+
 ## 1.4.4
 
 ### Patch Changes

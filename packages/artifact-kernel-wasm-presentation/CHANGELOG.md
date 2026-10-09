@@ -1,5 +1,31 @@
 # @opengeni/artifact-kernel-wasm-presentation
 
+## 1.5.0
+
+### Patch Changes
+
+- c13d080: Add canonical sparse row-height and column-width set/reset commands with live
+  spreadsheet projections and immediate, frame-coalesced drag and keyboard
+  resizing. Preserve existing dimension-free artifacts and shared artifact
+  authority, collaboration, and history.
+
+  Preserve sparse dimensions through native workbook reconciliation and verified
+  XLSX materialization, including empty-sheet geometry. Refresh all modality
+  kernel distributions together to retain their shared build identity.
+
+  Keep spreadsheet input responsive during delayed saves, retain pending cell
+  drafts when refocused, surface independent failures without unsafe overlapping
+  retries, and show server sync state separately from local command acceptance.
+
+  Center resize targets on header borders and retain valid covered cells while
+  viewport queries change. Show submitted cell input immediately without inventing
+  formula results. Support canonical worksheet renaming by double-click or F2,
+  with validated Enter/Save, Escape/Cancel, and readable pending/failure feedback.
+
+- 906d3c2: Preserve the exact scheduler authority label and immutable curated Skill artifacts during the branding refresh so scheduled dispatch and pinned library discovery remain compatible.
+
+  Refresh the canonical browser artifact kernels to match the branding-updated Rust source identity.
+
 ## 1.4.4
 
 ## 1.4.3
