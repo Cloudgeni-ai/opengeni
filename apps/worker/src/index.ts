@@ -1255,6 +1255,22 @@ export type RunOpenGeniWorkerOptions = OpenGeniWorkerServiceOptions & {
 /** Start, drain, and close one embedded worker process. */
 export async function runOpenGeniWorker(options: RunOpenGeniWorkerOptions): Promise<void> {
   const service = await createOpenGeniWorkerService(options);
+  // Reclaim multi-gigabyte workspace archive spools left by a previous worker
+  // process that stopped mid-capture/upload. Only provably dead owners' spools
+  // are removed, so peers sharing this TMPDIR are unaffected.
+  void import("@opengeni/runtime/sandbox")
+    .then(({ sweepOrphanedHostArchiveTemporaryDirectoriesOnce }) =>
+      sweepOrphanedHostArchiveTemporaryDirectoriesOnce(),
+    )
+    .then((removed) => {
+      if (removed.length > 0) {
+        options.activityDependencies.observability?.info(
+          "worker removed orphaned workspace archive spools",
+          { count: removed.length },
+        );
+      }
+    })
+    .catch(() => undefined);
   const signals =
     options.shutdownSignals === false ? [] : (options.shutdownSignals ?? ["SIGTERM", "SIGINT"]);
   const handlers = signals.map((signal) => {
