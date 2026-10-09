@@ -53,13 +53,13 @@ const MANAGED_AUTH_EMAIL_THROTTLE_FALLBACK_KEY = "opengeni:managed-auth:email-th
 export type { ManagedAuth };
 
 export function managedAuthRequiresEmailVerification(
-  settings: Pick<Settings, "environment">,
+  settings: Pick<Settings, "environment" | "managedAuthRequireEmailVerification">,
 ): boolean {
-  return settings.environment !== "local";
+  return settings.managedAuthRequireEmailVerification ?? settings.environment !== "local";
 }
 
 export function managedAuthUserCreateOverride(
-  settings: Pick<Settings, "environment">,
+  settings: Pick<Settings, "environment" | "managedAuthRequireEmailVerification">,
   user: { emailVerified: boolean } & Record<string, unknown>,
 ): { data: typeof user } | undefined {
   if (managedAuthRequiresEmailVerification(settings)) return undefined;
@@ -98,7 +98,7 @@ export class ManagedAuthNewSignupsPausedError extends APIError {
 
 export function managedAuthUserCreateAdmission(
   settings: Pick<Settings, "environment" | "allowedUserEmails"> &
-    Partial<Pick<Settings, "managedAuthNewSignupsEnabled">>,
+    Partial<Pick<Settings, "managedAuthNewSignupsEnabled" | "managedAuthRequireEmailVerification">>,
   user: { emailVerified: boolean } & Record<string, unknown>,
   providerId: string,
 ): { data: typeof user } | false | undefined {
@@ -107,7 +107,7 @@ export function managedAuthUserCreateAdmission(
   if (settings.managedAuthNewSignupsEnabled === false) return false;
   if (!managedUserEmailAllowed(settings.allowedUserEmails, user.email)) return false;
   if (
-    managedAuthRequiresEmailVerification(settings) &&
+    (settings.environment !== "local" || managedAuthRequiresEmailVerification(settings)) &&
     providerId !== "credential" &&
     !user.emailVerified
   ) {
@@ -428,7 +428,7 @@ export function createManagedAuth(
       disableSignUp: !settings.managedAuthNewSignupsEnabled,
       // Local managed mode exists so the complete human/org tenancy flow can
       // be exercised without first configuring a transactional-email vendor.
-      // Every non-local deployment retains the verified-email boundary.
+      // Non-local deployments require verification unless explicitly overridden.
       requireEmailVerification,
       revokeSessionsOnPasswordReset: true,
       onExistingUserSignUp: async ({ user }) => {

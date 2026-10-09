@@ -372,6 +372,12 @@ never pads a grant or signs an empty token; external-host, host-local,
 connection-backed and already-authorized native paths keep their own authority.
 See [automation defaults](automations.md#empty-first-party-authority).
 
+Managed password sign-ups require email verification outside local development
+unless the operator explicitly disables `OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION`.
+That opt-out attests new password users before provisioning; it requires an
+independent trusted-user boundary. Social-provider proof remains required outside
+local development. See [verification configuration](deployment.md#password-sign-up-email-verification).
+
 Organization settings owns the cross-workspace roster and roles. A managed
 browser administrator is the ordinary authority. Single-user local deployments
 also admit only the access resolver's canonical `opengeni:local/default` + `dev`

@@ -1292,6 +1292,23 @@ start the matching release. Do not restart an older API that exposes the raw
 provider-management routes. This feature does not authorize changing the
 deployment's configured browser session-set mode.
 
+### Password sign-up email verification
+
+`OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION` optionally overrides the
+password sign-up verification requirement. Unset preserves the existing default:
+required outside `local`, skipped in `local`. `true` requires it in every
+environment; `false` skips the verification email and attests new password
+sign-ups before provisioning and session creation. Restart all API replicas with
+the same setting.
+
+Disabling this check trusts the supplied email address, including email-based
+invitation claims and later account linking. Only use this setting where an
+independent access boundary admits trusted users. Existing users are not
+bulk-verified or migrated. Social providers still need a verified email assertion
+outside `local`; provider-linking, allowlists and paused sign-up gates remain in
+force. Password reset and invitation delivery still need an email provider;
+this setting does not remove production email-provider configuration requirements.
+
 ### Durable invited-user email delivery (0351)
 
 Migration 0351 is rolling and additive. Before inviting users, configure
@@ -4040,7 +4057,8 @@ boundary validation and compacted-history limitations.
 
 Set `OPENGENI_ALLOWED_USER_EMAILS` to a comma-separated list of exact email
 addresses to restrict native human signup, sign-in and existing browser sessions.
-Addresses are case-insensitive; email verification remains required. Unset keeps
+Addresses are case-insensitive; email verification follows the
+[password sign-up setting](#password-sign-up-email-verification). Unset keeps
 open registration; an explicitly empty or invalid list fails startup. Apply the
 same value to all API replicas and restart them when changing the list.
 
