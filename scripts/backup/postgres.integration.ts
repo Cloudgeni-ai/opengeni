@@ -72,6 +72,13 @@ integration(
         }),
       );
       const env = { ...process.env, PGSERVICEFILE: services, RCLONE_CONFIG: storage };
+      // Service-scoped authentication may allow only the configured database.
+      // pg_dumpall must not silently select postgres/template1 instead.
+      writeFileSync(
+        join(data, "pg_hba.conf"),
+        "local source all trust\nlocal recovery all trust\nlocal all all reject\n",
+      );
+      invoke("psql", ["-d", "source", "-Atc", "SELECT pg_reload_conf()"], pgEnv);
       const cli = (mode: string, extra: string[] = []) =>
         spawnSync(
           process.execPath,
