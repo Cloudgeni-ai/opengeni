@@ -360,7 +360,7 @@ BEGIN
     CREATE FUNCTION opengeni_private.subscription_codex_revision_authority_v2(
       p_account_id uuid, p_workspace_id uuid, p_task_id uuid, p_revision bigint
     ) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path = pg_catalog, %1$I, pg_temp
+    SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
     AS $body$
     BEGIN
       IF p_account_id IS DISTINCT FROM nullif(current_setting('opengeni.account_id', true), '')::uuid
@@ -967,7 +967,7 @@ BEGIN
       -- attempt, with no live claim, moves to this workspace and keeps its
       -- one upstream idempotency key, status and outcome.
       IF holder.id = p_attempt_id AND holder.subject_id = p_subject_id
-    AND (holder.claim_expires_at IS NULL OR holder.claim_expires_at <= now()) THEN
+        AND (holder.claim_expires_at IS NULL OR holder.claim_expires_at <= now()) THEN
         UPDATE codex_reset_redemption_attempts attempt
         SET workspace_id = p_workspace_id, updated_at = now()
         WHERE attempt.account_id = p_account_id AND attempt.id = holder.id;
