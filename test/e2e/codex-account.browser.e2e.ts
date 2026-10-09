@@ -53,7 +53,7 @@ for (const theme of ["light", "dark"] as const) {
           name: "Use extra credits on subscription@example.test",
         });
         const allocation = page.getByRole("switch", {
-          name: "subscription@example.test is available for new chats",
+          name: "Use subscription@example.test for new work",
         });
         expect(await consent.getAttribute("aria-checked")).toBe("false");
         expect(await allocation.getAttribute("aria-checked")).toBe("false");

@@ -294,8 +294,7 @@ describe("organization Codex subscriptions", () => {
         };
         throw new Error("Account changed; refresh and try again");
       });
-      const selector =
-        '[role="switch"][aria-label="Backup subscription is available for new chats"]';
+      const selector = '[role="switch"][aria-label="Use Backup subscription for new work"]';
       await act(async () => container.querySelector<HTMLButtonElement>(selector)!.click());
       await flush();
       expect(container.textContent).toContain("Paused");
@@ -348,7 +347,7 @@ describe("organization Codex subscriptions", () => {
       await act(async () => root.render(<Harness accountId={inactiveAccountId} />));
       await flush();
       const toggle = container.querySelector<HTMLButtonElement>(
-        '[role="switch"][aria-label="Backup subscription is available for new chats"]',
+        '[role="switch"][aria-label="Use Backup subscription for new work"]',
       );
       expect(toggle).not.toBeNull();
       await act(async () => toggle!.click());
