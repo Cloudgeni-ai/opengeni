@@ -689,7 +689,7 @@ describe("runtime database posture evaluator", () => {
     const posture = safePosture();
     posture.subscriptionCodexCutoverActivationPresent = false;
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "database is missing the 0680 Codex subscription-core cutover receipt; run the drained migration first",
+      "database is missing the 0689 Codex subscription-core cutover receipt; run the drained migration first",
     );
   });
 
