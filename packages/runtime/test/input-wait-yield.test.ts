@@ -979,14 +979,16 @@ describe("trusted input wait runtime yield", () => {
         const model = new ScriptedModel([
           {
             output: [
+              // wait_for_input is a harness control tool: visible in the first
+              // request on every transport. The sibling stays deferred.
+              functionCall("opengeni__wait_for_input", {}, "wait-call"),
               deferred
                 ? functionCall(
                     "tool_invoke",
-                    { name: "opengeni__wait_for_input", arguments: {} },
-                    "wait-call",
+                    { name: "opengeni__sibling", arguments: {} },
+                    "sibling-call",
                   )
-                : functionCall("opengeni__wait_for_input", {}, "wait-call"),
-              functionCall("opengeni__sibling", {}, "sibling-call"),
+                : functionCall("opengeni__sibling", {}, "sibling-call"),
             ],
           },
           { error: new Error("a successful wait must never request another model step") },
@@ -998,7 +1000,9 @@ describe("trusted input wait runtime yield", () => {
           ...(deferred
             ? {
                 lazyToolTransport: "generic_dispatch",
-                toolPreparationReady: f.prepared.ready!.then(() => undefined),
+                ...(f.prepared.ready
+                  ? { toolPreparationReady: f.prepared.ready.then(() => undefined) }
+                  : {}),
               }
             : {}),
         });
@@ -1007,6 +1011,14 @@ describe("trusted input wait runtime yield", () => {
         for await (const event of stream) events.push(event);
         await stream.completed;
         expect(model.calls).toBe(1);
+        if (deferred) {
+          // The first-party server lists wait_for_input, so it joins the
+          // first-request barrier instead of preparing in the background.
+          expect(f.prepared.ready).toBeUndefined();
+          const names = model.requests[0]!.tools.map((entry) => entry.name);
+          expect(names).toContain("opengeni__wait_for_input");
+          expect(names).not.toContain("opengeni__sibling");
+        }
         expect(stream.finalOutput).toBe("");
         expect(stream.cancelled).toBe(false);
         expect(stream.error).toBeNull();

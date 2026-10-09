@@ -1080,7 +1080,10 @@ Always-visible first-request local tools (closed set): `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
 `request_human_input`, `list_models` (lists, never switches models), optional
 [`code_search`](code-search.md), and optional provider
-[`web_search`/`web_fetch`](web-search.md). Other non-MCP functions/non-eager MCP schemas require search.
+[`web_search`/`web_fetch`](web-search.md). Authorized first-party harness control
+tools (`opengeni__goal_*` lifecycle, `opengeni__command_read`/`command_wait`,
+`opengeni__wait_for_input`) are also always visible; the `opengeni` server then
+joins the first-request barrier. Other non-MCP functions/non-eager MCP schemas require search.
 
 Web search is hosted by the model provider where the catalog declares it, or
 worker-run through one deployment-configured search API (`web_search` /

@@ -951,8 +951,11 @@ and partial response for a later drain. Rejection never proves quiescence or
 permits numeric-PID fallback or another possibly dispatched helper Start.
 
 Fresh progressive-disclosure attempts complete only session-marked eager MCP
-connection and schema admission before inference. All non-eager MCPs—strict or
-optional—connect/list concurrently with the first provider request. A plain
+connection and schema admission before inference, plus the first-party
+`opengeni` server when it can list an authorized harness control tool (goal
+lifecycle, `command_read`, `command_wait`, `wait_for_input`; only those exact
+schemas become first-request visible). All other non-eager MCPs, strict or
+optional, connect/list concurrently with the first provider request. A plain
 terminal model response does not join that background work. Configured agents
 decide router visibility from authorized pending server identities without
 joining preparation. Once exposed, that router stays in the request tool prefix
