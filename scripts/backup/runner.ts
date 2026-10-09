@@ -305,7 +305,6 @@ export class BackupRunner {
         pg("pg_restore", targetService, [
           "--exit-on-error",
           "--single-transaction",
-          "--no-owner",
           `--dbname=service=${targetService}`,
         ]),
       ]);
