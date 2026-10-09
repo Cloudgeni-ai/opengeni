@@ -60,7 +60,10 @@ async function inScope<T>(
           subjectId: "service:subscription-core",
           initiatingHumanSubjectId: scope.sessionOwnerSubjectId,
         }
-      : { subjectId: scope.subjectId, initiatingHumanSubjectId: scope.subjectId };
+      : {
+          subjectId: scope.subjectId,
+          initiatingHumanSubjectId: scope.subjectId,
+        };
   return withSessionRlsActorContext(actor, () => withRlsContext(db, scope, operation));
 }
 
@@ -169,14 +172,31 @@ async function reserveTurnRequest(
         and status = 'running' for share`,
     );
     if (!locked.length) throw new SubscriptionCoreCodexLeaseLostError();
+    // The fence blocks automatic replay inside one execution: a replacement
+    // attempt after a worker loss, or a resumed generation (approval or
+    // capacity), never treats an ambiguous earlier request as settled. A
+    // failed turn reruns only through an explicit Retry, which claims a new
+    // generation; requests whose earlier-generation attempt closed as failed
+    // were already surfaced as that failure and do not block the retry.
     const [prior] = await rawRows<{ unresolved: boolean }>(
       tx,
       sql`select exists (
-      select 1 from subscription_operation_leases where account_id = ${identity.accountId}::uuid
-        and workspace_id = ${identity.workspaceId}::uuid and session_id = ${identity.sessionId}::uuid
-        and turn_id = ${identity.turnId}::uuid and provider = 'codex' and operation_kind = 'model'
-        and request_id is not null and (request_outcome = 'unknown'
-          or (request_outcome = 'reserved' and attempt_id <> ${request.attemptId}::uuid))
+      select 1 from subscription_operation_leases request
+      where request.account_id = ${identity.accountId}::uuid
+        and request.workspace_id = ${identity.workspaceId}::uuid
+        and request.session_id = ${identity.sessionId}::uuid
+        and request.turn_id = ${identity.turnId}::uuid and request.provider = 'codex'
+        and request.operation_kind = 'model' and request.request_id is not null
+        and (request.request_outcome = 'unknown'
+          or (request.request_outcome = 'reserved' and request.attempt_id <> ${request.attemptId}::uuid))
+        and not exists (
+          select 1 from session_turn_attempts attempt
+          where attempt.account_id = request.account_id
+            and attempt.workspace_id = request.workspace_id
+            and attempt.session_id = request.session_id and attempt.turn_id = request.turn_id
+            and attempt.id = request.attempt_id
+            and attempt.execution_generation < ${request.executionGeneration}
+            and attempt.state = 'closed' and attempt.outcome = 'failed')
     ) as unresolved`,
     );
     if (operationKind === "model" && prior?.unresolved)
@@ -267,7 +287,10 @@ export async function reserveSubscriptionCoreCodexAppsRequest(
 export async function settleSubscriptionCoreCodexAppsRequest(
   db: Database,
   target: { accountId: string; workspaceId: string; connectionId: string },
-  request: { operationId: string; outcome: SubscriptionCoreCodexRequestOutcome },
+  request: {
+    operationId: string;
+    outcome: SubscriptionCoreCodexRequestOutcome;
+  },
 ): Promise<void> {
   await withRlsContext(db, target, async (tx) => {
     await tx.execute(sql`update subscription_operation_leases set request_outcome = ${request.outcome}
@@ -306,7 +329,10 @@ export const settleSubscriptionCoreCodexTurnCredentialRequest = settleSubscripti
 export async function settleSubscriptionCoreCodexOperationRequest(
   db: Database,
   scope: SubscriptionCoreCodexOperationScope,
-  request: { operationId: string; outcome: SubscriptionCoreCodexRequestOutcome },
+  request: {
+    operationId: string;
+    outcome: SubscriptionCoreCodexRequestOutcome;
+  },
 ): Promise<void> {
   await inScope(db, scope, async (tx) => {
     const { accountId, workspaceId } = tenant(scope);

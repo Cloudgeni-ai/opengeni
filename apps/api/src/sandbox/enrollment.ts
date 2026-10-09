@@ -55,6 +55,7 @@ import {
   consumeDeviceEnrollmentRequest,
   createDeviceEnrollmentRequest,
   denyDeviceEnrollmentRequest,
+  EnrollTokenAlreadyRedeemedError,
   finalizeEnrollmentByToken,
   getDeviceEnrollmentRequestByDeviceCode,
   getEnrollment,
@@ -382,6 +383,8 @@ export async function mintEnrollToken(
     allowScreenControl: input.allowScreenControl,
     iat: nowSeconds,
     exp,
+    // Single-use: the exchange records this id, so the token connects one machine.
+    jti: randomBytes(18).toString("base64url"),
   });
   return {
     token,
@@ -394,7 +397,8 @@ export async function mintEnrollToken(
 export type ExchangeEnrollTokenResult =
   | { ok: true; credentials: EnrollTokenExchangeResponse["credentials"] }
   | { ok: false; reason: "disabled" }
-  | { ok: false; reason: "invalid" };
+  | { ok: false; reason: "invalid" }
+  | { ok: false; reason: "used" };
 
 /** EXCHANGE a headless enroll token (design 11 §A2.3) — the UNAUTHENTICATED path
  *  where the token IS the auth. Verifies the `oget_` token, then performs the SAME
@@ -429,18 +433,28 @@ export async function exchangeEnrollToken(
 
   // The SAME finalize as approve, but driven by the token's claims (no pending row).
   const sandboxName = (input.machineName?.trim() || `${input.os} machine`).slice(0, 256);
-  const { enrollment } = await finalizeEnrollmentByToken(db, {
-    accountId: claims.accountId,
-    workspaceId: claims.workspaceId,
-    pubkey: input.publicKey,
-    hasDisplay: input.canOfferDisplay,
-    // The token's allowScreenControl is the AUTHORITATIVE consent (NOT the agent's
-    // requestsScreenControl) — it was baked in at mint by the authorizing user.
-    allowScreenControl: claims.allowScreenControl,
-    os: input.os,
-    arch: input.arch,
-    sandboxName,
-  });
+  let enrollment: Awaited<ReturnType<typeof finalizeEnrollmentByToken>>["enrollment"];
+  try {
+    ({ enrollment } = await finalizeEnrollmentByToken(db, {
+      accountId: claims.accountId,
+      workspaceId: claims.workspaceId,
+      pubkey: input.publicKey,
+      hasDisplay: input.canOfferDisplay,
+      // The token's allowScreenControl is the AUTHORITATIVE consent (NOT the agent's
+      // requestsScreenControl) — it was baked in at mint by the authorizing user.
+      allowScreenControl: claims.allowScreenControl,
+      os: input.os,
+      arch: input.arch,
+      sandboxName,
+      // A token with an id connects one machine; the same machine may retry.
+      ...(claims.jti ? { tokenId: claims.jti, tokenExpiresAt: new Date(claims.exp * 1000) } : {}),
+    }));
+  } catch (error) {
+    if (error instanceof EnrollTokenAlreadyRedeemedError) {
+      return { ok: false, reason: "used" };
+    }
+    throw error;
+  }
 
   const credentials = await buildEnrollmentCredentials(services, {
     secret,

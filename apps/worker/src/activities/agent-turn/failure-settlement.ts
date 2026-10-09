@@ -627,12 +627,15 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // Codex refusal, quota attribution and failover belong exclusively to the
   // exact core placement and its generation fence.
   const coreCodex = billingState.isCodexTurn ? (providerTurn.codexSubscriptionCore ?? null) : null;
-  const coreRequestOutcomeUnknown = hasErrorInCauseChain(
-    error,
-    SubscriptionCoreCodexRequestOutcomeUnknownError,
-  )
-    ? new SubscriptionCoreCodexRequestOutcomeUnknownError()
-    : null;
+  // The transport may settle an ambiguous request before the SDK throws a plain
+  // HTTP error. That custody evidence must survive classification: advertising
+  // a retryable outage would contradict the replay fence already in force.
+  const coreRequestOutcomeUnknown =
+    hasErrorInCauseChain(error, SubscriptionCoreCodexRequestOutcomeUnknownError) ||
+    coreCodex?.requests?.hasUnknownOutcome() ||
+    coreCodex?.titleRequests?.hasUnknownOutcome()
+      ? new SubscriptionCoreCodexRequestOutcomeUnknownError()
+      : null;
   const coreCodexLeaseLost =
     coreCodex !== null &&
     !coreRequestOutcomeUnknown &&

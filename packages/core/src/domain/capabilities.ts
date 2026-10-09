@@ -15,6 +15,7 @@ import {
   capabilityCatalogItemIsTrustedForExposure,
   FIKEN_PROVIDER_DOMAIN,
   FIRST_PARTY_MCP_TOOL_NAMES,
+  OPENGENI_BROWSER_EXTENSION_URL,
   type AccessGrant,
   type CapabilityAction,
   type CapabilityCatalogResponse,
@@ -1560,8 +1561,15 @@ function providerIntegrationCatalogItems(
  * recommend the owning product flow without manufacturing an enabled catalog
  * row for GitHub resources, Documents, schedules, or other platform features.
  */
-export function nativeConnectionCapabilityRecommendations(): CapabilityCatalogItem[] {
-  return [
+/** The in-chat card id for connecting a person's own computer. */
+export const CONNECTED_MACHINE_CAPABILITY_ID = "api:connected-machine";
+
+export { OPENGENI_BROWSER_EXTENSION_URL };
+
+export function nativeConnectionCapabilityRecommendations(
+  options: { connectedMachines?: boolean } = {},
+): CapabilityCatalogItem[] {
+  const items = [
     CapabilityCatalogItem.parse({
       id: "api:github-app",
       kind: "api",
@@ -1595,6 +1603,65 @@ export function nativeConnectionCapabilityRecommendations(): CapabilityCatalogIt
       },
     }),
   ];
+  if (options.connectedMachines) {
+    items.push(
+      CapabilityCatalogItem.parse({
+        id: CONNECTED_MACHINE_CAPABILITY_ID,
+        kind: "api",
+        source: "built_in",
+        name: "Connected Machine",
+        description:
+          "Run this chat on the person's own computer or server (Mac, Linux or Windows), and optionally let agents use their Chrome through the OpenGeni Browser extension.",
+        category: "compute",
+        tags: [
+          "machine",
+          "computer",
+          "laptop",
+          "desktop",
+          "mac",
+          "macbook",
+          "linux",
+          "windows",
+          "server",
+          "gpu",
+          "local",
+          "self-hosted",
+          "chrome",
+          "browser",
+          "extension",
+          "terminal",
+        ],
+        homepageUrl: null,
+        providerDomain: "opengeni.ai",
+        authModel: "connected_machine_enrollment",
+        authKind: "none",
+        surfaceType: "first_party_connected_machine",
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        runtime: {
+          available: true,
+          notes: `The person runs a one-line connect command on their machine from the chat card. The OpenGeni Browser Chrome extension (${OPENGENI_BROWSER_EXTENSION_URL}) works only after the machine is connected.`,
+        },
+        lifecycle: {
+          status: "available",
+          readiness: "setup_required",
+          detail: "Connect a machine from the chat card.",
+          managedBy: "platform",
+        },
+        actions: ["connect", "inspect"],
+        metadata: {
+          firstPartyMcpTools: [
+            "sandboxes_list",
+            "sandbox_swap",
+            "run_on",
+            "connected_machine_enroll_token",
+          ],
+          browserExtensionUrl: OPENGENI_BROWSER_EXTENSION_URL,
+          recommendationOnly: true,
+        },
+      }),
+    );
+  }
+  return items;
 }
 
 function socialConnectionCounts(

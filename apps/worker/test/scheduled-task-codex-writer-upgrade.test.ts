@@ -23,14 +23,16 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   const writer = "0688_subscription_core_codex_writers.sql";
   const disconnect = "0691_subscription_core_codex_disconnect.sql";
+  const explicitRetry = "0697_codex_retry_after_unknown_outcome.sql";
   try {
     // Stage the actual pre-writer ledger, including on the stacked cutover
     // branch. This is a rolling/gate-off regression, not cutover activation.
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    // The graceful-disconnect migration rewrites writer routines: defer it with
-    // its prerequisite while constructing the genuine pre-writer fixture.
+    // Graceful disconnect rewrites writer routines, and explicit Retry rewrites
+    // its admission guard. Defer both with their prerequisite while constructing
+    // the genuine pre-writer fixture, then replay them in ledger order below.
     await database.admin`insert into schema_migrations(name) values (${writer}),
-      ('0689_subscription_core_codex_cutover.sql'), (${disconnect})`;
+      ('0689_subscription_core_codex_cutover.sql'), (${disconnect}), (${explicitRetry})`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     const appUrl = new URL(database.ownerUrl);
@@ -84,7 +86,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
       await database.admin`select execution_digest, authority_revision from scheduled_tasks where id = ${taskId}::uuid`;
     await client.close();
     client = undefined;
-    await database.admin`delete from schema_migrations where name in (${writer}, ${disconnect})`;
+    await database.admin`delete from schema_migrations where name in (${writer}, ${disconnect}, ${explicitRetry})`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     client = createDb(appUrl.toString());

@@ -43,7 +43,10 @@ describe("release schema contract", () => {
       contract.migrations.find(
         (migration) => migration.path === "0642_shared_subscription_core.sql",
       ),
-    ).toMatchObject({ path: "0642_shared_subscription_core.sql", deploymentMode: "rolling" });
+    ).toMatchObject({
+      path: "0642_shared_subscription_core.sql",
+      deploymentMode: "rolling",
+    });
   });
 
   test("registers the subscription inference-source settings migration as rolling", async () => {
@@ -179,7 +182,9 @@ describe("release schema contract", () => {
   test("checks complete ledger metadata against migration files", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     const sourceMigrationPaths = (
-      await readdir(join(import.meta.dir, "../packages/db/drizzle"), { withFileTypes: true })
+      await readdir(join(import.meta.dir, "../packages/db/drizzle"), {
+        withFileTypes: true,
+      })
     )
       .filter((entry) => entry.isFile() && entry.name.endsWith(".sql"))
       .map((entry) => entry.name)
@@ -2259,6 +2264,8 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0697_codex_retry_after_unknown_outcome.sql",
+      "0696_enrollment_token_redemptions.sql",
       "0695_subscription_model_catalog_observations.sql",
       "0694_inbox_skip_live_call_replies.sql",
       "0693_inbox_full_agent_access.sql",

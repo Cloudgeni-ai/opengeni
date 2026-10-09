@@ -199,7 +199,9 @@ import {
   hasPermission,
   authorizedSocialConnectionsForGrant,
   buildCapabilityCatalog,
+  CONNECTED_MACHINE_CAPABILITY_ID,
   nativeConnectionCapabilityRecommendations,
+  OPENGENI_BROWSER_EXTENSION_URL,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
@@ -4143,19 +4145,57 @@ function registerFleetTools(
     "sandbox_provision",
     {
       description:
-        "Provision a new sandbox for the fleet. kind=selfhosted returns interactive device-flow instructions for a human to approve. For authorized headless enrollment, use connected_machine_enroll_token when available instead. kind=modal creates a named Modal sandbox record, but it is NOT yet attachable as a swap target: routing a session onto a second Modal box is not supported yet, so sandbox_swap to its id is rejected. Use the session's own box (the default) or attach a Connected Machine instead.",
+        "Provision a new sandbox for the fleet. kind=selfhosted posts the Connected Machine card in this chat: the person copies a one-line connect command, runs it on their own computer, and picks Use in this chat; the card also offers the OpenGeni Browser Chrome extension once the machine is connected. When you can already run commands on the target machine, install it yourself with connected_machine_enroll_token instead. kind=modal creates a named Modal sandbox record, but it is NOT yet attachable as a swap target: routing a session onto a second Modal box is not supported yet, so sandbox_swap to its id is rejected. Use the session's own box (the default) or attach a Connected Machine instead.",
       inputSchema: {
         kind: z4.enum(["selfhosted", "modal"]),
         name: z4.string().min(1).max(120).optional(),
       },
     },
-    async ({ kind, name }) =>
-      json(
+    async ({ kind, name }) => {
+      if (kind === "selfhosted" && exactAgentAttemptClaims(grant)) {
+        // Same live-attempt authority the other fleet tools resolve, without
+        // requiring a session box: a chat with no sandbox can still connect one.
+        await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
+        const item = nativeConnectionCapabilityRecommendations({ connectedMachines: true }).find(
+          (candidate) => candidate.id === CONNECTED_MACHINE_CAPABILITY_ID,
+        )!;
+        const setup = await capabilitySetupProjection(
+          deps,
+          grant.workspaceId,
+          item,
+          new Set(),
+          new Set(),
+          false,
+          new Set(),
+          new Set(),
+        );
+        if (setup.status === "unavailable") {
+          return json({ kind: "selfhosted", status: "unavailable", message: setup.detail });
+        }
+        const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
+          item,
+          action: "connect",
+          rationale: "Connect your computer so this chat can run on it.",
+          toolName: "sandbox_provision",
+        });
+        return json({
+          kind: "selfhosted",
+          status: "card_posted",
+          eventId,
+          message: `${
+            setup.status === "ready"
+              ? `${setup.detail} The Connected Machine card lists them with Use in this chat and can connect another.`
+              : "The Connected Machine card was posted. The person copies its one-line connect command, runs it on their machine, and picks Use in this chat; nothing is connected yet."
+          } Check sandboxes_list after they confirm. Chrome needs the OpenGeni Browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on the connected machine.`,
+        });
+      }
+      return json(
         await provisionSandbox(services, await fleetContext(), {
           kind,
           ...(name ? { name } : {}),
         }),
-      ),
+      );
+    },
   );
 }
 
@@ -4175,7 +4215,9 @@ function registerConnectedMachineTools(
     "connected_machine_enroll_token",
     {
       description:
-        "Create a short-lived Connected Machine enrollment token for this workspace using existing enrollments:manage authority. Returns the token, expiry and Unix/PowerShell install commands. Run the appropriate command on the intended machine through an already-authorized execution path, then verify it with sandboxes_list. No separate device approval is required. Screen control is optional and defaults off. The token grants whole-machine access on enrollment; do not put it in public code or unrelated logs. Existing machine connections are preserved.",
+        "Create a single-use Connected Machine enrollment token for this workspace (expires in one hour) using existing enrollments:manage authority. Returns the token, expiry and Unix/PowerShell install commands. Use it when you can run commands on the target machine yourself (run_on, SSH, a VM you control): run the matching command there, then verify the machine with sandboxes_list. One token connects one machine; mint another for each additional machine (the same machine may rerun its command). When the person must run it on their own computer, post the Connected Machine card instead (capability_authorization_request with api:connected-machine), which mints the command in their browser; do not paste a token into the chat. Screen control is optional and defaults off. The token grants whole-machine access on enrollment; do not put it in public code or unrelated logs. Existing machine connections are preserved. For Chrome, the person installs the OpenGeni Browser extension (" +
+        OPENGENI_BROWSER_EXTENSION_URL +
+        ") after the machine is connected.",
       inputSchema: { allowScreenControl: z4.boolean().optional() },
     },
     async ({ allowScreenControl }) => {
@@ -6440,7 +6482,12 @@ function registerCapabilityDiscoveryTools(
     async ({ query, limit }) => {
       await authorize();
       const current = await catalog();
-      const candidates = [...current.items, ...nativeConnectionCapabilityRecommendations()];
+      const candidates = [
+        ...current.items,
+        ...nativeConnectionCapabilityRecommendations({
+          connectedMachines: deps.settings.sandboxSelfhostedEnabled,
+        }),
+      ];
       const ranked = searchCapabilityCatalogItems(candidates, query, limit ?? 8);
       const setups = await setupProjections(ranked.map(({ item }) => item));
       const matches = ranked.map(({ item, matchedOn, approximate }, index) => ({
@@ -6496,7 +6543,7 @@ function registerCapabilityDiscoveryTools(
     "capability_authorization_request",
     {
       description:
-        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) is the exception: when it is already connected the card is still shown, listing repositories the person can use in this chat.",
+        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the OpenGeni Browser Chrome extension link; never paste an enroll token into the chat yourself.",
       inputSchema: {
         capabilityId: z4.string().min(1).max(512),
         rationale: z4.string().min(1).max(2000),
@@ -6505,9 +6552,12 @@ function registerCapabilityDiscoveryTools(
     async ({ capabilityId, rationale }) => {
       await authorize();
       const current = await catalog();
-      const item = [...current.items, ...nativeConnectionCapabilityRecommendations()].find(
-        (candidate) => candidate.id === capabilityId,
-      );
+      const item = [
+        ...current.items,
+        ...nativeConnectionCapabilityRecommendations({
+          connectedMachines: deps.settings.sandboxSelfhostedEnabled,
+        }),
+      ].find((candidate) => candidate.id === capabilityId);
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
         throw new Error("Unknown or untrusted capability; search the catalog again.");
       }
@@ -6517,7 +6567,11 @@ function registerCapabilityDiscoveryTools(
       // it lists the shared repositories with a "Use" action that attaches one
       // to this chat, so a ready GitHub still gets its card.
       const githubCardWhenReady = setup.status === "ready" && item.id === "api:github-app";
-      if (setup.status === "ready" && !githubCardWhenReady) {
+      // The machine card likewise lists connected machines with "Use in this
+      // chat" and can connect another, so it is shown when machines exist too.
+      const machineCardWhenReady =
+        setup.status === "ready" && item.id === CONNECTED_MACHINE_CAPABILITY_ID;
+      if (setup.status === "ready" && !githubCardWhenReady && !machineCardWhenReady) {
         return json({
           capabilityId: item.id,
           status: "ready",
@@ -6531,42 +6585,24 @@ function registerCapabilityDiscoveryTools(
           message: setup.detail,
         });
       }
-      const claims = exactAgentCommandContext(grant, sessionId);
-      const payload = ToolAuthNeededPayload.parse({
-        serverId: item.runtime.mcpServerId ?? "opengeni",
-        toolName: "capability_authorization_request",
-        providerDomain: capabilityProviderDomain(item),
-        reason: "missing_connection",
-        capability: {
-          id: item.id,
-          name: item.name,
-          kind: item.kind,
-          source: item.source,
-          action: setup.action ?? "connect",
-          rationale,
-          requiredVariables: capabilityRequiredVariables(item),
-        },
+      const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
+        item,
+        action: setup.action ?? "connect",
+        rationale,
       });
-      const appended = await appendAndPublishTurnEventsFenced(
-        deps.db,
-        deps.bus,
-        grant.workspaceId,
-        sessionId,
-        claims.callerTurnId,
-        claims.callerExecutionGeneration,
-        claims.callerAttemptId,
-        [{ type: "tool.auth_needed", payload }],
-      );
-      if (!appended.accepted) {
-        throw new Error(
-          "The calling turn was replaced before the authorization request committed.",
-        );
+      if (machineCardWhenReady) {
+        return json({
+          capabilityId: item.id,
+          status: "ready",
+          eventId,
+          message: `${setup.detail} The Connected Machine card is in this chat: the person can pick a machine with "Use in this chat" or connect another. Chrome needs the OpenGeni Browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on a connected machine.`,
+        });
       }
       if (githubCardWhenReady) {
         return json({
           capabilityId: item.id,
           status: "ready",
-          eventId: appended.events[0]?.id ?? null,
+          eventId,
           message: `${setup.detail} The GitHub card is in this chat: the person picks a repository with its "Use" button, which attaches it to this chat.`,
         });
       }
@@ -6574,9 +6610,11 @@ function registerCapabilityDiscoveryTools(
         capabilityId: item.id,
         status: "authorization_requested",
         action: setup.action,
-        eventId: appended.events[0]?.id ?? null,
+        eventId,
         message:
-          "The recommendation was posted for human confirmation. No access has been granted yet.",
+          item.id === CONNECTED_MACHINE_CAPABILITY_ID
+            ? "The Connected Machine card was posted. The person copies its connect command, runs it on their machine, and picks Use in this chat; nothing is connected yet. Do not paste an enroll token into the chat."
+            : "The recommendation was posted for human confirmation. No access has been granted yet.",
       });
     },
   );
@@ -6758,6 +6796,29 @@ async function capabilitySetupProjection(
         "Fiken is connected, but its selected tools are unavailable in this execution. Check tool permissions and setup before retrying; reconnection is not required by this status.",
     };
   }
+  if (item.id === CONNECTED_MACHINE_CAPABILITY_ID) {
+    if (!deps.settings.sandboxSelfhostedEnabled) {
+      return {
+        status: "unavailable",
+        action: null,
+        detail: "Connected Machines are not enabled on this deployment.",
+      };
+    }
+    const enrolled = await listEnrollments(deps.db, workspaceId, { status: "active" });
+    if (enrolled.length > 0) {
+      return {
+        status: "ready",
+        action: null,
+        detail: "Machines are connected to this workspace; sandboxes_list shows which are online.",
+      };
+    }
+    return {
+      status: "authorization_required",
+      action: "connect",
+      detail:
+        "No machine is connected yet. The person copies a one-line connect command from the chat card and runs it on their machine.",
+    };
+  }
   if (item.id === "api:github-app" || item.surfaceType === "first_party_github") {
     const missing = githubAppMissingSettings(deps.settings);
     if (missing.length > 0) {
@@ -6856,6 +6917,54 @@ async function capabilitySetupProjection(
     action: "enable",
     detail: "A workspace admin must review and enable this capability.",
   };
+}
+
+/**
+ * Post a capability Connect card in the calling turn. The card carries identity
+ * and rationale only; the authenticated person completes setup through it.
+ */
+async function appendCapabilityCardEvent(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  input: {
+    item: CapabilityCatalogItem;
+    action: "connect" | "add_credentials" | "enable";
+    rationale: string;
+    toolName?: string;
+  },
+): Promise<string | null> {
+  const { item } = input;
+  const claims = exactAgentCommandContext(grant, sessionId);
+  const payload = ToolAuthNeededPayload.parse({
+    serverId: item.runtime.mcpServerId ?? "opengeni",
+    toolName: input.toolName ?? "capability_authorization_request",
+    providerDomain: capabilityProviderDomain(item),
+    reason: "missing_connection",
+    capability: {
+      id: item.id,
+      name: item.name,
+      kind: item.kind,
+      source: item.source,
+      action: input.action,
+      rationale: input.rationale,
+      requiredVariables: capabilityRequiredVariables(item),
+    },
+  });
+  const appended = await appendAndPublishTurnEventsFenced(
+    deps.db,
+    deps.bus,
+    grant.workspaceId,
+    sessionId,
+    claims.callerTurnId,
+    claims.callerExecutionGeneration,
+    claims.callerAttemptId,
+    [{ type: "tool.auth_needed", payload }],
+  );
+  if (!appended.accepted) {
+    throw new Error("The calling turn was replaced before the authorization request committed.");
+  }
+  return appended.events[0]?.id ?? null;
 }
 
 function capabilityRequiredVariables(item: CapabilityCatalogItem): string[] {
