@@ -857,7 +857,7 @@ export function useCodexSubscriptions({
           },
         );
         await refreshAccounts();
-        toast.success(enabled ? "Extra credits enabled" : "Extra credits protected");
+        toast.success(enabled ? "Extra credit spending on" : "Extra credit spending off");
       } catch (error) {
         await refreshAccounts();
         toast.error("Couldn't change this account", { description: userErrorText(error) });

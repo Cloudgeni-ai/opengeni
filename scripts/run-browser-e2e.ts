@@ -11,6 +11,7 @@ const testFiles =
         "./test/e2e/artifact-static-renderer.browser.e2e.ts",
         "./test/e2e/ai-gateway-connection.browser.e2e.ts",
         "./test/e2e/claude-subscription.browser.e2e.ts",
+        "./test/e2e/codex-account.browser.e2e.ts",
         "./test/e2e/editable-artifacts.browser.e2e.ts",
         "./test/e2e/browser.e2e.ts",
         "./test/e2e/connected-machine-removal.browser.e2e.ts",

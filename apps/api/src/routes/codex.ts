@@ -62,6 +62,7 @@ import {
   ensureCodexRotationSettings,
   ensureOrganizationCodexRotationSettings,
   fetchCodexUsageForAccount,
+  fetchOrganizationCodexUsageForAccount,
   fetchCodexRateLimitResetCreditsForAccount,
   fenceCodexResetRedemptionSend,
   getCodexResetRedemptionAttempt,
@@ -1007,6 +1008,28 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         activeCredentialId: rotation?.activeCredentialId ?? null,
       },
     });
+  });
+
+  app.get("/v1/organizations/:organizationId/codex/accounts/:accountId/usage", async (c) => {
+    const organizationId = c.req.param("organizationId");
+    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const mode = await codexRouteDisposition(deps, organizationId);
+    const credentialId = c.req.param("accountId");
+    if (!z.string().uuid().safeParse(credentialId).success) {
+      throw new HTTPException(404, { message: "codex account not found" });
+    }
+    const usage = await fetchOrganizationCodexUsageForAccount(
+      db,
+      settings,
+      {
+        organizationId,
+        actorSubjectId: human.subjectId,
+        credentialId,
+        mode,
+      },
+      deps.codexFetch ?? fetch,
+    );
+    return c.json(codexUsageJson(usage));
   });
 
   app.post("/v1/organizations/:organizationId/codex/connect/start", async (c) => {

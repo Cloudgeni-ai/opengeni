@@ -200,7 +200,7 @@ export function useOrganizationCodexSubscriptions({
           throw error;
         }
       },
-      extraCreditsEnabled ? "Extra credits enabled" : "Extra credits protected",
+      extraCreditsEnabled ? "Extra credit spending on" : "Extra credit spending off",
     );
 
   const setRotation = (rotationEnabled: boolean) =>

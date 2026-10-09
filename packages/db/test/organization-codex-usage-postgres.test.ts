@@ -1,0 +1,289 @@
+import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { CodexReloginRequired, type CodexFetch } from "@opengeni/codex";
+import type { Settings } from "@opengeni/config";
+import {
+  createDb,
+  ensureManagedAccessForUser,
+  fetchOrganizationCodexUsageForAccount,
+  type DbClient,
+} from "../src";
+import { encryptEnvironmentValue } from "../src/environment-crypto";
+
+const real = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
+let shared: SharedTestDatabase | null = null;
+let client: DbClient | null = null;
+const key = Buffer.alloc(32, 62);
+const settings = { environmentsEncryptionKey: key.toString("base64") } as Settings;
+beforeAll(async () => {
+  if (!real) return;
+  shared = await acquireSharedTestDatabase("organization-codex-usage");
+  if (!shared) throw new Error("Real PostgreSQL is required");
+  client = createDb(shared.appUrl, { max: 6 });
+}, 180_000);
+afterAll(async () => {
+  await client?.close();
+  await shared?.release();
+}, 180_000);
+
+async function fixture(mode: "legacy" | "core", expired = false) {
+  const userId = crypto.randomUUID();
+  const access = await ensureManagedAccessForUser(client!.db, {
+    userId,
+    email: `${userId}@example.test`,
+    name: "Usage fixture",
+  });
+  const organizationId = access.workspaceGrants[0]!.accountId;
+  const credentialId = crypto.randomUUID();
+  const actorSubjectId = `user:${userId}`;
+  const encrypted = encryptEnvironmentValue(
+    key,
+    JSON.stringify({
+      access_token: "synthetic-access",
+      refresh_token: "synthetic-refresh",
+      id_token: "synthetic-id",
+    }),
+  );
+  const expires = new Date(expired ? 0 : Date.now() + 86_400_000).toISOString();
+  if (mode === "legacy") {
+    await shared!.admin`insert into codex_subscription_credentials (
+      id, account_id, organization_id, authority_scope, credential_encrypted,
+      chatgpt_account_id, plan_type, status, allocator_enabled, allowed_workspace_ids,
+      allow_personal_workspaces, expires_at
+    ) values (${credentialId}, ${organizationId}, ${organizationId}, 'organization',
+      ${encrypted}, ${crypto.randomUUID()}, 'pro', 'active', false, '{}', false, ${expires})`;
+  } else {
+    await shared!.admin`insert into subscription_provider_cutovers (account_id, provider, enabled)
+      values (${organizationId}, 'codex', true)`;
+    await shared!.admin`insert into subscription_connections (
+      id, account_id, provider, kind, credential_encrypted, credential_format, provider_account_id,
+      plan_type, ownership, scope_kind, status, allocator_enabled, allow_personal_workspaces, expires_at
+    ) values (${credentialId}, ${organizationId}, 'codex', 'subscription', ${encrypted}, 'v2',
+      ${crypto.randomUUID()}, 'pro', 'shared', 'workspaces', 'active', false, false, ${expires})`;
+  }
+  return { organizationId, actorSubjectId, credentialId, mode };
+}
+
+function provider() {
+  return mock(
+    async () =>
+      new Response(
+        JSON.stringify({
+          plan_type: "pro",
+          rate_limit: {
+            primary_window: {
+              used_percent: 75,
+              limit_window_seconds: 18000,
+              reset_after_seconds: 120,
+            },
+          },
+          credits: { has_credits: true, unlimited: false, balance: "120.50" },
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+  ) as ReturnType<typeof mock> & CodexFetch;
+}
+
+for (const mode of ["legacy", "core"] as const) {
+  describe(`organization Codex usage (${mode})`, () => {
+    test.skipIf(!real)(
+      "retries a rejected unexpired bearer once and surfaces repeated rejection",
+      async () => {
+        const input = await fixture(mode);
+        const success = provider();
+        let calls = 0;
+        const fetch: CodexFetch = async (...args) =>
+          ++calls === 1 ? new Response(null, { status: 401 }) : success(...args);
+        const refresh = mock(async () => ({
+          accessToken: "fresh-access",
+          refreshToken: "fresh-refresh",
+          idToken: "synthetic-id",
+        }));
+        expect(
+          (await fetchOrganizationCodexUsageForAccount(client!.db, settings, input, fetch, refresh))
+            .status,
+        ).toBe("ok");
+        expect(calls).toBe(2);
+        expect(refresh).toHaveBeenCalledTimes(1);
+        const failed = await fixture(mode);
+        calls = 0;
+        const denied: CodexFetch = async () => {
+          calls += 1;
+          return new Response(null, { status: 401 });
+        };
+        expect(
+          (
+            await fetchOrganizationCodexUsageForAccount(
+              client!.db,
+              settings,
+              failed,
+              denied,
+              refresh,
+            )
+          ).reason,
+        ).toBe("needs_relogin");
+        expect(calls).toBe(2);
+        expect(refresh).toHaveBeenCalledTimes(2);
+      },
+    );
+    test.skipIf(!real)(
+      "reads paused, unassigned accounts without changing routing or consent",
+      async () => {
+        const input = await fixture(mode);
+        const fetch = provider();
+        const result = await fetchOrganizationCodexUsageForAccount(
+          client!.db,
+          settings,
+          input,
+          fetch,
+        );
+        expect(result.status).toBe("ok");
+        expect(result.credits?.balance).toBe("120.50");
+        expect(fetch).toHaveBeenCalledTimes(1);
+        const rows =
+          mode === "legacy"
+            ? await shared!
+                .admin`select allocator_enabled, extra_credits_enabled, allowed_workspace_ids
+            from codex_subscription_credentials where id = ${input.credentialId}`
+            : await shared!.admin`select allocator_enabled, extra_credits_enabled
+            from subscription_connections where id = ${input.credentialId}`;
+        expect(rows[0]).toMatchObject({ allocator_enabled: false, extra_credits_enabled: false });
+        if (mode === "legacy") expect(rows[0]!.allowed_workspace_ids).toEqual([]);
+      },
+    );
+    test.skipIf(!real)(
+      "denies another organization and a revoked administrator before provider I/O",
+      async () => {
+        const input = await fixture(mode);
+        const other = await fixture(mode);
+        const fetch = provider();
+        expect(
+          (
+            await fetchOrganizationCodexUsageForAccount(
+              client!.db,
+              settings,
+              {
+                ...input,
+                credentialId: other.credentialId,
+              },
+              fetch,
+            )
+          ).status,
+        ).toBe("error");
+        await shared!.admin`update organization_memberships set role = 'member'
+        where account_id = ${input.organizationId} and subject_id = ${input.actorSubjectId}`;
+        expect(
+          (await fetchOrganizationCodexUsageForAccount(client!.db, settings, input, fetch)).status,
+        ).toBe("error");
+        expect(fetch).not.toHaveBeenCalled();
+      },
+    );
+    test.skipIf(!real)(
+      "serializes stale bearer refresh and commits permanent sign-in failure",
+      async () => {
+        const input = await fixture(mode, true);
+        const fetch = provider();
+        const accessToken = `header.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url")}.signature`;
+        const refresh = mock(async () => ({
+          accessToken,
+          refreshToken: "rotated-refresh",
+          idToken: "synthetic-id",
+        }));
+        const results = await Promise.all(
+          [1, 2].map(() =>
+            fetchOrganizationCodexUsageForAccount(client!.db, settings, input, fetch, refresh),
+          ),
+        );
+        expect(results.map((r) => r.status)).toEqual(["ok", "ok"]);
+        expect(refresh).toHaveBeenCalledTimes(1);
+        const failed = await fixture(mode, true);
+        const refusal = mock(async () => {
+          throw new CodexReloginRequired("Synthetic expired sign-in");
+        });
+        expect(
+          (
+            await fetchOrganizationCodexUsageForAccount(
+              client!.db,
+              settings,
+              failed,
+              fetch,
+              refusal,
+            )
+          ).reason,
+        ).toBe("needs_relogin");
+        const rows =
+          mode === "legacy"
+            ? await shared!
+                .admin`select status from codex_subscription_credentials where id = ${failed.credentialId}`
+            : await shared!
+                .admin`select status from subscription_connections where id = ${failed.credentialId}`;
+        expect(rows[0]!.status).toBe("needs_relogin");
+      },
+    );
+    test.skipIf(!real)("refuses cutover maintenance without falling back", async () => {
+      const input = await fixture(mode);
+      await shared!.admin`insert into subscription_provider_cutovers (account_id, provider, enabled)
+        values (${input.organizationId}, 'codex', false)
+        on conflict (account_id, provider) do update set enabled = false`;
+      const fetch = provider();
+      expect(
+        (await fetchOrganizationCodexUsageForAccount(client!.db, settings, input, fetch)).status,
+      ).toBe("error");
+      expect(fetch).not.toHaveBeenCalled();
+    });
+    for (const change of ["quarantine", "maintenance"] as const) {
+      test.skipIf(!real)(
+        `retains rotated tokens when ${change} starts during refresh`,
+        async () => {
+          const input = await fixture(mode, true);
+          const fetch = provider();
+          const refresh = mock(async () => {
+            if (change === "maintenance") {
+              await shared!
+                .admin`insert into subscription_provider_cutovers (account_id, provider, enabled)
+              values (${input.organizationId}, 'codex', false)
+              on conflict (account_id, provider) do update set enabled = false`;
+            } else if (mode === "legacy") {
+              await shared!
+                .admin`update codex_subscription_credentials set status = 'error', last_error = 'Synthetic quarantine'
+              where id = ${input.credentialId}`;
+            } else {
+              await shared!
+                .admin`update subscription_connections set status = 'error', last_error = 'Synthetic quarantine'
+              where id = ${input.credentialId}`;
+            }
+            return {
+              accessToken: "rotated-access",
+              refreshToken: "rotated-refresh",
+              idToken: "synthetic-id",
+            };
+          });
+          const result = await fetchOrganizationCodexUsageForAccount(
+            client!.db,
+            settings,
+            input,
+            fetch,
+            refresh,
+          );
+          expect(result.status).toBe("error");
+          expect(fetch).not.toHaveBeenCalled();
+          const rows =
+            mode === "legacy"
+              ? await shared!
+                  .admin`select version as generation, status, last_error, credential_encrypted
+              from codex_subscription_credentials where id = ${input.credentialId}`
+              : await shared!
+                  .admin`select refresh_generation as generation, status, last_error, credential_encrypted
+              from subscription_connections where id = ${input.credentialId}`;
+          expect(Number(rows[0]!.generation)).toBe(2);
+          const { decryptEnvironmentValue } = await import("../src/environment-crypto");
+          expect(
+            JSON.parse(decryptEnvironmentValue(key, rows[0]!.credential_encrypted)).refresh_token,
+          ).toBe("rotated-refresh");
+          if (change === "quarantine")
+            expect(rows[0]).toMatchObject({ status: "error", last_error: "Synthetic quarantine" });
+        },
+      );
+    }
+  });
+}

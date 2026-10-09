@@ -2,12 +2,7 @@ import type { CodexAccount, ModelConnectionAccessResponse } from "@opengeni/sdk"
 import { CheckIcon, PencilIcon, UnplugIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
-import {
-  CodexDeviceCodePanel,
-  codexAccountName,
-  codexUsageReadings,
-  planLabel,
-} from "@/components/codex-connection";
+import { CodexDeviceCodePanel, codexAccountName, planLabel } from "@/components/codex-connection";
 import {
   ConnectionAccessFormPage,
   ConnectionAccessRows,
@@ -33,10 +28,9 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { FieldStack } from "@/components/ui/field";
 import { Notice } from "@/components/ui/notice";
 import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { RelativeTime } from "@/components/ui/relative-time";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Switch } from "@/components/ui/switch";
-import { UsageMeterGroup } from "@/components/ui/usage-meter";
+import { CODEX_EXTRA_CREDITS_DESCRIPTION, OrganizationCodexUsage } from "./codex-account-usage";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
@@ -75,14 +69,11 @@ export function OrgCodexAccountPage({
   codex,
   accountId,
   places,
-  usage,
   resets,
 }: {
   codex: OrganizationCodexSubscriptions;
   accountId: string;
   places: OrgCodexPlaces;
-  /** This account's usage, while the workspace the page is open in uses it. */
-  usage?: ReactNode;
   /** Its usage limit resets, which only an account owned by a workspace can redeem. */
   resets?: ReactNode;
 }) {
@@ -109,28 +100,18 @@ export function OrgCodexAccountPage({
       </DetailPage>
     );
   }
-  return (
-    <OrgCodexAccountDetail
-      codex={codex}
-      account={account}
-      places={places}
-      usage={usage}
-      resets={resets}
-    />
-  );
+  return <OrgCodexAccountDetail codex={codex} account={account} places={places} resets={resets} />;
 }
 
 function OrgCodexAccountDetail({
   codex,
   account,
   places,
-  usage,
   resets,
 }: {
   codex: OrganizationCodexSubscriptions;
   account: CodexAccount;
   places: OrgCodexPlaces;
-  usage: ReactNode;
   resets: ReactNode;
 }) {
   const listLabel = useModelsListLabel();
@@ -144,21 +125,6 @@ function OrgCodexAccountDetail({
     connectionId: account.id,
   });
   const reconnect = account.status !== "active";
-  // The last usage Opengeni saved, while no workspace that uses it reports live usage here.
-  const cachedReadings = codexUsageReadings(
-    { weekly: account.weekly ?? null, fiveHour: account.fiveHour ?? null },
-    Date.now(),
-  );
-  const cachedUsage = cachedReadings.some((reading) => reading.percent !== null) ? (
-    <UsageMeterGroup
-      windows={cachedReadings}
-      checked={
-        account.usageCheckedAt ? (
-          <RelativeTime date={account.usageCheckedAt} prefix="Checked" />
-        ) : undefined
-      }
-    />
-  ) : null;
   return (
     <DetailPage
       back={{ label: listLabel, onClick: places.backToList }}
@@ -214,11 +180,15 @@ function OrgCodexAccountDetail({
             </Notice>
           </DetailSection>
         ) : null}
-        {usage ? (
-          <DetailSection title="Usage">{usage}</DetailSection>
-        ) : cachedUsage ? (
-          <DetailSection title="Usage">{cachedUsage}</DetailSection>
-        ) : null}
+        <DetailSection title="Usage">
+          <OrganizationCodexUsage
+            key={`${codex.organizationId}:${account.id}`}
+            client={codex.client}
+            organizationId={codex.organizationId}
+            account={account}
+            onNeedsReconnect={codex.refresh}
+          />
+        </DetailSection>
         <DetailSection title="Settings">
           <SettingRowGroup className="-my-3">
             <SettingRow
@@ -236,7 +206,7 @@ function OrgCodexAccountDetail({
             />
             <SettingRow
               label="Use extra credits"
-              description="Use this account's extra credits when included usage is exhausted. Automatic rotation tries other accounts' included usage first. Turning this off protects credits from the next request."
+              description={CODEX_EXTRA_CREDITS_DESCRIPTION}
               control={
                 <Switch
                   aria-label={`Use extra credits on ${name}`}
@@ -250,11 +220,7 @@ function OrgCodexAccountDetail({
             {codex.accounts.length > 1 ? (
               <SettingRow
                 label="Primary account"
-                description={
-                  account.id === codex.activeAccountId
-                    ? `New work across ${places.organizationName} starts here.`
-                    : "Make this the account new work starts with."
-                }
+                description="Used with Primary only. Spread work chooses an available account."
                 control={
                   account.id === codex.activeAccountId ? (
                     <span className="inline-flex h-8 items-center gap-1.5 text-sm font-medium text-fg-muted">
@@ -281,13 +247,6 @@ function OrgCodexAccountDetail({
           </SettingRowGroup>
         </DetailSection>
         {resets ? <DetailSection title="Usage limit resets">{resets}</DetailSection> : null}
-        {usage || cachedUsage ? null : (
-          <DetailSection>
-            <p className="text-xs leading-4.5 text-fg-muted">
-              Usage shows here once a workspace has used this account.
-            </p>
-          </DetailSection>
-        )}
       </DetailPageBody>
       <RenameAccountDialog
         open={renaming}

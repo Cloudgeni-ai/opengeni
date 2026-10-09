@@ -1816,6 +1816,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "GET /v1/organizations/:organizationId/codex/accounts/:accountId/usage",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/usage",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
     "method": "GET",
     "path": "/v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",

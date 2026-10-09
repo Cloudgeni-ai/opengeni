@@ -615,6 +615,45 @@ describe("organization Codex routes with a cutover row", () => {
   const orgPath = `/v1/organizations/${ACCOUNT}/codex`;
   const orgAdmin = { accountId: ACCOUNT, workspaceId: null, subjectId: "user:org-admin" };
 
+  for (const mode of ["legacy", "core"] as const) {
+    test(`organization usage keeps administrator authority outside workspace routing (${mode})`, async () => {
+      cutover(mode);
+      mock("getOrganizationCodexRotationSettings", async () => null);
+      const payload = {
+        status: "ok" as const,
+        planType: "pro",
+        weekly: null,
+        fiveHour: null,
+        limitReached: false,
+        fetchedAt: new Date().toISOString(),
+        credits: {
+          hasCredits: true,
+          unlimited: false,
+          overageLimitReached: false,
+          balance: "50.00",
+        },
+      };
+      const usage = mock("fetchOrganizationCodexUsageForAccount", async () => payload);
+      const path = `${orgPath}/accounts/${CONNECTION}/usage`;
+      const response = await app().fetch(organizationAdminRequest(path));
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ status: "ok", usage: payload });
+      expect(usage.mock.calls[0]![2]).toEqual({
+        organizationId: ACCOUNT,
+        actorSubjectId: "user:org-admin",
+        credentialId: CONNECTION,
+        mode,
+      });
+      const denied = await app().request(path);
+      expect(denied.status).toBe(401);
+      expect(usage).toHaveBeenCalledTimes(1);
+      cutover("maintenance");
+      const held = await app().fetch(organizationAdminRequest(path));
+      expect(held.status).toBe(503);
+      expect(usage).toHaveBeenCalledTimes(1);
+    });
+  }
+
   test("organization pause uses organization authority and preserves conflict responses", async () => {
     organizationCutover("core");
     const allocator = mock("setSubscriptionCoreCodexAllocator", async () => ({
