@@ -8,6 +8,7 @@ import {
   MAX_SELECTED_VARIABLE_SETS,
   Permission,
   SESSION_INSTRUCTIONS_MAX_CHARACTERS,
+  SESSION_ADMIN_ACCESS_TOOL_NAME_SET,
   SESSION_TITLE_MAX_CHARACTERS,
   WORK_DISCOVERY_QUERY_MAX_CHARS,
   type AccessGrant,
@@ -1226,7 +1227,10 @@ describe("first-party MCP tool visibility policy", () => {
 
     const broad = registeredToolNames(server);
     expect(broad).toEqual(
-      FIRST_PARTY_REMOTE_MCP_TOOL_NAMES.filter((name) => name !== "slack_bot_search").sort(),
+      FIRST_PARTY_REMOTE_MCP_TOOL_NAMES.filter(
+        // Admin tools come from the session's admin access, not its selection.
+        (name) => name !== "slack_bot_search" && !SESSION_ADMIN_ACCESS_TOOL_NAME_SET.has(name),
+      ).sort(),
     );
     // Generic agent calls cannot supply Slack's trusted interaction action token,
     // even after an approved deployment enables full Slack access.
@@ -1473,6 +1477,55 @@ describe("first-party MCP tool visibility policy", () => {
     } finally {
       await Promise.all([client.close(), server.close()]);
     }
+  });
+});
+
+describe("session admin access tools", () => {
+  const adminTools = ["admin_action_call", "admin_action_describe", "admin_actions_search"];
+  const access = {
+    origin: "http://opengeni.test",
+    dispatch: async () => new Response(null, { status: 500 }),
+  };
+  const admin = (server: unknown) =>
+    registeredToolNames(server).filter((name) => name.startsWith("admin_"));
+
+  test("are never selected by default", () => {
+    for (const name of adminTools) {
+      expect(DEFAULT_FIRST_PARTY_MCP_TOOLS as readonly string[]).not.toContain(name);
+    }
+    expect(
+      admin(buildOpenGeniMcpServer(deps(), grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]))),
+    ).toEqual([]);
+  });
+
+  test("appear only while the session has admin access, whatever its selection or permissions", () => {
+    // An empty selection and no permissions: admin access alone adds them.
+    expect(
+      admin(buildOpenGeniMcpServer(deps(), grant([], []), { sessionAdminAccess: access })),
+    ).toEqual(adminTools);
+    // Selecting them by name without admin access never registers them.
+    expect(
+      admin(
+        buildOpenGeniMcpServer(
+          deps(),
+          grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], adminTools as FirstPartyMcpToolName[]),
+          { sessionAdminAccess: null },
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  test("need an agent turn bound to a session", () => {
+    const human: AccessGrant = {
+      accountId,
+      workspaceId,
+      subjectId: "user:someone",
+      principalKind: "human_session",
+      permissions: [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+    };
+    expect(admin(buildOpenGeniMcpServer(deps(), human, { sessionAdminAccess: access }))).toEqual(
+      [],
+    );
   });
 });
 

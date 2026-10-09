@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import { registerClaudeSubscriptionAccountRoutes } from "./routes/claude-subscription-accounts";
 import { isPreparedMcpConnectPath } from "./prepared-mcp-permissions";
 import { registerWorkspaceModelProviderRoutes } from "./routes/workspace-model-providers";
@@ -101,6 +103,7 @@ import {
   reapManagedAuthIsolatedSessions,
   reapExpiredManagedAuthSessionSets,
   resolveSessionMemoryAgentScope,
+  resolveSessionAdminAuthority,
   rlsContextForWorkspace,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
@@ -261,6 +264,7 @@ import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
 import { registerOrganizationModelProviderRoutes } from "./routes/organization-model-providers";
 import { registerOrganizationModelDefaultsRoutes } from "./routes/organization-model-defaults";
+import { registerSessionAdminAccessRoutes } from "./routes/session-admin-access";
 import { registerOrganizationIntegrationPolicyRoutes } from "./routes/organization-integration-policy";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
@@ -1676,6 +1680,10 @@ export function createAppComposition(deps: AppDependencies): {
       throw error;
     }
     const grant = authorization.grant;
+    // Admin actions dispatch back into this API as a person. Capture the
+    // context now, before this request takes on the agent's database and
+    // billing scope, so none of it carries into those actions.
+    const outsideAgentContext = AsyncLocalStorage.snapshot();
     // The agent-attempt context, this route check, and a tool's own entry check
     // re-read the same caller session and attempt; share those reads.
     return await withSessionAuthorizationReadReuse((reads) =>
@@ -1739,11 +1747,28 @@ export function createAppComposition(deps: AppDependencies): {
                 rootSessionId: null,
               })
             : null;
+        // Checked live: allowed by the organization, given to this session,
+        // and the person who gave it is still an owner or admin.
+        const sessionAdminAccess =
+          typeof boundSessionId === "string" &&
+          (await resolveSessionAdminAuthority(routeDeps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId: boundSessionId,
+          }))
+            ? {
+                origin: new URL(c.req.url).origin,
+                dispatch: (request: Request) =>
+                  outsideAgentContext(async () => await app.fetch(request, c.env)),
+                signal: c.req.raw.signal,
+              }
+            : null;
         const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
           requestOrigin: new URL(c.req.url).origin,
           workspaceMemoryEnabled,
           workspaceMemoryPromptMode,
           sessionMemory,
+          sessionAdminAccess,
         });
         // Bind tool handlers' `extra.signal` to the HTTP client's connection: a
         // worker that drops the call (Steer/Pause) aborts a blocking tool here.
@@ -2097,6 +2122,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
   registerOrganizationModelDefaultsRoutes(app, routeDeps);
+  registerSessionAdminAccessRoutes(app, routeDeps);
   registerWorkspaceModelProviderRoutes(app, routeDeps);
   registerClaudeSubscriptionOAuthRoutes(app, routeDeps);
   registerOrganizationIntegrationPolicyRoutes(app, routeDeps);

@@ -3517,6 +3517,9 @@ export type FirstPartyMcpToolName =
   | "project_reorder"
   | "project_delete"
   | "session_set_project"
+  | "admin_actions_search"
+  | "admin_action_describe"
+  | "admin_action_call"
   | "rig_list"
   | "rig_get"
   | "rig_propose_change"
@@ -3995,6 +3998,36 @@ export type UpdateOrganizationModelDefaultsRequest = {
     | null
     | undefined;
   modelCompactionThresholds?: Record<string, number | null> | undefined;
+};
+
+/**
+ * Whether owners and admins may give agent sessions admin access. Off by
+ * default; turning it off ends every session's admin access.
+ */
+export type OrganizationAgentAdminAccess = {
+  sessionAdminAccessAllowed: boolean;
+  updatedAt: string | null;
+};
+
+export type UpdateOrganizationAgentAdminAccessRequest = {
+  sessionAdminAccessAllowed: boolean;
+};
+
+/**
+ * A session's admin access as the viewer sees it. While `active`, the agent
+ * in this session can do what `grantedBy` can manage across the
+ * organization, checked live on every action.
+ */
+export type SessionAdminAccess = {
+  active: boolean;
+  grantedBy: { subjectId: string; name: string | null } | null;
+  grantedAt: string | null;
+  /** The organization allows admin access for sessions. */
+  allowed: boolean;
+  /** The viewer may turn it on: an owner or admin, in person, on their own session. */
+  canGrant: boolean;
+  /** The viewer may turn it off. */
+  canRevoke: boolean;
 };
 
 /** Full replacement body for `PUT /v1/workspaces/:id/model-policy`. */

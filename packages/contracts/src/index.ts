@@ -918,6 +918,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "project_reorder",
   "project_delete",
   "session_set_project",
+  "admin_actions_search",
+  "admin_action_describe",
+  "admin_action_call",
   "rig_list",
   "rig_get",
   "rig_propose_change",
@@ -1184,6 +1187,20 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
 } as const satisfies Partial<Record<FirstPartyMcpToolName, readonly [string, string]>>;
 
 /**
+ * Tools a session has only while it has admin access: the organization's
+ * actions, run as the owner or admin who gave it. Admin access, not the
+ * session's tool selection, decides whether they are there.
+ */
+export const SESSION_ADMIN_ACCESS_TOOL_NAMES = [
+  "admin_actions_search",
+  "admin_action_describe",
+  "admin_action_call",
+] as const satisfies readonly FirstPartyMcpToolName[];
+export const SESSION_ADMIN_ACCESS_TOOL_NAME_SET: ReadonlySet<string> = new Set<string>(
+  SESSION_ADMIN_ACCESS_TOOL_NAMES,
+);
+
+/**
  * Connector-wide tools are explicit-only except prepared bot sending. Ordinary
  * chats may select the bot's explicit channel without borrowing a personal
  * account; accepted turn/task policies and permission ceilings remain fixed.
@@ -1199,7 +1216,8 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
       name === "slack_bot_prepare_message" ||
       name === "slack_bot_send_prepared_message") &&
     !name.startsWith("fiken_") &&
-    !name.startsWith("atlassian_"),
+    !name.startsWith("atlassian_") &&
+    !SESSION_ADMIN_ACCESS_TOOL_NAME_SET.has(name),
 ) satisfies readonly FirstPartyMcpToolName[];
 
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
@@ -2511,6 +2529,41 @@ export const UpdateOrganizationModelDefaultsRequest = z
 export type UpdateOrganizationModelDefaultsRequest = z.infer<
   typeof UpdateOrganizationModelDefaultsRequest
 >;
+
+/**
+ * Whether owners and admins may give an agent session admin access. Off by
+ * default; turning it off ends every session's admin access.
+ */
+export const OrganizationAgentAdminAccess = z.object({
+  sessionAdminAccessAllowed: z.boolean(),
+  updatedAt: z.string().nullable(),
+});
+export type OrganizationAgentAdminAccess = z.infer<typeof OrganizationAgentAdminAccess>;
+
+export const UpdateOrganizationAgentAdminAccessRequest = z
+  .object({ sessionAdminAccessAllowed: z.boolean() })
+  .strict();
+export type UpdateOrganizationAgentAdminAccessRequest = z.infer<
+  typeof UpdateOrganizationAgentAdminAccessRequest
+>;
+
+/**
+ * A session's admin access as the viewer sees it. While `active`, the agent
+ * in this session can do what `grantedBy` can manage across the
+ * organization, checked live on every action.
+ */
+export const SessionAdminAccess = z.object({
+  active: z.boolean(),
+  grantedBy: z.object({ subjectId: z.string(), name: z.string().nullable() }).nullable(),
+  grantedAt: z.string().nullable(),
+  /** The organization allows admin access for sessions. */
+  allowed: z.boolean(),
+  /** The viewer may turn it on: an owner or admin, in person, on their own session. */
+  canGrant: z.boolean(),
+  /** The viewer may turn it off. */
+  canRevoke: z.boolean(),
+});
+export type SessionAdminAccess = z.infer<typeof SessionAdminAccess>;
 
 /** The organization's compaction preference for one exact model, or null. */
 export function organizationModelCompactionThreshold(
