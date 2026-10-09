@@ -4350,6 +4350,12 @@ would be a separate observability architecture.
 
 Provider request lifecycle diagnostics are synchronous, bounded, and best-effort. Codex reports `headers`, `first_byte`, and one semantic `terminal` phase; SuperGrok reports the equivalent `headers`, first valid SSE event, and terminal phases plus valid-event count/gap telemetry. Terminal outcomes are `completed`, `failed`, or `timed_out`. The worker maps these to `opengeni_model_request_phases_total{provider,phase,outcome}` and `opengeni_model_request_phase_duration_seconds{provider,phase}`. SuperGrok additionally exposes `opengeni_model_requests_inflight`, `opengeni_model_request_oldest_no_event_age_seconds`, `opengeni_model_request_stream_events_total`, and `opengeni_model_request_stream_event_gap_seconds`, all with provider-only labels. Provider ids come from the resolved provider registry; request ids, model bodies, credentials, session ids, and token content are not metric labels.
 
+When Codex request custody is unknown, the terminal `turn.failed` event retains
+the underlying failure in `detail` when available. The governing code remains
+`subscription_core_request_outcome_unknown` with `retryable: false`; diagnostic
+text never grants replay authority. The detail belongs only in the
+permission-controlled session event, not logs or telemetry.
+
 To locate one worker execution, derive
 `turnExecutionTelemetryKey(workspaceId, sessionId, attemptId)` from
 `@opengeni/observability` using authorized session and attempt records. The

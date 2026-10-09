@@ -2285,12 +2285,29 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     !!attempt.triggerEventId &&
     attempt.executionGeneration > 0;
   const earlyRecoverableSetup = earlyDefinitionMismatch || earlyCommandStartUnavailable;
+  // Custody decides whether replay is safe, not what caused the failure. Keep
+  // the existing diagnostic in the permission-controlled terminal event;
+  // never copy it into logs or use its retry classification for admission.
+  let unknownOutcomeDetail: string | undefined;
+  if (coreRequestOutcomeUnknown) {
+    try {
+      const sourceFailure = agentRunFailurePayload(error, {
+        isCodexTurn: billingState.isCodexTurn,
+      });
+      unknownOutcomeDetail = sourceFailure.detail ?? sourceFailure.error;
+    } catch {
+      // Diagnostic extraction cannot prevent durable failure settlement.
+    }
+  }
   let failure = withModelRoutePresentation(
     (coreRequestOutcomeUnknown
       ? {
           error: coreRequestOutcomeUnknown.message,
           code: coreRequestOutcomeUnknown.code,
           retryable: false,
+          ...(unknownOutcomeDetail && unknownOutcomeDetail !== coreRequestOutcomeUnknown.message
+            ? { detail: unknownOutcomeDetail }
+            : {}),
         }
       : earlyDefinitionMismatch
         ? { error: error.message, code: error.code, retryable: true }

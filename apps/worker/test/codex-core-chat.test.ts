@@ -6,8 +6,10 @@ import {
   CODEX_TRANSPORT_ERROR_HEADER,
   CodexReloginRequired,
   CodexResponseTimeoutError,
+  CodexStreamingTerminalError,
 } from "@opengeni/codex";
 import * as parentWake from "../src/activities/parent-wake";
+import * as turnErrors from "../src/activities/agent-turn/errors";
 import {
   selectCodexTurnCapacity,
   type CapacityPhaseDeps,
@@ -1238,6 +1240,80 @@ describe("core Codex failure settlement", () => {
               code: "subscription_core_request_outcome_unknown",
               retryable: false,
             }),
+          },
+        ]),
+      }),
+    );
+  });
+
+  test.each([
+    ["upstream_failed", "The provider could not finish the response"],
+    ["response_incomplete", "The Codex response was incomplete (max_output_tokens)"],
+    ["invalid_sse_terminal", "The Codex response stream ended without a terminal response"],
+  ])("unknown stream outcome preserves the %s diagnostic without replay", async (code, message) => {
+    const requests = createCoreCodexRequests({
+      reserve: async () => ({ operationId: "op" }),
+      settle: async () => {},
+    });
+    await requests.reserve({ requestId: "r", transportAttempt: 1 });
+    await requests.observe({ requestId: "r", transportAttempt: 1, outcome: "unknown" });
+    const error = new CodexStreamingTerminalError({
+      status: 502,
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+      error: { type: "server_error", code, message },
+    });
+    const { deps, settle } = failureDeps(error, { ...core, requests });
+    const checkpoint = mock(async (_options?: unknown) => undefined);
+    deps.historySink.reconcileConversationTruth = checkpoint;
+    const recovery = spy(db, "requestSessionTurnRecovery");
+    const refusal = spy(db, "recordSubscriptionCoreCodexTurnFailure");
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+    expect(checkpoint).toHaveBeenCalledWith({ requireDurable: true });
+    expect(recovery).not.toHaveBeenCalled();
+    expect(refusal).not.toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledWith(
+      expect.objectContaining({
+        events: expect.arrayContaining([
+          {
+            type: "turn.failed",
+            payload: expect.objectContaining({
+              code: "subscription_core_request_outcome_unknown",
+              retryable: false,
+              detail: message,
+            }),
+          },
+        ]),
+      }),
+    );
+  });
+
+  test("unreadable source diagnostics cannot prevent unknown-outcome settlement", async () => {
+    const requests = createCoreCodexRequests({
+      reserve: async () => ({ operationId: "op" }),
+      settle: async () => {},
+    });
+    await requests.reserve({ requestId: "r", transportAttempt: 1 });
+    await requests.observe({ requestId: "r", transportAttempt: 1, outcome: "unknown" });
+    const { deps, settle } = failureDeps(new Error("unreadable diagnostic"), { ...core, requests });
+    spy(turnErrors, "agentRunFailurePayload").mockImplementation(() => {
+      throw new Error("diagnostic extraction failed");
+    });
+    const recovery = spy(db, "requestSessionTurnRecovery");
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+    expect(recovery).not.toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledWith(
+      expect.objectContaining({
+        events: expect.arrayContaining([
+          {
+            type: "turn.failed",
+            payload: {
+              error: new db.SubscriptionCoreCodexRequestOutcomeUnknownError().message,
+              code: "subscription_core_request_outcome_unknown",
+              retryable: false,
+            },
           },
         ]),
       }),
