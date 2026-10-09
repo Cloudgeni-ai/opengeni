@@ -13,8 +13,11 @@ import { hasPermission, requireAccessGrant, type ApiRouteDeps } from "@opengeni/
 import { ApiHttpError } from "../http/api-error";
 import {
   clearSubscriptionCoreCodexApps,
+  connectSubscriptionCoreCodexConnection,
   deliverSubscriptionCoreCodexWake,
   designateSubscriptionCoreCodexApps,
+  disconnectAllSubscriptionCoreCodexConnections,
+  disconnectSubscriptionCoreCodexConnection,
   fetchSubscriptionCoreCodexUsage,
   getSubscriptionCoreCodexAppsSettings,
   getSubscriptionCoreCodexWorkspaceProjection,
@@ -27,7 +30,10 @@ import {
   setSubscriptionCoreCodexPrimary,
   setSubscriptionCoreCodexRotation,
   setSubscriptionCoreWorkspaceCodexSource,
+  SubscriptionCoreCodexOrganizationManagedError,
   SubscriptionCoreCodexSourceRefusedError,
+  type SubscriptionCoreCodexCredentialInput,
+  type SubscriptionCoreCodexDisconnectOutcome,
 } from "@opengeni/db";
 import type { CodexFetch, CodexUsagePayload } from "@opengeni/codex";
 import {
@@ -83,6 +89,152 @@ export function coreCodexRouteUnsupported(): never {
 
 function projection(deps: ApiRouteDeps, accountId: string, workspaceId: string) {
   return getSubscriptionCoreCodexWorkspaceProjection(deps.db, { accountId, workspaceId });
+}
+
+/**
+ * Persist a finished device-code sign-in on the core (M3 PR 3b): the legacy
+ * `connect/poll` response. `workspaceId` null is the organization route.
+ */
+export async function coreCodexConnected(
+  c: Context,
+  deps: ApiRouteDeps,
+  input: {
+    accountId: string;
+    workspaceId: string | null;
+    subjectId: string;
+    credential: SubscriptionCoreCodexCredentialInput;
+  },
+) {
+  const result = await connectSubscriptionCoreCodexConnection(deps.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    ...input.credential,
+  });
+  if (result.kind === "refused") {
+    switch (result.reason) {
+      case "managed_elsewhere":
+        throw new HTTPException(409, {
+          message:
+            "this Codex account is already connected in this organization and is managed elsewhere",
+        });
+      case "personal_connections_disabled":
+        throw new HTTPException(409, {
+          message: "personal Codex connections are turned off in this organization",
+        });
+      case "unavailable":
+        throw typedHttpError(
+          503,
+          SUBSCRIPTION_CORE_CUTOVER_DISABLED,
+          "Codex subscriptions are paused for maintenance in this organization",
+        );
+      default:
+        throw new HTTPException(403, {
+          message:
+            "only an organization administrator can connect a new shared Codex account; workspace administrators can reconnect the accounts their workspace manages",
+        });
+    }
+  }
+  try {
+    await deliverSubscriptionCoreCodexWake(deps.db, result.wake);
+  } catch {
+    // Every core waiter has its own bounded recheck; a lost wake only delays.
+  }
+  const activeCredentialId =
+    input.workspaceId === null
+      ? (
+          await getSubscriptionCoreOrganizationCodexProjection(deps.db, {
+            organizationId: input.accountId,
+            subjectId: input.subjectId,
+          })
+        ).rotation.activeCredentialId
+      : (await projection(deps, input.accountId, input.workspaceId)).rotation.activeCredentialId;
+  return c.json({
+    status: "connected",
+    plan: input.credential.planType,
+    accountId: result.id,
+    isActive: activeCredentialId === result.id,
+  });
+}
+
+function disconnectRefused(outcome: SubscriptionCoreCodexDisconnectOutcome): void {
+  if (outcome === "forbidden") {
+    throw new HTTPException(403, {
+      message: "only an organization administrator can disconnect a shared Codex account",
+    });
+  }
+  if (outcome === "unresolved_redemption") {
+    throw new HTTPException(409, {
+      message:
+        "this subscription has an unresolved reset redemption; recover it before disconnecting",
+    });
+  }
+  if (outcome === "in_use") {
+    throw new HTTPException(409, {
+      message: "Codex subscription cannot disconnect while active turns are using it",
+    });
+  }
+}
+
+/** Disconnect one account on the core: the legacy `{ disconnected, newActiveId }`. */
+export async function coreCodexDisconnect(
+  c: Context,
+  deps: ApiRouteDeps,
+  input: { accountId: string; workspaceId: string | null; subjectId: string; connectionId: string },
+) {
+  let result: Awaited<ReturnType<typeof disconnectSubscriptionCoreCodexConnection>>;
+  try {
+    result = await disconnectSubscriptionCoreCodexConnection(deps.db, input);
+  } catch (error) {
+    if (error instanceof SubscriptionCoreCodexOrganizationManagedError) {
+      throw new HTTPException(409, { message: error.message });
+    }
+    throw error;
+  }
+  disconnectRefused(result.outcome);
+  if (result.wake) {
+    try {
+      await deliverSubscriptionCoreCodexWake(deps.db, result.wake);
+    } catch {
+      // Bounded rechecks pick the change up.
+    }
+  }
+  const newActiveId =
+    input.workspaceId === null
+      ? (
+          await getSubscriptionCoreOrganizationCodexProjection(deps.db, {
+            organizationId: input.accountId,
+            subjectId: input.subjectId,
+          })
+        ).rotation.activeCredentialId
+      : (await projection(deps, input.accountId, input.workspaceId)).rotation.activeCredentialId;
+  return c.json({ disconnected: result.outcome === "removed", newActiveId });
+}
+
+/** The legacy workspace "disconnect all" on the core: `{ disconnected }`. */
+export async function coreCodexDisconnectAll(
+  c: Context,
+  deps: ApiRouteDeps,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+) {
+  const result = await disconnectAllSubscriptionCoreCodexConnections(deps.db, input);
+  if (result.refused) {
+    if (result.refused.outcome === "unresolved_redemption") {
+      throw new HTTPException(409, {
+        message:
+          "one or more subscriptions have unresolved reset redemptions; recover them before disconnecting",
+      });
+    }
+    disconnectRefused(result.refused.outcome);
+  }
+  if (result.wake) {
+    try {
+      await deliverSubscriptionCoreCodexWake(deps.db, result.wake);
+    } catch {
+      // Bounded rechecks pick the change up.
+    }
+  }
+  return c.json({ disconnected: result.removed > 0 });
 }
 
 export async function coreCodexSource(
@@ -170,11 +322,18 @@ export async function coreCodexAccounts(
   grant: Awaited<ReturnType<typeof requireAccessGrant>>,
   workspaceId: string,
 ) {
-  const [{ accounts, rotation, source }, apps, human] = await Promise.all([
-    projection(deps, grant.accountId, workspaceId),
+  const [{ accounts, rotation, source, personalAccountIds }, apps, human] = await Promise.all([
+    // In the viewer's own Personal workspace their personal connections are
+    // listed too (M3 PR 3b); nobody else ever sees them.
+    getSubscriptionCoreCodexWorkspaceProjection(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      viewerSubjectId: grant.subjectId,
+    }),
     getSubscriptionCoreCodexAppsSettings(deps.db, { accountId: grant.accountId, workspaceId }),
     managedHumanOrAgent(c, deps),
   ]);
+  const personal = new Set(personalAccountIds ?? []);
   const humanSubjectId = human?.subjectId === grant.subjectId ? human.subjectId : null;
   const canManageApps =
     deps.settings.codexConnectedAppsEnabled &&
@@ -189,7 +348,12 @@ export async function coreCodexAccounts(
       }),
       // Core designation authority is administrator/delegated manager in any
       // source mode (design 6.3), enforced by the database; this is the hint.
-      canEnableApps: apps.credentialId === null && canManageApps && account.status === "active",
+      // Designations are shared-only, so a personal connection never offers it.
+      canEnableApps:
+        apps.credentialId === null &&
+        canManageApps &&
+        account.status === "active" &&
+        !personal.has(account.id),
     })),
     activeAccountId: rotation.activeCredentialId,
     source,

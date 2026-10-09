@@ -147,4 +147,5 @@ export const embeddingMigrationTail = [
   "0678_inbox_mute_session_replies.sql",
   // Extends the shared connection table created by withheld 0642.
   "0679_codex_extra_credit_consent.sql",
+  "0672_subscription_core_codex_writers.sql",
 ];

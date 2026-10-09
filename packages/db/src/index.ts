@@ -293,7 +293,9 @@ export type {
   WorkspaceCodexSubscriptionSource,
 } from "./codex-account-types";
 export * from "./subscription-core-codex-operations";
+export * from "./subscription-core-codex-connections";
 import {
+  listSubscriptionCoreCodexPersonalAccountsInTransaction,
   projectSubscriptionCoreCodexWorkspace,
   type SubscriptionCoreCodexWake,
 } from "./subscription-core-codex-compat";
@@ -32108,6 +32110,25 @@ export type CodexResetRedemptionCredentialAuthority = (
   input: { accountId: string; workspaceId: string; credentialId: string; subjectId: string },
 ) => Promise<{ status: string; owned: boolean } | null>;
 
+/**
+ * The cross-workspace fence of one provider credit (M3 PR 3b): `clear` when
+ * no other workspace holds the credit, `refiled` when the caller's own
+ * logical attempt was moved here from another workspace for recovery,
+ * `held_elsewhere` when another workspace holds it, `refused` without
+ * redemption authority. The legacy ledger passes none (per-workspace).
+ */
+export type CodexResetCreditFence = (
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    credentialId: string;
+    subjectId: string;
+    creditId: string;
+    attemptId: string;
+  },
+) => Promise<"clear" | "refiled" | "held_elsewhere" | "refused">;
+
 export async function legacyCodexResetRedemptionAuthority(
   tx: Database,
   input: { accountId: string; workspaceId: string; credentialId: string; subjectId: string },
@@ -32247,6 +32268,7 @@ export async function claimCodexResetRedemption(
     claimTtlMs?: number;
   },
   authority: CodexResetRedemptionCredentialAuthority = legacyCodexResetRedemptionAuthority,
+  creditFence: CodexResetCreditFence | null = null,
 ): Promise<ClaimCodexResetRedemptionResult> {
   const claimTtlMs = input.claimTtlMs ?? 60_000;
   if (!Number.isFinite(claimTtlMs) || claimTtlMs <= 0) {
@@ -32274,6 +32296,21 @@ export async function claimCodexResetRedemption(
         );
         const credential = await authority(tx as unknown as Database, input);
         if (!credential) return { kind: "not_found" } as const;
+        // The core ledger also fences the credit across workspaces: another
+        // workspace's open or consumed attempt for the same credit wins, and
+        // the caller's own attempt filed elsewhere is moved here to recover.
+        if (creditFence) {
+          const fence = await creditFence(tx as unknown as Database, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            credentialId: input.credentialId,
+            subjectId: input.subjectId,
+            creditId: input.creditId,
+            attemptId: input.id,
+          });
+          if (fence === "refused") return { kind: "forbidden" } as const;
+          if (fence === "held_elsewhere") return { kind: "conflict" } as const;
+        }
         const [existing] = await tx
           .select()
           .from(schema.codexResetRedemptionAttempts)
@@ -32729,6 +32766,40 @@ export const subscriptionCoreCodexResetAuthority: CodexResetRedemptionCredential
   );
   return row ? { status: row.status, owned: row.authorized === true } : null;
 };
+
+/** The core ledger's cross-workspace credit fence (`subscription_codex_reset_credit_fence`). */
+export const subscriptionCoreCodexResetCreditFence: CodexResetCreditFence = async (tx, input) => {
+  const [row] = await rawRows<{ outcome: string }>(
+    tx,
+    sql`select outcome from opengeni_private.subscription_codex_reset_credit_fence(
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.credentialId}::uuid,
+      ${input.subjectId}, ${input.creditId}, ${input.attemptId}::uuid
+    )`,
+  );
+  const outcome = row?.outcome;
+  return outcome === "clear" || outcome === "refiled" || outcome === "held_elsewhere"
+    ? outcome
+    : "refused";
+};
+
+/**
+ * Run the cross-workspace credit fence on its own (redemption prepare): a
+ * person recovering their own attempt from another workspace gets it moved
+ * here, so the ordinary adopt and claim continue on the same upstream key.
+ */
+export async function fenceSubscriptionCoreCodexResetCredit(
+  db: Database,
+  input: Parameters<CodexResetCreditFence>[1],
+): Promise<Awaited<ReturnType<CodexResetCreditFence>>> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(
+        async (tx) => await subscriptionCoreCodexResetCreditFence(tx as unknown as Database, input),
+      ),
+  );
+}
 
 /**
  * Persist the exact provider outcome of a core redemption with its audit
@@ -34045,10 +34116,19 @@ export async function recordSubscriptionCoreCodexSelectionForTurnAttempt(
  * active turn's core lease and the workspace's core account pool. The
  * "Running on" account of a running turn is its live core lease; a waiting
  * turn shows only an explicit choice. Never reads a legacy Codex table.
+ *
+ * A turn running on a personal connection shows it only to that connection's
+ * owner (`viewerSubjectId`), read through the owner-only reader (M3 PR 3b);
+ * anyone else sees the id with a null account, as before.
  */
 export async function getSubscriptionCoreSessionCodexAccounts(
   db: Database,
-  input: { accountId: string; workspaceId: string; sessionId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    viewerSubjectId?: string | null;
+  },
 ) {
   return await withRlsContext(
     db,
@@ -34098,13 +34178,23 @@ export async function getSubscriptionCoreSessionCodexAccounts(
       const currentSelection = turn
         ? { waiting, credentialId: waiting ? pinnedAccountId : turn.connection_id }
         : null;
+      let currentAccount =
+        projection.accounts.find((account) => account.id === currentSelection?.credentialId) ??
+        null;
+      if (!currentAccount && currentSelection?.credentialId && input.viewerSubjectId) {
+        const personal = await listSubscriptionCoreCodexPersonalAccountsInTransaction(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.viewerSubjectId,
+        });
+        currentAccount =
+          personal.find((account) => account.id === currentSelection.credentialId) ?? null;
+      }
       return {
         accounts: projection.accounts,
         rotation: projection.rotation,
         currentSelection,
-        currentAccount:
-          projection.accounts.find((account) => account.id === currentSelection?.credentialId) ??
-          null,
+        currentAccount,
         pinnedAccountId,
         lastAccountId: codexBinding?.connectionId ?? null,
       };

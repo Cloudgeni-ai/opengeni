@@ -10,8 +10,9 @@
  * management authority: an organization administrator, or a workspace
  * administrator for a connection or setting that workspace manages. Nothing
  * here reads or writes a legacy Codex table, and nothing returns credential
- * material. Personal connections are never listed (they are visible only
- * inside their owner's exact accepted turn).
+ * material. Personal connections are listed only to their owner, through the
+ * owner-only reader (`subscription_codex_personal_connections`, M3 PR 3b):
+ * in the owner's Personal-workspace list and their sessions' "Running on".
  */
 import { sql } from "drizzle-orm";
 import { auditEvents } from "./schema";
@@ -207,6 +208,8 @@ export type SubscriptionCoreCodexWorkspaceProjection = {
   accounts: CodexAccountStatus[];
   rotation: CodexRotationSettings;
   source: WorkspaceCodexSubscriptionSource;
+  /** The viewer's own personal connections among `accounts` (Personal workspace only). */
+  personalAccountIds?: string[];
 };
 
 /**
@@ -340,12 +343,71 @@ export async function projectSubscriptionCoreCodexWorkspace(
 
 export async function getSubscriptionCoreCodexWorkspaceProjection(
   db: Database,
-  input: { accountId: string; workspaceId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    /**
+     * The viewing person. In their own Personal workspace their personal
+     * Codex connections are listed with the workspace pool (M3 PR 3b).
+     */
+    viewerSubjectId?: string | null;
+  },
 ): Promise<SubscriptionCoreCodexWorkspaceProjection> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (tx) => await projectSubscriptionCoreCodexWorkspace(tx, input),
+    async (tx) => {
+      const projection = await projectSubscriptionCoreCodexWorkspace(tx, input);
+      if (!input.viewerSubjectId || projection.source.workspaceKind !== "personal") {
+        return projection;
+      }
+      const personal = await listSubscriptionCoreCodexPersonalAccountsInTransaction(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.viewerSubjectId,
+      });
+      return personal.length === 0
+        ? projection
+        : {
+            ...projection,
+            accounts: [...projection.accounts, ...personal],
+            personalAccountIds: personal.map((account) => account.id),
+          };
+    },
+  );
+}
+
+/**
+ * The viewing person's own personal Codex connections in the legacy account
+ * shape (no credential material), through the owner-only reader. Requires the
+ * workspace RLS context on `tx`; sets the subject. Empty for anyone else, for
+ * a workspace the person may not use, or without an enabled cutover.
+ */
+export async function listSubscriptionCoreCodexPersonalAccountsInTransaction(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<CodexAccountStatus[]> {
+  if (!input.subjectId.startsWith("user:")) return [];
+  await setSubjectRlsContext(tx, input.subjectId);
+  const rows = await rawRows<ConnectionRow>(
+    tx,
+    sql`select personal.id::text as id, personal.label, personal.account_email,
+        personal.plan_type, personal.provider_account_id, personal.status, personal.last_error,
+        personal.allocator_enabled, personal.allocator_version, personal.allowed_model_ids,
+        personal.connected_by_subject_id, personal.expires_at, personal.last_refresh_at,
+        null::text as managed_by_workspace_id, personal.provider_state, personal.updated_at,
+        personal.quota, personal.quota_revision, personal.quota_observed_refresh_generation,
+        personal.quota_updated_at
+      from opengeni_private.subscription_codex_personal_connections(
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}
+      ) personal`,
+  );
+  return rows.map((row) =>
+    projectAccount(row, {
+      source: "workspace",
+      primaryConnectionId: null,
+      poolAllocatorEnabled: true,
+    }),
   );
 }
 

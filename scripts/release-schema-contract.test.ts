@@ -70,6 +70,18 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers the dormant Codex core writers as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0672_subscription_core_codex_writers.sql",
+      ),
+    ).toMatchObject({
+      path: "0672_subscription_core_codex_writers.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("registers the subscription people-assignment read policy fix as rolling", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -299,6 +311,12 @@ describe("release schema contract", () => {
     );
     if (subscriptionCoreCodexOperations) {
       expect(subscriptionCoreCodexOperations.deploymentMode).toBe("rolling");
+    }
+    const subscriptionCoreCodexWriters = sourceContract.migrations.find(
+      (migration) => migration.path === "0672_subscription_core_codex_writers.sql",
+    );
+    if (subscriptionCoreCodexWriters) {
+      expect(subscriptionCoreCodexWriters.deploymentMode).toBe("rolling");
     }
     // Keep the published-history assertions below scoped to their existing
     // migration range; the new forward migration is checked explicitly above.
@@ -2208,6 +2226,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0672_subscription_core_codex_writers.sql",
       "0671_subscription_core_codex_operations.sql",
       "0670_subscription_core_codex_apps.sql",
       "0669_subscription_core_codex_waits.sql",

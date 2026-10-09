@@ -126,6 +126,12 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "subscription_codex_apps_designation_target(uuid, uuid)",
   // M3 PR 2c: run only by the Codex connection-seam routines as their owner.
   "subscription_codex_connection_target(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  // M3 PR 3b: run only by the Codex writers as their owner (the trigger
+  // function fires without the inserting role holding EXECUTE).
+  "subscription_codex_writer_context(uuid, uuid, text)",
+  "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+  "drop_subscription_codex_owner_capabilities(uuid)",
+  "derive_scheduled_revision_subscription_authority()",
   "read_sender_connection(uuid, uuid, uuid, text)",
   // Lifecycle fact writers (migrations 0532 and 0565): owner-run trigger
   // functions and the migration-owner backfill. Runtime roles may still hold
@@ -709,6 +715,12 @@ export const SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES = [
   "subscription_codex_apps_designation_target(uuid, uuid)",
   // M3 PR 2c: returns a full connection row to the connection-seam routines.
   "subscription_codex_connection_target(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  // M3 PR 3b: the writers' caller check, capability internals and the
+  // revision-authority trigger function.
+  "subscription_codex_writer_context(uuid, uuid, text)",
+  "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+  "drop_subscription_codex_owner_capabilities(uuid)",
+  "derive_scheduled_revision_subscription_authority()",
 ] as const;
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [
