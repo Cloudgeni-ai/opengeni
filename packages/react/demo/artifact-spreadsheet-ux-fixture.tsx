@@ -14,7 +14,14 @@ const sheetId = "00000000000000010000000000000001";
 const generationId = "11111111111111111111111111111111";
 
 /** Actual production UI with deliberately simulated SDK projection/ack wiring. No persistence. */
-export function mountSpreadsheetUxFixture(target: HTMLElement) {
+export function mountSpreadsheetUxFixture(
+  target: HTMLElement,
+  options: {
+    download?: (signal: AbortSignal) => Promise<Blob>;
+    showHeader?: boolean;
+    authoringDelay?: number;
+  } = {},
+) {
   const calls: SpreadsheetArtifactCommandBatch[] = [];
   const values = new Map<string, string>();
   ["Period", "Revenue", "Expenses", "Net income", "Region", "Forecast"].forEach((value, col) =>
@@ -130,6 +137,9 @@ export function mountSpreadsheetUxFixture(target: HTMLElement) {
       calls.push(batch);
       const fail = failNext;
       failNext = false;
+      // Model the real SDK's async authoring before its pending WAL is visible.
+      if (options.authoringDelay)
+        await new Promise<void>((resolve) => setTimeout(resolve, options.authoringDelay));
       updateView({ pendingTransactions: view.pendingTransactions + 1 });
       await new Promise<void>((resolve) => setTimeout(resolve, 500));
       if (fail) {
@@ -183,6 +193,7 @@ export function mountSpreadsheetUxFixture(target: HTMLElement) {
       rowCount={200000}
       columnCount={32}
       allowAddSheet={false}
+      {...options}
     />,
   );
   return {
@@ -192,6 +203,7 @@ export function mountSpreadsheetUxFixture(target: HTMLElement) {
       failNext = true;
     },
     setWritable: (writable: boolean) => updateView({ writable }),
+    setPending: (pendingTransactions: number) => updateView({ pendingTransactions }),
     getName: () => name,
     unmount: () => root.unmount(),
   };

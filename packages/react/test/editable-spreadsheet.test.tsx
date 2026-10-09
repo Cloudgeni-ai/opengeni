@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import {
+  EDITABLE_ARTIFACT_COMMAND_MAX_BYTES,
+  EDITABLE_ARTIFACT_INTENT_MAX_BYTES,
+} from "@opengeni/contracts/editable-artifacts";
 import type {
   EditableArtifactPendingTransaction,
   EditableArtifactSession,
@@ -7,12 +11,21 @@ import type {
   EditableSpreadsheetMetadataListener,
   EditableSpreadsheetViewportListener,
   EditableSpreadsheetViewportQuery,
+  EditableArtifactLiveClose,
+  EditableArtifactWorkerKernel,
 } from "@opengeni/sdk/editable-artifacts";
 import {
+  createEditableArtifactSession,
+  MemoryEditableArtifactStorage,
   editableArtifactStableId,
   spreadsheetSheetId,
   type SpreadsheetArtifactCommandBatch,
 } from "@opengeni/sdk/editable-artifacts";
+import {
+  testCommitted,
+  testPending,
+  testStateHash,
+} from "../../sdk/test/editable-artifacts/protocol-fixtures";
 
 import {
   EditableSpreadsheetArtifactSurface,
@@ -42,6 +55,180 @@ function deferredAcceptance() {
   });
   return { promise, resolve, reject };
 }
+
+test("download cannot overtake a blurred cell through real SDK causal scheduling", async () => {
+  const projections = new FakeEditableSpreadsheetSession();
+  const authoring = deferredAcceptance();
+  const acknowledgement = deferredAcceptance();
+  let authorStarted = false;
+  let close!: (value: EditableArtifactLiveClose) => void;
+  const closed = new Promise<EditableArtifactLiveClose>((resolve) => {
+    close = resolve;
+  });
+  const stateHash = testStateHash(0);
+  const digest = testStateHash("snapshot");
+  const worker: EditableArtifactWorkerKernel = {
+    reset: async () => {},
+    loadSnapshot: async () => ({ stateHash, digest }),
+    replacePending: async () => ({ blockedPending: [] }),
+    reconcileCommitted: async (transaction) => ({
+      stateHash: transaction.stateHash,
+      blockedPending: [],
+    }),
+    querySpreadsheetMetadata: () => projections.querySpreadsheetMetadata(),
+    querySpreadsheetViewport: (query) => projections.querySpreadsheetViewport(query),
+    applyRecovered: async () => {
+      throw new Error("No retained transactions in this fixture");
+    },
+    queryDocument: async () => {
+      throw new Error("Spreadsheet-only fixture");
+    },
+    queryPresentation: async () => {
+      throw new Error("Spreadsheet-only fixture");
+    },
+    authorPending: async (input) => {
+      authorStarted = true;
+      await authoring.promise;
+      return testPending(input);
+    },
+  };
+  const session = createEditableArtifactSession({
+    artifactId: ARTIFACT_ID,
+    modality: "spreadsheet",
+    storageAuthority: {
+      deploymentOrigin: "https://test.invalid",
+      accountId: "account",
+      workspaceId: "workspace",
+      principalId: "principal",
+      authorizationEpoch: "epoch",
+    },
+    storage: new MemoryEditableArtifactStorage(),
+    worker,
+    ownsWorker: false,
+    kernelVersion: "test-kernel",
+    modelSchemaVersion: 2,
+    protocolVersion: 1,
+    commandVersion: 2,
+    transport: {
+      mintTicket: async ({ replicaId }) => ({
+        artifactId: ARTIFACT_ID,
+        modality: "spreadsheet",
+        replicaId,
+        token: "test-only",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        protocolVersion: 2,
+      }),
+      openLive: async () => ({
+        streamEpoch: "test-epoch",
+        limits: {
+          maxClientFrameBytes: 9_000_000,
+          maxCommandBytes: EDITABLE_ARTIFACT_COMMAND_MAX_BYTES,
+          maxIntentBytes: EDITABLE_ARTIFACT_INTENT_MAX_BYTES,
+          maxCommittedTransactionBytes: 8_000_000,
+          maxSnapshotBytes: 64_000_000,
+          maxInFlightTransactions: 256,
+          maxInFlightBytes: 64_000_000,
+        },
+        readBootstrap: async () => ({
+          artifactId: ARTIFACT_ID,
+          modality: "spreadsheet",
+          liveProtocolVersion: 2,
+          headSequence: 0,
+          headStateHash: stateHash,
+          headCausalFrontier: [],
+          kernelVersion: "test-kernel",
+          modelSchemaVersion: 2,
+          writable: true,
+          minimumReplaySequence: 1,
+          resyncRequired: false,
+          snapshot: {
+            artifactId: ARTIFACT_ID,
+            modality: "spreadsheet",
+            sequence: 0,
+            stateHash,
+            digest,
+            causalFrontier: [],
+            kernelVersion: "test-kernel",
+            modelSchemaVersion: 2,
+            operationProtocolVersion: 2,
+            snapshotVersion: 2,
+            bytes: new Uint8Array([1]),
+          },
+        }),
+        replay: async () => ({ artifactId: ARTIFACT_ID, transactions: [], headSequence: 0 }),
+        acknowledge: async () => {},
+        submit: async ({ transaction }) => {
+          await acknowledgement.promise;
+          const committed = testCommitted({
+            artifactId: ARTIFACT_ID,
+            requestHash: transaction.requestHash,
+            startSequence: 1,
+            endSequence: 1,
+            priorStateHash: stateHash,
+            stateHash: testStateHash(1),
+            causalFrontier: [
+              { replicaId: transaction.replicaId, counter: transaction.replicaCounter },
+            ],
+          });
+          return {
+            artifactId: ARTIFACT_ID,
+            clientTransactionId: transaction.clientTransactionId,
+            transactionId: committed.transactionId,
+            requestHash: transaction.requestHash,
+            committed,
+          };
+        },
+        closed,
+        close: () => close({ reason: "closed" }),
+      }),
+    },
+  });
+  await session.whenReady();
+  let exports = 0;
+  const mounted = await renderComponent(
+    <EditableSpreadsheetArtifactSurface
+      session={session}
+      download={async () => {
+        exports++;
+        throw new Error("Stop after export starts");
+      }}
+    />,
+  );
+  try {
+    const input = mounted.container.querySelector<HTMLInputElement>(
+      '[aria-label="Formula or value"]',
+    )!;
+    const button = [...mounted.container.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent === "Download",
+    )!;
+    await actRun(() => input.focus());
+    await actRun(() => replaceInputValue(input, "42"));
+    // Blur submits the real SDK call; download activates before its Worker reply.
+    await actRun(() => {
+      input.blur();
+      button.click();
+    });
+    expect(authorStarted).toBe(true);
+    expect(session.getView().pendingTransactions).toBe(0);
+    expect(exports).toBe(0);
+    expect(button.disabled).toBe(true);
+    await actRun(() => authoring.resolve());
+    await flush();
+    expect(session.getView().pendingTransactions).toBe(1);
+    expect(button.disabled).toBe(true);
+    await actRun(() => acknowledgement.resolve());
+    await flush();
+    expect(session.getView().pendingTransactions).toBe(0);
+    expect(button.disabled).toBe(false);
+    await actRun(() => button.click());
+    expect(exports).toBe(1);
+  } finally {
+    authoring.resolve();
+    acknowledgement.resolve();
+    await mounted.unmount();
+    await session.close();
+  }
+});
 
 async function enterCell(container: HTMLElement, value: string): Promise<void> {
   const input = container.querySelector<HTMLInputElement>('[aria-label="Formula or value"]')!;
