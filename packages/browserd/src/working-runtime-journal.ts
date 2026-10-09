@@ -22,7 +22,7 @@ export type BrowserWorkingRuntimeReceipt = {
   operationId: string;
   launchAttemptId: string;
   state: InteractionOperationState;
-  intent: "launch" | "retire";
+  intent: "launch" | "suspend" | "retire";
   authority: BrowserWorkingRuntimeAuthority;
   launchDigest: string;
   restoreAuthorityDigest: string | null;
@@ -117,6 +117,18 @@ export class SqliteBrowserWorkingRuntimeJournal {
     return { ...retiring, state: "dispatched" as const };
   }
 
+  suspend(receipt: BrowserWorkingRuntimeReceipt) {
+    if (
+      receipt.intent !== "launch" ||
+      receipt.state !== "completed" ||
+      !receipt.process ||
+      !receipt.directoryLaunchAllowed
+    )
+      throw unavailable();
+    const suspending = this.begin({ ...receipt, intent: "suspend" });
+    return { ...suspending, state: "dispatched" as const };
+  }
+
   close() {
     this.journal.close();
   }
@@ -155,7 +167,8 @@ export function assertWorkingRuntimeReceipt(
 ): asserts receipt is BrowserWorkingRuntimeReceipt & { process: OwnedManagedBrowserProcess } {
   if (
     !receipt ||
-    receipt.intent !== "launch" ||
+    (receipt.intent !== "launch" &&
+      !(receipt.intent === "suspend" && receipt.directoryLaunchAllowed)) ||
     receipt.state !== "completed" ||
     receipt.process === null ||
     receipt.launchDigest !== launchDigest ||
@@ -192,7 +205,7 @@ function parseReceipt(value: unknown): BrowserWorkingRuntimeReceipt {
     !["prepared", "dispatched", "completed", "failed", "outcome_unknown"].includes(
       String(value.state),
     ) ||
-    !["launch", "retire"].includes(String(value.intent)) ||
+    !["launch", "suspend", "retire"].includes(String(value.intent)) ||
     !record(value.authority) ||
     !Number.isSafeInteger(value.authority.tokenGeneration) ||
     Number(value.authority.tokenGeneration) < 1 ||

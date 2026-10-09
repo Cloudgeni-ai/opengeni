@@ -1648,8 +1648,12 @@ process-birth checks in [`linux-process-identity.ts`](../packages/browserd/src/l
 
 Explicit managed Chromium working-directory recovery uses the internal
 [`working-runtime-journal.ts`](../packages/browserd/src/working-runtime-journal.ts)
-launch/retirement receipt. Exact directory, controller, token, placement and
+launch/suspension/retirement receipt. Exact directory, controller, token, placement and
 process proof gates recovery; unknown launch outcomes cannot dispatch again.
+Graceful supervisor shutdown records suspension only for a completed, owned,
+directory-recoverable browser and confirms it after process cleanup. Recovery
+retains that profile and binding without replaying uncertain inputs. Explicit
+end/capture, unconfirmed process shutdown, and older retirement receipts do not authorize recovery.
 Cleanup retains its exact holder and directory until retirement and journal
 closure settle. See [`packages/browserd`](../packages/browserd/README.md).
 
