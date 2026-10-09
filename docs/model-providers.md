@@ -817,7 +817,7 @@ non-EU provider:
 
 Product ids are `opper/aws/claude-opus-5-5` and `workspace-opper/aws/claude-opus-5-5`.
 Effective context is the raw window minus Opper's max output (872,000);
-automatic compaction starts at 800,000. Capabilities:
+automatic compaction starts at 300,000, the same default as native Claude Opus 5.5. Capabilities:
 
 - **Reasoning** is runnable with `low`/`medium`/`high`/`xhigh`/`max` (the route's
   `opper.reasoning.supported`), default `medium` like the native Claude Opus 5.5
@@ -1869,8 +1869,8 @@ Managed Claude connections use per-model native profiles from
 expose low, medium, high, xhigh and max, with medium as the new-selection default.
 Supported adaptive models use a 1M context window, 872k safe input, 800k compaction
 threshold and up to 128k output; the native request includes the 1M-context beta.
-Haiku 5.5 instead defaults to compaction at 95k tokens, with the same 1M/872k/128k
-context/input/output limits. Workspaces can override each exact model's threshold
+Opus 5.5 instead defaults to compaction at 300k tokens and Haiku 5.5 at 95k, with the
+same 1M/872k/128k context/input/output limits. Workspaces can override each exact model's threshold
 under Models → Context & compaction; see [the preference contract](context-compaction.md#workspace-preferences).
 Haiku's reviewed comparison rates change strictly above 100,000 prompt tokens
 (including cached input): $0.10/$0.50 input/output per million below or at that

@@ -43,7 +43,7 @@ describe("deployment Opper rail", () => {
       shortLabel: "Opus 5.5",
       contextWindowTokens: 1_000_000,
       effectiveContextWindowTokens: 872_000,
-      autoCompactTokenLimit: 800_000,
+      autoCompactTokenLimit: 300_000,
       maxOutputTokens: 128_000,
     });
     expect(opus!.capabilities.functionCalling).toEqual({ upstream: "supported", runnable: true });
@@ -97,7 +97,7 @@ describe("deployment Opper rail", () => {
       upstreamModelId: OPUS,
       contextWindowTokens: 1_000_000,
       effectiveContextWindowTokens: 872_000,
-      autoCompactTokenLimit: 800_000,
+      autoCompactTokenLimit: 300_000,
     });
   });
 
@@ -296,7 +296,7 @@ describe("organization Opper rail", () => {
       label: "Claude Opus 5.5 (EU)",
       contextWindowTokens: 1_000_000,
       effectiveContextWindowTokens: 872_000,
-      autoCompactTokenLimit: 800_000,
+      autoCompactTokenLimit: 300_000,
     });
     expect(model.capabilities).toEqual(OPENGENI_OPPER_MODELS[0]!.capabilities);
   });

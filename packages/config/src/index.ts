@@ -3683,6 +3683,12 @@ function opperCapabilities(input: {
  * OPENGENI_OPPER_MODELS_JSON (code mode) or the catalog document's
  * `opperModels` (database mode).
  */
+/**
+ * Default automatic-compaction threshold for Claude Opus 5.5 on every route.
+ * Workspaces can still choose another threshold per model.
+ */
+export const OPUS_5_5_AUTO_COMPACT_TOKEN_LIMIT = 300_000;
+
 export const OPENGENI_OPPER_MODELS: readonly OpperCatalogModel[] = [
   OpperCatalogModel.parse({
     upstreamModelId: "aws/claude-opus-5-5",
@@ -3707,7 +3713,8 @@ export const OPENGENI_OPPER_MODELS: readonly OpperCatalogModel[] = [
     contextWindowTokens: 1_000_000,
     // 1,000,000 minus Opper's 128,000 max output tokens.
     effectiveContextWindowTokens: 872_000,
-    autoCompactTokenLimit: 800_000,
+    // Same product default as the native Claude Opus 5.5 profile.
+    autoCompactTokenLimit: OPUS_5_5_AUTO_COMPACT_TOKEN_LIMIT,
     maxOutputTokens: 128_000,
     pricing: {
       // Opper list: $4.40 input / $0.22 cached input / $5.50 5-minute cache
@@ -10526,7 +10533,11 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
       maxOutputTokens: 128_000,
       prefixBoundThinking:
         id === "claude-opus-5-5" || id === "claude-sonnet-5-5" || id === "claude-haiku-5-5",
-      ...(id === "claude-haiku-5-5" ? { autoCompactTokenLimit: 95_000 } : {}),
+      ...(id === "claude-haiku-5-5"
+        ? { autoCompactTokenLimit: 95_000 }
+        : id === "claude-opus-5-5"
+          ? { autoCompactTokenLimit: OPUS_5_5_AUTO_COMPACT_TOKEN_LIMIT }
+          : {}),
     },
   ]),
   ...["claude-opus-4-6", "claude-sonnet-4-6"].map((id) => [
