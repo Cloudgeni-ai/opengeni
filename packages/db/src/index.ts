@@ -57941,8 +57941,8 @@ export type IdleCheckpointCandidate = {
 };
 
 /** Global inventory of warm Modal boxes that no turn holds and that viewers,
- * browser/computer interactions or running unsupervised background commands
- * keep warm, whose workspace has writes the newest archive may not cover, and
+ * browser/computer interactions or running background commands (supervised or
+ * not) keep warm, whose workspace has writes the newest archive may not cover, and
  * whose last capture attempt and last idle checkpoint attempt are both at least
  * `intervalMs` old (least recently tried first). Discovery only: the exact
  * warm capture claim (`claimWorkspaceArchiveCapture` with `idleCheckpoint`)
@@ -62043,7 +62043,9 @@ async function settleRetainedProcessWithAuthority(
 
 /** Legacy containment never substitutes for native-supervisor terminal proof.
  * Presence, not successful descriptor parsing, is the fail-closed boundary.
- * Check the whole lease, including stale/already-enrolled process IDs. */
+ * Check the whole lease, including stale/already-enrolled process IDs. A warm
+ * point-in-time capture marked concurrent is the one exception: it never
+ * terminates the box (see `concurrentLeaseProcess`). */
 function noActiveSupervisedProcesses(leaseId: SQL): SQL {
   return sql`not exists (
     select 1 from sandbox_retained_processes supervised_process
@@ -62053,28 +62055,33 @@ function noActiveSupervisedProcesses(leaseId: SQL): SQL {
   )`;
 }
 
-/** The exact active, unsupervised background command on one lease epoch and
- * provider instance. Such a command may keep running across a warm checkpoint:
+/** The exact active background command on one lease epoch and provider
+ * instance. Such a command may keep running across a warm checkpoint:
  * Modal pauses the whole box while it snapshots, so the command is frozen rather
  * than racing the read, but a file it was in the middle of writing can be saved
  * half-written. That is deliberate. A long-running command used to
  * refuse every checkpoint for the box's whole lifetime, so an uncaptured
- * provider death lost everything since the last capture. Supervised commands
- * keep their separate proof gate (`noActiveSupervisedProcesses`); every other
- * holder and every in-flight request still blocks the capture. */
-function activeUnsupervisedLeaseProcess(
+ * provider death lost everything since the last capture. A supervised command
+ * runs through one too: its terminal receipt lives in the supervisor's memory
+ * behind its control socket, never in the snapshot, and a warm concurrent
+ * capture neither terminates the box nor settles the command. Drains,
+ * containment and every other publication still keep the supervised proof
+ * gate (`noActiveSupervisedProcesses`), and the database guard
+ * `supervised_command_capture_guard` admits only the warm concurrent claim
+ * and fold. Every other holder and every in-flight request still blocks the
+ * capture. */
+function concurrentLeaseProcess(
   process: SQL,
   lease: { id: SQL; epoch: SQL; instanceId: SQL },
 ): SQL {
   return sql`${process}.lease_id = ${lease.id}
     and ${process}.lease_epoch = ${lease.epoch}
     and ${process}.provider_instance_id = ${lease.instanceId}
-    and ${process}.state = 'active'
-    and not (coalesce(${process}.provider_command, '{}'::jsonb) ? 'supervision')`;
+    and ${process}.state = 'active'`;
 }
 
 /** A process holder owned by a background command that may run through a warm
- * checkpoint (see `activeUnsupervisedLeaseProcess`). */
+ * checkpoint (see `concurrentLeaseProcess`). */
 function concurrentCommandHolder(
   holder: SQL,
   lease: { id: SQL; epoch: SQL; instanceId: SQL },
@@ -62082,7 +62089,7 @@ function concurrentCommandHolder(
   return sql`(${holder}.kind = 'process' and exists (
     select 1 from sandbox_retained_processes concurrent_process
     where concurrent_process.holder_id = ${holder}.holder_id
-      and ${activeUnsupervisedLeaseProcess(sql`concurrent_process`, lease)}
+      and ${concurrentLeaseProcess(sql`concurrent_process`, lease)}
   ))`;
 }
 
@@ -62107,7 +62114,7 @@ function concurrentCommandAdmission(
   return sql`exists (
     select 1 from sandbox_retained_processes concurrent_process
     where concurrent_process.parent_admission_id = ${admission}.id
-      and ${activeUnsupervisedLeaseProcess(sql`concurrent_process`, lease)}
+      and ${concurrentLeaseProcess(sql`concurrent_process`, lease)}
   )`;
 }
 
@@ -62540,8 +62547,8 @@ export async function claimWorkspaceArchiveCapture(
      * around, and settled with the box after termination. */
     deadlineMandatoryCaptureLeadMs?: number;
     /** Warm point-in-time checkpoint of a box no turn holds, kept warm by
-     * viewers, browser/computer interactions or active unsupervised background
-     * commands (e.g. while the session waits for one or for input). Requires
+     * viewers, browser/computer interactions or active background commands
+     * (supervised or not) (e.g. while the session waits for one or for input). Requires
      * `pointInTimeCapture` and no `warmAttempt`: with no turn attempt to fence,
      * no other holder may be on the box, at least one of those must be (a box
      * no holder keeps warm belongs to the idle drain), and every other open
@@ -62709,8 +62716,26 @@ export async function claimWorkspaceArchiveCapture(
       if (idleCheckpoint && Number(row.refcount) === 0) {
         return { status: "lease_fenced" as const };
       }
+      // Neither a new process nor a new admission can appear while this claim
+      // is held, so "a command was running at claim time" is exactly the
+      // condition under which the snapshot may miss later writes.
+      const aroundCommands =
+        (input.warmAttempt !== undefined || idleCheckpoint) && input.pointInTimeCapture === true;
+      // A supervised command allows only a warm point-in-time capture that
+      // runs around it on its own box: such a claim is always marked
+      // concurrent below (the command is a concurrent process), publishes one
+      // generation behind and never terminates the box. Drains and tar-style
+      // captures keep waiting for its receipt.
       const [supervision] = await scopedDb.execute<{ safe: boolean }>(sql`
-        select ${noActiveSupervisedProcesses(sql`${row.id}::uuid`)} as safe
+        select ${noActiveSupervisedProcesses(sql`${row.id}::uuid`)}
+          or (${aroundCommands && input.liveness === "warm"} and not exists (
+            select 1 from sandbox_retained_processes supervised_process
+            where supervised_process.lease_id = ${row.id}
+              and supervised_process.state = 'active'
+              and coalesce(supervised_process.provider_command, '{}'::jsonb) ? 'supervision'
+              and not (supervised_process.lease_epoch = ${Number(row.lease_epoch)}
+                and supervised_process.provider_instance_id = ${input.expectedInstanceId})
+          )) as safe
       `);
       if (!supervision?.safe) return { status: "mutation_in_progress" as const };
       if (row.archive_capture_id !== null) {
@@ -62724,11 +62749,6 @@ export async function claimWorkspaceArchiveCapture(
         epoch: sql`${Number(row.lease_epoch)}`,
         instanceId: sql`${input.expectedInstanceId}`,
       };
-      // Neither a new process nor a new admission can appear while this claim
-      // is held, so "a command was running at claim time" is exactly the
-      // condition under which the snapshot may miss later writes.
-      const aroundCommands =
-        (input.warmAttempt !== undefined || idleCheckpoint) && input.pointInTimeCapture === true;
       const holderCounts =
         input.liveness === "warm"
           ? await scopedDb.execute<{
@@ -62770,14 +62790,14 @@ export async function claimWorkspaceArchiveCapture(
       // be the sole blocking holder means every other worker/session has
       // relinquished its provider handle before capture can pause the box.
       // A warm point-in-time capture runs around writers that never release on
-      // their own schedule: an active unsupervised background command, and a
+      // their own schedule: an active background command, and a
       // viewer or browser-interaction attach. A viewer is not passive (its
       // noVNC/PTY tunnel can mutate the workspace without a generation
       // admission), so the claim is marked concurrent below and the archive is
       // published one generation behind; the next capture after the writer
       // leaves completes it. Waiting for them instead starved checkpoints for as
       // long as a tab stayed open or a command ran. See
-      // `activeUnsupervisedLeaseProcess` for the torn-file trade-off. An idle
+      // `concurrentLeaseProcess` for the torn-file trade-off. An idle
       // checkpoint has no owner holder of its own. Tar-style and drain captures
       // keep requiring every holder gone.
       const expectedHolderCount = input.warmAttempt ? 1 : 0;
@@ -62861,7 +62881,7 @@ export async function claimWorkspaceArchiveCapture(
         ? await scopedDb.execute<{ present: boolean }>(sql`
             select exists (
               select 1 from sandbox_retained_processes concurrent_process
-              where ${activeUnsupervisedLeaseProcess(sql`concurrent_process`, leaseIdentity)}
+              where ${concurrentLeaseProcess(sql`concurrent_process`, leaseIdentity)}
             ) or exists (
               select 1 from sandbox_lease_holders concurrent_writer
               where concurrent_writer.lease_id = ${row.id}
@@ -64605,7 +64625,11 @@ async function foldWorkspaceArchiveOntoLease(
     where lease.workspace_id = ${input.workspaceId}
       and lease.sandbox_group_id = ${input.sandboxGroupId}
       and ${livenessGuard}
-      and ${noActiveSupervisedProcesses(sql`lease.id`)}
+      and (${noActiveSupervisedProcesses(sql`lease.id`)}${
+        // A warm claim that ran around a supervised command publishes one
+        // generation behind and leaves the box and command running.
+        input.livenessGuard === "warm" ? sql` or ${captureRanAroundCommands(sql`lease`)}` : sql``
+      })
       and lease.lease_epoch = ${currentLeaseEpoch}
       and lease.instance_id is not distinct from ${currentInstanceId}
       and lease.workspace_generation = ${input.expectedWorkspaceGeneration}

@@ -3380,8 +3380,9 @@ checkpoints for that entire interval, leaving later changes without a recovery
 point if the provider instance is lost.
 When the provider capture is a point-in-time image of a paused box (Modal native
 filesystem or directory snapshots), a warm (turn heartbeat or turn-end) capture
-therefore excludes exactly the process holders and parent admissions of active,
-unsupervised retained processes on the same lease epoch and provider instance.
+therefore excludes exactly the process holders and parent admissions of active
+retained processes, supervised or not, on the same lease epoch and provider
+instance.
 Modal pauses the whole box while it snapshots, so such a command is frozen during
 the read, but a file it was in the middle of writing can be saved half-written;
 that trade-off is deliberate, because a possibly torn file beats losing everything
@@ -3392,8 +3393,11 @@ browser or computer controller): their tunnels can write `/workspace` without a
 generation admission and they never release on the capture's schedule, so
 waiting for them starved every checkpoint for as long as a tab stayed open.
 Every other holder (direct request, sibling turn, any other process), every
-in-flight request (including a command's own stdin write), and supervised
-commands still block.
+in-flight request (including a command's own stdin write) still blocks. A
+supervised command allows only this warm concurrent capture: migration 0685
+narrows its lease guard to exactly the claim marked concurrent and the warm
+fold one generation behind, so no drain, enrollment or termination can follow
+without its receipt.
 
 A claim taken while such a command, viewer or interaction was attached records
 itself in `archive_capture_concurrent_capture_id` (migration 0659). No new process
@@ -3428,10 +3432,10 @@ Modal boxes with point-in-time capture where:
 
 - at least one holder keeps the box warm (a zero-holder box belongs to its drain),
   no turn holds it, and every holder is a viewer, an interaction, or the
-  process holder of an active, unsupervised retained process on the exact lease
+  process holder of an active retained process (supervised or not) on the exact lease
   epoch and instance (a direct request or any other process holder blocks);
-- no supervised process is active, no rotation or operator hold is set, and no
-  unobservable command drain is open;
+- no rotation or operator hold is set and no unobservable command drain is open
+  (an active supervised process no longer excludes the box, migration 0685);
 - the workspace is dirty: `archive_generation` is null or behind
   `workspace_generation`, or `untracked_writer_since` is set;
 - no capture and no idle checkpoint attempt (`idle_checkpoint_attempted_at`)

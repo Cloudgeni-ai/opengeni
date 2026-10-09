@@ -25,6 +25,7 @@ import {
   getRetainedProcess,
   initializeSessionStartAtomically,
   listIdleCheckpointCandidates,
+  markWarmLeaseInstanceLost,
   readLease,
   releaseLeaseHolder,
   requestDueSandboxRotationsGlobal,
@@ -571,7 +572,74 @@ describe("checkpoints of held boxes between turns", () => {
     ).not.toContain(fixture.sandboxGroupId);
   }, 60_000);
 
-  test("a turn, direct request, supervised command or in-flight request on the box holds the checkpoint off", async () => {
+  test("a box held by a supervised background command is checkpointed around it", async () => {
+    const fixture = await heldBoxFixture({ supervised: true });
+    const provider = modalProvider();
+    await idleFor(fixture, 45);
+    const before = await readLease(db, fixture.workspaceId, fixture.sandboxGroupId);
+    expect(before).toMatchObject({ liveness: "warm", archiveGeneration: null });
+
+    // Supervised commands used to refuse every checkpoint for as long as they
+    // ran, so the box's only save was the mandatory pre-deadline save.
+    const tick = await reaperTick(provider, fixture);
+    expect(tick.checkpoints.map((row) => row.sandboxGroupId)).toContain(fixture.sandboxGroupId);
+    expect(tick.results.map((result) => result.status)).toEqual(["checkpointed"]);
+    expect(provider.snapshots()).toBe(1);
+    const after = await readLease(db, fixture.workspaceId, fixture.sandboxGroupId);
+    expect(after).toMatchObject({ liveness: "warm", archiveCapture: null });
+    expect(after?.currentCheckpointArtifactId).not.toBeNull();
+    // The command may still write: published one generation behind.
+    expect(after!.workspaceGeneration).toBe(before!.workspaceGeneration + 1);
+    expect(after!.archiveGeneration).toBe(before!.workspaceGeneration);
+    expect(after!.archiveComplete).toBe(false);
+    // Nothing about the supervised command changed: it keeps running, with no
+    // receipt and no claim that its output was captured.
+    const [running] = await admin<
+      { state: string; supervision_receipt: unknown; supervision_output_captured: boolean }[]
+    >`select state, supervision_receipt, supervision_output_captured
+      from sandbox_retained_processes where id = ${fixture.processId}`;
+    expect(running).toEqual({
+      state: "active",
+      supervision_receipt: null,
+      supervision_output_captured: false,
+    });
+
+    // The box is then lost without warning. The command is lost with no
+    // fabricated proof, and the mid-command checkpoint is what remains: a
+    // historical restore point instead of nothing at all.
+    const loss = await markWarmLeaseInstanceLost(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sandboxGroupId: fixture.sandboxGroupId,
+      expectedEpoch: EPOCH,
+      expectedInstanceId: fixture.instanceId,
+      expectedBackend: "modal",
+    });
+    expect(loss.status).toBe("marked");
+    const [lost] = await admin<
+      {
+        state: string;
+        supervision_receipt: unknown;
+        supervision_output_captured: boolean;
+        settlement_reason: string;
+      }[]
+    >`select state, supervision_receipt, supervision_output_captured, settlement_reason
+      from sandbox_retained_processes where id = ${fixture.processId}`;
+    expect(lost).toEqual({
+      state: "lost",
+      supervision_receipt: null,
+      supervision_output_captured: false,
+      settlement_reason: "provider_instance_lost",
+    });
+    const recovered = await readLease(db, fixture.workspaceId, fixture.sandboxGroupId);
+    expect(recovered).toMatchObject({
+      archiveGeneration: after!.archiveGeneration,
+      archiveComplete: false,
+      currentCheckpointArtifactId: after!.currentCheckpointArtifactId,
+    });
+  }, 60_000);
+
+  test("a turn, direct request or in-flight request on the box holds the checkpoint off", async () => {
     const holders = {
       turn: async (fixture: Fixture) => {
         await addHolder(holderScope(fixture), "turn");
@@ -581,11 +649,8 @@ describe("checkpoints of held boxes between turns", () => {
         await addHolder(holderScope(fixture), "direct");
       },
     };
-    for (const [kind, add] of Object.entries({
-      ...holders,
-      supervised: async () => undefined,
-    })) {
-      const fixture = await heldBoxFixture({ supervised: kind === "supervised" });
+    for (const [kind, add] of Object.entries(holders)) {
+      const fixture = await heldBoxFixture();
       const provider = modalProvider();
       await idleFor(fixture, 45);
       await add(fixture);
