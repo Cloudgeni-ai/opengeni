@@ -13979,6 +13979,16 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     renameSeed: z.string(),
     scheduledTaskId: z.string().nullable(),
     siteOrigin: z.object({ siteId: z.string().uuid(), title: z.string() }).nullable(),
+    /**
+     * Display-only model and reasoning effort for compact rows: the latest
+     * started turn's policy, or the session's stored defaults when an explicit
+     * settings change is newer or no turn has started. A row projected from a
+     * full Session (the SDK fallback for older servers) carries that session's
+     * effective model instead. Detail reads remain authoritative for the
+     * composer default; never use these fields to choose a model.
+     */
+    model: z.string().min(1).optional(),
+    reasoningEffort: ReasoningEffort.optional(),
   }),
 );
 export type SessionListEntry = z.infer<typeof SessionListEntry>;

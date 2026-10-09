@@ -1753,7 +1753,10 @@ export type CreateSessionResponse = Session & {
 
 export type SessionSummary = Session;
 
-/** Compact list-only record, excluding prompts and execution configuration. */
+/**
+ * Compact list-only record, excluding prompts and execution configuration
+ * other than the model and reasoning effort shown with a row.
+ */
 export type SessionListEntry = Pick<
   Session,
   | "id"
@@ -1791,6 +1794,15 @@ export type SessionListEntry = Pick<
   renameSeed: string;
   scheduledTaskId: string | null;
   siteOrigin: { siteId: string; title: string } | null;
+  /**
+   * Display-only: the latest started turn's model, or the session's stored
+   * default when an explicit settings change is newer or no turn has started.
+   * Rows the SDK projects from an older server's full pages carry the
+   * session's effective model instead. `getSession` remains authoritative for
+   * the composer default.
+   */
+  model?: string | undefined;
+  reasoningEffort?: ReasoningEffort | undefined;
 };
 export type SessionListEntryResponse = Omit<SessionListResponse, "pinned" | "sessions"> & {
   projection: "summary";
