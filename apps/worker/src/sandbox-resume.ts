@@ -1057,7 +1057,7 @@ async function persistWarmWorkspaceSnapshot(
     // A host-backed spool capture reads the workspace locally, so it is
     // stopped at the snapshot timeout instead: its rejection is the physical
     // end of the reads, and holding the write fence for an unbounded local
-    // read would turn a slow host into failed workspace writes (OPE-776).
+    // read would turn a slow host into failed workspace writes.
     const captureAbort = new AbortController();
     const captureAbortTimer = setTimeout(
       () => captureAbort.abort(new SnapshotTimeoutError(settings.sandboxSnapshotTimeoutMs)),

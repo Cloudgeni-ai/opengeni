@@ -47,6 +47,13 @@ const withheldMigrations = [
   // adds, so they run with the withheld tail, in ledger order.
   "0688_subscription_core_codex_writers.sql",
   "0689_subscription_core_codex_cutover.sql",
+  // Disconnect patches the cutover routine; catalog observations and retry
+  // admission extend its tables and guards. Replay after those prerequisites.
+  "0691_subscription_core_codex_disconnect.sql",
+  "0695_subscription_model_catalog_observations.sql",
+  "0697_codex_retry_after_unknown_outcome.sql",
+  // Patches ownerless access and lease guards created by withheld 0667 and 0671.
+  "0698_codex_ownerless_person_turns.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

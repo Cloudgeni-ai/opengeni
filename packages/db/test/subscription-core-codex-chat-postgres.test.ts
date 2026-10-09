@@ -28,6 +28,7 @@ import {
   recordSubscriptionCoreCodexModelCatalog,
   readSubscriptionCoreTurnIdentity,
   readSubscriptionSessionBinding,
+  reserveSubscriptionCoreCodexRequest,
   recordSubscriptionCoreCodexQuotaObservation,
   recordSubscriptionCoreCodexSelectionForTurnAttempt,
   recordSubscriptionCoreCodexTurnFailure,
@@ -1066,6 +1067,71 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
         }
       }
     }
+  });
+
+  test("a person's turn in an ownerless session places shared-only, like a scheduled run", async () => {
+    // A scheduled task that opens a new session per run creates the session
+    // without an owner, while its turn still records the person it runs for.
+    // That turn must place on shared capacity, never on personal capacity.
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    const personal = await personalConnection(org, "not-for-ownerless");
+    const turn = await runningTurn(org, {
+      workspaceId: org.sharedWorkspaceId,
+      owner: "none",
+      initiator: { kind: "subject", subjectId: org.ownerSubjectId },
+    });
+    expect(turn.identity).toMatchObject({
+      sessionOwnerSubjectId: null,
+      sessionOwnerMembershipId: null,
+      initiatingHumanSubjectId: org.ownerSubjectId,
+    });
+    expect(await place(turn)).toMatchObject({ kind: "wait", reason: "no_eligible_capacity" });
+    const sharedId = await sharedConnection(org, {
+      workspaceId: org.sharedWorkspaceId,
+      label: "ownerless-person",
+    });
+    expect(await place(turn)).toMatchObject({
+      kind: "run",
+      connectionId: sharedId,
+      personal: false,
+    });
+    const binding = await withRlsContext(
+      client!.db,
+      { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+      (db) => readSubscriptionSessionBinding(db, turn.identity),
+    );
+    expect(binding).toBeNull();
+    expect(
+      await loadSubscriptionCoreCodexCredential(
+        client!.db,
+        settings,
+        turn.identity,
+        leaseOf(turn, personal),
+      ),
+    ).toEqual({ kind: "lease_lost" });
+    expect(
+      await loadSubscriptionCoreCodexCredential(
+        client!.db,
+        settings,
+        turn.identity,
+        leaseOf(turn, sharedId),
+      ),
+    ).toMatchObject({ kind: "loaded", credential: { connectionId: sharedId } });
+    // The turn can also admit its model requests on the shared lease.
+    expect(
+      await reserveSubscriptionCoreCodexRequest(
+        client!.db,
+        turn.identity,
+        leaseOf(turn, sharedId),
+        {
+          requestId: crypto.randomUUID(),
+          transportAttempt: 1,
+          attemptId: turn.attemptId,
+          executionGeneration: turn.executionGeneration,
+        },
+      ),
+    ).toMatchObject({ operationId: expect.any(String) });
   });
 
   test("concurrent refreshes of one generation persist one rotation and call the provider once", async () => {

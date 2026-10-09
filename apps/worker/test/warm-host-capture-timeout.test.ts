@@ -1,4 +1,4 @@
-// Regression (OPE-776): a slow host-backed (Docker/local) warm capture must not
+// Regression: a slow host-backed (Docker/local) warm capture must not
 // hold the durable capture claim, and therefore the workspace write fence, for
 // its full physical duration. The local spool read is stopped at the snapshot
 // timeout and the exact claim is released once those reads have ended. Drives

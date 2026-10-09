@@ -1,4 +1,4 @@
-/** One-shot physical request admission and nonsecret outcome custody (OPE-766).
+/** One-shot physical request admission and nonsecret outcome custody.
  * A reservation is not a dispatch receipt. Neither expiry nor `unknown` means
  * that a remote request failed, and neither permits replay of that request.
  */
