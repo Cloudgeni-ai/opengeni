@@ -1431,6 +1431,12 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 0690 adds one organization-isolated table with full runtime DML.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // Individual Claude accounts share the six subscription runtime tables;
           // the organization key scope join and service accounts add two more.
           (tables === FORCE_RLS_TABLES ||
@@ -1522,7 +1528,16 @@ describe("runtime database posture evaluator", () => {
         6 +
         1 +
         16 + // M2 and M3 runtime-store migrations add sixteen FORCE-RLS tables with explicit runtime DML contracts.
-        1; // Session content blobs: append-only, session-owned.
+        1 + // Session content blobs: append-only, session-owned.
+        1; // 0690 organization model defaults: full-DML, FORCE-RLS.
+      expect(FORCE_RLS_TABLES).toContain("organization_model_defaults");
+      expect(RUNTIME_FULL_DML_TABLES).toContain("organization_model_defaults");
+      expect(RUNTIME_TABLE_PRIVILEGES.organization_model_defaults).toEqual([
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+      ]);
       expect(RUNTIME_TABLE_PRIVILEGES.credit_debit_allocations).toEqual(["SELECT", "INSERT"]);
       for (const removed of [
         "workspace_packs",

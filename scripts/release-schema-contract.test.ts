@@ -70,6 +70,15 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers request-level Codex disconnect as maintenance-only", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0691_subscription_core_codex_disconnect.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "maintenance" });
+  });
+
   test("registers the dormant Codex core writers as rolling", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -191,10 +200,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0691_native_pty_command_supervision.sql",
+        (migration) => migration.path === "0693_native_pty_command_supervision.sql",
       ),
     ).toMatchObject({
-      path: "0691_native_pty_command_supervision.sql",
+      path: "0693_native_pty_command_supervision.sql",
       deploymentMode: "maintenance",
     });
   });
@@ -203,10 +212,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0692_native_command_qualification.sql",
+        (migration) => migration.path === "0694_native_command_qualification.sql",
       ),
     ).toMatchObject({
-      path: "0692_native_command_qualification.sql",
+      path: "0694_native_command_qualification.sql",
       deploymentMode: "maintenance",
     });
   });
@@ -359,6 +368,12 @@ describe("release schema contract", () => {
     );
     if (subscriptionCoreCodexCutover) {
       expect(subscriptionCoreCodexCutover.deploymentMode).toBe("maintenance");
+    }
+    const subscriptionCoreCodexDisconnect = sourceContract.migrations.find(
+      (migration) => migration.path === "0691_subscription_core_codex_disconnect.sql",
+    );
+    if (subscriptionCoreCodexDisconnect) {
+      expect(subscriptionCoreCodexDisconnect.deploymentMode).toBe("maintenance");
     }
     // Keep the published-history assertions below scoped to their existing
     // migration range; the new forward migration is checked explicitly above.
@@ -2268,8 +2283,10 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0690_organization_model_defaults.sql",
       "0686_target_tool_approval_bindings.sql",
       "0689_subscription_core_codex_cutover.sql",
+      "0691_subscription_core_codex_disconnect.sql",
       "0671_subscription_core_codex_operations.sql",
       "0688_subscription_core_codex_writers.sql",
       "0670_subscription_core_codex_apps.sql",
@@ -2656,8 +2673,8 @@ describe("release schema contract", () => {
       "0684_claude_haiku_5_5_default_model.sql",
       "0685_sandbox_capture_around_supervised_commands.sql",
       "0687_human_wait_command_containment.sql",
-      "0691_native_pty_command_supervision.sql",
-      "0692_native_command_qualification.sql",
+      "0693_native_pty_command_supervision.sql",
+      "0694_native_command_qualification.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

@@ -147,6 +147,7 @@ import {
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
   type ConnectorActionPolicyHooks,
+  type PrepareToolsOptions,
   type RuntimeMetricsHooks,
 } from "../src/index";
 import { MCP_MAX_TOOL_RESULT_BYTES } from "../src/mcp-network";
@@ -10048,10 +10049,17 @@ describe("runtime event normalization", () => {
       tokenResolutions += 1;
       return await authorize(use);
     };
+    const legacyFetch = codexAppsTestFetch(mcp.url);
     const prepared = await prepareAgentTools(
       testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
       [{ kind: "mcp", id: "codex_apps" }],
-      { codexAppsAuth: auth, mcpFetchImpl: codexAppsTestFetch(mcp.url) },
+      {
+        codexAppsAuth: auth,
+        mcpFetchImpl: async (input, init) => {
+          expect(init?.redirect).toBe("manual");
+          return await legacyFetch(input, init);
+        },
+      },
     );
     try {
       expect(prepared.mcpServers).toHaveLength(1);
@@ -10063,6 +10071,242 @@ describe("runtime event normalization", () => {
       expect(JSON.stringify(result)).toContain("found document for gmail");
       expect(tokenResolutions).toBeGreaterThanOrEqual(2);
     } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps: core admission owns each physical fetch and fences calls after disconnect", async () => {
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer tok-123", "chatgpt-account-id": "acct-9" },
+    });
+    let disconnected = false;
+    let admissions = 0;
+    let dispatches = 0;
+    let availablePermits = 0;
+    let legacyAuthorizations = 0;
+    const auth: NonNullable<PrepareToolsOptions["codexAppsAuth"]> = {
+      clientVersion: "0.0.0-test",
+      withAuthorization: async () => {
+        legacyAuthorizations += 1;
+        throw new Error("core must not extract a bearer outside physical admission");
+      },
+      withRequest: async (use) => {
+        if (disconnected) throw new CodexAppsCredentialUnavailable();
+        admissions += 1;
+        availablePermits += 1;
+        return await use({ accessToken: "tok-123", chatgptAccountId: "acct-9" });
+      },
+    };
+    const fetchImpl = codexAppsTestFetch(mcp.url);
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: auth,
+        mcpFetchImpl: async (input, init) => {
+          expect(availablePermits).toBeGreaterThan(0);
+          expect(init?.redirect).toBe("error");
+          availablePermits -= 1;
+          dispatches += 1;
+          return await fetchImpl(input, init);
+        },
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(1);
+      const result = await prepared.mcpServers[0]!.callTool("codex_apps__search_documents", {
+        query: "admitted",
+      });
+      expect(JSON.stringify(result)).toContain("found document for admitted");
+      expect(dispatches).toBe(admissions);
+      expect(availablePermits).toBe(0);
+      expect(legacyAuthorizations).toBe(0);
+      const sent = dispatches;
+      disconnected = true;
+      const refused = await prepared.mcpServers[0]!.callToolResult!(
+        "codex_apps__search_documents",
+        { query: "must-not-send" },
+      );
+      expect(refused).toMatchObject({ isError: true });
+      expect(dispatches).toBe(sent);
+      expect(mcp.calls).toHaveLength(1);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps: core refuses a native redirect without another physical request or tool replay", async () => {
+    const mcp = startTestMcpServer();
+    let redirectRequests = 0;
+    let destinationRequests = 0;
+    const redirectServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        if (new URL(request.url).pathname === "/redirect") {
+          redirectRequests += 1;
+          return new Response(null, { status: 307, headers: { location: "/destination" } });
+        }
+        destinationRequests += 1;
+        return new Response("must not reach redirected destination");
+      },
+    });
+    let unknownRequests = 0;
+    const auth: NonNullable<PrepareToolsOptions["codexAppsAuth"]> = {
+      ...makeCodexAppsAuth(),
+      withRequest: async (use) => {
+        try {
+          return await use({ accessToken: "tok-123", chatgptAccountId: "acct-9" });
+        } catch (error) {
+          unknownRequests += 1;
+          throw error;
+        }
+      },
+    };
+    const fetchImpl = codexAppsTestFetch(mcp.url);
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: auth,
+        mcpFetchImpl: async (input, init) => {
+          expect(init?.redirect).toBe("error");
+          const method =
+            typeof init?.body === "string" ? String(JSON.parse(init.body).method) : null;
+          return method === "tools/call"
+            ? await fetch(new URL("/redirect", redirectServer.url), init)
+            : await fetchImpl(input, init);
+        },
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(1);
+      const result = await prepared.mcpServers[0]!.callToolResult!("codex_apps__search_documents", {
+        query: "must-not-follow",
+      });
+      expect(result).toMatchObject({ isError: true });
+      expect(redirectRequests).toBe(1);
+      expect(destinationRequests).toBe(0);
+      expect(unknownRequests).toBe(1);
+      expect(mcp.calls).toEqual([]);
+    } finally {
+      await prepared.close();
+      mcp.close();
+      await redirectServer.stop(true);
+    }
+  });
+
+  test("codex_apps: a pending native admission cannot dispatch and receives the transport signal", async () => {
+    const mcp = startTestMcpServer();
+    let beginAdmission!: () => void;
+    const admissionStarted = new Promise<void>((resolve) => (beginAdmission = resolve));
+    let releaseAdmission!: () => void;
+    const admissionGate = new Promise<void>((resolve) => (releaseAdmission = resolve));
+    let gate = false;
+    let dispatches = 0;
+    let admittedSignal: AbortSignal | null | undefined;
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const auth: NonNullable<PrepareToolsOptions["codexAppsAuth"]> = {
+      ...makeCodexAppsAuth(),
+      withRequest: async (use, options) => {
+        if (gate) {
+          admittedSignal = options?.signal;
+          beginAdmission();
+          await admissionGate;
+          throw new CodexAppsCredentialUnavailable();
+        }
+        return await use({ accessToken: "tok-123", chatgptAccountId: "acct-9" });
+      },
+    };
+    const fetchImpl = codexAppsTestFetch(mcp.url);
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: auth,
+        mcpFetchImpl: async (input, init) => {
+          dispatches += 1;
+          return await fetchImpl(input, init);
+        },
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(1);
+      const before = dispatches;
+      gate = true;
+      const pending = prepared.mcpServers[0]!.callToolResult!("codex_apps__search_documents", {
+        query: "waiting-for-commit",
+      });
+      await admissionStarted;
+      expect(dispatches).toBe(before);
+      expect(admittedSignal).toBeInstanceOf(AbortSignal);
+      releaseAdmission();
+      expect(await pending).toMatchObject({ isError: true });
+      expect(dispatches).toBe(before);
+      expect(mcp.calls).toEqual([]);
+      expect(authNeeded).toHaveLength(1);
+      expect(authNeeded[0]?.reason).toBe("designated_credential_unavailable");
+    } finally {
+      releaseAdmission();
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps: admitted transport failure is not replayed or reported as a refresh failure", async () => {
+    const mcp = startTestMcpServer();
+    let failTransport = false;
+    let failedDispatches = 0;
+    const failedMethods: string[] = [];
+    let unknownRequests = 0;
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const auth: NonNullable<PrepareToolsOptions["codexAppsAuth"]> = {
+      ...makeCodexAppsAuth(),
+      withRequest: async (use) => {
+        try {
+          return await use({ accessToken: "tok-123", chatgptAccountId: "acct-9" });
+        } catch (error) {
+          unknownRequests += 1;
+          throw error;
+        }
+      },
+    };
+    const fetchImpl = codexAppsTestFetch(mcp.url);
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: auth,
+        mcpFetchImpl: async (input, init) => {
+          const method =
+            typeof init?.body === "string" ? String(JSON.parse(init.body).method) : null;
+          if (failTransport && method === "tools/call") {
+            failedDispatches += 1;
+            failedMethods.push(method);
+            throw new Error("provider accepted request but response was lost");
+          }
+          return await fetchImpl(input, init);
+        },
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(1);
+      failTransport = true;
+      const result = await prepared.mcpServers[0]!.callToolResult!("codex_apps__search_documents", {
+        query: "ambiguous",
+      });
+      expect(result).toMatchObject({ isError: true });
+      expect(failedMethods).toEqual(["tools/call"]);
+      expect(failedDispatches).toBe(1);
+      expect(unknownRequests).toBe(1);
+      expect(authNeeded).toEqual([]);
+      expect(mcp.calls).toEqual([]);
+    } finally {
+      failTransport = false;
       await prepared.close();
       mcp.close();
     }

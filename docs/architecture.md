@@ -628,7 +628,7 @@ Those groups require native ownership for every new turn command while the
 global flag stays false. Read-only scoped RPCs inspect the owner-only ledger;
 existing groups never gain retrospective qualification. Canonical source:
 `packages/db/src/native-command-qualification.ts` and maintenance migrations
-`0691`/`0692`.
+`0693`/`0694`.
 Exact-instance capability verification precedes admission; durable invocation
 retention precedes dispatch. The supervisor starts idle. Only original launch
 releases user code; reconstructed observers never release abandoned reservations.
@@ -1260,6 +1260,12 @@ Claude account pools: [setup and quotas](model-providers.md#claude-subscription-
 
 Codex requires exact live credential leases and frozen accepted source/rotation
 policy; recovery preserves that policy while current health governs capacity.
+Shared-core local disconnect fences each physical request at an exact one-shot
+reservation, removes persisted secrets atomically, and preserves already-admitted
+response custody. Expiry and unknown outcomes are not remote completion receipts;
+the next request checkpoints and re-places the same continuation. See
+[`request-level disconnect`](design/codex-graceful-disconnect.md) for the admission
+boundary, reconnect isolation and unsupported provider recovery.
 [Allocator and picker rules](codex-subscription-rotation.md).
 [Migration 0492 rollout](codex-subscription-rotation.md) requires drained processes and matching binaries.
 

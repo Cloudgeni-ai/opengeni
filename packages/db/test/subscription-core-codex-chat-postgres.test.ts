@@ -10,6 +10,7 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  disconnectSubscriptionCoreCodexConnection,
   enqueueSessionTurn,
   ensureManagedAccessForUser,
   loadSubscriptionCoreCodexCredential,
@@ -682,7 +683,49 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
       (db) => readSubscriptionSessionBinding(db, turn.identity),
     );
     expect(binding).toMatchObject({ connectionId: pinned, choice: "explicit" });
+    expect(
+      (
+        await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+          disconnectSubscriptionCoreCodexConnection(client!.db, {
+            accountId: org.accountId,
+            workspaceId: null,
+            subjectId: org.ownerSubjectId,
+            connectionId: pinned,
+          }),
+        )
+      ).outcome,
+    ).toBe("removed");
+    expect(await place(turn)).toMatchObject({ kind: "wait", explicitConnectionId: pinned });
+    expect(await leaseRows(org, turn)).toEqual([]);
     void other;
+  });
+
+  test("a disconnected automatic source re-places the continuation, then waits when none remain", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    await sharedConnection(org, { workspaceId: org.sharedWorkspaceId, label: "drain-first" });
+    await sharedConnection(org, { workspaceId: org.sharedWorkspaceId, label: "drain-second" });
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    const initial = await place(turn);
+    if (initial.kind !== "run") throw new Error("initial placement failed");
+    const remove = (connectionId: string) =>
+      withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+        disconnectSubscriptionCoreCodexConnection(client!.db, {
+          accountId: org.accountId,
+          workspaceId: null,
+          subjectId: org.ownerSubjectId,
+          connectionId,
+        }),
+      );
+    expect((await remove(initial.connectionId)).outcome).toBe("removed");
+    // Retaining the original turn lease protects its response writer, but is
+    // not permission for another request to reuse this disconnected source.
+    const next = await place(turn);
+    if (next.kind !== "run") throw new Error("continuation did not re-place");
+    expect(next.connectionId).not.toBe(initial.connectionId);
+    expect((await remove(next.connectionId)).outcome).toBe("removed");
+    expect(await place(turn)).toMatchObject({ kind: "wait" });
+    expect(await leaseRows(org, turn)).toEqual([]);
   });
 
   test("a personal connection serves only its owner's own work with a matching v2 entry", async () => {

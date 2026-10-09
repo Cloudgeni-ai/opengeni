@@ -17,6 +17,7 @@ import {
   acquireSubscriptionCoreCodexOperationLease,
   buildCodexTokenResolver,
   buildSubscriptionCoreCodexConnectionTokenResolver,
+  buildSubscriptionCoreCodexOperationFetch,
   listSubscriptionCoreCodexOperationCandidates,
   readCodexCutoverDisposition,
   readSubscriptionCoreSessionOwner,
@@ -372,6 +373,15 @@ export async function brokerSessionCoreCodexRealtime(
         candidate.connectionId,
         ref,
       );
+      // Configuration and call creation are separate physical requests, as
+      // are both requests of the single authentication-only retry.
+      const requestFetch = buildSubscriptionCoreCodexOperationFetch(
+        db,
+        scope,
+        ref,
+        candidate.connectionId,
+        fetchImpl,
+      );
       return await brokerSessionCodexRealtime(
         {
           enabled: true,
@@ -391,7 +401,7 @@ export async function brokerSessionCoreCodexRealtime(
                 "Codex subscription credential is unavailable",
               );
             }
-            return await createRealtimeCall(fetchImpl, auth, callInput, options);
+            return await createRealtimeCall(requestFetch, auth, callInput, options);
           },
         },
         { ...input, sessionId: context.sessionId },

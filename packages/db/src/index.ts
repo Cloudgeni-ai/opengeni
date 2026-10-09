@@ -299,6 +299,7 @@ export type {
   WorkspaceCodexSubscriptionSource,
 } from "./codex-account-types";
 export * from "./subscription-core-codex-operations";
+export * from "./subscription-core-codex-requests";
 export * from "./subscription-core-codex-connections";
 export * from "./subscription-core-codex-catalog";
 import {

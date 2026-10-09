@@ -57,6 +57,10 @@ import {
 import { projectSubscriptionCoreCodexWorkspace } from "./subscription-core-codex-compat";
 import { withSubscriptionCoreAcceptedTurn } from "./subscription-core-placement-world";
 import {
+  reserveSubscriptionCoreCodexOperationRequest,
+  settleSubscriptionCoreCodexOperationRequest,
+} from "./subscription-core-codex-requests";
+import {
   acquireSubscriptionOperationLease,
   decodeSubscriptionQuota,
   readSubscriptionProviderCutoverState,
@@ -72,6 +76,10 @@ const CORE_SUBSCRIPTION_SUBJECT = "service:subscription-core";
 
 /** Default lease for one Codex operation; renewed before each provider dispatch. */
 export const SUBSCRIPTION_CORE_CODEX_OPERATION_LEASE_TTL_MS = 5 * 60 * 1000;
+
+// These adapters return finite JSON/SDP, never model/SSE streams. In particular,
+// do not bypass realtime's bounded SDP reader with an unbounded eager buffer.
+const CODEX_OPERATION_RESPONSE_MAX_BYTES = 8 * 1024 * 1024;
 
 export type SubscriptionCoreCodexOperationScope =
   | { kind: "turn"; identity: SubscriptionCoreTurnIdentity }
@@ -108,7 +116,7 @@ function scopeTenant(scope: SubscriptionCoreCodexOperationScope): {
  * Run `operation` in the scope's exact RLS context. `null` means the turn is
  * no longer the accepted turn it claims to be (or is not visible).
  */
-async function withOperationScope<T>(
+export async function withOperationScope<T>(
   db: Database,
   scope: SubscriptionCoreCodexOperationScope,
   operation: (tx: Database) => Promise<T>,
@@ -132,6 +140,107 @@ async function withOperationScope<T>(
       withRlsContext(db, scopeTenant(scope), operation),
     ),
   };
+}
+
+/**
+ * Physical request custody for the finite JSON/SDP non-chat transports. An
+ * operation lease is access authority, never permission to send another HTTP
+ * request after disconnect. Each invocation commits a fresh native reservation
+ * before fetch, and retains the already-loaded bearer only for that request.
+ *
+ * Buffer the complete response before returning it: headers, cancellation and
+ * lease release are not EOF. Existing provider deadlines still bound the call;
+ * a fetch implementation that ignores abort may finish later, but its aborted
+ * reservation remains unknown and is never replayed here. Not for chat/SSE.
+ */
+export function buildSubscriptionCoreCodexOperationFetch(
+  db: Database,
+  scope: SubscriptionCoreCodexOperationScope,
+  ref: SubscriptionCoreCodexOperationLeaseRef | null,
+  connectionId: string,
+  fetchImpl: CodexFetch = fetch,
+  deps: {
+    /** Reuse a durable logical identity when the caller has one (transcription). */
+    requestId?: string;
+    reserve?: typeof reserveSubscriptionCoreCodexOperationRequest;
+    settle?: typeof settleSubscriptionCoreCodexOperationRequest;
+  } = {},
+): CodexFetch {
+  const requestId = deps.requestId ?? crypto.randomUUID();
+  let transportAttempt = 0;
+  const reserve = deps.reserve ?? reserveSubscriptionCoreCodexOperationRequest;
+  const settle = deps.settle ?? settleSubscriptionCoreCodexOperationRequest;
+  return async (url, init) => {
+    const signal = init?.signal;
+    signal?.throwIfAborted();
+    const { operationId } = await reserve(db, scope, ref, connectionId, {
+      requestId,
+      transportAttempt: ++transportAttempt,
+    });
+    let settled = false;
+    const finish = async (outcome: "response_received" | "refused" | "unknown") => {
+      if (settled) return;
+      settled = true;
+      // Settlement failure leaves the native nonsecret reservation unresolved;
+      // it must not turn an observed response into a retry of the provider call.
+      await settle(db, scope, { operationId, outcome }).catch(() => undefined);
+    };
+    if (signal?.aborted) {
+      await finish("refused");
+      signal.throwIfAborted();
+    }
+    const onAbort = () => void finish("unknown");
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      // Native redirect following would perform another physical request
+      // without a reservation. These fixed provider endpoints do not redirect.
+      const response = await fetchImpl(url, { ...init, redirect: "error" });
+      const body = await readCodexOperationResponse(response);
+      await finish("response_received");
+      return new Response(body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    } catch (error) {
+      await finish("unknown");
+      throw error;
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
+  };
+}
+
+async function readCodexOperationResponse(
+  response: Response,
+): Promise<Uint8Array<ArrayBuffer> | null> {
+  if (!response.body) return null;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      length += next.value.byteLength;
+      if (length > CODEX_OPERATION_RESPONSE_MAX_BYTES) {
+        // Cancelling an oversized body is not remote completion. The caller
+        // records unknown, and the provider operation is never replayed.
+        void reader.cancel().catch(() => undefined);
+        throw new Error("Codex operation response exceeded its byte limit");
+      }
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 async function codexCutoverEnabled(tx: Database, accountId: string): Promise<boolean> {
@@ -828,7 +937,7 @@ export async function fetchSubscriptionCoreCodexUsage(
         isFedramp: token.isFedramp,
         clientVersion: CODEX_CLIENT_VERSION,
       },
-      fetchImpl,
+      buildSubscriptionCoreCodexOperationFetch(db, scope, null, connectionId, fetchImpl),
     );
     usage = normalizeCodexUsage(response.status, response.payload);
   } catch {

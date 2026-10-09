@@ -96,7 +96,7 @@ selects the PTY protocol for a PTY shell, or v1 for a pipe-mode shell. This does
 not adopt them as session background commands. Their exact-instance capability
 and canonical database fences must pass before mutation admission; missing or
 old helpers reject the call, never fall back to a process-group wrapper.
-Maintenance migration `0691` extends the immutable initial-retention guard to PTY descriptors.
+Maintenance migration `0693` extends the immutable initial-retention guard to PTY descriptors.
 PTY readiness also checks the guard's protocol version, since the five older
 trigger names alone certify only v1. Drain old writers before applying it and
 start compatible readers with the exact native image before sending these calls;
@@ -104,7 +104,7 @@ old warm boxes are not retrofitted by an image-pin update.
 
 ## Operator-qualified new groups
 
-Maintenance migration `0692` adds an owner-only qualification ledger. It has no
+Maintenance migration `0694` adds an owner-only qualification ledger. It has no
 public session field or model override. Before enrollment, the operator supplies
 one reviewed `NativeCommandQualification` to
 `publishNativeCommandQualification` in `packages/db/src/native-command-qualification.ts`:
