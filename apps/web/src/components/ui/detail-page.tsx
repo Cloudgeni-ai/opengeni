@@ -48,23 +48,27 @@ export function DetailMeta({ children, className }: { children: ReactNode; class
   // Children.toArray already drops null, undefined and booleans.
   const parts = Children.toArray(children).filter((part) => part !== "");
   return (
-    <p className={cn("m-0 min-w-0 text-sm leading-5 text-fg-muted", className)}>
-      {parts.map((part, index) => (
-        // The dot travels with the part after it, so a wrapped line never ends
-        // on a dangling separator. A part moves to the next line whole; only a
-        // part longer than the line wraps inside.
-        <span
-          key={isValidElement(part) && part.key !== null ? part.key : index}
-          className="inline-block max-w-full align-top"
-        >
-          {index > 0 ? (
-            <span aria-hidden="true" className="px-1.5 text-fg-subtle">
-              ·
-            </span>
-          ) : null}
-          {part}
-        </span>
-      ))}
+    <p className={cn("m-0 min-w-0 overflow-x-clip text-sm leading-5 text-fg-muted", className)}>
+      {/* Each part sits after a gap that holds its dot. The row is shifted left
+          by one gap, so a part that starts a wrapped line has its dot outside
+          the clipped edge: no line starts or ends on a dangling separator. A
+          part moves to the next line whole; only a part longer than the line
+          wraps inside. */}
+      <span className="-ml-4 flex flex-wrap">
+        {parts.map((part, index) => (
+          <span
+            key={isValidElement(part) && part.key !== null ? part.key : index}
+            className="relative ml-4 max-w-full min-w-0"
+          >
+            {index > 0 ? (
+              <span aria-hidden="true" className="absolute top-0 -left-[0.6rem] text-fg-subtle">
+                ·
+              </span>
+            ) : null}
+            {part}
+          </span>
+        ))}
+      </span>
     </p>
   );
 }

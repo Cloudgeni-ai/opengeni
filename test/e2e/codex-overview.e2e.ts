@@ -680,7 +680,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     expect(await resets.getByText(/available again\./).count()).toBe(1);
     expect(await page.getByRole("button", { name: /^Redeem / }).count()).toBe(1);
     const aria = await detailed.ariaSnapshot();
-    expect(aria).toContain('switch "Detailed account is available for new chats"');
+    expect(aria).toContain('switch "Use Detailed account for new work"');
     expect(aria).toContain('button "Redeem Full reset"');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
@@ -750,7 +750,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     expect(
       (
         await mobileDetailed
-          .getByRole("switch", { name: "Detailed account is available for new chats" })
+          .getByRole("switch", { name: "Use Detailed account for new work" })
           .boundingBox()
       )?.height ?? 0,
     ).toBeGreaterThan(0);
@@ -786,7 +786,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     await backToModels(page);
     const detailedAgain = await openCodexAccount(page, "Detailed account");
     const allocator = detailedAgain.getByRole("switch", {
-      name: "Detailed account is available for new chats",
+      name: "Use Detailed account for new work",
     });
     await allocator.click();
     await waitFor(async () => (await allocator.getAttribute("aria-checked")) === "false", {
@@ -861,7 +861,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     // Redemption never touched the allocator choice made earlier.
     expect(
       await recoveryDetailed
-        .getByRole("switch", { name: "Detailed account is available for new chats" })
+        .getByRole("switch", { name: "Use Detailed account for new work" })
         .getAttribute("aria-checked"),
     ).toBe("false");
     expect(
