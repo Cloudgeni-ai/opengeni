@@ -63,6 +63,7 @@ export interface NativeSessionScreenProps extends Omit<
           | "messages"
           | "onActionFeedback"
           | "voice"
+          | "call"
         >
       >
     | undefined;
@@ -272,6 +273,7 @@ function SessionScreenBody({
         inputRef: composerInput,
         messages: composerSlots?.messages,
         voice: composerSlots?.voice,
+        call: composerSlots?.call,
         below: composer.draftConflict ? (
           <DraftConflictStrip
             messages={composerSlots?.messages}

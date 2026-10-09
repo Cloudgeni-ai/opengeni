@@ -31,6 +31,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
 import { useAccount } from "@/account";
+import { useAgentCall } from "@/call";
 import { cachedLists, rememberLists } from "@/session-list-cache";
 import { serverLabel } from "@/account-store";
 import { BrandMark } from "@/brand-mark";
@@ -259,6 +260,40 @@ function Home() {
     }
   };
 
+  // A call from the empty composer starts a new conversation as a call, with
+  // the chosen model and options, then opens it beneath the call screen.
+  const agentCall = useAgentCall();
+  const [calling, setCalling] = useState(false);
+  const startCall = async () => {
+    if (!workspaceId || calling || creating) return;
+    setCalling(true);
+    void Haptics.selectionAsync();
+    try {
+      const chosen = options.request();
+      const created = await client.createSession(workspaceId, {
+        startMode: "realtime",
+        ...(model ? { model } : {}),
+        ...(effort ? { reasoningEffort: effort } : {}),
+        ...(latencyMode !== "standard" ? { latencyMode } : {}),
+        ...(chosen.visibility ? { visibility: chosen.visibility } : {}),
+        ...(chosen.targetSandboxId ? { targetSandboxId: chosen.targetSandboxId } : {}),
+        ...(chosen.channelId ? { channelId: chosen.channelId } : {}),
+        ...(chosen.variableSetIds ? { variableSetIds: chosen.variableSetIds } : {}),
+        ...(chosen.excludedMcpServerIds
+          ? { excludedMcpServerIds: chosen.excludedMcpServerIds }
+          : {}),
+        ...(chosen.resources.length ? { resources: chosen.resources } : {}),
+      });
+      options.reset();
+      router.push(`/session/${created.id}`);
+      agentCall.callSession(created.id);
+    } catch (caught) {
+      setListError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setCalling(false);
+    }
+  };
+
   const problem = error?.message ?? listError;
   const servers = new Set(accounts.map((each) => each.baseUrl)).size;
   return (
@@ -385,6 +420,11 @@ function Home() {
             sending={creating}
             placeholder="Describe a task for the agent..."
             voice={voice}
+            call={
+              workspaceId
+                ? { onPress: () => void startCall(), busy: calling, disabled: creating }
+                : undefined
+            }
             onPasteImages={(files) => void attachments.addFiles(files)}
             renderLeading={() => (
               <ComposerPlusMenu

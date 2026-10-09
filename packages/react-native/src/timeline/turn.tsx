@@ -2,14 +2,13 @@ import type { ActivityItem, TurnOutcome } from "@opengeni/react/session";
 import {
   createTurnSummaryContext,
   formatElapsed,
-  GENIE_PREPARING_PHRASES,
-  GENIE_WAITING_PHRASES,
   resolveTurnSummaryFacets,
   rollingActivityItem,
   selectTurnSummaryFacets,
   toolDisplayName,
   type TurnSummaryFacetConfiguration,
 } from "@opengeni/react/timeline-model";
+import { nativeLoadingPhrases } from "./composer-state";
 import {
   createContext,
   useContext,
@@ -466,7 +465,7 @@ export function PreparingState({
 }) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
-  const phrases = phase === "waiting" ? GENIE_WAITING_PHRASES : GENIE_PREPARING_PHRASES;
+  const phrases = nativeLoadingPhrases(m.loadingPhrases, phase);
   const [index, setIndex] = useState(() => Math.floor(Math.random() * phrases.length));
   const [slow, setSlow] = useState(false);
   useEffect(() => {
