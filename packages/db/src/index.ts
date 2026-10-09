@@ -57544,14 +57544,20 @@ async function sandboxGroupIdleForCommandContainmentTx(
                 and admission.lease_epoch = lease.lease_epoch)
           ) < now() - (${input.windowMs}::bigint * interval '1 millisecond'), false)
           -- A command that printed inside the window is working, not idle.
+          -- Only each command's newest output row is read (backward over the
+          -- output page index), so the cost does not grow with its history.
           and not exists (
             select 1 from sandbox_retained_processes busy
-            join session_events output on output.workspace_id = busy.workspace_id
-              and output.session_id = busy.session_id
-              and output.type = 'sandbox.command.output.delta'
-              and output.created_at >= now() - (${input.windowMs}::bigint * interval '1 millisecond')
-              and output.payload->>'commandId' = busy.id::text
             where busy.lease_id = ${input.leaseId} and busy.state = 'active'
+              and (
+                select output.created_at from session_events output
+                where output.workspace_id = busy.workspace_id
+                  and output.session_id = busy.session_id
+                  and output.type = 'sandbox.command.output.delta'
+                  and output.payload->>'commandId' = busy.id::text
+                order by output.sequence desc
+                limit 1
+              ) >= now() - (${input.windowMs}::bigint * interval '1 millisecond')
           ) as idle,
         array(select id from member_sessions order by id) as session_ids,
         array(select distinct turn.session_id from session_turns turn
@@ -79799,12 +79805,22 @@ async function queuedSteerHasUnquiescedPredecessor(
   return row !== undefined;
 }
 
+/** A pending background-command result that reports an idle containment
+ * stop. Nothing used the box, so the notice wakes nothing on its own, not even
+ * a held wait: it rides along with the next turn, which a person, another
+ * input or the wait's timeout starts. */
+function passiveCommandNoticeSql() {
+  return sql<boolean>`(${schema.sessionSystemUpdates.kind} = 'background_command_result'
+    and ${schema.sessionSystemUpdates.payload} ->> 'reason' = ${IDLE_COMMAND_CONTAINMENT_REASON})`;
+}
+
 /** Read durable session state without reserving a turn-worker slot or mutating it. */
 /**
  * Which wake classes are represented among a session's pending machine inputs.
  * `immediate` kinds make the session runnable even against a current
  * `wait_for_input` declaration; deferred child notices only do so without one.
- * Command results are separate: only a current explicit wait lets them wake.
+ * Command results are separate: only a current explicit wait lets them wake,
+ * and an idle-containment notice never does (see `passiveCommandNoticeSql`).
  */
 async function pendingSystemUpdateWakeClassesTx(
   db: Database,
@@ -79812,7 +79828,10 @@ async function pendingSystemUpdateWakeClassesTx(
   sessionId: string,
 ): Promise<{ immediate: boolean; deferred: boolean; command: boolean }> {
   const rows = await db
-    .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
+    .selectDistinct({
+      kind: schema.sessionSystemUpdates.kind,
+      passive: passiveCommandNoticeSql(),
+    })
     .from(schema.sessionSystemUpdates)
     .where(
       and(
@@ -79826,7 +79845,7 @@ async function pendingSystemUpdateWakeClassesTx(
   let command = false;
   for (const row of rows) {
     if (row.kind === "background_command_result") {
-      command = true;
+      if (!row.passive) command = true;
       continue;
     }
     const wakeClass =
@@ -87288,7 +87307,10 @@ export async function markSessionWorkflowWakeDelivered(
                 session,
               );
               const pending = await tx
-                .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
+                .selectDistinct({
+                  kind: schema.sessionSystemUpdates.kind,
+                  passive: passiveCommandNoticeSql(),
+                })
                 .from(schema.sessionSystemUpdates)
                 .where(
                   and(
@@ -87309,7 +87331,8 @@ export async function markSessionWorkflowWakeDelivered(
                 .limit(1);
               if (
                 pending.some(
-                  ({ kind }) =>
+                  ({ kind, passive }) =>
+                    !passive &&
                     SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind as SessionSystemUpdateKind] ===
                       "immediate" &&
                     (kind !== "background_command_result" || wait.disposition === "held") &&
@@ -88539,7 +88562,12 @@ function backgroundCommandTerminalMutation(input: {
         input.sessionId,
         session,
       );
-      const waitingForInput = commandWait.disposition === "held";
+      // An idle-containment notice never wakes a wait: nothing used the box,
+      // and waking would end a wait for a person, spend a model turn and
+      // invite a restart every window. It is delivered with the next turn.
+      const waitingForInput =
+        commandWait.disposition === "held" &&
+        !(command.state === "lost" && reason === IDLE_COMMAND_CONTAINMENT_REASON);
       const autoResumed = waitingForInput
         ? await autoResumeGoalPausedByCapInTransaction(tx, {
             workspaceId: input.workspaceId,

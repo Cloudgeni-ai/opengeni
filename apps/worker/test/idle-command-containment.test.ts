@@ -1263,14 +1263,17 @@ describe("idle command containment", () => {
         liveness: "draining",
         unobservableCommandDrainIds: [fixture.processId],
       });
+      await admin`delete from session_workflow_wake_outbox
+        where session_id = ${fixture.attempt.sessionId}`;
       const { result, persisted } = await drain(fixture);
       expect(result.status).toBe("terminated");
       expect(persisted).toEqual([true]);
       expect((await readLease(db, fixture.workspaceId, fixture.sandboxGroupId))?.liveness).toBe(
         "cold",
       );
-      // The waiting agent hears why its command stopped; the box comes back
-      // only when something needs it.
+      // The agent hears why its command stopped at its next turn. The notice
+      // does not wake it: that would end the wait for the person, cost a model
+      // turn, and invite a restart of the server every window.
       const record = await commandTerminalRecord(fixture);
       expect(record.command).toEqual({
         state: "lost",
@@ -1278,6 +1281,44 @@ describe("idle command containment", () => {
         settlement_reason: "idle_containment",
       });
       expect(record.updates[0]?.summary).toBe(IDLE_NOTICE);
+      const [session] = await admin<{ status: string; input_wait_until: Date | null }[]>`
+        select status, input_wait_until from sessions where id = ${fixture.attempt.sessionId}`;
+      expect(session!.status).not.toBe("queued");
+      expect(session!.input_wait_until).not.toBeNull();
+      const [wakes] = await admin<{ count: number }[]>`select count(*)::integer as count
+        from session_workflow_wake_outbox where session_id = ${fixture.attempt.sessionId}`;
+      expect(wakes!.count).toBe(0);
+      const claim = await claimSessionWorkForAttempt(db, fixture.workspaceId, {
+        sessionId: fixture.attempt.sessionId,
+        workflowId: `session-${fixture.attempt.sessionId}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        dispatchId: `containment-${crypto.randomUUID()}`,
+        trigger: { kind: "next" },
+      });
+      expect(claim.action).toBe("unclaimed");
+      const [notice] = await admin<{ state: string }[]>`select state from session_system_updates
+        where session_id = ${fixture.attempt.sessionId} and kind = 'background_command_result'`;
+      expect(notice!.state).toBe("pending");
+      // The next input that does start a turn carries the notice with it.
+      await admin`insert into session_system_updates (
+          account_id, workspace_id, session_id, kind, source_id, dedupe_key, summary, payload
+        ) values (${fixture.accountId}, ${fixture.workspaceId}, ${fixture.attempt.sessionId},
+          'agent_message', ${crypto.randomUUID()}, ${`containment-${crypto.randomUUID()}`},
+          'the review is done', ${admin.json({ type: "agent_message" })})`;
+      const next = await claimSessionWorkForAttempt(db, fixture.workspaceId, {
+        sessionId: fixture.attempt.sessionId,
+        workflowId: `session-${fixture.attempt.sessionId}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        dispatchId: `containment-${crypto.randomUUID()}`,
+        trigger: { kind: "next" },
+      });
+      expect(next.action).toBe("claimed");
+      const [delivered] = await admin<{ delivered_turn_id: string | null }[]>`
+        select delivered_turn_id from session_system_updates
+        where session_id = ${fixture.attempt.sessionId} and kind = 'background_command_result'`;
+      expect(delivered!.delivered_turn_id).toBe(next.action === "claimed" ? next.turn.id : null);
     }
     // Unclaimed machine input that will start a turn (here an agent message).
     {

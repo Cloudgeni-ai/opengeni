@@ -3164,14 +3164,21 @@ workspace control fence and the process -> admission -> lease row locks:
   person, a child or a timer, none of which needs the machine. The wait's start
   is already on the clock as its turn finish or attempt close, so after the
   ordinary window the box is saved and stopped, the wait and the pending request
-  survive, and the box resumes on demand when the answer, the timeout or a
-  command result starts the next turn;
+  survive, and the box resumes on demand when the answer, the timeout or other
+  input starts the next turn. The containment notice itself never wakes the
+  session, not even under a held wait: it stays pending and is delivered with
+  that next turn (`passiveCommandNoticeSql`). Waking would end the wait for the
+  person, spend a model turn, and invite the agent to restart the stopped server
+  every window. A pending approval resolved after containment resumes on a
+  restored box without the command, and the notice tells the agent why;
 - no active command on the lease printed output inside the window. The
   retained-process reconciler drains a running command's output into durable
   `sandbox.command.output.delta` events (keyed by the process id) at most five
-  minutes apart, so a command that is visibly working keeps its box whether or
-  not anything waits on it, and one that printed nothing for the whole window is
-  idle. A busy command whose output goes only to a file looks idle and is
+  minutes apart while observation is healthy, so a command that is visibly
+  working keeps its box whether or not anything waits on it, and one that
+  printed nothing for the whole window is idle. Only each command's newest output
+  row is read. A command whose observation is quarantined, or a window shorter
+  than the reconciler's backoff, can look silent while it still runs. A busy command whose output goes only to a file looks idle and is
   contained; the agent receives the notice and can restart it. Only exact
   enrollment reads `session_events` (under the caller's tenant RLS); the
   inventory stays wider so that this hot table needs no owner read policy, and a

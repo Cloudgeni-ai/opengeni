@@ -1941,7 +1941,8 @@ Legacy retained Modal commands use the existing drain once the group is unused
 for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS` and no active command printed
 output in that window; they settle lost with a notice. A held input wait or a
 pending approval or human-input request is not use: the box is saved, stopped and
-resumed on demand. A recovering turn under
+resumed on demand, and the stop notice waits for the next turn instead of
+waking the session. A recovering turn under
 an effective pause does not retain the machine once physical writers have
 quiesced and the idle window has elapsed; workspace capture precedes stop,
 while turn history and pause state survive. Command backoff never
