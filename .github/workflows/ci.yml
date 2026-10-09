@@ -1582,7 +1582,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.browserd_real_e2e == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 27
     steps:
       - name: Check out exact candidate
         uses: actions/checkout@v6
@@ -1603,6 +1603,23 @@ jobs:
         timeout-minutes: 17
         with:
           browsers: chromium
+
+      - name: Verify managed recovery in an owned process namespace
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          chromium_binary="$(bun -e 'import { chromium } from "playwright"; process.stdout.write(chromium.executablePath())')"
+          # Recovery must prove that no process still owns the exact profile.
+          # Keep the test non-root, but give it its own complete PID inventory
+          # and the real executable rather than the launch wrapper below.
+          sudo env PATH="$PATH" HOME="$HOME" \
+            OPENGENI_BROWSERD_E2E=1 OPENGENI_BROWSERD_RECOVERY_E2E=1 \
+            OPENGENI_BROWSER_EXECUTABLE="$chromium_binary" \
+            unshare --mount --pid --fork --mount-proc --kill-child=SIGTERM \
+            --setuid="$(id -u)" --setgid="$(id -g)" \
+            "$(command -v bun)" test --timeout 120000 \
+            packages/browserd/test/supervisor.e2e.test.ts \
+            --test-name-pattern '^graceful shutdown'
 
       - name: Run actual browserd end-to-end suite
         timeout-minutes: 6

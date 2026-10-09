@@ -17,8 +17,13 @@ import {
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
-const linuxE2e = process.platform === "linux" ? e2e : test.skip;
-linuxE2e(
+// Positive directory recovery needs a complete process inventory and the exact
+// Chromium executable. CI runs this separately in an owned PID namespace.
+const recoveryE2e =
+  process.platform === "linux" && process.env.OPENGENI_BROWSERD_RECOVERY_E2E === "1"
+    ? e2e
+    : test.skip;
+recoveryE2e(
   "graceful shutdown recovers the same managed profile and stored page state",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-graceful-e2e-");
