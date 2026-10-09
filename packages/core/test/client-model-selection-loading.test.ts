@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { configuredModels, withCodexCatalogProvider } from "@opengeni/config";
+import { EMPTY_ORGANIZATION_MODEL_DEFAULTS } from "@opengeni/contracts";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { requireLimit } from "../src/billing/limits";
@@ -79,6 +80,10 @@ describe("fresh model admission versus live discovery", () => {
       allowance,
       // The pre-cutover world (no Codex cutover row): the legacy readers decide.
       spyOn(opengeniDb, "readCodexCutoverDisposition").mockResolvedValue("legacy"),
+      // No organization-wide model defaults: the live selections decide.
+      spyOn(opengeniDb, "getOrganizationModelDefaults").mockResolvedValue(
+        EMPTY_ORGANIZATION_MODEL_DEFAULTS,
+      ),
       spyOn(opengeniDb, "legacyWorkspaceCodexSubscriptionActive").mockImplementation(
         async () => active,
       ),

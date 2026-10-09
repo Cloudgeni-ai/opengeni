@@ -920,7 +920,7 @@ describe("embedded worker lifecycle contract", () => {
       /missing the Claude subscription account activation receipt/,
     );
     await expect(dbReadyCheck(embeddedDb(true, true, false), options)()).rejects.toThrow(
-      /missing the 0680 Codex subscription-core cutover receipt/,
+      /missing the 0689 Codex subscription-core cutover receipt/,
     );
   });
 

@@ -290,8 +290,8 @@ describe("targeted gateway contract and settlement", () => {
     f.options.prepare = async (...args) => {
       const prepared = await prepare(...args);
       const original = prepared.toolGateway.prepareCall.bind(prepared.toolGateway);
-      prepared.toolGateway.prepareCall = async (...args) => {
-        const { effectDigest: _effect, ...call } = await original(...args);
+      prepared.toolGateway.prepareCall = async (...callArgs) => {
+        const { effectDigest: _effect, ...call } = await original(...callArgs);
         return call;
       };
       return prepared;

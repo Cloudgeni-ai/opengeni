@@ -179,6 +179,19 @@ schema was already in context; it now searches only when the schema is missing.
 + Saying or verifying that the work is done does not complete the goal: call opengeni__goal_complete by its exact name, and search for a goal tool only when its input schema is not in context.
 ```
 
+Session targets. Conversations about another session now keep a remembered
+target and read, send to, or steer that session through the session tools, so
+session coordination says how to select it and follow a sent update to its
+result.
+
+```diff
++ For a conversation about another session, use session_target_get/set to remember or clear the selected target; selection is context, not permission to mutate.
++ Discover with sessions_list and inspect with session_events; keep voice in this session.
++ Send only when asked, and use Steer only for an explicit change of direction.
++ After Send or Steer, use session_message_status with the returned update ID to follow its exact consuming turn and read the indicated result before relaying it.
++ Do not resend pending work or mistake acceptance for completion.
+```
+
 ## Conditional variants (capability or resource absent)
 
 These sentences replace or drop a legacy sentence only when the named
