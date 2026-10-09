@@ -1771,9 +1771,18 @@ describe.skipIf(!realDb)(
         expect((await disconnect(a.owner, a.w1)).outcome).toBe("not_found");
         const result = await disconnect(a.owner, a.personalOwner);
         expect(result).toMatchObject({ outcome: "removed", connectionId: a.c5 });
-        const remaining =
-          await owned.admin`select 1 from subscription_connections where id = ${a.c5}`;
-        expect(remaining).toHaveLength(0);
+        // The current disconnect contract keeps nonsecret request history,
+        // while removing credentials and making the connection ineligible.
+        const [remaining] = await owned.admin`select disconnected_at, status,
+          credential_encrypted, provider_account_id, allocator_enabled
+          from subscription_connections where id = ${a.c5}`;
+        expect(remaining).toMatchObject({
+          disconnected_at: expect.any(Date),
+          status: "disabled",
+          credential_encrypted: "",
+          provider_account_id: null,
+          allocator_enabled: false,
+        });
       });
 
       test("an organization created after the cutover is born on the core", async () => {
