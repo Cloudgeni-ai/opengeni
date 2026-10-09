@@ -22,6 +22,24 @@ permissions:
   contents: read
 
 jobs:
+  native-terminal-ready:
+    if: ${{ !(github.head_ref == 'main' && github.base_ref == 'production') }}
+    name: Bash terminal input readiness
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Install Bash loadable headers
+        timeout-minutes: 3
+        run: sudo apt-get update && sudo apt-get install -y bash-builtins
+      - name: Exercise real login-shell PTYs and unsupported manual-input cases
+        timeout-minutes: 2
+        run: make -C agent/native/terminal-ready test
+
   headless-image:
     if: ${{ !(github.head_ref == 'main' && github.base_ref == 'production') }}
     name: Headless terminal ABI (amd64 + arm64)

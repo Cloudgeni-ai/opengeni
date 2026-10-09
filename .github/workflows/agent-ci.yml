@@ -48,21 +48,6 @@ defaults:
     working-directory: agent
 
 jobs:
-  native-terminal-ready:
-    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
-    name: Bash terminal input readiness
-    runs-on: ubuntu-latest
-    timeout-minutes: 6
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-      - name: Install Bash loadable headers
-        timeout-minutes: 3
-        run: sudo apt-get update && sudo apt-get install -y bash-builtins
-      - name: Exercise real login-shell PTYs and unsupported manual-input cases
-        timeout-minutes: 2
-        run: make -C native/terminal-ready test
-
   native-command-supervisor:
     # Skip the main -> production promotion PR: its head already ran as a main push.
     if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}

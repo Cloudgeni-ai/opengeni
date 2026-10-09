@@ -6,7 +6,7 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "fddcac8966b0344675b1d209f010985bea88fc0d62c72246e636f9a9fdc0d293"
+      "sha256": "e0ef92904d5adf0f132a72ca7cbf432ca358af7f375357ea3d77999ab178dd25"
     },
     {
       "path": ".github/workflows/agent-release.yml",
@@ -114,7 +114,7 @@
     },
     {
       "path": ".github/workflows/terminal-readiness.yml",
-      "sha256": "841beb92b55c60639b40c3c90750cf2f7bc03f906a308c7807dbaa0079817212"
+      "sha256": "309c95455622198bae3740d5051c8eec728fa8771264432ebca1bee90920d50d"
     },
     {
       "path": ".github/workflows/verify-public-container-packages.yml",
