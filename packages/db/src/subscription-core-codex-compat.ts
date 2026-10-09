@@ -403,7 +403,8 @@ export async function listSubscriptionCoreCodexPersonalAccountsInTransaction(
         personal.connected_by_subject_id, personal.expires_at, personal.last_refresh_at,
         null::text as managed_by_workspace_id, personal.provider_state, personal.updated_at,
         personal.quota, personal.quota_revision, personal.quota_observed_refresh_generation,
-        personal.quota_updated_at
+        personal.quota_updated_at, personal.extra_credits_enabled,
+        personal.extra_credits_version, personal.extra_credits_updated_at
       from opengeni_private.subscription_codex_personal_connections(
         ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}
       ) personal`,
@@ -708,6 +709,54 @@ export async function setSubscriptionCoreCodexExtraCredits(
   wake: SubscriptionCoreCodexWake | null;
 }> {
   return await withCodexAdministration(db, input, async (tx) => {
+    if (input.workspaceId) {
+      const [personal] = await rawRows<{
+        result:
+          | ({ id: string } & Exclude<
+              SubscriptionCoreCodexExtraCreditsResult,
+              { kind: "not_found" }
+            >)
+          | null;
+      }>(
+        tx,
+        sql`select opengeni_private.manage_subscription_codex_personal(
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}, ${input.connectionId}::uuid,
+        'extra_credits', null, ${input.enabled}, ${input.expectedVersion}::integer) as result`,
+      );
+      if (personal?.result) {
+        const result = {
+          ...personal.result,
+          extraCreditsUpdatedAt: date(personal.result.extraCreditsUpdatedAt),
+        };
+        if (result.kind === "updated") {
+          await tx.insert(auditEvents).values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                subjectId: input.subjectId,
+                action: "codex.extra_credits.updated",
+                targetType: "subscription_connection",
+                targetId: result.id,
+                metadata: {
+                  extraCreditsEnabled: result.extraCreditsEnabled,
+                  extraCreditsVersion: result.extraCreditsVersion,
+                },
+              },
+              "metadata",
+              "metadataCodecVersion",
+            ),
+          );
+        }
+        return {
+          result,
+          wake:
+            result.kind === "updated"
+              ? { accountId: input.accountId, reason: "core_codex_extra_credits_changed" }
+              : null,
+        };
+      }
+    }
     const visible = await visibleSharedConnection(tx, input, input.connectionId);
     if (!visible) return { result: { kind: "not_found" }, wake: null };
     const [row] = await rawRows<{ enabled: boolean; version: number }>(

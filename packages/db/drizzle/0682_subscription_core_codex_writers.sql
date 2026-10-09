@@ -678,7 +678,7 @@ BEGIN
     DECLARE target subscription_connections%%ROWTYPE; result jsonb; mode text;
     BEGIN
       IF NOT opengeni_subscription_internal.subscription_codex_writer_context(p_account_id, p_workspace_id, p_subject_id)
-        OR p_action NOT IN ('resolve', 'rename', 'allocator', 'primary') OR p_connection_id IS NULL
+        OR p_action NOT IN ('resolve', 'rename', 'allocator', 'primary', 'extra_credits') OR p_connection_id IS NULL
       THEN RETURN NULL; END IF;
       PERFORM opengeni_subscription_internal.grant_subscription_codex_owner_capability(
         'codex_connection_owner', p_account_id, p_workspace_id, p_subject_id,
@@ -726,6 +726,26 @@ BEGIN
         END IF;
         result := result || jsonb_build_object('allocatorEnabled', target.allocator_enabled,
           'allocatorVersion', target.allocator_version, 'allocatorUpdatedAt', target.updated_at);
+      ELSIF p_action = 'extra_credits' THEN
+        IF p_enabled IS NULL OR p_expected_version IS NULL THEN
+          PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
+          RETURN NULL;
+        END IF;
+        IF target.extra_credits_enabled IS DISTINCT FROM p_enabled THEN
+          IF target.extra_credits_version <> p_expected_version THEN
+            result := result || '{"kind":"conflict"}'::jsonb;
+          ELSE
+            UPDATE subscription_connections SET extra_credits_enabled = p_enabled,
+              extra_credits_version = extra_credits_version + 1,
+              extra_credits_updated_by_subject_id = p_subject_id,
+              extra_credits_updated_at = clock_timestamp(), updated_at = clock_timestamp()
+            WHERE id = target.id RETURNING * INTO target;
+            result := result || '{"kind":"updated"}'::jsonb;
+          END IF;
+        END IF;
+        result := result || jsonb_build_object('extraCreditsEnabled', target.extra_credits_enabled,
+          'extraCreditsVersion', target.extra_credits_version,
+          'extraCreditsUpdatedAt', target.extra_credits_updated_at);
       ELSIF p_action = 'primary' THEN
         mode := coalesce(subscription_effective_settings(p_account_id, p_workspace_id)
           #>> '{values,rotation,codex,mode}', 'spread');
@@ -753,7 +773,8 @@ BEGIN
       allowed_model_ids text[], connected_by_subject_id text, expires_at timestamptz,
       last_refresh_at timestamptz, provider_state jsonb, updated_at timestamptz, quota jsonb,
       quota_revision bigint, quota_observed_refresh_generation bigint,
-      quota_updated_at timestamptz
+      quota_updated_at timestamptz, extra_credits_enabled boolean,
+      extra_credits_version integer, extra_credits_updated_at timestamptz
     )
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
@@ -782,7 +803,9 @@ BEGIN
           connection.allowed_model_ids, connection.connected_by_subject_id,
           connection.expires_at, connection.last_refresh_at, connection.provider_state,
           connection.updated_at, quota.quota, quota.revision::bigint,
-          quota.observed_refresh_generation, quota.updated_at
+          quota.observed_refresh_generation, quota.updated_at,
+          connection.extra_credits_enabled, connection.extra_credits_version,
+          connection.extra_credits_updated_at
         FROM subscription_connections connection
         LEFT JOIN subscription_connection_quota quota
           ON quota.account_id = connection.account_id AND quota.connection_id = connection.id

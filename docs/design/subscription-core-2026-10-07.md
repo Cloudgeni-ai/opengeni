@@ -1542,6 +1542,18 @@ The exported enqueue helper freezes acceptance v2 (service work gets empty autho
 so otherwise identical frozen-authority system updates can batch without weakening
 the equality key.
 
+Consent integration incident (2026-10-09): main added account-owned extra-credit
+consent while this stack was under review. The shared-only compatibility setter
+and omitted personal projection fields would have prevented a migrated personal
+owner from revoking opt-in. The approved bounded integration repair uses the
+existing owner-only `manage_subscription_codex_personal` seam, canonical/alias
+resolution, row lock and separate consent OCC version. Same-state calls remain
+idempotent; conflicting stale requests do not write. Only actual changes emit
+the existing audit and capacity wake. Personal read projection includes typed
+consent fields, and pause/reconnect/refresh never reset consent. Neither an
+organization administrator nor service caller acquires someone else's personal
+management capability. Placement reads live consent before allocating new work.
+
 - **Connect and disconnect (SUB-OWN-01/04/08).** The device-code start
   touches no account state; workspace device state binds the starting actor
   and poll rejects another actor. Managed-cookie start/poll require the same

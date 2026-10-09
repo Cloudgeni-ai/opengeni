@@ -26,6 +26,9 @@ import {
   renameSubscriptionCoreCodexConnection,
   setSubscriptionCoreCodexAllocator,
   setSubscriptionCoreCodexPrimary,
+  setSubscriptionCoreCodexExtraCredits,
+  readSubscriptionCoreTurnIdentity,
+  evaluateSubscriptionCoreCodexPlacement,
   subscriptionCoreCodexResetAuthority,
   subscriptionCoreCodexResetCreditFence,
   SubscriptionCoreCodexOrganizationManagedError,
@@ -260,6 +263,165 @@ async function insertLease(input: {
 }
 
 describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
+  test("personal extra-credit consent is owner-only, OCC-fenced, preserved and immediately revocable", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const member = await person(org, "member");
+    const connected = await connect(
+      org,
+      member.subjectId,
+      member.personalWorkspaceId,
+      "personal-credit",
+    );
+    if (connected.kind !== "connected") throw new Error("connect failed");
+    const alias = crypto.randomUUID();
+    await shared!
+      .admin`insert into subscription_connection_aliases(account_id, provider, alias_connection_id, connection_id)
+      values (${org.accountId}::uuid, 'codex', ${alias}::uuid, ${connected.id}::uuid)`;
+    const admin = {
+      accountId: org.accountId,
+      workspaceId: member.personalWorkspaceId,
+      subjectId: member.subjectId,
+      connectionId: connected.id,
+    };
+    const change = (
+      connectionId: string,
+      enabled: boolean,
+      expectedVersion: number,
+      subjectId = member.subjectId,
+    ) =>
+      withSessionRlsActorContext({ subjectId }, () =>
+        setSubscriptionCoreCodexExtraCredits(client!.db, {
+          ...admin,
+          subjectId,
+          connectionId,
+          enabled,
+          expectedVersion,
+        }),
+      );
+    expect(
+      (await personalAccounts(org, member.subjectId, member.personalWorkspaceId)).accounts[0],
+    ).toMatchObject({
+      extraCreditsEnabled: false,
+      extraCreditsVersion: 1,
+      extraCreditsUpdatedAt: null,
+    });
+    for (const subject of [org.ownerSubjectId, "service:fixture", "user:other"]) {
+      expect((await change(alias, true, 1, subject)).result).toEqual({ kind: "not_found" });
+    }
+    expect(await change(connected.id, true, 1)).toMatchObject({
+      result: { kind: "updated", extraCreditsEnabled: true, extraCreditsVersion: 2 },
+      wake: { accountId: org.accountId, reason: "core_codex_extra_credits_changed" },
+    });
+    expect(await change(alias, true, 1)).toMatchObject({
+      result: { kind: "unchanged", extraCreditsVersion: 2 },
+      wake: null,
+    });
+    expect(await change(alias, false, 1)).toMatchObject({
+      result: { kind: "conflict", extraCreditsEnabled: true, extraCreditsVersion: 2 },
+      wake: null,
+    });
+    await withSessionRlsActorContext({ subjectId: member.subjectId }, () =>
+      setSubscriptionCoreCodexAllocator(client!.db, {
+        ...admin,
+        enabled: false,
+        expectedVersion: 1,
+      }),
+    );
+    await connect(org, member.subjectId, member.personalWorkspaceId, "personal-credit");
+    const projection = (await personalAccounts(org, member.subjectId, member.personalWorkspaceId))
+      .accounts[0]!;
+    expect(projection).toMatchObject({
+      extraCreditsEnabled: true,
+      extraCreditsVersion: 2,
+      allocatorEnabled: false,
+    });
+    expect(projection.extraCreditsUpdatedAt).toBeInstanceOf(Date);
+    await withSessionRlsActorContext({ subjectId: member.subjectId }, () =>
+      setSubscriptionCoreCodexAllocator(client!.db, {
+        ...admin,
+        enabled: true,
+        expectedVersion: 2,
+      }),
+    );
+    await shared!
+      .admin`update subscription_settings set personal_fallback_allowed = true where account_id = ${org.accountId}::uuid and workspace_id is null`;
+    await shared!
+      .admin`insert into subscription_person_preferences(account_id, organization_membership_id, personal_fallback_opt_in)
+      values (${org.accountId}::uuid, ${member.membershipId}::uuid, true)`;
+    const accepted = await withSessionRlsActorContext({ subjectId: member.subjectId }, async () => {
+      const session = await createSession(client!.db, {
+        accountId: org.accountId,
+        workspaceId: member.personalWorkspaceId,
+        subjectId: member.subjectId,
+        initialMessage: "credit consent",
+        resources: [],
+        metadata: {},
+        model: MODEL,
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        visibility: "user_private",
+        createdBy: { kind: "subject", subjectId: member.subjectId },
+        createdByContext: {},
+      });
+      const turn = await enqueueSessionTurn(client!.db, {
+        accountId: org.accountId,
+        workspaceId: member.personalWorkspaceId,
+        sessionId: session.id,
+        triggerEventId: crypto.randomUUID(),
+        temporalWorkflowId: `session-${session.id}`,
+        source: "user",
+        prompt: "credit consent",
+        resources: [],
+        tools: [],
+        model: MODEL,
+        reasoningEffort: "medium",
+        sandboxBackend: "none",
+        metadata: {},
+        initiator: { kind: "subject", subjectId: member.subjectId },
+      });
+      return {
+        accountId: org.accountId,
+        workspaceId: member.personalWorkspaceId,
+        sessionId: session.id,
+        turnId: turn.id,
+      };
+    });
+    const now = Date.now();
+    await shared!.admin`insert into subscription_connection_quota(account_id, connection_id, quota,
+      observed_refresh_generation, revision) values (${org.accountId}::uuid, ${connected.id}::uuid,
+      ${shared!.admin.json({
+        windows: [
+          { id: "primary", usedPercent: 100, resetsAt: now + 3600_000, status: "exhausted" },
+        ],
+        modelCooldowns: {},
+        exhaustedUntil: null,
+        exhaustedKind: null,
+        observedAt: now,
+        source: "usage_endpoint",
+      })}::jsonb, 2, 1)`;
+    const identity = await readSubscriptionCoreTurnIdentity(client!.db, accepted);
+    if (!identity) throw new Error("accepted identity missing");
+    const placement = () =>
+      evaluateSubscriptionCoreCodexPlacement(client!.db, {
+        identity,
+        productModelId: MODEL,
+        reasoningLevel: "medium",
+      });
+    expect((await placement()).kind).toBe("run");
+    expect((await change(alias, false, 2)).result).toMatchObject({
+      kind: "updated",
+      extraCreditsEnabled: false,
+      extraCreditsVersion: 3,
+    });
+    expect((await placement()).kind).toBe("wait");
+    const audits = await shared!
+      .admin`select metadata from audit_events where account_id = ${org.accountId}::uuid
+      and target_id = ${connected.id} and action = 'codex.extra_credits.updated'`;
+    expect(audits).toHaveLength(2);
+  });
+
   test("runs as the non-superuser, non-bypass application role", async () => {
     const [role] = await rawRows<{ currentUser: string; superuser: boolean; bypassRls: boolean }>(
       client!.db,
