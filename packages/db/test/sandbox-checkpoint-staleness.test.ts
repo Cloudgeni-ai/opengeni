@@ -1,4 +1,4 @@
-// The checkpoint-staleness inventory (migrations 0672 and 0681) counts live
+// The checkpoint-staleness inventory (migrations 0672 and 0683) counts live
 // Modal boxes with an uncaptured write on that exact box, aged from the first
 // such write (never before the box was created). Runs as the restricted app role.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -73,6 +73,8 @@ async function lease(input: {
   writes?: Write[];
   /** A viewer or interaction holder attached this many hours ago. */
   attached?: { kind: "viewer" | "interaction"; hoursAgo: number };
+  /** A writer first attached this many hours ago, since the last clean capture. */
+  untrackedWriterSinceHoursAgo?: number;
 }) {
   const leaseId = crypto.randomUUID();
   const sandboxGroupId = crypto.randomUUID();
@@ -84,14 +86,19 @@ async function lease(input: {
     insert into sandbox_leases (id, account_id, workspace_id, sandbox_group_id, liveness, refcount,
       turn_holders, viewer_holders, instance_id, backend, lease_epoch, resume_backend_id,
       resume_state, expires_at, workspace_generation, archive_generation, provider_created_at,
-      provider_deadline_at)
+      provider_deadline_at, untracked_writer_since)
     values (${leaseId}, ${accountId}, ${workspaceId}, ${sandboxGroupId},
       ${input.liveness ?? "warm"}, 0, 0, 0, ${live ? instanceId : null}, ${backend}, 1,
       ${backend},
       ${JSON.stringify({ backendId: backend, sessionState })}::text::jsonb,
       now() + interval '10 minutes', ${input.workspaceGeneration}, ${input.archiveGeneration},
       now() - (${input.boxHoursAgo} * interval '1 hour'),
-      now() + (${24 - input.boxHoursAgo} * interval '1 hour'))`;
+      now() + (${24 - input.boxHoursAgo} * interval '1 hour'),
+      ${
+        input.untrackedWriterSinceHoursAgo === undefined
+          ? null
+          : hoursAgo(input.untrackedWriterSinceHoursAgo)
+      })`;
   if (input.attached) {
     await admin`insert into sandbox_lease_holders
       (account_id, lease_id, workspace_id, kind, holder_id, subject_id, last_heartbeat_at,
@@ -314,6 +321,41 @@ describe("sandbox checkpoint staleness inventory", () => {
     const ages = runbook
       .map((row) => (Date.now() - new Date(row.unsaved_since).getTime()) / 3_600_000)
       .filter((age) => (age > 5.9 && age < 6.1) || (age > 1.9 && age < 2.1));
+    expect(ages.length).toBeGreaterThanOrEqual(2);
+  }, 60_000);
+
+  test("a writer that detached since the last capture still counts", async () => {
+    const before = await readSandboxCheckpointStaleness(client.db);
+    const beforeRunbook = await runbookRows();
+    // A terminal tab opened 3h ago and closed again, after a complete
+    // checkpoint 5h ago: nothing is attached and the generation did not move,
+    // but the tab may have written. Counted from the attach, 3h.
+    await lease({
+      workspaceGeneration: 3,
+      archiveGeneration: 3,
+      archiveAt: hoursAgo(5).toISOString(),
+      boxHoursAgo: 8,
+      untrackedWriterSinceHoursAgo: 3,
+    });
+    // A tab first attached 9h ago and still recorded, with a checkpoint that
+    // ran around it 6h ago and a second tab attached 1h ago: counted from
+    // the checkpoint, 6h, not from the newer attach.
+    await lease({
+      workspaceGeneration: 4,
+      archiveGeneration: 3,
+      archiveAt: hoursAgo(6).toISOString(),
+      boxHoursAgo: 10,
+      untrackedWriterSinceHoursAgo: 9,
+      attached: { kind: "viewer", hoursAgo: 1 },
+    });
+    const after = await readSandboxCheckpointStaleness(client.db);
+    expect(after.dirty - before.dirty).toBe(2);
+    expect(after.stale4h - before.stale4h).toBe(1);
+    const runbook = await runbookRows();
+    expect(runbook.length - beforeRunbook.length).toBe(2);
+    const ages = runbook
+      .map((row) => (Date.now() - new Date(row.unsaved_since).getTime()) / 3_600_000)
+      .filter((age) => (age > 2.9 && age < 3.1) || (age > 5.9 && age < 6.1));
     expect(ages.length).toBeGreaterThanOrEqual(2);
   }, 60_000);
 

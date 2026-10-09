@@ -6,11 +6,13 @@
 -- command keeps writing and settles after it, and the box was not counted
 -- dirty. Any captured write on the exact box that settled after the checkpoint
 -- now counts, aged from that checkpoint. The lookup is a range scan over the
--- lease's writes settled after the checkpoint (index from migration 0680), so
+-- lease's writes settled after the checkpoint (index from migration 0682), so
 -- it stays bounded by recent writes rather than the lease's whole history.
--- An attached viewer or interaction (desktop/terminal tab, browser or computer
--- controller) can write without a generation admission, so it also counts,
--- aged from the later of the checkpoint and the attach.
+-- A viewer or interaction (desktop/terminal tab, browser or computer
+-- controller) can write without a generation admission, so one attached now,
+-- or attached since the last capture that did not run around writers
+-- (`untracked_writer_since`, migration 0680), also counts, aged from the later
+-- of the checkpoint and the first such attach.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
@@ -44,7 +46,8 @@ BEGIN
           (SELECT pg_catalog.min(holder.created_at)
              FROM %1$I.sandbox_lease_holders holder
             WHERE holder.lease_id = lease.id
-              AND holder.kind IN ('viewer', 'interaction')) AS writer_attached_at
+              AND holder.kind IN ('viewer', 'interaction')) AS writer_attached_at,
+          lease.untracked_writer_since
         FROM %1$I.sandbox_leases lease
         WHERE lease.backend = 'modal'
           AND lease.liveness IN ('warm', 'draining')
@@ -81,10 +84,13 @@ BEGIN
             )
             THEN coalesce(live.checkpoint_at, live.box_created_at)
           END AS spanning_write_at,
-          -- A writer that bypasses admissions: unsaved since it attached, or
-          -- since the checkpoint it was attached through.
-          CASE WHEN live.writer_attached_at IS NOT NULL THEN greatest(
-            live.writer_attached_at, coalesce(live.checkpoint_at, live.box_created_at))
+          -- A writer that bypasses admissions, attached now or since the last
+          -- capture that did not run around one: unsaved since it first
+          -- attached, or since the checkpoint it was attached through.
+          CASE WHEN coalesce(live.untracked_writer_since, live.writer_attached_at) IS NOT NULL
+            THEN greatest(
+              least(live.untracked_writer_since, live.writer_attached_at),
+              coalesce(live.checkpoint_at, live.box_created_at))
           END AS untracked_write_at
         FROM live
       ),
