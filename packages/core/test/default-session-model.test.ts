@@ -122,12 +122,17 @@ function decide(
   state: Parameters<typeof selections>[1] & {
     credits?: boolean;
     workspaceDefaults?: { model: string; reasoningEffort: "low" | "medium" | "high" | "xhigh" };
+    organizationDefaults?: {
+      model: string;
+      reasoningEffort: "low" | "medium" | "high" | "xhigh";
+    };
   } = {},
 ) {
   return selectDefaultSessionModel({
     settings,
     selections: selections(settings, state),
     workspaceDefaults: state.workspaceDefaults ?? null,
+    organizationDefaults: state.organizationDefaults ?? null,
     creditsAvailable: state.credits === true,
   });
 }
@@ -304,6 +309,34 @@ describe("default model precedence", () => {
         workspaceDefaults: { model: "gpt-6-sol", reasoningEffort: "xhigh" },
       }),
     ).toEqual({ model: "gpt-6-sol", reasoningEffort: "high", source: "workspace" });
+  });
+
+  test("a workspace without its own default follows the organization's", () => {
+    expect(
+      decide(hostedSettings(), {
+        codex: true,
+        credits: true,
+        organizationDefaults: { model: DEFAULT_OPENROUTER_MODEL_ID, reasoningEffort: "low" },
+      }),
+    ).toEqual({
+      model: DEFAULT_OPENROUTER_MODEL_ID,
+      reasoningEffort: "low",
+      source: "organization",
+    });
+    // The workspace's own default wins over the organization's.
+    expect(
+      decide(hostedSettings(), {
+        workspaceDefaults: { model: "gpt-6-sol", reasoningEffort: "high" },
+        organizationDefaults: { model: DEFAULT_OPENROUTER_MODEL_ID, reasoningEffort: "low" },
+      }),
+    ).toEqual({ model: "gpt-6-sol", reasoningEffort: "high", source: "workspace" });
+    // An organization default this workspace can't run falls through, like its own would.
+    expect(
+      decide(hostedSettings(), {
+        credits: true,
+        organizationDefaults: { model: "codex/gpt-6-sol", reasoningEffort: "high" },
+      }),
+    ).toEqual({ model: "gpt-6-luna", reasoningEffort: "xhigh", source: "credits" });
   });
 
   test("an unselectable saved workspace default falls through to the next rule", () => {

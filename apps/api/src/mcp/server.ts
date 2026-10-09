@@ -363,6 +363,10 @@ import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletio
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { orchestrationFailureDiagnostic } from "./orchestration-failure-diagnostic";
 import { loadCodexSessionPointerProjection } from "../codex-session-pointers";
+import {
+  registerSessionAdminAccessTools,
+  type SessionAdminAccessDispatch,
+} from "./session-admin-access-tools";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -377,6 +381,13 @@ export type McpServerOptions = {
    * save into that private layer. Omitted/null keeps the workspace layer.
    */
   sessionMemory?: MemoryAgentScope | null | undefined;
+  /**
+   * Set by the route only when the bound session has admin access right now
+   * (allowed by the organization, given by an owner or admin who still is
+   * one). It adds the admin tools whatever the session's tool selection;
+   * each call checks the access again.
+   */
+  sessionAdminAccess?: SessionAdminAccessDispatch | null | undefined;
 };
 
 const ORCHESTRATION_FAILURE_CODE_MAX_LENGTH = 128;
@@ -785,6 +796,7 @@ class PolicyMcpServer extends McpServer {
     private readonly grant: AccessGrant,
     private readonly sessionId: string | null,
     private readonly selectedTools: ReadonlySet<FirstPartyMcpToolName> | null,
+    private readonly sessionAdminAccess: boolean = false,
   ) {
     super({ name: "opengeni", version: "1.0.0" });
   }
@@ -809,14 +821,20 @@ class PolicyMcpServer extends McpServer {
     if (catalogued) {
       const toolName = name as FirstPartyMcpToolName;
       const policy: FirstPartyToolAuthorization = FIRST_PARTY_TOOL_AUTHORIZATION[toolName];
-      const authorized =
-        (!policy.sessionRequired || this.sessionId !== null) &&
-        (policy.allOf?.every((permission) => hasPermission(this.grant.permissions, permission)) ??
-          true) &&
-        (policy.anyOf?.some((permission) => hasPermission(this.grant.permissions, permission)) ??
-          true);
-      const selected = this.selectedTools === null || this.selectedTools.has(toolName);
-      admitted = authorized && selected;
+      if (policy.adminAccessRequired) {
+        // Admin access, not the tool selection or the agent's own
+        // permissions, decides: the tools act as the person who gave it.
+        admitted = this.sessionId !== null && this.sessionAdminAccess;
+      } else {
+        const authorized =
+          (!policy.sessionRequired || this.sessionId !== null) &&
+          (policy.allOf?.every((permission) => hasPermission(this.grant.permissions, permission)) ??
+            true) &&
+          (policy.anyOf?.some((permission) => hasPermission(this.grant.permissions, permission)) ??
+            true);
+        const selected = this.selectedTools === null || this.selectedTools.has(toolName);
+        admitted = authorized && selected;
+      }
     }
     if (!admitted) {
       return {
@@ -976,7 +994,23 @@ export function buildOpenGeniMcpServer(
     typeof nestedAgentDepth !== "number" ||
     typeof effectiveMaxNestedAgentDepth !== "number" ||
     nestedAgentDepth < effectiveMaxNestedAgentDepth;
-  const server = new PolicyMcpServer(grant, sessionId, selectedTools);
+  const sessionAdminAccess =
+    sessionId !== null && exactAgentAttemptClaims(grant) !== null
+      ? (options.sessionAdminAccess ?? null)
+      : null;
+  const server = new PolicyMcpServer(grant, sessionId, selectedTools, sessionAdminAccess !== null);
+  if (sessionId !== null && sessionAdminAccess !== null) {
+    registerSessionAdminAccessTools({
+      server,
+      db: deps.db,
+      grant,
+      sessionId,
+      access: sessionAdminAccess,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+    });
+  }
   // set_session_title names the agent's OWN session — pure session metadata,
   // not a goal operation — so it is available on every session, gated only on
   // the signed sessionId (NOT goals:manage, and NOT on a goal existing).

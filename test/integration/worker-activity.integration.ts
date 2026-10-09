@@ -5422,11 +5422,15 @@ describe("worker activities integration", () => {
         );
       }
       await setSubscriptionCoreCodexPrimary(dbClient.db, {
-        accountId: grant.accountId, workspaceId: grant.workspaceId, subjectId: grant.subjectId,
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
         connectionId: credentialIds.get(input.homeExternalId)!,
       });
       await setSubscriptionCoreCodexRotation(dbClient.db, {
-        accountId: grant.accountId, workspaceId: grant.workspaceId, subjectId: grant.subjectId,
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
         rotationEnabled: input.rotationEnabled ?? false,
       });
       const session = await createOwnedSession(dbClient.db, grant, {
@@ -5439,10 +5443,14 @@ describe("worker activities integration", () => {
         model: "codex/gpt-6-sol",
         sandboxBackend: "none",
       });
-      if (input.pinSource === "manual") await pinSubscriptionCoreSessionCodexAccount(dbClient.db, {
-        accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id,
-        connectionId: credentialIds.get(input.homeExternalId)!, subjectId: grant.subjectId,
-      });
+      if (input.pinSource === "manual")
+        await pinSubscriptionCoreSessionCodexAccount(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          connectionId: credentialIds.get(input.homeExternalId)!,
+          subjectId: grant.subjectId,
+        });
       await appendOwnedEvents(dbClient.db, grant, session.id, [
         { type: "user.message", payload: { text: "plan downgrade" } },
       ]);
@@ -5583,41 +5591,78 @@ describe("worker activities integration", () => {
       test(`an empty 400 with observed ${observedPlan} plan does not switch or quarantine`, async () => {
         const failing = `empty-400-${observedPlan}`;
         const healthy = `empty-400-${observedPlan}-healthy`;
-        fakeAccounts[failing] = { responses: "empty_400", usagePlan: observedPlan, refreshedPlan: observedPlan };
+        fakeAccounts[failing] = {
+          responses: "empty_400",
+          usagePlan: observedPlan,
+          refreshedPlan: observedPlan,
+        };
         fakeAccounts[healthy] = { responses: "ok", usagePlan: "pro", refreshedPlan: "pro" };
-        const {grant,session,credentialIds} = await seedCodexTurn({
-          accounts: [failing,healthy].map(externalId=>({externalId,label:externalId})),
-          homeExternalId:failing,pinSource:"policy",
+        const { grant, session, credentialIds } = await seedCodexTurn({
+          accounts: [failing, healthy].map((externalId) => ({ externalId, label: externalId })),
+          homeExternalId: failing,
+          pinSource: "policy",
         });
-        const activities=createWorkerActivities({settings:codexSettings(),db:dbClient.db,bus,runtime:createProductionAgentRuntime()});
-        const first=await runCodexTurn(activities,grant,session.id);
+        const activities = createWorkerActivities({
+          settings: codexSettings(),
+          db: dbClient.db,
+          bus,
+          runtime: createProductionAgentRuntime(),
+        });
+        const first = await runCodexTurn(activities, grant, session.id);
         expect(first.status).toBe("failed");
-        const events=await listSessionEvents(dbClient.db,grant.workspaceId,session.id,0,200);
-        expect(events.some(event=>event.type==="turn.recovery.requested")).toBe(false);
-        expect(events.some(event=>event.type==="turn.failed")).toBe(true);
-        const projection=await getSubscriptionCoreCodexWorkspaceProjection(dbClient.db,{accountId:grant.accountId,workspaceId:grant.workspaceId,viewerSubjectId:grant.subjectId});
-        expect(projection.accounts.find(row=>row.id===credentialIds.get(failing))).toMatchObject({status:"active",planType:"pro",planEntitlementExclusion:null});
-        expect(callsFor("responses",[failing,healthy])).toEqual([failing]);
-      },60_000);
+        const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
+        expect(events.some((event) => event.type === "turn.recovery.requested")).toBe(false);
+        expect(events.some((event) => event.type === "turn.failed")).toBe(true);
+        const projection = await getSubscriptionCoreCodexWorkspaceProjection(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          viewerSubjectId: grant.subjectId,
+        });
+        expect(
+          projection.accounts.find((row) => row.id === credentialIds.get(failing)),
+        ).toMatchObject({ status: "active", planType: "pro", planEntitlementExclusion: null });
+        expect(callsFor("responses", [failing, healthy])).toEqual([failing]);
+      }, 60_000);
     }
 
-    test("a single account's unexplained rejection does not poison later accepted turns",async()=>{
-      const externalId="core-solo-rejection";
-      const behavior:FakeCodexAccountBehavior={responses:"empty_400",usagePlan:"free",refreshedPlan:"free"};
-      fakeAccounts[externalId]=behavior;
-      const {grant,session}=await seedCodexTurn({accounts:[{externalId,label:"Solo"}],homeExternalId:externalId,pinSource:"manual"});
-      const activities=createWorkerActivities({settings:codexSettings(),db:dbClient.db,bus,runtime:createProductionAgentRuntime()});
-      expect((await runCodexTurn(activities,grant,session.id)).status).toBe("failed");
-      await appendOwnedEvents(dbClient.db,grant,session.id,[{type:"user.message",payload:{text:"new accepted request"}}]);
-      expect((await runCodexTurn(activities,grant,session.id)).status).toBe("failed");
-      expect(callsFor("responses",[externalId])).toHaveLength(2);
-      behavior.responses="ok"; behavior.usagePlan="pro"; behavior.refreshedPlan="pro";
-      await appendOwnedEvents(dbClient.db,grant,session.id,[{type:"user.message",payload:{text:"provider recovered"}}]);
-      expect((await runCodexTurn(activities,grant,session.id)).status).toBe("idle");
-      const events=await listSessionEvents(dbClient.db,grant.workspaceId,session.id,0,300);
-      expect(JSON.stringify(events.filter(event=>event.type==="turn.completed").at(-1))).toContain(`Served by ${externalId}`);
-      expect(events.some(event=>event.type==="turn.recovery.requested")).toBe(false);
-    },60_000);
+    test("a single account's unexplained rejection does not poison later accepted turns", async () => {
+      const externalId = "core-solo-rejection";
+      const behavior: FakeCodexAccountBehavior = {
+        responses: "empty_400",
+        usagePlan: "free",
+        refreshedPlan: "free",
+      };
+      fakeAccounts[externalId] = behavior;
+      const { grant, session } = await seedCodexTurn({
+        accounts: [{ externalId, label: "Solo" }],
+        homeExternalId: externalId,
+        pinSource: "manual",
+      });
+      const activities = createWorkerActivities({
+        settings: codexSettings(),
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime(),
+      });
+      expect((await runCodexTurn(activities, grant, session.id)).status).toBe("failed");
+      await appendOwnedEvents(dbClient.db, grant, session.id, [
+        { type: "user.message", payload: { text: "new accepted request" } },
+      ]);
+      expect((await runCodexTurn(activities, grant, session.id)).status).toBe("failed");
+      expect(callsFor("responses", [externalId])).toHaveLength(2);
+      behavior.responses = "ok";
+      behavior.usagePlan = "pro";
+      behavior.refreshedPlan = "pro";
+      await appendOwnedEvents(dbClient.db, grant, session.id, [
+        { type: "user.message", payload: { text: "provider recovered" } },
+      ]);
+      expect((await runCodexTurn(activities, grant, session.id)).status).toBe("idle");
+      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 300);
+      expect(
+        JSON.stringify(events.filter((event) => event.type === "turn.completed").at(-1)),
+      ).toContain(`Served by ${externalId}`);
+      expect(events.some((event) => event.type === "turn.recovery.requested")).toBe(false);
+    }, 60_000);
 
     // Shared driver: the first attempt fails over with a plan entitlement
     // receipt, and the recovered attempt of the SAME turn is served by the
@@ -5655,9 +5700,13 @@ describe("worker activities integration", () => {
         credentialId: credentialIds.get(input.failing),
         failureKind: "plan_entitlement",
       });
-      const failing = ((await getSubscriptionCoreCodexWorkspaceProjection(dbClient.db, { accountId: grant.accountId, workspaceId: grant.workspaceId, viewerSubjectId: grant.subjectId })).accounts).find(
-        (account) => account.id === credentialIds.get(input.failing),
-      );
+      const failing = (
+        await getSubscriptionCoreCodexWorkspaceProjection(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          viewerSubjectId: grant.subjectId,
+        })
+      ).accounts.find((account) => account.id === credentialIds.get(input.failing));
       expect(failing).toMatchObject({
         status: "active",
         exhaustedUntil: null,
@@ -5696,12 +5745,26 @@ describe("worker activities integration", () => {
         healthy: "acct-plus-healthy",
         excludedPlan: "plus",
         beforeTurn: async ({ grant, credentialIds }) => {
-          const {usage} = await fetchSubscriptionCoreCodexUsage(dbClient.db,codexSettings(),{
-            kind:"workspace",accountId:grant.accountId,workspaceId:grant.workspaceId,subjectId:grant.subjectId,
-          },credentialIds.get("acct-plus-first")!);
+          const { usage } = await fetchSubscriptionCoreCodexUsage(
+            dbClient.db,
+            codexSettings(),
+            {
+              kind: "workspace",
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              subjectId: grant.subjectId,
+            },
+            credentialIds.get("acct-plus-first")!,
+          );
           expect(usage.planType).toBe("plus");
-          const observed=(await getSubscriptionCoreCodexWorkspaceProjection(dbClient.db,{accountId:grant.accountId,workspaceId:grant.workspaceId,viewerSubjectId:grant.subjectId})).accounts.find(row=>row.id===credentialIds.get("acct-plus-first"));
-          expect(observed).toMatchObject({planType:"pro",planEntitlementExclusion:null});
+          const observed = (
+            await getSubscriptionCoreCodexWorkspaceProjection(dbClient.db, {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              viewerSubjectId: grant.subjectId,
+            })
+          ).accounts.find((row) => row.id === credentialIds.get("acct-plus-first"));
+          expect(observed).toMatchObject({ planType: "pro", planEntitlementExclusion: null });
         },
       });
     }, 60_000);

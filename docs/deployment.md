@@ -1,5 +1,14 @@
 # Deployment
 
+## Database backup and recovery
+
+The optional standalone [database backup runner](backups.md) provides verified
+encrypted dumps, latest-nightly/weekly retention, freshness checks and isolated
+restoration. Use `bun run deployment:backup --help` or the independent operator
+image. Helm's `backup` settings schedule it without giving backup credentials to
+the application. This is database-only protection, not a snapshot of object files
+or host state; retain provider-native recovery where appropriate.
+
 Workspace/member allowances use rolling migrations and a default-off producer
 gate. Upgrade every API, control worker, and turn worker before enabling
 `OPENGENI_USAGE_ALLOWANCES_ENABLED`; disabling it does not disable enforcement

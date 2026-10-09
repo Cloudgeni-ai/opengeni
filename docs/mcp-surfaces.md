@@ -98,6 +98,37 @@ Connected agents are listed, changed and disconnected at
 `listOrganizationMcpConnections`, `updateOrganizationMcpConnection`,
 `deleteOrganizationMcpConnection`). Migration `0601` is rolling.
 
+### Admin access for agent sessions
+
+An owner or admin can let one of their own Opengeni sessions reach the same
+organization actions, without connecting an outside client:
+
+- The organization allows it first: Organization settings > Security & data >
+  Agents, "Admin access for agent sessions" (off by default;
+  `GET`/`PATCH /v1/organizations/:id/agent-admin-access`, owners and admins).
+  Turning it off removes every session's access at once, and turning it on
+  again restores none.
+- Then, in the session's header menu, "Give admin access…" (`PUT
+  /v1/workspaces/:ws/sessions/:id/admin-access`). Only an owner or admin, in
+  their own browser, on a session they started themselves. Agents, API keys
+  and MCP callers can never give access, to their own session or another.
+  The granter or any owner or admin can turn it off from the shield beside
+  the title or the same menu (`DELETE`; `GET` returns the state and what the
+  viewer may do).
+- While it is on, the session's agent sees `admin_actions_search`,
+  `admin_action_describe` and `admin_action_call`. They are never part of a
+  tool selection or default: the session's Opengeni MCP server lists them only
+  while access is in effect, and every call checks again, so turning it off,
+  the organization turning it off, or the granter losing their owner or admin
+  role applies to the very next call.
+- They cover exactly the organization MCP server's catalog and run each
+  action in process as the granter with Full access over all workspaces,
+  under the same rules (`browserOnly` actions, provider sign-in and agent
+  connection management stay with the person). Nothing of the agent's own
+  workspace scope carries into the action.
+
+Migration `0692` is rolling.
+
 The public OAuth authorization server is deliberately narrow: public dynamic
 client registration, authorization-code grant with mandatory PKCE S256, exact
 RFC 8707 resource binding to one workspace MCP/Docs/Files resource, scope

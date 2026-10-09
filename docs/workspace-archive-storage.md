@@ -18,6 +18,17 @@ provider archive protocols retain their existing compatibility paths; this is
 not a bounded-memory guarantee for those paths. Existing archive limits and
 capture/publication ownership fences remain authoritative and unchanged.
 
+A warm (periodic or turn-end) host spool capture is stopped at
+`OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`. Its reads are local, so the abort ends
+them at the next chunk, removes the private spool and only then releases the
+exact capture claim; it is settlement, not a timeout-based release. Without it
+a slow host (swap, a very large workspace) held the workspace write fence for
+the whole read, so writers failed with `SandboxWorkspaceMutationFencedError` and
+turn finalization stalled behind the capture. A capture still waiting for the
+in-process provider operation gate is abandoned the same way. Provider-native
+captures and object-storage publication are not interrupted; the lease drain
+capture keeps its own budget.
+
 Host spool directories (`opengeni-host-archive-o<pid-namespace>.<pid>.<start-time>-*`,
 `packages/runtime/src/sandbox/host-archive-temporary.ts`) record their owner
 process. Object-storage restore download spools use the same rule with the

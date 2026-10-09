@@ -184,7 +184,7 @@ async function browserdConfig(environment: NodeJS.ProcessEnv): Promise<BrowserdC
   const tokenFile = resolve(requiredEnvironment(environment, "OPENGENI_BROWSERD_ADMIN_TOKEN_FILE"));
   return {
     rootDirectory,
-    computerBackend: computerBackend(environment.OPENGENI_BROWSERD_COMPUTER_BACKEND),
+    ...computerRuntimeConfig(environment),
     ...(environment.OPENGENI_BROWSERD_SOCKET_ROOT
       ? { socketRootDirectory: resolve(environment.OPENGENI_BROWSERD_SOCKET_ROOT) }
       : {}),
@@ -211,9 +211,6 @@ async function browserdConfig(environment: NodeJS.ProcessEnv): Promise<BrowserdC
       10_000,
       "OPENGENI_BROWSERD_MAX_COMPUTER_SESSIONS",
     ),
-    computerEnvironmentMode: computerEnvironmentMode(
-      environment.OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE,
-    ),
     allowedOrigins: commaSeparated(environment.OPENGENI_BROWSERD_ALLOWED_ORIGINS),
     ...(environment.OPENGENI_BROWSERD_BROWSER_EXECUTABLE
       ? { browserExecutablePath: resolve(environment.OPENGENI_BROWSERD_BROWSER_EXECUTABLE) }
@@ -235,8 +232,35 @@ async function browserdConfig(environment: NodeJS.ProcessEnv): Promise<BrowserdC
   };
 }
 
-function computerBackend(value: string | undefined): "native" | "cua" {
-  if (value === undefined || value === "native") return "native";
+export function computerRuntimeConfig(
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): Pick<BrowserdConfig, "computerBackend" | "computerEnvironmentMode"> {
+  const environmentMode = environment.OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE;
+  const backend = computerBackend(
+    environment.OPENGENI_BROWSERD_COMPUTER_BACKEND,
+    platform,
+    environmentMode,
+  );
+  return {
+    computerBackend: backend,
+    computerEnvironmentMode: computerEnvironmentMode(environmentMode),
+  };
+}
+
+function computerBackend(
+  value: string | undefined,
+  platform: NodeJS.Platform,
+  environmentMode: string | undefined,
+): "native" | "cua" {
+  if (value === undefined) {
+    // Linux CUA owns an isolated seat. Require that explicit environment choice
+    // so an upgrade cannot redirect an existing host desktop to a new seat.
+    return platform === "darwin" || (platform === "linux" && environmentMode === "isolated_linux")
+      ? "cua"
+      : "native";
+  }
+  if (value === "native") return "native";
   if (value === "cua") return "cua";
   throw new Error("OPENGENI_BROWSERD_COMPUTER_BACKEND is invalid");
 }

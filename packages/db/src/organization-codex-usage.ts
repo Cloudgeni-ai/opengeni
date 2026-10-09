@@ -1,11 +1,13 @@
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
   CODEX_CLIENT_VERSION,
+  CODEX_WHAM_BASE,
   CodexReloginRequired,
-  fetchCodexUsage,
+  codexSubscriptionHeaders,
   normalizeCodexUsage,
   refreshCodexToken,
   type CodexFetch,
+  type CodexAuthHeaders,
   type CodexUsagePayload,
 } from "@opengeni/codex";
 import { sql } from "drizzle-orm";
@@ -17,6 +19,112 @@ import { resolveSubscriptionConnectionId } from "./subscription-core-repository"
 
 type AdministratorScope = <T>(db: Database, use: (tx: Database) => Promise<T>) => Promise<T>;
 
+const nativeUsageFetch: CodexFetch = fetch;
+const CORE_USAGE_TIMEOUT_MS = 5_000;
+const CORE_USAGE_MAX_BYTES = 1024 * 1024;
+
+function remainingCoreUsageBudget(deadline: number): number {
+  const remaining = deadline - performance.now();
+  if (remaining <= 0) throw new Error("Codex usage request deadline exceeded");
+  return remaining;
+}
+
+/**
+ * An injected core transport must cancel and join its local work for this exact
+ * signal, including any deferred dispatch, before this promise resolves. Native
+ * Fetch already provides abortable fetch/body custody. Arbitrary CodexFetch
+ * callbacks do not, so they fail closed before receiving a bearer.
+ */
+export type OrganizationCodexUsageJoinedFetch = CodexFetch & {
+  abortAndJoin: (signal: AbortSignal) => Promise<void>;
+};
+
+function joinedTransport(fetchImpl: CodexFetch) {
+  if (fetchImpl === nativeUsageFetch) return null;
+  const candidate = fetchImpl as Partial<OrganizationCodexUsageJoinedFetch>;
+  if (typeof candidate.abortAndJoin !== "function") {
+    throw new Error("Organization Codex usage requires an abort-and-join transport");
+  }
+  return candidate.abortAndJoin.bind(fetchImpl);
+}
+
+/** No detached deadline: the administrator transaction awaits local fetch/body teardown. */
+async function fetchCoreUsageJoined(
+  auth: CodexAuthHeaders,
+  fetchImpl: CodexFetch,
+  options: { signal?: AbortSignal; deadline: number },
+): Promise<{ status: number; payload: unknown }> {
+  const abortAndJoin = joinedTransport(fetchImpl);
+  const controller = new AbortController();
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let teardown: Promise<unknown> = Promise.resolve();
+  const abort = () => controller.abort(new Error("Codex usage request aborted"));
+  const onAbort = () => {
+    teardown = Promise.all([
+      reader?.cancel().catch(() => undefined),
+      Promise.resolve().then(() => abortAndJoin?.(controller.signal)),
+    ]);
+    // Observe immediately; the transaction still joins this exact promise below.
+    void teardown.catch(() => undefined);
+  };
+  controller.signal.addEventListener("abort", onAbort, { once: true });
+  options.signal?.throwIfAborted();
+  options.signal?.addEventListener("abort", abort, { once: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let complete = false;
+  try {
+    timer = setTimeout(abort, remainingCoreUsageBudget(options.deadline));
+    controller.signal.throwIfAborted();
+    // No await between this final expiry check and the physical invocation.
+    remainingCoreUsageBudget(options.deadline);
+    const response = await fetchImpl(`${CODEX_WHAM_BASE}/wham/usage`, {
+      method: "GET",
+      headers: codexSubscriptionHeaders(auth),
+      redirect: "error",
+      signal: controller.signal,
+    });
+    reader = response.body?.getReader();
+    controller.signal.throwIfAborted();
+    remainingCoreUsageBudget(options.deadline);
+    if (Number(response.headers.get("content-length")) > CORE_USAGE_MAX_BYTES) {
+      throw new Error("Codex usage response exceeded its byte limit");
+    }
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    if (reader) {
+      while (true) {
+        const next = await reader.read();
+        controller.signal.throwIfAborted();
+        remainingCoreUsageBudget(options.deadline);
+        if (next.done) break;
+        size += next.value.byteLength;
+        if (size > CORE_USAGE_MAX_BYTES)
+          throw new Error("Codex usage response exceeded its byte limit");
+        if (response.ok || response.status === 404) chunks.push(next.value);
+      }
+    }
+    let payload: unknown = null;
+    if (response.ok || response.status === 404) {
+      try {
+        payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      } catch {
+        // Preserve the existing usage normalization for invalid JSON, not body failures.
+      }
+    }
+    remainingCoreUsageBudget(options.deadline);
+    complete = true;
+    return { status: response.status, payload };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    options.signal?.removeEventListener("abort", abort);
+    if (!complete) abort();
+    // A fetch that returns late after abort still has a body to cancel locally.
+    if (controller.signal.aborted) await reader?.cancel().catch(() => undefined);
+    await teardown;
+    reader?.releaseLock();
+  }
+}
+
 /**
  * Administrative usage inspection is independent of inference eligibility.
  * This path may refresh the exact account's bearer, but never changes quota,
@@ -25,7 +133,14 @@ type AdministratorScope = <T>(db: Database, use: (tx: Database) => Promise<T>) =
 export async function readOrganizationCodexUsage(
   db: Database,
   settings: Settings,
-  input: { organizationId: string; credentialId: string; mode: "core" },
+  input: {
+    organizationId: string;
+    credentialId: string;
+    mode: "core";
+    signal?: AbortSignal;
+    /** May shorten, never extend, the core admission-plus-request budget. */
+    requestTimeoutMs?: number;
+  },
   withAdministrator: AdministratorScope,
   fetchImpl: CodexFetch = fetch,
   refresh: CodexAuthDeps["refresh"] = refreshCodexToken,
@@ -34,7 +149,7 @@ export async function readOrganizationCodexUsage(
   const condition = () =>
     sql`account_id = ${input.organizationId}::uuid and id = ${credentialId}::uuid
         and provider = 'codex' and kind = 'subscription' and ownership = 'shared'
-        and managed_by_workspace_id is null`;
+        and managed_by_workspace_id is null and disconnected_at is null`;
   const scoped: AdministratorScope = (targetDb, use) =>
     withAdministrator(targetDb, async (tx) => {
       if ((await readCodexCutoverDisposition(tx, input.organizationId)) !== "core") {
@@ -142,6 +257,8 @@ export async function readOrganizationCodexUsage(
   };
   try {
     {
+      input.signal?.throwIfAborted();
+      joinedTransport(fetchImpl);
       // Resolve under current administrator authority, then freeze this exact
       // identity for reads, refresh locking and generation-fenced writes.
       const canonical = await scoped(db, (tx) =>
@@ -161,40 +278,80 @@ export async function readOrganizationCodexUsage(
       credentialId,
       deps,
     );
-    let token = await resolver.getToken();
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      // Recheck administration, maintenance and health before each dispatch.
-      let current = await deps.loadCredential(db, settings, input.organizationId, credentialId);
-      if (!current) throw new CodexReloginRequired("Sign in to ChatGPT again");
-      if (current.version !== token.credentialVersion) {
-        token = await resolver.getToken();
-        current = await deps.loadCredential(db, settings, input.organizationId, credentialId);
-        if (!current || current.version !== token.credentialVersion) {
+    {
+      const probe = (expectedGeneration: number) => {
+        // Anchor before administrator/source-lock admission, not after its last
+        // awaited credential read. A suspended worker may outlive PostgreSQL's
+        // orphan-transaction backstop; resuming it must not restart this budget.
+        const timeoutMs = Number.isFinite(input.requestTimeoutMs)
+          ? Math.min(CORE_USAGE_TIMEOUT_MS, Math.max(1, input.requestTimeoutMs!))
+          : CORE_USAGE_TIMEOUT_MS;
+        const deadline = performance.now() + timeoutMs;
+        return scoped(db, async (tx) => {
+          remainingCoreUsageBudget(deadline);
+          // The read-only exception holds the source lock through the finite GET.
+          // A dead worker cannot leave an idle transaction retaining this lock.
+          await tx.execute(sql`set local idle_in_transaction_session_timeout = '10s'`);
+          remainingCoreUsageBudget(deadline);
+          await tx.execute(sql`set local statement_timeout = '10s'`);
+          remainingCoreUsageBudget(deadline);
+          await tx.execute(sql`set local lock_timeout = '5s'`);
+          remainingCoreUsageBudget(deadline);
+          await tx.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${`subscription-refresh:${credentialId}`}, 0))`,
+          );
+          remainingCoreUsageBudget(deadline);
+          // Re-enter native administration/cutover checks AFTER the source lock.
+          // Never send the resolver's previously cached bearer or return this one.
+          const current = await deps.loadCredential(
+            tx,
+            settings,
+            input.organizationId,
+            credentialId,
+          );
+          remainingCoreUsageBudget(deadline);
+          if (!current) throw new CodexReloginRequired("Sign in to ChatGPT again");
+          if (current.version !== expectedGeneration) return null;
+          return await fetchCoreUsageJoined(
+            {
+              accessToken: current.tokens.accessToken,
+              chatgptAccountId: current.chatgptAccountId,
+              isFedramp: current.isFedramp,
+              clientVersion: CODEX_CLIENT_VERSION,
+            },
+            fetchImpl,
+            {
+              deadline,
+              ...(input.signal ? { signal: input.signal } : {}),
+            },
+          );
+        });
+      };
+      let generation = (await resolver.getToken()).credentialVersion;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        let result = await probe(generation);
+        if (!result) {
+          generation = (await resolver.getToken()).credentialVersion;
+          result = await probe(generation);
+          if (!result) throw new Error("Codex account changed while checking usage");
+        }
+        if (result.status !== 401) return normalizeCodexUsage(result.status, result.payload);
+        if (attempt === 1) {
+          const marked = await deps.setStatus(db, input.organizationId, "needs_relogin", null, {
+            id: credentialId,
+            version: generation,
+          });
+          if (marked) throw new CodexReloginRequired("Sign in to ChatGPT again");
           throw new Error("Codex account changed while checking usage");
         }
+        const latest = await deps.loadCredential(db, settings, input.organizationId, credentialId);
+        if (!latest) throw new CodexReloginRequired("Sign in to ChatGPT again");
+        generation = (
+          latest.version !== generation ? await resolver.getToken() : await resolver.refresh()
+        ).credentialVersion;
       }
-      const result = await fetchCodexUsage(
-        { ...token, clientVersion: CODEX_CLIENT_VERSION },
-        fetchImpl,
-      );
-      if (result.status !== 401) return normalizeCodexUsage(result.status, result.payload);
-      if (attempt === 1) {
-        const marked = await deps.setStatus(db, input.organizationId, "needs_relogin", null, {
-          id: credentialId,
-          version: token.credentialVersion,
-        });
-        if (marked) throw new CodexReloginRequired("Sign in to ChatGPT again");
-        throw new Error("Codex account changed while checking usage");
-      }
-      const latest = await deps.loadCredential(db, settings, input.organizationId, credentialId);
-      if (!latest) throw new CodexReloginRequired("Sign in to ChatGPT again");
-      // Another caller may already have replaced the rejected bearer.
-      token =
-        latest.version !== token.credentialVersion
-          ? await resolver.getToken()
-          : await resolver.refresh();
+      throw new Error("Codex usage retry exhausted");
     }
-    throw new Error("Codex usage retry exhausted");
   } catch (error) {
     return {
       status: "error",

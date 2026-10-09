@@ -295,6 +295,10 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   project_reorder: "workspaceAdmin",
   project_delete: "workspaceAdmin",
   session_set_project: "workspaceAdmin",
+  // Present only while a person has given the session admin access.
+  admin_actions_search: "workspaceAdmin",
+  admin_action_describe: "workspaceAdmin",
+  admin_action_call: "workspaceAdmin",
   rig_list: "workspaceAdmin",
   rig_get: "workspaceAdmin",
   rig_propose_change: "workspaceAdmin",

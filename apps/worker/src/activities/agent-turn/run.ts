@@ -2,6 +2,8 @@ import { withClaudeConnectionCredential } from "@opengeni/config";
 import {
   getSessionAuthorityProjection,
   canSpendSubscriptionCoreCodexExtraCredits,
+  reserveSubscriptionCoreCodexRequest,
+  settleSubscriptionCoreCodexRequest,
   readActiveSandbox,
   getWorkspaceCredentialProvider,
   resolveClaudeAccountCredential,
@@ -102,8 +104,10 @@ import { claimTurnAttempt } from "./claim";
 import { selectCodexTurnCapacity, type CapacityPhaseDeps } from "./codex-capacity";
 import {
   assertTurnModelConnection,
+  assertCoreCodexSourceConnected,
   buildCoreCodexRequestTokenResolver,
 } from "./codex-core-capacity";
+import { createCoreCodexRequests, buildCoreCodexUsageReader } from "./codex-core-requests";
 import { observeCodexResponseCompletion } from "./codex-core-settlement";
 import { prepareGovernanceAndModel } from "./governance-model";
 import { prepareCompaction, runPostAgentCompaction } from "./compaction-prep";
@@ -128,6 +132,7 @@ import { buildTurnAgent } from "./agent-build";
 export function sessionTitleCodexRequestContext(
   context: CodexRequestContext,
   nextRequestId: () => string,
+  requests?: ReturnType<typeof createCoreCodexRequests>,
 ): CodexRequestContext {
   return {
     clientVersion: context.clientVersion,
@@ -136,9 +141,19 @@ export function sessionTitleCodexRequestContext(
     refresh: context.refresh,
     resolveModel: context.resolveModel,
     ...(context.onUsageHeaders ? { onUsageHeaders: context.onUsageHeaders } : {}),
-    ...(context.beforeProviderDispatch
-      ? { beforeProviderDispatch: context.beforeProviderDispatch }
-      : {}),
+    ...(requests
+      ? {
+          beforeProviderDispatch: async (
+            request: Parameters<NonNullable<CodexRequestContext["beforeProviderDispatch"]>>[0],
+          ) => {
+            await context.beforeProviderDispatch?.();
+            if (request) await requests.reserve(request);
+          },
+          onProviderRequestSettled: requests.observe,
+        }
+      : context.beforeProviderDispatch
+        ? { beforeProviderDispatch: context.beforeProviderDispatch }
+        : {}),
     ...(context.responseTimeoutPolicy
       ? { responseTimeoutPolicy: context.responseTimeoutPolicy }
       : {}),
@@ -674,6 +689,38 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ? ((): CodexRequestContext => {
                   const coreCodex = providerTurn.codexSubscriptionCore;
                   if (!coreCodex) throw new Error("Codex core placement is required for dispatch");
+                  let coreUsageReader: ReturnType<typeof buildCoreCodexUsageReader> | undefined;
+                  if (coreCodex) {
+                    const ref = {
+                      connectionId: coreCodex.connectionId,
+                      holderId: leases.codex.holderId!,
+                      generation: leases.codex.generation!,
+                    };
+                    const execution = {
+                      attemptId: input.attemptId,
+                      executionGeneration: attempt.executionGeneration!,
+                    };
+                    const requestDeps: Parameters<typeof createCoreCodexRequests>[0] = {
+                      reserve: (request) =>
+                        reserveSubscriptionCoreCodexRequest(db, coreCodex.identity, ref, {
+                          ...request,
+                          ...execution,
+                        }),
+                      settle: (request) =>
+                        settleSubscriptionCoreCodexRequest(db, coreCodex.identity, ref, {
+                          ...request,
+                          ...execution,
+                        }),
+                    };
+                    coreCodex.requests = createCoreCodexRequests(requestDeps);
+                    coreCodex.titleRequests = createCoreCodexRequests(requestDeps);
+                    coreUsageReader = buildCoreCodexUsageReader(
+                      db,
+                      coreCodex.identity,
+                      ref,
+                      execution,
+                    );
+                  }
                   const resolver = buildCoreCodexRequestTokenResolver(
                     db,
                     runSettings,
@@ -690,6 +737,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     return token;
                   };
                   const creditGuard = createCodexCreditGuard({
+                    ...(coreUsageReader ? { fetchUsage: coreUsageReader } : {}),
                     canSpendCredits: async () => {
                       if (!leases.codex.holderId || leases.codex.generation === null) return false;
                       return await canSpendSubscriptionCoreCodexExtraCredits(db, {
@@ -735,13 +783,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       providerTurn.latestCodexUsage = snapshot;
                       creditGuard.observe(snapshot);
                     }, // latest wins; flushed once in finally
-                    beforeProviderDispatch: async () => {
+                    beforeProviderDispatch: async (request) => {
+                      if (coreCodex) await assertCoreCodexSourceConnected(db, coreCodex);
                       await assertCodexDispatchAdmission(
                         creditGuard.assertObservedUsageAllowsDispatch,
                         () => leases.codex.assertCurrentForDispatch(),
                       );
+                      if (coreCodex && request) await coreCodex.requests!.reserve(request);
                       observeProviderDispatch();
                     },
+                    ...(coreCodex ? { onProviderRequestSettled: coreCodex.requests!.observe } : {}),
                     onRequestPreparationDiagnostic: (phase) => {
                       if (
                         eventing.firstModelRequestCheckpointAt === null ||
@@ -1120,6 +1171,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ? sessionTitleCodexRequestContext(
                 codexContext,
                 () => `${dispatchId}:title:${++codexSessionTitleRequestSequence}`,
+                providerTurn.codexSubscriptionCore?.titleRequests,
               )
             : null;
           const xaiSessionTitleContext = providerTurn.xaiRequestContext

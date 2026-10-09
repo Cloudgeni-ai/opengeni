@@ -18,13 +18,19 @@ import {
 import { initialReasoningEffort } from "@/lib/session-tools";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import { cn } from "@/lib/utils";
+import type { OrganizationModelDefaultsState } from "@/components/models/use-organization-model-defaults";
 import type { IntelligenceEffort } from "@/lib/session-tools";
 
 type Draft = { model: string; reasoningEffort: IntelligenceEffort };
 
 /** How an unsaved workspace default is chosen, in plain words. */
-function automaticDefaultNote(source: DefaultModelSelectionSource | undefined): string {
+function automaticDefaultNote(
+  source: DefaultModelSelectionSource | undefined,
+  organizationName: string | undefined,
+): string {
   switch (source) {
+    case "organization":
+      return `Following ${organizationName ?? "your organization"}.`;
     case "subscription":
       return "Picked from your connected subscription until you choose one.";
     case "credits":
@@ -32,6 +38,19 @@ function automaticDefaultNote(source: DefaultModelSelectionSource | undefined): 
     default:
       return "The deployment's default until you choose one.";
   }
+}
+
+/** A small text button inside a row's description, like "Use default". */
+function InlineAction({ children, onClick }: { children: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="rounded-sm font-medium text-fg underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring/55 pointer-coarse:min-h-11"
+    >
+      {children}
+    </button>
+  );
 }
 
 /**
@@ -86,8 +105,13 @@ export function defaultModelSummary(
   };
 }
 
-/** Workspace default inherited by new chats and new scheduled tasks. */
+/**
+ * The default model for new chats and new scheduled tasks: one workspace's,
+ * which follows its organization's until it saves its own, or (with
+ * `organizationDefaults`) the organization's default for every workspace.
+ */
 export function DefaultSessionModelPreferenceRow(props: {
+  /** The workspace whose default this is, or whose models the organization's default lists. */
   workspaceId: string;
   canManage: boolean;
   /**
@@ -95,14 +119,28 @@ export function DefaultSessionModelPreferenceRow(props: {
    * The trigger already names the model and its payment source; this says whose.
    */
   describePayer?: ((model: WorkspaceModelCatalogModel) => string) | undefined;
+  /** Names the organization a workspace follows. */
+  organizationName?: string | undefined;
+  /** Edit the organization's default for every workspace instead. */
+  organizationDefaults?: OrganizationModelDefaultsState | undefined;
 }) {
   const context = useAppContext();
   const catalog = useWorkspaceModelCatalog(props.workspaceId);
   const workspace = context.workspaces.find((candidate) => candidate.id === props.workspaceId);
-  const configured = resolveWorkspaceSessionDefaults(workspace?.settings);
+  const organizationScope = props.organizationDefaults !== undefined;
+  const organizationLabel = props.organizationName ?? "your organization";
+  const configured = organizationScope
+    ? (props.organizationDefaults?.defaults?.sessionDefaults ?? null)
+    : resolveWorkspaceSessionDefaults(workspace?.settings);
   // Without a saved default, show what new chats actually get: the server
-  // resolves a connected subscription, then credits, then the deployment model.
-  const automatic = catalog.defaultSelection;
+  // resolves the organization's default, then a connected subscription, then
+  // credits, then the deployment model. The organization's own row only
+  // shows the automatic part, never one workspace's own choice.
+  const resolved = catalog.defaultSelection;
+  const automatic =
+    organizationScope && (resolved?.source === "workspace" || resolved?.source === "organization")
+      ? null
+      : resolved;
   const effective: Draft = {
     model: configured?.model ?? automatic?.model ?? context.clientConfig.defaultModel,
     reasoningEffort:
@@ -139,15 +177,32 @@ export function DefaultSessionModelPreferenceRow(props: {
     setDraft(next);
   }
 
+  /** Saves a default, or null to follow the organization (or the automatic choice) again. */
+  async function persist(next: Draft | null): Promise<boolean> {
+    if (props.organizationDefaults) {
+      try {
+        await props.organizationDefaults.update({ sessionDefaults: next });
+        return true;
+      } catch (caught) {
+        toast.error(
+          caught instanceof Error && caught.message
+            ? caught.message
+            : "Couldn't save the default model. Try again.",
+        );
+        return false;
+      }
+    }
+    return Boolean(
+      await context.updateWorkspaceSettings(props.workspaceId, { sessionDefaults: next }),
+    );
+  }
+
   async function save(reasoningEffort: IntelligenceEffort) {
     const next = { ...draftRef.current, reasoningEffort };
     updateDraft(next);
     setSaving(true);
     try {
-      const updated = await context.updateWorkspaceSettings(props.workspaceId, {
-        sessionDefaults: next,
-      });
-      if (updated) {
+      if (await persist(next)) {
         toast.success("Default model updated");
       } else {
         updateDraft(effective);
@@ -157,14 +212,34 @@ export function DefaultSessionModelPreferenceRow(props: {
     }
   }
 
+  async function reset() {
+    setSaving(true);
+    try {
+      if (await persist(null)) {
+        toast.success(
+          organizationScope
+            ? "Default model is automatic again"
+            : `Default model follows ${organizationLabel} again`,
+        );
+        if (!organizationScope) await catalog.refresh();
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const selected = pickerRows.find((row) => row.id === draft.model) ?? null;
   const selectedModel = catalog.models.find((model) => model.id === draft.model) ?? null;
   const payer = selectedModel && props.describePayer ? props.describePayer(selectedModel) : null;
-  const starts = payer
-    ? `New chats and schedules start with this model, ${payer}.`
-    : "New chats and schedules start with this model.";
+  const starts = organizationScope
+    ? "New chats and schedules in every workspace start with this model."
+    : payer
+      ? `New chats and schedules start with this model, ${payer}.`
+      : "New chats and schedules start with this model.";
+  // A workspace's own catalog says what can run there; the organization's
+  // default is checked in each workspace instead.
   const cantRun =
-    catalog.loading || catalog.error
+    catalog.loading || catalog.error || organizationScope
       ? null
       : !selected
         ? "The current default isn't available in this workspace, so new work can't start with it. Pick another model."
@@ -180,7 +255,30 @@ export function DefaultSessionModelPreferenceRow(props: {
     <SettingRow
       label="Default model"
       controlWidth="auto"
-      description={configured ? starts : `${starts} ${automaticDefaultNote(automatic?.source)}`}
+      description={
+        configured ? (
+          <>
+            {starts}{" "}
+            {organizationScope
+              ? null
+              : props.organizationName
+                ? "Changed for this workspace."
+                : null}
+            {props.canManage && !saving && (organizationScope || props.organizationName) ? (
+              <>
+                {" "}
+                <InlineAction onClick={() => void reset()}>
+                  {organizationScope ? "Make automatic" : `Use ${organizationLabel}’s default`}
+                </InlineAction>
+              </>
+            ) : null}
+          </>
+        ) : organizationScope ? (
+          `${starts} Automatic until you choose one: a connected subscription, then Opengeni credits, then this server’s default.`
+        ) : (
+          `${starts} ${automaticDefaultNote(automatic?.source, props.organizationName)}`
+        )
+      }
       error={cantRun}
       hint={saving ? "Saving…" : undefined}
       control={

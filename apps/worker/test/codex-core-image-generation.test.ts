@@ -3,6 +3,13 @@ import type * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { CodexCredentialLeaseLostError } from "../src/activities/agent-turn/credential-leases";
 import { executeCoreCodexImageGeneration } from "../src/activities/codex-image-generation";
+import type { CodexRequestContext } from "@opengeni/codex";
+
+type ImageContext = Pick<
+  CodexRequestContext,
+  "beforeProviderDispatch" | "onProviderRequestSettled"
+>;
+const physicalRequest = { requestId: "image-request", transportAttempt: 1 };
 
 const identity = {
   accountId: "11111111-1111-4111-8111-111111111111",
@@ -22,6 +29,8 @@ type Harness = {
   resets: unknown[];
   unknowns: unknown[];
   acquired: unknown[][];
+  reservations: unknown[][];
+  settlements: unknown[];
 };
 
 function run(
@@ -30,11 +39,20 @@ function run(
     renew?: () => Promise<Date | null>;
     chatLease?: () => Promise<void>;
     creditAdmission?: () => Promise<void>;
-    generate?: (context: { beforeProviderDispatch?: () => Promise<void> }) => Promise<unknown>;
+    generate?: (context: ImageContext) => Promise<unknown>;
+    reserve?: () => Promise<{ operationId: string }>;
+    retain?: () => Promise<unknown>;
     toolCallId?: string;
   } = {},
 ) {
-  const harness: Harness = { calls: [], resets: [], unknowns: [], acquired: [] };
+  const harness: Harness = {
+    calls: [],
+    resets: [],
+    unknowns: [],
+    acquired: [],
+    reservations: [],
+    settlements: [],
+  };
   const ports = {
     prepare: async () => ({ operation: { status: "prepared" } }),
     begin: async () => ({ started: true, operation: { status: "provider_started" } }),
@@ -46,9 +64,12 @@ function run(
     },
     retain: async () => {
       harness.calls.push("retain");
+      if (options.retain) return await options.retain();
       throw new Error("retention is outside this test");
     },
-    complete: async () => undefined,
+    complete: async () => {
+      harness.calls.push("complete");
+    },
     markRetentionFailed: async () => undefined,
     recover: async () => null,
   } as never;
@@ -87,6 +108,15 @@ function run(
         harness.calls.push("release");
         return true;
       },
+      reserve: async (...args) => {
+        harness.calls.push("reserve");
+        harness.reservations.push(args);
+        return options.reserve ? await options.reserve() : { operationId: "native-request" };
+      },
+      settle: async (_db, _scope, request) => {
+        harness.calls.push(`settle:${request.outcome}`);
+        harness.settlements.push(request);
+      },
       resolver: () => ({
         getToken: async () => ({
           accessToken: "token",
@@ -100,13 +130,15 @@ function run(
         },
       }),
       ports,
-      generateImage: (async (input: {
-        context: { beforeProviderDispatch?: () => Promise<void> };
-      }) => {
+      generateImage: (async (input: { context: ImageContext }) => {
         harness.calls.push("generate");
         if (options.generate) return await options.generate(input.context);
-        await input.context.beforeProviderDispatch?.();
+        await input.context.beforeProviderDispatch?.(physicalRequest);
         harness.calls.push("dispatched");
+        await input.context.onProviderRequestSettled?.({
+          ...physicalRequest,
+          outcome: "response_received",
+        });
         return { bytes: new Uint8Array([1, 2, 3]), declaredMediaType: "image/png" };
       }) as never,
     },
@@ -123,6 +155,7 @@ test("a successful operation checks the chat lease, renews before dispatch and r
     "generate",
     "chat_lease",
     "renew",
+    "reserve",
     "dispatched",
     "release",
     "retain",
@@ -134,12 +167,15 @@ test("a successful operation checks the chat lease, renews before dispatch and r
     connectionId: CONNECTION,
     generation: 3,
   });
+  expect(harness.reservations[0]![4]).toEqual(physicalRequest);
+  expect(harness.settlements).toEqual([]); // Retention failed; transport success is insufficient.
 });
 
 test("an error after dispatch still releases the lease and records outcome unknown", async () => {
   const { harness, promise } = run({
     generate: async (context) => {
-      await context.beforeProviderDispatch?.();
+      await context.beforeProviderDispatch?.(physicalRequest);
+      await context.onProviderRequestSettled?.({ ...physicalRequest, outcome: "unknown" });
       throw new Error("provider failed after dispatch");
     },
   });
@@ -147,6 +183,56 @@ test("an error after dispatch still releases the lease and records outcome unkno
   expect(harness.calls.at(-1)).toBe("release");
   expect(harness.unknowns).toHaveLength(1);
   expect(harness.resets).toHaveLength(0);
+});
+
+test("native image response settlement follows permanent artifact retention and ledger completion", async () => {
+  const receipt = { status: "created", fileId: "fixture" };
+  const { harness, promise } = run({ retain: async () => ({ receipt }) });
+  expect(await promise).toEqual(receipt);
+  expect(harness.calls.slice(-3)).toEqual(["retain", "complete", "settle:response_received"]);
+  expect(harness.settlements).toEqual([
+    { operationId: "native-request", outcome: "response_received" },
+  ]);
+});
+
+test("source removal at native image reservation refuses dispatch without ambiguous ledger effects", async () => {
+  const { harness, promise } = run({
+    reserve: async () => {
+      throw new Error("source disconnected");
+    },
+  });
+  expect(await promise).toBeInstanceOf(CodexCredentialLeaseLostError);
+  expect(harness.calls).not.toContain("dispatched");
+  expect(harness.resets).toHaveLength(1);
+  expect(harness.unknowns).toEqual([]);
+});
+
+test("an image 401 retry cannot reuse its first native reservation", async () => {
+  let sequence = 0;
+  const { harness, promise } = run({
+    reserve: async () => ({ operationId: `request-${++sequence}` }),
+    generate: async (context) => {
+      await context.beforeProviderDispatch?.(physicalRequest);
+      await context.onProviderRequestSettled?.({ ...physicalRequest, outcome: "refused" });
+      await context.beforeProviderDispatch?.({ ...physicalRequest, transportAttempt: 2 });
+      await context.onProviderRequestSettled?.({
+        ...physicalRequest,
+        transportAttempt: 2,
+        outcome: "response_received",
+      });
+      return { bytes: new Uint8Array([1]), declaredMediaType: "image/png" };
+    },
+    retain: async () => ({ receipt: { status: "created" } }),
+  });
+  await promise;
+  expect(harness.reservations.map((args) => args[4])).toEqual([
+    physicalRequest,
+    { ...physicalRequest, transportAttempt: 2 },
+  ]);
+  expect(harness.settlements).toEqual([
+    { operationId: "request-1", outcome: "refused" },
+    { operationId: "request-2", outcome: "response_received" },
+  ]);
 });
 
 test("an abort releases the lease", async () => {

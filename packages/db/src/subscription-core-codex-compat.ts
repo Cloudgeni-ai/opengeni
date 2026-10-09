@@ -271,6 +271,7 @@ export async function projectSubscriptionCoreCodexWorkspace(
       on quota.account_id = connection.account_id and quota.connection_id = connection.id
     where connection.account_id = ${input.accountId}::uuid
       and connection.provider = 'codex' and connection.kind = 'subscription'
+      and connection.disconnected_at is null
       and connection.ownership = 'shared'
       and (connection.scope_kind = 'organization'
         or (connection.scope_kind = 'workspaces' and (
@@ -317,11 +318,16 @@ export async function projectSubscriptionCoreCodexWorkspace(
       : workspaceAvailable
         ? "workspace"
         : "organization";
-  const primaryConnectionId = await readPrimaryConnectionId(
+  let primaryConnectionId = await readPrimaryConnectionId(
     tx,
     input.accountId,
     settings.rotationSource === "workspace" ? input.workspaceId : null,
   );
+  // Shared rows were already filtered for lifecycle and workspace scope above.
+  // Personal primaries are checked only after the owner-only reader joins.
+  if (workspaceKind === "shared" && !rows.some((row) => row.id === primaryConnectionId)) {
+    primaryConnectionId = null;
+  }
   // Only the effective pool is listed (legacy parity): nothing while Codex is
   // disabled here, only workspace-classified connections for the workspace
   // source and only organization-classified ones for the organization
@@ -392,6 +398,15 @@ export async function getSubscriptionCoreCodexWorkspaceProjection(
         workspaceId: input.workspaceId,
         subjectId: input.viewerSubjectId,
       });
+      // Personal rows are intentionally visible only through the owner reader,
+      // so sanitize the historical primary pointer after that projection joins.
+      if (
+        ![...projection.accounts, ...personal].some(
+          (account) => account.id === projection.rotation.activeCredentialId,
+        )
+      ) {
+        projection.rotation.activeCredentialId = null;
+      }
       return personal.length === 0
         ? projection
         : {
@@ -479,7 +494,7 @@ export async function getSubscriptionCoreOrganizationCodexProjection(
         from subscription_settings
         where account_id = ${input.organizationId}::uuid and workspace_id is null`,
       );
-      const primaryConnectionId = org?.primary_id ?? null;
+      let primaryConnectionId = org?.primary_id ?? null;
       const rows = await rawRows<ConnectionRow>(
         tx,
         sql`select ${CONNECTION_COLUMNS}
@@ -488,9 +503,11 @@ export async function getSubscriptionCoreOrganizationCodexProjection(
         on quota.account_id = connection.account_id and quota.connection_id = connection.id
       where connection.account_id = ${input.organizationId}::uuid
         and connection.provider = 'codex' and connection.kind = 'subscription'
+        and connection.disconnected_at is null
         and connection.ownership = 'shared' and connection.managed_by_workspace_id is null
       order by connection.created_at, connection.id`,
       );
+      if (!rows.some((row) => row.id === primaryConnectionId)) primaryConnectionId = null;
       return {
         accounts: rows.map((row) =>
           projectAccount(row, {
@@ -576,11 +593,16 @@ async function visibleSharedConnection(
     connectionId: rawId,
   });
   if (!connectionId) return null;
+  // Management must not accept a stale primary/allocator target after removal.
+  // Use the same lifecycle order as disconnect before reading its current row.
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(
+    ${`subscription-refresh:${connectionId}`}, 0))`);
   const [row] = await rawRows<{ allocator_enabled: boolean; allocator_version: number | string }>(
     tx,
     sql`select allocator_enabled, allocator_version from subscription_connections
       where account_id = ${input.accountId}::uuid and provider = 'codex' and kind = 'subscription'
         and ownership = 'shared' and id = ${connectionId}::uuid
+        and disconnected_at is null
         and (${input.workspaceId}::uuid is not null or managed_by_workspace_id is null)`,
   );
   if (!row) return null;

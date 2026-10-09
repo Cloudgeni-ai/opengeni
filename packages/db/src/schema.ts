@@ -4496,6 +4496,59 @@ export const workspaceModelPolicies = pgTable(
   }),
 );
 
+// Model defaults every workspace in the organization follows until it sets its
+// own: the default model for new work, the model allowlist for workspaces with
+// no policy row, and compaction triggers by exact model id. One row per
+// organization; absent reads as no defaults.
+export const organizationModelDefaults = pgTable("organization_model_defaults", {
+  accountId: uuid("account_id")
+    .primaryKey()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  sessionDefaults: jsonb("session_defaults").$type<{
+    model: string;
+    reasoningEffort: string;
+  } | null>(),
+  allowedProviders: text("allowed_providers").array(),
+  allowedModels: text("allowed_models").array(),
+  modelCompactionThresholds: jsonb("model_compaction_thresholds")
+    .$type<Record<string, number>>()
+    .notNull()
+    .default({}),
+  updatedBySubjectId: text("updated_by_subject_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Whether owners and admins may give an agent session admin access (0691).
+export const organizationAgentAdminAccess = pgTable("organization_agent_admin_access", {
+  accountId: uuid("account_id")
+    .primaryKey()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  sessionAdminAccessAllowed: boolean("session_admin_access_allowed").notNull().default(false),
+  updatedBySubjectId: text("updated_by_subject_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// A session an owner or admin gave admin access; the row ends when it is removed.
+export const sessionAdminAccess = pgTable(
+  "session_admin_access",
+  {
+    sessionId: uuid("session_id")
+      .primaryKey()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    grantedBySubjectId: text("granted_by_subject_id").notNull(),
+    grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("session_admin_access_account_idx").on(table.accountId)],
+);
+
 // One workspace-local short-lived holder per running Codex turn. Selection and
 // insertion happen atomically while codex_rotation_settings is locked FOR
 // UPDATE, so concurrent replicas in the SAME workspace see one another's

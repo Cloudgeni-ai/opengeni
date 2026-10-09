@@ -1050,10 +1050,20 @@ async function persistWarmWorkspaceSnapshot(
         reason,
       }).catch(() => undefined);
     };
-    // The SDK capture itself is not cancellable. Keep one owned continuation
+    // A provider-native capture is not cancellable. Keep one owned continuation
     // alive through provider settlement even if this caller's bounded wait or
     // turn signal resolves first. Its finally block is the only normal release
     // of the exact admission gate; a late callback cannot release a successor.
+    // A host-backed spool capture reads the workspace locally, so it is
+    // stopped at the snapshot timeout instead: its rejection is the physical
+    // end of the reads, and holding the write fence for an unbounded local
+    // read would turn a slow host into failed workspace writes (OPE-776).
+    const captureAbort = new AbortController();
+    const captureAbortTimer = setTimeout(
+      () => captureAbort.abort(new SnapshotTimeoutError(settings.sandboxSnapshotTimeoutMs)),
+      settings.sandboxSnapshotTimeoutMs,
+    );
+    captureAbortTimer.unref?.();
     const captureAndPublish = (async (): Promise<boolean> => {
       const captureStarted = performance.now();
       let captureOutcome: "completed" | "failed" = "failed";
@@ -1067,9 +1077,11 @@ async function persistWarmWorkspaceSnapshot(
           {
             requestId: claimed.claim.providerRequestId,
             strategy: capturePolicy.strategy,
+            signal: captureAbort.signal,
           },
           Boolean(services.objectStorage),
         );
+        clearTimeout(captureAbortTimer);
         candidate = await registerCandidate(archive);
         const archiveDescriptor = archive.descriptor;
         const published = await putVersion1TarArchiveOrInline({
@@ -1118,6 +1130,7 @@ async function persistWarmWorkspaceSnapshot(
           await abandonCandidate(candidate.id, "snapshot_capture_failed");
         throw error;
       } finally {
+        clearTimeout(captureAbortTimer);
         await disposeWorkspaceArchive(archive).catch(() => {
           console.warn("workspace archive spool cleanup failed");
         });

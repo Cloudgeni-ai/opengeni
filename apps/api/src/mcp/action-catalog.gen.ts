@@ -1436,6 +1436,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "deleteWorkspaceModelAccessPolicy",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/model-policy",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "deleteWorkspaceOpenRouterCustomModel",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/openrouter-custom-models/:customModelId",
@@ -2509,6 +2516,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getOrganizationAgentAdminAccess",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agent-admin-access",
+    "request": [],
+    "response": [
+      "OrganizationAgentAdminAccess"
+    ]
+  },
+  {
     "id": "getOrganizationApiKey",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/api-keys/:apiKeyId",
@@ -2567,6 +2583,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "OrganizationIntegrationPolicy"
+    ]
+  },
+  {
+    "id": "getOrganizationModelDefaults",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/model-defaults",
+    "request": [],
+    "response": [
+      "OrganizationModelDefaults"
     ]
   },
   {
@@ -2752,6 +2777,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "Session"
+    ]
+  },
+  {
+    "id": "getSessionAdminAccess",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/admin-access",
+    "request": [],
+    "response": [
+      "SessionAdminAccess"
     ]
   },
   {
@@ -3159,6 +3193,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "GitStatusResponse"
     ]
+  },
+  {
+    "id": "grantSessionAdminAccess",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/admin-access",
+    "request": [],
+    "response": [
+      "SessionAdminAccess"
+    ],
+    "browserOnly": "giving an agent admin access, or allowing it for the organization, is done by an owner or admin in person in the Opengeni app"
   },
   {
     "id": "grantWorkspaceCredits",
@@ -5560,6 +5604,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "revokeSessionAdminAccess",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/admin-access",
+    "request": [],
+    "response": [
+      "SessionAdminAccess"
+    ]
+  },
+  {
     "id": "revokeUserResourceGrant",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/user-resource-authorities/grants/:grantId",
@@ -6543,6 +6596,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "updateOrganizationAgentAdminAccess",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/agent-admin-access",
+    "request": [
+      "UpdateOrganizationAgentAdminAccessRequest"
+    ],
+    "response": [
+      "OrganizationAgentAdminAccess"
+    ],
+    "browserOnly": "giving an agent admin access, or allowing it for the organization, is done by an owner or admin in person in the Opengeni app"
+  },
+  {
     "id": "updateOrganizationApiKey",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/api-keys/:apiKeyId",
@@ -6573,6 +6638,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationMember"
+    ]
+  },
+  {
+    "id": "updateOrganizationModelDefaults",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/model-defaults",
+    "request": [
+      "UpdateOrganizationModelDefaultsRequest"
+    ],
+    "response": [
+      "OrganizationModelDefaults"
     ]
   },
   {

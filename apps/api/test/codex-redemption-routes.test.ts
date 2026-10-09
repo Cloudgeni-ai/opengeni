@@ -1845,119 +1845,133 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     expect(remaining?.count).toBe(0);
   }, 30_000);
 
-  test("timeout ambiguity survives reload/prepare and retries the same upstream key", async () => {
-    if (!available) return;
-    provider.ambiguousFailures = 0;
-    const api = app();
-    const access = await api.request("/v1/access/me", {
-      headers: { cookie: OWNER_COOKIE },
-    });
-    const context = (await access.json()) as AccessContext;
-    const workspaceId = context.defaultWorkspaceId!;
-    const key = Buffer.from(settings.environmentsEncryptionKey!, "base64");
-    const account = await upsertCodexSubscriptionCredential(client.db, {
-      accountId: context.defaultAccountId!,
-      workspaceId,
-      credentialEncrypted: encryptEnvironmentValue(
-        key,
-        JSON.stringify({
-          access_token: "token",
-          refresh_token: "refresh",
-          id_token: "id",
-        }),
-      ),
-      chatgptAccountId: `session-rotation-${crypto.randomUUID()}`,
-      scopes: null,
-      planType: "pro",
-      isFedramp: false,
-      expiresAt: new Date(Date.now() + 60 * 60_000),
-      lastRefreshAt: new Date(),
-      connectedBySubjectId: `user:${OWNER_USER_ID}`,
-    });
-    const attemptId = crypto.randomUUID();
-    const firstPreparation = await prepare(
-      api,
-      workspaceId,
-      account.id,
-      "credit-ambiguous",
-      attemptId,
-    );
-    const redeem = (confirmationToken: string, headers = browserHeaders()) =>
-      api.request(
-        `/v1/workspaces/${workspaceId}/codex/accounts/${account.id}/reset-credits/redeem`,
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            attemptId,
-            creditId: "credit-ambiguous",
-            confirmationToken,
-            confirmation: "REDEEM_USAGE_LIMIT_RESET",
+  test.each([false, true])(
+    "timeout ambiguity survives browser recovery or is fenced by graceful disconnect (disconnect=%s)",
+    async (disconnect) => {
+      if (!available) return;
+      provider.ambiguousFailures = 0;
+      const api = app();
+      const access = await api.request("/v1/access/me", {
+        headers: { cookie: OWNER_COOKIE },
+      });
+      const context = (await access.json()) as AccessContext;
+      const workspaceId = context.defaultWorkspaceId!;
+      const key = Buffer.from(settings.environmentsEncryptionKey!, "base64");
+      const account = await upsertCodexSubscriptionCredential(client.db, {
+        accountId: context.defaultAccountId!,
+        workspaceId,
+        credentialEncrypted: encryptEnvironmentValue(
+          key,
+          JSON.stringify({
+            access_token: "token",
+            refresh_token: "refresh",
+            id_token: "id",
           }),
-        },
-      );
-    const first = await redeem(firstPreparation.body.confirmationToken);
-    expect(first.status).toBe(503);
-    expect((await first.json()) as any).toMatchObject({
-      status: "ambiguous",
-      retryable: true,
-    });
-
-    const disconnectOne = await api.request(
-      `/v1/workspaces/${workspaceId}/codex/accounts/${account.id}`,
-      { method: "DELETE", headers: { cookie: OWNER_COOKIE } },
-    );
-    expect(disconnectOne.status).toBe(409);
-    const disconnectAll = await api.request(`/v1/workspaces/${workspaceId}/codex`, {
-      method: "DELETE",
-      headers: { cookie: OWNER_COOKIE },
-    });
-    expect(disconnectAll.status).toBe(409);
-
-    // A second authenticated browser session for the same owning human has no
-    // local/sessionStorage hint. The owner-scoped overview is the discovery
-    // authority and returns the exact durable attempt id without provider keys.
-    const rotatedOverview = await api.request(`/v1/workspaces/${workspaceId}/codex/overview`, {
-      headers: { cookie: ROTATED_OWNER_COOKIE },
-    });
-    expect(rotatedOverview.status).toBe(200);
-    const rotatedBody = (await rotatedOverview.json()) as any;
-    expect(rotatedBody.accounts[account.id].redemptions).toContainEqual(
-      expect.objectContaining({
+        ),
+        chatgptAccountId: `session-rotation-${crypto.randomUUID()}`,
+        scopes: null,
+        planType: "pro",
+        isFedramp: false,
+        expiresAt: new Date(Date.now() + 60 * 60_000),
+        lastRefreshAt: new Date(),
+        connectedBySubjectId: `user:${OWNER_USER_ID}`,
+      });
+      const attemptId = crypto.randomUUID();
+      const firstPreparation = await prepare(
+        api,
+        workspaceId,
+        account.id,
+        "credit-ambiguous",
         attemptId,
-        creditId: "credit-ambiguous",
-        status: "provider_started",
-        outcome: null,
-      }),
-    );
+      );
+      const redeem = (confirmationToken: string, headers = browserHeaders()) =>
+        api.request(
+          `/v1/workspaces/${workspaceId}/codex/accounts/${account.id}/reset-credits/redeem`,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              attemptId,
+              creditId: "credit-ambiguous",
+              confirmationToken,
+              confirmation: "REDEEM_USAGE_LIMIT_RESET",
+            }),
+          },
+        );
+      const first = await redeem(firstPreparation.body.confirmationToken);
+      expect(first.status).toBe(503);
+      expect((await first.json()) as any).toMatchObject({
+        status: "ambiguous",
+        retryable: true,
+      });
 
-    // The rotated session asks for a fresh five-minute confirmation and adopts
-    // the same logical attempt. Durable provider_started state skips a new
-    // availability preflight and reuses the one server key.
-    const resumedPreparation = await prepare(
-      api,
-      workspaceId,
-      account.id,
-      "credit-ambiguous",
-      attemptId,
-      browserHeaders(ROTATED_OWNER_COOKIE),
-    );
-    expect(resumedPreparation.body.resumable).toBe(true);
-    expect(resumedPreparation.body.recoveryStatus).toBe("provider_started");
-    const second = await redeem(
-      resumedPreparation.body.confirmationToken,
-      browserHeaders(ROTATED_OWNER_COOKIE),
-    );
-    expect(second.status).toBe(200);
-    expect((await second.json()) as any).toMatchObject({
-      status: "completed",
-      outcome: "alreadyRedeemed",
-      overview: null,
-    });
-    const bodies = provider.consumeBodies.filter((body) => body.credit_id === "credit-ambiguous");
-    expect(bodies).toHaveLength(2);
-    expect(new Set(bodies.map((body) => body.redeem_request_id)).size).toBe(1);
-  }, 60_000);
+      if (disconnect) {
+        const consumedBeforeDisconnect = provider.consumeBodies.length;
+        const disconnectOne = await api.request(
+          `/v1/workspaces/${workspaceId}/codex/accounts/${account.id}`,
+          { method: "DELETE", headers: { cookie: OWNER_COOKIE } },
+        );
+        expect(disconnectOne.status).toBe(200);
+        const disconnectAll = await api.request(`/v1/workspaces/${workspaceId}/codex`, {
+          method: "DELETE",
+          headers: { cookie: OWNER_COOKIE },
+        });
+        expect(disconnectAll.status).toBe(200);
+        const refused = await redeem(firstPreparation.body.confirmationToken);
+        expect(refused.status).toBeGreaterThanOrEqual(400);
+        expect(provider.consumeBodies).toHaveLength(consumedBeforeDisconnect);
+        const [durable] = await admin`
+        select status from codex_reset_redemption_attempts where id = ${attemptId}`;
+        expect(durable!.status).toBe("provider_started");
+        return;
+      }
+
+      // A second authenticated browser session for the same owning human has no
+      // local/sessionStorage hint. The owner-scoped overview is the discovery
+      // authority and returns the exact durable attempt id without provider keys.
+      const rotatedOverview = await api.request(`/v1/workspaces/${workspaceId}/codex/overview`, {
+        headers: { cookie: ROTATED_OWNER_COOKIE },
+      });
+      expect(rotatedOverview.status).toBe(200);
+      const rotatedBody = (await rotatedOverview.json()) as any;
+      expect(rotatedBody.accounts[account.id].redemptions).toContainEqual(
+        expect.objectContaining({
+          attemptId,
+          creditId: "credit-ambiguous",
+          status: "provider_started",
+          outcome: null,
+        }),
+      );
+
+      // The rotated session asks for a fresh five-minute confirmation and adopts
+      // the same logical attempt. Durable provider_started state skips a new
+      // availability preflight and reuses the one server key.
+      const resumedPreparation = await prepare(
+        api,
+        workspaceId,
+        account.id,
+        "credit-ambiguous",
+        attemptId,
+        browserHeaders(ROTATED_OWNER_COOKIE),
+      );
+      expect(resumedPreparation.body.resumable).toBe(true);
+      expect(resumedPreparation.body.recoveryStatus).toBe("provider_started");
+      const second = await redeem(
+        resumedPreparation.body.confirmationToken,
+        browserHeaders(ROTATED_OWNER_COOKIE),
+      );
+      expect(second.status).toBe(200);
+      expect((await second.json()) as any).toMatchObject({
+        status: "completed",
+        outcome: "alreadyRedeemed",
+        overview: null,
+      });
+      const bodies = provider.consumeBodies.filter((body) => body.credit_id === "credit-ambiguous");
+      expect(bodies).toHaveLength(2);
+      expect(new Set(bodies.map((body) => body.redeem_request_id)).size).toBe(1);
+    },
+    60_000,
+  );
 
   test("an agent the owner signed in (organization MCP) cannot bypass the core browser-human reset fence", async () => {
     if (!available) return;

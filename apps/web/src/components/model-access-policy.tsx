@@ -26,11 +26,13 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { useAppContext } from "@/context";
+import type { OrganizationModelDefaultsState } from "@/components/models/use-organization-model-defaults";
 
 /* ----------------------------------------------------------------------------
-   Allowed models: the one workspace-wide limit on which models new work may
-   use, on top of every connected account. A summary row on the Models page
-   opens a form page to change it.
+   Allowed models: the one limit on which models new work may use, on top of
+   every connected account. The organization sets it once for every
+   workspace; a workspace follows that until its admins give it its own list.
+   A summary row on the Models page opens a form page to change it.
    -------------------------------------------------------------------------- */
 
 export type ModelAccessPolicyDraft = {
@@ -38,18 +40,35 @@ export type ModelAccessPolicyDraft = {
   selectedModelIds: Set<string>;
   originalPolicy: WorkspaceModelAccessPolicy;
   policyVerdictComplete: boolean;
+  /** A workspace that follows its organization's list rather than its own. */
+  follow: boolean;
 };
+
+/** Whose list a page edits: one workspace's, or the organization's default. */
+export type ModelPolicyScope =
+  | { kind: "workspace"; workspaceId: string }
+  | {
+      kind: "organization";
+      /** The workspace whose catalog lists the models to choose from. */
+      workspaceId: string;
+      defaults: OrganizationModelDefaultsState;
+    };
+
+const UNRESTRICTED = { allowedProviders: null, allowedModels: null } as const;
 
 export function modelAccessPolicyDraft(
   policy: WorkspaceModelAccessPolicy,
   models: readonly WorkspaceModelCatalogModel[],
 ): ModelAccessPolicyDraft {
+  // Older servers don't say where a policy comes from; treat it as the workspace's own.
+  const follow = policy.source === "organization" || policy.source === "none";
   if (policy.allowedProviders === null && policy.allowedModels === null) {
     return {
       mode: "unrestricted",
       selectedModelIds: new Set(models.map((model) => model.id)),
       originalPolicy: policy,
       policyVerdictComplete: true,
+      follow,
     };
   }
 
@@ -67,6 +86,7 @@ export function modelAccessPolicyDraft(
       selectedModelIds,
       originalPolicy: policy,
       policyVerdictComplete,
+      follow,
     };
   }
 
@@ -75,13 +95,36 @@ export function modelAccessPolicyDraft(
     selectedModelIds: new Set(policy.allowedModels ?? []),
     originalPolicy: policy,
     policyVerdictComplete: true,
+    follow,
+  };
+}
+
+/** The organization's list a following workspace shows, as a draft. */
+function organizationDraft(
+  saved: ModelAccessPolicyDraft,
+  models: readonly WorkspaceModelCatalogModel[],
+): ModelAccessPolicyDraft {
+  const organization = saved.originalPolicy.organization ?? UNRESTRICTED;
+  return {
+    ...modelAccessPolicyDraft(
+      { ...organization, source: "organization", organization: saved.originalPolicy.organization },
+      models,
+    ),
+    originalPolicy: saved.originalPolicy,
   };
 }
 
 export function modelAccessPolicyRequest(
   draft: ModelAccessPolicyDraft,
 ): WorkspaceModelAccessPolicy {
-  if (draft.mode === "provider") return draft.originalPolicy;
+  if (draft.mode === "provider") {
+    // A following workspace that unpins keeps the organization's provider list.
+    const policy =
+      draft.follow || draft.originalPolicy.source !== "organization"
+        ? draft.originalPolicy
+        : (draft.originalPolicy.organization ?? draft.originalPolicy);
+    return { allowedProviders: policy.allowedProviders, allowedModels: policy.allowedModels };
+  }
   if (draft.mode === "unrestricted") {
     return { allowedProviders: null, allowedModels: null };
   }
@@ -92,11 +135,26 @@ export function modelAccessPolicyRequest(
 }
 
 function policyDraftKey(draft: ModelAccessPolicyDraft): string {
-  return JSON.stringify(modelAccessPolicyRequest(draft));
+  return JSON.stringify({ follow: draft.follow, policy: modelAccessPolicyRequest(draft) });
 }
 
 /** The saved policy and the catalog it applies to, reloaded when a connection changes. */
-export function useModelAccessPolicy(workspaceId: string) {
+export function useModelAccessPolicy(scopeOrWorkspaceId: string | ModelPolicyScope) {
+  const scope: ModelPolicyScope =
+    typeof scopeOrWorkspaceId === "string"
+      ? { kind: "workspace", workspaceId: scopeOrWorkspaceId }
+      : scopeOrWorkspaceId;
+  const workspaceId = scope.workspaceId;
+  const organizationDefaults = scope.kind === "organization" ? scope.defaults : null;
+  const organizationPolicy = organizationDefaults?.defaults ?? null;
+  const organizationKey = organizationDefaults
+    ? JSON.stringify([
+        organizationDefaults.loading,
+        Boolean(organizationDefaults.error),
+        organizationPolicy?.allowedProviders,
+        organizationPolicy?.allowedModels,
+      ])
+    : "";
   const client = useAppContext().client;
   const [models, setModels] = useState<WorkspaceModelCatalogModel[]>([]);
   const [saved, setSaved] = useState<ModelAccessPolicyDraft | null>(null);
@@ -109,14 +167,24 @@ export function useModelAccessPolicy(workspaceId: string) {
     const generation = ++loadGeneration.current;
     setLoading(true);
     setError(null);
+    // The organization's list arrives with its defaults; wait for them.
+    if (organizationDefaults?.loading) return;
     try {
       const [policy, catalog] = await Promise.all([
-        client.getWorkspaceModelAccessPolicy(workspaceId),
+        organizationDefaults
+          ? Promise.resolve<WorkspaceModelAccessPolicy | null>(
+              organizationPolicy && {
+                allowedProviders: organizationPolicy.allowedProviders,
+                allowedModels: organizationPolicy.allowedModels,
+              },
+            )
+          : client.getWorkspaceModelAccessPolicy(workspaceId),
         client.getWorkspaceModelCatalog(workspaceId),
       ]);
       if (generation !== loadGeneration.current) return;
       setModels(catalog.models);
-      setSaved(modelAccessPolicyDraft(policy, catalog.models));
+      setSaved(policy ? modelAccessPolicyDraft(policy, catalog.models) : null);
+      if (!policy && organizationDefaults?.error) throw organizationDefaults.error;
     } catch (caught) {
       if (generation !== loadGeneration.current) return;
       setModels([]);
@@ -125,7 +193,9 @@ export function useModelAccessPolicy(workspaceId: string) {
     } finally {
       if (generation === loadGeneration.current) setLoading(false);
     }
-  }, [client, workspaceId]);
+    // Reload when the organization's saved list changes, not on every render.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- keyed by the saved values
+  }, [client, workspaceId, organizationKey]);
 
   useEffect(() => {
     scopeRef.current = { client, mounted: true, workspaceId };
@@ -160,7 +230,16 @@ export function useModelAccessPolicy(workspaceId: string) {
         );
       };
       try {
-        await client.updateWorkspaceModelAccessPolicy(workspaceId, modelAccessPolicyRequest(draft));
+        if (organizationDefaults) {
+          await organizationDefaults.update({ modelPolicy: modelAccessPolicyRequest(draft) });
+        } else if (draft.follow) {
+          await client.deleteWorkspaceModelAccessPolicy(workspaceId);
+        } else {
+          await client.updateWorkspaceModelAccessPolicy(
+            workspaceId,
+            modelAccessPolicyRequest(draft),
+          );
+        }
       } catch (caught) {
         if (!isCurrentScope()) return false;
         // The form page says what to do and keeps an API error's facts in Technical details.
@@ -174,10 +253,18 @@ export function useModelAccessPolicy(workspaceId: string) {
       toast.success("Allowed models saved");
       return true;
     },
-    [client, load, workspaceId],
+    [client, load, organizationDefaults, workspaceId],
   );
 
-  return { models, saved, loading, error, reload: load, save };
+  return {
+    scope: scope.kind,
+    models,
+    saved,
+    loading: loading || Boolean(organizationDefaults?.loading),
+    error,
+    reload: load,
+    save,
+  };
 }
 
 export type ModelAccessPolicyState = ReturnType<typeof useModelAccessPolicy>;
@@ -199,13 +286,31 @@ export function allowedModelsSummary(
   return count === 0 ? "No models" : count === 1 ? "1 model" : `${count} models`;
 }
 
+/**
+ * Where a workspace's list comes from, in words, or null when the server
+ * doesn't say (or this is the organization's own list).
+ */
+export function allowedModelsSource(
+  state: Pick<ModelAccessPolicyState, "saved" | "scope">,
+  organizationName: string | undefined,
+): string | null {
+  const saved = state.saved;
+  if (state.scope !== "workspace" || !saved?.originalPolicy.source || !organizationName) {
+    return null;
+  }
+  return saved.follow ? `Following ${organizationName}.` : "Changed for this workspace.";
+}
+
 /** The Allowed models row on the Models page: opens its page. */
 export function AllowedModelsRow({
   state,
   onEdit,
+  organizationName,
 }: {
   state: ModelAccessPolicyState;
   onEdit: () => void;
+  /** Names what a workspace follows; omit on the organization's own row. */
+  organizationName?: string | undefined;
 }) {
   if (state.loading && !state.saved) return <SettingRowSkeleton />;
   if (state.error) {
@@ -218,13 +323,18 @@ export function AllowedModelsRow({
     );
   }
   const blocked = state.saved?.mode === "selected" && state.saved.selectedModelIds.size === 0;
+  const source = allowedModelsSource(state, organizationName);
   return (
     <SettingNavRow
       label="Allowed models"
       description={
         blocked
-          ? "No model is allowed, so new work can't start."
-          : "The models people can pick for new chats and schedules."
+          ? state.scope === "organization"
+            ? "No model is allowed, so workspaces that follow this can't start new work."
+            : "No model is allowed, so new work can't start."
+          : source
+            ? `The models people can pick for new chats and schedules. ${source}`
+            : "The models people can pick for new chats and schedules."
       }
       value={allowedModelsSummary(state)}
       onOpen={onEdit}
@@ -232,17 +342,32 @@ export function AllowedModelsRow({
   );
 }
 
-/** The form page. */
+/** The form page, for one workspace or for the organization's default. */
 export function AllowedModelsFormPage({
   workspaceId,
   canManage,
   onClose,
+  organizationName,
+  organizationDefaults,
 }: {
+  /** The workspace whose list this edits, or whose catalog the organization's list uses. */
   workspaceId: string;
   canManage: boolean;
   onClose: () => void;
+  /** Names the organization a workspace can follow. */
+  organizationName?: string | undefined;
+  /** Edit the organization's default instead of one workspace's list. */
+  organizationDefaults?: OrganizationModelDefaultsState | undefined;
 }) {
-  const state = useModelAccessPolicy(workspaceId);
+  const state = useModelAccessPolicy(
+    organizationDefaults
+      ? { kind: "organization", workspaceId, defaults: organizationDefaults }
+      : { kind: "workspace", workspaceId },
+  );
+  const organizationScope = Boolean(organizationDefaults);
+  // A workspace can follow its organization once the server reports where its list comes from.
+  const canFollow = !organizationScope && Boolean(state.saved?.originalPolicy.source);
+  const organizationLabel = organizationName ?? "your organization";
   const { models, saved } = state;
   const [draft, setDraft] = useState<ModelAccessPolicyDraft | null>(null);
   const [pendingReplacementMode, setPendingReplacementMode] = useState<
@@ -302,9 +427,45 @@ export function AllowedModelsFormPage({
     });
   }
 
-  const providerRestrictionActive = draft?.originalPolicy.allowedProviders !== null;
+  // Choosing exact models replaces a provider limit; say so before saving.
+  const providerRestrictionActive =
+    draft !== null && !draft.follow && draft.originalPolicy.allowedProviders !== null;
   const visiblePolicyAllowedCount = models.filter((model) => model.policyAllowed).length;
-  const disabled = !canManage;
+  const following = canFollow && draft?.follow === true;
+  const disabled = !canManage || following;
+
+  function setFollow(follow: boolean) {
+    setDraft((current) => {
+      if (!current || !saved) return current;
+      // Following shows the organization's list; changing it starts from that list.
+      return follow
+        ? { ...organizationDraft(saved, models), follow: true }
+        : { ...current, follow: false };
+    });
+  }
+
+  const followRow = canFollow ? (
+    <SettingRowGroup className="-mt-3">
+      <SettingRow
+        label={`Use ${organizationLabel}’s allowed models`}
+        description={
+          following
+            ? `Changes ${organizationLabel} makes apply here too. Turn this off to choose this workspace’s own models.`
+            : "This workspace has its own list."
+        }
+        control={
+          <Switch
+            checked={following}
+            disabled={!canManage}
+            disabledReason={
+              !canManage ? "Only workspace admins can change Allowed models." : undefined
+            }
+            onCheckedChange={setFollow}
+          />
+        }
+      />
+    </SettingRowGroup>
+  ) : null;
 
   let body: ReactNode = null;
   if (state.error) {
@@ -320,8 +481,8 @@ export function AllowedModelsFormPage({
         Nothing was changed.
       </ErrorMessage>
     );
-  } else if (draft?.mode === "provider") {
-    body = draft.policyVerdictComplete ? (
+  } else if (draft?.mode === "provider" && organizationScope) {
+    body = (
       <Notice
         tone="info"
         title="Limited to whole providers"
@@ -348,9 +509,41 @@ export function AllowedModelsFormPage({
           ) : undefined
         }
       >
-        This workspace allows {visiblePolicyAllowedCount} of {models.length} models by provider, and
-        may also allow future models from the same providers. It was set through the API; the
-        providers themselves aren't shown here.
+        {organizationLabel} allows models by provider, including future models from the same
+        providers. It was set through the API; the providers themselves aren't shown here.
+      </Notice>
+    );
+  } else if (draft?.mode === "provider") {
+    const providerNotice = draft.policyVerdictComplete ? (
+      <Notice
+        tone="info"
+        title="Limited to whole providers"
+        action={
+          canManage ? (
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setPendingReplacementMode("unrestricted")}
+              >
+                Allow all instead
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setPendingReplacementMode("selected")}
+              >
+                Choose exact models
+              </Button>
+            </div>
+          ) : undefined
+        }
+      >
+        {following ? organizationLabel : "This workspace"} allows {visiblePolicyAllowedCount} of{" "}
+        {models.length} models by provider, and may also allow future models from the same
+        providers. It was set through the API; the providers themselves aren't shown here.
       </Notice>
     ) : (
       <Notice tone="waiting" title="Refresh after the update finishes">
@@ -358,9 +551,18 @@ export function AllowedModelsFormPage({
         can't be replaced until you refresh.
       </Notice>
     );
+    body = followRow ? (
+      <div className="flex min-w-0 flex-col gap-4">
+        {followRow}
+        {providerNotice}
+      </div>
+    ) : (
+      providerNotice
+    );
   } else if (draft) {
     body = (
       <div className="flex min-w-0 flex-col gap-4">
+        {followRow}
         {providerRestrictionActive ? (
           <Notice
             tone="waiting"
@@ -388,7 +590,13 @@ export function AllowedModelsFormPage({
                 checked={draft.mode === "unrestricted"}
                 disabled={disabled}
                 disabledReason={
-                  disabled ? "Only workspace admins can change Allowed models." : undefined
+                  following
+                    ? `Follows ${organizationLabel}. Turn off “Use ${organizationLabel}’s allowed models” to change it.`
+                    : disabled
+                      ? organizationScope
+                        ? "Only organization owners and admins can change this."
+                        : "Only workspace admins can change Allowed models."
+                      : undefined
                 }
                 onCheckedChange={(next) => setMode(next ? "unrestricted" : "selected")}
               />
@@ -400,7 +608,7 @@ export function AllowedModelsFormPage({
             groups={groups}
             customIds={customIds}
             selected={draft.selectedModelIds}
-            canManage={canManage}
+            canManage={canManage && !following}
             onToggle={setModelSelected}
             onAdd={(modelId) => setModelSelected(modelId, true)}
           />
@@ -413,20 +621,28 @@ export function AllowedModelsFormPage({
     <>
       <ModelsFormPage
         title="Allowed models"
-        description="Choose which models people can pick for new chats and schedules."
+        description={
+          organizationScope
+            ? `Choose which models people can pick in every workspace. A workspace can choose its own instead.`
+            : "Choose which models people can pick for new chats and schedules."
+        }
         onClose={onClose}
         loading={state.loading && !saved}
         submitLabel="Save"
         pendingLabel="Saving…"
-        submitDisabled={!canManage || !dirty || draft?.mode === "provider"}
+        submitDisabled={
+          !canManage || !dirty || (draft?.mode === "provider" && !(draft.follow !== saved?.follow))
+        }
         // The footer shows only while there is something to save.
         className={canManage && dirty ? undefined : "[&>form>footer]:hidden"}
         footerStart={
-          draft && draft.mode !== "provider"
-            ? draft.mode === "unrestricted"
-              ? "Every model allowed"
-              : `${draft.selectedModelIds.size} ${draft.selectedModelIds.size === 1 ? "model" : "models"} allowed`
-            : null
+          following
+            ? `Follows ${organizationLabel}`
+            : draft && draft.mode !== "provider"
+              ? draft.mode === "unrestricted"
+                ? "Every model allowed"
+                : `${draft.selectedModelIds.size} ${draft.selectedModelIds.size === 1 ? "model" : "models"} allowed`
+              : null
         }
         onSubmit={async () => {
           if (!draft || !canManage) return false;

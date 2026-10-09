@@ -489,9 +489,9 @@ describe("Codex routes with an enabled cutover", () => {
       expect({ reason, status: refused.status }).toEqual({ reason, status });
     }
     // The cutover can change while token exchange is in flight. Re-read it
-    // before deciding which writer may run; no stale legacy write is allowed.
+    // before deciding whether its core writer may still run.
     let gateReads = 0;
-    mock("readCodexCutoverDisposition", async () => (++gateReads === 1 ? "legacy" : "core"));
+    mock("readCodexCutoverDisposition", async () => (++gateReads === 1 ? "core" : "maintenance"));
     result = {
       kind: "connected",
       id: CONNECTION,
@@ -499,7 +499,7 @@ describe("Codex routes with an enabled cutover", () => {
       ownership: "shared",
       wake: { accountId: ACCOUNT, reason: "core_codex_connected" },
     };
-    expect((await poll()).status).toBe(200);
+    expect((await poll()).status).toBe(503);
     expect(gateReads).toBe(2);
   });
 
@@ -874,7 +874,7 @@ describe("organization Codex routes with a cutover row", () => {
   const orgPath = `/v1/organizations/${ACCOUNT}/codex`;
   const orgAdmin = { accountId: ACCOUNT, workspaceId: null, subjectId: "user:org-admin" };
 
-  for (const mode of ["legacy", "core"] as const) {
+  for (const mode of ["core"] as const) {
     test(`organization usage keeps administrator authority outside workspace routing (${mode})`, async () => {
       cutover(mode);
       const administrator = mock("assertOrganizationCodexAdministrator", async () => undefined);

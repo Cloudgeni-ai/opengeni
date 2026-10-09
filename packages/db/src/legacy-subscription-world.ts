@@ -318,14 +318,22 @@ export async function loadLegacySubscriptionPlacementWorld(
         select s.visibility, s.owner_subject_id, s.codex_compaction_mode,
           get_workspace_kind(${request.accountId}::uuid, ${request.workspaceId}::uuid)
             as workspace_kind,
-          policy.allowed_providers, policy.allowed_models,
-          (policy.workspace_id is not null) as has_model_policy,
+          -- The workspace's own policy, else its organization's default.
+          case when policy.workspace_id is not null then policy.allowed_providers
+            else organization_defaults.allowed_providers end as allowed_providers,
+          case when policy.workspace_id is not null then policy.allowed_models
+            else organization_defaults.allowed_models end as allowed_models,
+          (policy.workspace_id is not null
+            or organization_defaults.allowed_providers is not null
+            or organization_defaults.allowed_models is not null) as has_model_policy,
           (select max(fact.occurred_at) from model_call_facts fact
             where fact.workspace_id = ${request.workspaceId}::uuid
               and fact.session_id = s.id) as last_model_call_at
         from sessions s
         left join workspace_model_policies policy
           on policy.workspace_id = s.workspace_id
+        left join organization_model_defaults organization_defaults
+          on organization_defaults.account_id = s.account_id
         where s.workspace_id = ${request.workspaceId}::uuid
           and s.id = ${request.sessionId}::uuid
         limit 1

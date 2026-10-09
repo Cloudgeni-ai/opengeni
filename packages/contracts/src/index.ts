@@ -918,6 +918,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "project_reorder",
   "project_delete",
   "session_set_project",
+  "admin_actions_search",
+  "admin_action_describe",
+  "admin_action_call",
   "rig_list",
   "rig_get",
   "rig_propose_change",
@@ -1184,6 +1187,20 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
 } as const satisfies Partial<Record<FirstPartyMcpToolName, readonly [string, string]>>;
 
 /**
+ * Tools a session has only while it has admin access: the organization's
+ * actions, run as the owner or admin who gave it. Admin access, not the
+ * session's tool selection, decides whether they are there.
+ */
+export const SESSION_ADMIN_ACCESS_TOOL_NAMES = [
+  "admin_actions_search",
+  "admin_action_describe",
+  "admin_action_call",
+] as const satisfies readonly FirstPartyMcpToolName[];
+export const SESSION_ADMIN_ACCESS_TOOL_NAME_SET: ReadonlySet<string> = new Set<string>(
+  SESSION_ADMIN_ACCESS_TOOL_NAMES,
+);
+
+/**
  * Connector-wide tools are explicit-only except prepared bot sending. Ordinary
  * chats may select the bot's explicit channel without borrowing a personal
  * account; accepted turn/task policies and permission ceilings remain fixed.
@@ -1199,7 +1216,8 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
       name === "slack_bot_prepare_message" ||
       name === "slack_bot_send_prepared_message") &&
     !name.startsWith("fiken_") &&
-    !name.startsWith("atlassian_"),
+    !name.startsWith("atlassian_") &&
+    !SESSION_ADMIN_ACCESS_TOOL_NAME_SET.has(name),
 ) satisfies readonly FirstPartyMcpToolName[];
 
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
@@ -2428,7 +2446,13 @@ export const WorkspaceModelCompactionThresholdsPatch = z
 
 export const ModelCompactionPolicy = z.object({
   defaultTokens: z.number().int().nonnegative(),
+  /** This scope's own preference; null follows the inherited value or the model default. */
   overrideTokens: ModelCompactionTokenThreshold.nullable(),
+  /**
+   * The organization's preference a workspace follows while it sets none of
+   * its own. Absent or null on an organization-scope projection.
+   */
+  organizationTokens: ModelCompactionTokenThreshold.nullable().optional(),
   effectiveTokens: z.number().int().nonnegative(),
   minimumTokens: z.number().int().nonnegative(),
   maximumTokens: z.number().int().nonnegative(),
@@ -2455,11 +2479,109 @@ export function workspaceModelCompactionThreshold(
   return parsed.success ? parsed.data : null;
 }
 
+/**
+ * Model defaults an organization owner or admin sets once for every workspace
+ * in the organization. Each workspace follows them until it sets its own
+ * value; a workspace value always wins, field by field and model by model.
+ * Subscriptions and keys are not defaults: they stay organization resources
+ * that are shared with workspaces.
+ */
+export const OrganizationModelDefaults = z.object({
+  /** Model and reasoning for new chats and schedules; null leaves it automatic. */
+  sessionDefaults: WorkspaceSessionDefaults.nullable(),
+  /** Provider allowlist for workspaces without their own policy; null allows every provider. */
+  allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable(),
+  /** Exact model allowlist for workspaces without their own policy; null allows every model. */
+  allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable(),
+  /** Automatic compaction trigger by exact model id. */
+  modelCompactionThresholds: z.record(z.string().min(1).max(512), ModelCompactionTokenThreshold),
+  updatedAt: z.string().nullable(),
+});
+export type OrganizationModelDefaults = z.infer<typeof OrganizationModelDefaults>;
+
+export const EMPTY_ORGANIZATION_MODEL_DEFAULTS: OrganizationModelDefaults = Object.freeze({
+  sessionDefaults: null,
+  allowedProviders: null,
+  allowedModels: null,
+  modelCompactionThresholds: Object.freeze({}) as Record<string, number>,
+  updatedAt: null,
+});
+
+/**
+ * PATCH body for organization model defaults. Each field is independent:
+ * omitted keeps it, `sessionDefaults: null` makes it automatic again,
+ * `modelPolicy` replaces both allowlists at once (null allows everything),
+ * and compaction merges by exact model id (null resets just that model).
+ */
+export const UpdateOrganizationModelDefaultsRequest = z
+  .object({
+    sessionDefaults: WorkspaceSessionDefaults.nullable().optional(),
+    modelPolicy: z
+      .object({
+        allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable().optional(),
+        allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable().optional(),
+      })
+      .nullable()
+      .optional(),
+    modelCompactionThresholds: WorkspaceModelCompactionThresholdsPatch.optional(),
+  })
+  .strict();
+export type UpdateOrganizationModelDefaultsRequest = z.infer<
+  typeof UpdateOrganizationModelDefaultsRequest
+>;
+
+/**
+ * Whether owners and admins may give an agent session admin access. Off by
+ * default; turning it off ends every session's admin access.
+ */
+export const OrganizationAgentAdminAccess = z.object({
+  sessionAdminAccessAllowed: z.boolean(),
+  updatedAt: z.string().nullable(),
+});
+export type OrganizationAgentAdminAccess = z.infer<typeof OrganizationAgentAdminAccess>;
+
+export const UpdateOrganizationAgentAdminAccessRequest = z
+  .object({ sessionAdminAccessAllowed: z.boolean() })
+  .strict();
+export type UpdateOrganizationAgentAdminAccessRequest = z.infer<
+  typeof UpdateOrganizationAgentAdminAccessRequest
+>;
+
+/**
+ * A session's admin access as the viewer sees it. While `active`, the agent
+ * in this session can do what `grantedBy` can manage across the
+ * organization, checked live on every action.
+ */
+export const SessionAdminAccess = z.object({
+  active: z.boolean(),
+  grantedBy: z.object({ subjectId: z.string(), name: z.string().nullable() }).nullable(),
+  grantedAt: z.string().nullable(),
+  /** The organization allows admin access for sessions. */
+  allowed: z.boolean(),
+  /** The viewer may turn it on: an owner or admin, in person, on their own session. */
+  canGrant: z.boolean(),
+  /** The viewer may turn it off. */
+  canRevoke: z.boolean(),
+});
+export type SessionAdminAccess = z.infer<typeof SessionAdminAccess>;
+
+/** The organization's compaction preference for one exact model, or null. */
+export function organizationModelCompactionThreshold(
+  defaults: Pick<OrganizationModelDefaults, "modelCompactionThresholds"> | null | undefined,
+  modelId: string,
+): number | null {
+  const values = defaults?.modelCompactionThresholds;
+  if (!values || !Object.hasOwn(values, modelId)) return null;
+  const parsed = ModelCompactionTokenThreshold.safeParse(values[modelId]);
+  return parsed.success ? parsed.data : null;
+}
+
 export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
     memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
-    sessionDefaults: WorkspaceSessionDefaults.optional(),
+    // Null (written by no current release) reads as unset, never as a bad bag.
+    sessionDefaults: WorkspaceSessionDefaults.nullable().optional(),
     sessionToolDefaults: WorkspaceSessionToolDefaults.optional(),
     /** Preferred workspace voice-input toggle. */
     voiceInput: WorkspaceVoiceInputSettings.optional(),
@@ -2665,7 +2787,8 @@ export const UpdateWorkspaceSettingsRequest = z
   .object({
     memoryEnabled: z.boolean().optional(),
     memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
-    sessionDefaults: WorkspaceSessionDefaults.optional(),
+    // null removes the workspace's own default so it follows the organization's.
+    sessionDefaults: WorkspaceSessionDefaults.nullable().optional(),
     sessionToolDefaults: WorkspaceSessionToolDefaultsPatch.optional(),
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /** @deprecated Prefer `voiceInput`. Kept for one compatibility release. */
@@ -2699,6 +2822,25 @@ export const UpdateWorkspaceModelPolicyRequest = z.object({
   allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable().optional(),
 });
 export type UpdateWorkspaceModelPolicyRequest = z.infer<typeof UpdateWorkspaceModelPolicyRequest>;
+
+/**
+ * The model policy a workspace runs with (`allowedProviders`/`allowedModels`)
+ * and where it comes from: its own saved policy, the organization's default it
+ * follows, or no restriction at all. `organization` is what the workspace would
+ * follow after removing its own policy.
+ */
+export const WorkspaceModelPolicyResponse = z.object({
+  allowedProviders: z.array(z.string()).nullable(),
+  allowedModels: z.array(z.string()).nullable(),
+  source: z.enum(["workspace", "organization", "none"]),
+  organization: z
+    .object({
+      allowedProviders: z.array(z.string()).nullable(),
+      allowedModels: z.array(z.string()).nullable(),
+    })
+    .nullable(),
+});
+export type WorkspaceModelPolicyResponse = z.infer<typeof WorkspaceModelPolicyResponse>;
 
 export const WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH = 238;
 
@@ -18703,12 +18845,13 @@ export type WorkspaceModelCatalogModel = z.infer<typeof WorkspaceModelCatalogMod
 
 /**
  * Why a new chat or scheduled task without an explicit model gets its default:
- * a saved workspace default, the first usable connected subscription model, the
- * configured Opengeni credits model while the organization holds a credit
- * balance, or the deployment default.
+ * a saved workspace default, the organization's default the workspace follows,
+ * the first usable connected subscription model, the configured Opengeni
+ * credits model while the organization holds a credit balance, or the
+ * deployment default.
  */
 export const DefaultModelSelectionSource = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.enum(["workspace", "subscription", "credits", "deployment"]),
+  z.enum(["workspace", "organization", "subscription", "credits", "deployment"]),
 );
 export type DefaultModelSelectionSource = z.infer<typeof DefaultModelSelectionSource>;
 

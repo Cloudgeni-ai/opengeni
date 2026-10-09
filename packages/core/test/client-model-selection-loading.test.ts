@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { configuredModels, withCodexCatalogProvider } from "@opengeni/config";
+import { EMPTY_ORGANIZATION_MODEL_DEFAULTS } from "@opengeni/contracts";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { requireLimit } from "../src/billing/limits";
@@ -69,6 +70,9 @@ describe("fresh model admission versus live discovery", () => {
       spyOn(opengeniDb, "workspaceClaudeSubscriptionActiveForAuthority").mockResolvedValue(false),
       restrictions,
       policy,
+      spyOn(opengeniDb, "getOrganizationModelDefaults").mockResolvedValue(
+        EMPTY_ORGANIZATION_MODEL_DEFAULTS,
+      ),
       spyOn(codexAvailability, "loadWorkspaceCodexCatalogReadiness").mockImplementation(
         async (_db, _settings, _context, options) => ({
           active,

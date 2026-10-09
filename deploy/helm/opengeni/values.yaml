@@ -1,3 +1,18 @@
+# Optional independent operator job; never uses application/runtime credentials.
+# Retains latest nightly + a Sunday weekly checkpoint. See docs/backups.md.
+backup:
+  enabled: false
+  schedule: "15 3 * * *"
+  checkSchedule: "0 12 * * *"
+  timeZone: UTC
+  existingSecret: ""
+  existingClaim: ""
+  image:
+    repository: opengeni-backup
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+
 global:
   # Default to the public GHCR images so a vanilla `helm install` pulls the
   # released Opengeni images with no extra config. Per-cloud example values

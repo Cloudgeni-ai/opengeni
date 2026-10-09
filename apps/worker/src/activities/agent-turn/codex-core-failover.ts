@@ -40,15 +40,16 @@ export function coreCodexFailoverDisposition(
 }
 
 /**
- * Settle a recorded core refusal by re-placing the same turn, or stop it at
- * the bound. Returns null when automatic replay is unsafe (the checkpoint
+ * Re-place the same turn after graceful source disappearance, without a
+ * refusal/quarantine budget, or settle a recorded refusal within its bound.
+ * Returns null when automatic replay is unsafe (the checkpoint
  * did not become durable, or the bound could not be read): the caller then
  * fails the turn with its typed copy instead.
  */
 export async function failOverCoreCodexTurn(
   deps: TurnFailureDeps,
   core: CodexSubscriptionCoreTurn,
-  refusal: CodexCredentialFailure,
+  refusal: CodexCredentialFailure | "source_disconnected",
 ): Promise<RunAgentTurnResult | null> {
   const {
     error,
@@ -73,6 +74,7 @@ export async function failOverCoreCodexTurn(
   try {
     await flushRuntimeBatcher();
     await historySink.reconcileConversationTruth({ requireDurable: true });
+    await core.requests?.checkpoint();
   } catch {
     observability.incrementCounter({
       name: "opengeni_codex_failover_checkpoints_total",
@@ -81,11 +83,17 @@ export async function failOverCoreCodexTurn(
     });
     return null;
   }
-  const refusals = await countSubscriptionCoreCodexTurnRefusals(db, core.identity).catch(
-    () => null,
-  );
+  // Logical disconnect/lease loss never proves an outstanding fetch quiescent.
+  if (core.requests && !core.requests.canRecover()) return null;
+  if (core.titleRequests && !core.titleRequests.canRecover()) return null;
+  const disconnected = refusal === "source_disconnected";
+  const refusals = disconnected
+    ? null
+    : await countSubscriptionCoreCodexTurnRefusals(db, core.identity).catch(() => null);
   const disposition =
-    refusal.origin !== undefined ? "failover" : coreCodexFailoverDisposition(refusals);
+    disconnected || refusal.origin !== undefined
+      ? "failover"
+      : coreCodexFailoverDisposition(refusals);
   observability.incrementCounter({
     name: "opengeni_codex_failover_settlements_total",
     help: "Atomic Codex failover settlements by outcome.",
@@ -140,12 +148,16 @@ export async function failOverCoreCodexTurn(
     detail: {
       provider: "codex-subscription",
       credentialId: core.connectionId,
-      failureKind: refusal.kind,
+      failureKind: disconnected ? "source_disconnected" : refusal.kind,
       // The legacy detail shape counts switches: refusal n (below the
       // bound) starts switch n of at most limit - 1. The exhausted failure
       // reports the refusals themselves (refusals / maxRefusals).
-      failoverCount: refusals,
-      maxFailovers: SUBSCRIPTION_CORE_CODEX_TURN_REFUSAL_LIMIT - 1,
+      ...(disconnected
+        ? {}
+        : {
+            failoverCount: refusals,
+            maxFailovers: SUBSCRIPTION_CORE_CODEX_TURN_REFUSAL_LIMIT - 1,
+          }),
     },
   });
   if (recovery.action === "stale") {

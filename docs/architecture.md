@@ -1237,6 +1237,12 @@ Claude account pools: [setup and quotas](model-providers.md#claude-subscription-
 
 Codex requires exact live credential leases and frozen accepted source/rotation
 policy; recovery preserves that policy while current health governs capacity.
+Shared-core local disconnect fences each physical request at an exact one-shot
+reservation, removes persisted secrets atomically, and preserves already-admitted
+response custody. Expiry and unknown outcomes are not remote completion receipts;
+the next request checkpoints and re-places the same continuation. See
+[`request-level disconnect`](design/codex-graceful-disconnect.md) for the admission
+boundary, reconnect isolation and unsupported provider recovery.
 [Allocator and picker rules](codex-subscription-rotation.md).
 [Migration 0492 rollout](codex-subscription-rotation.md) requires drained processes and matching binaries.
 
@@ -1700,7 +1706,9 @@ Native macOS operations drain Cocoa pools and clear pending capture starts;
 desktop discovery is independent of semantic inspection.
 
 `ComputerBackend` supplies desktop operations behind the shared `ComputerDriver`.
-Opt-in [CUA](../packages/browserd/CUA-PILOT.md) includes Windows semantic actions; native remains default.
+[CUA](../packages/browserd/CUA-PILOT.md) is the default for macOS and explicitly
+selected isolated Linux desktops. Linux host desktops and Windows retain the
+native default; explicit backend configuration is retained.
 
 Native framed Desktop input negotiates `pointerClickContinuation`. A supported
 viewer sends its first click immediately; the real second human click may be
@@ -2208,6 +2216,14 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Advanced in-process embedding | `packages/core/`, `apps/api/`, `apps/worker/` | [`embedding.md`](embedding.md) |
 
 ### Operations
+
+The standalone database backup runner (`scripts/backup.ts`, `scripts/backup/`)
+uses PostgreSQL clients, Age and rclone without depending on the API or worker.
+Deployment-owned scheduling and a dedicated credential boundary keep recovery
+available during application failure. Its optional Helm CronJobs share a
+persistent checkpoint/lock volume; the independent operator image is published
+separately from runtime images. See [database backups](backups.md) for retention,
+validation, isolated restoration and coverage limits.
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |

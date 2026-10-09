@@ -3517,6 +3517,9 @@ export type FirstPartyMcpToolName =
   | "project_reorder"
   | "project_delete"
   | "session_set_project"
+  | "admin_actions_search"
+  | "admin_action_describe"
+  | "admin_action_call"
   | "rig_list"
   | "rig_get"
   | "rig_propose_change"
@@ -3531,6 +3534,9 @@ export type FirstPartyMcpToolName =
   | "command_wait"
   | "session_create"
   | "session_send_message"
+  | "session_message_status"
+  | "session_target_get"
+  | "session_target_set"
   | "session_pause"
   | "session_resume"
   | "session_steer"
@@ -3791,7 +3797,10 @@ export type WorkspaceModelCatalogModel = ClientModel & {
   compactionPolicy?:
     | {
         defaultTokens: number;
+        /** This workspace's own limit; null follows the organization's or the model's default. */
         overrideTokens: number | null;
+        /** The organization's limit this workspace follows while it sets none. */
+        organizationTokens?: number | null | undefined;
         effectiveTokens: number;
         minimumTokens: number;
         maximumTokens: number;
@@ -3805,7 +3814,12 @@ export type WorkspaceModelCatalogModel = ClientModel & {
 };
 
 /** Why a new chat or scheduled task without an explicit model gets its default. */
-export type DefaultModelSelectionSource = "workspace" | "subscription" | "credits" | "deployment";
+export type DefaultModelSelectionSource =
+  | "workspace"
+  | "organization"
+  | "subscription"
+  | "credits"
+  | "deployment";
 
 export type DefaultModelSelection = {
   model: string;
@@ -3955,6 +3969,65 @@ export type DeleteOrganizationProviderCustomModelRequest = DeleteWorkspaceGatewa
 export type WorkspaceModelAccessPolicy = {
   allowedProviders: string[] | null;
   allowedModels: string[] | null;
+  /**
+   * Where the policy comes from: the workspace's own, the organization's
+   * default it follows, or no restriction. Absent from older servers.
+   */
+  source?: "workspace" | "organization" | "none" | undefined;
+  /** The organization default the workspace follows without its own policy. */
+  organization?: { allowedProviders: string[] | null; allowedModels: string[] | null } | null;
+};
+
+/**
+ * Model defaults every workspace in an organization follows until it sets its
+ * own (`GET/PATCH /v1/organizations/:id/model-defaults`, owners and admins).
+ */
+export type OrganizationModelDefaults = {
+  sessionDefaults: { model: string; reasoningEffort: ReasoningEffort } | null;
+  allowedProviders: string[] | null;
+  allowedModels: string[] | null;
+  modelCompactionThresholds: Record<string, number>;
+  updatedAt: string | null;
+};
+
+/** Field-by-field update; compaction merges by model id and null resets one model. */
+export type UpdateOrganizationModelDefaultsRequest = {
+  sessionDefaults?: { model: string; reasoningEffort: ReasoningEffort } | null | undefined;
+  modelPolicy?:
+    | { allowedProviders?: string[] | null | undefined; allowedModels?: string[] | null }
+    | null
+    | undefined;
+  modelCompactionThresholds?: Record<string, number | null> | undefined;
+};
+
+/**
+ * Whether owners and admins may give agent sessions admin access. Off by
+ * default; turning it off ends every session's admin access.
+ */
+export type OrganizationAgentAdminAccess = {
+  sessionAdminAccessAllowed: boolean;
+  updatedAt: string | null;
+};
+
+export type UpdateOrganizationAgentAdminAccessRequest = {
+  sessionAdminAccessAllowed: boolean;
+};
+
+/**
+ * A session's admin access as the viewer sees it. While `active`, the agent
+ * in this session can do what `grantedBy` can manage across the
+ * organization, checked live on every action.
+ */
+export type SessionAdminAccess = {
+  active: boolean;
+  grantedBy: { subjectId: string; name: string | null } | null;
+  grantedAt: string | null;
+  /** The organization allows admin access for sessions. */
+  allowed: boolean;
+  /** The viewer may turn it on: an owner or admin, in person, on their own session. */
+  canGrant: boolean;
+  /** The viewer may turn it off. */
+  canRevoke: boolean;
 };
 
 /** Full replacement body for `PUT /v1/workspaces/:id/model-policy`. */
@@ -5250,7 +5323,8 @@ export type UpdateWorkspaceSettingsRequest = {
   modelCompactionThresholds?: Record<string, number | null>;
   memoryEnabled?: boolean | undefined;
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
-  sessionDefaults?: WorkspaceSessionDefaults | undefined;
+  /** null removes the workspace's own default so it follows its organization's. */
+  sessionDefaults?: WorkspaceSessionDefaults | null | undefined;
   sessionToolDefaults?:
     | {
         mcpServerIds?: string[] | null;

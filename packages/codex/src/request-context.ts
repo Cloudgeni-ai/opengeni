@@ -74,7 +74,18 @@ export type CodexRequestOpaqueArtifacts = {
  * dispatched. Errors are intentionally not classified here: the owning worker
  * must receive typed lease-loss failures unchanged.
  */
-export type CodexBeforeProviderDispatch = () => Promise<void> | void;
+export type CodexProviderRequestIdentity = { requestId: string; transportAttempt: number };
+
+export type CodexProviderRequestSettlement = CodexProviderRequestIdentity & {
+  /** Transport evidence only; response_received is NOT a durable history checkpoint. */
+  outcome: "response_received" | "refused" | "unknown";
+};
+
+// The optional argument preserves credit-admission consumers (notably images)
+// which do not dispatch through the Responses transport and own their own fence.
+export type CodexBeforeProviderDispatch = (
+  request?: CodexProviderRequestIdentity,
+) => Promise<void> | void;
 
 export type CodexRequestPreparationPhase =
   | "transport_entry"
@@ -128,6 +139,8 @@ export type CodexRequestContext = {
    * immediately before each actual provider dispatch, including auth retries.
    */
   beforeProviderDispatch?: CodexBeforeProviderDispatch;
+  /** Independent of audit delivery. Unknown never proves physical quiescence. */
+  onProviderRequestSettled?: (request: CodexProviderRequestSettlement) => Promise<void> | void;
   /** Stable request identity supplied by the owning durable execution. */
   nextRequestId?: () => string;
   /**

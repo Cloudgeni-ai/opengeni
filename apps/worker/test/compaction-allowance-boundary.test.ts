@@ -71,6 +71,7 @@ test("stream component retains the completed compaction checkpoint before refusi
           initiatingHumanSubjectId: "user:frozen-initiator",
         },
         turnExecutionPolicy: { providerId: "openai" },
+        providerTurn: {},
         trigger: { type: "user.message" },
         eventing: { modelRunSettings: settings },
         historySink: {

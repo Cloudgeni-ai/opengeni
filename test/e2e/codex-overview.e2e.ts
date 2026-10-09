@@ -1,4 +1,3 @@
-import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import AxeBuilder from "@axe-core/playwright";
@@ -176,43 +175,55 @@ async function completePriorNoCreditAttempt(
   creditId: string,
   browserSessionHash: string,
 ): Promise<{ attemptId: string; upstreamIdempotencyKey: string }> {
-  return await withSessionRlsActorContext({ subjectId: `user:${OWNER_USER_ID}`, initiatingHumanSubjectId: `user:${OWNER_USER_ID}` }, async () => {
-  const attemptId = crypto.randomUUID();
-  const claimHolderId = crypto.randomUUID();
-  const priorAttempt = await claimCodexResetRedemption(client.db, {
-    id: attemptId,
-    accountId: defaultAccountId,
-    workspaceId,
-    credentialId: detailedCredentialId,
-    subjectId: `user:${OWNER_USER_ID}`,
-    browserSessionHash,
-    creditId,
-    confirmationExpiresAt: new Date(Date.now() + 5 * 60_000),
-    claimHolderId,
-  }, subscriptionCoreCodexResetAuthority, subscriptionCoreCodexResetCreditFence);
-  if (priorAttempt.kind !== "claimed") throw new Error("expected prior non-consuming claim");
-  const priorFence = await fenceCodexResetRedemptionSend(client.db, {
-    accountId: defaultAccountId,
-    workspaceId,
-    attemptId,
-    claimHolderId,
-    credentialId: detailedCredentialId,
-    subjectId: `user:${OWNER_USER_ID}`,
-    browserSessionHash,
-  }, subscriptionCoreCodexResetAuthority);
-  if (priorFence.kind !== "ready") throw new Error("expected prior non-consuming send fence");
-  const priorCompletion = await completeSubscriptionCoreCodexResetRedemption(client.db, {
-    accountId: defaultAccountId,
-    workspaceId,
-    attemptId,
-    claimHolderId,
-    outcome: "noCredit",
-  });
-  if (priorCompletion.attempt?.outcome !== "noCredit") {
-    throw new Error("expected prior non-consuming completion");
-  }
-  return { attemptId, upstreamIdempotencyKey: priorAttempt.attempt.upstreamIdempotencyKey };
-  });
+  return await withSessionRlsActorContext(
+    { subjectId: `user:${OWNER_USER_ID}`, initiatingHumanSubjectId: `user:${OWNER_USER_ID}` },
+    async () => {
+      const attemptId = crypto.randomUUID();
+      const claimHolderId = crypto.randomUUID();
+      const priorAttempt = await claimCodexResetRedemption(
+        client.db,
+        {
+          id: attemptId,
+          accountId: defaultAccountId,
+          workspaceId,
+          credentialId: detailedCredentialId,
+          subjectId: `user:${OWNER_USER_ID}`,
+          browserSessionHash,
+          creditId,
+          confirmationExpiresAt: new Date(Date.now() + 5 * 60_000),
+          claimHolderId,
+        },
+        subscriptionCoreCodexResetAuthority,
+        subscriptionCoreCodexResetCreditFence,
+      );
+      if (priorAttempt.kind !== "claimed") throw new Error("expected prior non-consuming claim");
+      const priorFence = await fenceCodexResetRedemptionSend(
+        client.db,
+        {
+          accountId: defaultAccountId,
+          workspaceId,
+          attemptId,
+          claimHolderId,
+          credentialId: detailedCredentialId,
+          subjectId: `user:${OWNER_USER_ID}`,
+          browserSessionHash,
+        },
+        subscriptionCoreCodexResetAuthority,
+      );
+      if (priorFence.kind !== "ready") throw new Error("expected prior non-consuming send fence");
+      const priorCompletion = await completeSubscriptionCoreCodexResetRedemption(client.db, {
+        accountId: defaultAccountId,
+        workspaceId,
+        attemptId,
+        claimHolderId,
+        outcome: "noCredit",
+      });
+      if (priorCompletion.attempt?.outcome !== "noCredit") {
+        throw new Error("expected prior non-consuming completion");
+      }
+      return { attemptId, upstreamIdempotencyKey: priorAttempt.attempt.upstreamIdempotencyKey };
+    },
+  );
 }
 
 async function expectNoWcagAxeViolations(page: Page, include: string): Promise<void> {
@@ -557,28 +568,42 @@ beforeAll(async () => {
       subjectId: `user:${OWNER_USER_ID}`,
       label,
     });
-    if (connected.kind !== "connected") throw new Error(`core fixture refused: ${connected.reason}`);
-    if (externalId === "unowned") await shared.admin`update subscription_connections
+    if (connected.kind !== "connected")
+      throw new Error(`core fixture refused: ${connected.reason}`);
+    if (externalId === "unowned")
+      await shared.admin`update subscription_connections
       set connected_by_subject_id = null where id = ${connected.id}`;
     if (externalId === "detailed") detailedCredentialId = connected.id;
     if (externalId === "cached") {
       const old = new Date(Date.now() - 20 * 60_000);
-      await recordSubscriptionCoreCodexUsageObservation(client.db,
-        { kind: "workspace", accountId, workspaceId, subjectId: `user:${OWNER_USER_ID}` }, connected.id, {
+      await recordSubscriptionCoreCodexUsageObservation(
+        client.db,
+        { kind: "workspace", accountId, workspaceId, subjectId: `user:${OWNER_USER_ID}` },
+        connected.id,
+        {
           windows: [
             { id: "primary", usedPercent: 44, resetsAt: Date.now() + 60_000, status: "ok" },
             { id: "secondary", usedPercent: 22, resetsAt: Date.now() + 120_000, status: "ok" },
           ],
-          modelCooldowns: {}, exhaustedUntil: null, exhaustedKind: null,
-          revision: 0, observedAt: old.getTime(), observedRefreshGeneration: 1, source: "usage_endpoint",
-        });
+          modelCooldowns: {},
+          exhaustedUntil: null,
+          exhaustedKind: null,
+          revision: 0,
+          observedAt: old.getTime(),
+          observedRefreshGeneration: 1,
+          source: "usage_endpoint",
+        },
+      );
       await shared.admin`update subscription_connections
-        set provider_state = provider_state || ${shared.admin.json({resetCreditAvailableCount:2, resetCreditsCheckedAt:old.toISOString()})}::jsonb
+        set provider_state = provider_state || ${shared.admin.json({ resetCreditAvailableCount: 2, resetCreditsCheckedAt: old.toISOString() })}::jsonb
         where id = ${connected.id}`;
     }
   }
   await setSubscriptionCoreCodexPrimary(client.db, {
-    accountId, workspaceId, subjectId: `user:${OWNER_USER_ID}`, connectionId: detailedCredentialId,
+    accountId,
+    workspaceId,
+    subjectId: `user:${OWNER_USER_ID}`,
+    connectionId: detailedCredentialId,
   });
   const priorAttempt = await completePriorNoCreditAttempt(
     "detailed-credit",
@@ -701,7 +726,10 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     // Shared core administration does not borrow a historical connector's
     // identity. A missing connected-by label never asks an admin to claim it.
     expect(await unowned.getByText(/No one is recorded as the owner/).count()).toBe(0);
-    await unowned.getByRole("button", { name: /^Redeem / }).first().waitFor();
+    await unowned
+      .getByRole("button", { name: /^Redeem / })
+      .first()
+      .waitFor();
     expect(await unowned.getByRole("button", { name: "Reconnect same account" }).count()).toBe(0);
     expect(provider.maxActiveOverviewCalls).toBeLessThanOrEqual(4);
 

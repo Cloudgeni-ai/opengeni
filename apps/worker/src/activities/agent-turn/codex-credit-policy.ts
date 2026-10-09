@@ -6,6 +6,7 @@ import {
   type CodexUsageHeaderSnapshot,
   type CodexUsagePayload,
 } from "@opengeni/codex";
+import { SubscriptionCoreCodexRequestOutcomeUnknownError } from "@opengeni/db";
 
 /** Local admission decision, never a synthetic provider/transport error. */
 export class CodexIncludedUsageExhaustedError extends Error {
@@ -110,11 +111,16 @@ export function createCodexCreditGuard(input: {
     try {
       usage = await readUsage(token);
     } catch (error) {
+      if (error instanceof SubscriptionCoreCodexRequestOutcomeUnknownError) throw error;
       if (error instanceof CodexUsageUnauthorizedError && input.refreshToken) {
         // This runs during credential resolution, before the model's auth
         // headers are constructed. The caller tracks the refreshed version.
         token = await input.refreshToken();
-        usage = await readUsage(token).catch(() => null);
+        usage = await readUsage(token).catch((usageError: unknown) => {
+          if (usageError instanceof SubscriptionCoreCodexRequestOutcomeUnknownError)
+            throw usageError;
+          return null;
+        });
       } else {
         usage = null;
       }

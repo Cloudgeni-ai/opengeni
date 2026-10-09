@@ -137,6 +137,21 @@ async function setCutover(accountId: string, enabled: boolean): Promise<void> {
     on conflict (account_id, provider) do update set enabled = excluded.enabled`;
 }
 
+/** Seed historical/corrupt state to test independent reader defenses. */
+async function seedHistoricalAppsDesignation(org: Org, connectionId: string): Promise<void> {
+  await shared!.admin.begin(async (tx) => {
+    // Only this synthetic, privileged transaction bypasses the new admission
+    // fence. Real designation writers and all request readers remain guarded.
+    await tx`alter table subscription_apps_designations disable trigger subscription_designation_disconnect_admission`;
+    await tx`insert into subscription_apps_designations
+      (account_id, workspace_id, connection_id, updated_by_subject_id)
+      values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid,
+        ${connectionId}::uuid, ${org.ownerSubjectId})
+      on conflict (workspace_id) do update set connection_id = excluded.connection_id`;
+    await tx`alter table subscription_apps_designations enable trigger subscription_designation_disconnect_admission`;
+  });
+}
+
 async function sharedConnection(
   org: Org,
   label: string,
@@ -302,9 +317,7 @@ function authorizationCases(harness: "template" | "owner-migrated") {
   test(`${harness}: without a cutover row nothing on the core resolves, even with core rows present`, async () => {
     const org = await organization();
     const connectionId = await sharedConnection(org, "gate-off");
-    await shared!.admin`
-      insert into subscription_apps_designations (account_id, workspace_id, connection_id, updated_by_subject_id)
-      values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${connectionId}::uuid, ${org.ownerSubjectId})`;
+    await seedHistoricalAppsDesignation(org, connectionId);
     expect(await readCodexCutoverDisposition(client!.db, org.accountId)).toBe("maintenance");
     const scope = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };
     expect(await resolveSubscriptionCoreCodexAppsDesignation(client!.db, scope)).toBeNull();
@@ -574,9 +587,7 @@ function authorizationCases(harness: "template" | "owner-migrated") {
       values (${org.accountId}::uuid, ${peopleScoped!.id}::uuid, ${org.ownerMembershipId}::uuid)`;
     await shared!.admin`
       delete from subscription_apps_designations where workspace_id = ${org.sharedWorkspaceId}::uuid`;
-    await shared!.admin`
-      insert into subscription_apps_designations (account_id, workspace_id, connection_id, updated_by_subject_id)
-      values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${peopleScoped!.id}::uuid, ${org.ownerSubjectId})`;
+    await seedHistoricalAppsDesignation(org, peopleScoped!.id);
     expect(await resolveSubscriptionCoreCodexAppsDesignation(client!.db, scope)).toBeNull();
     expect(await readCredential(org, org.sharedWorkspaceId, peopleScoped!.id)).toEqual([]);
 
@@ -595,15 +606,11 @@ function authorizationCases(harness: "template" | "owner-migrated") {
           ${org.accountId}::uuid, ${provider}, ${kind}, ${encryptedTokens(`${provider}-${kind}`)},
           'shared', 'organization', ${`${provider}-${kind}-account`}
         ) returning id::text as id`;
-      await shared!.admin`
-        update subscription_apps_designations set connection_id = ${foreignKind!.id}::uuid
-        where workspace_id = ${org.sharedWorkspaceId}::uuid`;
+      await seedHistoricalAppsDesignation(org, foreignKind!.id);
       expect(await resolveSubscriptionCoreCodexAppsDesignation(client!.db, scope)).toBeNull();
       expect(await readCredential(org, org.sharedWorkspaceId, foreignKind!.id)).toEqual([]);
     }
-    await shared!.admin`
-      update subscription_apps_designations set connection_id = ${organizationScoped}::uuid
-      where workspace_id = ${org.sharedWorkspaceId}::uuid`;
+    await seedHistoricalAppsDesignation(org, organizationScoped);
     expect(await resolveSubscriptionCoreCodexAppsDesignation(client!.db, scope)).toEqual({
       connectionId: organizationScoped,
       status: "active",

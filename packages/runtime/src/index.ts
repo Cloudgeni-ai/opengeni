@@ -4430,6 +4430,11 @@ export type PrepareToolsOptions = {
     withAuthorization: <T>(
       use: (token: { accessToken: string; chatgptAccountId: string | null }) => Promise<T>,
     ) => Promise<T>;
+    /** Core admission commits before this one physical request; owns its response body. */
+    withRequest?: (
+      use: (token: { accessToken: string; chatgptAccountId: string | null }) => Promise<Response>,
+      options?: { signal?: AbortSignal | null | undefined },
+    ) => Promise<Response>;
   };
   /** Injectable final MCP transport for tests and embedded hosts. */
   mcpFetchImpl?: FetchLike;
@@ -4898,7 +4903,15 @@ export async function prepareAgentTools(
           firstPartyMcpServerUrlForRun(settings, config, options.workspaceId) ?? config.url;
         const firstParty = isFirstPartyMcpServer(settings, config);
         const baseFetch = isCodexAppsMcpServer(config)
-          ? codexAppsSanitizingFetch(mcpFetchImpl, codexConnectorNamespaces)
+          ? codexAppsSanitizingFetch(
+              // The generic network guard forces manual redirects. Core Apps
+              // needs the stricter policy at the final physical transport too:
+              // one reservation can never authorize a redirect chain.
+              options.codexAppsAuth?.withRequest
+                ? (input, init) => mcpFetchImpl(input, { ...init, redirect: "error" })
+                : mcpFetchImpl,
+              codexConnectorNamespaces,
+            )
           : mcpFetchImpl;
         const guardedTransport = guardedMcpFetch(
           firstParty ? { ...settings, integrationsAllowPrivateNetworkTargets: true } : settings,
@@ -7446,25 +7459,42 @@ function codexAppsAuthFetch(
       await publishForToolCall(request, "missing_connection");
       throw new Error("Codex Apps has no explicit workspace designation");
     }
-    let token: { accessToken: string; chatgptAccountId: string | null };
+    let dispatched = false;
+    const dispatch = async (token: { accessToken: string; chatgptAccountId: string | null }) => {
+      if (dispatched) throw new Error("Codex Apps physical request callback cannot be reused");
+      const headers: Record<string, string> = {
+        authorization: `Bearer ${token.accessToken}`,
+        originator: CODEX_ORIGINATOR,
+        "user-agent": `${CODEX_ORIGINATOR}/${auth.clientVersion}`,
+        version: auth.clientVersion,
+      };
+      if (token.chatgptAccountId) headers["chatgpt-account-id"] = token.chatgptAccountId;
+      if (settings.codexProductSku) headers["X-OpenAI-Product-Sku"] = settings.codexProductSku;
+      dispatched = true;
+      const requestInit = withConnectionHeaders(input, init, headers);
+      return await baseFetch(
+        fetchInputForAttempt(input),
+        auth.withRequest ? { ...requestInit, redirect: "error" } : requestInit,
+      );
+    };
+    let response: Response;
     try {
-      token = await auth.withAuthorization(async (snapshot) => snapshot);
+      response = auth.withRequest
+        ? await auth.withRequest(dispatch, {
+            signal:
+              init?.signal !== undefined
+                ? init.signal
+                : input instanceof Request
+                  ? input.signal
+                  : undefined,
+          })
+        : await dispatch(await auth.withAuthorization(async (snapshot) => snapshot));
     } catch (error) {
-      await publishForToolCall(request, codexAppsAuthFailureReason(error));
+      // Provider/transport failures aren't credential resolution failures.
+      // No replay: the request-aware seam retains unknown request custody.
+      if (!dispatched) await publishForToolCall(request, codexAppsAuthFailureReason(error));
       throw error;
     }
-    const headers: Record<string, string> = {
-      authorization: `Bearer ${token.accessToken}`,
-      originator: CODEX_ORIGINATOR,
-      "user-agent": `${CODEX_ORIGINATOR}/${auth.clientVersion}`,
-      version: auth.clientVersion,
-    };
-    if (token.chatgptAccountId) headers["chatgpt-account-id"] = token.chatgptAccountId;
-    if (settings.codexProductSku) headers["X-OpenAI-Product-Sku"] = settings.codexProductSku;
-    const response = await baseFetch(
-      fetchInputForAttempt(input),
-      withConnectionHeaders(input, init, headers),
-    );
     if (response.status === 401 || response.status === 403) {
       await publishForToolCall(request, response.status === 403 ? "insufficient_scope" : "expired");
     }

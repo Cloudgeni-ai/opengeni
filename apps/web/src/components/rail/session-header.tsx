@@ -30,11 +30,18 @@ import {
   PencilIcon,
   PinIcon,
   SearchIcon,
+  ShieldCheckIcon,
+  ShieldOffIcon,
 } from "lucide-react";
 import { useCallback, useRef, useState, type ReactNode } from "react";
 
 import { BillingClassMark, type BillingClass } from "@/components/billing-class-mark";
 import { ConnectionPill } from "@/components/common";
+import {
+  GrantSessionAdminAccessDialog,
+  SessionAdminAccessIndicator,
+  type SessionAdminAccessControl,
+} from "@/components/session/session-admin-access";
 import { SessionAncestryBreadcrumb } from "@/components/session/subagents";
 import { Button } from "@/components/ui/button";
 import {
@@ -77,6 +84,7 @@ export function SessionHeader({
   onPin,
   onArchive,
   repliesMute,
+  adminAccess,
   sandboxSlot,
   codexSlot,
   accessSlot,
@@ -114,6 +122,11 @@ export function SessionHeader({
    * action (sub-agents, people without an inbox, servers without it).
    */
   repliesMute?: SessionRepliesMute | null;
+  /**
+   * This session's admin access, when the viewer can see it on or give it.
+   * Absent hides the shield and the menu action.
+   */
+  adminAccess?: SessionAdminAccessControl | null;
   /** The "Run on <machine>" control — a live component in production. */
   sandboxSlot?: ReactNode;
   /**
@@ -169,6 +182,7 @@ export function SessionHeader({
   const rename = useInlineRename(session, onRename);
   const pin = useSessionPinToggle(session, onPin);
   const canArchive = Boolean(onArchive) && session.parentSessionId === null;
+  const [grantAdminOpen, setGrantAdminOpen] = useState(false);
   // Menu actions that move focus (rename input, find field) run after the menu
   // has closed, so its focus restoration cannot steal focus back to the trigger.
   const afterMenuClose = useRef<(() => void) | null>(null);
@@ -231,6 +245,7 @@ export function SessionHeader({
             label={startupLabel}
           />
           {accessSlot}
+          {adminAccess ? <SessionAdminAccessIndicator control={adminAccess} /> : null}
         </div>
       </div>
       <div className="ml-auto flex shrink-0 items-center justify-end gap-0.5 lg:min-w-0 lg:max-w-full lg:shrink lg:flex-wrap lg:gap-2">
@@ -399,6 +414,22 @@ export function SessionHeader({
                 {repliesMute.muted ? "Unmute replies" : "Mute replies"}
               </DropdownMenuItem>
             ) : null}
+            {adminAccess?.state.active && adminAccess.state.canRevoke ? (
+              <DropdownMenuItem disabled={adminAccess.busy} onSelect={() => adminAccess.revoke()}>
+                <ShieldOffIcon />
+                Turn off admin access
+              </DropdownMenuItem>
+            ) : adminAccess && !adminAccess.state.active && adminAccess.state.canGrant ? (
+              <DropdownMenuItem
+                disabled={adminAccess.busy}
+                onSelect={() => {
+                  afterMenuClose.current = () => setGrantAdminOpen(true);
+                }}
+              >
+                <ShieldCheckIcon />
+                Give admin access…
+              </DropdownMenuItem>
+            ) : null}
             {canArchive ? (
               <>
                 <DropdownMenuSeparator />
@@ -411,6 +442,13 @@ export function SessionHeader({
             ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
+        {adminAccess ? (
+          <GrantSessionAdminAccessDialog
+            control={adminAccess}
+            open={grantAdminOpen}
+            onOpenChange={setGrantAdminOpen}
+          />
+        ) : null}
       </div>
     </header>
   );

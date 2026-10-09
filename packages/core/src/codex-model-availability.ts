@@ -2,6 +2,7 @@ import { CODEX_CLIENT_VERSION, fetchCodexModels } from "@opengeni/codex";
 import { configuredModels, withCodexCatalogProvider, type Settings } from "@opengeni/config";
 import {
   buildSubscriptionCoreCodexConnectionTokenResolver,
+  buildSubscriptionCoreCodexOperationFetch,
   listSubscriptionCoreCodexServingConnections,
   readCodexCutoverDisposition,
   subscriptionCoreCodexConnectionAllowsModel,
@@ -105,12 +106,25 @@ async function loadCoreConnectionCatalog(
     const entry: CatalogCacheEntry = {
       expiresAt: Date.now() + CATALOG_CACHE_MS,
       result: deps
-        .fetchModels({
-          accessToken: token.accessToken,
-          chatgptAccountId: token.chatgptAccountId,
-          isFedramp: token.isFedramp,
-          clientVersion: CODEX_CLIENT_VERSION,
-        })
+        .fetchModels(
+          {
+            accessToken: token.accessToken,
+            chatgptAccountId: token.chatgptAccountId,
+            isFedramp: token.isFedramp,
+            clientVersion: CODEX_CLIENT_VERSION,
+          },
+          buildSubscriptionCoreCodexOperationFetch(
+            db,
+            {
+              kind: "workspace",
+              accountId: context.accountId,
+              workspaceId: context.workspaceId,
+              subjectId: context.subjectId ?? CATALOG_SERVICE_SUBJECT,
+            },
+            null,
+            connection.connectionId,
+          ),
+        )
         .catch(() => ({ ok: false, slugs: [] as string[] }))
         .then((result) => {
           entry.expiresAt = Date.now() + (result.ok ? CATALOG_CACHE_MS : CATALOG_ERROR_CACHE_MS);

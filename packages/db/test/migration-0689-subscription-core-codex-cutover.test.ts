@@ -1771,9 +1771,12 @@ describe.skipIf(!realDb)(
         expect((await disconnect(a.owner, a.w1)).outcome).toBe("not_found");
         const result = await disconnect(a.owner, a.personalOwner);
         expect(result).toMatchObject({ outcome: "removed", connectionId: a.c5 });
-        const remaining =
-          await owned.admin`select 1 from subscription_connections where id = ${a.c5}`;
-        expect(remaining).toHaveLength(0);
+        // Current core disconnect retains the identity/alias tombstone and
+        // scrubs the bearer after quiescence; 0691 no longer deletes the row.
+        const [remaining] =
+          await owned.admin`select disconnected_at, credential_encrypted from subscription_connections where id = ${a.c5}`;
+        expect(remaining!.disconnected_at).not.toBeNull();
+        expect(remaining!.credential_encrypted).toBe("");
       });
 
       test("an organization created after the cutover is born on the core", async () => {
