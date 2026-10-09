@@ -1234,6 +1234,52 @@ describe("idle command containment", () => {
     );
   }, 180_000);
 
+  test("an idle-containment notice never leads a batch ahead of a real command result", async () => {
+    // Under a held wait a real command result may start a turn, but the older
+    // passive notice must not take its place: the planner closes a batch on
+    // causal grouping, so whichever update leads decides the turn.
+    const fixture = await idleFixture();
+    await admin`update sessions set input_wait_turn_id = ${fixture.attempt.turnId},
+      input_wait_until = now() + interval '6 hours', input_wait_reason = 'waiting for your answer',
+      input_wait_set_at = now() where id = ${fixture.attempt.sessionId}`;
+    const insertResult = async (state: "lost" | "exited", reason: string, age: string) => {
+      const commandId = crypto.randomUUID();
+      const [row] = await admin<{ id: string }[]>`insert into session_system_updates (
+          account_id, workspace_id, session_id, kind, source_id, dedupe_key, summary, payload,
+          created_at
+        ) values (${fixture.accountId}, ${fixture.workspaceId}, ${fixture.attempt.sessionId},
+          'background_command_result', ${commandId}, ${`containment-${crypto.randomUUID()}`},
+          ${`command ${state}`}, ${admin.json({
+            type: "background_command_result",
+            commandId,
+            state,
+            exitCode: state === "exited" ? 0 : null,
+            reason,
+            outputLocator: { eventType: "sandbox.command.output.delta", commandId },
+          })}, now() - ${age}::interval) returning id`;
+      return row!.id;
+    };
+    const notice = await insertResult("lost", "idle_containment", "10 minutes");
+    const real = await insertResult("exited", "exited", "1 minute");
+    const claim = await claimSessionWorkForAttempt(db, fixture.workspaceId, {
+      sessionId: fixture.attempt.sessionId,
+      workflowId: `session-${fixture.attempt.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `containment-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claim.action).toBe("claimed");
+    const turnId = claim.action === "claimed" ? claim.turn.id : null;
+    const rows = await admin<{ id: string; state: string; delivered_turn_id: string | null }[]>`
+      select id, state, delivered_turn_id from session_system_updates
+      where id in (${notice}, ${real})`;
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    expect(byId.get(real)).toMatchObject({ state: "delivered", delivered_turn_id: turnId });
+    // Ungrouped here (neither carries causal lineage), so the notice waits.
+    expect(byId.get(notice)).toMatchObject({ state: "pending", delivered_turn_id: null });
+  }, 180_000);
+
   test("a held input wait or a pending human request does not keep a silent command's box", async () => {
     // The agent asked a person and registered wait_for_input while its dev
     // server sat silent. Only the person or the wait's timeout can wake the
@@ -1319,6 +1365,12 @@ describe("idle command containment", () => {
           'malformed', ${admin.json({ type: "agent_message" })})`;
       const rejected = await claimNext();
       expect(rejected.action).not.toBe("claimed");
+      const [malformed] = await admin<{ state: string }[]>`select state from session_system_updates
+        where session_id = ${fixture.attempt.sessionId} and kind = 'agent_message'`;
+      expect(malformed!.state).toBe("failed");
+      const [afterReject] = await admin<{ status: string }[]>`
+        select status from sessions where id = ${fixture.attempt.sessionId}`;
+      expect(afterReject!.status).not.toBe("queued");
       const [stillPending] = await admin<
         { state: string }[]
       >`select state from session_system_updates

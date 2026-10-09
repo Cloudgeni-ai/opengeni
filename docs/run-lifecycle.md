@@ -3170,7 +3170,8 @@ workspace control fence and the process -> admission -> lease row locks:
   input that opened a claim is rejected: it stays pending and is delivered with
   the next turn whose causal authority it can share, normally the wait's
   timeout or the person's answer (`passiveCommandNoticeSql`,
-  `isPassiveCommandNotice`). Waking would end the wait for the
+  `isPassiveCommandNotice`). Pending reads sort it after real command results,
+  so it never leads a batch the planner would close on it alone. Waking would end the wait for the
   person, spend a model turn, and invite the agent to restart the stopped server
   every window. A pending approval resolved after containment resumes on a
   restored box without the command, and the notice tells the agent why;

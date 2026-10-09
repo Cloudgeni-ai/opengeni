@@ -76090,8 +76090,11 @@ export async function claimSessionWorkForAttempt(
                   )
                   .orderBy(
                     // Command notices are retained context, not a reason to
-                    // strand later actionable input behind the read limit.
-                    sql`case when ${schema.sessionSystemUpdates.kind} = 'background_command_result' then 1 else 0 end`,
+                    // strand later actionable input behind the read limit. A
+                    // passive idle-containment notice sorts after real command
+                    // results so it can only ride along, never lead a batch
+                    // that the planner then closes on it alone.
+                    sql`case when ${passiveCommandNoticeSql()} then 2 when ${schema.sessionSystemUpdates.kind} = 'background_command_result' then 1 else 0 end`,
                     asc(schema.sessionSystemUpdates.createdAt),
                     asc(schema.sessionSystemUpdates.id),
                   )
@@ -86253,7 +86256,7 @@ export async function getSessionQueueSnapshot(
         sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then 0 else 1 end`,
         sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then ${schema.sessionSystemUpdates.createdAt} end desc`,
         sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then ${schema.sessionSystemUpdates.id} end desc`,
-        sql`case when ${schema.sessionSystemUpdates.kind} = 'background_command_result' then 1 else 0 end`,
+        sql`case when ${passiveCommandNoticeSql()} then 2 when ${schema.sessionSystemUpdates.kind} = 'background_command_result' then 1 else 0 end`,
         asc(schema.sessionSystemUpdates.createdAt),
         asc(schema.sessionSystemUpdates.id),
       );
