@@ -67,7 +67,12 @@ export type {
   ToolRenderer,
   ToolRendererProps,
 } from "./timeline";
-export { SessionConversation } from "./components/session-conversation";
+export { SessionConversation, SessionConversationView } from "./components/session-conversation";
+export { useSessionConversation } from "./hooks/use-session-conversation";
+export type {
+  SessionConversationController,
+  UseSessionConversationOptions,
+} from "./hooks/use-session-conversation";
 export { SessionList } from "./components/session-list";
 export type { SessionListLabels, SessionListProps } from "./components/session-list";
 export { OpenGeniChat } from "./components/open-geni-chat";
@@ -79,6 +84,7 @@ export type {
 export type {
   SessionConversationLabels,
   SessionConversationProps,
+  SessionConversationViewProps,
 } from "./components/session-conversation";
 export type { QueueSurfaceProps } from "./components/queue-surface";
 export {

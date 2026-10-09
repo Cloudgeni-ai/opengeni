@@ -120,7 +120,8 @@ function pruneRealtimeModelCatalogCache(
   }
 }
 
-function loadRealtimeModelCatalog(
+/** Shared by the lazy conversation offer and the stock voice control. */
+export function loadRealtimeModelCatalog(
   client: RealtimeControllerClient,
   workspaceId: string,
   signal?: AbortSignal,

@@ -175,6 +175,7 @@ export function SessionRealtimeControl(props: {
   useEffect(() => {
     onVoiceActiveChange?.(voiceActive);
   }, [onVoiceActiveChange, voiceActive]);
+  useEffect(() => () => onVoiceActiveChange?.(false), [onVoiceActiveChange]);
 
   useEffect(() => {
     const pending = autostartModelRef.current;

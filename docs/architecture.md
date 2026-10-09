@@ -1754,6 +1754,15 @@ tool approvals/attachments/human-input forms/history; `ChatComposer` is input-on
 clients. Foreground/background share tokens; light embeds set iframe
 `data-og-theme="light"`.
 
+`useSessionConversation` owns that same feed, queue and composer independently
+of presentation. `SessionConversationView` consumes the controller without
+opening another stream or maintaining a second draft. Hosts with persistent
+panels mount the hook above layout switches and keep call-bearing views mounted
+while a live voice call is in progress. Host context/notifications use native
+composer hooks, never a replacement Send/Steer validator. Observer failures do
+not change accepted delivery. The lazy embedded voice entry reuses
+`SessionRealtimeControl` and its catalog rather than owning another call flow.
+
 `conversationTimeline`/`SessionChrome`/`SessionCommands`/`ChatComposer`
 share reconciliation/controls. Commands mount only in open activity drawers.
 `SessionConnectionRequest` requires exact native identities, failing closed on
