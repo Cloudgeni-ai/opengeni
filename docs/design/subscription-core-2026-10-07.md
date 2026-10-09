@@ -1540,7 +1540,12 @@ database routine below rechecks the enabled row itself.
     workspace manages (the core update policy); an account connected and
     managed elsewhere is never widened or taken over (`managed_elsewhere`,
     409). SUB-OWN-08 holds by construction: one connection per organization,
-    provider account and owner;
+    provider account, signed-in person and owner. The person
+    (`provider_subject_id`, the id_token's ChatGPT user id) is part of the
+    identity because every member of a ChatGPT Team/Business/Enterprise
+    workspace shares the account id: another person's login of the same
+    ChatGPT workspace is a new connection, never a replacement of someone
+    else's credential;
   - in the person's own Personal workspace, connect creates or reconnects
     their personal connection through the owner-scoped writer
     `connect_subscription_codex_personal`, only with personal connections
