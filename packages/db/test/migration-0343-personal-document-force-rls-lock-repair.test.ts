@@ -112,6 +112,9 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     // The current turn adapter projects the M3 authority snapshot while this
     // fixture is deliberately staged before that migration.
     await admin`alter table session_turns add column subscription_authority jsonb`;
+    // ...and the M3 PR 3b slots on internal updates and their outbox rows.
+    await admin`alter table session_system_updates add column subscription_authority jsonb`;
+    await admin`alter table session_system_update_outbox add column subscription_authority jsonb`;
     // 0608 owns the receiver context; the historical claim only needs its nullable projection.
     await admin`alter table session_turns add column execution_context_turn_id uuid`;
     await admin`alter table session_system_updates add column mcp_account_bindings jsonb`;
@@ -358,6 +361,8 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     await admin`alter table session_turns drop column mcp_account_bindings`;
     await admin`alter table session_turns drop column surface`;
     await admin`alter table session_turns drop column subscription_authority`;
+    await admin`alter table session_system_updates drop column subscription_authority`;
+    await admin`alter table session_system_update_outbox drop column subscription_authority`;
     await admin`alter table session_turns drop column execution_context_turn_id`;
     await admin`alter table session_system_updates drop column mcp_account_bindings`;
     await admin`alter table session_system_update_outbox drop column mcp_account_bindings`;
