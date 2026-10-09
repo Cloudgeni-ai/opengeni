@@ -1,3 +1,4 @@
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { lazy, Suspense, useRef, type ComponentProps, type FormEvent } from "react";
 import {
   useNewConversation,
@@ -186,7 +187,13 @@ export function NewConversationView({
         </p>
       ) : error ? (
         <p role="alert" className="text-center text-og-sm text-og-status-failed">
-          {formatError(error.cause)}
+          {
+            // A proxy without a createSession hook refuses the route itself
+            // (older proxies also report no sessionCreation flag up front).
+            error.cause instanceof OpenGeniApiError && error.cause.code === "route_not_allowed"
+              ? labels.unavailable
+              : formatError(error.cause)
+          }
         </p>
       ) : null}
       {pending ? (
