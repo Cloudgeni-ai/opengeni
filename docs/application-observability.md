@@ -131,9 +131,8 @@ first uncaptured write, or for a writer from the later of the checkpoint and its
 first attach, clamped to the box's creation. `OpenGeniSandboxCheckpointStale` warns when any box has held such a
 write for more than 12 hours, half the default provider lifetime: an unplanned
 provider loss would lose it. Boxes kept warm between turns by a tab, a
-controller or an unsupervised background command are checkpointed by the idle
-checkpoint sweep (migration 0680); a box held by a supervised command is not yet,
-and can raise it.
+controller or a background command (supervised or not, migration 0685) are
+checkpointed by the idle checkpoint sweep (migration 0680).
 
 To find the leases behind the alert, run this as a role that bypasses row-level
 security (a superuser or a `BYPASSRLS` role); under forced row-level security an

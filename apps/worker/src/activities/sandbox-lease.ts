@@ -742,7 +742,7 @@ export function createSandboxLeaseActivities(
 
   /** Checkpoint one warm box between turns. Reuses the turn's warm checkpoint
    * path with an idle owner: the exact capture claim requires that only
-   * viewers, interactions and active unsupervised background commands hold the
+   * viewers, interactions and active background commands hold the
    * box and that no other request is open, then the native Modal snapshot runs
    * around them and is published one generation behind the workspace. */
   async function checkpointIdleSandboxLease(

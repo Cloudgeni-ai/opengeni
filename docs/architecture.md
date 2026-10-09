@@ -645,8 +645,10 @@ changes. Drain budgets cover dispatch/capture/retry within the lifecycle ceiling
 Warm-capture reclamation/heartbeat cleanup retain holders through the original
 deadline after turn closure: no takeover or authority extension.
 
-Supervision-key presence—even malformed—blocks legacy containment enrollment,
-capture, publication and teardown. Observation failure never proves exit.
+Supervision-key presence (even malformed) blocks legacy containment enrollment,
+drain capture, publication and teardown. Only a warm point-in-time checkpoint
+that runs around the command, published one generation behind, may capture
+the box meanwhile (migration 0685). Observation failure never proves exit.
 
 Acquisition/mutation waits extend once through the first durable capture deadline
 plus handoff grace (one-hour cap). Expired/replacement claims never replenish
