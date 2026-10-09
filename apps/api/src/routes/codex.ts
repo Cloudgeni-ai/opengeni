@@ -1128,7 +1128,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
           lastRefreshAt: new Date(),
           accountEmail: id.email ?? null,
           label: id.email ?? id.chatgptAccountId ?? null,
-          connectedBySubjectId: human.subjectId,
+          connectedBySubjectId: (await managedCookieHuman(c, deps))?.subjectId ?? null,
         },
       });
     }
