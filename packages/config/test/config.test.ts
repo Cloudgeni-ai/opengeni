@@ -2995,3 +2995,21 @@ test("existing pause-enabled sessions gain resume without changing unrelated sel
     "goal_resume",
   ]);
 });
+
+describe("managed auth email verification switch", () => {
+  test("keeps the environment default unless explicitly overridden", () => {
+    expect(withEnv({}, () => getSettings()).managedAuthRequireEmailVerification).toBeUndefined();
+    for (const [value, expected] of [
+      ["true", true],
+      ["false", false],
+    ] as const) {
+      expect(
+        withEnv({ OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION: value }, () => getSettings())
+          .managedAuthRequireEmailVerification,
+      ).toBe(expected);
+    }
+    expect(() =>
+      withEnv({ OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION: "invalid" }, () => getSettings()),
+    ).toThrow();
+  });
+});

@@ -1575,6 +1575,8 @@ const SettingsSchema = z.object({
   // email verification, and invitation-bound account setup keep working. Read
   // at startup; the 0585 runtime switch pauses sign-ups without a restart.
   managedAuthNewSignupsEnabled: EnvBoolean.default(true),
+  // Unset retains environment-based verification (required outside local).
+  managedAuthRequireEmailVerification: EnvBoolean.optional(),
   // Query transport is an explicit second-stage rollout. A pre-compatibility
   // web image understands only fragment bearers, so API replicas must keep
   // generating fragment links until the compatible web fleet has converged.
@@ -4856,6 +4858,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     apnsPrivateKey: optional("OPENGENI_APNS_PRIVATE_KEY"),
     fcmServiceAccountJson: optional("OPENGENI_FCM_SERVICE_ACCOUNT_JSON"),
     managedAuthNewSignupsEnabled: optional("OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED"),
+    managedAuthRequireEmailVerification: optional(
+      "OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION",
+    ),
     organizationUserSetupEmailTokenTransport: optional(
       "OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT",
     ),
