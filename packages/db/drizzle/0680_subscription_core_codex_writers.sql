@@ -1,4 +1,9 @@
 -- deployment-mode: rolling
+-- Owner-only implementation details live outside the runtime API schema.
+-- Previous binaries require EXECUTE on every unknown opengeni_private routine;
+-- exposing these capability internals there breaks safe rolling coexistence.
+CREATE SCHEMA IF NOT EXISTS opengeni_subscription_internal;
+REVOKE ALL ON SCHEMA opengeni_subscription_internal FROM PUBLIC;
 -- M3 PR 3b: the remaining Codex writers on the shared subscription core
 -- (design docs/design/subscription-core-2026-10-07.md, "PR 3b"). Dormant like
 -- PR 1/2: every routine below refuses unless the organization's Codex cutover
@@ -118,7 +123,7 @@ DO $revision_subscription_authority$
 DECLARE data_schema text := current_schema();
 BEGIN
   EXECUTE format($ddl$
-    CREATE FUNCTION opengeni_private.derive_scheduled_revision_subscription_authority()
+    CREATE FUNCTION opengeni_subscription_internal.derive_scheduled_revision_subscription_authority()
     RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER
     SET search_path = pg_catalog, %1$I, pg_temp
     AS $body$
@@ -141,10 +146,10 @@ BEGIN
   $ddl$, data_schema);
 END
 $revision_subscription_authority$;
-REVOKE ALL ON FUNCTION opengeni_private.derive_scheduled_revision_subscription_authority() FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_subscription_internal.derive_scheduled_revision_subscription_authority() FROM PUBLIC;
 CREATE TRIGGER scheduled_task_revision_authorities_subscription_authority_trg
   BEFORE INSERT ON scheduled_task_revision_authorities
-  FOR EACH ROW EXECUTE FUNCTION opengeni_private.derive_scheduled_revision_subscription_authority();
+  FOR EACH ROW EXECUTE FUNCTION opengeni_subscription_internal.derive_scheduled_revision_subscription_authority();
 
 -- 2. Owner-run capabilities and the owner-only policies that admit them.
 ALTER TABLE opengeni_private.subscription_runtime_capabilities
@@ -374,7 +379,7 @@ BEGIN
     $body$
   $ddl$, data_schema);
   EXECUTE format($ddl$
-    CREATE FUNCTION opengeni_private.subscription_codex_writer_context(
+    CREATE FUNCTION opengeni_subscription_internal.subscription_codex_writer_context(
       p_account_id uuid, p_workspace_id uuid, p_subject_id text
     ) RETURNS boolean
     LANGUAGE sql STABLE
@@ -394,7 +399,7 @@ BEGIN
   $ddl$, data_schema);
 
   EXECUTE format($ddl$
-    CREATE FUNCTION opengeni_private.grant_subscription_codex_owner_capability(
+    CREATE FUNCTION opengeni_subscription_internal.grant_subscription_codex_owner_capability(
       p_kind text, p_account_id uuid, p_workspace_id uuid, p_subject_id text, p_connection_id uuid
     ) RETURNS void
     LANGUAGE sql
@@ -413,7 +418,7 @@ BEGIN
   $ddl$, data_schema);
 
   EXECUTE format($ddl$
-    CREATE FUNCTION opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id uuid)
+    CREATE FUNCTION opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id uuid)
     RETURNS void
     LANGUAGE sql
     SET search_path = pg_catalog, %1$I, pg_temp
@@ -430,7 +435,7 @@ BEGIN
   EXECUTE format($ddl$
     CREATE FUNCTION opengeni_private.connect_subscription_codex_personal(
       p_account_id uuid, p_workspace_id uuid, p_subject_id text,
-      p_credential_encrypted text, p_provider_account_id text, p_plan_type text,
+      p_credential_encrypted text, p_provider_account_id text, p_provider_subject_id text, p_plan_type text,
       p_provider_state jsonb, p_expires_at timestamptz, p_last_refresh_at timestamptz,
       p_account_email text, p_label text, p_connected_by_subject_id text
     ) RETURNS TABLE (outcome text, connection_id uuid, is_new boolean)
@@ -445,14 +450,14 @@ BEGIN
       authority_gen bigint;
       personal_allowed boolean;
     BEGIN
-      IF NOT opengeni_private.subscription_codex_writer_context(
+      IF NOT opengeni_subscription_internal.subscription_codex_writer_context(
           p_account_id, p_workspace_id, p_subject_id)
         OR p_credential_encrypted IS NULL OR length(p_credential_encrypted) = 0
         OR (p_provider_state IS NOT NULL AND jsonb_typeof(p_provider_state) <> 'object')
       THEN
         outcome := 'refused'; RETURN NEXT; RETURN;
       END IF;
-      PERFORM opengeni_private.grant_subscription_codex_owner_capability(
+      PERFORM opengeni_subscription_internal.grant_subscription_codex_owner_capability(
         'codex_connection_owner', p_account_id, p_workspace_id, p_subject_id,
         '00000000-0000-0000-0000-000000000000'::uuid);
       -- Only the person, in their own Personal workspace.
@@ -464,13 +469,13 @@ BEGIN
         AND membership.status = 'active' AND membership.revoked_at IS NULL
         AND membership.personal_workspace_id = p_workspace_id;
       IF owner_membership IS NULL THEN
-        PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
+        PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
         outcome := 'not_personal_workspace'; RETURN NEXT; RETURN;
       END IF;
       personal_allowed := coalesce((subscription_effective_settings(p_account_id, p_workspace_id)
         #>> '{values,personalConnectionsAllowed}')::boolean, false);
       IF NOT personal_allowed THEN
-        PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
+        PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
         outcome := 'personal_connections_disabled'; RETURN NEXT; RETURN;
       END IF;
       PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
@@ -478,13 +483,26 @@ BEGIN
       PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
         'subscription-connect:' || p_account_id::text || ':codex:' || owner_membership::text
           || ':' || coalesce(p_provider_account_id, ''), 0));
+      IF p_provider_account_id IS NULL OR p_provider_subject_id IS NULL
+        OR p_provider_subject_id LIKE 'legacy:%%'
+        OR EXISTS (SELECT 1 FROM subscription_connections connection
+          WHERE connection.account_id = p_account_id AND connection.provider = 'codex'
+            AND connection.kind = 'subscription' AND connection.ownership = 'personal'
+            AND connection.owner_organization_membership_id = owner_membership
+            AND connection.provider_account_id = p_provider_account_id
+            AND (connection.provider_subject_id IS NULL OR connection.provider_subject_id LIKE 'legacy:%%'))
+      THEN
+        PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
+        outcome := 'identity_unverified'; RETURN NEXT; RETURN;
+      END IF;
       IF p_provider_account_id IS NOT NULL THEN
         SELECT connection.id INTO existing_id
         FROM subscription_connections connection
         WHERE connection.account_id = p_account_id AND connection.provider = 'codex'
           AND connection.kind = 'subscription' AND connection.ownership = 'personal'
           AND connection.owner_organization_membership_id = owner_membership
-          AND connection.provider_account_id = p_provider_account_id;
+          AND connection.provider_account_id = p_provider_account_id
+          AND connection.provider_subject_id = p_provider_subject_id;
       END IF;
       IF existing_id IS NOT NULL THEN
         -- Credential replacement: the refresh key first, then the row lock
@@ -505,7 +523,7 @@ BEGIN
           label = coalesce(connection.label, p_label),
           connected_by_subject_id = p_connected_by_subject_id, updated_at = clock_timestamp()
         WHERE connection.account_id = p_account_id AND connection.id = existing_id;
-        PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
+        PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
         outcome := 'connected'; connection_id := existing_id; is_new := false;
         RETURN NEXT; RETURN;
       END IF;
@@ -540,19 +558,19 @@ BEGIN
         authority_gen, 'active'
       ) RETURNING id INTO authority;
       INSERT INTO subscription_connections (
-        id, account_id, provider, kind, provider_account_id, account_email, label, plan_type,
+        id, account_id, provider, kind, provider_account_id, provider_subject_id, account_email, label, plan_type,
         credential_encrypted, credential_format, expires_at, last_refresh_at, status,
         ownership, owner_organization_membership_id, owner_subject_id, authority_id,
         authority_resource_kind, authority_generation, connected_by_subject_id, scope_kind,
         allow_personal_workspaces, managed_by_workspace_id, provider_state
       ) VALUES (
-        new_id, p_account_id, 'codex', 'subscription', p_provider_account_id, p_account_email,
+        new_id, p_account_id, 'codex', 'subscription', p_provider_account_id, p_provider_subject_id, p_account_email,
         p_label, p_plan_type, p_credential_encrypted, 'v1', p_expires_at, p_last_refresh_at,
         'active', 'personal', owner_membership, p_subject_id, authority,
         'subscription_connection', authority_gen, p_connected_by_subject_id, 'people', true, NULL,
         coalesce(p_provider_state, '{}'::jsonb)
       );
-      PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
+      PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
       outcome := 'connected'; connection_id := new_id; is_new := true;
       RETURN NEXT;
     END
@@ -571,11 +589,11 @@ BEGIN
       target subscription_connections%%ROWTYPE;
       owner_personal_workspace uuid;
     BEGIN
-      IF NOT opengeni_private.subscription_codex_writer_context(
+      IF NOT opengeni_subscription_internal.subscription_codex_writer_context(
           p_account_id, p_workspace_id, p_subject_id) OR p_connection_id IS NULL THEN
         RETURN 'refused';
       END IF;
-      PERFORM opengeni_private.grant_subscription_codex_owner_capability(
+      PERFORM opengeni_subscription_internal.grant_subscription_codex_owner_capability(
         'codex_connection_owner', p_account_id, p_workspace_id, p_subject_id, p_connection_id);
       -- Visible to an organization administrator (shared) or to its owner
       -- through the capability (personal); nothing else.
@@ -583,14 +601,14 @@ BEGIN
       WHERE connection.account_id = p_account_id AND connection.id = p_connection_id
         AND connection.provider = 'codex' AND connection.kind = 'subscription';
       IF NOT FOUND THEN
-        PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
+        PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
         RETURN 'not_found';
       END IF;
       IF target.ownership = 'shared' THEN
         -- SUB-OWN-04: delegated managers reconnect, rename and toggle
         -- allocation; only an organization administrator deletes.
         IF NOT opengeni_private.subscription_organization_admin(p_account_id) THEN
-          PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
+          PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
           RETURN 'forbidden';
         END IF;
       ELSE
@@ -601,7 +619,7 @@ BEGIN
           AND membership.subject_id = p_subject_id;
         IF target.owner_subject_id IS DISTINCT FROM p_subject_id
           OR owner_personal_workspace IS DISTINCT FROM p_workspace_id THEN
-          PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
+          PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
           RETURN 'not_found';
         END IF;
       END IF;
@@ -620,7 +638,7 @@ BEGIN
       IF EXISTS (SELECT 1 FROM codex_reset_redemption_attempts attempt
         WHERE attempt.account_id = p_account_id AND attempt.credential_id = p_connection_id
           AND attempt.status = 'provider_started') THEN
-        PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
+        PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
         RETURN 'unresolved_redemption';
       END IF;
       BEGIN
@@ -634,7 +652,7 @@ BEGIN
         WHERE connection.account_id = p_account_id AND connection.id = p_connection_id;
       EXCEPTION WHEN foreign_key_violation THEN
         -- A chat or operation lease still names it (leases are RESTRICT).
-        PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
+        PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
         RETURN 'in_use';
       END;
       IF target.ownership = 'personal' THEN
@@ -643,7 +661,7 @@ BEGIN
         WHERE resource.account_id = p_account_id AND resource.id = target.authority_id
           AND resource.resource_id = p_connection_id AND resource.status <> 'revoked';
       END IF;
-      PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
+      PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
       RETURN 'removed';
     END
     $body$
@@ -659,10 +677,10 @@ BEGIN
     AS $body$
     DECLARE target subscription_connections%%ROWTYPE; result jsonb; mode text;
     BEGIN
-      IF NOT opengeni_private.subscription_codex_writer_context(p_account_id, p_workspace_id, p_subject_id)
+      IF NOT opengeni_subscription_internal.subscription_codex_writer_context(p_account_id, p_workspace_id, p_subject_id)
         OR p_action NOT IN ('resolve', 'rename', 'allocator', 'primary') OR p_connection_id IS NULL
       THEN RETURN NULL; END IF;
-      PERFORM opengeni_private.grant_subscription_codex_owner_capability(
+      PERFORM opengeni_subscription_internal.grant_subscription_codex_owner_capability(
         'codex_connection_owner', p_account_id, p_workspace_id, p_subject_id,
         '00000000-0000-0000-0000-000000000000'::uuid);
       SELECT coalesce((SELECT alias.connection_id FROM subscription_connection_aliases alias
@@ -677,14 +695,14 @@ BEGIN
         AND membership.personal_workspace_id = p_workspace_id
         AND membership.status = 'active' AND membership.revoked_at IS NULL;
       IF NOT FOUND THEN
-        PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
+        PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
         RETURN NULL;
       END IF;
       result := jsonb_build_object('id', target.id, 'kind', 'unchanged');
       IF p_action <> 'resolve' THEN
         SELECT * INTO target FROM subscription_connections WHERE id = target.id FOR UPDATE;
         IF NOT FOUND THEN
-          PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
+          PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
           RETURN NULL;
         END IF;
       END IF;
@@ -693,7 +711,7 @@ BEGIN
           version = version + 1, updated_at = clock_timestamp() WHERE id = target.id;
       ELSIF p_action = 'allocator' THEN
         IF p_enabled IS NULL OR p_expected_version IS NULL THEN
-          PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
+          PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
           RETURN NULL;
         END IF;
         IF target.allocator_enabled IS DISTINCT FROM p_enabled THEN
@@ -708,7 +726,7 @@ BEGIN
         END IF;
         result := result || jsonb_build_object('allocatorEnabled', target.allocator_enabled,
           'allocatorVersion', target.allocator_version, 'allocatorUpdatedAt', target.updated_at);
-      ELSE
+      ELSIF p_action = 'primary' THEN
         mode := coalesce(subscription_effective_settings(p_account_id, p_workspace_id)
           #>> '{values,rotation,codex,mode}', 'spread');
         INSERT INTO subscription_settings (account_id, workspace_id, rotation, codex_primary_connection_id,
@@ -720,7 +738,7 @@ BEGIN
           updated_by_subject_id = p_subject_id, version = subscription_settings.version + 1,
           updated_at = clock_timestamp();
       END IF;
-      PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
+      PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
       RETURN result;
     END
     $body$
@@ -741,11 +759,11 @@ BEGIN
     SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
     AS $body$
     BEGIN
-      IF NOT opengeni_private.subscription_codex_writer_context(
+      IF NOT opengeni_subscription_internal.subscription_codex_writer_context(
           p_account_id, p_workspace_id, p_subject_id) THEN
         RETURN;
       END IF;
-      PERFORM opengeni_private.grant_subscription_codex_owner_capability(
+      PERFORM opengeni_subscription_internal.grant_subscription_codex_owner_capability(
         'codex_connection_owner', p_account_id, p_workspace_id, p_subject_id,
         '00000000-0000-0000-0000-000000000000'::uuid);
       -- The person must be an active member who may use this workspace.
@@ -773,7 +791,7 @@ BEGIN
           AND connection.owner_subject_id = p_subject_id
         ORDER BY connection.created_at, connection.id;
       END IF;
-      PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
+      PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
     END
     $body$
   $ddl$, data_schema);
@@ -944,7 +962,7 @@ BEGIN
       -- One provider credit of one connection, whichever workspace files it.
       PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
         'subscription-reset-credit:' || p_connection_id::text || ':' || p_credit_id, 0));
-      PERFORM opengeni_private.grant_subscription_codex_owner_capability(
+      PERFORM opengeni_subscription_internal.grant_subscription_codex_owner_capability(
         'codex_reset_credit_fence', p_account_id, p_workspace_id, p_subject_id, p_connection_id);
       -- An expired pre-provider claim has no uncertain upstream effect. Like
       -- the same-workspace claim path, retire it under the global credit lock.
@@ -960,7 +978,7 @@ BEGIN
       LIMIT 1
       FOR UPDATE;
       IF NOT FOUND THEN
-        PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
+        PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
         outcome := 'clear'; RETURN NEXT; RETURN;
       END IF;
       -- Recovery from another workspace: the same person's same logical
@@ -971,10 +989,10 @@ BEGIN
         UPDATE codex_reset_redemption_attempts attempt
         SET workspace_id = p_workspace_id, updated_at = now()
         WHERE attempt.account_id = p_account_id AND attempt.id = holder.id;
-        PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
+        PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
         outcome := 'refiled'; attempt_workspace_id := holder.workspace_id; RETURN NEXT; RETURN;
       END IF;
-      PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
+      PERFORM opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(p_account_id);
       outcome := 'held_elsewhere'; attempt_workspace_id := holder.workspace_id; RETURN NEXT;
     END
     $body$
@@ -982,13 +1000,13 @@ BEGIN
 END
 $codex_owner_routines$;
 
-REVOKE ALL ON FUNCTION opengeni_private.subscription_codex_writer_context(uuid, uuid, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_subscription_internal.subscription_codex_writer_context(uuid, uuid, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.subscription_codex_revision_authority_v2(uuid, uuid, uuid, bigint) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.manage_subscription_codex_personal(uuid, uuid, text, uuid, text, text, boolean, integer) FROM PUBLIC;
-REVOKE ALL ON FUNCTION opengeni_private.grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid) FROM PUBLIC;
-REVOKE ALL ON FUNCTION opengeni_private.drop_subscription_codex_owner_capabilities(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_subscription_internal.grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.connect_subscription_codex_personal(
-  uuid, uuid, text, text, text, text, jsonb, timestamptz, timestamptz, text, text, text) FROM PUBLIC;
+  uuid, uuid, text, text, text, text, text, jsonb, timestamptz, timestamptz, text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.disconnect_subscription_codex_connection(uuid, uuid, text, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.subscription_codex_personal_connections(uuid, uuid, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.subscription_codex_reset_authority(uuid, uuid, uuid, text) FROM PUBLIC;
@@ -1002,7 +1020,7 @@ BEGIN
     GRANT EXECUTE ON FUNCTION opengeni_private.subscription_codex_revision_authority_v2(uuid, uuid, uuid, bigint) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION opengeni_private.manage_subscription_codex_personal(uuid, uuid, text, uuid, text, text, boolean, integer) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION opengeni_private.connect_subscription_codex_personal(
-      uuid, uuid, text, text, text, text, jsonb, timestamptz, timestamptz, text, text, text) TO opengeni_app;
+      uuid, uuid, text, text, text, text, text, jsonb, timestamptz, timestamptz, text, text, text) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION opengeni_private.disconnect_subscription_codex_connection(
       uuid, uuid, text, uuid) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION opengeni_private.subscription_codex_personal_connections(
@@ -1015,13 +1033,13 @@ BEGIN
       uuid, uuid, uuid, text) TO opengeni_app;
     -- Policy and capability internals are owner-only; the trigger function
     -- fires without the inserting role holding EXECUTE.
-    REVOKE EXECUTE ON FUNCTION opengeni_private.subscription_codex_writer_context(
+    REVOKE EXECUTE ON FUNCTION opengeni_subscription_internal.subscription_codex_writer_context(
       uuid, uuid, text) FROM opengeni_app;
-    REVOKE EXECUTE ON FUNCTION opengeni_private.grant_subscription_codex_owner_capability(
+    REVOKE EXECUTE ON FUNCTION opengeni_subscription_internal.grant_subscription_codex_owner_capability(
       text, uuid, uuid, text, uuid) FROM opengeni_app;
-    REVOKE EXECUTE ON FUNCTION opengeni_private.drop_subscription_codex_owner_capabilities(uuid)
+    REVOKE EXECUTE ON FUNCTION opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(uuid)
       FROM opengeni_app;
-    REVOKE EXECUTE ON FUNCTION opengeni_private.derive_scheduled_revision_subscription_authority()
+    REVOKE EXECUTE ON FUNCTION opengeni_subscription_internal.derive_scheduled_revision_subscription_authority()
       FROM opengeni_app;
   END IF;
 END

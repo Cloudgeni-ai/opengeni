@@ -74415,6 +74415,18 @@ export async function enqueueSessionTurn(
                   input.xaiProviderAccountAuthoritySnapshot ?? sharedTurnPool!.xai,
                 claudeProviderAccountAuthoritySnapshot:
                   input.claudeProviderAccountAuthoritySnapshot ?? sharedTurnPool!.claude,
+                // This exported low-level enqueue is also an acceptance boundary.
+                // Freeze the named human (or empty service authority) exactly once,
+                // just like the canonical prompt path; never leave postcutover NULL.
+                subscriptionAuthority: await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
+                  tx as unknown as Database,
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    acceptingSubjectId: initiatingHumanSubjectId,
+                  },
+                ),
                 createdAt: acceptedAt,
                 updatedAt: acceptedAt,
               },

@@ -34,10 +34,14 @@ import {
   type DbClient,
   type SubscriptionCoreCodexCredentialInput,
 } from "../src";
-import { rawRows } from "../src/database";
+import { rawRows, withRlsContext } from "../src/database";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import {
+  evaluateRuntimeDatabasePosture,
+  inspectRuntimeDatabasePosture,
+} from "../src/runtime-posture";
 
 setDefaultTimeout(180_000);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -650,15 +654,23 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
   });
 
   test("owner-only routines and capability internals are not the runtime role's", async () => {
+    const [schema] = await rawRows<{ usage: boolean }>(
+      client!.db,
+      sql`select has_schema_privilege(current_user, 'opengeni_subscription_internal', 'USAGE') as usage`,
+    );
+    expect(schema!.usage).toBe(false);
     for (const signature of [
-      "opengeni_private.subscription_codex_writer_context(uuid,uuid,text)",
-      "opengeni_private.grant_subscription_codex_owner_capability(text,uuid,uuid,text,uuid)",
-      "opengeni_private.drop_subscription_codex_owner_capabilities(uuid)",
-      "opengeni_private.derive_scheduled_revision_subscription_authority()",
+      "opengeni_subscription_internal.subscription_codex_writer_context(uuid,uuid,text)",
+      "opengeni_subscription_internal.grant_subscription_codex_owner_capability(text,uuid,uuid,text,uuid)",
+      "opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(uuid)",
+      "opengeni_subscription_internal.derive_scheduled_revision_subscription_authority()",
     ]) {
       const [privilege] = await rawRows<{ executable: boolean }>(
         client!.db,
-        sql`select has_function_privilege(current_user, ${signature}, 'EXECUTE') as executable`,
+        sql`select has_function_privilege(current_user, p.oid, 'EXECUTE') as executable
+          from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+          where n.nspname = 'opengeni_subscription_internal'
+            and p.proname = ${signature.split(".")[1]!.split("(")[0]!}`,
       );
       expect({ signature, executable: privilege!.executable }).toEqual({
         signature,
@@ -674,6 +686,106 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
           gen_random_uuid(), 'codex', 'user:intruder')`,
     ).catch((error: unknown) => error);
     expect(String((direct as { cause?: unknown })?.cause ?? direct)).toContain("permission denied");
+  });
+
+  test("personal identity preserves distinct upstream people and refuses unresolved identities", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const write = (
+      providerSubjectId: string | null,
+      workspaceId: string | null = org.personalWorkspaceId,
+    ) =>
+      withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+        connectSubscriptionCoreCodexConnection(client!.db, {
+          ...credential("team-identity"),
+          accountId: org.accountId,
+          subjectId: org.ownerSubjectId,
+          workspaceId,
+          providerSubjectId,
+        }),
+      );
+    const a = await write("upstream-A");
+    const b = await write("upstream-B");
+    if (a.kind !== "connected" || b.kind !== "connected") throw new Error("connect failed");
+    expect(a.id).not.toBe(b.id);
+    expect(await write("upstream-A")).toMatchObject({ kind: "connected", id: a.id, isNew: false });
+    expect(await write("upstream-B")).toMatchObject({ kind: "connected", id: b.id, isNew: false });
+    for (const workspaceId of [org.personalWorkspaceId, null]) {
+      if (workspaceId === null) await write("upstream-A", workspaceId);
+      for (const unresolved of [null, `legacy:${crypto.randomUUID()}`]) {
+        await shared!.admin`update subscription_connections set provider_subject_id = ${unresolved}
+          where account_id = ${org.accountId}::uuid and provider_account_id = 'chatgpt-team-identity'
+          and provider_subject_id = 'upstream-A'
+          and ownership = ${workspaceId === null ? "shared" : "personal"}`;
+        for (const incoming of [null, "upstream-A", "upstream-C"]) {
+          expect(await write(incoming, workspaceId)).toEqual({
+            kind: "refused",
+            reason: "identity_unverified",
+          });
+        }
+        await shared!.admin`update subscription_connections set provider_subject_id = 'upstream-A'
+          where account_id = ${org.accountId}::uuid and provider_account_id = 'chatgpt-team-identity'
+          and provider_subject_id is not distinct from ${unresolved}
+          and ownership = ${workspaceId === null ? "shared" : "personal"}`;
+      }
+      expect(await write("upstream-A", workspaceId)).toMatchObject({
+        kind: "connected",
+        isNew: false,
+      });
+    }
+  });
+
+  test("canonical and aliased resolve and refused personal disconnect never change settings", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const a = await connect(org, org.ownerSubjectId, org.personalWorkspaceId, "resolve-A");
+    const b = await connect(org, org.ownerSubjectId, org.personalWorkspaceId, "resolve-B");
+    if (a.kind !== "connected" || b.kind !== "connected") throw new Error("connect failed");
+    await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+      setSubscriptionCoreCodexPrimary(client!.db, {
+        accountId: org.accountId,
+        workspaceId: org.personalWorkspaceId,
+        subjectId: org.ownerSubjectId,
+        connectionId: a.id,
+      }),
+    );
+    const snapshot = () => shared!
+      .admin`select to_jsonb(settings) as settings from subscription_settings settings
+      where account_id = ${org.accountId}::uuid and workspace_id = ${org.personalWorkspaceId}::uuid`;
+    const before = await snapshot();
+    const alias = crypto.randomUUID();
+    await shared!
+      .admin`insert into subscription_connection_aliases(account_id, provider, alias_connection_id, connection_id)
+      values (${org.accountId}::uuid, 'codex', ${alias}::uuid, ${b.id}::uuid)`;
+    await shared!.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`insert into subscription_operation_leases(account_id, workspace_id, operation_id, attempt_id, operation_kind,
+        provider, connection_id, holder_id, generation, leased_until)
+        values (${org.accountId}::uuid, ${org.personalWorkspaceId}::uuid, ${crypto.randomUUID()}::uuid,
+          ${crypto.randomUUID()}::uuid, 'transcription', 'codex', ${b.id}::uuid, 'resolve-proof', 1, now() + interval '5 minutes')`;
+    });
+    for (const target of [b.id, alias]) {
+      await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+        withRlsContext(
+          client!.db,
+          { accountId: org.accountId, workspaceId: org.personalWorkspaceId },
+          async (tx) => {
+            const [resolved] = await rawRows<{ result: { id: string } }>(
+              tx,
+              sql`select opengeni_private.manage_subscription_codex_personal(${org.accountId}::uuid,
+              ${org.personalWorkspaceId}::uuid, ${org.ownerSubjectId}, ${target}::uuid,
+              'resolve', null, null, null) as result`,
+            );
+            expect(resolved!.result.id).toBe(b.id);
+          },
+        ),
+      );
+      expect(await snapshot()).toEqual(before);
+      expect(
+        (await disconnect(org, org.ownerSubjectId, org.personalWorkspaceId, target)).outcome,
+      ).toBe("in_use");
+      expect(await snapshot()).toEqual(before);
+    }
   });
 
   test("the owner-scoped writer and fences hold under a NOBYPASSRLS migration owner", async () => {
@@ -693,13 +805,24 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       const [owner] = await owned.admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
         select rolsuper, rolbypassrls from pg_roles where rolname = ${owned.ownerRole}`;
       expect(owner).toEqual({ rolsuper: false, rolbypassrls: false });
-      // Provisioning grants every opengeni_private routine; the internals are
-      // revoked again after that blanket grant.
+      // The old binary inventories opengeni_private as its runtime API. New
+      // owner-only implementations must not enter that inventory at all.
       const [executable] = await owned.admin<{ executable: boolean }[]>`
         select has_function_privilege('opengeni_app',
-          'opengeni_private.grant_subscription_codex_owner_capability(text,uuid,uuid,text,uuid)',
+          'opengeni_subscription_internal.grant_subscription_codex_owner_capability(text,uuid,uuid,text,uuid)',
           'EXECUTE') as executable`;
       expect(executable).toEqual({ executable: false });
+      const options = {
+        rlsStrategy: "force" as const,
+        expectedRole: "opengeni_app",
+        targetSchema: "public",
+      };
+      const posture = await inspectRuntimeDatabasePosture(ownerClient!.db, options);
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+      expect(posture.subscriptionOwnerRoutines).toHaveLength(4);
+      for (const routine of posture.subscriptionOwnerRoutines!) {
+        expect(posture.privateRoutines.some((entry) => entry.name === routine.name)).toBe(false);
+      }
       await personalCase();
       await organizationRedemptionCase();
     } finally {

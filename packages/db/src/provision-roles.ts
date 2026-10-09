@@ -2102,7 +2102,7 @@ BEGIN
       'persist_subscription_codex_connection_refresh(uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)',
       'fail_subscription_codex_connection_refresh(uuid,uuid,uuid,bigint,text)',
       'subscription_codex_reset_authority(uuid,uuid,uuid,text)',
-      'connect_subscription_codex_personal(uuid,uuid,text,text,text,text,jsonb,timestamptz,timestamptz,text,text,text)',
+      'connect_subscription_codex_personal(uuid,uuid,text,text,text,text,text,jsonb,timestamptz,timestamptz,text,text,text)',
       'disconnect_subscription_codex_connection(uuid,uuid,text,uuid)',
       'subscription_codex_personal_connections(uuid,uuid,text)',
       'subscription_codex_reset_credit_fence(uuid,uuid,uuid,text,text,uuid)',
@@ -2153,9 +2153,9 @@ BEGIN
       'drop_subscription_codex_owner_capabilities(uuid)',
       'derive_scheduled_revision_subscription_authority()'
     ] LOOP
-      IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
+      IF to_regprocedure('opengeni_subscription_internal.' || routine_signature) IS NOT NULL THEN
         EXECUTE format(
-          'REVOKE EXECUTE ON FUNCTION opengeni_private.%s FROM %I',
+          'REVOKE EXECUTE ON FUNCTION opengeni_subscription_internal.%s FROM %I',
           routine_signature,
           ${literal(role)}
         );

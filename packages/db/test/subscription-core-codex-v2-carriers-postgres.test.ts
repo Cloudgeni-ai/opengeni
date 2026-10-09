@@ -116,7 +116,7 @@ async function personalConnection(org: Org): Promise<string> {
         JSON.stringify({ access_token: "a", refresh_token: "r", id_token: "i" }),
       ),
       providerAccountId: `chatgpt-${crypto.randomUUID()}`,
-      providerSubjectId: null,
+      providerSubjectId: "verified-fixture-person",
       planType: "pro",
       isFedramp: false,
       expiresAt: new Date(Date.now() + 86_400_000),

@@ -21,7 +21,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   }
   let client: ReturnType<typeof createDb> | undefined;
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
-  const writer = "0679_subscription_core_codex_writers.sql";
+  const writer = "0680_subscription_core_codex_writers.sql";
   try {
     // Stage the actual pre-writer ledger, including on the stacked cutover
     // branch. This is a rolling/gate-off regression, not cutover activation.

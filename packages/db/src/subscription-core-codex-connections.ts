@@ -154,7 +154,7 @@ async function connectPersonal(
     sql`select outcome, connection_id::text as connection_id, is_new
       from opengeni_private.connect_subscription_codex_personal(
         ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId},
-        ${input.credentialEncrypted}, ${input.providerAccountId}, ${input.planType},
+        ${input.credentialEncrypted}, ${input.providerAccountId}, ${input.providerSubjectId}, ${input.planType},
         ${JSON.stringify(providerState(input))}::jsonb, ${iso(input.expiresAt)}::timestamptz,
         ${iso(input.lastRefreshAt)}::timestamptz, ${input.accountEmail}, ${input.label},
         ${input.connectedBySubjectId ?? null}
@@ -176,6 +176,9 @@ async function connectPersonal(
   if (row?.outcome === "personal_connections_disabled") {
     return { kind: "refused", reason: "personal_connections_disabled" };
   }
+  if (row?.outcome === "identity_unverified") {
+    return { kind: "refused", reason: "identity_unverified" };
+  }
   if (row?.outcome === "not_personal_workspace") return { kind: "refused", reason: "forbidden" };
   return { kind: "refused", reason: "unavailable" };
 }
@@ -190,9 +193,16 @@ async function connectShared(
       where account_id = ${input.accountId}::uuid and provider = 'codex'`,
   );
   if (cutover?.enabled !== true) return { kind: "refused", reason: "unavailable" };
+  if (
+    !input.providerAccountId ||
+    !input.providerSubjectId ||
+    input.providerSubjectId.startsWith("legacy:")
+  ) {
+    return { kind: "refused", reason: "identity_unverified" };
+  }
   if (input.providerAccountId !== null) {
     await tx.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${`subscription-connect:${input.accountId}:codex:shared:${input.providerAccountId}:${input.providerSubjectId ?? ""}`}, 0))`,
+      sql`select pg_advisory_xact_lock(hashtextextended(${`subscription-connect:${input.accountId}:codex:shared:${input.providerAccountId}`}, 0))`,
     );
   }
   const admin = await isOrganizationAdministrator(tx, input.accountId);
@@ -202,7 +212,8 @@ async function connectShared(
       sql`select id from subscription_connections
       where account_id = ${input.accountId}::uuid and provider = 'codex'
         and kind = 'subscription' and ownership = 'shared'
-        and provider_account_id = ${input.providerAccountId} and provider_subject_id is null limit 1`,
+        and provider_account_id = ${input.providerAccountId}
+        and (provider_subject_id is null or provider_subject_id like 'legacy:%') limit 1`,
     );
     if (unidentified) return { kind: "refused", reason: "identity_unverified" };
   }
