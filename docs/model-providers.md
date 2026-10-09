@@ -1833,6 +1833,16 @@ workspace connection create/rotate/revoke API. Model IDs are scoped under
 `organization-anthropic/` and `organization-claude-subscription/`. Custom models use
 immutable generations: retiring one prevents fresh selection while preserving
 accepted execution history. Connection/model allowlists still govern execution.
+
+Connecting a Claude account (an Anthropic API key, or a subscription by sign-in or
+setup token) adds the default models `CLAUDE_DEFAULT_CONNECTION_MODEL_IDS`
+(Opus 5.5, Sonnet 5.5 and Haiku 5.5) for that scope and connection kind, but only
+when the scope has never had a model of that kind, active or removed. A configured
+or trimmed list is never changed, and a removed default stays removed. Migration
+`0684` adds Haiku 5.5 where Claude models of a kind were already in use and Haiku
+5.5 was never added or removed there. Workspace model policy still decides who may
+pick each model.
+
 Workspace API-key credential rotation and disconnect/reconnect preserve the
 previous connection's model access policy, including deny-all restrictions and
 its policy revision. Credential management does not grant permission to reset

@@ -38,7 +38,8 @@ import {
   ensureManagedAccessForUserWithOrganizationMemberships,
   loadWorkspaceProviderApiKey,
   loadOrganizationModelProviderApiKey,
-  createOrganizationModelProviderCustomModel,
+  listOrganizationModelProviderCustomModels,
+  listWorkspaceProviderCustomModels,
 } from "@opengeni/db";
 import {
   startClaudeSubscriptionOAuth,
@@ -822,13 +823,29 @@ test("catalog loading remains offline with expired OAuth in both scopes and pres
   expect(
     await loadWorkspaceProviderApiKey(client.db, settings, row!.id, "claude_subscription"),
   ).toBeNull();
-  await createOrganizationModelProviderCustomModel(client.db, {
-    organizationId: scope.accountId,
-    actorSubjectId: scope.actorSubjectId,
-    providerKind: "claude_subscription",
-    operationId: randomUUID(),
-    upstreamModelId: "claude-opus-5-5",
-  });
+  // Connecting offered the default models in each scope; nobody added them.
+  expect(
+    (
+      await listOrganizationModelProviderCustomModels(client.db, {
+        organizationId: scope.accountId,
+        actorSubjectId: scope.actorSubjectId,
+        providerKind: "claude_subscription",
+      })
+    )
+      .map((model) => model.upstreamModelId)
+      .sort(),
+  ).toEqual(["claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5"]);
+  expect(
+    (
+      await listWorkspaceProviderCustomModels(client.db, {
+        accountId: scope.accountId,
+        workspaceId: row!.id,
+        providerKind: "claude_subscription",
+      })
+    )
+      .map((model) => model.upstreamModelId)
+      .sort(),
+  ).toEqual(["claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5"]);
   const catalogs = await settingsWithOrganizationProviderCredentials(
     client.db,
     scope.accountId,
