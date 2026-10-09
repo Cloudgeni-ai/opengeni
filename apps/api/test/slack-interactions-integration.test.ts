@@ -1748,7 +1748,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
           resources: Array<Record<string, unknown>>;
           variable_set_ids: string[];
           tools: Array<{ kind: string; id: string }>;
-          tool_policy: { mode: string };
+          tool_policy: { mode: string; firstPartyMode?: string; firstPartyAdditions?: string[] };
           first_party_mcp_tools: string[];
           first_party_mcp_permissions: string[] | null;
           initial_message: string;
@@ -1794,6 +1794,16 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
       );
       expect(new Set(session!.first_party_mcp_tools).size).toBe(
         session!.first_party_mcp_tools.length,
+      );
+      // Built-ins follow the workspace defaults (so later built-ins arrive);
+      // the Slack read tools are guaranteed on top rather than frozen in.
+      expect(session!.tool_policy.firstPartyMode).toBe("workspace_default");
+      expect(session!.tool_policy.firstPartyAdditions).toEqual(
+        trigger === "reaction"
+          ? undefined
+          : SLACK_READ_ONLY_CONTEXT_TOOLS.filter(
+              (tool) => !DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(tool),
+            ),
       );
       // An explicitly chosen model narrows nothing and still carries over.
       expect(session!.reasoning_effort).toBe("high");

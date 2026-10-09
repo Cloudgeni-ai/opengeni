@@ -58,3 +58,36 @@ test("following defaults never lifts the deployment ceiling or preserves removed
     ),
   ).toEqual(["custom_mcp_setup_request"]);
 });
+
+test("guaranteed additions ride on top of whatever defaults the session follows", () => {
+  const withAdditions = {
+    toolPolicy: { ...policy, firstPartyAdditions: ["session_pause"] as FirstPartyMcpToolName[] },
+    firstPartyMcpTools: ["session_get", "session_pause"] as FirstPartyMcpToolName[],
+  };
+  const wider = { ...settings, allowedFirstPartyMcpTools: [...defaults, "session_pause"] as const };
+  // Deployment defaults, then a workspace override (even an empty one), each
+  // keep the additions; new defaults still arrive.
+  expect(resolveSessionFirstPartyMcpTools(wider, withAdditions, {})).toEqual([
+    ...defaults,
+    "session_pause",
+  ]);
+  expect(
+    resolveSessionFirstPartyMcpTools(wider, withAdditions, {
+      sessionToolDefaults: { firstPartyMcpTools: [] },
+    }),
+  ).toEqual(["session_pause"]);
+  // The deployment ceiling still bounds an addition.
+  expect(resolveSessionFirstPartyMcpTools(settings, withAdditions, {})).toEqual(defaults);
+  // An explicit selection ignores additions entirely.
+  expect(
+    resolveSessionFirstPartyMcpTools(
+      wider,
+      {
+        ...withAdditions,
+        toolPolicy: { ...withAdditions.toolPolicy, firstPartyMode: "explicit" },
+        firstPartyMcpTools: [],
+      },
+      {},
+    ),
+  ).toEqual([]);
+});

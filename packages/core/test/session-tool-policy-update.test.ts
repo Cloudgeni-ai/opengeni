@@ -406,6 +406,80 @@ describe("durable session tool-policy updates", () => {
     expect(resolveSessionFirstPartyMcpTools(newerSettings, pinned, {})).toEqual([]);
   }, 180_000);
 
+  test("guaranteed built-in additions survive an explicit pin and return on reset", async () => {
+    if (!available) return;
+    const owner = await workspace("first-party-additions");
+    const additionSettings = testSettings({
+      ...settings,
+      defaultFirstPartyMcpTools: ["session_get"],
+      allowedFirstPartyMcpTools: ["session_get", "custom_mcp_setup_request", "session_pause"],
+    });
+    const followsWithAdditions: SessionToolPolicy = {
+      mode: "workspace_default",
+      inheritedFromSessionId: null,
+      firstPartyMode: "workspace_default",
+      firstPartyAdditions: ["session_pause"],
+    };
+    const created = await session(firstDb, {
+      ...owner,
+      tools: [OPENGENI],
+      toolPolicy: followsWithAdditions,
+    });
+    const bus = new MemoryEventBus();
+    const newerSettings = {
+      ...additionSettings,
+      defaultFirstPartyMcpTools: ["session_get", "custom_mcp_setup_request"] as const,
+    };
+    expect(resolveSessionFirstPartyMcpTools(newerSettings, created, {})).toEqual([
+      "session_get",
+      "custom_mcp_setup_request",
+      "session_pause",
+    ]);
+
+    const pinned = await updateSessionToolPolicy(
+      deps(firstDb, bus, additionSettings),
+      grant(owner.workspaceId, owner.accountId),
+      created.id,
+      { mode: "explicit", tools: [OPENGENI], firstPartyMcpTools: [], expectedVersion: 1 },
+    );
+    expect(resolveSessionFirstPartyMcpTools(newerSettings, pinned, {})).toEqual([]);
+    expect(pinned.toolPolicy.firstPartyAdditions).toEqual(["session_pause"]);
+
+    const reset = await updateSessionToolPolicy(
+      deps(firstDb, bus, additionSettings),
+      grant(owner.workspaceId, owner.accountId),
+      created.id,
+      { mode: "workspace_default", expectedVersion: 2 },
+    );
+    expect(reset.firstPartyMcpTools).toEqual(["session_get", "session_pause"]);
+    expect(reset.toolPolicy).toMatchObject(followsWithAdditions);
+    expect(resolveSessionFirstPartyMcpTools(newerSettings, reset, {})).toEqual([
+      "session_get",
+      "custom_mcp_setup_request",
+      "session_pause",
+    ]);
+
+    const child = await session(firstDb, {
+      ...owner,
+      tools: [OPENGENI],
+      parentSessionId: created.id,
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: created.id },
+    });
+    const adopted = await updateSessionToolPolicy(
+      deps(firstDb, bus, additionSettings),
+      grant(owner.workspaceId, owner.accountId),
+      child.id,
+      { mode: "workspace_default", expectedVersion: 1 },
+    );
+    expect(adopted.toolPolicy).toEqual({
+      mode: "workspace_default",
+      inheritedFromSessionId: created.id,
+      firstPartyMode: "workspace_default",
+      firstPartyAdditions: ["session_pause"],
+    });
+    expect(resolveSessionFirstPartyMcpTools(newerSettings, adopted, {})).toContain("session_pause");
+  }, 180_000);
+
   test("allows default adoption only through a workspace-default parent ceiling", async () => {
     if (!available) return;
     const owner = await workspace("child-adopt-workspace-defaults");
