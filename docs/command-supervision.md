@@ -89,7 +89,7 @@ selects the PTY protocol for a PTY shell, or v1 for a pipe-mode shell. This does
 not adopt them as session background commands. Their exact-instance capability
 and canonical database fences must pass before mutation admission; missing or
 old helpers reject the call, never fall back to a process-group wrapper.
-Maintenance migration `0689` extends the immutable initial-retention guard to PTY descriptors.
+Maintenance migration `0691` extends the immutable initial-retention guard to PTY descriptors.
 PTY readiness also checks the guard's protocol version, since the five older
 trigger names alone certify only v1. Drain old writers before applying it and
 start compatible readers with the exact native image before sending these calls;
@@ -97,11 +97,12 @@ old warm boxes are not retrofitted by an image-pin update.
 
 ## Operator-qualified new groups
 
-Maintenance migration `0690` adds an owner-only qualification ledger. It has no
+Maintenance migration `0692` adds an owner-only qualification ledger. It has no
 public session field or model override. Before enrollment, the operator supplies
 one reviewed `NativeCommandQualification` to
 `publishNativeCommandQualification` in `packages/db/src/native-command-qualification.ts`:
-the qualification UUID, exact account/workspace UUIDs, positive activation
+the qualification UUID, exact account/workspace UUIDs, the authenticated human
+`creatorSubjectId`, one exact canonical `createIdempotencyKey`, positive activation
 generation, immutable server source SHA, exact stock desktop image digest,
 the actual immutable Modal `providerImageId` returned by its authenticated
 registry preparation, the exact authenticated `providerBindingKey`, both
@@ -113,13 +114,25 @@ enabled trigger bindings, including the birth, physical enrollment, and private
 ledger guards. Missing, disabled, or wrongly bound triggers block admission;
 they cannot turn an absent birth receipt into a legacy decision.
 
-A qualification applies only to new explicit Modal self-groups born in the
-canonical session INSERT transaction. Existing groups, inherited/shared groups,
-old warm boxes and restored legacy groups never enroll retrospectively.
+A qualification applies only to the new explicit Modal self-group whose
+canonical session INSERT has creator kind `subject`, the selected authenticated
+subject and the exact selected create key. Other humans, service actors and
+probe keys in the same workspace remain outside the cohort. The immutable birth
+receipt copies those original creator/key facts and binds them to the owner row;
+later session key edits cannot enroll or requalify a group. Canonical keyed
+replay after disabling enrollment retains the original birth. Existing groups,
+inherited/shared groups, old warm boxes and restored legacy groups never enroll
+retrospectively.
 The first physical create retains a server-generated qualification descriptor
-in the original `provider_create_attempt` before provider dispatch. The actual
-warming-to-warm transition binds that exact create operation and immutable
-qualification to its provider instance and warm epoch. Fresh creates require
+in the original `provider_create_attempt` before provider dispatch.
+API cold attachment and worker creation paths both record this intent at the
+original Modal wire boundary and attribute its exact operation before setup.
+Lost replies retain the unresolved create receipt and never permit redispatch.
+Unknown setup starts after attribution preserve the box and warming fence until
+the original invocation can be reconciled; API failure cleanup uses the same
+conservative predicate as the Modal runtime.
+The actual warming-to-warm transition binds that exact create operation and
+immutable qualification to its provider instance and warm epoch. Fresh creates require
 the original canonical selector/build preparation and its actual wire image ID
 to match the operator's provider-image pin and namespace. A copied intent,
 configured `modalImageId`, arbitrary Image object or matching digest text cannot

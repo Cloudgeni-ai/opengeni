@@ -11,6 +11,9 @@ const Qualification = z.object({
   id: z.uuid(),
   accountId: z.uuid(),
   workspaceId: z.uuid(),
+  creatorSubjectId: z.string().min(1),
+  // Exact canonical HTTP create key: preserve every character, including spaces.
+  createIdempotencyKey: z.string().min(1).max(200),
   activationGeneration: z.number().int().positive().safe(),
   sourceSha: z.string().regex(/^[a-f0-9]{40}$/u),
   imageRef: z
@@ -73,8 +76,9 @@ export async function publishNativeCommandQualification(
         await tx.execute(sql`update opengeni_private.native_command_qualifications
       set enrollment_enabled = false where data_schema = current_schema() and workspace_id = ${input.workspaceId}::uuid and enrollment_enabled`);
       await tx.execute(sql`insert into opengeni_private.native_command_qualifications
-      (data_schema,id,account_id,workspace_id,activation_generation,source_sha,image_ref,provider_image_id,provider_binding_key,protocols,acceptance_evidence_hash,enrollment_enabled)
+      (data_schema,id,account_id,workspace_id,creator_kind,creator_subject_id,create_idempotency_key,activation_generation,source_sha,image_ref,provider_image_id,provider_binding_key,protocols,acceptance_evidence_hash,enrollment_enabled)
       values (current_schema(),${qualification.id}::uuid,${qualification.accountId}::uuid,${qualification.workspaceId}::uuid,
+        'subject',${qualification.creatorSubjectId},${qualification.createIdempotencyKey},
         ${qualification.activationGeneration},${qualification.sourceSha},${qualification.imageRef},${qualification.providerImageId},${qualification.providerBindingKey},
         ARRAY['native-subreaper-v1','native-subreaper-pty-v1'],${qualification.acceptanceEvidenceHash},${input.enrollmentEnabled})`);
     }),

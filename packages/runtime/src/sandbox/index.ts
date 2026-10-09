@@ -213,6 +213,7 @@ export {
 } from "./providers/modal";
 export {
   getModalCommandStartInvocation,
+  modalCommandStartCleanupIsSafe,
   withModalCommandStartSignal,
   type ModalCommandStartInvocation,
 } from "./providers/modal-command-start-errors";

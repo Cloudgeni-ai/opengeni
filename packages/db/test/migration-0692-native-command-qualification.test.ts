@@ -45,6 +45,8 @@ const BINDING = {
   environment: "native-fixture",
 };
 const BINDING_KEY = JSON.stringify(BINDING);
+const intendedBirthKeys = new Map<string, string>();
+const workspaceExternalIds = new Map<string, string>();
 
 beforeAll(async () => {
   const acquired = await acquireOwnerMigratedTestDatabase("native-command-qualification");
@@ -156,15 +158,248 @@ async function workspace() {
     subjectId: `test-${suffix}`,
   });
   const grant = access.workspaceGrants[0]!;
-  return { accountId: grant.accountId, workspaceId: grant.workspaceId! };
+  workspaceExternalIds.set(grant.workspaceId!, suffix);
+  return {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId!,
+    subjectId: grant.subjectId,
+  };
 }
+
+test("owner qualification excludes other keys from the same authenticated creator despite forged metadata", async () => {
+  const ws = await workspace();
+  const q = {
+    ...(await qualification(ws)),
+    id: crypto.randomUUID(),
+    activationGeneration: 2,
+    creatorSubjectId: ws.subjectId,
+    createIdempotencyKey: `native-intended-${crypto.randomUUID()}`,
+  };
+  await publishNativeCommandQualification(owner.db, q);
+  const probe = await createSession(app.db, {
+    ...ws,
+    createdBy: { kind: "subject", subjectId: ws.subjectId },
+    createIdempotencyKey: `native-probe-${crypto.randomUUID()}`,
+    sandboxBackend: "modal",
+    initialMessage: "Unrelated human probe",
+    resources: [],
+    metadata: {
+      nativeCommandQualification: q,
+      creatorSubjectId: q.creatorSubjectId,
+      createIdempotencyKey: q.createIdempotencyKey,
+      enrollmentEnabled: true,
+    },
+    model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+  });
+  expect(
+    await loadNativeCommandBirthQualification(app.db, scopeFor(ws, probe.sandboxGroupId)),
+  ).toBeNull();
+  for (const key of [null, `${q.createIdempotencyKey} `, ` ${q.createIdempotencyKey}`]) {
+    const unselected = await session(ws, { createIdempotencyKey: key });
+    expect(
+      await loadNativeCommandBirthQualification(app.db, scopeFor(ws, unselected.sandboxGroupId)),
+    ).toBeNull();
+  }
+});
+
+test("exact intended key cannot enroll another human or a service with the selected human subject", async () => {
+  for (const creatorKind of ["subject", "service"] as const) {
+    const ws = await workspace();
+    const q = await qualification(ws);
+    let subjectId = ws.subjectId;
+    if (creatorKind === "subject") {
+      const externalId = workspaceExternalIds.get(ws.workspaceId)!;
+      const access = await bootstrapWorkspace(app.db, {
+        accountExternalSource: "test",
+        accountExternalId: externalId,
+        accountName: "Native qualification",
+        workspaceExternalSource: "test",
+        workspaceExternalId: externalId,
+        workspaceName: "Native qualification",
+        subjectId: `other-human-${crypto.randomUUID()}`,
+      });
+      const grant = access.workspaceGrants[0]!;
+      expect(grant.workspaceId).toBe(ws.workspaceId);
+      subjectId = grant.subjectId;
+    }
+    const unselected = await session(
+      { ...ws, subjectId },
+      {
+        createdBy: { kind: creatorKind, subjectId },
+        createIdempotencyKey: q.createIdempotencyKey,
+      },
+    );
+    expect(unselected.createdBy).toEqual({ kind: creatorKind, subjectId });
+    expect(unselected.createIdempotencyKey).toBe(q.createIdempotencyKey);
+    const scope = scopeFor(ws, unselected.sandboxGroupId);
+    expect(await loadNativeCommandBirthQualification(app.db, scope)).toBeNull();
+    expect(
+      await inspectNativeCommandProviderQualification(app.db, {
+        ...scope,
+        providerInstanceId: "sb-unselected",
+        leaseEpoch: 1,
+        protocol: "native-subreaper-v1",
+        sourceSha: SOURCE,
+      }),
+    ).toEqual({ status: "legacy" });
+  }
+});
+
+test("birth receipt copies exact original selectors and later session key edits cannot alter enrollment", async () => {
+  const ws = await workspace();
+  const q = await qualification(ws);
+  const born = await session(ws);
+  const scope = scopeFor(ws, born.sandboxGroupId);
+  const [receipt] =
+    await fixture.admin`select creator_kind, creator_subject_id, create_idempotency_key
+    from opengeni_private.native_command_group_births where sandbox_group_id=${born.id}`;
+  expect(receipt).toEqual({
+    creator_kind: "subject",
+    creator_subject_id: ws.subjectId,
+    create_idempotency_key: q.createIdempotencyKey,
+  });
+  await fixture.admin`update sessions set create_idempotency_key=${`later-${crypto.randomUUID()}`} where id=${born.id}`;
+  const loaded = await loadNativeCommandBirthQualification(app.db, scope);
+  expect(loaded?.creatorSubjectId).toBe(ws.subjectId);
+  expect(loaded?.createIdempotencyKey).toBe(q.createIdempotencyKey);
+  await warming(scope);
+  const create = createInput(scope);
+  await beginModalProviderCreate(app.db, create);
+  const physical = await warm(scope, create);
+  const decision = await inspect(scope, physical);
+  expect(decision.status).toBe("enrolled");
+  if (decision.status !== "enrolled") throw new Error("Expected selected physical enrollment");
+  expect(decision.qualification.creatorSubjectId).toBe(ws.subjectId);
+  expect(decision.qualification.createIdempotencyKey).toBe(q.createIdempotencyKey);
+
+  const legacyWs = await workspace();
+  const legacyQ = await qualification(legacyWs);
+  const probe = await session(legacyWs, { createIdempotencyKey: `probe-${crypto.randomUUID()}` });
+  await fixture.admin`update sessions set create_idempotency_key=${legacyQ.createIdempotencyKey},
+    metadata=${fixture.admin.json({ nativeCommandQualification: legacyQ, createdBy: { kind: "subject", subjectId: legacyWs.subjectId } })}
+    where id=${probe.id}`;
+  expect(
+    await loadNativeCommandBirthQualification(app.db, scopeFor(legacyWs, probe.sandboxGroupId)),
+  ).toBeNull();
+});
+
+async function expectBirthSelectorRefusal(action: Promise<unknown>) {
+  let failure: unknown;
+  try {
+    await action;
+  } catch (error) {
+    failure = error;
+  }
+  if (!failure) throw new Error("Expected inconsistent birth selector refusal");
+  while (failure instanceof Error && failure.cause) failure = failure.cause;
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).toContain("birth selector is inconsistent");
+  expect((failure as { code?: string }).code).toBe("55000");
+}
+
+test("required owner selectors and copied receipt facts are constrained, immutable, and fail closed if corrupted", async () => {
+  const ws = await workspace();
+  const q = await qualification(ws);
+  const { creatorSubjectId: _subject, ...missingSubject } = q;
+  const { createIdempotencyKey: _key, ...missingKey } = q;
+  for (const missing of [missingSubject, missingKey]) {
+    await expect(
+      publishNativeCommandQualification(owner.db, missing as NativeCommandQualification),
+    ).rejects.toThrow();
+  }
+  for (const invalid of [
+    { creator_kind: "service" },
+    { creator_subject_id: null },
+    { creator_subject_id: "" },
+    { create_idempotency_key: null },
+    { create_idempotency_key: "" },
+    { create_idempotency_key: "x".repeat(201) },
+  ]) {
+    await expect(
+      Promise.resolve(fixture.admin`insert into opengeni_private.native_command_qualifications
+      select (jsonb_populate_record(null::opengeni_private.native_command_qualifications,
+        to_jsonb(existing) || ${fixture.admin.json({ ...invalid, id: crypto.randomUUID(), activation_generation: 2, enrollment_enabled: false })})).*
+      from opengeni_private.native_command_qualifications existing where id=${q.id}`),
+    ).rejects.toThrow();
+  }
+  const born = await session(ws);
+  const scope = scopeFor(ws, born.sandboxGroupId);
+  for (const field of ["creator_subject_id", "create_idempotency_key"] as const) {
+    await expect(
+      Promise.resolve(fixture.admin`update opengeni_private.native_command_qualifications
+      set ${fixture.admin(field)}=${"unselected"} where id=${q.id}`),
+    ).rejects.toThrow("immutable");
+    await expect(
+      Promise.resolve(fixture.admin`update opengeni_private.native_command_group_births
+      set ${fixture.admin(field)}=${"unselected"} where sandbox_group_id=${born.id}`),
+    ).rejects.toThrow("immutable");
+    await expect(
+      Promise.resolve(fixture.admin`insert into opengeni_private.native_command_group_births
+      select (jsonb_populate_record(null::opengeni_private.native_command_group_births,
+        to_jsonb(existing) || ${fixture.admin.json({ [field]: "unselected", sandbox_group_id: crypto.randomUUID() })})).*
+      from opengeni_private.native_command_group_births existing where sandbox_group_id=${born.id}`),
+    ).rejects.toThrow("foreign key");
+  }
+  const leaseId = await warming(scope);
+  const create = createInput(scope);
+  await expect(
+    Promise.resolve(fixture.admin`insert into opengeni_private.native_command_group_births
+    select (jsonb_populate_record(null::opengeni_private.native_command_group_births,
+      to_jsonb(existing) || ${fixture.admin.json({ creator_kind: "service", sandbox_group_id: crypto.randomUUID() })})).*
+    from opengeni_private.native_command_group_births existing where sandbox_group_id=${born.id}`),
+  ).rejects.toThrow("check constraint");
+  for (const field of ["account_id", "creator_subject_id", "create_idempotency_key"] as const) {
+    const replacement = field === "account_id" ? crypto.randomUUID() : "unselected";
+    // The fixture superuser emulates pre-existing corruption, then restores it.
+    // Runtime roles never receive the trigger/constraint bypass capability.
+    await fixture.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`update opengeni_private.native_command_group_births set ${tx(field)}=${replacement} where sandbox_group_id=${born.id}`;
+    });
+    try {
+      await expectBirthSelectorRefusal(loadNativeCommandBirthQualification(app.db, scope));
+      await expectBirthSelectorRefusal(
+        inspectNativeCommandProviderQualification(app.db, {
+          ...scope,
+          providerInstanceId: "sb-unqualified",
+          leaseEpoch: 1,
+          protocol: "native-subreaper-v1",
+          sourceSha: SOURCE,
+        }),
+      );
+      await expectBirthSelectorRefusal(beginModalProviderCreate(app.db, create));
+      await expectBirthSelectorRefusal(
+        Promise.resolve(
+          fixture.admin`update sandbox_leases set liveness='cold' where id=${leaseId}`,
+        ),
+      );
+    } finally {
+      const original =
+        field === "account_id"
+          ? ws.accountId
+          : field === "creator_subject_id"
+            ? ws.subjectId
+            : q.createIdempotencyKey;
+      await fixture.admin.begin(async (tx) => {
+        await tx`set local session_replication_role = replica`;
+        await tx`update opengeni_private.native_command_group_births set ${tx(field)}=${original} where sandbox_group_id=${born.id}`;
+      });
+    }
+  }
+  expect((await loadNativeCommandBirthQualification(app.db, scope))?.id).toBe(q.id);
+});
 
 async function qualification(
   scope: Awaited<ReturnType<typeof workspace>>,
   generation = 1,
 ): Promise<NativeCommandQualification> {
   const row: NativeCommandQualification = {
-    ...scope,
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    creatorSubjectId: scope.subjectId,
+    createIdempotencyKey: `native-cohort-${generation}-${crypto.randomUUID()}`,
     id: crypto.randomUUID(),
     activationGeneration: generation,
     sourceSha: SOURCE,
@@ -176,6 +411,7 @@ async function qualification(
     enrollmentEnabled: true,
   };
   await publishNativeCommandQualification(owner.db, row);
+  intendedBirthKeys.set(scope.workspaceId, row.createIdempotencyKey);
   return row;
 }
 
@@ -184,12 +420,20 @@ async function session(
   options: {
     sandboxBackend?: "modal" | "none";
     sandboxGroupId?: string;
-    createIdempotencyKey?: string;
+    createIdempotencyKey?: string | null;
+    createdBy?: Parameters<typeof createSession>[1]["createdBy"];
   } = {},
 ) {
   return createSession(app.db, {
     ...scope,
     ...options,
+    createdBy: options.createdBy ?? { kind: "subject", subjectId: scope.subjectId },
+    createIdempotencyKey:
+      options.createIdempotencyKey !== undefined
+        ? options.createIdempotencyKey
+        : options.sandboxGroupId || options.sandboxBackend === "none"
+          ? `native-probe-${crypto.randomUUID()}`
+          : (intendedBirthKeys.get(scope.workspaceId) ?? `native-bootstrap-${crypto.randomUUID()}`),
     sandboxBackend: options.sandboxBackend ?? "modal",
     initialMessage: "Qualification fixture",
     resources: [],
@@ -689,7 +933,9 @@ test("disabling births preserves frozen cohort and exact replacement provenance;
   const physical = await warm(scope, create);
   await disableNativeCommandEnrollment(owner.db, { ...ws, qualificationId: q.id });
   expect((await inspect(scope, physical)).status).toBe("enrolled");
-  const disabledBorn = await session(ws);
+  const disabledBorn = await session(ws, {
+    createIdempotencyKey: `disabled-${crypto.randomUUID()}`,
+  });
   expect(
     await loadNativeCommandBirthQualification(app.db, scopeFor(ws, disabledBorn.sandboxGroupId)),
   ).toBeNull();
@@ -728,7 +974,8 @@ test("canonical keyed birth replay keeps the original qualification after disabl
   const q = await qualification(ws);
   const input = {
     ...ws,
-    createIdempotencyKey: `native-birth-${crypto.randomUUID()}`,
+    createdBy: { kind: "subject" as const, subjectId: ws.subjectId },
+    createIdempotencyKey: q.createIdempotencyKey,
     sandboxBackend: "modal" as const,
     initialMessage: "Keyed birth",
     resources: [],

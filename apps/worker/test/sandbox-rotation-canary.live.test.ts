@@ -52,7 +52,10 @@
  * Desktop mode keeps the global background flag false. Factual bare pipe/PTY
  * native receipts from an unenrolled bootstrap group are hashed before an
  * isolated owner qualification is published. Only a NEW explicit Modal group
- * can acquire its birth; its exact stock import and snapshot lineage must pass
+ * with the canonical fixture grant's trusted subject creator and preselected
+ * original request key can acquire its birth. Bootstrap uses a distinct key;
+ * caller metadata supplies neither selector. Canonical keyed creation owns the
+ * request identity/winner transaction. Its exact stock import and snapshot lineage must pass
  * the canonical physical create fences. Real worker and core/API constructors
  * run through the production cancellation controller. Native receipt, complete
  * output, writer/holder settlement, genuine PTY job control, two-second physical
@@ -68,9 +71,11 @@ import {
   acquireLease,
   addSessionSystemUpdate,
   applySessionTurnSettlement,
+  bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  createSessionWithIdempotencyKeyResult,
   initializeSessionStartAtomically,
   readLease,
   releaseLeaseHolder,
@@ -285,15 +290,38 @@ test.skipIf(!live)(
         ),
       );
       try {
-        const [account] = await admin<
-          { id: string }[]
-        >`insert into managed_accounts(name) values (${`sandbox_rotation-${runId}`}) returning id`;
-        const [workspace] = await admin<
-          { id: string }[]
-        >`insert into workspaces(account_id,name) values (${account!.id},${`sandbox_rotation-${runId}`}) returning id`;
-        workspaceId = workspace!.id;
-        const accountId = account!.id;
-        await admin`insert into workspace_inference_controls(workspace_id,account_id) values (${workspaceId},${accountId})`;
+        let accountId: string;
+        let trustedCreatorSubjectId: string | undefined;
+        if (desktopNative) {
+          const subjectId = `sandbox-rotation-canary:${runId}`;
+          const access = await bootstrapWorkspace(db, {
+            accountExternalSource: "sandbox-rotation-canary",
+            accountExternalId: runId,
+            accountName: `sandbox_rotation-${runId}`,
+            workspaceExternalSource: "sandbox-rotation-canary",
+            workspaceExternalId: runId,
+            workspaceName: `sandbox_rotation-${runId}`,
+            subjectId,
+          });
+          const grant = access.workspaceGrants[0];
+          requireCanary(
+            grant?.workspaceId && grant.subjectId === subjectId,
+            "canonical fixture bootstrap did not return its exact creator grant",
+          );
+          accountId = grant.accountId;
+          workspaceId = grant.workspaceId;
+          trustedCreatorSubjectId = grant.subjectId;
+        } else {
+          const [account] = await admin<
+            { id: string }[]
+          >`insert into managed_accounts(name) values (${`sandbox_rotation-${runId}`}) returning id`;
+          const [workspace] = await admin<
+            { id: string }[]
+          >`insert into workspaces(account_id,name) values (${account!.id},${`sandbox_rotation-${runId}`}) returning id`;
+          workspaceId = workspace!.id;
+          accountId = account!.id;
+          await admin`insert into workspace_inference_controls(workspace_id,account_id) values (${workspaceId},${accountId})`;
+        }
         const sessionInput = {
           accountId,
           workspaceId,
@@ -305,7 +333,33 @@ test.skipIf(!live)(
           latencyMode: "standard" as const,
           sandboxBackend: "modal" as const,
         };
-        let session = await createSession(db, sessionInput);
+        const bootstrapCreateKey = `sandbox-rotation-canary:bootstrap:${runId}`;
+        const cohortCreateKey = `sandbox-rotation-canary:cohort:${runId}`;
+        async function createDesktopSession(createIdempotencyKey: string) {
+          requireCanary(
+            desktopNative && trustedCreatorSubjectId,
+            "desktop keyed create requires its trusted fixture creator",
+          );
+          const result = await createSessionWithIdempotencyKeyResult(db, {
+            ...sessionInput,
+            createdBy: { kind: "subject", subjectId: trustedCreatorSubjectId },
+            createIdempotencyKey,
+          });
+          requireCanary(
+            !result.denied && result.created,
+            "desktop keyed create did not commit a fresh canonical session winner",
+          );
+          requireCanary(
+            result.session.createdBy.kind === "subject" &&
+              result.session.createdBy.subjectId === trustedCreatorSubjectId &&
+              result.session.createIdempotencyKey === createIdempotencyKey,
+            "canonical session winner did not freeze its exact trusted creator/request key",
+          );
+          return result.session;
+        }
+        let session = desktopNative
+          ? await createDesktopSession(bootstrapCreateKey)
+          : await createSession(db, sessionInput);
         let ids = {
           accountId,
           workspaceId,
@@ -586,7 +640,7 @@ test.skipIf(!live)(
               accountId,
               workspaceId: ids.workspaceId,
               sessionId: session.id,
-              resourceSubjectId: "dev",
+              resourceSubjectId: trustedCreatorSubjectId ?? "dev",
               homeLease: {
                 sandboxGroupId: ids.sandboxGroupId,
                 leaseEpoch: current.resumed.leaseEpoch,
@@ -632,7 +686,7 @@ test.skipIf(!live)(
           const requested = await requestSessionBackgroundCommandCancellation(db, {
             ...ids,
             commandId: retained.command_id,
-            subjectId: "dev",
+            subjectId: trustedCreatorSubjectId ?? "dev",
           });
           requireCanary(requested.accepted, "canonical adopted-command stop was not accepted");
           await activities.reapSandboxLeases();
@@ -733,8 +787,14 @@ test.skipIf(!live)(
             image: config.image,
             providerImageId: actualImageId,
             providerBindingKey: binding.key,
+            creatorSubjectId: trustedCreatorSubjectId,
+            createIdempotencyKey: cohortCreateKey,
             bootstrap,
           });
+          requireCanary(
+            trustedCreatorSubjectId,
+            "isolated qualification lacks its trusted creator",
+          );
           await publishNativeCommandQualification(owner.db, {
             id: qualificationId,
             accountId,
@@ -744,6 +804,8 @@ test.skipIf(!live)(
             imageRef: config.image,
             providerImageId: actualImageId,
             providerBindingKey: binding.key,
+            creatorSubjectId: trustedCreatorSubjectId,
+            createIdempotencyKey: cohortCreateKey,
             protocols: ["native-subreaper-v1", "native-subreaper-pty-v1"],
             acceptanceEvidenceHash,
             enrollmentEnabled: true,
@@ -752,8 +814,28 @@ test.skipIf(!live)(
             (await loadNativeCommandBirthQualification(db, ids)) === null,
             "qualification retrospectively enrolled bootstrap group",
           );
+          const unmatched = await createDesktopSession(
+            `sandbox-rotation-canary:unmatched:${runId}`,
+          );
+          requireCanary(
+            (await loadNativeCommandBirthQualification(db, {
+              accountId,
+              workspaceId: ids.workspaceId,
+              sandboxGroupId: unmatched.sandboxGroupId,
+            })) === null,
+            "qualification enrolled a fresh request with the right creator but wrong original key",
+          );
           // Only canonical explicit Modal self-group INSERT can acquire birth.
-          session = await createSession(db, sessionInput);
+          session = await createDesktopSession(cohortCreateKey);
+          const replay = await createSessionWithIdempotencyKeyResult(db, {
+            ...sessionInput,
+            createdBy: { kind: "subject", subjectId: trustedCreatorSubjectId },
+            createIdempotencyKey: cohortCreateKey,
+          });
+          requireCanary(
+            !replay.denied && !replay.created && replay.session.id === session.id,
+            "canonical keyed replay did not return the original qualified session winner",
+          );
           ids = {
             accountId,
             workspaceId: ids.workspaceId,
@@ -767,8 +849,10 @@ test.skipIf(!live)(
           const birth = await loadNativeCommandBirthQualification(db, ids);
           requireCanary(
             birth?.id === qualificationId &&
-              birth.acceptanceEvidenceHash === acceptanceEvidenceHash,
-            "new cohort birth did not freeze the reviewed factual native evidence",
+              birth.acceptanceEvidenceHash === acceptanceEvidenceHash &&
+              birth.creatorSubjectId === trustedCreatorSubjectId &&
+              birth.createIdempotencyKey === cohortCreateKey,
+            "new cohort birth did not freeze the exact creator/key and reviewed native evidence",
           );
           await initializeSessionStartAtomically(db, {
             ...ids,
@@ -796,6 +880,8 @@ test.skipIf(!live)(
               qualificationId,
               bootstrapGroupId,
               cohortGroupId: ids.sandboxGroupId,
+              creatorSubjectId: trustedCreatorSubjectId,
+              createIdempotencyKey: cohortCreateKey,
               acceptanceEvidenceHash,
               bootstrap,
               cohort,

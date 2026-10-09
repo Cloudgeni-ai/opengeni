@@ -8,6 +8,9 @@ CREATE TABLE opengeni_private.native_command_qualifications (
   id uuid NOT NULL,
   account_id uuid NOT NULL,
   workspace_id uuid NOT NULL,
+  creator_kind text NOT NULL DEFAULT 'subject' CHECK (creator_kind = 'subject'),
+  creator_subject_id text NOT NULL CHECK (length(creator_subject_id) > 0),
+  create_idempotency_key text NOT NULL CHECK (length(create_idempotency_key) BETWEEN 1 AND 200),
   activation_generation bigint NOT NULL CHECK (activation_generation > 0),
   source_sha text NOT NULL CHECK (source_sha ~ '^[a-f0-9]{40}$'),
   image_ref text NOT NULL CHECK (image_ref ~ '^(ghcr\.io/cloudgeni-ai|opengenipublicneuacr\.azurecr\.io)/opengeni-desktop@sha256:[a-f0-9]{64}$'),
@@ -17,7 +20,8 @@ CREATE TABLE opengeni_private.native_command_qualifications (
   acceptance_evidence_hash text NOT NULL CHECK (acceptance_evidence_hash ~ '^[a-f0-9]{64}$'),
   enrollment_enabled boolean NOT NULL DEFAULT false,
   PRIMARY KEY (data_schema, workspace_id, id),
-  UNIQUE (data_schema, workspace_id, activation_generation)
+  UNIQUE (data_schema, workspace_id, activation_generation),
+  UNIQUE (data_schema, workspace_id, id, account_id, creator_kind, creator_subject_id, create_idempotency_key)
 );
 CREATE UNIQUE INDEX native_command_one_enabled_qualification
   ON opengeni_private.native_command_qualifications(data_schema, workspace_id)
@@ -29,9 +33,12 @@ CREATE TABLE opengeni_private.native_command_group_births (
   workspace_id uuid NOT NULL,
   sandbox_group_id uuid NOT NULL,
   qualification_id uuid NOT NULL,
+  creator_kind text NOT NULL CHECK (creator_kind = 'subject'),
+  creator_subject_id text NOT NULL CHECK (length(creator_subject_id) > 0),
+  create_idempotency_key text NOT NULL CHECK (length(create_idempotency_key) BETWEEN 1 AND 200),
   PRIMARY KEY (data_schema, workspace_id, sandbox_group_id),
-  FOREIGN KEY (data_schema, workspace_id, qualification_id)
-    REFERENCES opengeni_private.native_command_qualifications(data_schema, workspace_id, id)
+  FOREIGN KEY (data_schema, workspace_id, qualification_id, account_id, creator_kind, creator_subject_id, create_idempotency_key)
+    REFERENCES opengeni_private.native_command_qualifications(data_schema, workspace_id, id, account_id, creator_kind, creator_subject_id, create_idempotency_key)
 );
 
 CREATE TABLE opengeni_private.native_command_provider_enrollments (
@@ -142,14 +149,19 @@ BEGIN
     CREATE FUNCTION %1$I.freeze_native_command_group_birth() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $birth$
     BEGIN
-      IF NEW.sandbox_group_id = NEW.id AND NEW.sandbox_backend = 'modal' THEN
+      IF NEW.sandbox_group_id = NEW.id AND NEW.sandbox_backend = 'modal'
+        AND NEW.created_by_kind = 'subject' THEN
         PERFORM pg_advisory_xact_lock_shared(hashtextextended('native-command-qualification:' || %2$L || ':' || NEW.workspace_id::text, 0));
         INSERT INTO opengeni_private.native_command_group_births
-          (data_schema, account_id, workspace_id, sandbox_group_id, qualification_id)
-        SELECT %2$L, NEW.account_id, NEW.workspace_id, NEW.id, q.id
+          (data_schema, account_id, workspace_id, sandbox_group_id, qualification_id,
+            creator_kind, creator_subject_id, create_idempotency_key)
+        SELECT %2$L, NEW.account_id, NEW.workspace_id, NEW.id, q.id,
+          NEW.created_by_kind, NEW.created_by_subject_id, NEW.create_idempotency_key
         FROM opengeni_private.native_command_qualifications q
         WHERE q.data_schema = %2$L AND q.account_id = NEW.account_id
-          AND q.workspace_id = NEW.workspace_id AND q.enrollment_enabled;
+          AND q.workspace_id = NEW.workspace_id AND q.enrollment_enabled
+          AND q.creator_kind = NEW.created_by_kind AND q.creator_subject_id = NEW.created_by_subject_id
+          AND q.create_idempotency_key = NEW.create_idempotency_key;
       END IF;
       RETURN NEW;
     END
@@ -166,11 +178,17 @@ BEGIN
       image_source jsonb := attempt->'nativeImageSource';
     BEGIN
       SELECT * INTO birth FROM opengeni_private.native_command_group_births b
-        WHERE b.data_schema = %2$L AND b.account_id = NEW.account_id
-          AND b.workspace_id = NEW.workspace_id AND b.sandbox_group_id = NEW.sandbox_group_id;
+        WHERE b.data_schema = %2$L AND b.workspace_id = NEW.workspace_id
+          AND b.sandbox_group_id = NEW.sandbox_group_id;
       IF NOT FOUND THEN RETURN NEW; END IF;
       SELECT * INTO STRICT qualification FROM opengeni_private.native_command_qualifications q
         WHERE q.data_schema = birth.data_schema AND q.workspace_id = birth.workspace_id AND q.id = birth.qualification_id;
+      IF birth.account_id IS DISTINCT FROM NEW.account_id OR birth.account_id IS DISTINCT FROM qualification.account_id
+        OR birth.creator_kind IS DISTINCT FROM 'subject' OR birth.creator_kind IS DISTINCT FROM qualification.creator_kind
+        OR birth.creator_subject_id IS DISTINCT FROM qualification.creator_subject_id
+        OR birth.create_idempotency_key IS DISTINCT FROM qualification.create_idempotency_key THEN
+        RAISE EXCEPTION 'Qualified native command birth selector is inconsistent' USING ERRCODE = '55000';
+      END IF;
       IF NEW.backend <> 'modal' THEN
         RAISE EXCEPTION 'Qualified native command group requires Modal physical provenance' USING ERRCODE = '55000';
       END IF;
@@ -281,21 +299,30 @@ BEGIN
 
     CREATE FUNCTION %1$I.native_command_birth_qualification(p_account uuid, p_workspace uuid, p_group uuid)
     RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $read$
-    DECLARE result jsonb;
+    DECLARE birth opengeni_private.native_command_group_births%%ROWTYPE;
+      q opengeni_private.native_command_qualifications%%ROWTYPE;
     BEGIN
       IF p_account::text IS DISTINCT FROM nullif(current_setting('opengeni.account_id', true), '')
         OR p_workspace::text IS DISTINCT FROM nullif(current_setting('opengeni.workspace_id', true), '') THEN
         RAISE EXCEPTION 'Native command qualification scope mismatch' USING ERRCODE = '42501';
       END IF;
-      SELECT jsonb_build_object('id', q.id, 'accountId', q.account_id, 'workspaceId', q.workspace_id,
+      SELECT * INTO birth FROM opengeni_private.native_command_group_births b
+        WHERE b.data_schema = %2$L AND b.workspace_id = p_workspace AND b.sandbox_group_id = p_group;
+      IF NOT FOUND THEN RETURN NULL; END IF;
+      SELECT * INTO STRICT q FROM opengeni_private.native_command_qualifications qualification
+        WHERE qualification.data_schema = birth.data_schema AND qualification.workspace_id = birth.workspace_id
+          AND qualification.id = birth.qualification_id;
+      IF birth.account_id IS DISTINCT FROM p_account OR birth.account_id IS DISTINCT FROM q.account_id
+        OR birth.creator_kind IS DISTINCT FROM 'subject' OR birth.creator_kind IS DISTINCT FROM q.creator_kind
+        OR birth.creator_subject_id IS DISTINCT FROM q.creator_subject_id
+        OR birth.create_idempotency_key IS DISTINCT FROM q.create_idempotency_key THEN
+        RAISE EXCEPTION 'Qualified native command birth selector is inconsistent' USING ERRCODE = '55000';
+      END IF;
+      RETURN jsonb_build_object('id', q.id, 'accountId', q.account_id, 'workspaceId', q.workspace_id,
+        'creatorSubjectId', q.creator_subject_id, 'createIdempotencyKey', q.create_idempotency_key,
         'activationGeneration', q.activation_generation, 'sourceSha', q.source_sha, 'imageRef', q.image_ref,
         'providerImageId', q.provider_image_id, 'providerBindingKey', q.provider_binding_key,
-        'protocols', q.protocols, 'acceptanceEvidenceHash', q.acceptance_evidence_hash)
-      INTO result FROM opengeni_private.native_command_group_births b
-      JOIN opengeni_private.native_command_qualifications q ON q.data_schema = b.data_schema
-        AND q.workspace_id = b.workspace_id AND q.id = b.qualification_id
-      WHERE b.data_schema = %2$L AND b.account_id = p_account AND b.workspace_id = p_workspace AND b.sandbox_group_id = p_group;
-      RETURN result;
+        'protocols', q.protocols, 'acceptanceEvidenceHash', q.acceptance_evidence_hash);
     END
     $read$;
 

@@ -167,10 +167,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0689_native_pty_command_supervision.sql",
+        (migration) => migration.path === "0691_native_pty_command_supervision.sql",
       ),
     ).toMatchObject({
-      path: "0689_native_pty_command_supervision.sql",
+      path: "0691_native_pty_command_supervision.sql",
       deploymentMode: "maintenance",
     });
   });
@@ -179,10 +179,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0690_native_command_qualification.sql",
+        (migration) => migration.path === "0692_native_command_qualification.sql",
       ),
     ).toMatchObject({
-      path: "0690_native_command_qualification.sql",
+      path: "0692_native_command_qualification.sql",
       deploymentMode: "maintenance",
     });
   });
@@ -2615,8 +2615,8 @@ describe("release schema contract", () => {
       "0680_sandbox_idle_checkpoint.sql",
       "0681_sandbox_ended_epoch_blockers.sql",
       "0684_claude_haiku_5_5_default_model.sql",
-      "0689_native_pty_command_supervision.sql",
-      "0690_native_command_qualification.sql",
+      "0691_native_pty_command_supervision.sql",
+      "0692_native_command_qualification.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
