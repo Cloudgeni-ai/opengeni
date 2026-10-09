@@ -14,6 +14,7 @@
 // timer, viewer activity, owner task queue, or provider-specific lifecycle path
 // in the normal drain state machine.
 import { warnDrainSnapshotFailure } from "../sandbox-snapshot-diagnostics";
+import { maybePersistWarmWorkspaceSnapshot } from "../sandbox-resume";
 import { publishDurableSessionEvents } from "../session-event-fanout";
 import { warnRetainedProcessProofFailure } from "../retained-process-diagnostics";
 import { retainedProcessDeadlineRetryMs } from "../retained-process-retry";
@@ -32,7 +33,9 @@ import {
   appendSessionEventToSandboxGroup,
   bindRetainedProcessProviderIdentity,
   claimWorkspaceArchiveCapture,
+  leaseMayHaveUntrackedWriters,
   releaseWorkspaceArchiveCapture,
+  listIdleCheckpointCandidates,
   claimSandboxCheckpointArtifactsForGc,
   claimTerminalRetainedProcesses,
   countActiveRetainedProcessesByOwnerState,
@@ -95,6 +98,7 @@ import {
   type ConnectedMachineBackgroundCommandProof,
 } from "@opengeni/db/session-background-commands";
 import {
+  sandboxArchiveCaptureTimeoutMs,
   sandboxDeadlineMandatoryCaptureLeadMs,
   sandboxWarmRateMicrosPerSecond,
 } from "@opengeni/config";
@@ -158,6 +162,9 @@ import {
   SANDBOX_REAPER_CHILD_DISPATCH_LIMIT,
   type SandboxDrainActivityInput,
   type SandboxLeaseSweepMaintenanceInput,
+  sandboxDrainTimeoutClass,
+  type SandboxIdleCheckpointActivityInput,
+  type SandboxIdleCheckpointPlan,
 } from "../sandbox-reaper-contract";
 import { CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES } from "../concurrency";
 import { assertSandboxDrainInputTiming, sandboxDrainTiming } from "../sandbox-reaper-timeout";
@@ -325,7 +332,16 @@ export type SandboxLeaseActivityOptions = {
   /** Override the read-only exact-instance readiness probe used before the
    * reaper settles blockers for a provider that has definitively vanished. */
   probeDrainableProvider?: DrainableProviderProbeFn;
+  /** Override only the resume-by-id of the box an idle checkpoint captures.
+   * Returns the live session, or null when the provider no longer has it. The
+   * capture claim, publication and release remain real. */
+  resumeIdleCheckpointSession?: ResumeIdleCheckpointSessionFn;
 };
+
+export type ResumeIdleCheckpointSessionFn = (
+  settings: ActivityServices["settings"],
+  lease: LeaseSnapshot,
+) => Promise<unknown | null>;
 
 export type RetainedProcessProbeResult =
   | { status: "proved"; proof: RetainedProcessProviderProof }
@@ -480,6 +496,15 @@ export type SandboxLeaseSweepPlan = {
   rotationsRequested: number;
 };
 
+export type SandboxIdleCheckpointActivityResult = {
+  status: "checkpointed" | "skipped";
+  reason?: string;
+};
+
+/** Children per sweep; the next sweep continues where this one stopped
+ * (oldest capture attempt first). */
+const SANDBOX_IDLE_CHECKPOINT_BATCH = 32;
+
 export type SandboxLeaseSweepMaintenanceResult = {
   metered: number;
   forceDrained: number;
@@ -581,6 +606,8 @@ export function createSandboxLeaseActivities(
     options.inspectOpenSandboxKubernetesInventory ?? inspectOpenSandboxKubernetesInventory;
   const probeRetainedProcess = options.probeRetainedProcess ?? probeRetainedProcessAtProvider;
   const probeDrainableProvider = options.probeDrainableProvider ?? probeDrainableProviderReadiness;
+  const resumeIdleCheckpointSession =
+    options.resumeIdleCheckpointSession ?? resumeIdleCheckpointSessionAtProvider;
   async function prepareSandboxLeaseSweep(): Promise<SandboxLeaseSweepPlan> {
     const stopHeartbeat = startSandboxReaperHeartbeat({ phase: "prepare" });
     try {
@@ -668,6 +695,127 @@ export function createSandboxLeaseActivities(
         captureTimeoutMs: timing.captureTimeoutMs,
         rotationsRequested,
       };
+    } finally {
+      stopHeartbeat();
+    }
+  }
+
+  /** Inventory for the idle checkpoint sweep. DB only: warm boxes no turn
+   * holds, kept warm by viewers, interactions or running background commands,
+   * with writes no capture may cover yet and no capture attempt within the
+   * snapshot interval.
+   * Oldest attempt first; the next sweep continues past the batch. */
+  async function listIdleSandboxCheckpoints(): Promise<SandboxIdleCheckpointPlan> {
+    const stopHeartbeat = startSandboxReaperHeartbeat({ phase: "idle_checkpoint_inventory" });
+    try {
+      const { db, settings } = await services();
+      // The idle capture claims the warm checkpoint budget, not the drain's;
+      // freeze the matching activity class with each child.
+      const timeoutClass = sandboxDrainTimeoutClass(sandboxArchiveCaptureTimeoutMs(settings));
+      if (!settings.sandboxOwnershipEnabled || settings.sandboxSnapshotIntervalMs <= 0) {
+        return { targets: [], timeoutClass };
+      }
+      const rows = await listIdleCheckpointCandidates(db, {
+        limit: SANDBOX_IDLE_CHECKPOINT_BATCH,
+        intervalMs: settings.sandboxSnapshotIntervalMs,
+      });
+      return {
+        targets: rows.map(({ accountId: _accountId, ...target }) => target),
+        timeoutClass,
+      };
+    } finally {
+      stopHeartbeat();
+    }
+  }
+
+  /** Checkpoint one warm box between turns. Reuses the turn's warm checkpoint
+   * path with an idle owner: the exact capture claim requires that only
+   * viewers, interactions and active unsupervised background commands hold the
+   * box and that no other request is open, then the native Modal snapshot runs
+   * around them and is published one generation behind the workspace. */
+  async function checkpointIdleSandboxLease(
+    input: SandboxIdleCheckpointActivityInput,
+  ): Promise<SandboxIdleCheckpointActivityResult> {
+    const target = input.target;
+    const stopHeartbeat = startSandboxReaperHeartbeat({
+      phase: "idle_checkpoint",
+      workspaceId: target.workspaceId,
+      sandboxGroupId: target.sandboxGroupId,
+      leaseEpoch: target.leaseEpoch,
+      instanceId: target.instanceId,
+    });
+    try {
+      const { db, settings, observability, objectStorage } = await services();
+      const fields = {
+        sandboxLeaseKey: sandboxLeaseTelemetryKey(target.workspaceId, target.sandboxGroupId),
+        leaseEpoch: target.leaseEpoch,
+      };
+      const skipped = (reason: string): SandboxIdleCheckpointActivityResult => {
+        observability.info("sandbox reaper: idle checkpoint skipped", { ...fields, reason });
+        return { status: "skipped", reason };
+      };
+      if (!settings.sandboxOwnershipEnabled || settings.sandboxSnapshotIntervalMs <= 0) {
+        return skipped("disabled");
+      }
+      const lease = await readLease(db, target.workspaceId, target.sandboxGroupId);
+      if (
+        !lease ||
+        lease.liveness !== "warm" ||
+        lease.leaseEpoch !== target.leaseEpoch ||
+        lease.instanceId !== target.instanceId
+      ) {
+        return skipped("lease_fenced");
+      }
+      if (!providerWorkspaceCaptureIsPointInTime(lease.backend, lease.resumeState)) {
+        return skipped("capture_policy");
+      }
+      if (lease.archiveComplete && !leaseMayHaveUntrackedWriters(lease)) return skipped("clean");
+      const { accountId } = await rlsContextForWorkspace(db, target.workspaceId);
+      if (lease.archiveCapture) {
+        const tookOver = await releaseWorkspaceArchiveCapture(db, {
+          accountId,
+          workspaceId: target.workspaceId,
+          sandboxGroupId: target.sandboxGroupId,
+          captureId: lease.archiveCapture.id,
+          expectedEpoch: target.leaseEpoch,
+          expectedInstanceId: target.instanceId,
+          onlyExpiredWarmTakeover: true,
+        });
+        if (!tookOver) return skipped("capture_in_progress");
+        observability.warn("sandbox reaper: released an expired warm capture claim", {
+          ...fields,
+          captureId: lease.archiveCapture.id,
+        });
+      }
+      let session: unknown;
+      try {
+        session = await resumeIdleCheckpointSession(settings, lease);
+      } catch (error) {
+        observability.warn("sandbox reaper: idle checkpoint resume failed", {
+          ...fields,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return skipped("provider_error");
+      }
+      if (session === null) return skipped("provider_missing");
+      const capture = maybePersistWarmWorkspaceSnapshot(
+        { db, settings, objectStorage, observability },
+        {
+          accountId,
+          workspaceId: target.workspaceId,
+          sandboxGroupId: target.sandboxGroupId,
+          idleCheckpoint: true,
+        },
+        session,
+        target.leaseEpoch,
+      );
+      const persisted = await capture;
+      // Return only after the provider capture settled and its exact claim
+      // was released, so the activity never outlives its own gate unobserved.
+      await capture.settled;
+      if (!persisted) return skipped("not_captured");
+      observability.info("sandbox reaper: idle checkpoint published", fields);
+      return { status: "checkpointed" };
     } finally {
       stopHeartbeat();
     }
@@ -954,6 +1102,21 @@ export function createSandboxLeaseActivities(
         }),
       ),
     );
+    // The embedded path has no idle checkpoint sweep workflow; run the same
+    // inventory and per-box activity inline. Failure defers to the next sweep.
+    await listIdleSandboxCheckpoints()
+      .then(({ targets, timeoutClass }) =>
+        Promise.allSettled(
+          targets
+            .slice(0, CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES)
+            .map((target) => checkpointIdleSandboxLease({ target, timeoutClass })),
+        ),
+      )
+      .catch((error: unknown) => {
+        service.observability.warn("sandbox reaper: idle checkpoint inventory failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
     const terminated = outcomes.filter(
       (outcome) => outcome.status === "fulfilled" && outcome.value.status === "terminated",
     ).length;
@@ -978,9 +1141,57 @@ export function createSandboxLeaseActivities(
   return {
     prepareSandboxLeaseSweep,
     drainSandboxLease,
+    listIdleSandboxCheckpoints,
+    checkpointIdleSandboxLease,
     maintainSandboxLeaseSweep,
     reapSandboxLeases,
   };
+}
+
+/** Resume the exact warm box by id for an idle checkpoint, with no cold
+ * restore and no replacement. Returns null when the provider no longer has
+ * it; the ordinary loss paths own that box. The session is not closed: the
+ * box keeps running its commands. */
+export async function resumeIdleCheckpointSessionAtProvider(
+  settings: ActivityServices["settings"],
+  lease: LeaseSnapshot,
+): Promise<unknown | null> {
+  const durableBackendId = (lease.resumeBackendId ?? lease.backend) as string;
+  const backend = sandboxBackendForSdkBackendId(durableBackendId) ?? durableBackendId;
+  if (backend !== "modal" || !lease.instanceId || !lease.resumeState) {
+    throw new Error(`sandbox backend ${backend} has no resumable idle checkpoint box`);
+  }
+  if (sandboxProviderInstanceIdFromEnvelope(lease.resumeState) !== lease.instanceId) {
+    throw new Error("idle checkpoint lease envelope does not name its provider instance");
+  }
+  const client = createSandboxClientForBackend(backend as never, settings) as
+    | RetainedProcessProbeClient
+    | undefined;
+  if (!client?.resume) {
+    throw new Error(`sandbox backend ${backend} cannot resume an idle checkpoint box`);
+  }
+  try {
+    const envelopeSessionState =
+      (lease.resumeState as { sessionState?: unknown }).sessionState ?? lease.resumeState;
+    const resumedState = await deserializeSandboxSessionStateEnvelope(
+      client as never,
+      envelopeSessionState,
+      lease.instanceId,
+    );
+    if (resumedState === undefined) {
+      throw new Error(`sandbox backend ${backend} returned no resumable provider state`);
+    }
+    const resumed = await withRetainedProcessProbeTimeout(
+      resumeExactSandboxSession(client, backend, resumedState, lease.instanceId),
+    );
+    return resumed.session;
+  } catch (error) {
+    if (error === RETAINED_PROCESS_PROBE_TIMEOUT) {
+      throw new Error("idle checkpoint provider resume timed out", { cause: error });
+    }
+    if (isProviderSandboxNotFoundError(client.backendId, error)) return null;
+    throw error;
+  }
 }
 
 const CHECKPOINT_GC_LIMIT = 50;

@@ -23,6 +23,8 @@ export {
 } from "./workflows/knowledge-source-sync";
 export {
   sandboxDrainWorkflow,
+  sandboxIdleCheckpointSweepWorkflow,
+  sandboxIdleCheckpointWorkflow,
   sandboxReaperMaintenanceWorkflow,
   sandboxReaperWorkflow,
   sandboxReaperWorkflowV2,

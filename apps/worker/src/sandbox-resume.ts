@@ -51,6 +51,7 @@ import {
   registerSandboxCheckpointArtifact,
   recordWarmingSandboxCreated,
   reinstateTurnLeaseHolder,
+  leaseMayHaveUntrackedWriters,
   releaseWorkspaceArchiveCapture,
   releaseLeaseHolder,
   touchLeaseHolder,
@@ -785,16 +786,22 @@ export type WarmWorkspaceSnapshotPromise = Promise<boolean> & {
   readonly settled: Promise<void>;
 };
 
+/** Who owns a warm checkpoint: the exact turn attempt holding the box, or
+ * (`idleCheckpoint`) the reaper checkpointing a box that no turn holds and only
+ * running background commands keep warm. The idle owner is fenced by its
+ * exact capture claim alone and is limited to point-in-time Modal captures. */
+export type WarmWorkspaceSnapshotOwner = {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+} & (
+  | { sessionId: string; turnId: string; attemptId: string; idleCheckpoint?: never }
+  | { idleCheckpoint: true; sessionId?: never; turnId?: never; attemptId?: never }
+);
+
 export function maybePersistWarmWorkspaceSnapshot(
   services: SandboxResumeServices,
-  ids: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    attemptId: string;
-    sandboxGroupId: string;
-  },
+  ids: WarmWorkspaceSnapshotOwner,
   session: unknown,
   leaseEpoch: number,
   signal?: AbortSignal,
@@ -830,14 +837,7 @@ export function maybePersistWarmWorkspaceSnapshot(
 
 async function persistWarmWorkspaceSnapshot(
   services: SandboxResumeServices,
-  ids: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    attemptId: string;
-    sandboxGroupId: string;
-  },
+  ids: WarmWorkspaceSnapshotOwner,
   session: unknown,
   leaseEpoch: number,
   signal: AbortSignal | undefined,
@@ -914,7 +914,8 @@ async function persistWarmWorkspaceSnapshot(
       lease?.liveness === "draining" &&
       lease.instanceId !== null &&
       lease.leaseEpoch === leaseEpoch;
-    if (!lease || (!canWarmCapture && !canForceDrainingCapture)) {
+    const turnOwner = ids.idleCheckpoint === true ? null : ids;
+    if (!lease || (!canWarmCapture && (!canForceDrainingCapture || !turnOwner))) {
       console.error("mid-session workspace snapshot skipped (lease not warm)", {
         sandboxGroupId: ids.sandboxGroupId,
         expectedEpoch: leaseEpoch,
@@ -927,8 +928,10 @@ async function persistWarmWorkspaceSnapshot(
     }
     // A checkpoint of this exact mutation generation already protects every
     // settled operation admitted so far. Capturing it again cannot improve the
-    // recovery point, even when the wall-clock interval has elapsed.
-    if (lease.archiveComplete) {
+    // recovery point, even when the wall-clock interval has elapsed. An
+    // attached viewer or interaction can write without advancing the
+    // generation; the claim then decides whether the box is really clean.
+    if (lease.archiveComplete && !leaseMayHaveUntrackedWriters(lease)) {
       return false;
     }
     if (lease.instanceId === null) {
@@ -949,6 +952,12 @@ async function persistWarmWorkspaceSnapshot(
     const nativeModalPersistence =
       workspacePersistence === "snapshot_filesystem" ||
       workspacePersistence === "snapshot_directory";
+    if (!turnOwner && !nativeModalPersistence) {
+      // Only a paused-box image may run around the commands keeping an idle
+      // box warm; a file-by-file read of the running box could tear.
+      reportSkipped(lease.backend, "capture_policy");
+      return false;
+    }
     const checkpointBinding = nativeModalPersistence
       ? await resolveModalCheckpointBindingBeforeCapture(settings, persistable, signal)
       : null;
@@ -971,21 +980,23 @@ async function persistWarmWorkspaceSnapshot(
       // Modal pauses the box for a native snapshot, so the image is one
       // instant even while background commands run.
       pointInTimeCapture: nativeModalPersistence,
-      ...(captureLiveness === "warm"
-        ? {
-            warmAttempt: {
-              sessionId: ids.sessionId,
-              turnId: ids.turnId,
-              attemptId: ids.attemptId,
-              holderId: sandboxLeaseHolderIdForAttempt(ids.attemptId),
-            },
-          }
-        : {}),
+      ...(captureLiveness !== "warm"
+        ? {}
+        : turnOwner
+          ? {
+              warmAttempt: {
+                sessionId: turnOwner.sessionId,
+                turnId: turnOwner.turnId,
+                attemptId: turnOwner.attemptId,
+                holderId: sandboxLeaseHolderIdForAttempt(turnOwner.attemptId),
+              },
+            }
+          : { idleCheckpoint: true }),
     });
     if (claimed.status !== "claimed") {
       // A scheduled interval not being due is normal, including after a failed
       // attempt. Do not turn every ten-second heartbeat into an error log.
-      if (claimed.status === "throttled") return false;
+      if (claimed.status === "throttled" || claimed.status === "clean") return false;
       console.error("mid-session workspace snapshot skipped (capture claim)", {
         sandboxGroupId: ids.sandboxGroupId,
         status: claimed.status,
@@ -1076,9 +1087,13 @@ async function persistWarmWorkspaceSnapshot(
             persistWarmSnapshot(db, {
               accountId: ids.accountId,
               workspaceId: ids.workspaceId,
-              sessionId: ids.sessionId,
-              turnId: ids.turnId,
-              attemptId: ids.attemptId,
+              ...(turnOwner
+                ? {
+                    sessionId: turnOwner.sessionId,
+                    turnId: turnOwner.turnId,
+                    attemptId: turnOwner.attemptId,
+                  }
+                : { idleCheckpoint: true as const }),
               sandboxGroupId: ids.sandboxGroupId,
               expectedEpoch: leaseEpoch,
               expectedInstanceId: instanceId,
