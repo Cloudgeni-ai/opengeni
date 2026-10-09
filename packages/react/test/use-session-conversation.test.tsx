@@ -10,6 +10,61 @@ import { actRun, flush, registerDom, renderComponent, renderHook } from "./rende
 
 registerDom();
 
+test("stock view retains host connection actions and empty presentation", async () => {
+  const f = fixture();
+  const renderConnection = (item: { serverId: string | null }) => (
+    <button>Connect {item.serverId}</button>
+  );
+  function Host({ connected }: { connected: boolean }) {
+    const conversation = useSessionConversation(f.sessionId, {
+      client: f.client,
+      workspaceId: WORKSPACE_ID,
+    });
+    return (
+      <SessionConversationView
+        conversation={{
+          ...conversation,
+          timeline: connected
+            ? [
+                {
+                  kind: "auth-needed",
+                  id: "connect-example",
+                  turnId: "turn-example",
+                  serverId: "acme",
+                  toolName: "read_ticket",
+                  reason: "missing_connection",
+                  providerDomain: "example.com",
+                  connectionId: null,
+                  scopes: [],
+                  resource: null,
+                  authorizationUrl: null,
+                  occurredAt: "2026-10-01T00:00:00Z",
+                },
+              ]
+            : [],
+        }}
+        timelineProps={{
+          turnSummary: { rolling: false },
+          emptyState: <p>Choose a support task</p>,
+          renderAuthNeeded: renderConnection,
+        }}
+      />
+    );
+  }
+  const view = await renderComponent(<Host connected={false} />);
+  try {
+    await flush(50);
+    expect(view.container.textContent).toContain("Choose a support task");
+    await view.rerender(<Host connected />);
+    await flush(50);
+    expect(view.container.textContent).toContain("Connect acme");
+    expect(view.container.querySelector("textarea")).not.toBeNull();
+    expect(f.streams()).toBe(1);
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a session change retires ready files and late upload settlements from the previous draft", async () => {
   const f = fixture();
   const getConfig = f.client.getClientConfig;

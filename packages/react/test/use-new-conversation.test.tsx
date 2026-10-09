@@ -1,12 +1,14 @@
 import { expect, spyOn, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk";
+import { StrictMode } from "react";
 import {
   useNewConversation,
   type CreatedConversation,
   type NewConversationCreateOptions,
+  type NewConversationController,
 } from "../src/hooks/use-new-conversation";
 import { fakeClient, WORKSPACE_ID } from "./fake-client";
-import { actRun, flush, registerDom, renderHook } from "./render-hook";
+import { actRun, flush, registerDom, renderComponent, renderHook } from "./render-hook";
 
 registerDom();
 function client() {
@@ -364,6 +366,113 @@ test("a changed scope rejects stale send callbacks and ignores old creation sett
     expect(created).toEqual([]);
     expect(hook.result.current.composer.value).toBe("For record B");
     expect(hook.result.current.composer.sending).toBe(false);
+  } finally {
+    await hook.unmount();
+  }
+});
+
+test("retired callbacks stay inert after returning to an earlier scope identity", async () => {
+  const api = client();
+  const calls: Array<{ version: number; text: string; options: NewConversationCreateOptions }> = [];
+  const hook = await renderHook(
+    ({ scopeKey, version }) =>
+      useNewConversation({
+        client: api,
+        workspaceId: WORKSPACE_ID,
+        scopeKey,
+        modelPicker: true,
+        realtimeVoice: true,
+        createSession: async (text, _key, options) => {
+          calls.push({ version, text, options });
+          return "created-id";
+        },
+      }),
+    { scopeKey: "record-a", version: 1 },
+  );
+  try {
+    await flush(30);
+    const retired = hook.result.current;
+    await hook.rerender({ scopeKey: "record-b", version: 2 });
+    await hook.rerender({ scopeKey: "record-a", version: 3 });
+    await actRun(() => {
+      hook.result.current.composer.setValue("Current A draft");
+      hook.result.current.composer.setModel!("current-model");
+      retired.composer.setValue("Retired transcript");
+      retired.composer.setModel!("retired-model");
+      retired.composer.setReasoningEffort!("low");
+      retired.composer.setLatencyMode!("fast");
+    });
+    expect(hook.result.current.composer.value).toBe("Current A draft");
+    expect(hook.result.current.composer.policy?.model).toBe("current-model");
+    expect(await actRun(() => retired.composer.send())).toBe(false);
+    expect(await actRun(() => retired.startRealtime("opengeni-azure/gpt-live-1"))).toBe(false);
+    expect(calls).toEqual([]);
+    expect(await actRun(() => hook.result.current.composer.send())).toBe(true);
+    expect(calls).toEqual([
+      { version: 3, text: "Current A draft", options: { model: "current-model" } },
+    ]);
+  } finally {
+    await hook.unmount();
+  }
+});
+
+test("committed first-render actions remain usable through StrictMode effect replay", async () => {
+  const api = client();
+  let calls = 0;
+  let creation!: NewConversationController;
+  function Host() {
+    creation = useNewConversation({
+      client: api,
+      workspaceId: WORKSPACE_ID,
+      createSession: async () => {
+        calls++;
+        return "created-id";
+      },
+    });
+    return null;
+  }
+  const view = await renderComponent(
+    <StrictMode>
+      <Host />
+    </StrictMode>,
+  );
+  try {
+    expect(calls).toBe(0);
+    await actRun(() => creation.composer.setValue("First committed draft"));
+    expect(creation.composer.value).toBe("First committed draft");
+    expect(await actRun(() => creation.composer.send())).toBe(true);
+    expect(calls).toBe(1);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a retired retry cannot dispatch the current scope's pending operation", async () => {
+  const api = client();
+  let calls = 0;
+  const hook = await renderHook(
+    ({ scopeKey }) =>
+      useNewConversation({
+        client: api,
+        workspaceId: WORKSPACE_ID,
+        scopeKey,
+        createSession: async () => {
+          if (++calls === 1) throw new Error("Response lost");
+          return "created-id";
+        },
+      }),
+    { scopeKey: "record-a" },
+  );
+  try {
+    const retry = hook.result.current.retry;
+    await hook.rerender({ scopeKey: "record-b" });
+    await hook.rerender({ scopeKey: "record-a" });
+    await actRun(() => hook.result.current.composer.setValue("Current request"));
+    expect(await actRun(() => hook.result.current.composer.send())).toBe(false);
+    expect(await actRun(retry)).toBe(false);
+    expect(calls).toBe(1);
+    expect(await actRun(() => hook.result.current.retry())).toBe(true);
+    expect(calls).toBe(2);
   } finally {
     await hook.unmount();
   }

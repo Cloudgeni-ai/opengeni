@@ -112,6 +112,10 @@ export type SessionConversationProps = ClientOverride &
     renderInteractiveBlock?: MessageTimelineProps["renderInteractiveBlock"] | false;
     /** Product-specific tool-call renderers; defaults to the built-in registry. */
     toolRegistry?: MessageTimelineProps["toolRegistry"];
+    /** Host presentation without replacing native history, navigation or annotations. */
+    timelineProps?:
+      | Pick<MessageTimelineProps, "turnSummary" | "renderAuthNeeded" | "emptyState">
+      | undefined;
     /**
      * Replace the "usage limit reached" row for an `allowance_exhausted`
      * refusal, for example to link your own plan or admin page.
@@ -289,6 +293,7 @@ function ConversationView({
   resolveSessionTitle,
   renderInteractiveBlock,
   toolRegistry,
+  timelineProps,
   renderAllowanceExhausted,
   allowanceExhaustedLabels,
   voiceInput: voiceInputRequested = true,
@@ -496,6 +501,7 @@ function ConversationView({
           events={feed.events}
           items={conversation.timeline}
           turnSummary={{ rolling: true }}
+          {...timelineProps}
           status={status}
           hasOlder={feed.hasOlder}
           loadingOlder={feed.loadingOlder}

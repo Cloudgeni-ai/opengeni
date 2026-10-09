@@ -6,7 +6,7 @@ import {
   type ReasoningEffort,
 } from "@opengeni/sdk";
 import type { SessionRealtimeModel } from "@opengeni/sdk/realtime";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../session-context";
 import { notifyObserver } from "../lib/notify-observer";
 import {
@@ -102,7 +102,17 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
   const completionRef = useRef<Completion | null>(null);
   const inFlight = useRef(false);
   const lifetime = useRef({ mounted: true, generation: 0 }).current;
-  const identity = useRef({ ...scope, scopeKey: options.scopeKey });
+  // An identity value may recur (A → B → A); callbacks from the first A
+  // must not become live again. Commit a distinct token for each scope epoch.
+  const identity = useMemo(
+    () => ({
+      client: context.client,
+      workspaceId: context.workspaceId,
+      scopeKey: options.scopeKey,
+    }),
+    [context.client, context.workspaceId, options.scopeKey],
+  );
+  const committedIdentity = useRef(identity);
   useLayoutEffect(() => {
     lifetime.mounted = true;
     return () => {
@@ -111,18 +121,8 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     };
   }, [lifetime]);
   useLayoutEffect(() => {
-    const previous = identity.current;
-    if (
-      previous.client === context.client &&
-      previous.workspaceId === context.workspaceId &&
-      previous.scopeKey === options.scopeKey
-    )
-      return;
-    identity.current = {
-      client: context.client,
-      workspaceId: context.workspaceId,
-      scopeKey: options.scopeKey,
-    };
+    if (committedIdentity.current === identity) return;
+    committedIdentity.current = identity;
     lifetime.generation++;
     inFlight.current = false;
     pendingRef.current = null;
@@ -137,13 +137,9 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     setPending(null);
     setCompletion(null);
     filesRef.current.clear();
-  }, [context.client, context.workspaceId, options.scopeKey, lifetime]);
+  }, [identity, lifetime]);
 
-  const ownsScope = () =>
-    lifetime.mounted &&
-    identity.current.client === context.client &&
-    identity.current.workspaceId === context.workspaceId &&
-    identity.current.scopeKey === options.scopeKey;
+  const ownsScope = () => lifetime.mounted && committedIdentity.current === identity;
   const updateText = (value: string) => {
     if (!ownsScope()) return;
     if (value !== textRef.current) textRevision.current++;
@@ -354,7 +350,9 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     restoredResources: [],
     removeRestoredResource: () => {},
     error: null,
-    clearError: () => setError(null),
+    clearError: () => {
+      if (ownsScope()) setError(null);
+    },
   };
   return {
     ...scope,
