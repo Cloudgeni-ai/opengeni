@@ -30,17 +30,6 @@ const settings = testSettings({
   environmentsEncryptionKey: Buffer.alloc(32, 19).toString("base64"),
 });
 
-beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("codex-disconnect-characterization");
-  if (!shared) throw new Error("Disconnect characterization requires real PostgreSQL");
-  client = createDb(shared.appUrl, { max: 4 });
-}, 180_000);
-
-afterAll(async () => {
-  await client?.close();
-  await shared?.release();
-}, 180_000);
-
 async function fixture() {
   const admin = shared!.admin;
   const [account] = await admin<{ id: string }[]>`
@@ -135,7 +124,21 @@ async function fixture() {
   };
 }
 
-describe("legacy Codex disconnect: known pre-fix behavior", () => {
+const describeRealDatabase =
+  process.env.OPENGENI_REQUIRE_REAL_DB === "1" ? describe : describe.skip;
+
+describeRealDatabase("legacy Codex disconnect: known pre-fix behavior", () => {
+  beforeAll(async () => {
+    shared = await acquireSharedTestDatabase("codex-disconnect-characterization");
+    if (!shared) throw new Error("Disconnect characterization requires real PostgreSQL");
+    client = createDb(shared.appUrl, { max: 4 });
+  }, 180_000);
+
+  afterAll(async () => {
+    await client?.close();
+    await shared?.release();
+  }, 180_000);
+
   test("live-use rejection does not establish a new-work fence", async () => {
     const f = await fixture();
     let failure: unknown;

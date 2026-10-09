@@ -4,6 +4,12 @@ Status: proposed; **not implemented or deployed**. Applies to the October 9,
 2026 disconnect report, tracked as OPE-766. This is a follow-up to OPE-700, not the active
 credential-writer security repair in PRs #3895/#3896.
 
+Architecture decision (October 9, 11:02 UTC): reuse the corrected OPE-717
+shared-core operation/settlement seam. Do not build a parallel legacy operation
+ledger or activate a chat-only drain. Implementation depends on the coordinator
+releasing stable writers and cutover heads. Live legacy disconnect remains
+unfixed until the integrated change is verified and delivered.
+
 ## Existing behavior and reusable boundaries
 
 At base `b194e3149f9f97018d8d0acdfba98f8063e57cd7`, organization DELETE calls
