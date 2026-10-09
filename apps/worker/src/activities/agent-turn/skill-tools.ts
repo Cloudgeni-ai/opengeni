@@ -8,6 +8,7 @@ import {
   installPortableSkill,
   replayPortableSkillInstall,
   listSkillDescriptors,
+  SkillLifecycleRefusedError,
   type Database,
   type InstallPortableSkillInput,
 } from "@opengeni/db";
@@ -48,6 +49,43 @@ import {
   type SkillCheckoutObservation,
 } from "./skill-checkout";
 import type { SkillFileSystem } from "./skill-transfer";
+import type { AttemptToolDefinition } from "@opengeni/codemode";
+
+/** What a refused Skill change means for the agent, in words it can act on. */
+export function skillRefusalMessage(error: SkillLifecycleRefusedError): string {
+  if (error.message === "Skill outside accepted learning scope") {
+    return "Nothing was saved. This Skill is in a different scope (personal or workspace) than this chat's Agent learning saves to, so it can't be changed from this chat. A person can edit it under Skills, or it can be changed from a chat whose learning saves to that scope. Do not copy it into another scope as a workaround.";
+  }
+  if (error.code === "40001" || error.code === "23505") {
+    return `Nothing was saved: ${error.message}. Read the Skill again for its current revision and scope version, then retry with a new operation ID if the change still applies.`;
+  }
+  return `Nothing was saved: ${error.message}.`;
+}
+
+/**
+ * The lifecycle rolls a refused change back as a whole, so report it as a
+ * definite refusal with its reason, not a failure whose outcome is unknown.
+ */
+function withDefiniteSkillRefusals(definition: AttemptToolDefinition): AttemptToolDefinition {
+  return {
+    ...definition,
+    execute: async (args, context) => {
+      try {
+        return await definition.execute(args, context);
+      } catch (error) {
+        if (!(error instanceof SkillLifecycleRefusedError)) throw error;
+        const message = skillRefusalMessage(error);
+        return {
+          isError: true,
+          content: [{ type: "text", text: message }],
+          structuredContent: {
+            error: { code: "skill_change_refused", message, retryable: error.retryable },
+          },
+        };
+      }
+    },
+  };
+}
 
 export function createWorkspaceSkillTools(input: {
   db: Database;
@@ -312,7 +350,7 @@ export function createWorkspaceSkillTools(input: {
       },
     }),
     createSkillPublishAttemptToolDefinition({ authorize, filesystem: input.filesystem, save }),
-  ];
+  ].map(withDefiniteSkillRefusals);
 }
 
 function registrySkillSource(scope: SkillScope): SkillReadOrigin["source"] {
