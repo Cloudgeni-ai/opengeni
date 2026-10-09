@@ -55410,12 +55410,18 @@ async function linkedLostProviderCommandSessionIdsTx(
         and process.state = 'active'
       union
       -- A closed, unquiesced owner of an open request on the lost box is woken
-      -- by the settlement; lock its session in the canonical prefix first.
-      select admission.session_id
+      -- by the settlement; lock its session in the canonical prefix first. A
+      -- process actor's request (e.g. supervised stdin) pins the attempt that
+      -- owns its process.
+      select attempt.session_id
       from sandbox_workspace_mutation_admissions admission
-      join session_turn_attempts attempt on attempt.id = admission.attempt_id
+      left join sandbox_retained_processes actor_process
+        on admission.actor_kind = 'process'
+        and actor_process.id = admission.actor_id
+        and actor_process.workspace_id = admission.workspace_id
+      join session_turn_attempts attempt
+        on attempt.id = coalesce(admission.attempt_id, actor_process.owner_attempt_id)
         and attempt.workspace_id = admission.workspace_id
-        and attempt.session_id = admission.session_id
       where admission.account_id = ${input.accountId}
         and admission.workspace_id = ${input.workspaceId}
         and admission.lease_id = ${input.leaseId}
@@ -55680,17 +55686,21 @@ async function settleExactLostProviderWorkspaceBlockersTx(
 
   if (rejectedAdmissions.length) {
     // A rejected request whose closed owner still awaits its quiescence receipt
-    // (a crashed worker's orphan) has no process delivery to wake that
-    // owner either; the receipt reconciliation runs from this durable wake.
+    // (a crashed worker's orphan, or a process actor's request whose process
+    // owner closed) has no process delivery to wake that owner either; the
+    // receipt reconciliation runs from this durable wake.
     const owners = await rawRows<{ session_id: string; temporal_workflow_id: string }>(
       tx,
       sql`
         select distinct attempt.session_id, attempt.temporal_workflow_id
-        from session_turn_attempts attempt
-        join sandbox_workspace_mutation_admissions admission
-          on admission.attempt_id = attempt.id
-          and admission.workspace_id = attempt.workspace_id
-          and admission.session_id = attempt.session_id
+        from sandbox_workspace_mutation_admissions admission
+        left join sandbox_retained_processes actor_process
+          on admission.actor_kind = 'process'
+          and actor_process.id = admission.actor_id
+          and actor_process.workspace_id = admission.workspace_id
+        join session_turn_attempts attempt
+          on attempt.id = coalesce(admission.attempt_id, actor_process.owner_attempt_id)
+          and attempt.workspace_id = admission.workspace_id
         where attempt.workspace_id = ${input.workspaceId}
           and attempt.account_id = ${input.accountId}
           and attempt.state = 'closed' and attempt.quiesced_at is null
@@ -56114,6 +56124,109 @@ export async function reconcileColdLostLeaseInstanceBlockers(
           lease: mapLeaseRow(refreshed),
           settlement,
         };
+      },
+    );
+  });
+}
+
+export type EndedEpochBlockerTuple = {
+  accountId: string;
+  workspaceId: string;
+  leaseId: string;
+  sandboxGroupId: string;
+  lostEpoch: number;
+  lostBackend: string;
+  lostInstanceId: string;
+};
+
+/**
+ * Exact provider tuples (lease, epoch, Modal box) that still hold an open
+ * request although the lease has moved to a later epoch and another box. (An
+ * open PTY always belongs to an active process on its tuple.) Lease succession alone does not prove the old box is gone: the caller
+ * inspects it and settles only on a terminal observation
+ * (`settleEndedEpochWorkspaceBlockers`). Tuples with an active retained
+ * process are left to retained-process reconciliation.
+ */
+export async function listEndedEpochWorkspaceBlockers(
+  db: Database,
+  input: { limit: number },
+): Promise<EndedEpochBlockerTuple[]> {
+  if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 500) {
+    throw new Error("Ended-epoch blocker batch is invalid");
+  }
+  const rows = await rawRows<{
+    account_id: string;
+    workspace_id: string;
+    lease_id: string;
+    sandbox_group_id: string;
+    lease_epoch: number | string;
+    provider_backend: string;
+    provider_instance_id: string;
+  }>(
+    db,
+    sql`select * from opengeni_private.list_sandbox_ended_epoch_blockers(${input.limit}::integer)`,
+  );
+  return rows.map((row) => ({
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    leaseId: row.lease_id,
+    sandboxGroupId: row.sandbox_group_id,
+    lostEpoch: Number(row.lease_epoch),
+    lostBackend: row.provider_backend,
+    lostInstanceId: row.provider_instance_id,
+  }));
+}
+
+/**
+ * Settle the open requests and PTYs of one listed tuple after the caller
+ * observed its exact Modal box terminated. Requests are rejected (never
+ * replayed), PTYs closed and closed unquiesced owners woken, through the same
+ * full-identity settlement as provider loss, in the canonical
+ * session -> blocker -> lease lock order. The lease must still be past the
+ * tuple's epoch on another box, and no active retained process may remain on
+ * the tuple (its own reconciliation owns it). Returns null when that no longer
+ * holds.
+ */
+export async function settleEndedEpochWorkspaceBlockers(
+  db: Database,
+  tuple: EndedEpochBlockerTuple,
+): Promise<LostProviderWorkspaceSettlement | null> {
+  const scope: LostProviderBlockerScope = { ...tuple };
+  return await withLostProviderCommandSessionRetry(async () => {
+    return await withSessionActivityRlsContext(
+      db,
+      { accountId: scope.accountId, workspaceId: scope.workspaceId },
+      async (tx) => {
+        const lockedCommandSessions = await lockLostProviderCommandSessionsTx(tx, scope);
+        await lockExactLostProviderWorkspaceBlockersTx(tx, scope);
+        const [lease] = await rawRows<{ ended: boolean }>(
+          tx,
+          sql`
+            select (
+              lease.backend = 'modal'
+              and ${scope.lostBackend} = 'modal'
+              and lease.lease_epoch > ${scope.lostEpoch}
+              and lease.instance_id is distinct from ${scope.lostInstanceId}
+              and not exists (
+                select 1 from sandbox_retained_processes process
+                where process.lease_id = lease.id
+                  and process.lease_epoch = ${scope.lostEpoch}
+                  and process.provider_backend = ${scope.lostBackend}
+                  and process.provider_instance_id = ${scope.lostInstanceId}
+                  and process.state = 'active'
+              )
+            ) as ended
+            from sandbox_leases lease
+            where lease.id = ${scope.leaseId}
+              and lease.account_id = ${scope.accountId}
+              and lease.workspace_id = ${scope.workspaceId}
+              and lease.sandbox_group_id = ${scope.sandboxGroupId}
+            for update of lease
+          `,
+        );
+        if (lease?.ended !== true) return null;
+        await assertLostProviderCommandSessionsLockedTx(tx, scope, lockedCommandSessions);
+        return await settleExactLostProviderWorkspaceBlockersTx(tx, scope);
       },
     );
   });
@@ -58409,25 +58522,58 @@ export async function confirmDrainCold(
         ) {
           return { wentCold: false };
         }
-        // A request a crashed worker left on this exact box let the drain
-        // capture around it (crashedWorkerOrphanAdmissionSql). The box is now
-        // terminated, so nothing it started can still run: settle it with the
-        // exact provider blockers instead of leaving it to pin its attempt's
-        // quiescence forever. Selfhosted and backend-less leases are never
-        // terminated by a drain and keep their requests.
-        const orphanedRequests =
+        // The box is stopped (or proven gone) before this commit, and the cold
+        // commit retires its epoch for good. Every open blocker it leaves on
+        // that exact box can therefore never progress: a request a crashed
+        // worker left behind (the capture ran around it), a request of an
+        // attempt that already recorded quiescence, a deadline-forced request,
+        // or an unheld process (with its terminals).
+        // Settle them all here with the exact provider blockers. Left open on
+        // an old epoch they would pin their attempt's quiescence, and with it
+        // the session, forever. A selfhosted machine or backend-less lease is
+        // never stopped by a drain and keeps its rows. A supervised command
+        // settles as lost only with the missing-provider truth (0496), so a
+        // stopped box keeps it to its own supervision path.
+        const staleBlockers =
           observed.instance_id &&
           (input.providerStopped === true || input.providerMissingBeforeCapture === true)
             ? await rawRows<{ present: boolean }>(
                 tx,
                 sql`
-                  select exists (
-                    select 1 from sandbox_workspace_mutation_admissions admission
-                    where admission.lease_id = ${observed.id}
-                      and admission.lease_epoch = ${input.expectedEpoch}
-                      and admission.provider_backend = ${observed.backend}
-                      and admission.provider_instance_id = ${observed.instance_id}
-                      and ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
+                  select (
+                    exists (
+                      select 1 from sandbox_workspace_mutation_admissions admission
+                      where admission.lease_id = ${observed.id}
+                        and admission.lease_epoch = ${input.expectedEpoch}
+                        and admission.provider_backend = ${observed.backend}
+                        and admission.provider_instance_id = ${observed.instance_id}
+                        and admission.settled_at is null
+                    ) or exists (
+                      select 1 from sandbox_pty_sessions pty
+                      where pty.lease_id = ${observed.id}
+                        and pty.lease_epoch = ${input.expectedEpoch}
+                        and pty.provider_backend = ${observed.backend}
+                        and pty.provider_instance_id = ${observed.instance_id}
+                        and pty.status = 'open'
+                    ) or exists (
+                      select 1 from sandbox_retained_processes process
+                      where process.lease_id = ${observed.id}
+                        and process.lease_epoch = ${input.expectedEpoch}
+                        and process.provider_backend = ${observed.backend}
+                        and process.provider_instance_id = ${observed.instance_id}
+                        and process.state = 'active'
+                    )
+                  ) and (
+                    ${input.providerMissingBeforeCapture === true}
+                    or not exists (
+                      select 1 from sandbox_retained_processes supervised
+                      where supervised.lease_id = ${observed.id}
+                        and supervised.lease_epoch = ${input.expectedEpoch}
+                        and supervised.provider_backend = ${observed.backend}
+                        and supervised.provider_instance_id = ${observed.instance_id}
+                        and supervised.state = 'active'
+                        and supervised.provider_command ? 'supervision'
+                    )
                   ) as present
                 `,
               )
@@ -58436,7 +58582,7 @@ export async function confirmDrainCold(
           (input.providerMissingBeforeCapture ||
             observed.unobservable_command_drain_ids?.length ||
             observed.deadline_forced_admission_ids?.length ||
-            orphanedRequests[0]?.present === true) &&
+            staleBlockers[0]?.present === true) &&
           observed.instance_id
             ? {
                 accountId: input.accountId,
