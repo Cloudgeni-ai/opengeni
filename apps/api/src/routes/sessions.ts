@@ -23,7 +23,15 @@ import { SandboxRecoveryRequest } from "@opengeni/contracts";
 import { getManagedHumanSandboxRecovery, consentManagedHumanSandboxRecovery } from "@opengeni/core";
 import { SandboxRecoveryConflictError } from "@opengeni/db";
 import { codexAccountJson } from "./codex";
-import { getSessionCodexAccounts } from "@opengeni/db";
+import {
+  deliverSubscriptionCoreCodexWake,
+  getSessionCodexAccounts,
+  getSubscriptionCoreCodexSessionPointers,
+  getSubscriptionCoreSessionCodexAccounts,
+  pinSubscriptionCoreSessionCodexAccount,
+  readCodexCutoverDisposition,
+} from "@opengeni/db";
+import { codexRouteDisposition } from "./codex-core";
 import { getToolActionReview, getToolReviewDetailsPage } from "@opengeni/db";
 import {
   AcknowledgeStreamRequest,
@@ -966,10 +974,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       ...page.pinned,
       ...page.sessions,
     ]);
+    const codexSessions = new Map(
+      (
+        await withCoreCodexSessionPointers(deps, grant.accountId, workspaceId, [
+          ...page.pinned,
+          ...page.sessions,
+        ])
+      ).map((session) => [session.id, session]),
+    );
     const decorate = (session: Session): Session => {
       const activity = commandActivity.get(session.id);
       const decorated = {
-        ...session,
+        ...(codexSessions.get(session.id) ?? session),
         hasSchedules: scheduleTargets.has(session.id),
         ...(activity ? { backgroundCommandActivity: activity } : {}),
       };
@@ -1206,6 +1222,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
+    const [codexSession] = await withCoreCodexSessionPointers(deps, grant.accountId, workspaceId, [
+      session,
+    ]);
     // Independent reads of the already-authorized session: the effective
     // policy context depends only on the session row, not on the activity or
     // schedule annotations, so all three are read concurrently.
@@ -1224,7 +1243,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json(
       sessionWithEffectiveToolPolicy(
         {
-          ...session,
+          ...codexSession!,
           hasSchedules: scheduleTargets.has(sessionId),
           ...(activity.get(sessionId)
             ? { backgroundCommandActivity: activity.get(sessionId) }
@@ -2334,9 +2353,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/codex-accounts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     // authorizeSessionHttp has already enforced private-session and agent scope.
-    const projection = await getSessionCodexAccounts(db, workspaceId, c.req.param("sessionId"));
+    const projection =
+      (await codexRouteDisposition(deps, grant.accountId)) === "core"
+        ? await getSubscriptionCoreSessionCodexAccounts(db, {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId: c.req.param("sessionId"),
+          })
+        : await getSessionCodexAccounts(db, workspaceId, c.req.param("sessionId"));
     if (!projection) throw new HTTPException(404, { message: "session not found" });
     const activeAccountId = projection.rotation?.activeCredentialId ?? null;
     return c.json({
@@ -2384,6 +2410,24 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     }
     const pinned = target === "auto" ? null : target;
+    if ((await codexRouteDisposition(deps, grant.accountId)) === "core") {
+      const core = await pinSubscriptionCoreSessionCodexAccount(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId,
+        connectionId: pinned,
+        subjectId: grant.subjectId,
+      });
+      if (!core.result.changed) {
+        throw new HTTPException(404, { message: "session or codex account not found" });
+      }
+      await deliverSubscriptionCoreCodexWake(db, core.wake);
+      await publishDurableSessionEvents(bus, workspaceId, sessionId, core.result.events);
+      return c.json({
+        pinned: target === "auto" ? "auto" : target,
+        appliedTo: core.result.appliedTo,
+      });
+    }
     const mutation = await switchSessionCodexAccount(db, {
       workspaceId,
       sessionId,
@@ -6361,4 +6405,40 @@ function mapLineageNodes(nodes: LineageNode[], policy: EffectivePolicyContext): 
     ),
     children: mapLineageNodes(node.children, policy),
   }));
+}
+
+/**
+ * Sessions of an organization whose Codex cutover is enabled show their core
+ * binding in the legacy pointer fields; the legacy columns are never written
+ * with core ids. Without a cutover row the sessions are returned unchanged
+ * (one cutover-row read).
+ */
+async function withCoreCodexSessionPointers<
+  T extends {
+    id: string;
+    codexPinnedCredentialId: string | null;
+    codexLastCredentialId: string | null;
+  },
+>(deps: ApiRouteDeps, accountId: string, workspaceId: string, sessions: T[]): Promise<T[]> {
+  if (sessions.length === 0) return sessions;
+  // Never fail a session read on Codex state: a disabled cutover (maintenance)
+  // shows no pointers rather than legacy ones.
+  const disposition = await readCodexCutoverDisposition(deps.db, accountId);
+  if (disposition === "legacy") return sessions;
+  const pointers =
+    disposition === "core"
+      ? await getSubscriptionCoreCodexSessionPointers(deps.db, {
+          accountId,
+          workspaceId,
+          sessionIds: sessions.map((session) => session.id),
+        })
+      : new Map<string, { pinnedCredentialId: string | null; lastCredentialId: string | null }>();
+  return sessions.map((session) => {
+    const pointer = pointers.get(session.id);
+    return {
+      ...session,
+      codexPinnedCredentialId: pointer?.pinnedCredentialId ?? null,
+      codexLastCredentialId: pointer?.lastCredentialId ?? null,
+    };
+  });
 }

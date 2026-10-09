@@ -685,6 +685,12 @@ export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   "recover_subscription_codex_connection_health(uuid, uuid, uuid, uuid)",
   "persist_subscription_codex_refresh_with_plan(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone, text)",
   "subscription_codex_acceptance_authority_v2(uuid, uuid, uuid, text)",
+  // M3 PR 2b: the Codex Apps designation on the core.
+  "resolve_subscription_codex_apps_designation(uuid, uuid)",
+  "read_subscription_codex_apps_credential(uuid, uuid, uuid)",
+  "begin_subscription_codex_apps_refresh(uuid, uuid, uuid)",
+  "persist_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text)",
 ] as const;
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [

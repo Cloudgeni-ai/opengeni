@@ -64,6 +64,17 @@ export function readSubscriptionLeaseBusyChain(
     : undefined;
 }
 
+/**
+ * Only an enabled cutover resolves the core Codex Apps designation; a
+ * disabled row resolves none (maintenance, fail closed).
+ */
+export function claimMayResolveCoreCodexApps(input: {
+  codexConnectedAppsEnabled: boolean;
+  cutover: ClaimCodexCutoverState;
+}): boolean {
+  return input.codexConnectedAppsEnabled && input.cutover === "enabled";
+}
+
 /** A cutover row of any state means no legacy Codex Apps credential. */
 export function claimMayResolveLegacyCodexApps(input: {
   codexConnectedAppsEnabled: boolean;
