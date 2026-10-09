@@ -15,6 +15,7 @@ import postgres from "postgres";
 import type { Settings } from "@opengeni/config";
 import {
   acquireLease,
+  acquireSandboxLeaseReaperHold,
   advanceWorkspaceGeneration,
   claimSessionWorkForAttempt,
   claimWorkspaceArchiveCapture,
@@ -26,6 +27,7 @@ import {
   listIdleCheckpointCandidates,
   readLease,
   releaseLeaseHolder,
+  requestDueSandboxRotationsGlobal,
   retainedProcessSettlementIdentity,
   retainWorkspaceMutationProcess,
   settleRetainedProcess,
@@ -634,6 +636,93 @@ describe("checkpoints of held boxes between turns", () => {
     await idleFor(fixture, 16);
     expect(await listed()).toContain(fixture.sandboxGroupId);
   }, 120_000);
+
+  test("a hold installed after inventory fences the idle child before its snapshot RPC", async () => {
+    for (const timing of ["after_inventory", "during_resume"] as const) {
+      const fixture = await heldBoxFixture();
+      await idleFor(fixture, 45);
+      const holdId = crypto.randomUUID();
+      const hold = async () => {
+        const receipt = await acquireSandboxLeaseReaperHold(db, {
+          accountId: fixture.accountId,
+          workspaceId: fixture.workspaceId,
+          sandboxGroupId: fixture.sandboxGroupId,
+          expectedEpoch: EPOCH,
+          expectedInstanceId: fixture.instanceId,
+          holdId,
+          ttlMs: 60_000,
+          providerDeadlineHeadroomMs: 60_000,
+          reason: "preserve synthetic idle checkpoint fixture",
+        });
+        expect(receipt.status).toBe("held");
+      };
+      const provider = modalProvider();
+      const activities = createSandboxLeaseActivities(services(), {
+        resumeIdleCheckpointSession: async () => {
+          if (timing === "during_resume") await hold();
+          return await provider.resume();
+        },
+      });
+      const inventory = await activities.listIdleSandboxCheckpoints();
+      const target = inventory.targets.find((row) => row.sandboxGroupId === fixture.sandboxGroupId);
+      expect(target).toBeDefined();
+      if (timing === "after_inventory") await hold();
+
+      const result = await activities.checkpointIdleSandboxLease({
+        target: target!,
+        timeoutClass: inventory.timeoutClass,
+      });
+      expect(provider.snapshots(), timing).toBe(0);
+      expect(result.status).toBe("skipped");
+      const lease = await readLease(db, fixture.workspaceId, fixture.sandboxGroupId);
+      expect(lease).toMatchObject({
+        liveness: "warm",
+        archiveCapture: null,
+        archiveGeneration: null,
+        reaperHold: { id: holdId },
+      });
+    }
+  }, 60_000);
+
+  test("a rotation requested after inventory fences the idle child before its snapshot RPC", async () => {
+    for (const timing of ["after_inventory", "during_resume"] as const) {
+      const fixture = await heldBoxFixture();
+      await idleFor(fixture, 45);
+      const rotate = async () => {
+        await admin`update sandbox_leases set provider_created_at = now() - interval '23 hours',
+          provider_deadline_at = now() + interval '5 minutes'
+          where id = ${fixture.leaseId}`;
+        await requestDueSandboxRotationsGlobal(db, 10 * 60_000, 100);
+        const lease = await readLease(db, fixture.workspaceId, fixture.sandboxGroupId);
+        expect(lease?.rotationRequestedAt).not.toBeNull();
+        expect(lease?.rotationReason).toBe("provider_deadline");
+      };
+      const provider = modalProvider();
+      const activities = createSandboxLeaseActivities(services(), {
+        resumeIdleCheckpointSession: async () => {
+          if (timing === "during_resume") await rotate();
+          return await provider.resume();
+        },
+      });
+      const inventory = await activities.listIdleSandboxCheckpoints();
+      const target = inventory.targets.find((row) => row.sandboxGroupId === fixture.sandboxGroupId);
+      expect(target).toBeDefined();
+      if (timing === "after_inventory") await rotate();
+
+      const result = await activities.checkpointIdleSandboxLease({
+        target: target!,
+        timeoutClass: inventory.timeoutClass,
+      });
+      expect(provider.snapshots(), timing).toBe(0);
+      expect(result.status).toBe("skipped");
+      expect(await readLease(db, fixture.workspaceId, fixture.sandboxGroupId)).toMatchObject({
+        liveness: "warm",
+        archiveCapture: null,
+        archiveGeneration: null,
+        rotationReason: "provider_deadline",
+      });
+    }
+  }, 60_000);
 
   test("a capture claim orphaned by a dead worker is taken over after its deadline", async () => {
     const fixture = await heldBoxFixture();
