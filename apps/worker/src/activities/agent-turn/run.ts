@@ -48,6 +48,7 @@ import { codexUpstreamModelSlugs } from "@opengeni/config";
 import { parseModelProvidersJson } from "@opengeni/config";
 import { withClaudeUsageObserver } from "@opengeni/runtime";
 import { createClaudeUsageObserver } from "./claude-usage-observer";
+import { createCodexCreditGuard } from "./codex-credit-policy";
 import {
   xaiSubscriptionRequestStorage,
   type XaiSubscriptionRequestContext,
@@ -691,12 +692,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                           generation: leases.codex.generation!,
                         },
                       );
+                  let resolvedToken: Awaited<ReturnType<typeof resolver.getToken>> | null = null;
+                  const trackToken = (token: Awaited<ReturnType<typeof resolver.getToken>>) => {
+                    providerTurn.effectiveCodexCredentialVersion = token.credentialVersion;
+                    resolvedToken = token;
+                    return token;
+                  };
+                  const creditGuard = createCodexCreditGuard({
+                    allowExtraCredits: runSettings.codexAllowExtraCredits,
+                    refreshToken: async () => trackToken(await resolver.refresh()),
+                    onUsage: (snapshot) => {
+                      providerTurn.latestCodexUsage = snapshot;
+                    },
+                  });
                   const resolveTrackedToken = async (
                     resolve: () => ReturnType<typeof resolver.getToken>,
                   ) => {
-                    const token = await resolve();
-                    providerTurn.effectiveCodexCredentialVersion = token.credentialVersion;
-                    return token;
+                    const token = trackToken(await resolve());
+                    creditGuard.setToken(token);
+                    await leases.codex.assertCurrentForDispatch();
+                    await creditGuard.assertCanDispatch();
+                    // Usage may have refreshed an unexpectedly rejected bearer.
+                    // Return it before the transport constructs auth headers.
+                    return resolvedToken!;
                   };
                   return {
                     clientVersion: CODEX_CLIENT_VERSION,
@@ -712,9 +730,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),
                     onUsageHeaders: (snapshot) => {
                       providerTurn.latestCodexUsage = snapshot;
+                      creditGuard.observe(snapshot);
                     }, // latest wins; flushed once in finally
                     beforeProviderDispatch: async () => {
                       await leases.codex.assertCurrentForDispatch();
+                      creditGuard.assertObservedUsageAllowsDispatch();
                       observeProviderDispatch();
                     },
                     onRequestPreparationDiagnostic: (phase) => {

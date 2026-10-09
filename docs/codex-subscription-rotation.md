@@ -55,6 +55,52 @@ to cancel or finish accepted turns. Normal checkpoint/recovery retains their
 logical identity and source binding; normal settings changes require no idle
 window after activation.
 
+## Included allowance and extra credits
+
+Codex chat and compaction check included allowance immediately before each
+provider request, in `agent-turn/codex-credit-policy.ts`. This is independent
+of account selection: a long-running turn must not keep spending just because
+the provider accepts requests after the included limit.
+
+The default protects extra credits. An exhausted response-header observation
+stops dispatch immediately; otherwise a bounded `/wham/usage` read is required
+for each request. A successful check is never reused for the next request.
+Weekly-only plans use their reported window, without inventing a five-hour cap.
+Missing/unreadable allowance stops the turn with typed, non-retryable copy;
+it does not mark the account unhealthy or manufacture quota evidence.
+Reported exhausted feature allowances also block spending conservatively:
+provider feature identifiers do not yet have an authoritative model mapping.
+
+Observed exhaustion is a local admission refusal, not a fabricated HTTP error.
+Both allocator implementations checkpoint durable progress before switching
+the same turn. Existing manual pins, rotation policy, failover bounds and
+capacity waits still apply. Reset credits are never redeemed automatically.
+The explicit deployment opt-in `OPENGENI_CODEX_ALLOW_EXTRA_CREDITS=true` permits
+active turns to continue past included limits; it does not change which
+accounts the allocator prefers for new work. It defaults to false.
+
+This is request-boundary protection, not a provider-enforced monetary cap:
+an individual request can cross a limit, provider reporting can lag, and
+concurrent clients can consume allowance after a check. Independent image,
+voice and external-client requests have their own admission paths.
+
+Account usage details display the provider's extra-credit balance without
+inventing a currency or converting missing data to zero. This balance is
+separate from earned usage-limit resets. Accounts outside the current
+workspace's usage visibility still have only their existing cached projection.
+
+## Organization pause
+
+Organization administrators can pause a Codex account for new chats and
+schedules from its account page. The allocator switch keeps the connection,
+workspace access, primary choice, credential health and running leases intact.
+`PATCH /v1/organizations/:organizationId/codex/accounts/:accountId/allocator`
+requires same-origin human organization administration and the current
+allocator version. Same-state requests are idempotent; conflicting stale
+writes return 409 and the UI refreshes before retry. Legacy changes and their
+capacity wakes commit atomically; the shared core uses its canonical policy
+mutation. Pause does not cancel an accepted running turn.
+
 ## Atomic selection and fairness
 
 Every Codex turn calls `acquireCodexCredentialLease` before model/tool

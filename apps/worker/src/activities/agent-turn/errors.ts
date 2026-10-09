@@ -74,6 +74,10 @@ import {
 } from "./codex-plan-entitlement";
 import { SubscriptionCoreCodexTurnError } from "./codex-core-errors";
 import {
+  CodexIncludedUsageExhaustedError,
+  findCodexCreditPolicyError,
+} from "./codex-credit-policy";
+import {
   classifyXaiSubscriptionStreamingTerminalError,
   classifyXaiSubscriptionStreamIdleTimeoutError,
   isXaiSubscriptionHostedToolContinuationError,
@@ -1950,6 +1954,10 @@ function baseAgentRunFailurePayload(
   // The looser "429 ... usage limit" wording counts only on a Codex transport
   // error: an API-key provider's 429 that says "usage limit" is provider quota
   // evidence, not a ChatGPT/Codex subscription cap.
+  const creditPolicy = findCodexCreditPolicyError(error);
+  if (creditPolicy) {
+    return { error: creditPolicy.message, code: creditPolicy.code, retryable: false };
+  }
   const usageLimit = classifyCodexUsageLimitError(error);
   if (usageLimit && (isCodexTransportError(error) || hasCodexUsageLimitType(error))) {
     return codexUsageLimitFailurePayload(usageLimit, message);
@@ -2096,6 +2104,7 @@ export type CodexCredentialFailure = {
    */
   kind: "auth" | "forbidden" | "rate_limit" | "quota" | "plan_entitlement";
   cooldownSeconds: number | null;
+  origin?: "included_usage_policy";
 };
 
 export const CODEX_ALLOWANCE_FALLBACK_MS = 5 * 60 * 60_000;
@@ -2160,6 +2169,14 @@ export function codexCredentialCooldownUntil(
  * progress and therefore MUST NOT walk the credential pool automatically.
  */
 export function classifyCodexCredentialFailure(error: unknown): CodexCredentialFailure | null {
+  const creditPolicy = findCodexCreditPolicyError(error);
+  if (creditPolicy instanceof CodexIncludedUsageExhaustedError) {
+    return {
+      kind: "quota",
+      cooldownSeconds: creditPolicy.resetsInSeconds,
+      origin: "included_usage_policy",
+    };
+  }
   // A request safety refusal is not evidence that another account should run it.
   if (isProviderSafetyRefusal(error)) return null;
   // A permanent OAuth refresh failure is definitive and the shared resolver has

@@ -2748,7 +2748,7 @@ const routeLabelPatterns: Array<{
     label: (match) => `/v1/organizations/:organizationId/codex/connect/${match[1]}`,
   },
   {
-    pattern: /^\/v1\/organizations\/[^/]+\/codex\/accounts\/[^/]+(?:\/activate)?$/,
+    pattern: /^\/v1\/organizations\/[^/]+\/codex\/accounts\/[^/]+(?:\/(activate|allocator))?$/,
     label: "/v1/organizations/:organizationId/codex/accounts/:accountId",
   },
   {

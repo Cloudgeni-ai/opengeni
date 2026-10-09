@@ -14,6 +14,7 @@ import {
   setWorkspaceCodexSubscriptionModeInTransaction,
   upsertCodexSubscriptionCredential,
   upsertOrganizationCodexSubscriptionCredential,
+  updateCodexAllocatorEligibility,
   withSessionCodexCapacityMutation,
   type DbClient,
 } from "../src";
@@ -180,6 +181,83 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
         }),
       "55000",
     );
+  });
+
+  test("organization pause preserves credential and access policy, audits once, and fences stale writes", async () => {
+    if (!shared || !client) return;
+    const [account] = await shared.admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('organization-codex-pause') returning id`;
+    const [workspace] = await shared.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name) values (${account!.id}, 'pause fixture') returning id`;
+    await shared.admin`insert into workspace_inference_controls (account_id, workspace_id)
+      values (${account!.id}, ${workspace!.id})`;
+    const subjectId = `user:${crypto.randomUUID()}`;
+    await shared.admin`insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+      values (${account!.id}, ${subjectId}, 'owner', 'active', ${workspace!.id})`;
+    const credential = await upsertOrganizationCodexSubscriptionCredential(client.db, {
+      organizationId: account!.id,
+      actorSubjectId: subjectId,
+      credentialEncrypted: "fixture-not-a-token",
+      chatgptAccountId: crypto.randomUUID(),
+      scopes: null,
+      planType: "pro",
+      isFedramp: false,
+      expiresAt: null,
+      lastRefreshAt: null,
+    });
+    const input = {
+      accountId: account!.id,
+      workspaceId: null,
+      credentialId: credential.id,
+      subjectId,
+      enabled: false,
+      expectedVersion: 1,
+    };
+    const before =
+      await shared.admin`select version, credential_encrypted, allowed_workspace_ids, allow_personal_workspaces, status
+      from codex_subscription_credentials where id = ${credential.id}`;
+    expect((await updateCodexAllocatorEligibility(client.db, input)).result).toMatchObject({
+      kind: "updated",
+      allocatorEnabled: false,
+      allocatorVersion: 2,
+    });
+    expect((await updateCodexAllocatorEligibility(client.db, input)).result).toMatchObject({
+      kind: "unchanged",
+      allocatorVersion: 2,
+    });
+    expect(
+      (await updateCodexAllocatorEligibility(client.db, { ...input, enabled: true })).result,
+    ).toMatchObject({ kind: "conflict", allocatorEnabled: false, allocatorVersion: 2 });
+    const after =
+      await shared.admin`select version, credential_encrypted, allowed_workspace_ids, allow_personal_workspaces, status
+      from codex_subscription_credentials where id = ${credential.id}`;
+    expect(after).toEqual(before);
+    const audit =
+      await shared.admin`select action from audit_events where account_id = ${account!.id} and target_id = ${credential.id} and action = 'codex.allocator.updated'`;
+    expect(audit).toHaveLength(1);
+    await expect(
+      updateCodexAllocatorEligibility(client.db, {
+        ...input,
+        subjectId: `user:${crypto.randomUUID()}`,
+      }),
+    ).rejects.toThrow();
+    expect(
+      (
+        await updateCodexAllocatorEligibility(client.db, {
+          ...input,
+          credentialId: crypto.randomUUID(),
+        })
+      ).result,
+    ).toEqual({ kind: "not_found" });
+    expect(
+      (
+        await updateCodexAllocatorEligibility(client.db, {
+          ...input,
+          enabled: true,
+          expectedVersion: 2,
+        })
+      ).result,
+    ).toMatchObject({ kind: "updated", allocatorEnabled: true, allocatorVersion: 3 });
   });
 
   test("disconnect clears used organization credentials across workspace fences atomically", async () => {

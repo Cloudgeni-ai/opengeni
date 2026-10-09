@@ -23,6 +23,7 @@ import {
   settleTurnFailure,
 } from "../src/activities/agent-turn/failure-settlement";
 import { CodexCredentialLeaseLostError } from "../src/activities/agent-turn/credential-leases";
+import { CodexIncludedUsageExhaustedError } from "../src/activities/agent-turn/codex-credit-policy";
 import {
   MAX_AUTOMATIC_PROVIDER_RECOVERIES,
   providerRecoveryResult,
@@ -1106,51 +1107,56 @@ test("persistence failure diagnostic is captured before a failing settlement dep
 });
 
 describe("definitive Codex failure settlement", () => {
-  test("both failure reads retain the accepted pool after live source is disabled", async () => {
-    const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockImplementation(
-      async (_db, _workspaceId, turnId) =>
-        turnId === "turn-1"
-          ? ([
-              codexAccount("serving", { status: "needs_relogin" }),
-              codexAccount("alternate"),
-            ] as never)
-          : [],
-    );
-    const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue({
-      action: "recorded",
-      failoverCount: 1,
-      maxFailovers: 2,
-      exhausted: false,
-    });
-    const failover = spyOn(opengeniDb, "settleCodexCredentialFailover").mockResolvedValue({
-      action: "recovering",
-      failoverCount: 1,
-      maxFailovers: 2,
-      events: [],
-    });
-    const { deps } = codexFailureDeps({
-      codexPolicySnapshot: {
-        schemaVersion: 1,
-        source: "workspace",
-        activeCredentialId: "serving",
-        rotationEnabled: true,
-        rotationStrategy: "sharded",
-        pinnedCredentialId: null,
-        pinSource: null,
-        lastCredentialId: "serving",
-      },
-    });
-    try {
-      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
-      expect(listAccounts).toHaveBeenCalledTimes(2);
-      for (const args of listAccounts.mock.calls) expect(args[2]).toBe("turn-1");
-      expect(failover).toHaveBeenCalledTimes(1);
-    } finally {
-      listAccounts.mockRestore();
-      quarantine.mockRestore();
-      failover.mockRestore();
-    }
-  });
+  test.each(["provider", "included_usage_policy"])(
+    "%s failure retains the accepted pool after live source is disabled",
+    async (origin) => {
+      const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockImplementation(
+        async (_db, _workspaceId, turnId) =>
+          turnId === "turn-1"
+            ? ([
+                codexAccount("serving", { status: "needs_relogin" }),
+                codexAccount("alternate"),
+              ] as never)
+            : [],
+      );
+      const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue({
+        action: "recorded",
+        failoverCount: 1,
+        maxFailovers: 2,
+        exhausted: false,
+      });
+      const failover = spyOn(opengeniDb, "settleCodexCredentialFailover").mockResolvedValue({
+        action: "recovering",
+        failoverCount: 1,
+        maxFailovers: 2,
+        events: [],
+      });
+      const { deps } = codexFailureDeps({
+        codexPolicySnapshot: {
+          schemaVersion: 1,
+          source: "workspace",
+          activeCredentialId: "serving",
+          rotationEnabled: true,
+          rotationStrategy: "sharded",
+          pinnedCredentialId: null,
+          pinSource: null,
+          lastCredentialId: "serving",
+        },
+      });
+      if (origin === "included_usage_policy")
+        deps.error = new CodexIncludedUsageExhaustedError(3600);
+      try {
+        expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+        expect(listAccounts).toHaveBeenCalledTimes(2);
+        for (const args of listAccounts.mock.calls) expect(args[2]).toBe("turn-1");
+        expect(failover).toHaveBeenCalledTimes(1);
+      } finally {
+        listAccounts.mockRestore();
+        quarantine.mockRestore();
+        failover.mockRestore();
+      }
+    },
+  );
   test("routes a typed pre-dispatch deadline loss through lease-loss recovery", async () => {
     const leaseLoss = spyOn(opengeniDb, "settleCodexCredentialLeaseLoss").mockResolvedValue({
       action: "recovering",

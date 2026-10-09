@@ -4002,7 +4002,7 @@ export type CodexUsagePayload = {
     hasCredits: boolean;
     unlimited: boolean;
     overageLimitReached: boolean;
-    balance: string;
+    balance: string | null;
   };
 };
 

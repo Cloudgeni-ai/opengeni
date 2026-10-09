@@ -1077,6 +1077,7 @@ export function CodexUsage({
   account: CodexAccount;
 }) {
   const live = codex.usageMap[account.id];
+  const credits = live?.usage?.credits;
   const overview = codex.overviewMap[account.id];
   const readings = codexUsageReadings(live?.usage, codex.now);
   const fetchedAt = overview?.usage.fetchedAt ?? live?.usage?.fetchedAt ?? null;
@@ -1090,28 +1091,41 @@ export function CodexUsage({
         ? "ChatGPT hasn't reported usage for this account yet."
         : undefined;
   return (
-    <UsageMeterGroup
-      windows={readings}
-      loading={codex.refreshingUsage && !live}
-      checked={
-        fetchedAt ? (
-          <span title={provenance}>
-            <RelativeTime date={fetchedAt} prefix="Checked" now={codex.now} />
-            {overview?.usage.stale ? " · may be out of date" : null}
-          </span>
-        ) : codex.refreshingUsage ? (
-          "Checking…"
-        ) : (
-          "Not checked yet"
-        )
-      }
-      error={error}
-      refreshing={codex.refreshingRow === account.id}
-      refreshDisabledReason={
-        needsReconnect(account) ? "Sign in to ChatGPT again to check usage." : undefined
-      }
-      onRefresh={codex.canManage ? () => void codex.refreshAccountUsage(account.id) : undefined}
-    />
+    <>
+      <UsageMeterGroup
+        windows={readings}
+        loading={codex.refreshingUsage && !live}
+        checked={
+          fetchedAt ? (
+            <span title={provenance}>
+              <RelativeTime date={fetchedAt} prefix="Checked" now={codex.now} />
+              {overview?.usage.stale ? " · may be out of date" : null}
+            </span>
+          ) : codex.refreshingUsage ? (
+            "Checking…"
+          ) : (
+            "Not checked yet"
+          )
+        }
+        error={error}
+        refreshing={codex.refreshingRow === account.id}
+        refreshDisabledReason={
+          needsReconnect(account) ? "Sign in to ChatGPT again to check usage." : undefined
+        }
+        onRefresh={codex.canManage ? () => void codex.refreshAccountUsage(account.id) : undefined}
+      />
+      <div className="flex items-baseline justify-between gap-4 py-3 text-sm">
+        <span className="text-fg-muted">Extra credits</span>
+        <span className="text-fg">
+          {credits?.unlimited
+            ? "Unlimited"
+            : credits?.balance !== null && credits?.balance !== undefined
+              ? credits.balance
+              : "Not reported"}
+          {credits?.overageLimitReached ? " · spending limit reached" : null}
+        </span>
+      </div>
+    </>
   );
 }
 

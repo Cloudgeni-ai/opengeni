@@ -31490,115 +31490,148 @@ export async function updateCodexAllocatorEligibility(
   db: Database,
   input: {
     accountId: string;
-    workspaceId: string;
+    workspaceId: string | null;
     credentialId: string;
     subjectId: string;
     enabled: boolean;
     expectedVersion: number;
   },
 ): Promise<CodexCapacityMutationResult<CodexAllocatorUpdateResult>> {
-  return await withCodexCapacityMutation<CodexAllocatorUpdateResult>(
+  const scope =
+    input.workspaceId === null
+      ? and(
+          eq(schema.codexSubscriptionCredentials.organizationId, input.accountId),
+          eq(schema.codexSubscriptionCredentials.authorityScope, "organization"),
+        )
+      : eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId);
+  const mutate = async (
+    tx: Database,
+  ): Promise<{ result: CodexAllocatorUpdateResult; changed: boolean }> => {
+    const [row] = await tx
+      .select({
+        allocatorEnabled: schema.codexSubscriptionCredentials.allocatorEnabled,
+        allocatorVersion: schema.codexSubscriptionCredentials.allocatorVersion,
+        allocatorUpdatedBySubjectId:
+          schema.codexSubscriptionCredentials.allocatorUpdatedBySubjectId,
+        allocatorUpdatedAt: schema.codexSubscriptionCredentials.allocatorUpdatedAt,
+      })
+      .from(schema.codexSubscriptionCredentials)
+      .where(
+        and(
+          eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
+          scope,
+          eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!row) return { result: { kind: "not_found" } as const, changed: false };
+    const current = {
+      allocatorEnabled: row.allocatorEnabled,
+      allocatorVersion: row.allocatorVersion,
+      allocatorUpdatedBySubjectId: row.allocatorUpdatedBySubjectId,
+      allocatorUpdatedAt: codexMetadataDate(row.allocatorUpdatedAt),
+    };
+    if (row.allocatorEnabled === input.enabled) {
+      return {
+        result: { kind: "unchanged", ...current } as const,
+        changed: false,
+      };
+    }
+    if (row.allocatorVersion !== input.expectedVersion) {
+      return {
+        result: { kind: "conflict", ...current } as const,
+        changed: false,
+      };
+    }
+
+    const changedAt = new Date();
+    const [updated] = await tx
+      .update(schema.codexSubscriptionCredentials)
+      .set({
+        allocatorEnabled: input.enabled,
+        allocatorVersion: sql`${schema.codexSubscriptionCredentials.allocatorVersion} + 1`,
+        allocatorUpdatedBySubjectId: input.subjectId,
+        allocatorUpdatedAt: changedAt,
+        // Deliberately no credential version/updatedAt write.
+      })
+      .where(
+        and(
+          eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
+          scope,
+          eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+          eq(schema.codexSubscriptionCredentials.allocatorVersion, input.expectedVersion),
+        ),
+      )
+      .returning({
+        allocatorEnabled: schema.codexSubscriptionCredentials.allocatorEnabled,
+        allocatorVersion: schema.codexSubscriptionCredentials.allocatorVersion,
+        allocatorUpdatedBySubjectId:
+          schema.codexSubscriptionCredentials.allocatorUpdatedBySubjectId,
+        allocatorUpdatedAt: schema.codexSubscriptionCredentials.allocatorUpdatedAt,
+      });
+    if (!updated) {
+      throw new Error("Codex allocator row changed while locked");
+    }
+    await tx.insert(schema.auditEvents).values(
+      withLosslessContentWriteVersion(
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+          action: "codex.allocator.updated",
+          targetType: "codex_subscription_credential",
+          targetId: input.credentialId,
+          metadata: {
+            allocatorEnabled: updated.allocatorEnabled,
+            allocatorVersion: updated.allocatorVersion,
+          },
+        },
+        "metadata",
+        "metadataCodecVersion",
+      ),
+    );
+    return {
+      result: {
+        kind: "updated",
+        allocatorEnabled: updated.allocatorEnabled,
+        allocatorVersion: updated.allocatorVersion,
+        allocatorUpdatedBySubjectId: updated.allocatorUpdatedBySubjectId,
+        allocatorUpdatedAt: codexMetadataDate(updated.allocatorUpdatedAt),
+      } as const,
+      changed: true,
+    };
+  };
+  if (input.workspaceId === null) {
+    return await withOrganizationCodexAdministrator(
+      db,
+      { organizationId: input.accountId, actorSubjectId: input.subjectId },
+      async (tx) => {
+        await lockOrganizationCodexSubscriptionSources(tx, input.accountId);
+        await tx
+          .select({ accountId: schema.organizationCodexRotationSettings.accountId })
+          .from(schema.organizationCodexRotationSettings)
+          .where(eq(schema.organizationCodexRotationSettings.accountId, input.accountId))
+          .for("update");
+        const mutation = await mutate(tx);
+        const wakeTargets = mutation.changed
+          ? await wakeOrganizationCodexCapacityWaitersInTransaction(tx, {
+              accountId: input.accountId,
+              reason: "codex_allocator_eligibility_changed",
+              restoreWorkspaceId: null,
+            })
+          : [];
+        return { result: mutation.result, wakeTargets };
+      },
+    );
+  }
+  return await withCodexCapacityMutation(
     db,
     {
       workspaceId: input.workspaceId,
       reason: "codex_allocator_eligibility_changed",
     },
-    async (tx) => {
-      const [row] = await tx
-        .select({
-          allocatorEnabled: schema.codexSubscriptionCredentials.allocatorEnabled,
-          allocatorVersion: schema.codexSubscriptionCredentials.allocatorVersion,
-          allocatorUpdatedBySubjectId:
-            schema.codexSubscriptionCredentials.allocatorUpdatedBySubjectId,
-          allocatorUpdatedAt: schema.codexSubscriptionCredentials.allocatorUpdatedAt,
-        })
-        .from(schema.codexSubscriptionCredentials)
-        .where(
-          and(
-            eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
-            eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
-            eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!row) return { result: { kind: "not_found" } as const, changed: false };
-      const current = {
-        allocatorEnabled: row.allocatorEnabled,
-        allocatorVersion: row.allocatorVersion,
-        allocatorUpdatedBySubjectId: row.allocatorUpdatedBySubjectId,
-        allocatorUpdatedAt: codexMetadataDate(row.allocatorUpdatedAt),
-      };
-      if (row.allocatorEnabled === input.enabled) {
-        return {
-          result: { kind: "unchanged", ...current } as const,
-          changed: false,
-        };
-      }
-      if (row.allocatorVersion !== input.expectedVersion) {
-        return {
-          result: { kind: "conflict", ...current } as const,
-          changed: false,
-        };
-      }
-
-      const changedAt = new Date();
-      const [updated] = await tx
-        .update(schema.codexSubscriptionCredentials)
-        .set({
-          allocatorEnabled: input.enabled,
-          allocatorVersion: sql`${schema.codexSubscriptionCredentials.allocatorVersion} + 1`,
-          allocatorUpdatedBySubjectId: input.subjectId,
-          allocatorUpdatedAt: changedAt,
-          // Deliberately no credential version/updatedAt write.
-        })
-        .where(
-          and(
-            eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
-            eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
-            eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-            eq(schema.codexSubscriptionCredentials.allocatorVersion, input.expectedVersion),
-          ),
-        )
-        .returning({
-          allocatorEnabled: schema.codexSubscriptionCredentials.allocatorEnabled,
-          allocatorVersion: schema.codexSubscriptionCredentials.allocatorVersion,
-          allocatorUpdatedBySubjectId:
-            schema.codexSubscriptionCredentials.allocatorUpdatedBySubjectId,
-          allocatorUpdatedAt: schema.codexSubscriptionCredentials.allocatorUpdatedAt,
-        });
-      if (!updated) {
-        throw new Error("Codex allocator row changed while locked");
-      }
-      await tx.insert(schema.auditEvents).values(
-        withLosslessContentWriteVersion(
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: input.subjectId,
-            action: "codex.allocator.updated",
-            targetType: "codex_subscription_credential",
-            targetId: input.credentialId,
-            metadata: {
-              allocatorEnabled: updated.allocatorEnabled,
-              allocatorVersion: updated.allocatorVersion,
-            },
-          },
-          "metadata",
-          "metadataCodecVersion",
-        ),
-      );
-      return {
-        result: {
-          kind: "updated",
-          allocatorEnabled: updated.allocatorEnabled,
-          allocatorVersion: updated.allocatorVersion,
-          allocatorUpdatedBySubjectId: updated.allocatorUpdatedBySubjectId,
-          allocatorUpdatedAt: codexMetadataDate(updated.allocatorUpdatedAt),
-        } as const,
-        changed: true,
-      };
-    },
+    mutate,
   );
 }
 

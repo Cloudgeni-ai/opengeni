@@ -1201,6 +1201,42 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
   });
 
+  app.patch("/v1/organizations/:organizationId/codex/accounts/:accountId/allocator", async (c) => {
+    const organizationId = c.req.param("organizationId");
+    requireSameOriginBrowserMutation(c, deps);
+    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const parsed = z
+      .object({
+        enabled: z.boolean(),
+        expectedVersion: z.number().int().positive(),
+      })
+      .safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "enabled and expectedVersion are required" });
+    }
+    const admin = { accountId: organizationId, workspaceId: null, subjectId: human.subjectId };
+    if ((await codexRouteDisposition(deps, organizationId)) === "core") {
+      return await coreCodexAllocator(c, deps, admin, c.req.param("accountId"), parsed.data);
+    }
+    const mutation = await updateCodexAllocatorEligibility(db, {
+      ...admin,
+      credentialId: c.req.param("accountId"),
+      ...parsed.data,
+    });
+    const result = mutation.result;
+    if (result.kind === "not_found") {
+      throw new HTTPException(404, { message: "codex account not found" });
+    }
+    await signalCodexCapacityTargets(deps, mutation.wakeTargets);
+    const response = {
+      allocatorEnabled: result.allocatorEnabled,
+      allocatorVersion: result.allocatorVersion,
+      allocatorUpdatedAt: result.allocatorUpdatedAt,
+      changed: result.kind === "updated",
+    };
+    return result.kind === "conflict" ? c.json(response, 409) : c.json(response);
+  });
+
   app.patch("/v1/organizations/:organizationId/codex/accounts/:accountId", async (c) => {
     const organizationId = c.req.param("organizationId");
     requireSameOriginBrowserMutation(c, deps);

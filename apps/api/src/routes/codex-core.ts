@@ -348,7 +348,7 @@ export async function coreCodexRename(
 export async function coreCodexAllocator(
   c: Context,
   deps: ApiRouteDeps,
-  admin: Admin & { workspaceId: string },
+  admin: Admin,
   connectionId: string,
   body: { enabled: boolean; expectedVersion: number },
 ) {
