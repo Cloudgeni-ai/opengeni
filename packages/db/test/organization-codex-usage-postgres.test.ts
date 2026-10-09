@@ -26,7 +26,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-async function fixture(mode: "legacy" | "core", expired = false) {
+async function fixture(mode: "legacy" | "core", expired = false, workspaceManaged = false) {
   const userId = crypto.randomUUID();
   const access = await ensureManagedAccessForUser(client!.db, {
     userId,
@@ -46,6 +46,9 @@ async function fixture(mode: "legacy" | "core", expired = false) {
   );
   const expires = new Date(expired ? 0 : Date.now() + 86_400_000).toISOString();
   if (mode === "legacy") {
+    // Reconstruct the pre-cutover fixture; new organizations are seeded core.
+    await shared!.admin`delete from subscription_provider_cutovers
+      where account_id = ${organizationId} and provider = 'codex'`;
     await shared!.admin`insert into codex_subscription_credentials (
       id, account_id, organization_id, authority_scope, credential_encrypted,
       chatgpt_account_id, plan_type, status, allocator_enabled, allowed_workspace_ids,
@@ -54,15 +57,97 @@ async function fixture(mode: "legacy" | "core", expired = false) {
       ${encrypted}, ${crypto.randomUUID()}, 'pro', 'active', false, '{}', false, ${expires})`;
   } else {
     await shared!.admin`insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${organizationId}, 'codex', true)`;
+      values (${organizationId}, 'codex', true)
+      on conflict (account_id, provider) do update set enabled = true`;
     await shared!.admin`insert into subscription_connections (
       id, account_id, provider, kind, credential_encrypted, credential_format, provider_account_id,
-      plan_type, ownership, scope_kind, status, allocator_enabled, allow_personal_workspaces, expires_at
+      plan_type, ownership, scope_kind, status, allocator_enabled, allow_personal_workspaces, expires_at,
+      managed_by_workspace_id
     ) values (${credentialId}, ${organizationId}, 'codex', 'subscription', ${encrypted}, 'v2',
-      ${crypto.randomUUID()}, 'pro', 'shared', 'workspaces', 'active', false, false, ${expires})`;
+      ${crypto.randomUUID()}, 'pro', 'shared', 'workspaces', 'active', false, false, ${expires},
+      ${workspaceManaged ? access.workspaceGrants[0]!.workspaceId : null})`;
   }
   return { organizationId, actorSubjectId, credentialId, mode };
 }
+
+async function aliasFor(input: Awaited<ReturnType<typeof fixture>>) {
+  const alias = crypto.randomUUID();
+  await shared!.admin`insert into subscription_connection_aliases
+    (account_id, provider, alias_connection_id, connection_id)
+    values (${input.organizationId}, 'codex', ${alias}, ${input.credentialId})`;
+  return { ...input, credentialId: alias };
+}
+
+describe("organization Codex usage through retained core aliases", () => {
+  test.skipIf(!real)("reads the canonical account without routing or consent changes", async () => {
+    const canonical = await fixture("core");
+    const alias = await aliasFor(canonical);
+    const fetch = provider();
+    expect(
+      (await fetchOrganizationCodexUsageForAccount(client!.db, settings, alias, fetch)).status,
+    ).toBe("ok");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const [row] = await shared!.admin`select status, allocator_enabled, extra_credits_enabled,
+      refresh_generation from subscription_connections where id = ${canonical.credentialId}`;
+    expect(row).toMatchObject({
+      status: "active",
+      allocator_enabled: false,
+      extra_credits_enabled: false,
+    });
+    expect(Number(row!.refresh_generation)).toBe(1);
+  });
+
+  test.skipIf(!real)(
+    "shares one canonical refresh lock and updates the canonical generation",
+    async () => {
+      const canonical = await fixture("core", true);
+      const alias = await aliasFor(canonical);
+      const fetch = provider();
+      const accessToken = `header.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url")}.signature`;
+      const refresh = mock(async () => ({
+        accessToken,
+        refreshToken: "alias-rotated",
+        idToken: "synthetic-id",
+      }));
+      const results = await Promise.all(
+        [canonical, alias].map((input) =>
+          fetchOrganizationCodexUsageForAccount(client!.db, settings, input, fetch, refresh),
+        ),
+      );
+      expect(results.map((result) => result.status)).toEqual(["ok", "ok"]);
+      expect(refresh).toHaveBeenCalledTimes(1);
+      const [row] = await shared!.admin`select refresh_generation from subscription_connections
+      where id = ${canonical.credentialId}`;
+      expect(Number(row!.refresh_generation)).toBe(2);
+    },
+  );
+
+  test.skipIf(!real)(
+    "rejects foreign and workspace-managed aliases before provider I/O",
+    async () => {
+      const canonical = await fixture("core");
+      const alias = await aliasFor(canonical);
+      const other = await fixture("core");
+      const fetch = provider();
+      expect(
+        (
+          await fetchOrganizationCodexUsageForAccount(
+            client!.db,
+            settings,
+            { ...other, credentialId: alias.credentialId },
+            fetch,
+          )
+        ).status,
+      ).toBe("error");
+      const managedAlias = await aliasFor(await fixture("core", false, true));
+      expect(
+        (await fetchOrganizationCodexUsageForAccount(client!.db, settings, managedAlias, fetch))
+          .status,
+      ).toBe("error");
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+});
 
 function provider() {
   return mock(

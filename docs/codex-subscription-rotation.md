@@ -10,7 +10,7 @@ PR 4. Its historical text remains in git history.
 | Requirements | [Subscription accounts contract](subscription-accounts.md) |
 | Placement, leases, refresh, waits, Apps and operations | [Subscription core design](design/subscription-core-2026-10-07.md) |
 | Legacy migration and mapping | [Design, PR 3](design/subscription-core-2026-10-07.md#pr-3-the-drained-codex-cutover) |
-| Deployment and fix-forward | [Deployment](deployment.md#codex-on-the-shared-subscription-core-0685) |
+| Deployment and fix-forward | [Deployment](deployment.md#codex-on-the-shared-subscription-core-0689) |
 | Entry-point inventory | [Inventory](subscription-accounts-inventory.md) |
 
 Legacy account ids remain aliases of their canonical connections; routes, SDK
