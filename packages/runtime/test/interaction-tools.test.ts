@@ -37,6 +37,54 @@ const computerSessionId = randomUUID();
 const now = "2026-08-10T12:00:00.000Z";
 
 describe("interaction attempt tools", () => {
+  test("native platform alternatives admit Linux arguments and retain the session boundary", async () => {
+    let calls = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open", "computer_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        callNativeComputerTool: async (_workspace, _computer, request) => {
+          calls++;
+          expect(request.arguments).toEqual({ launch_path: "fixture-app" });
+          return {
+            protocolVersion: 1,
+            operationId: request.operationId,
+            computerSessionId,
+            controllerGeneration: "fixture",
+            targetId: null,
+            state: "failed",
+            dispatchedAt: null,
+            settledAt: now,
+            observation: null,
+            error: { code: "unsupported", message: "Synthetic fixture", retryable: false },
+          };
+        },
+      }),
+    });
+    const environment = createAttemptToolEnvironment({
+      scope: { accountId, workspaceId, sessionId, turnId, attemptId, executionGeneration: 1 },
+      generation: 1,
+      definitions,
+    });
+    await environment.callModel({
+      operationId: randomUUID(),
+      subjectId: "model:fixture",
+      modelName: "interaction__cua_launch_app",
+      arguments: { computerSessionId, launch_path: "fixture-app" },
+    });
+    expect(calls).toBe(1);
+    await expect(
+      environment.callModel({
+        operationId: randomUUID(),
+        subjectId: "model:fixture",
+        modelName: "interaction__cua_launch_app",
+        arguments: { computerSessionId, session: "other", launch_path: "fixture-app" },
+      }),
+    ).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
   test("oversized native output retains completed operation evidence through the prepared gateway", async () => {
     const definitions = createInteractionAttemptToolDefinitions({
       workspaceId,

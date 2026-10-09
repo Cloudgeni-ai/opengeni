@@ -1091,6 +1091,10 @@ worker-run through one deployment-configured search API (`web_search` /
 both the worker's tools and the API's effective-tools projection; provider
 calls are credit-billed per call when billing is active. See
 [web search](web-search.md).
+Included hosted-search evidence is projected request-locally by
+`packages/runtime/src/hosted-search-evidence.ts` before model/portable-compaction
+accounting: bounded untrusted facts, not a dependency on stored provider IDs.
+Canonical hosted items remain unchanged.
 
 Configured-router visibility never joins pending non-eager MCP preparation;
 execution joins the exact catalog. Exposed routers remain in the prefix after
@@ -1766,6 +1770,17 @@ while a live voice call is in progress. Host context/notifications use native
 composer hooks, never a replacement Send/Steer validator. Observer failures do
 not change accepted delivery. The lazy embedded voice entry reuses
 `SessionRealtimeControl` and its catalog rather than owning another call flow.
+
+`OpenGeniChat` uses the reusable `useNewConversation`/`NewConversationView`
+pair (`NewConversation` is the standalone assembled component). The stock
+controller owns a click's immutable request/idempotency key, uncertain retry,
+scope fences, and unsent draft/file/policy handoff. `initialDraft` on the native
+composer seeds local content without inventing its server revision. Host
+creation adapters own only application admission/configuration and durable
+application records. Live voice uses explicit empty `startMode: "realtime"`
+creation and the existing voice-autostart control, never a synthetic first
+message. The session proxy preserves browser retry keys unless the server
+hook supplies its own; authority remains server-owned.
 
 `conversationTimeline`/`SessionChrome`/`SessionCommands`/`ChatComposer`
 share reconciliation/controls. Commands mount only in open activity drawers.

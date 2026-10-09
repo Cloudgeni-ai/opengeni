@@ -64,6 +64,10 @@ export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reaso
     reason: "the person's inbox requires their own signed-in browser session",
   },
   {
+    pattern: /^(GET|PUT) \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/inbox-mute$/,
+    reason: "the person's session mute requires their own signed-in browser session",
+  },
+  {
     pattern:
       /^(POST \/v1\/organizations(\/additional)?|GET \/v1\/organization-(memberships|invitations)|POST \/v1\/organization-invitations\/:invitationId\/accept)$/,
     reason:

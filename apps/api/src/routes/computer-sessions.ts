@@ -1159,6 +1159,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         workspaceId: sourceSession.workspaceId,
         session: sourceSession,
         subjectId: grant.subjectId,
+        grant,
         waitSignal,
         operation,
         retryControllerTransport: operation === "computer.read" || operation === "computer.action",
@@ -1569,6 +1570,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       deps.db,
       deps.settings,
       sourceSession,
+      { grant },
     );
     const acquired = await acquireLease(deps.db, {
       accountId: grant.accountId,

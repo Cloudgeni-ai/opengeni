@@ -50,6 +50,7 @@ export type SubscriptionConnection = {
   kind: ConnectionKind;
   ownership: ConnectionOwnership;
   health: ConnectionHealth;
+  extraCreditsEnabled?: boolean;
   allocatorEnabled: boolean;
   /**
    * Models the plan entitles, as reported by the adapter. Null means every

@@ -2,6 +2,7 @@ import { isCacheWarm } from "./cache";
 import {
   canServe,
   connectionCapacity,
+  connectionUsesExtraCredits,
   connectionIneligibility,
   isPermanentIneligibility,
   modelAllowedInWorkspace,
@@ -84,6 +85,7 @@ export function rankConnections(
     const rotation = rotationFor(input.settings, connection.provider);
     return {
       connection,
+      credits: connectionUsesExtraCredits(input, connection),
       primary: rotation.mode === "primary_first" && rotation.primaryConnectionId === connection.id,
       known: connectionCapacity(input, connection).kind === "available",
       hash: spreadHash(input.session.id, connection.id),
@@ -91,6 +93,7 @@ export function rankConnections(
   });
   keyed.sort(
     (left, right) =>
+      Number(left.credits) - Number(right.credits) ||
       Number(right.primary) - Number(left.primary) ||
       Number(right.known) - Number(left.known) ||
       left.hash - right.hash ||
@@ -186,6 +189,13 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     binding &&
     bound &&
     bindingServable &&
+    (!connectionUsesExtraCredits(input, bound) ||
+      !connections.some(
+        (candidate) =>
+          (candidate.ownership.kind === "shared" || fallback) &&
+          !connectionUsesExtraCredits(input, candidate) &&
+          canServe(input, candidate, binding.modelId),
+      )) &&
     session.reselectionPoints.length === 0 &&
     isCacheWarm(binding, input.cacheFacts[bound.provider], input.now)
   ) {
@@ -196,7 +206,15 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   // connections, before the next model (SUB-SEL-01, SUB-SEL-02, D-12).
   for (const [index, modelId] of models.entries()) {
     if (!modelPermitted(input, modelId)) continue;
-    const servable = connections.filter((connection) => canServe(input, connection, modelId));
+    const eligible = connections.filter(
+      (connection) =>
+        canServe(input, connection, modelId) &&
+        (connection.ownership.kind === "shared" || fallback),
+    );
+    const included = eligible.filter(
+      (connection) => !connectionUsesExtraCredits(input, connection),
+    );
+    const servable = included.length ? included : eligible;
     const chosen =
       rankConnections(
         input,

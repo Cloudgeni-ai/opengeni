@@ -35,6 +35,7 @@ import {
 import {
   applyQuotaObservation,
   connectionIneligibility,
+  connectionUsesExtraCredits,
   decidePlacement,
   quotaCapacity,
   type PlacementDecision,
@@ -331,7 +332,9 @@ async function placeOnce(
       const binding = input.session.binding;
       const explicitConnectionId = binding?.choice === "explicit" ? binding.connectionId : null;
       const decision =
-        reuse !== null && (explicitConnectionId === null || explicitConnectionId === reuse)
+        reuse !== null &&
+        (explicitConnectionId === null || explicitConnectionId === reuse) &&
+        !connectionUsesExtraCredits(input, input.connections.find((row) => row.id === reuse)!)
           ? ({ kind: "run", connectionId: reuse, switch: "sticky" } as const)
           : decidePlacement(input);
       if (decision.kind === "wait") {
@@ -533,6 +536,68 @@ export type SubscriptionCoreCodexPlacementEvaluation =
  * then places (and leases) through placeSubscriptionCoreCodexTurn, which
  * rechecks everything in its own transaction.
  */
+/** Read live credit consent and placement without changing a binding or lease. */
+export async function canSpendSubscriptionCoreCodexExtraCredits(
+  db: Database,
+  request: SubscriptionCoreCodexPlacementRequest & { connectionId: string },
+): Promise<boolean> {
+  const { identity } = request;
+  const now = new Date();
+  const result = await withSubscriptionCorePlacementWorld(
+    db,
+    codexPlacementWorldRequest(identity, request.productModelId, request.reasoningLevel, now),
+    async (tx, worldInput) => {
+      if (
+        !(await codexCutoverEnabled(tx, identity.accountId)) ||
+        !(await readAttemptFence(tx, request))
+      )
+        return false;
+      if (
+        !(await assertSubscriptionTurnLeaseCurrent(tx, {
+          ...identity,
+          provider: "codex",
+          connectionId: request.connectionId,
+          holderId: request.holderId,
+          generation: request.executionGeneration,
+        }))
+      )
+        return false;
+      const input = await codexPlacementInput(tx, identity, worldInput, request.productModelId);
+      const current = input.connections.find((row) => row.id === request.connectionId);
+      if (!current?.extraCreditsEnabled) return false;
+      // The exact accepted lease remains usable after allocator pause.
+      current.allocatorEnabled = true;
+      if (current.assignmentPolicies)
+        current.assignmentPolicies = current.assignmentPolicies.map((policy) => ({
+          ...policy,
+          allocatorEnabled: true,
+        }));
+      current.quota = {
+        modelCooldowns: {},
+        exhaustedUntil: null,
+        exhaustedKind: null,
+        revision: 0,
+        observedAt: now.getTime(),
+        observedRefreshGeneration: current.refreshGeneration,
+        source: "usage_endpoint",
+        ...current.quota,
+        windows: [
+          ...(current.quota?.windows ?? []),
+          {
+            id: "included_admission",
+            status: "exhausted",
+            usedPercent: 100,
+            resetsAt: now.getTime() + 60_000,
+          },
+        ],
+      };
+      const decision = decidePlacement(input);
+      return decision.kind === "run" && decision.connectionId === request.connectionId;
+    },
+  );
+  return result.status === "completed" && result.value;
+}
+
 export async function evaluateSubscriptionCoreCodexPlacement(
   db: Database,
   request: {

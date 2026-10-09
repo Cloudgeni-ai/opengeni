@@ -1,6 +1,7 @@
 import type { Settings } from "@opengeni/config";
 import { boundModelToolOutputItem } from "@opengeni/codex";
 import type { Agent, AgentInputItem, CallModelInputFilter } from "@openai/agents";
+import { projectHostedSearchEvidence } from "./hosted-search-evidence";
 
 import {
   CompactionNeededError,
@@ -33,10 +34,11 @@ export type ContextRobustnessFilterOptions = {
  * responses, and that store is not durable enough to anchor long runs on: a
  * response that streamed successfully can be missing from the store on the
  * very next call, which then fails with 400 "Item with id ... not found"
- * (observed live on Azure OpenAI mid-turn). All item content — including the
- * encrypted reasoning payload carried in providerData when
- * `openaiReasoningEncryptedContent` is on — is sent inline, so the ids add
- * fragility without adding information. Pairing fields (`call_id`/`callId`)
+ * (observed live on Azure OpenAI mid-turn). Inline encrypted reasoning can
+ * survive this detachment. Hosted search is different: the base model-input
+ * filter projects included evidence into portable text before stripping ids;
+ * the provider otherwise hides those results behind its stored id.
+ * Pairing fields (`call_id`/`callId`)
  * are separate properties and stay untouched; items are cloned, never mutated.
  */
 export const stripProviderItemIdsFilter: CallModelInputFilter = ({ modelData }) => {
@@ -504,6 +506,9 @@ export function baseModelInputFilterForSettings(settings: Settings): CallModelIn
       item = normalizeComputerCallAction(
         item as unknown as Record<string, unknown>,
       ) as unknown as AgentInputItem;
+      item = projectHostedSearchEvidence(
+        item as unknown as Record<string, unknown>,
+      ) as AgentInputItem;
       return stripProviderIds ? stripProviderItemId(item) : item;
     },
     // The SDK's externally-owned run history is immutable and append-only.

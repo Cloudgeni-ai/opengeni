@@ -58,6 +58,31 @@ are attempt tools, so Codemode programs can call them too.
 `replace` exists so an operator can A/B the two (see the eval below) or route
 every model through one audited provider.
 
+### Hosted evidence across tool calls
+
+Azure can complete a search but hide its results on the next model request when
+stored response IDs are detached. The runtime requests `web_search_call.action.sources`
+whenever Azure native search is attached, and `web_search_call.results` when the
+request enables reasoning (a nonempty effort other than `none`). Existing includes,
+including encrypted reasoning, remain enabled. Other providers' includes are unchanged.
+
+The SDK retains returned evidence in canonical history. Before replay and portable
+compaction accounting, `packages/runtime/src/hosted-search-evidence.ts` projects
+included HTTP(S) URLs and text-result titles/snippets into one unprivileged assistant
+historical-evidence message at the original position. It labels web content as
+untrusted, examines at most 64 entries per include, emits at most 20 entries, and
+bounds the serialized message to 32 KiB. Titles/snippets are clipped explicitly;
+URLs are never shortened or rewritten. Omitted evidence is distinguished from
+genuinely empty includes. Provider IDs and arbitrary provider metadata are not
+needed to replay these facts. Canonical hosted items and tool pairing stay intact.
+
+This does not reconstruct evidence absent from older responses, perform another
+search, or guarantee native citation annotations. Sources-only includes supply URLs,
+not page facts. Azure supplies result snippets only for reasoning searches, not
+`open_page` or `find_in_page`; unsupported or missing includes cannot supply their
+page bodies. A completed hosted-call status alone is not proof of usable results.
+See the [Azure web-search contract](https://learn.microsoft.com/en-us/azure/ai-foundry/openai/how-to/web-search).
+
 ## Tools
 
 `web_search {query, maxResults?}` returns at most 10 results (default 5). Each

@@ -1,10 +1,30 @@
 import { describe, expect, test } from "bun:test";
+import { hostedSearchFixture } from "./fixtures/hosted-search";
 import {
   projectHistoryForProvider,
   ProviderHistoryIncompatibleError,
 } from "../src/provider-history-adapter";
 
 describe("projectHistoryForProvider", () => {
+  test("included search evidence stays inert and in order on every provider API", () => {
+    const items = [
+      { type: "message", role: "user", content: "Find docs" },
+      hostedSearchFixture(),
+      { type: "function_call", callId: "checkpoint", name: "checkpoint", arguments: "{}" },
+      { type: "function_call_result", callId: "checkpoint", output: "ACK" },
+    ];
+    const before = structuredClone(items);
+    for (const api of ["responses", "chat", "anthropic-messages"] as const) {
+      const projected = projectHistoryForProvider(items, api);
+      expect(projected).toHaveLength(items.length);
+      expect(projected[1]).toMatchObject({ type: "message", role: "assistant" });
+      expect(JSON.stringify(projected[1]!.content)).toContain("exactly seven colors");
+      expect(projected[2]).toBe(items[2]);
+      expect(projected[3]).toBe(items[3]);
+      expect(projectHistoryForProvider(projected, api)).toBe(projected);
+      expect(items).toEqual(before);
+    }
+  });
   test("legacy Chat raw reasoning becomes inert assistant context without truncation or mutation", () => {
     const text = "Synthetic reasoning. ".repeat(2000);
     const items = [

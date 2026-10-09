@@ -20,6 +20,7 @@ import type { Settings } from "@opengeni/config";
 import type { ObjectStorage } from "@opengeni/storage";
 import type { GeneratedImageReceipt } from "./generated-images";
 import { CodexCredentialLeaseLostError } from "./agent-turn/credential-leases";
+import { findCodexCreditPolicyError } from "./agent-turn/codex-credit-policy";
 import {
   executeImageGenerationOperation,
   imageGenerationOperationIdentity,
@@ -74,7 +75,9 @@ export async function executeCodexImageGeneration(
       modelId: CODEX_IMAGE_MODEL,
       ...(input.references ? { referenceDigests: input.references } : {}),
       isProviderDispatchRejected: (error) =>
-        !providerDispatchAdmitted && error instanceof CodexCredentialLeaseLostError,
+        !providerDispatchAdmitted &&
+        (error instanceof CodexCredentialLeaseLostError ||
+          findCodexCreditPolicyError(error) !== null),
       generate: async () => {
         // A lease that cannot be taken is a verified pre-dispatch rejection:
         // the ledger returns to `prepared` and nothing reached the provider.
@@ -128,6 +131,8 @@ export async function executeCoreCodexImageGeneration(
      * the provider call.
      */
     assertChatLease: () => Promise<void>;
+    /** Uses the same live account spending policy as the owning chat turn. */
+    assertCreditAdmission: () => Promise<void>;
     deps?: {
       acquire?: typeof acquireSubscriptionCoreCodexOperationLease;
       renew?: typeof renewSubscriptionCoreCodexOperationLease;
@@ -173,7 +178,8 @@ export async function executeCoreCodexImageGeneration(
     try {
       await step();
     } catch (error) {
-      if (error instanceof CodexCredentialLeaseLostError) throw error;
+      if (error instanceof CodexCredentialLeaseLostError || findCodexCreditPolicyError(error))
+        throw error;
       throw new CodexCredentialLeaseLostError("not_found");
     }
   };
@@ -189,6 +195,7 @@ export async function executeCoreCodexImageGeneration(
     settings: _settings,
     core: _core,
     assertChatLease: _assertChatLease,
+    assertCreditAdmission: _assertCreditAdmission,
     ...operationInput
   } = input;
   return await executeCodexImageGeneration(
@@ -202,6 +209,7 @@ export async function executeCoreCodexImageGeneration(
         refresh: () => resolver.refresh().catch(unavailable),
         beforeProviderDispatch: async () => {
           await preDispatch(async () => {
+            await input.assertCreditAdmission();
             await input.assertChatLease();
             if (!(await renew(input.db, scope, ref))) {
               throw new CodexCredentialLeaseLostError("not_found");

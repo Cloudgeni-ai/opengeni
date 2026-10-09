@@ -5,9 +5,9 @@ on:
     branches:
       - main
       - production
+  # Ordinary main PRs use targeted local checks; post-merge CI remains enabled.
   pull_request:
     branches:
-      - main
       - production
   schedule:
     # Weekly full-mode drift coverage complements impact-selected pull-request

@@ -6,11 +6,11 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "dd17e6ba9f634bc75efd7ec682b719b8a3247940d75835d6d5dc695cb0311cbf"
+      "sha256": "1c18e243d1d82540d1439c4354f9e07f6c12a8391d68ab4b3940146a82ef220a"
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "a95edaf47917c6f48a518fd1436819ea409d99f8c43a204a23cd155f2fedb79b"
+      "sha256": "17f62a74dd6c34f546e2d3c58ac7627097e81e1f20d5fa1626f7f4df5decd86a"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "8abef43d1dcbef59b4d2ac1ca798c4b482bb7563f847c83180f1c788427795b8"
+      "sha256": "4738e9fe9554dc8718c5de4d886b2dd086aca5e41b397f26e910cd9823fed29e"
     },
     {
       "path": ".github/workflows/deprecate-pre-1.0.yml",
@@ -26,11 +26,11 @@
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
-      "sha256": "a739913b5470819b147f4d94633cdbbb7edbe89decfa98888aefa7d24ef3a9e7"
+      "sha256": "1e91ea9240f054e85160a461fd40bf92d1480709c0cf77ac41a41f0b4dbe815c"
     },
     {
       "path": ".github/workflows/local-startup.yml",
-      "sha256": "67ea5d4835dd967cb25663e114fc56aa257bf8cc3fa33878c6a64b608d49c66c"
+      "sha256": "fb1ee347cf037689810c03a4105bfc09de906fa19d1392484763f6b7d4a7b715"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
@@ -153,6 +153,24 @@
   "uncappedRuns": [
     {
       "workflow": ".github/workflows/agent-ci.yml",
+      "job": "cua-linux",
+      "step": "Install desktop and native build dependencies",
+      "sha256": "722dff126e5b2546e8183fc78087791c1334aed807d48eabd8260b0177526ae0"
+    },
+    {
+      "workflow": ".github/workflows/agent-ci.yml",
+      "job": "cua-linux",
+      "step": "Stage the native Linux worker and transport",
+      "sha256": "89680d8ae3cf3fe0c257a252fe0445cf724e83c0873a001cc3007d926dea2d95"
+    },
+    {
+      "workflow": ".github/workflows/agent-ci.yml",
+      "job": "cua-linux",
+      "step": "Verify isolated desktops and compiled packaging",
+      "sha256": "053f0ca55c7ce235956a91a7a5cd606c4af45e4260645b4a1be853fdaea5cd9c"
+    },
+    {
+      "workflow": ".github/workflows/agent-ci.yml",
       "job": "install-smoke",
       "step": "Build the agent binary",
       "sha256": "e9513a6a0b8d0d899e23abf99c6bd6c677869ad04795f12c58cac1d535c9c697"
@@ -257,7 +275,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Build interaction helpers (Linux glibc)",
-      "sha256": "c223939a65f128e9c5eba3163d85e03acc2f21ea52d8183e4de741e0e2a7e4b6"
+      "sha256": "96627610d87b395d487b77685a4ba02a71ab04aab86c797234d29d81483471a4"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",

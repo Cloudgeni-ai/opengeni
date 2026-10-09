@@ -27,7 +27,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { githubAppBotIdentity } from "@opengeni/github";
-import type { Session } from "@opengeni/contracts";
+import type { AccessGrant, Session } from "@opengeni/contracts";
 import {
   acquireLease,
   getSandboxSessionEnvelope,
@@ -151,6 +151,9 @@ export type ChannelAContext = {
   session: Session;
   // The principal that drives the op (for emit attribution + pty opened_by).
   subjectId: string;
+  /** The authenticated route grant, when one drives the op. It resolves the
+   *  session's Sandbox Environment for an agent attempt as its initiating human. */
+  grant?: AccessGrant | undefined;
   /** Cancel lifecycle waiting when the originating HTTP request disconnects. */
   waitSignal?: AbortSignal | undefined;
   /** Bounded route identity for metrics and safe operator diagnostics. */
@@ -781,7 +784,12 @@ async function withChannelAOperation<T>(
   // surface. Without this, Terminal/Files/Browser/Computer/viewers could rearm
 
   // deployment image for the same durable sandbox group.
-  const sandboxRuntime = await resolveSessionSandboxRuntime(db, settings, session);
+  const sandboxRuntime = await resolveSessionSandboxRuntime(
+    db,
+    settings,
+    session,
+    ctx.grant ? { grant: ctx.grant } : { subjectId: ctx.subjectId },
+  );
 
   const release = async (): Promise<void> => {
     await releaseLeaseHolder(db, {

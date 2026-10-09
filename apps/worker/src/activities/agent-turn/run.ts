@@ -1,6 +1,8 @@
 import { withClaudeConnectionCredential } from "@opengeni/config";
 import {
   getSessionAuthorityProjection,
+  canSpendCodexExtraCreditsForTurn,
+  canSpendSubscriptionCoreCodexExtraCredits,
   readActiveSandbox,
   getWorkspaceCredentialProvider,
   resolveClaudeAccountCredential,
@@ -48,6 +50,7 @@ import { codexUpstreamModelSlugs } from "@opengeni/config";
 import { parseModelProvidersJson } from "@opengeni/config";
 import { withClaudeUsageObserver } from "@opengeni/runtime";
 import { createClaudeUsageObserver } from "./claude-usage-observer";
+import { createCodexCreditGuard, assertCodexDispatchAdmission } from "./codex-credit-policy";
 import {
   xaiSubscriptionRequestStorage,
   type XaiSubscriptionRequestContext,
@@ -97,7 +100,12 @@ import { finalizeTurnAttempt } from "./finalization";
 import { settleTurnFailure } from "./failure-settlement";
 import { runTurnStreamAttempt } from "./stream-attempt";
 import { claimTurnAttempt } from "./claim";
-import { selectCodexTurnCapacity, type CapacityPhaseDeps } from "./codex-capacity";
+import {
+  selectCodexTurnCapacity,
+  selectCodexTurnAccount,
+  codexAccountsLackingTurnModel,
+  type CapacityPhaseDeps,
+} from "./codex-capacity";
 import {
   assertTurnModelConnection,
   buildCoreCodexRequestTokenResolver,
@@ -691,12 +699,70 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                           generation: leases.codex.generation!,
                         },
                       );
+                  let resolvedToken: Awaited<ReturnType<typeof resolver.getToken>> | null = null;
+                  const trackToken = (token: Awaited<ReturnType<typeof resolver.getToken>>) => {
+                    providerTurn.effectiveCodexCredentialVersion = token.credentialVersion;
+                    resolvedToken = token;
+                    return token;
+                  };
+                  const creditGuard = createCodexCreditGuard({
+                    canSpendCredits: async () => {
+                      if (!leases.codex.holderId || leases.codex.generation === null) return false;
+                      if (coreCodex)
+                        return await canSpendSubscriptionCoreCodexExtraCredits(db, {
+                          identity: coreCodex.identity,
+                          connectionId: coreCodex.connectionId,
+                          attemptId: input.attemptId,
+                          executionGeneration: attempt.executionGeneration!,
+                          holderId: leases.codex.holderId,
+                          productModelId: providerTurn.codexProductModelId!,
+                          reasoningLevel: turnExecutionPolicy.reasoningEffort,
+                          leaseTtlMs: 60_000,
+                        });
+                      const lackingModel = await codexAccountsLackingTurnModel(
+                        db,
+                        runSettings,
+                        input.workspaceId,
+                        turnExecutionPolicy.upstreamModelId,
+                      );
+                      return await canSpendCodexExtraCreditsForTurn(
+                        db,
+                        {
+                          accountId: input.accountId,
+                          workspaceId: input.workspaceId,
+                          sessionId: input.sessionId,
+                          turnId: turn.id,
+                          attemptId: input.attemptId,
+                          executionGeneration: attempt.executionGeneration!,
+                          credentialId: providerTurn.effectiveCodexCredentialId!,
+                          holderId: leases.codex.holderId,
+                          generation: leases.codex.generation,
+                        },
+                        (context, acceptedSession) =>
+                          selectCodexTurnAccount({
+                            context,
+                            session: acceptedSession,
+                            sessionId: input.sessionId,
+                            productModelId: turnExecutionPolicy.productModelId,
+                            lackingModel,
+                          }),
+                      );
+                    },
+                    refreshToken: async () => trackToken(await resolver.refresh()),
+                    onUsage: (snapshot) => {
+                      providerTurn.latestCodexUsage = snapshot;
+                    },
+                  });
                   const resolveTrackedToken = async (
                     resolve: () => ReturnType<typeof resolver.getToken>,
                   ) => {
-                    const token = await resolve();
-                    providerTurn.effectiveCodexCredentialVersion = token.credentialVersion;
-                    return token;
+                    const token = trackToken(await resolve());
+                    creditGuard.setToken(token);
+                    await leases.codex.assertCurrentForDispatch();
+                    await creditGuard.assertCanDispatch();
+                    // Usage may have refreshed an unexpectedly rejected bearer.
+                    // Return it before the transport constructs auth headers.
+                    return resolvedToken!;
                   };
                   return {
                     clientVersion: CODEX_CLIENT_VERSION,
@@ -712,9 +778,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),
                     onUsageHeaders: (snapshot) => {
                       providerTurn.latestCodexUsage = snapshot;
+                      creditGuard.observe(snapshot);
                     }, // latest wins; flushed once in finally
                     beforeProviderDispatch: async () => {
-                      await leases.codex.assertCurrentForDispatch();
+                      await assertCodexDispatchAdmission(
+                        creditGuard.assertObservedUsageAllowsDispatch,
+                        () => leases.codex.assertCurrentForDispatch(),
+                      );
                       observeProviderDispatch();
                     },
                     onRequestPreparationDiagnostic: (phase) => {

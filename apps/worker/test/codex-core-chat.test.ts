@@ -40,6 +40,7 @@ import {
   type TurnCredentialLeaseDeps,
 } from "../src/activities/agent-turn/credential-leases";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
+import { CodexIncludedUsageExhaustedError } from "../src/activities/agent-turn/codex-credit-policy";
 import {
   coreCodexFailoverDisposition,
   SUBSCRIPTION_CORE_CODEX_TURN_REFUSAL_LIMIT,
@@ -772,50 +773,59 @@ describe("core Codex failure settlement", () => {
       headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
     });
 
-  test("a usage cap records against the core connection and re-places the same turn", async () => {
-    const quota = spy(db, "recordSubscriptionCoreCodexQuotaObservation").mockResolvedValue(true);
-    const failure = spy(db, "recordSubscriptionCoreCodexTurnFailure").mockResolvedValue(true);
-    spy(db, "countSubscriptionCoreCodexTurnRefusals").mockResolvedValue(1);
-    const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
-      action: "recovering",
-      events: [],
-    } as never);
-    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
-    const legacyStatuses = spy(db, "listCodexAccountStatuses");
-    const legacyQuarantine = spy(db, "quarantineCodexCredentialForLease");
-    const legacyFailover = spy(db, "settleCodexCredentialFailover");
-    const { deps, settle } = failureDeps(usageCap(), core);
-    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
-    expect(quota).toHaveBeenCalledWith(
-      {},
-      identity,
-      { connectionId: "connection-core", holderId: "codex-turn:holder", generation: 3 },
-      expect.objectContaining({ exhaustedKind: "quota", observedRefreshGeneration: 5 }),
-    );
-    expect(failure).toHaveBeenCalledTimes(1);
-    // The lease is released first so the next placement need not wait for it.
-    expect(deps.leases.codex.releaseCurrent).toHaveBeenCalledTimes(1);
-    expect(deps.leases.codex.held).toBe(false);
-    expect(recovery).toHaveBeenCalledWith(
-      {},
-      "workspace-1",
-      expect.objectContaining({
-        turnId: "turn-1",
-        reason: "codex_credential_failover",
-        detail: {
-          provider: "codex-subscription",
-          credentialId: "connection-core",
-          failureKind: "quota",
-          failoverCount: 1,
-          maxFailovers: SUBSCRIPTION_CORE_CODEX_TURN_REFUSAL_LIMIT - 1,
-        },
-      }),
-    );
-    expect(settle).not.toHaveBeenCalled();
-    expect(legacyStatuses).not.toHaveBeenCalled();
-    expect(legacyQuarantine).not.toHaveBeenCalled();
-    expect(legacyFailover).not.toHaveBeenCalled();
-  });
+  test.each([
+    ["provider quota refusal", () => usageCap()],
+    ["local included-usage protection", () => new CodexIncludedUsageExhaustedError(3600)],
+  ] as const)(
+    "%s records against the core connection and re-places the same turn",
+    async (label, makeError) => {
+      const quota = spy(db, "recordSubscriptionCoreCodexQuotaObservation").mockResolvedValue(true);
+      const failure = spy(db, "recordSubscriptionCoreCodexTurnFailure").mockResolvedValue(true);
+      spy(db, "countSubscriptionCoreCodexTurnRefusals").mockResolvedValue(1);
+      const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
+        action: "recovering",
+        events: [],
+      } as never);
+      spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+      const legacyStatuses = spy(db, "listCodexAccountStatuses");
+      const legacyQuarantine = spy(db, "quarantineCodexCredentialForLease");
+      const legacyFailover = spy(db, "settleCodexCredentialFailover");
+      const { deps, settle } = failureDeps(makeError(), core);
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+      expect(quota).toHaveBeenCalledWith(
+        {},
+        identity,
+        { connectionId: "connection-core", holderId: "codex-turn:holder", generation: 3 },
+        expect.objectContaining({
+          exhaustedKind: label === "provider quota refusal" ? "quota" : null,
+          observedRefreshGeneration: 5,
+        }),
+      );
+      expect(failure).toHaveBeenCalledTimes(label === "provider quota refusal" ? 1 : 0);
+      // The lease is released first so the next placement need not wait for it.
+      expect(deps.leases.codex.releaseCurrent).toHaveBeenCalledTimes(1);
+      expect(deps.leases.codex.held).toBe(false);
+      expect(recovery).toHaveBeenCalledWith(
+        {},
+        "workspace-1",
+        expect.objectContaining({
+          turnId: "turn-1",
+          reason: "codex_credential_failover",
+          detail: {
+            provider: "codex-subscription",
+            credentialId: "connection-core",
+            failureKind: "quota",
+            failoverCount: 1,
+            maxFailovers: SUBSCRIPTION_CORE_CODEX_TURN_REFUSAL_LIMIT - 1,
+          },
+        }),
+      );
+      expect(settle).not.toHaveBeenCalled();
+      expect(legacyStatuses).not.toHaveBeenCalled();
+      expect(legacyQuarantine).not.toHaveBeenCalled();
+      expect(legacyFailover).not.toHaveBeenCalled();
+    },
+  );
 
   test("the refusal that reaches the per-turn bound fails the turn with typed copy", async () => {
     spy(db, "recordSubscriptionCoreCodexQuotaObservation").mockResolvedValue(true);

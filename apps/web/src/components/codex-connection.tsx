@@ -519,6 +519,7 @@ export type CodexWorking =
   | "source"
   | "rotation"
   | `allocator:${string}`
+  | `extra-credits:${string}`
   | `apps:${string}`
   | `activate:${string}`
   | `rename:${string}`
@@ -842,6 +843,32 @@ export function useCodexSubscriptions({
     [client, workspaceId, refreshAccounts],
   );
 
+  const setExtraCredits = useCallback(
+    async (account: CodexAccount, enabled: boolean) => {
+      setBusy(true);
+      setWorking(`extra-credits:${account.id}`);
+      try {
+        await client.requestJson(
+          "PATCH",
+          `/v1/workspaces/${workspaceId}/codex/accounts/${account.id}/extra-credits`,
+          {
+            enabled,
+            expectedVersion: account.extraCreditsVersion ?? 1,
+          },
+        );
+        await refreshAccounts();
+        toast.success(enabled ? "Extra credits enabled" : "Extra credits protected");
+      } catch (error) {
+        await refreshAccounts();
+        toast.error("Couldn't change this account", { description: userErrorText(error) });
+      } finally {
+        setBusy(false);
+        setWorking(null);
+      }
+    },
+    [client, workspaceId, refreshAccounts],
+  );
+
   const setAppsCredential = useCallback(
     async (account: CodexAccount, enabled: boolean) => {
       if (!data?.apps) return;
@@ -1060,6 +1087,7 @@ export function useCodexSubscriptions({
     activate,
     setRotation,
     setAllocator,
+    setExtraCredits,
     setAppsCredential,
     beginRedemption,
     confirmRedemption,

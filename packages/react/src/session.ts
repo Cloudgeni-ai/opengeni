@@ -31,6 +31,13 @@ export type {
 
 export { useSession, isTitleEvent } from "./hooks/use-session";
 export { useSessionConversation } from "./hooks/use-session-conversation";
+export { useNewConversation } from "./hooks/use-new-conversation";
+export type {
+  NewConversationController,
+  UseNewConversationOptions,
+  NewConversationCreateOptions,
+  CreatedConversation,
+} from "./hooks/use-new-conversation";
 export type {
   SessionConversationController,
   UseSessionConversationOptions,
@@ -54,6 +61,7 @@ export {
 export type {
   ComposerControllerState,
   ComposerPolicy,
+  InitialComposerDraft,
   ComposerSendExtras,
   ComposerState,
   UseComposerOptions,

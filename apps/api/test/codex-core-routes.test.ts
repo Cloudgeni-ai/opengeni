@@ -251,6 +251,46 @@ describe("Codex routes with an enabled cutover", () => {
     });
   });
 
+  test("per-account credit consent writes use their own revision and wake placement", async () => {
+    cutover("core");
+    const consent = mock("setSubscriptionCoreCodexExtraCredits", async () => ({
+      result: {
+        kind: "updated",
+        extraCreditsEnabled: true,
+        extraCreditsVersion: 2,
+        extraCreditsUpdatedAt: null,
+      },
+      wake: { accountId: ACCOUNT, reason: "core_codex_extra_credits_changed" },
+    }));
+    const response = await app().request(
+      `/v1/workspaces/${WS}/codex/accounts/${CONNECTION}/extra-credits`,
+      {
+        method: "PATCH",
+        headers: {
+          authorization: await bearer(["connections:write"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ enabled: true, expectedVersion: 1 }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      changed: true,
+      extraCreditsEnabled: true,
+      extraCreditsVersion: 2,
+      extraCreditsUpdatedAt: null,
+    });
+    expect(consent.mock.calls[0]![1]).toMatchObject({
+      accountId: ACCOUNT,
+      workspaceId: WS,
+      connectionId: CONNECTION,
+      subjectId: "tester",
+      enabled: true,
+      expectedVersion: 1,
+    });
+    expect(wakes).toEqual([{ accountId: ACCOUNT, reason: "core_codex_extra_credits_changed" }]);
+  });
+
   test("allocator and source writes go to the core and wake waiters", async () => {
     cutover("core");
     const allocator = mock("setSubscriptionCoreCodexAllocator", async () => ({
@@ -575,6 +615,64 @@ describe("organization Codex routes with a cutover row", () => {
   const orgPath = `/v1/organizations/${ACCOUNT}/codex`;
   const orgAdmin = { accountId: ACCOUNT, workspaceId: null, subjectId: "user:org-admin" };
 
+  test("organization pause uses organization authority and preserves conflict responses", async () => {
+    organizationCutover("core");
+    const allocator = mock("setSubscriptionCoreCodexAllocator", async () => ({
+      result: {
+        kind: "updated",
+        allocatorEnabled: false,
+        allocatorVersion: 4,
+        allocatorUpdatedAt: null,
+      },
+      wake: { accountId: ACCOUNT, reason: "core_codex_allocator_changed" },
+    }));
+    const path = `${orgPath}/accounts/${CONNECTION}/allocator`;
+    const response = await app().fetch(
+      organizationAdminRequest(path, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: false, expectedVersion: 3 }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(allocator.mock.calls[0]![1]).toEqual({
+      ...orgAdmin,
+      connectionId: CONNECTION,
+      enabled: false,
+      expectedVersion: 3,
+    });
+    expect(wakes).toEqual([{ accountId: ACCOUNT, reason: "core_codex_allocator_changed" }]);
+    mock("setSubscriptionCoreCodexAllocator", async () => ({
+      result: {
+        kind: "conflict",
+        allocatorEnabled: false,
+        allocatorVersion: 4,
+        allocatorUpdatedAt: null,
+      },
+      wake: null,
+    }));
+    const conflict = await app().fetch(
+      organizationAdminRequest(path, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: true, expectedVersion: 3 }),
+      }),
+    );
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ allocatorVersion: 4, changed: false });
+    const invalid = await app().fetch(
+      organizationAdminRequest(path, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: false }),
+      }),
+    );
+    expect(invalid.status).toBe(400);
+    const unauthorized = await app().request(path, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: false, expectedVersion: 3 }),
+    });
+    expect(unauthorized.status).toBe(403);
+  });
+
   test("a disabled cutover fails closed on every organization route", async () => {
     organizationCutover("maintenance");
     for (const [method, path, body] of [
@@ -582,6 +680,7 @@ describe("organization Codex routes with a cutover row", () => {
       ["POST", `/accounts/${CONNECTION}/activate`, {}],
       ["PATCH", "/settings", { rotationEnabled: false }],
       ["PATCH", `/accounts/${CONNECTION}`, { label: "x" }],
+      ["PATCH", `/accounts/${CONNECTION}/allocator`, { enabled: false, expectedVersion: 3 }],
     ] as const) {
       const response = await app().fetch(
         organizationAdminRequest(`${orgPath}${path}`, {

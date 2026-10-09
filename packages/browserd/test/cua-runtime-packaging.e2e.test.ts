@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { stageCuaRuntime } from "../scripts/stage-cua-runtime";
 
-// This can run on a locked or headless Mac. It does not grant permissions,
+// This can run headless. It does not grant permissions,
 // capture the desktop, discover apps or deliver input.
-test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_PACKAGING_E2E !== "1")(
+test.skipIf(
+  !["darwin", "linux"].includes(process.platform) || process.env.OPENGENI_CUA_PACKAGING_E2E !== "1",
+)(
   "compiled CUA loads only its adjacent release-contained assets",
   async () => {
     const root = await mkdtemp(join(tmpdir(), "opengeni-cua-package-"));
@@ -39,13 +41,22 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_PACKAGING_
         binary,
       ]);
       if (build.exitCode !== 0) throw new Error(build.stderr);
-      const signed = await run(["codesign", "--force", "--sign", "-", "--timestamp=none", binary]);
-      if (signed.exitCode !== 0) throw new Error(signed.stderr);
+      if (process.platform === "darwin") {
+        const signed = await run([
+          "codesign",
+          "--force",
+          "--sign",
+          "-",
+          "--timestamp=none",
+          binary,
+        ]);
+        if (signed.exitCode !== 0) throw new Error(signed.stderr);
+      }
       const loaded = await run([binary]);
       if (loaded.exitCode !== 0) throw new Error(loaded.stderr);
       expect(JSON.parse(loaded.stdout)).toEqual({
         permissionsRead: true,
-        cursorEnabled: true,
+        cursorAvailable: true,
         workerStopped: true,
       });
       await rm(join(root, "cua-driver"));

@@ -164,8 +164,37 @@ export function azureModelRequestPolicy({
 }: {
   body: Readonly<Record<string, unknown>>;
 }): ReturnType<ModelJsonRequestPolicy> {
+  // Azure documents sources for web search and result snippets for reasoning
+  // models. Request only when the native tool is actually attached; this is not
+  // capability discovery or a second search. Effort presence is a conservative
+  // predicate: no/disabled reasoning still receives URL-only sources.
+  const hostedSearch =
+    body.input !== undefined &&
+    Array.isArray(body.tools) &&
+    body.tools.some((tool) => tool?.type === "web_search" || tool?.type === "web_search_preview");
+  let projectedBody: Record<string, unknown> = body;
+  if (hostedSearch && (body.include === undefined || Array.isArray(body.include))) {
+    const reasoning = body.reasoning as { effort?: unknown } | undefined;
+    const includes = [
+      ...(Array.isArray(body.include) ? body.include : []),
+      "web_search_call.action.sources",
+      ...(typeof reasoning?.effort === "string" &&
+      reasoning.effort.trim() &&
+      reasoning.effort !== "none"
+        ? ["web_search_call.results"]
+        : []),
+    ];
+    const include = [...new Set(includes)];
+    if (
+      !Array.isArray(body.include) ||
+      include.length !== body.include.length ||
+      include.some((value, index) => value !== (body.include as unknown[])[index])
+    ) {
+      projectedBody = { ...body, include };
+    }
+  }
   const input = body.input;
-  if (!Array.isArray(input)) return undefined;
+  if (!Array.isArray(input)) return projectedBody === body ? undefined : { body: projectedBody };
   const containsComputerProtocol = input.some(
     (item) =>
       item &&
@@ -173,7 +202,8 @@ export function azureModelRequestPolicy({
       ((item as Record<string, unknown>).type === "computer_call" ||
         (item as Record<string, unknown>).type === "computer_call_output"),
   );
-  if (!containsComputerProtocol) return undefined;
+  if (!containsComputerProtocol)
+    return projectedBody === body ? undefined : { body: projectedBody };
   const projectedInput = input.map((item) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return item;
     const record = item as Record<string, unknown>;
@@ -188,10 +218,14 @@ export function azureModelRequestPolicy({
     }
     return item;
   });
-  const projectedBody: Record<string, unknown> = { ...body, input: projectedInput };
-  const changedComputerCalls = rewriteComputerCallsToActionsOnly(projectedBody);
-  const changedScreenshots = rewriteEmptyComputerCallOutputImageUrls(projectedBody);
-  return changedComputerCalls || changedScreenshots ? { body: projectedBody } : undefined;
+  const computerBody = { ...projectedBody, input: projectedInput };
+  const changedComputerCalls = rewriteComputerCallsToActionsOnly(computerBody);
+  const changedScreenshots = rewriteEmptyComputerCallOutputImageUrls(computerBody);
+  return changedComputerCalls || changedScreenshots
+    ? { body: computerBody }
+    : projectedBody === body
+      ? undefined
+      : { body: projectedBody };
 }
 
 /**

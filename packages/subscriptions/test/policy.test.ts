@@ -1090,3 +1090,49 @@ describe("cache lifetime and settings fields", () => {
     });
   });
 });
+
+describe("Codex credit consent", () => {
+  const exhausted = () =>
+    quota({
+      windows: [{ id: "weekly", usedPercent: 100, resetsAt: NOW + 3600000, status: "exhausted" }],
+    });
+  test("included allowance outranks primary and warm credit fallback; consent is account-specific", () => {
+    const a = connection("a", "codex", { extraCreditsEnabled: true, quota: exhausted() });
+    const b = connection("b", "codex");
+    const world = input({
+      connections: [a, b],
+      settings: { rotation: { codex: { mode: "primary_first", primaryConnectionId: "a" } } },
+      session: {
+        onlyThisModel: true,
+        binding: {
+          connectionId: "a",
+          provider: "codex",
+          modelId: "codex/a",
+          choice: "automatic",
+          lastModelCallAt: NOW,
+        },
+      },
+    });
+    expect(decidePlacement(world)).toMatchObject({ kind: "run", connectionId: "b" });
+    b.quota = exhausted();
+    expect(decidePlacement(world)).toMatchObject({ kind: "run", connectionId: "a" });
+    a.extraCreditsEnabled = false;
+    expect(decidePlacement(world)).toMatchObject({ kind: "wait" });
+  });
+  test("real provider refusal and paused/model-excluded accounts stay blocked with consent", () => {
+    for (const patch of [
+      { quota: exhausted(), allocatorEnabled: false },
+      { quota: quota({ exhaustedUntil: NOW + 60000, exhaustedKind: "quota", source: "refusal" }) },
+      { quota: exhausted(), excludedModelIds: ["codex/a"] },
+    ] satisfies Partial<SubscriptionConnection>[]) {
+      expect(
+        decidePlacement(
+          input({
+            connections: [connection("a", "codex", { extraCreditsEnabled: true, ...patch })],
+            session: { onlyThisModel: true },
+          }),
+        ),
+      ).toMatchObject({ kind: "wait" });
+    }
+  });
+});

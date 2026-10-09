@@ -5456,6 +5456,117 @@ describe("worker activities integration", () => {
       });
     }
 
+    test("included exhaustion rotates before opted-in credits without consuming the refusal budget", async () => {
+      const ids = ["acct-credit-first", "acct-included-second"];
+      fakeAccounts[ids[0]!] = {
+        responses: "ok",
+        usagePlan: "pro",
+        refreshedPlan: "pro",
+        usagePercent: 100,
+      };
+      fakeAccounts[ids[1]!] = {
+        responses: "ok",
+        usagePlan: "pro",
+        refreshedPlan: "pro",
+        usagePercent: 20,
+      };
+      const { grant, session, credentialIds } = await seedCodexTurn({
+        accounts: ids.map((externalId) => ({ externalId, label: externalId })),
+        homeExternalId: ids[0]!,
+        pinSource: "policy",
+      });
+      const { updateCodexExtraCreditsPolicy } = await import("@opengeni/db");
+      await updateCodexExtraCreditsPolicy(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        credentialId: credentialIds.get(ids[0]!)!,
+        subjectId: grant.subjectId,
+        enabled: true,
+        expectedVersion: 1,
+      });
+      const activities = createWorkerActivities({
+        settings: codexSettings(),
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime(),
+      });
+      expect(await runCodexTurn(activities, grant, session.id)).toMatchObject({
+        status: "recovering",
+      });
+      expect(callsFor("responses", [ids[0]!])).toEqual([]);
+      expect(await runCodexTurn(activities, grant, session.id)).toMatchObject({ status: "idle" });
+      expect(callsFor("responses", [ids[1]!]).length).toBeGreaterThan(0);
+      fakeAccounts[ids[1]!]!.usagePercent = 100;
+      await appendOwnedEvents(dbClient.db, grant, session.id, [
+        { type: "user.message", payload: { text: "Continue the synthetic task" } },
+      ]);
+      expect(await runCodexTurn(activities, grant, session.id)).toMatchObject({
+        status: "recovering",
+      });
+      expect(await runCodexTurn(activities, grant, session.id)).toMatchObject({ status: "idle" });
+      expect(callsFor("responses", [ids[0]!]).length).toBeGreaterThan(0);
+      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
+      expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    });
+
+    for (const scenario of ["unverifiable", "model_unavailable"] as const)
+      test(`${scenario} allowance candidate does not trap credit routing`, async () => {
+        const first = `acct-${scenario}-first`;
+        const second = `acct-${scenario}-second`;
+        fakeAccounts[first] = {
+          responses: "ok",
+          usagePlan: "pro",
+          refreshedPlan: "pro",
+          usagePercent: 100,
+          ...(scenario === "unverifiable" ? { usageUnavailable: true } : {}),
+        };
+        fakeAccounts[second] = {
+          responses: "ok",
+          usagePlan: "pro",
+          refreshedPlan: "pro",
+          usagePercent: 20,
+          ...(scenario === "model_unavailable" ? { models: ["smaller-model"] } : {}),
+        };
+        const { grant, session, credentialIds } = await seedCodexTurn({
+          accounts: [first, second].map((externalId) => ({ externalId, label: externalId })),
+          homeExternalId: first,
+          pinSource: "policy",
+        });
+        const { updateCodexExtraCreditsPolicy } = await import("@opengeni/db");
+        await updateCodexExtraCreditsPolicy(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          credentialId: credentialIds.get(first)!,
+          subjectId: grant.subjectId,
+          enabled: true,
+          expectedVersion: 1,
+        });
+        const activities = createWorkerActivities({
+          settings: codexSettings(),
+          db: dbClient.db,
+          bus,
+          runtime: createProductionAgentRuntime(),
+        });
+        if (scenario === "unverifiable") {
+          const initial = await runCodexTurn(activities, grant, session.id);
+          expect(initial).toMatchObject({ status: "recovering" });
+          expect(callsFor("responses", [first])).toEqual([]);
+          expect(await runCodexTurn(activities, grant, session.id)).toMatchObject({
+            status: "idle",
+            turnId: initial.turnId,
+          });
+          expect(callsFor("responses", [second]).length).toBeGreaterThan(0);
+        } else {
+          expect(await runCodexTurn(activities, grant, session.id)).toMatchObject({
+            status: "idle",
+          });
+          expect(callsFor("responses", [second])).toEqual([]);
+          expect(callsFor("responses", [first]).length).toBeGreaterThan(0);
+        }
+        const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
+        expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+      }, 60_000);
+
     test("an empty-body 400 after a Pro to Free downgrade recovers the same turn on another subscription", async () => {
       Object.assign(fakeAccounts, {
         "acct-downgraded": { responses: "empty_400", usagePlan: "free", refreshedPlan: "free" },
@@ -5896,6 +6007,9 @@ async function connectFakeCodexCredential(
 }
 
 type FakeCodexAccountBehavior = {
+  usagePercent?: number;
+  usageUnavailable?: boolean;
+  models?: string[];
   responses: "ok" | "empty_400" | "plan_403" | "usage_not_included_429";
   usagePlan: string | null;
   refreshedPlan: string;
@@ -6050,12 +6164,29 @@ function installFakeCodexBackend(accounts: Record<string, FakeCodexAccountBehavi
         headers: { "content-type": "text/event-stream" },
       });
     }
+    if (url.startsWith("https://chatgpt.com/backend-api/codex/models")) {
+      const behavior = account ? accounts[account] : undefined;
+      return new Response(
+        JSON.stringify({ models: (behavior?.models ?? ["gpt-6-sol"]).map((slug) => ({ slug })) }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
     if (url === "https://chatgpt.com/backend-api/wham/usage") {
       calls.push({ route: "usage", account });
       const behavior = account ? accounts[account] : undefined;
       if (!behavior) return new Response("", { status: 401 });
+      if (behavior.usageUnavailable) return new Response("", { status: 503 });
       return new Response(
-        JSON.stringify(behavior.usagePlan === null ? {} : { plan_type: behavior.usagePlan }),
+        JSON.stringify({
+          ...(behavior.usagePlan === null ? {} : { plan_type: behavior.usagePlan }),
+          rate_limit: {
+            primary_window: {
+              used_percent: behavior.usagePercent ?? 10,
+              limit_window_seconds: 18000,
+            },
+            secondary_window: { used_percent: 20, limit_window_seconds: 604800 },
+          },
+        }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }

@@ -6,8 +6,12 @@ export const cuaSourceRevision = "35e376ed509cb8eee49624279256a81da83df8cc";
 const repository = "https://github.com/trycua/cua.git";
 
 export async function buildCuaWorker(architecture: string): Promise<string> {
-  if (process.platform !== "darwin" || !["x64", "arm64"].includes(architecture))
-    throw new Error("CUA worker packaging requires macOS x64/arm64");
+  if (
+    !["darwin", "linux"].includes(process.platform) ||
+    !["x64", "arm64"].includes(architecture) ||
+    (process.platform === "linux" && architecture !== process.arch)
+  )
+    throw new Error("CUA worker packaging requires macOS x64/arm64 or native Linux");
   const source = resolve(
     process.env.OPENGENI_CUA_SOURCE_DIR ??
       join(import.meta.dir, "../dist/cua-source", cuaSourceRevision),

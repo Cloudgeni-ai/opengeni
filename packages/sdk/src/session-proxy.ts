@@ -100,7 +100,10 @@ export type SessionProxyContext = {
  * to refuse an input.
  */
 export type SessionProxyCreateInput = {
+  /** Empty for a voice-first session; no initial user message is fabricated. */
   initialMessage: string;
+  /** Available only while the proxy permits realtime voice. */
+  startMode?: "realtime" | undefined;
   /** Browser retry key; replay is scoped to the acting user by the API. */
   idempotencyKey?: string | undefined;
   /** Files attached to the first message (uploaded through this proxy). */
@@ -117,6 +120,8 @@ export type SessionProxyCreateInput = {
 export type SessionProxyMessageInput = {
   /** Absent for `create`. */
   sessionId?: string | undefined;
+  /** An empty voice-first session shell, not an initial model-producing turn. */
+  startMode?: "realtime" | undefined;
   /**
    * `realtime` is live voice: once when a call starts (refuse it, or rotate
    * MCP credentials), and before each batch of finalized transcripts and spoken
@@ -359,6 +364,7 @@ const CREATE_FIELDS: ReadonlySet<string> = new Set([
   "initialMessage",
   "idempotencyKey",
   "resources",
+  "startMode",
 ]);
 const MODEL_FIELDS = ["model", "reasoningEffort", "latencyMode"] as const;
 /** The API's single-recording ceiling (25 MiB) plus multipart framing. */
@@ -1006,13 +1012,19 @@ export function createSessionProxyHandler(
           return errorJson(404, "route_not_allowed", "Not found.");
         }
         const input = createInput(await readJsonBody(request, maxBodyBytes), modelSelection);
+        if (input.startMode === "realtime" && !realtimeVoiceEnabled) {
+          return errorJson(404, "route_not_allowed", "Not found.");
+        }
         const hooked = await options.createSession(input, context);
         if (hooked instanceof Response) return hooked;
         const created = withBrowserCreateChoices(
           toolServer ? withToolServer(hooked, toolServer, await toolToken()) : hooked,
           input,
         );
-        const extras = await messageExtras({ delivery: "create" });
+        const extras = await messageExtras({
+          delivery: "create",
+          ...(input.startMode ? { startMode: input.startMode } : {}),
+        });
         if (extras instanceof Response) return extras;
         const modelContext = joinContext(extras?.modelContext, created.modelContext);
         return json(
@@ -1722,13 +1734,27 @@ function createInput(
   }
   const initialMessage = body?.initialMessage;
   const idempotencyKey = body?.idempotencyKey;
-  if (typeof initialMessage !== "string" || !initialMessage.trim()) {
+  const startMode = body?.startMode;
+  if (startMode !== undefined && startMode !== "realtime") {
+    reject(400, "invalid_start_mode", "startMode must be realtime when supplied.");
+  }
+  if (startMode === "realtime" && initialMessage !== undefined && initialMessage !== "") {
+    reject(
+      400,
+      "initial_message_not_allowed",
+      "Voice-first creation does not send an initial message.",
+    );
+  }
+  if (startMode !== "realtime" && (typeof initialMessage !== "string" || !initialMessage.trim())) {
     reject(400, "initial_message_required", "initialMessage is required.");
   }
   if (idempotencyKey !== undefined && (typeof idempotencyKey !== "string" || !idempotencyKey)) {
     reject(400, "invalid_idempotency_key", "idempotencyKey must be a non-empty string.");
   }
   const resources = createResources(body?.resources);
+  if (startMode === "realtime" && resources.length > 0) {
+    reject(400, "resource_not_allowed", "Keep attachments in the draft until a message is sent.");
+  }
   const policy: Pick<SessionProxyCreateInput, "model" | "reasoningEffort" | "latencyMode"> = {};
   for (const field of MODEL_FIELDS) {
     const value = body?.[field];
@@ -1739,7 +1765,8 @@ function createInput(
     (policy as Record<string, string>)[field] = value;
   }
   return {
-    initialMessage,
+    initialMessage: startMode === "realtime" ? "" : (initialMessage as string),
+    ...(startMode === "realtime" ? { startMode } : {}),
     ...(idempotencyKey ? { idempotencyKey } : {}),
     ...(resources.length > 0 ? { resources } : {}),
     ...policy,
@@ -1788,6 +1815,12 @@ function withBrowserCreateChoices(
   const added = (input.resources ?? []).filter((resource) => !attached.has(resource.fileId));
   return {
     ...created,
+    // Preserve browser retry identity even when a simple host hook omits it;
+    // an explicit server-owned key continues to take precedence.
+    ...(created.idempotencyKey === undefined && input.idempotencyKey
+      ? { idempotencyKey: input.idempotencyKey }
+      : {}),
+    ...(input.startMode === "realtime" ? { startMode: "realtime", initialMessage: undefined } : {}),
     ...(added.length > 0 ? { resources: [...existing, ...added] } : {}),
     ...(input.model ? { model: input.model } : {}),
     ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),

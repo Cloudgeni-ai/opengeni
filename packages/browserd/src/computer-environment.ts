@@ -48,6 +48,7 @@ export type LinuxVirtualComputerEnvironmentOptions = {
   depth?: number;
   dpi?: number;
   windowManagerBinary?: string | null;
+  compositing?: boolean;
 };
 
 /** One isolated X11, D-Bus and AT-SPI envelope per managed Linux ComputerSession. */
@@ -57,6 +58,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
   private readonly depth: number;
   private readonly dpi: number;
   private readonly windowManagerBinary: string | null;
+  private readonly compositing: boolean;
 
   constructor(options: LinuxVirtualComputerEnvironmentOptions = {}) {
     this.width = boundedInteger(options.width ?? 1_440, 320, 8_192, "virtual display width");
@@ -64,6 +66,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
     this.depth = boundedInteger(options.depth ?? 24, 16, 32, "virtual display depth");
     this.dpi = boundedInteger(options.dpi ?? 96, 48, 384, "virtual display DPI");
     this.windowManagerBinary = options.windowManagerBinary ?? "xfwm4";
+    this.compositing = options.compositing ?? false;
   }
 
   async allocate(context: ComputerEnvironmentContext): Promise<ComputerEnvironmentLease> {
@@ -78,6 +81,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
       .digest("hex")
       .slice(0, 32);
     const runtimeDirectory = join("/tmp", `opengeni-cs-${environmentDigest}`);
+    const homeDirectory = join(context.sessionDirectory, "gui-home");
     const cacheDirectory = join(context.sessionDirectory, "gui-cache");
     const configDirectory = join(context.sessionDirectory, "gui-config");
     const dataDirectory = join(context.sessionDirectory, "gui-data");
@@ -87,6 +91,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
     const temporaryDirectory = join("/tmp", `ogct-${environmentDigest}`);
     const directories = [
       runtimeDirectory,
+      homeDirectory,
       cacheDirectory,
       configDirectory,
       dataDirectory,
@@ -139,14 +144,18 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
       const displayId = `:${displayNumber}`;
       const sessionEnvironment: NodeJS.ProcessEnv = {
         ...baseEnvironment,
+        HOME: homeDirectory,
         DISPLAY: displayId,
+        WAYLAND_DISPLAY: undefined,
+        XAUTHORITY: undefined,
+        AT_SPI_BUS_ADDRESS: undefined,
         XDG_RUNTIME_DIR: runtimeDirectory,
         XDG_CACHE_HOME: cacheDirectory,
         XDG_CONFIG_HOME: configDirectory,
         XDG_DATA_HOME: dataDirectory,
         TMPDIR: temporaryDirectory,
         NO_AT_BRIDGE: "0",
-        GTK_A11Y: "1",
+        GTK_A11Y: "atspi",
         GTK_MODULES: "gail:atk-bridge",
         QT_ACCESSIBILITY: "1",
         GDK_BACKEND: "x11",
@@ -185,11 +194,17 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
       sessionEnvironment.DBUS_SESSION_BUS_ADDRESS = busAddress;
 
       if (this.windowManagerBinary) {
-        const windowManager = spawn(this.windowManagerBinary, ["--replace", "--compositor=off"], {
-          detached: true,
-          env: sessionEnvironment,
-          stdio: ["ignore", "ignore", "pipe"],
-        });
+        // CUA window captures need backing buffers so its overlay cannot
+        // obscure the application's pixels in an otherwise bare X11 seat.
+        const windowManager = spawn(
+          this.windowManagerBinary,
+          ["--replace", `--compositor=${this.compositing ? "on" : "off"}`],
+          {
+            detached: true,
+            env: sessionEnvironment,
+            stdio: ["ignore", "ignore", "pipe"],
+          },
+        );
         trackProcess(processes, windowManager);
         drain(windowManager.stderr);
         // XFWM must be ready before the first client maps. Otherwise a late

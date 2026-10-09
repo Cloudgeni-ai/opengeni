@@ -202,7 +202,7 @@ async function hydrateNewSessionDraft(
     delete options.variableSetId;
   }
   if (options.rigId) {
-    const rig = await getRig(deps.db, workspaceId, options.rigId);
+    const rig = await getRig(deps.db, { ...grant, workspaceId }, options.rigId);
     if (!rig?.activeVersion) delete options.rigId;
   }
   if (options.targetSandboxId) {

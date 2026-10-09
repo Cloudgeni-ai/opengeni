@@ -42,10 +42,12 @@ fn main() {
     }
     println!("cargo:rustc-cfg=opengeni_embedded_runtime");
     if let Some(manifest) = env::var_os("OPENGENI_EMBEDDED_CUA_RUNTIME") {
-        assert_eq!(
-            env::var("CARGO_CFG_TARGET_OS").as_deref(),
-            Ok("macos"),
-            "CUA assets currently require a macOS target"
+        assert!(
+            matches!(
+                env::var("CARGO_CFG_TARGET_OS").as_deref(),
+                Ok("macos" | "linux")
+            ),
+            "CUA assets require a macOS or Linux target"
         );
         let path = std::path::PathBuf::from(manifest);
         println!(

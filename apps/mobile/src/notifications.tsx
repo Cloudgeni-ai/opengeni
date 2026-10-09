@@ -305,6 +305,16 @@ export function useNotificationSettingsSection(): SettingsSection | null {
 /** The session the person is looking at, so its own pushes stay quiet. */
 let visibleSessionId: string | null = null;
 
+// Tapped notifications are handled once for the app's life. Switching account
+// remounts everything under the account's environment, this router included,
+// so this memory lives outside it: otherwise each remount replays the last
+// tapped notification, opening an unrelated session and switching back to the
+// account that notification belonged to.
+const handledResponses = new Set<string>();
+let launchResponseHandled = false;
+/** A tapped notification waiting for its account to finish switching in. */
+let pendingOpen: { accountId: string; data: PushData } | null = null;
+
 Notifications.setNotificationHandler({
   handleNotification: async (notification) => {
     const data = notification.request.content.data as PushData | undefined;
@@ -326,7 +336,6 @@ Notifications.setNotificationHandler({
 export function NotificationRouting() {
   const { accounts, account, status, switchAccount, setWorkspaceId, client } = useAccount();
   const pathname = usePathname();
-  const pending = useRef<{ accountId: string; data: PushData } | null>(null);
   visibleSessionId = pathname.startsWith("/session/") ? pathname.slice("/session/".length) : null;
 
   const open = useCallback(
@@ -336,7 +345,7 @@ export function NotificationRouting() {
         ? accounts.find((each) => each.subjectId === data.subjectId && !each.signedOut)
         : account;
       if (owner && owner.id !== account?.id) {
-        pending.current = { accountId: owner.id, data };
+        pendingOpen = { accountId: owner.id, data };
         switchAccount(owner.id);
         return;
       }
@@ -348,28 +357,28 @@ export function NotificationRouting() {
 
   // After an account switch for a tapped notification, finish opening it.
   useEffect(() => {
-    const target = pending.current;
+    const target = pendingOpen;
     if (!target || status !== "ready" || account?.id !== target.accountId) return;
-    pending.current = null;
+    pendingOpen = null;
     const data = target.data;
     if (data.workspaceId) setWorkspaceId(data.workspaceId);
     router.push(sessionPath(data));
   }, [account?.id, setWorkspaceId, status]);
 
-  // Each tapped notification opens once: one subscription for the app's life
-  // (a new subscription can replay the last response), reading the latest
-  // account state through a ref.
+  // Each tapped notification opens once (a new subscription can replay the
+  // last response), reading the latest account state through a ref.
   const openRef = useRef(open);
   openRef.current = open;
   const clientRef = useRef(client);
   clientRef.current = client;
-  const handled = useRef(new Set<string>());
   const respond = useCallback((response: Notifications.NotificationResponse) => {
     const id = response.notification.request.identifier;
     const action = response.actionIdentifier;
     const key = `${id}:${action}`;
-    if (handled.current.has(key)) return;
-    handled.current.add(key);
+    if (handledResponses.has(key)) return;
+    handledResponses.add(key);
+    // Nothing should open this tap again: not a later launch, not a remount.
+    Notifications.clearLastNotificationResponse();
     const data = response.notification.request.content.data as PushData;
     if (action === APPROVE_ACTION || action === DENY_ACTION || action === REPLY_ACTION) {
       // Settled from the notification: confirm quietly, or open the session when
@@ -394,10 +403,9 @@ export function NotificationRouting() {
     return () => subscription.remove();
   }, [respond]);
 
-  const handledLaunch = useRef(false);
   useEffect(() => {
-    if (handledLaunch.current || status !== "ready") return;
-    handledLaunch.current = true;
+    if (launchResponseHandled || status !== "ready") return;
+    launchResponseHandled = true;
     void Notifications.getLastNotificationResponseAsync().then((response) => {
       if (response) respond(response);
     });

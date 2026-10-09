@@ -3395,6 +3395,61 @@ describe("ComputerViewer", () => {
     await rendered.unmount();
   });
 
+  for (const scenario of [
+    "owned",
+    "other-session",
+    "physical",
+    "other-adapter",
+    "macos",
+    "no-display",
+    "no-pointer",
+    "no-keyboard",
+  ] as const) {
+    test(`isolated CUA viewer input preserves seat authority: ${scenario}`, async () => {
+      const canvasMock = mockComputerCanvas();
+      const currentSession = computerSession();
+      currentSession.adapter = "opengeni.cua.linux.v1";
+      currentSession.seatId = `linux-virtual:${currentSession.id}`;
+      currentSession.capabilities!.backgroundInput = false;
+      if (scenario === "other-session")
+        currentSession.seatId = `linux-virtual:${PEER_COMPUTER_SESSION_ID}`;
+      if (scenario === "physical") currentSession.seatId = "seat-1";
+      if (scenario === "other-adapter") currentSession.adapter = "opengeni.linux.atspi-x11.v1";
+      if (scenario === "macos") currentSession.platform = "macos";
+      if (scenario === "no-display") currentSession.displayId = "";
+      if (scenario === "no-pointer") currentSession.capabilities!.pointerInput = false;
+      if (scenario === "no-keyboard") currentSession.capabilities!.keyboardInput = false;
+      const owned = ["owned", "no-pointer", "no-keyboard"].includes(scenario);
+      const fixture = await renderComputerInputFixture(undefined, undefined, {
+        currentTarget: { ...target(), title: "Background fixture", focused: false },
+        currentSession,
+      });
+      try {
+        await fixture.frame(1);
+        await canvasMock.finishDecode(0);
+        expect(fixture.keyboard.disabled).toBe(!owned || scenario === "no-keyboard");
+        await computerGesture(fixture.canvas, [20, 20]);
+        await flush(350);
+        await actRun(() => {
+          fixture.keyboard.value = "Hello";
+          fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true, data: "Hello" }));
+        });
+        await flush(50);
+        expect(fixture.actions.filter(({ action }) => action.type === "pointer")).toHaveLength(
+          owned && scenario !== "no-pointer" ? 1 : 0,
+        );
+        expect(fixture.actions.filter(({ action }) => action.type === "keyboard")).toHaveLength(
+          owned && scenario !== "no-keyboard" ? 1 : 0,
+        );
+        expect(currentSession.capabilities!.backgroundInput).toBe(false);
+        expect(fixture.actions.every(({ targetId }) => targetId === "window-1")).toBe(true);
+      } finally {
+        await fixture.rendered.unmount();
+        canvasMock.restore();
+      }
+    });
+  }
+
   test("keeps semantic controls live but disables raw input for an unfocused background window", async () => {
     const backgroundWindow = { ...target(), focused: false };
     const actions: unknown[] = [];
@@ -5053,12 +5108,13 @@ async function renderComputerInputFixture(
   readComputerClipboard?: () => Promise<ComputerClipboard>,
   options: {
     currentTarget?: ComputerTarget;
+    currentSession?: ComputerSession;
     backgroundInput?: boolean;
     pointerClickContinuation?: boolean;
   } = {},
 ) {
   const currentTarget = options.currentTarget ?? target();
-  const currentSession = computerSession();
+  const currentSession = options.currentSession ?? computerSession();
   if (options.backgroundInput !== undefined) {
     currentSession.capabilities!.backgroundInput = options.backgroundInput;
   }
