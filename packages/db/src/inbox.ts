@@ -392,3 +392,58 @@ async function isLocalInstallAccount(db: Database, accountId: string): Promise<b
     .limit(1);
   return Boolean(account);
 }
+
+/** The session's account, read under its workspace's context, or null if it isn't there. */
+async function sessionAccount(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ accountId: schema.sessions.accountId })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    return row?.accountId ?? null;
+  });
+}
+
+/**
+ * Whether this person muted the session's replies (0677), or null when the
+ * session is not in the workspace.
+ */
+export async function getSessionRepliesMuted(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; subjectId: string },
+): Promise<boolean | null> {
+  if (!(await sessionAccount(db, input.workspaceId, input.sessionId))) return null;
+  const [row] = await rawRows<{ muted: boolean }>(
+    db,
+    sql`select opengeni_private.session_replies_muted_for_v1(
+      ${input.sessionId}::uuid, ${input.subjectId}::text
+    ) as muted`,
+  );
+  return row?.muted ?? false;
+}
+
+/**
+ * Mute or unmute the session's replies for this person (0677). Muting takes
+ * its current reply out of their inbox. Null when the session is not in the
+ * workspace.
+ */
+export async function setSessionRepliesMuted(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; subjectId: string; muted: boolean },
+): Promise<boolean | null> {
+  const accountId = await sessionAccount(db, input.workspaceId, input.sessionId);
+  if (!accountId) return null;
+  const [row] = await rawRows<{ muted: boolean }>(
+    db,
+    sql`select opengeni_private.set_session_replies_muted_v1(
+      ${accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid,
+      ${input.subjectId}::text, ${input.muted}::boolean
+    ) as muted`,
+  );
+  return row?.muted ?? input.muted;
+}

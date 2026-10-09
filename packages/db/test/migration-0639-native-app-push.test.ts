@@ -13,6 +13,7 @@ import {
   enqueueNativePush,
   getNativePushDevice,
   registerNativePushDevice,
+  setSessionRepliesMuted,
   settleNativePushDelivery,
   unregisterNativePushDevice,
   type DbClient,
@@ -269,6 +270,37 @@ describe("0639 native app push", () => {
     expect((await pendingFor(person.authSessionId)).map((row) => row.rule)).toEqual([
       "needs_input",
       "reply_ready",
+    ]);
+  });
+
+  test("a session whose replies the person muted still asks them questions (0677)", async () => {
+    if (!client) return;
+    const person = await personWithAppSession("muted");
+    await registerNativePushDevice(db(), {
+      authSessionId: person.authSessionId,
+      platform: "ios",
+      appId: "ai.opengeni.app",
+      environment: "development",
+      token: "8".repeat(64),
+      rules: ["needs_input", "reply_ready", "failed"],
+    });
+    await setSessionRepliesMuted(db(), {
+      workspaceId: person.scope.workspaceId,
+      sessionId: person.session.id,
+      subjectId: person.subjectId,
+      muted: true,
+    });
+    await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+      { type: "turn.completed", payload: {} },
+      {
+        type: "session.humanInput.requested",
+        payload: { request: { questions: [{ prompt: "Which region?" }] } },
+      },
+      { type: "turn.failed", payload: { error: "boom" } },
+    ]);
+    expect((await pendingFor(person.authSessionId)).map((row) => row.rule)).toEqual([
+      "needs_input",
+      "failed",
     ]);
   });
 
