@@ -288,6 +288,7 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   sandbox_provision: "workspaceAdmin",
   connected_machine_remove: "workspaceAdmin",
   connected_machine_enroll_token: "workspaceAdmin",
+  connected_machine_enable_screen_control: "workspaceAdmin",
   project_list: "workspaceAdmin",
   project_get: "workspaceAdmin",
   project_create: "workspaceAdmin",

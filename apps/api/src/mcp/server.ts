@@ -14,6 +14,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { assertGoalResumeAllowed } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
+import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
 import { registerNotificationTools } from "./notification-tools";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import {
@@ -120,6 +121,8 @@ import {
   listSessionEventPage,
   listOutstandingSessionSystemUpdates,
   listSessionDiscoverySummaries,
+  getSandbox,
+  authorizePersonalMachineForAttempt,
   listEnrollments,
   projectEffectiveControlForRelatedAccess,
   projectSessionForRelatedAccess,
@@ -4215,7 +4218,7 @@ function registerConnectedMachineTools(
     "connected_machine_enroll_token",
     {
       description:
-        "Create a single-use Connected Machine enrollment token for this workspace (expires in one hour) using existing enrollments:manage authority. Returns the token, expiry and Unix/PowerShell install commands. Use it when you can run commands on the target machine yourself (run_on, SSH, a VM you control): run the matching command there, then verify the machine with sandboxes_list. One token connects one machine; mint another for each additional machine (the same machine may rerun its command). When the person must run it on their own computer, post the Connected Machine card instead (capability_authorization_request with api:connected-machine), which mints the command in their browser; do not paste a token into the chat. Screen control is optional and defaults off. The token grants whole-machine access on enrollment; do not put it in public code or unrelated logs. Existing machine connections are preserved. For Chrome, the person installs the OpenGeni Browser extension (" +
+        "Create a single-use Connected Machine enrollment token for this workspace (expires in one hour) using existing enrollments:manage authority. Returns the token, expiry and Unix/PowerShell install commands. Use it when you can run commands on the target machine yourself (run_on, SSH, a VM you control): run the matching command there, then verify the machine with sandboxes_list. One token connects one machine; mint another for each additional machine (the same machine may rerun its command). When the person must run it on their own computer, post the Connected Machine card instead (capability_authorization_request with api:connected-machine), which mints the command in their browser; do not paste a token into the chat. Screen control is optional and defaults off; to turn it on for a machine that is already connected, use connected_machine_enable_screen_control instead of reconnecting. The token grants whole-machine access on enrollment; do not put it in public code or unrelated logs. Existing machine connections are preserved. For Chrome, the person installs the OpenGeni Browser extension (" +
         OPENGENI_BROWSER_EXTENSION_URL +
         ") after the machine is connected.",
       inputSchema: { allowScreenControl: z4.boolean().optional() },
@@ -4240,6 +4243,79 @@ function registerConnectedMachineTools(
         installCommandUnix: `curl -fsSL ${unixQuote(`${base}/install.sh`)} | OPENGENI_API_URL=${unixQuote(base)} OPENGENI_ENROLL_TOKEN=${unixQuote(minted.token)} sh`,
         installCommandWindows: `$env:OPENGENI_API_URL=${windowsQuote(base)}; $env:OPENGENI_ENROLL_TOKEN=${windowsQuote(minted.token)}; irm ${windowsQuote(`${base}/install.ps1`)} | iex`,
       });
+    },
+  );
+  server.registerTool(
+    "connected_machine_enable_screen_control",
+    {
+      description:
+        "Turn screen control on for a machine that is already connected, in place, so agents can see and use its screen (computer and attached-Chrome tools). `target` is a sandboxes_list id or an enrollment id. Needs no human click, token, terminal or reconnect: OpenGeni records the consent on that machine and its agent refreshes its own credentials over the live connection. status=active means it is on now. status=pending means it is allowed and turns on by itself: reason=offline when the machine next connects; reason=agent_update_required after its agent is updated (update it with the machine update action, POST /v1/workspaces/{workspaceId}/machines/{enrollmentId}/update); reason=renewal_failed: call again shortly; reason=reconnect_required: the machine's connection predates in-place changes, so rerun the connect command on it (connected_machine_enroll_token with allowScreenControl=true). On a Mac the OS must also allow Screen Recording, Accessibility and Input Monitoring for OpenGeni: open each pane on the Mac with run_on exec `open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'` (Privacy_Accessibility, Privacy_ListenEvent; also the privacy-settings machine action) and ask the person to switch OpenGeni on there, choosing Quit & Reopen if macOS asks; the machine list reports runtime.macPermissions. Chrome additionally needs the OpenGeni Browser extension (" +
+        OPENGENI_BROWSER_EXTENSION_URL +
+        ") on that machine.",
+      inputSchema: { target: z4.string().min(1) },
+    },
+    async ({ target }) => {
+      if (sessionId) {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      }
+      // Personal machines belong to the person the attempt acts for.
+      const attempt = sessionId ? exactAgentAttemptClaims(grant) : null;
+      const resourceGrant =
+        sessionId && attempt
+          ? {
+              ...grant,
+              subjectId:
+                (await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId))
+                  .initiatingHumanSubjectId ?? grant.subjectId,
+            }
+          : grant;
+      const enrollments = await listEnrollments(deps.db, resourceGrant, { status: "active" });
+      let enrollment = enrollments.find((candidate) => candidate.id === target);
+      if (!enrollment) {
+        const sandbox = await getSandbox(deps.db, resourceGrant, target).catch(() => null);
+        enrollment = enrollments.find((candidate) => candidate.id === sandbox?.enrollmentId);
+      }
+      if (!enrollment) {
+        throw new Error("machine not found in this access scope; use a sandboxes_list id");
+      }
+      if (enrollment.scope === "organization" && !grant.permissions.includes("account:admin")) {
+        throw new Error("missing permission: account:admin");
+      }
+      if (enrollment.scope === "user" && sessionId && attempt) {
+        // The same per-attempt admission run_on requires for personal machines.
+        const admitted = await authorizePersonalMachineForAttempt(deps.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          subjectId: resourceGrant.subjectId,
+          sessionId,
+          turnId: attempt.turnId,
+          attemptId: attempt.attemptId,
+          executionGeneration: attempt.executionGeneration,
+          enrollmentId: enrollment.id,
+          requireActiveSandbox: false,
+        }).catch(() => false);
+        if (!admitted) {
+          throw new Error("personal Connected Machine authority was not admitted for this attempt");
+        }
+      }
+      const result = await enableMachineScreenControl(
+        {
+          db: deps.db,
+          settings: deps.settings,
+          ...(deps.bus ? { bus: deps.bus } : {}),
+          observability: deps.observability,
+        },
+        {
+          enrollment,
+          access: enrollmentAccess(enrollment, resourceGrant),
+          actor: {
+            subjectId: grant.subjectId,
+            sessionId: sessionId ?? null,
+            attemptId: attempt?.attemptId ?? null,
+          },
+        },
+      );
+      return json({ ...result, machine: enrollment.id });
     },
   );
   server.registerTool(

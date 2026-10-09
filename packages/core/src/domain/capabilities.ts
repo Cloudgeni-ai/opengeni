@@ -1678,6 +1678,7 @@ export function nativeConnectionCapabilityRecommendations(
             "sandbox_swap",
             "run_on",
             "connected_machine_enroll_token",
+            "connected_machine_enable_screen_control",
           ],
           browserExtensionUrl: OPENGENI_BROWSER_EXTENSION_URL,
           recommendationOnly: true,

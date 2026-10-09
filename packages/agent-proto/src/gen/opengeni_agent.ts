@@ -1036,6 +1036,24 @@ export interface Capabilities {
    * Independent of op_stream. Absent/false runners MUST NOT receive this path.
    */
   transactionalFsWrite: boolean;
+  /**
+   * The runner serves CredentialRenewRequest: renew this connection's enrollment
+   * credentials immediately with the install-key proof, so a consent change on
+   * the enrollment (screen control turned on) applies without reconnecting.
+   */
+  credentialRenew: boolean;
+  /**
+   * macOS desktop permissions (TCC), read without prompting. Present only on Mac
+   * builds with desktop support; absence means unknown, never denied.
+   */
+  macPermissions: MacDesktopPermissions | undefined;
+}
+
+/** The three macOS Privacy & Security grants desktop capture and input need. */
+export interface MacDesktopPermissions {
+  screenRecording: boolean;
+  accessibility: boolean;
+  inputMonitoring: boolean;
 }
 
 /**
@@ -1611,6 +1629,8 @@ export interface Heartbeat {
 export interface DesktopStatus {
   available: boolean;
   unavailableReason: string;
+  /** Live macOS permission snapshot; absent off macOS or on older runners. */
+  macPermissions: MacDesktopPermissions | undefined;
 }
 
 /**
@@ -1821,6 +1841,22 @@ export interface AgentUpdateApplyResponse {
   currentVersion: string;
   currentSha256: string;
   targetVersion: string;
+}
+
+/**
+ * Renew the credentials of the connection this request arrived on, now, through
+ * the same install-key-signed POST /v1/enrollments/renew the periodic renewal
+ * uses. Sent when the enrollment's consent changed. The renewed credentials are
+ * saved over the same connection file, and the live reconciler adopts them
+ * without restarting the process. Requires Capabilities.credential_renew.
+ */
+export interface CredentialRenewRequest {
+}
+
+export interface CredentialRenewResponse {
+  renewed: boolean;
+  /** The screen-control consent carried by the credentials now on disk. */
+  consentedScreenControl: boolean;
 }
 
 /**
@@ -2134,6 +2170,7 @@ export interface ControlRequest {
     | { $case: "browserFramesOpen"; browserFramesOpen: BrowserFramesOpenRequest }
     | { $case: "computerFramesOpen"; computerFramesOpen: ComputerFramesOpenRequest }
     | { $case: "agentUpdateApply"; agentUpdateApply: AgentUpdateApplyRequest }
+    | { $case: "credentialRenew"; credentialRenew: CredentialRenewRequest }
     | undefined;
 }
 
@@ -2175,6 +2212,7 @@ export interface ControlResponse {
     | { $case: "browserFramesOpen"; browserFramesOpen: BrowserFramesOpenResponse }
     | { $case: "computerFramesOpen"; computerFramesOpen: ComputerFramesOpenResponse }
     | { $case: "agentUpdateApply"; agentUpdateApply: AgentUpdateApplyResponse }
+    | { $case: "credentialRenew"; credentialRenew: CredentialRenewResponse }
     | undefined;
 }
 
@@ -2867,6 +2905,8 @@ function createBaseCapabilities(): Capabilities {
     operationResourcePolicy: false,
     operationCpuQuota: false,
     transactionalFsWrite: false,
+    credentialRenew: false,
+    macPermissions: undefined,
   };
 }
 
@@ -2913,6 +2953,12 @@ export const Capabilities: MessageFns<Capabilities> = {
     }
     if (message.transactionalFsWrite !== false) {
       writer.uint32(112).bool(message.transactionalFsWrite);
+    }
+    if (message.credentialRenew !== false) {
+      writer.uint32(120).bool(message.credentialRenew);
+    }
+    if (message.macPermissions !== undefined) {
+      MacDesktopPermissions.encode(message.macPermissions, writer.uint32(130).fork()).join();
     }
     return writer;
   },
@@ -3036,6 +3082,22 @@ export const Capabilities: MessageFns<Capabilities> = {
           message.transactionalFsWrite = reader.bool();
           continue;
         }
+        case 15: {
+          if (tag !== 120) {
+            break;
+          }
+
+          message.credentialRenew = reader.bool();
+          continue;
+        }
+        case 16: {
+          if (tag !== 130) {
+            break;
+          }
+
+          message.macPermissions = MacDesktopPermissions.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3093,6 +3155,16 @@ export const Capabilities: MessageFns<Capabilities> = {
         : isSet(object.transactional_fs_write)
         ? globalThis.Boolean(object.transactional_fs_write)
         : false,
+      credentialRenew: isSet(object.credentialRenew)
+        ? globalThis.Boolean(object.credentialRenew)
+        : isSet(object.credential_renew)
+        ? globalThis.Boolean(object.credential_renew)
+        : false,
+      macPermissions: isSet(object.macPermissions)
+        ? MacDesktopPermissions.fromJSON(object.macPermissions)
+        : isSet(object.mac_permissions)
+        ? MacDesktopPermissions.fromJSON(object.mac_permissions)
+        : undefined,
     };
   },
 
@@ -3140,6 +3212,12 @@ export const Capabilities: MessageFns<Capabilities> = {
     if (message.transactionalFsWrite !== false) {
       obj.transactionalFsWrite = message.transactionalFsWrite;
     }
+    if (message.credentialRenew !== false) {
+      obj.credentialRenew = message.credentialRenew;
+    }
+    if (message.macPermissions !== undefined) {
+      obj.macPermissions = MacDesktopPermissions.toJSON(message.macPermissions);
+    }
     return obj;
   },
 
@@ -3164,6 +3242,110 @@ export const Capabilities: MessageFns<Capabilities> = {
     message.operationResourcePolicy = object.operationResourcePolicy ?? false;
     message.operationCpuQuota = object.operationCpuQuota ?? false;
     message.transactionalFsWrite = object.transactionalFsWrite ?? false;
+    message.credentialRenew = object.credentialRenew ?? false;
+    message.macPermissions = (object.macPermissions !== undefined && object.macPermissions !== null)
+      ? MacDesktopPermissions.fromPartial(object.macPermissions)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseMacDesktopPermissions(): MacDesktopPermissions {
+  return { screenRecording: false, accessibility: false, inputMonitoring: false };
+}
+
+export const MacDesktopPermissions: MessageFns<MacDesktopPermissions> = {
+  encode(message: MacDesktopPermissions, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.screenRecording !== false) {
+      writer.uint32(8).bool(message.screenRecording);
+    }
+    if (message.accessibility !== false) {
+      writer.uint32(16).bool(message.accessibility);
+    }
+    if (message.inputMonitoring !== false) {
+      writer.uint32(24).bool(message.inputMonitoring);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MacDesktopPermissions {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMacDesktopPermissions();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.screenRecording = reader.bool();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.accessibility = reader.bool();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.inputMonitoring = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): MacDesktopPermissions {
+    return {
+      screenRecording: isSet(object.screenRecording)
+        ? globalThis.Boolean(object.screenRecording)
+        : isSet(object.screen_recording)
+        ? globalThis.Boolean(object.screen_recording)
+        : false,
+      accessibility: isSet(object.accessibility) ? globalThis.Boolean(object.accessibility) : false,
+      inputMonitoring: isSet(object.inputMonitoring)
+        ? globalThis.Boolean(object.inputMonitoring)
+        : isSet(object.input_monitoring)
+        ? globalThis.Boolean(object.input_monitoring)
+        : false,
+    };
+  },
+
+  toJSON(message: MacDesktopPermissions): unknown {
+    const obj: any = {};
+    if (message.screenRecording !== false) {
+      obj.screenRecording = message.screenRecording;
+    }
+    if (message.accessibility !== false) {
+      obj.accessibility = message.accessibility;
+    }
+    if (message.inputMonitoring !== false) {
+      obj.inputMonitoring = message.inputMonitoring;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<MacDesktopPermissions>, I>>(base?: I): MacDesktopPermissions {
+    return MacDesktopPermissions.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<MacDesktopPermissions>, I>>(object: I): MacDesktopPermissions {
+    const message = createBaseMacDesktopPermissions();
+    message.screenRecording = object.screenRecording ?? false;
+    message.accessibility = object.accessibility ?? false;
+    message.inputMonitoring = object.inputMonitoring ?? false;
     return message;
   },
 };
@@ -9037,7 +9219,7 @@ export const Heartbeat: MessageFns<Heartbeat> = {
 };
 
 function createBaseDesktopStatus(): DesktopStatus {
-  return { available: false, unavailableReason: "" };
+  return { available: false, unavailableReason: "", macPermissions: undefined };
 }
 
 export const DesktopStatus: MessageFns<DesktopStatus> = {
@@ -9047,6 +9229,9 @@ export const DesktopStatus: MessageFns<DesktopStatus> = {
     }
     if (message.unavailableReason !== "") {
       writer.uint32(18).string(message.unavailableReason);
+    }
+    if (message.macPermissions !== undefined) {
+      MacDesktopPermissions.encode(message.macPermissions, writer.uint32(26).fork()).join();
     }
     return writer;
   },
@@ -9074,6 +9259,14 @@ export const DesktopStatus: MessageFns<DesktopStatus> = {
           message.unavailableReason = reader.string();
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.macPermissions = MacDesktopPermissions.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -9091,6 +9284,11 @@ export const DesktopStatus: MessageFns<DesktopStatus> = {
         : isSet(object.unavailable_reason)
         ? globalThis.String(object.unavailable_reason)
         : "",
+      macPermissions: isSet(object.macPermissions)
+        ? MacDesktopPermissions.fromJSON(object.macPermissions)
+        : isSet(object.mac_permissions)
+        ? MacDesktopPermissions.fromJSON(object.mac_permissions)
+        : undefined,
     };
   },
 
@@ -9102,6 +9300,9 @@ export const DesktopStatus: MessageFns<DesktopStatus> = {
     if (message.unavailableReason !== "") {
       obj.unavailableReason = message.unavailableReason;
     }
+    if (message.macPermissions !== undefined) {
+      obj.macPermissions = MacDesktopPermissions.toJSON(message.macPermissions);
+    }
     return obj;
   },
 
@@ -9112,6 +9313,9 @@ export const DesktopStatus: MessageFns<DesktopStatus> = {
     const message = createBaseDesktopStatus();
     message.available = object.available ?? false;
     message.unavailableReason = object.unavailableReason ?? "";
+    message.macPermissions = (object.macPermissions !== undefined && object.macPermissions !== null)
+      ? MacDesktopPermissions.fromPartial(object.macPermissions)
+      : undefined;
     return message;
   },
 };
@@ -11388,6 +11592,129 @@ export const AgentUpdateApplyResponse: MessageFns<AgentUpdateApplyResponse> = {
   },
 };
 
+function createBaseCredentialRenewRequest(): CredentialRenewRequest {
+  return {};
+}
+
+export const CredentialRenewRequest: MessageFns<CredentialRenewRequest> = {
+  encode(_: CredentialRenewRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CredentialRenewRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCredentialRenewRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): CredentialRenewRequest {
+    return {};
+  },
+
+  toJSON(_: CredentialRenewRequest): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CredentialRenewRequest>, I>>(base?: I): CredentialRenewRequest {
+    return CredentialRenewRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CredentialRenewRequest>, I>>(_: I): CredentialRenewRequest {
+    const message = createBaseCredentialRenewRequest();
+    return message;
+  },
+};
+
+function createBaseCredentialRenewResponse(): CredentialRenewResponse {
+  return { renewed: false, consentedScreenControl: false };
+}
+
+export const CredentialRenewResponse: MessageFns<CredentialRenewResponse> = {
+  encode(message: CredentialRenewResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.renewed !== false) {
+      writer.uint32(8).bool(message.renewed);
+    }
+    if (message.consentedScreenControl !== false) {
+      writer.uint32(16).bool(message.consentedScreenControl);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CredentialRenewResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCredentialRenewResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.renewed = reader.bool();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.consentedScreenControl = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CredentialRenewResponse {
+    return {
+      renewed: isSet(object.renewed) ? globalThis.Boolean(object.renewed) : false,
+      consentedScreenControl: isSet(object.consentedScreenControl)
+        ? globalThis.Boolean(object.consentedScreenControl)
+        : isSet(object.consented_screen_control)
+        ? globalThis.Boolean(object.consented_screen_control)
+        : false,
+    };
+  },
+
+  toJSON(message: CredentialRenewResponse): unknown {
+    const obj: any = {};
+    if (message.renewed !== false) {
+      obj.renewed = message.renewed;
+    }
+    if (message.consentedScreenControl !== false) {
+      obj.consentedScreenControl = message.consentedScreenControl;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CredentialRenewResponse>, I>>(base?: I): CredentialRenewResponse {
+    return CredentialRenewResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CredentialRenewResponse>, I>>(object: I): CredentialRenewResponse {
+    const message = createBaseCredentialRenewResponse();
+    message.renewed = object.renewed ?? false;
+    message.consentedScreenControl = object.consentedScreenControl ?? false;
+    return message;
+  },
+};
+
 function createBaseAgentUpdateProgress(): AgentUpdateProgress {
   return {
     operationId: "",
@@ -13624,6 +13951,9 @@ export const ControlRequest: MessageFns<ControlRequest> = {
       case "agentUpdateApply":
         AgentUpdateApplyRequest.encode(message.op.agentUpdateApply, writer.uint32(314).fork()).join();
         break;
+      case "credentialRenew":
+        CredentialRenewRequest.encode(message.op.credentialRenew, writer.uint32(322).fork()).join();
+        break;
     }
     return writer;
   },
@@ -13909,6 +14239,17 @@ export const ControlRequest: MessageFns<ControlRequest> = {
           };
           continue;
         }
+        case 40: {
+          if (tag !== 322) {
+            break;
+          }
+
+          message.op = {
+            $case: "credentialRenew",
+            credentialRenew: CredentialRenewRequest.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -14055,6 +14396,10 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         ? { $case: "agentUpdateApply", agentUpdateApply: AgentUpdateApplyRequest.fromJSON(object.agentUpdateApply) }
         : isSet(object.agent_update_apply)
         ? { $case: "agentUpdateApply", agentUpdateApply: AgentUpdateApplyRequest.fromJSON(object.agent_update_apply) }
+        : isSet(object.credentialRenew)
+        ? { $case: "credentialRenew", credentialRenew: CredentialRenewRequest.fromJSON(object.credentialRenew) }
+        : isSet(object.credential_renew)
+        ? { $case: "credentialRenew", credentialRenew: CredentialRenewRequest.fromJSON(object.credential_renew) }
         : undefined,
     };
   },
@@ -14128,6 +14473,8 @@ export const ControlRequest: MessageFns<ControlRequest> = {
       obj.computerFramesOpen = ComputerFramesOpenRequest.toJSON(message.op.computerFramesOpen);
     } else if (message.op?.$case === "agentUpdateApply") {
       obj.agentUpdateApply = AgentUpdateApplyRequest.toJSON(message.op.agentUpdateApply);
+    } else if (message.op?.$case === "credentialRenew") {
+      obj.credentialRenew = CredentialRenewRequest.toJSON(message.op.credentialRenew);
     }
     return obj;
   },
@@ -14338,6 +14685,15 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         }
         break;
       }
+      case "credentialRenew": {
+        if (object.op?.credentialRenew !== undefined && object.op?.credentialRenew !== null) {
+          message.op = {
+            $case: "credentialRenew",
+            credentialRenew: CredentialRenewRequest.fromPartial(object.op.credentialRenew),
+          };
+        }
+        break;
+      }
     }
     return message;
   },
@@ -14436,6 +14792,9 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         break;
       case "agentUpdateApply":
         AgentUpdateApplyResponse.encode(message.result.agentUpdateApply, writer.uint32(314).fork()).join();
+        break;
+      case "credentialRenew":
+        CredentialRenewResponse.encode(message.result.credentialRenew, writer.uint32(322).fork()).join();
         break;
     }
     return writer;
@@ -14704,6 +15063,17 @@ export const ControlResponse: MessageFns<ControlResponse> = {
           };
           continue;
         }
+        case 40: {
+          if (tag !== 322) {
+            break;
+          }
+
+          message.result = {
+            $case: "credentialRenew",
+            credentialRenew: CredentialRenewResponse.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -14843,6 +15213,10 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         ? { $case: "agentUpdateApply", agentUpdateApply: AgentUpdateApplyResponse.fromJSON(object.agentUpdateApply) }
         : isSet(object.agent_update_apply)
         ? { $case: "agentUpdateApply", agentUpdateApply: AgentUpdateApplyResponse.fromJSON(object.agent_update_apply) }
+        : isSet(object.credentialRenew)
+        ? { $case: "credentialRenew", credentialRenew: CredentialRenewResponse.fromJSON(object.credentialRenew) }
+        : isSet(object.credential_renew)
+        ? { $case: "credentialRenew", credentialRenew: CredentialRenewResponse.fromJSON(object.credential_renew) }
         : undefined,
     };
   },
@@ -14909,6 +15283,8 @@ export const ControlResponse: MessageFns<ControlResponse> = {
       obj.computerFramesOpen = ComputerFramesOpenResponse.toJSON(message.result.computerFramesOpen);
     } else if (message.result?.$case === "agentUpdateApply") {
       obj.agentUpdateApply = AgentUpdateApplyResponse.toJSON(message.result.agentUpdateApply);
+    } else if (message.result?.$case === "credentialRenew") {
+      obj.credentialRenew = CredentialRenewResponse.toJSON(message.result.credentialRenew);
     }
     return obj;
   },
@@ -15105,6 +15481,15 @@ export const ControlResponse: MessageFns<ControlResponse> = {
           message.result = {
             $case: "agentUpdateApply",
             agentUpdateApply: AgentUpdateApplyResponse.fromPartial(object.result.agentUpdateApply),
+          };
+        }
+        break;
+      }
+      case "credentialRenew": {
+        if (object.result?.credentialRenew !== undefined && object.result?.credentialRenew !== null) {
+          message.result = {
+            $case: "credentialRenew",
+            credentialRenew: CredentialRenewResponse.fromPartial(object.result.credentialRenew),
           };
         }
         break;

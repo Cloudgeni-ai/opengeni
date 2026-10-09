@@ -17,7 +17,11 @@ const grant: AccessGrant = {
   principalKind: "human_session",
   permissions: ["enrollments:manage"],
 };
-function setup(overrides: Record<string, unknown> = {}, authority = grant) {
+function setup(
+  overrides: Record<string, unknown> = {},
+  authority = grant,
+  toolName: string = name,
+) {
   const deps = {
     settings: testSettings({
       sandboxSelfhostedEnabled: true,
@@ -43,7 +47,7 @@ function setup(overrides: Record<string, unknown> = {}, authority = grant) {
         }
       >;
     }
-  )._registeredTools[name];
+  )._registeredTools[toolName];
 }
 
 test("enrollment tool uses existing permission and feature gates", () => {
@@ -107,4 +111,23 @@ test("enrollment tool fails without signing configuration", async () => {
   await expect(
     setup({ enrollmentSigningSecret: undefined, delegationSecret: undefined })!.handler({}, {}),
   ).rejects.toThrow("enrollment credential plane is not configured");
+});
+
+test("screen-control tool is open to agents with the same machine permission", () => {
+  const tool = "connected_machine_enable_screen_control";
+  expect(setup({}, grant, tool)).toBeDefined();
+  expect(setup({}, { ...grant, permissions: ["sessions:control"] }, tool)).toBeUndefined();
+  expect(setup({ sandboxSelfhostedEnabled: false }, grant, tool)).toBeUndefined();
+  const agent: AccessGrant = {
+    ...grant,
+    principalKind: "agent_attempt",
+    metadata: {
+      sessionId: crypto.randomUUID(),
+      turnId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      executionGeneration: 1,
+      firstPartyMcpTools: [tool as FirstPartyMcpToolName],
+    },
+  };
+  expect(setup({}, agent, tool)).toBeDefined();
 });

@@ -83,6 +83,27 @@ with `capability_authorization_request` and `api:connected-machine` (or
 their browser, shows when the machine comes online, and offers "Use in this
 chat". Do not paste an enroll token into the chat.
 
+An already connected machine never needs reconnecting to gain screen control.
+Call `connected_machine_enable_screen_control` with its `sandboxes_list` id. It
+turns screen control on in place (same machine, owner and scope) with no human
+click: the machine refreshes its own credentials over its live connection.
+`status: "active"` means it is on now. `status: "pending"` means it is allowed
+and applies by itself: when the machine reconnects (`offline`), or after its
+agent is updated (`agent_update_required`; use the machine update action).
+On `renewal_failed`, call it again. On `reconnect_required`, rerun the connect
+command on that machine (`connected_machine_enroll_token` with
+`allowScreenControl: true`).
+
+On a Mac the OS also needs Screen Recording, Accessibility and Input Monitoring
+for OpenGeni; the machine list reports them as `runtime.macPermissions`. Open
+each missing pane on the Mac with
+`POST /v1/workspaces/{workspaceId}/machines/{enrollmentId}/privacy-settings`
+(`pane`: `screen_recording`, `accessibility` or `input_monitoring`), or with
+`run_on` (`open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'`,
+`Privacy_Accessibility`, `Privacy_ListenEvent`). Then ask the person to switch
+OpenGeni on there, choosing Quit & Reopen if macOS asks; only they can flip
+those OS switches.
+
 To let agents use the person's own Chrome, the machine must be connected first;
 then they install the OpenGeni Browser extension from the Chrome Web Store:
 https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch.

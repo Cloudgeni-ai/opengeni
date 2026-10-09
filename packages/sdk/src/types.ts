@@ -3522,6 +3522,7 @@ export type FirstPartyMcpToolName =
   | "sandbox_provision"
   | "connected_machine_remove"
   | "connected_machine_enroll_token"
+  | "connected_machine_enable_screen_control"
   | "project_list"
   | "project_get"
   | "project_create"
@@ -9136,6 +9137,17 @@ export type MachineRuntimeCapabilities = {
   operationResourcePolicy: boolean;
   operationCpuQuota: boolean;
   transactionalFsWrite: boolean;
+  /** The agent renews its credentials on request, so screen control turns on in place. */
+  credentialRenew: boolean;
+  /** The live agent's credentials carry screen-control consent; null when unknown. */
+  screenControl: boolean | null;
+};
+
+/** The three macOS Privacy & Security grants desktop capture and input need. */
+export type MachineMacPermissions = {
+  screenRecording: boolean;
+  accessibility: boolean;
+  inputMonitoring: boolean;
 };
 
 export type MachineUpdateStatus =
@@ -9172,6 +9184,8 @@ export type MachineRuntime = {
   updateBlockedReason?: string | null | undefined;
   capabilities: MachineRuntimeCapabilities;
   update: MachineUpdateState | null;
+  /** Live macOS permissions; null off macOS or when the agent does not report them. */
+  macPermissions: MachineMacPermissions | null;
 };
 
 export type UpdateMachineAgentResponse = {
@@ -9179,6 +9193,26 @@ export type UpdateMachineAgentResponse = {
   accepted: boolean;
   targetVersion: string;
 };
+
+/** POST /v1/workspaces/:ws/machines/:enrollmentId/screen-control response.
+ * active: on now. pending: allowed, and turns on by itself when the machine
+ * reconnects (offline), after its agent update (agent_update_required), or on
+ * a retry (renewal_failed). reconnect_required: run the connect command on the
+ * machine again. */
+export type EnableMachineScreenControlResponse = {
+  status: "active" | "pending";
+  reason: "offline" | "agent_update_required" | "renewal_failed" | "reconnect_required" | null;
+  message: string | null;
+};
+
+/** macOS Privacy & Security panes the agent needs for desktop capture/input. */
+export type MachinePrivacySettingsPane = "screen_recording" | "accessibility" | "input_monitoring";
+
+/** POST /v1/workspaces/:ws/machines/:enrollmentId/privacy-settings body. */
+export type OpenMachinePrivacySettingsRequest = { pane: MachinePrivacySettingsPane };
+
+/** POST /v1/workspaces/:ws/machines/:enrollmentId/privacy-settings response. */
+export type OpenMachinePrivacySettingsResponse = { opened: boolean; message: string | null };
 
 export type MachineOperationPolicy = {
   memoryMaxBytes: number | null;

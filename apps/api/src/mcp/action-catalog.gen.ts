@@ -1646,6 +1646,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "enableMachineScreenControl",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/machines/:enrollmentId/screen-control",
+    "request": [],
+    "response": [
+      "EnableMachineScreenControlResponse"
+    ]
+  },
+  {
     "id": "endBrowserSession",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end",
@@ -4513,6 +4522,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "ExternalAuthInteractiveResponse"
+    ]
+  },
+  {
+    "id": "openMachinePrivacySettings",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/machines/:enrollmentId/privacy-settings",
+    "request": [
+      "OpenMachinePrivacySettingsRequest"
+    ],
+    "response": [
+      "OpenMachinePrivacySettingsResponse"
     ]
   },
   {

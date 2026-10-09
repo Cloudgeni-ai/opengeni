@@ -21,6 +21,7 @@
 
 import type { Settings } from "@opengeni/config";
 import {
+  enrollmentMacPermissions,
   getSession,
   getLiveEnrollmentConnection,
   listEnrollments,
@@ -124,8 +125,15 @@ function runtimeFor(settings: Settings, enrollment: EnrollmentRecord): MachineVi
       operationResourcePolicy: capability("operationResourcePolicy"),
       operationCpuQuota: capability("operationCpuQuota"),
       transactionalFsWrite: capability("transactionalFsWrite"),
+      credentialRenew: capability("credentialRenew"),
+      screenControl:
+        typeof enrollment.agentCapabilities.screenControl === "boolean"
+          ? enrollment.agentCapabilities.screenControl
+          : null,
     },
     update,
+    macPermissions:
+      enrollment.os === "macos" ? enrollmentMacPermissions(enrollment.agentCapabilities) : null,
   };
 }
 
