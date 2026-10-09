@@ -1144,9 +1144,15 @@ nothing unless the account's Codex cutover is enabled.
   through placement (§6.3). `subscription_codex_apps_designation_target`
   returns the designated connection only while the designation still names
   it, the connection is a shared Codex subscription connection, and it is
-  still in the workspace's scope (organization scope, an exact workspace
-  assignment, or a people assignment with an active member in the workspace,
-  the same predicate the designation write policy uses). On top of it:
+  organization-scoped or assigned to this exact workspace. Decision (strict
+  fail-closed): a people-scoped or personal designation resolves nothing,
+  even though the merged 0642 write policy can store one, because Apps serve
+  every caller in the workspace, including ownerless and service sessions
+  and the tool gateway, which may use organization or workspace capacity
+  only. That helper returns a full connection row, so it is never executable
+  by the runtime role: 0670 and role provisioning revoke it after the
+  schema-wide grant, and the runtime posture check rejects a runtime role
+  that can execute it. On top of it:
   `resolve_subscription_codex_apps_designation` (id and health only),
   `read_subscription_codex_apps_credential` (ciphertext only while active)
   and `begin/persist/fail_subscription_codex_apps_refresh`, which take the
@@ -1163,6 +1169,8 @@ nothing unless the account's Codex cutover is enabled.
   worker claim use `resolveCodexAppsDesignationForRun` (legacy designation,
   core designation, or none); `resolveCodexAppsCredentialIdForRun` is now
   legacy-only and returns nothing for an organization with any cutover row.
+  The designate route authenticates the managed human before it reads the
+  cutover row, so an unauthenticated caller learns nothing about it.
   Designate/clear on the core use the designation table's own policy: an
   organization administrator, or a workspace administrator for a connection
   that workspace manages, in any inference source mode. The core row is
@@ -1185,7 +1193,11 @@ nothing unless the account's Codex cutover is enabled.
   (get/set), activate, rotation settings, rename and allocator; organization
   accounts, activate, settings and rename; session pin. Mappings: the
   account pool lists shared subscription connections in the workspace's
-  scope (an administrator's wider visibility is filtered explicitly);
+  scope and in its effective pool, as legacy did (nothing while Codex is
+  disabled there; only workspace-classified connections for the workspace
+  source and only organization-classified ones for the organization source;
+  both shared pools for automatic, which the core admits; an administrator's
+  wider visibility is filtered explicitly);
   `source` is `workspace` when the connection has a workspace-pool
   assignment here (or, without assignment rows, is managed here);
   `activeCredentialId` is the effective primary connection; rotation on is

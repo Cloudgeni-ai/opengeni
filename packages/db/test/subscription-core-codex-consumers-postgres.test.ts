@@ -514,6 +514,37 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
         })
       ).kind,
     ).toBe("not_found");
+
+    // A people-scoped shared connection never backs Apps for a workspace,
+    // even when a designation row names it (Apps serve every caller there,
+    // including ownerless and service sessions).
+    const [peopleScoped] = await shared!.admin<{ id: string }[]>`
+      insert into subscription_connections (
+        account_id, provider, kind, credential_encrypted, ownership, scope_kind, provider_account_id
+      ) values (
+        ${org.accountId}::uuid, 'codex', 'subscription', ${encryptedTokens("people-apps")},
+        'shared', 'people', 'chatgpt-people-apps'
+      ) returning id::text as id`;
+    await shared!.admin`
+      insert into subscription_connection_people (account_id, connection_id, organization_membership_id)
+      values (${org.accountId}::uuid, ${peopleScoped!.id}::uuid, ${org.ownerMembershipId}::uuid)`;
+    await shared!.admin`
+      delete from subscription_apps_designations where workspace_id = ${org.sharedWorkspaceId}::uuid`;
+    await shared!.admin`
+      insert into subscription_apps_designations (account_id, workspace_id, connection_id, updated_by_subject_id)
+      values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${peopleScoped!.id}::uuid, ${org.ownerSubjectId})`;
+    expect(await resolveSubscriptionCoreCodexAppsDesignation(client!.db, scope)).toBeNull();
+    expect(await readCredential(org, org.sharedWorkspaceId, peopleScoped!.id)).toEqual([]);
+
+    // The internal target helper (full connection row) is owner-only.
+    const direct = await withRlsContext(client!.db, scope, (tx) =>
+      rawRows(
+        tx,
+        sql`select id from opengeni_private.subscription_codex_apps_designation_target(
+          ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid)`,
+      ),
+    ).catch((error: unknown) => error);
+    expect(String((direct as { cause?: unknown })?.cause ?? direct)).toContain("permission denied");
   });
 
   test("workspace and organization projections keep the legacy shapes and hide personal connections", async () => {
@@ -618,6 +649,14 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
       mode: "organization",
     });
     expect(source.source).toMatchObject({ mode: "organization", effectiveSource: "organization" });
+    // Only the effective pool is listed (legacy parity).
+    const listed = async () =>
+      (await getSubscriptionCoreCodexWorkspaceProjection(client!.db, scope)).accounts
+        .map((account) => account.id)
+        .sort();
+    expect(await listed()).toEqual([first]);
+    await setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...admin, mode: "workspace" });
+    expect(await listed()).toEqual([second]);
     expect(
       (await setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...admin, mode: "disabled" }))
         .source,
@@ -625,6 +664,7 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
       mode: "disabled",
       effectiveSource: "disabled",
     });
+    expect(await listed()).toEqual([]);
     expect(
       (await setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...admin, mode: "automatic" }))
         .source.mode,

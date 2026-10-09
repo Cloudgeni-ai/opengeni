@@ -152,6 +152,25 @@ describe("Codex routes with a disabled cutover", () => {
   });
 });
 
+describe("Codex Apps designation authenticates before reading organization state", () => {
+  test("unauthenticated and bearer callers learn nothing about the cutover row", async () => {
+    const cutoverRead = mock("readCodexCutoverDisposition", async () => "core");
+    for (const headers of [
+      { "content-type": "application/json" },
+      { "content-type": "application/json", authorization: await bearer(["connections:write"]) },
+    ]) {
+      const response = await app().request(`/v1/workspaces/${WS}/codex/apps`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ accountId: CONNECTION, expectedVersion: 0 }),
+      });
+      expect(response.status).toBeGreaterThanOrEqual(400);
+      expect(response.status).toBeLessThan(500);
+    }
+    expect(cutoverRead.mock.calls.length).toBe(0);
+  });
+});
+
 describe("Codex routes with an enabled cutover", () => {
   test("GET accounts keeps the legacy shape, projected from the core", async () => {
     cutover("core");

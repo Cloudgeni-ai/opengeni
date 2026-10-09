@@ -11,13 +11,15 @@
 -- Codex connection for one workspace. At run time the workspace's grant is
 -- the only caller context: there is no session, turn or chat lease.
 --
--- 1. subscription_codex_apps_designation_target (internal; not granted here,
---    though role provisioning grants every opengeni_private routine, so it
---    exposes no more than read_subscription_codex_apps_credential) returns the designated connection only while the designation still
---    names it, the connection is a shared Codex subscription connection, and
---    it is still in scope for the workspace (organization scope, an exact
---    workspace assignment, or a people assignment whose active member belongs
---    to the workspace, as the designation write policy requires).
+-- 1. subscription_codex_apps_designation_target (internal; revoked from the
+--    application role here and after role provisioning's schema-wide grant,
+--    and asserted by the runtime posture check) returns the designated
+--    connection only while the designation still names it, the connection is
+--    a shared Codex subscription connection, and it is organization-scoped or
+--    assigned to this exact workspace. A people-scoped (or personal)
+--    designation resolves nothing: Apps serve every caller in the workspace,
+--    including ownerless and service sessions and the tool gateway, so only
+--    workspace-wide shared capacity may back them (strict fail-closed).
 -- 2. resolve_subscription_codex_apps_designation returns the designated
 --    connection id and health, never credential material (catalog overlays,
 --    worker claim and the tool gateway).
@@ -123,21 +125,6 @@ BEGIN
             WHERE assignment.account_id = target.account_id
               AND assignment.connection_id = target.id
               AND assignment.workspace_id = p_workspace_id
-          ))
-          OR (target.scope_kind = 'people' AND EXISTS (
-            SELECT 1 FROM subscription_connection_people assignment
-            JOIN organization_memberships membership
-              ON membership.id = assignment.organization_membership_id
-              AND membership.account_id = assignment.account_id
-            WHERE assignment.account_id = target.account_id
-              AND assignment.connection_id = target.id
-              AND membership.status = 'active' AND membership.revoked_at IS NULL
-              AND (membership.personal_workspace_id = p_workspace_id OR EXISTS (
-                SELECT 1 FROM workspace_memberships workspace_membership
-                WHERE workspace_membership.account_id = p_account_id
-                  AND workspace_membership.workspace_id = p_workspace_id
-                  AND workspace_membership.subject_id = membership.subject_id
-              ))
           ));
       END IF;
 
@@ -414,8 +401,9 @@ REVOKE ALL ON FUNCTION opengeni_private.fail_subscription_codex_apps_refresh(
   uuid, uuid, uuid, bigint, text
 ) FROM PUBLIC;
 
--- The internal target helper is not granted here; the routines above call it
--- as its owner.
+-- The internal target helper is never executable by the application role;
+-- the routines above call it as its owner. Revoke explicitly so default
+-- privileges or an earlier schema-wide grant cannot expose it.
 DO $grant_codex_apps$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
@@ -434,6 +422,9 @@ BEGIN
     GRANT EXECUTE ON FUNCTION opengeni_private.fail_subscription_codex_apps_refresh(
       uuid, uuid, uuid, bigint, text
     ) TO opengeni_app;
+    REVOKE EXECUTE ON FUNCTION opengeni_private.subscription_codex_apps_designation_target(
+      uuid, uuid
+    ) FROM opengeni_app;
   END IF;
 END
 $grant_codex_apps$;

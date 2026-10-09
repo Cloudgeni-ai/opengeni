@@ -282,10 +282,24 @@ export async function projectSubscriptionCoreCodexWorkspace(
     input.accountId,
     settings.rotationSource === "workspace" ? input.workspaceId : null,
   );
-  const accounts = pools.map(({ row, entries, local }) => {
-    const inEffectivePool = entries.filter(
-      (entry) => effectiveSource === "disabled" || entry.pool === effectiveSource,
-    );
+  // Only the effective pool is listed (legacy parity): nothing while Codex is
+  // disabled here, only workspace-classified connections for the workspace
+  // source and only organization-classified ones for the organization
+  // source. Automatic admits both shared pools on the core, so both are
+  // listed. Callers with mere workspace read access must not see accounts
+  // that cannot serve this workspace.
+  const inEffectiveSource = (entry: (typeof pools)[number]) =>
+    effectiveSource === "disabled"
+      ? false
+      : settings.inferenceSource === "automatic"
+        ? true
+        : effectiveSource === "workspace"
+          ? entry.local
+          : entry.entries.length > 0
+            ? entry.entries.some((policy) => policy.pool === "organization")
+            : !entry.local;
+  const accounts = pools.filter(inEffectiveSource).map(({ row, entries, local }) => {
+    const inEffectivePool = entries.filter((entry) => entry.pool === effectiveSource);
     return projectAccount(row, {
       source: local ? "workspace" : "organization",
       primaryConnectionId,

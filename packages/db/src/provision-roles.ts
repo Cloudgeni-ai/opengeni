@@ -2115,6 +2115,14 @@ BEGIN
         );
       END IF;
     END LOOP;
+    -- The Codex Apps designation target helper returns a full connection row;
+    -- only its owner-run callers may execute it, never the runtime role.
+    IF to_regprocedure('opengeni_private.subscription_codex_apps_designation_target(uuid,uuid)') IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.subscription_codex_apps_designation_target(uuid,uuid) FROM %I',
+        ${literal(role)}
+      );
+    END IF;
     -- This exact content-free repair inventory shares the existing global
     -- wake dispatcher's authority. Converge custom-role and migrate-then-
     -- provision installs without opening a generic owner/posture exception.

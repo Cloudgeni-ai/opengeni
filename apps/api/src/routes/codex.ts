@@ -81,8 +81,6 @@ import {
   activeCodexPlanExclusions,
   type CodexAccountStatus,
   type CodexCapacityWakeTarget,
-  readCodexCutoverDisposition,
-  rlsContextForWorkspace,
 } from "@opengeni/db";
 
 // The picker surfaces codex models under their own "no credits" provider group so
@@ -1540,14 +1538,12 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/codex/apps", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    // An organization with a Codex cutover row never reads the legacy source:
-    // authenticate the designating human first, then use the core (or fail
-    // closed for a disabled cutover). Without a row the legacy order is kept.
-    const owner = await rlsContextForWorkspace(db, workspaceId);
-    if ((await readCodexCutoverDisposition(db, owner.accountId, workspaceId)) !== "legacy") {
-      const appsHuman = await requireCodexAppsHuman(c, deps, workspaceId);
-      await codexRouteDisposition(deps, appsHuman.accountId);
-      return await coreCodexDesignateApps(c, deps, workspaceId, appsHuman);
+    // Authenticate the designating human before any organization state is
+    // read, so an unauthenticated caller learns nothing about the cutover row.
+    // An organization with a cutover row then never reads the legacy source.
+    const { human, accountId } = await requireCodexAppsHuman(c, deps, workspaceId);
+    if ((await codexRouteDisposition(deps, accountId)) === "core") {
+      return await coreCodexDesignateApps(c, deps, workspaceId, { human, accountId });
     }
     await requireWorkspaceCodexManagementSource(deps, workspaceId);
     if (!settings.codexConnectedAppsEnabled) {
@@ -1555,7 +1551,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "Codex Apps is disabled for this deployment",
       });
     }
-    const { human, accountId } = await requireCodexAppsHuman(c, deps, workspaceId);
     const parsed = z
       .object({
         accountId: z.string().uuid(),
