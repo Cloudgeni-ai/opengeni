@@ -62672,8 +62672,14 @@ export async function claimWorkspaceArchiveCapture(
       ) {
         return { status: "lease_fenced" as const };
       }
-      if (input.liveness === "draining" && row.reaper_hold_active) {
+      if ((input.liveness === "draining" || idleCheckpoint) && row.reaper_hold_active) {
         return { status: "reaper_held" as const };
+      }
+      // Inventory is only discovery: a later rotation owns this box's final
+      // checkpoint. Fence the idle child under the same lease lock, without
+      // blocking a turn's mandatory rotation checkpoint.
+      if (idleCheckpoint && row.rotation_requested_at !== null) {
+        return { status: "lease_fenced" as const };
       }
       // A box no holder keeps warm belongs to the idle drain, which captures
       // it before teardown; an idle checkpoint would duplicate that capture.

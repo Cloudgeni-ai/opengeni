@@ -3462,6 +3462,9 @@ the same children in the background, keyed by the same id, so a slow capture
 never blocks the reaper tick. `claimWorkspaceArchiveCapture` with
 `idleCheckpoint: true` expects zero turn holders and at least one holder, runs around the same holders and parent admissions as
 a warm turn capture, and refuses if any other holder or open request exists.
+It also rechecks active operator holds and requested rotation under that same
+lease row lock, so a preservation or rotation decision made after inventory
+fences the idle child. A turn's mandatory rotation checkpoint remains allowed.
 Publication lands one generation behind the workspace whenever a writer was
 attached, as above. A clean box, a box no longer warm on that epoch and
 instance, and any capture policy other than point-in-time are skipped without a
