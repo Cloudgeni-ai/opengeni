@@ -114,6 +114,7 @@ import {
   buildCoreCodexRequestTokenResolver,
 } from "./codex-core-capacity";
 import { createCoreCodexRequests, buildCoreCodexUsageReader } from "./codex-core-requests";
+import { createAttemptRequestIdGenerator } from "./provider-request-identity";
 import { observeCodexResponseCompletion } from "./codex-core-settlement";
 import { prepareGovernanceAndModel } from "./governance-model";
 import { prepareCompaction, runPostAgentCompaction } from "./compaction-prep";
@@ -688,7 +689,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // Build it once and wrap BOTH the compaction summarizer (a separate model
           // call on the same codex client) and the main run; otherwise the summarizer
           // would hit the codex backend unauthenticated.
-          let codexModelRequestSequence = 0;
           let firstModelRequestAuditRecorded = false;
           const firstModelRequestCheckpoints = new Set<string>();
           const codexContext: CodexRequestContext | null =
@@ -913,7 +913,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         durationSeconds: event.durationMs / 1000,
                       });
                     },
-                    nextRequestId: () => `${dispatchId}:${++codexModelRequestSequence}`,
+                    nextRequestId: createAttemptRequestIdGenerator(input.attemptId, "codex"),
                     onModelRequestEvent: async (event) => {
                       if (!eventing.publish || !attempt.turnId) {
                         throw new Error(
@@ -989,7 +989,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             if (!providerTurn.effectiveXaiCredentialId || !leases.xai.subjectId) {
               throw new Error("SuperGrok subscription execution has no leased credential");
             }
-            let xaiModelRequestSequence = 0;
             const authorization = await buildXaiTurnRequestAuthorization({
               db,
               settings: runSettings,
@@ -1009,7 +1008,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 }).webSearch,
               },
               streamIdleTimeoutMs: runSettings.supergrokResponseStreamIdleTimeoutMs,
-              nextRequestId: () => `${dispatchId}:xai:${++xaiModelRequestSequence}`,
+              nextRequestId: createAttemptRequestIdGenerator(input.attemptId, "xai"),
               onModelRequestDiagnostic: (event) => {
                 const requestKey = `${event.requestId}:${event.transportAttempt}`;
                 if (event.phase === "started") {
@@ -1210,19 +1209,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ? xaiSubscriptionRequestStorage.run(providerTurn.xaiRequestContext, fn)
                 : withCodex(fn),
             );
-          let codexSessionTitleRequestSequence = 0;
-          let xaiSessionTitleRequestSequence = 0;
           const codexSessionTitleContext = codexContext
             ? sessionTitleCodexRequestContext(
                 codexContext,
-                () => `${dispatchId}:title:${++codexSessionTitleRequestSequence}`,
+                createAttemptRequestIdGenerator(input.attemptId, "codex-title"),
                 providerTurn.codexSubscriptionCore?.titleRequests,
               )
             : null;
           const xaiSessionTitleContext = providerTurn.xaiRequestContext
             ? sessionTitleXaiRequestContext(
                 providerTurn.xaiRequestContext,
-                () => `${dispatchId}:xai:title:${++xaiSessionTitleRequestSequence}`,
+                createAttemptRequestIdGenerator(input.attemptId, "xai-title"),
               )
             : null;
           const withSessionTitleProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
