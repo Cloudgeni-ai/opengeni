@@ -8708,7 +8708,7 @@ export const sessionSystemUpdates = pgTable(
       .$type<ClaudeProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
-    // M3 v2 slot (0674): the Codex entry frozen with the update; copied, never
+    // M3 v2 slot (0676): the Codex entry frozen with the update; copied, never
     // recomputed, by the turn that delivers it. NULL before the cutover.
     subscriptionAuthority: jsonb(
       "subscription_authority",
@@ -8820,7 +8820,7 @@ export const sessionSystemUpdateOutbox = pgTable(
       .$type<ClaudeProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
-    // M3 v2 slot (0674), copied onto the update the outbox row delivers.
+    // M3 v2 slot (0676), copied onto the update the outbox row delivers.
     subscriptionAuthority: jsonb(
       "subscription_authority",
     ).$type<SubscriptionPersonalAuthorityV2 | null>(),
@@ -11741,7 +11741,7 @@ export const scheduledTasks = pgTable(
       .$type<ClaudeProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
-    // M3 v2 slot (0674): frozen at task creation; a firing copies it (or its
+    // M3 v2 slot (0676): frozen at task creation; a firing copies it (or its
     // current revision authority's value), never recomputes it.
     subscriptionAuthority: jsonb(
       "subscription_authority",
