@@ -192,6 +192,8 @@ export type CodexSubscriptionCoreTurn = {
   /** Refresh generation of the connection when it was placed. */
   placedRefreshGeneration: number;
   personal: boolean;
+  requests?: ReturnType<typeof import("./codex-core-requests").createCoreCodexRequests>;
+  titleRequests?: ReturnType<typeof import("./codex-core-requests").createCoreCodexRequests>;
 };
 
 export type ProviderTurnState = {

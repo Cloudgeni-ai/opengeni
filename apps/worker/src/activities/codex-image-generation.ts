@@ -11,6 +11,9 @@ import {
   releaseSubscriptionCoreCodexOperationLease,
   renewSubscriptionCoreCodexOperationLease,
   SubscriptionCoreCodexOperationUnavailableError,
+  SubscriptionCoreCodexSourceDisconnectedError,
+  reserveSubscriptionCoreCodexOperationRequest,
+  settleSubscriptionCoreCodexOperationRequest,
   type Database,
   type SubscriptionCoreCodexOperationLeaseRef,
   type SubscriptionCoreCodexOperationScope,
@@ -45,7 +48,11 @@ export async function executeCodexImageGeneration(
     credentialId: string;
     codexContext: Pick<
       CodexRequestContext,
-      "clientVersion" | "getToken" | "refresh" | "beforeProviderDispatch"
+      | "clientVersion"
+      | "getToken"
+      | "refresh"
+      | "beforeProviderDispatch"
+      | "onProviderRequestSettled"
     >;
     abortSignal?: AbortSignal;
     /** Core turns only: the per-operation lease held around the provider call. */
@@ -59,12 +66,16 @@ export async function executeCodexImageGeneration(
   let providerDispatchAdmitted = false;
   const codexContext: Pick<
     CodexRequestContext,
-    "clientVersion" | "getToken" | "refresh" | "beforeProviderDispatch"
+    "clientVersion" | "getToken" | "refresh" | "beforeProviderDispatch" | "onProviderRequestSettled"
   > = {
     ...input.codexContext,
-    beforeProviderDispatch: async () => {
-      await input.codexContext.beforeProviderDispatch?.();
+    beforeProviderDispatch: async (request) => {
+      await input.codexContext.beforeProviderDispatch?.(request);
       providerDispatchAdmitted = true;
+    },
+    onProviderRequestSettled: async (request) => {
+      await input.codexContext.onProviderRequestSettled?.(request);
+      if (request.outcome === "refused") providerDispatchAdmitted = false;
     },
   };
   return await executeImageGenerationOperation(
@@ -138,6 +149,8 @@ export async function executeCoreCodexImageGeneration(
       renew?: typeof renewSubscriptionCoreCodexOperationLease;
       release?: typeof releaseSubscriptionCoreCodexOperationLease;
       resolver?: typeof buildSubscriptionCoreCodexConnectionTokenResolver;
+      reserve?: typeof reserveSubscriptionCoreCodexOperationRequest;
+      settle?: typeof settleSubscriptionCoreCodexOperationRequest;
       ports?: ImageGenerationOperationPorts;
       generateImage?: typeof generateCodexSubscriptionImage;
     };
@@ -147,6 +160,8 @@ export async function executeCoreCodexImageGeneration(
   const renew = input.deps?.renew ?? renewSubscriptionCoreCodexOperationLease;
   const release = input.deps?.release ?? releaseSubscriptionCoreCodexOperationLease;
   const buildResolver = input.deps?.resolver ?? buildSubscriptionCoreCodexConnectionTokenResolver;
+  const reserve = input.deps?.reserve ?? reserveSubscriptionCoreCodexOperationRequest;
+  const settle = input.deps?.settle ?? settleSubscriptionCoreCodexOperationRequest;
   const scope: SubscriptionCoreCodexOperationScope = {
     kind: "turn",
     identity: input.core.identity,
@@ -185,7 +200,10 @@ export async function executeCoreCodexImageGeneration(
   };
   const unavailable = (error: unknown): never => {
     // The operation lost its lease, scope or enabled cutover before dispatch.
-    if (error instanceof SubscriptionCoreCodexOperationUnavailableError) {
+    if (
+      error instanceof SubscriptionCoreCodexOperationUnavailableError ||
+      error instanceof SubscriptionCoreCodexSourceDisconnectedError
+    ) {
       throw new CodexCredentialLeaseLostError("not_found");
     }
     throw error;
@@ -198,7 +216,9 @@ export async function executeCoreCodexImageGeneration(
     assertCreditAdmission: _assertCreditAdmission,
     ...operationInput
   } = input;
-  return await executeCodexImageGeneration(
+  let pendingRequest: { operationId: string; responseReceived: boolean } | null = null;
+  let uncertain = false;
+  const receipt = await executeCodexImageGeneration(
     {
       ...operationInput,
       credentialId: input.core.connectionId,
@@ -207,14 +227,28 @@ export async function executeCoreCodexImageGeneration(
         clientVersion: input.clientVersion,
         getToken: () => resolver.getToken().catch(unavailable),
         refresh: () => resolver.refresh().catch(unavailable),
-        beforeProviderDispatch: async () => {
+        beforeProviderDispatch: async (request) => {
           await preDispatch(async () => {
+            if (!request || pendingRequest || uncertain)
+              throw new Error("Image request predecessor is unsettled");
             await input.assertCreditAdmission();
             await input.assertChatLease();
             if (!(await renew(input.db, scope, ref))) {
               throw new CodexCredentialLeaseLostError("not_found");
             }
+            const reserved = await reserve(input.db, scope, ref, input.core.connectionId, request);
+            pendingRequest = { ...reserved, responseReceived: false };
           });
+        },
+        onProviderRequestSettled: async ({ outcome }) => {
+          if (!pendingRequest) throw new Error("Image request settlement has no reservation");
+          if (outcome === "response_received") {
+            pendingRequest.responseReceived = true;
+            return;
+          }
+          if (outcome === "unknown") uncertain = true;
+          await settle(input.db, scope, { operationId: pendingRequest.operationId, outcome });
+          pendingRequest = null;
         },
       },
       operationLease: {
@@ -232,4 +266,17 @@ export async function executeCoreCodexImageGeneration(
     },
     input.deps?.ports,
   );
+  // The image operation has retained the bytes and committed its artifact
+  // receipt. A transport success alone never licensed this native settlement.
+  const completedRequest = pendingRequest as {
+    operationId: string;
+    responseReceived: boolean;
+  } | null;
+  if (completedRequest?.responseReceived) {
+    await settle(input.db, scope, {
+      operationId: completedRequest.operationId,
+      outcome: "response_received",
+    });
+  }
+  return receipt;
 }

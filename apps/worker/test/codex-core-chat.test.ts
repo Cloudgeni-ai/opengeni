@@ -1,7 +1,11 @@
-import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
 import * as events from "@opengeni/events";
-import { CODEX_TRANSPORT_ERROR_HEADER, CodexReloginRequired } from "@opengeni/codex";
+import {
+  CODEX_TRANSPORT_ERROR_HEADER,
+  CodexReloginRequired,
+  CodexResponseTimeoutError,
+} from "@opengeni/codex";
 import * as parentWake from "../src/activities/parent-wake";
 import {
   selectCodexTurnCapacity,
@@ -46,8 +50,19 @@ import {
   SUBSCRIPTION_CORE_CODEX_TURN_REFUSAL_LIMIT,
 } from "../src/activities/agent-turn/codex-core-failover";
 import type { CodexSubscriptionCoreTurn } from "../src/activities/agent-turn/turn-context";
+import { createCoreCodexRequests } from "../src/activities/agent-turn/codex-core-requests";
+import {
+  ensureRunAllowed,
+  turnExecutionPolicyBillingIdentity,
+} from "../src/activities/agent-turn/admission";
+import { testSettings } from "@opengeni/testing";
+import { resolveTurnExecutionPolicyV1, withCodexCatalogProvider } from "@opengeni/config";
+import { CODEX_FALLBACK_MODEL_SLUGS } from "@opengeni/codex/constants";
 
 const restores: Array<{ mockRestore(): void }> = [];
+beforeEach(() => {
+  spy(db, "isSubscriptionCoreCodexSourceDisconnected").mockResolvedValue(false);
+});
 function spy<T extends object, K extends keyof T>(target: T, key: K) {
   // oxlint-disable-next-line typescript/no-explicit-any
   const handle = spyOn(target as any, key as any);
@@ -349,6 +364,73 @@ describe("Codex cutover gate dispositions", () => {
     expect(deps.providerTurn.codexSubscriptionCore).toBeNull();
   });
 
+  test.each(["pinned_account_unavailable", "no_eligible_capacity"] as const)(
+    "accepted recovery with no live funding reaches %s instead of a credit/access terminal",
+    async (reason) => {
+      gate("enabled");
+      const resetAt = new Date(Date.now() + 3_600_000);
+      const { waiter, armed, evaluate, reconcile } = coreWaitMocks(resetAt);
+      const unavailable = {
+        kind: "wait",
+        reason,
+        earliestResetAt: resetAt,
+        healthRetryAt: null,
+        explicitConnectionId: reason === "pinned_account_unavailable" ? "connection-pinned" : null,
+      };
+      spy(db, "placeSubscriptionCoreCodexTurn").mockResolvedValue(unavailable);
+      evaluate.mockResolvedValue(unavailable);
+      reconcile.mockResolvedValue({
+        action: "waiting",
+        waiter: { ...waiter, waitReason: reason },
+        events: [],
+      });
+      const liveFunding = spy(db, "subscriptionCoreAcceptedCodexTurnIsFunded").mockResolvedValue(
+        false,
+      );
+      const credits = spy(db, "getSpendableCreditBalance").mockRejectedValue(
+        new Error("No credits available"),
+      );
+      spy(db, "checkWorkspaceAllowance").mockResolvedValue(null);
+      const settings = withCodexCatalogProvider(
+        testSettings({
+          codexSubscriptionEnabled: true,
+          billingMode: "stripe",
+          usageLimitsMode: "managed",
+        }),
+      );
+      const policy = resolveTurnExecutionPolicyV1(settings, {
+        modelId: `codex/${CODEX_FALLBACK_MODEL_SLUGS[0]}`,
+        requestedModelId: null,
+        modelSource: "continuation",
+        reasoningEffort: "low",
+        reasoningSource: "continuation",
+        latencyMode: "standard",
+        latencyModeSource: "continuation",
+      });
+      const billing = turnExecutionPolicyBillingIdentity(policy);
+      await ensureRunAllowed(
+        settings,
+        {} as db.Database,
+        "account-1",
+        "workspace-1",
+        billing.externallyBilled,
+        undefined,
+        false,
+        billing.countsTowardTokenCap,
+        identity.initiatingHumanSubjectId,
+        policy.productModelId,
+      );
+      const outcome = await selectCodexTurnCapacity(capacityDeps());
+      expect(outcome).toMatchObject({ exit: { status: "waiting_capacity", turnId: "turn-1" } });
+      expect(armed).toHaveBeenCalledWith(
+        {},
+        expect.objectContaining({ turnId: "turn-1", waitReason: reason }),
+      );
+      expect(liveFunding).not.toHaveBeenCalled();
+      expect(credits).not.toHaveBeenCalled();
+    },
+  );
+
   test("a core wait whose re-evaluation can already run resumes the same turn", async () => {
     gate("enabled");
     const { evaluate, reconcile } = coreWaitMocks(new Date(Date.now() + 60_000));
@@ -443,6 +525,39 @@ describe("Codex cutover gate dispositions", () => {
 });
 
 describe("core Codex credential materialization in the worker", () => {
+  test("disconnect fences both token loading and forced refresh without touching the secret resolver", async () => {
+    const getToken = mock(async () => {
+      throw new Error("must not load scrubbed token");
+    });
+    const refresh = mock(async () => {
+      throw new Error("must not refresh");
+    });
+    spy(db, "buildSubscriptionCoreCodexTokenResolver").mockReturnValue({ getToken, refresh });
+    spy(db, "isSubscriptionCoreCodexSourceDisconnected").mockResolvedValue(true);
+    const held = leases();
+    held.codex.useSubscriptionCoreLease("connection-core");
+    held.codex.generation = 3;
+    const resolver = buildCoreCodexRequestTokenResolver(
+      {} as never,
+      {} as never,
+      {
+        identity,
+        connectionId: "connection-core",
+        placedRefreshGeneration: 1,
+        personal: false,
+      },
+      held.codex,
+    );
+    await expect(resolver.getToken()).rejects.toBeInstanceOf(
+      db.SubscriptionCoreCodexSourceDisconnectedError,
+    );
+    await expect(resolver.refresh()).rejects.toBeInstanceOf(
+      db.SubscriptionCoreCodexSourceDisconnectedError,
+    );
+    expect(getToken).not.toHaveBeenCalled();
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
   const core: CodexSubscriptionCoreTurn = {
     identity,
     connectionId: "connection-core",
@@ -641,6 +756,35 @@ describe("core Codex usage, quota and refusal bookkeeping", () => {
     );
     expect(legacy).not.toHaveBeenCalled();
   });
+
+  test("a disconnected binding rejects the cache hint without failing response custody or quota bookkeeping", async () => {
+    const quota = spy(db, "applySubscriptionCoreCodexQuotaObservation").mockResolvedValue({
+      applied: true,
+      recovered: true,
+    });
+    const touch = spy(db, "touchSubscriptionCoreCodexBinding").mockRejectedValue(
+      new db.SubscriptionCoreCodexSourceDisconnectedError(),
+    );
+    const completed = new Date();
+    await expect(
+      finalizeCoreCodexUsage({
+        db: {} as db.Database,
+        core,
+        lease,
+        usage: {
+          primaryUsedPercent: 10,
+          primaryResetAt: null,
+          secondaryUsedPercent: 5,
+          secondaryResetAt: null,
+          checkedAt: completed,
+        },
+        credentialVersion: 5,
+        modelCallCompletedAt: completed,
+      }),
+    ).resolves.toEqual({ capacityRecovered: true });
+    expect(quota).toHaveBeenCalledTimes(1);
+    expect(touch).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("core Codex failure settlement", () => {
@@ -765,6 +909,108 @@ describe("core Codex failure settlement", () => {
     expect(legacy).not.toHaveBeenCalled();
   });
 
+  test("graceful disappearance checkpoints the same continuation without refusal counts or quarantine", async () => {
+    const order: string[] = [];
+    const requests = createCoreCodexRequests({
+      reserve: async () => ({ operationId: "operation-1" }),
+      settle: async () => {
+        order.push("response_persisted");
+      },
+    });
+    await requests.reserve({ requestId: "request-1", transportAttempt: 1 });
+    await requests.observe({
+      requestId: "request-1",
+      transportAttempt: 1,
+      outcome: "response_received",
+    });
+    const { deps, settle } = failureDeps(new db.SubscriptionCoreCodexSourceDisconnectedError(), {
+      ...core,
+      requests,
+    });
+    deps.historySink.reconcileConversationTruth = async () => {
+      order.push("history_checkpoint");
+    };
+    const count = spy(db, "countSubscriptionCoreCodexTurnRefusals");
+    const refusal = spy(db, "recordSubscriptionCoreCodexTurnFailure");
+    const recovery = spy(db, "requestSessionTurnRecovery").mockImplementation(async () => {
+      order.push("recover");
+      return { action: "recovering", events: [] };
+    });
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+    expect(await settleTurnFailure(deps as never)).toMatchObject({
+      status: "recovering",
+      turnId: "turn-1",
+    });
+    expect(order).toEqual(["history_checkpoint", "response_persisted", "recover"]);
+    expect(recovery).toHaveBeenCalledWith(
+      {},
+      "workspace-1",
+      expect.objectContaining({
+        turnId: "turn-1",
+        attemptId: "attempt-1",
+        triggerEventId: "trigger-1",
+        detail: {
+          provider: "codex-subscription",
+          credentialId: "connection-core",
+          failureKind: "source_disconnected",
+        },
+      }),
+    );
+    expect(count).not.toHaveBeenCalled();
+    expect(refusal).not.toHaveBeenCalled();
+    expect(settle).not.toHaveBeenCalled();
+  });
+
+  test("disconnect with a definite auth refusal recovers without penalizing the removed source", async () => {
+    spy(db, "isSubscriptionCoreCodexSourceDisconnected").mockResolvedValue(true);
+    const requests = createCoreCodexRequests({
+      reserve: async () => ({ operationId: "op" }),
+      settle: async () => {},
+    });
+    await requests.reserve({ requestId: "r", transportAttempt: 1 });
+    await requests.observe({ requestId: "r", transportAttempt: 1, outcome: "refused" });
+    const { deps } = failureDeps(
+      Object.assign(new Error("401 unauthorized"), {
+        status: 401,
+        headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+      }),
+      { ...core, requests },
+    );
+    const refusal = spy(db, "recordSubscriptionCoreCodexTurnFailure");
+    const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    });
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+    expect(recovery).toHaveBeenCalledTimes(1);
+    expect(refusal).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    () => new db.SubscriptionCoreCodexSourceDisconnectedError(),
+    () => new db.SubscriptionCoreCodexLeaseLostError(),
+    () => new CodexResponseTimeoutError("headers", "r", false),
+  ])("unknown request plus disconnect or lost lease never replays (%#)", async (error) => {
+    const requests = createCoreCodexRequests({
+      reserve: async () => ({ operationId: "op" }),
+      settle: async () => {},
+    });
+    await requests.reserve({ requestId: "r", transportAttempt: 1 });
+    await requests.observe({ requestId: "r", transportAttempt: 1, outcome: "unknown" });
+    const thrown = error();
+    const { deps } = failureDeps(thrown, { ...core, requests });
+    deps.leases.codex.lost = true;
+    const recovery = spy(db, "requestSessionTurnRecovery");
+    const refusal = spy(db, "recordSubscriptionCoreCodexTurnFailure");
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+    expect(await settleTurnFailure(deps as never)).toMatchObject({
+      status: thrown instanceof db.SubscriptionCoreCodexSourceDisconnectedError ? "idle" : "failed",
+    });
+    expect(recovery).not.toHaveBeenCalled();
+    expect(refusal).not.toHaveBeenCalled();
+  });
+
   const usageCap = () =>
     Object.assign(new Error("429 You have hit your usage limit"), {
       status: 429,
@@ -772,6 +1018,44 @@ describe("core Codex failure settlement", () => {
       error: { type: "usage_limit_reached", resets_in_seconds: 7200 },
       headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
     });
+
+  test.each([false, true])(
+    "native unresolved outcome is nonretryable even through an SDK wrapper and lost lease (wrapped=%s)",
+    async (wrapped) => {
+      const unresolved = new db.SubscriptionCoreCodexRequestOutcomeUnknownError();
+      const error = wrapped
+        ? Object.assign(new Error("503 retryable transport wrapper", { cause: unresolved }), {
+            status: 503,
+            headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+          })
+        : unresolved;
+      const { deps, settle } = failureDeps(error, core);
+      deps.leases.codex.lost = wrapped;
+      const checkpoint = mock(async (_options?: unknown) => undefined);
+      deps.historySink.reconcileConversationTruth = checkpoint;
+      const recovery = spy(db, "requestSessionTurnRecovery");
+      const refusal = spy(db, "recordSubscriptionCoreCodexTurnFailure");
+      spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+      expect(checkpoint).toHaveBeenCalledWith({ requireDurable: true });
+      expect(recovery).not.toHaveBeenCalled();
+      expect(refusal).not.toHaveBeenCalled();
+      expect(settle).toHaveBeenCalledWith(
+        expect.objectContaining({
+          events: expect.arrayContaining([
+            {
+              type: "turn.failed",
+              payload: expect.objectContaining({
+                code: unresolved.code,
+                error: unresolved.message,
+                retryable: false,
+              }),
+            },
+          ]),
+        }),
+      );
+    },
+  );
 
   test.each([
     ["provider quota refusal", () => usageCap()],

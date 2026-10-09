@@ -22,6 +22,9 @@ import {
   isSessionEventPersistenceError,
   SANDBOX_SETUP_RECOVERY_LIMIT,
   SubscriptionCoreCodexAccessLostError,
+  SubscriptionCoreCodexSourceDisconnectedError,
+  SubscriptionCoreCodexRequestOutcomeUnknownError,
+  isSubscriptionCoreCodexSourceDisconnected,
   SubscriptionCoreCodexLeaseLostError,
   type CodexLeaseAccountStatus,
 } from "@opengeni/db";
@@ -855,9 +858,18 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // A turn placed by the shared subscription core never reaches the legacy
   // Codex settlement below: its connection id is not a legacy credential row.
   const coreCodex = billingState.isCodexTurn ? (providerTurn.codexSubscriptionCore ?? null) : null;
+  const coreRequestOutcomeUnknown = hasErrorInCauseChain(
+    error,
+    SubscriptionCoreCodexRequestOutcomeUnknownError,
+  )
+    ? new SubscriptionCoreCodexRequestOutcomeUnknownError()
+    : null;
   const legacyCodexTurn = billingState.isCodexTurn && coreCodex === null;
   const coreCodexLeaseLost =
     coreCodex !== null &&
+    !coreRequestOutcomeUnknown &&
+    (!coreCodex.requests || coreCodex.requests.canRecover()) &&
+    (!coreCodex.titleRequests || coreCodex.titleRequests.canRecover()) &&
     (leases.codex.lost ||
       error instanceof CodexCredentialLeaseLostError ||
       error instanceof SubscriptionCoreCodexLeaseLostError);
@@ -924,7 +936,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // A definitive account refusal on a core turn becomes a typed terminal
   // failure that idles the session (settled below).
   let coreAccountRefusal: SubscriptionCoreCodexTurnError | null = null;
-  if (coreCodex) {
+  if (coreCodex && !coreRequestOutcomeUnknown) {
     // Core turns record the refusal against the leased connection (failure
     // receipt, plus the quota, health or model-cooldown state that keeps
     // placement away from it) and re-place the same turn within the per-turn
@@ -938,7 +950,22 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     const refusal =
       coreFailure ??
       (planEntitlement ? { kind: "plan_entitlement" as const, cooldownSeconds: null } : null);
-    if (refusal) {
+    // Only a pre-dispatch lifecycle fence or a definite refusal can enter
+    // graceful recovery. A concurrent disconnect never upgrades a timeout,
+    // partial stream, missing response, or failed checkpoint into replay proof.
+    const disconnected =
+      hasErrorInCauseChain(error, SubscriptionCoreCodexSourceDisconnectedError) ||
+      (!!refusal &&
+        (await isSubscriptionCoreCodexSourceDisconnected(
+          db,
+          coreCodex.identity,
+          coreCodex.connectionId,
+        )));
+    if (disconnected) {
+      const settled = await failOverCoreCodexTurn(deps, coreCodex, "source_disconnected");
+      if (settled) return settled;
+    }
+    if (refusal && !disconnected) {
       const recorded = await recordCoreCodexRefusal({
         db,
         core: coreCodex,
@@ -952,15 +979,16 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         if (settled) return settled;
       }
     }
-    coreAccountRefusal = hasErrorInCauseChain(error, SubscriptionCoreCodexAccessLostError)
-      ? subscriptionCoreAccountRefusedFailure("access_lost")
-      : refusal?.kind === "auth" || hasErrorInCauseChain(error, CodexReloginRequired)
-        ? subscriptionCoreAccountRefusedFailure("sign_in")
-        : refusal?.kind === "forbidden"
-          ? subscriptionCoreAccountRefusedFailure("forbidden")
-          : refusal?.kind === "plan_entitlement"
-            ? subscriptionCoreAccountRefusedFailure("entitlement")
-            : null;
+    coreAccountRefusal =
+      disconnected || hasErrorInCauseChain(error, SubscriptionCoreCodexAccessLostError)
+        ? subscriptionCoreAccountRefusedFailure("access_lost")
+        : refusal?.kind === "auth" || hasErrorInCauseChain(error, CodexReloginRequired)
+          ? subscriptionCoreAccountRefusedFailure("sign_in")
+          : refusal?.kind === "forbidden"
+            ? subscriptionCoreAccountRefusedFailure("forbidden")
+            : refusal?.kind === "plan_entitlement"
+              ? subscriptionCoreAccountRefusedFailure("entitlement")
+              : null;
   }
   let codexCredentialFailure: CodexCredentialFailure | null =
     legacyCodexTurn && providerTurn.effectiveCodexCredentialId
@@ -2148,7 +2176,9 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // fall through to the terminal path rather than resend an equivalent
   // request forever.
   const encryptedArtifactRejection =
-    billingState.isCodexTurn && providerTurn.effectiveCodexCredentialId
+    !coreRequestOutcomeUnknown &&
+    billingState.isCodexTurn &&
+    providerTurn.effectiveCodexCredentialId
       ? classifyCodexEncryptedArtifactRejection(error)
       : null;
   if (
@@ -2231,16 +2261,25 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     attempt.executionGeneration > 0;
   const earlyRecoverableSetup = earlyDefinitionMismatch || earlyCommandStartUnavailable;
   let failure = withModelRoutePresentation(
-    (earlyDefinitionMismatch
-      ? { error: error.message, code: error.code, retryable: true }
-      : (codexTerminalFailure ??
-        agentRunFailurePayload(error, {
-          isCodexTurn: billingState.isCodexTurn,
-        }))) as ReturnType<typeof agentRunFailurePayload>,
+    (coreRequestOutcomeUnknown
+      ? {
+          error: coreRequestOutcomeUnknown.message,
+          code: coreRequestOutcomeUnknown.code,
+          retryable: false,
+        }
+      : earlyDefinitionMismatch
+        ? { error: error.message, code: error.code, retryable: true }
+        : (codexTerminalFailure ??
+          agentRunFailurePayload(error, {
+            isCodexTurn: billingState.isCodexTurn,
+          }))) as ReturnType<typeof agentRunFailurePayload>,
     attempt.modelRoutePresentation,
   );
   if (
     attempt.turnId &&
+    !coreRequestOutcomeUnknown &&
+    (!coreCodex?.requests || coreCodex.requests.canRecover()) &&
+    (!coreCodex?.titleRequests || coreCodex.titleRequests.canRecover()) &&
     (earlyRecoverableSetup ||
       (failure.retryable && eventing.publish && eventing.turnStartedPublished))
   ) {
@@ -2430,7 +2469,11 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // never replays work from an incomplete history. This does not retry or
   // rotate the ambiguous request.
   await flushRuntimeBatcher();
-  await historySink.reconcileConversationTruth();
+  if (coreRequestOutcomeUnknown) {
+    await historySink.reconcileConversationTruth({ requireDurable: true });
+  } else {
+    await historySink.reconcileConversationTruth();
+  }
   if (
     !(await eventing.settle!({
       events: [
