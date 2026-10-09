@@ -13,6 +13,14 @@ import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
 
+async function waitFor(condition: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(message);
+    await flush(10);
+  }
+}
+
 const WS = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const S = "aaaaaaaa-0000-4000-8000-000000000001";
 const OTHER = "aaaaaaaa-0000-4000-8000-000000000009";
@@ -271,6 +279,7 @@ async function mountStockChat(
   props: Partial<OpenGeniChatProps> = {},
   rewriteConfig: (config: Record<string, unknown>) => Record<string, unknown> = (config) => config,
   withGoal = false,
+  beforeBrowserResponse?: (path: string) => Promise<void>,
 ): Promise<Mounted> {
   const events = conversation().map((event, index) => ({
     id: `eeeeeeee-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
@@ -546,6 +555,7 @@ async function mountStockChat(
       code = ((await response.clone().json()) as { error?: { code?: string } }).error?.code ?? "";
     }
     browser.push(`${response.status} ${init?.method ?? "GET"} ${path} ${code}`.trim());
+    await beforeBrowserResponse?.(path);
     return response;
   }) as typeof fetch;
 
@@ -683,10 +693,28 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
       [{ realtimeVoice: true }, {}],
       [{}, { conversationProps: { realtimeVoice: true } }],
     ] as const) {
-      const chat = await mountStockChat(proxy, props);
-      expect(chat.browser).toContain(`200 GET /v1/workspaces/${WS}/realtime-model-catalog`);
-      expect(voiceButton(chat.container)).not.toBeNull();
-      await unmountChat();
+      let releaseCatalog!: () => void;
+      const catalogDelivery = new Promise<void>((resolve) => {
+        releaseCatalog = resolve;
+      });
+      try {
+        const chat = await mountStockChat(proxy, props, undefined, false, async (path) => {
+          if (path.endsWith("/realtime-model-catalog")) await catalogDelivery;
+        });
+        await waitFor(
+          () => chat.browser.includes(`200 GET /v1/workspaces/${WS}/realtime-model-catalog`),
+          "the proxy did not return the realtime model catalog",
+        );
+        // A recorded HTTP 200 precedes response delivery and the React commit.
+        // Prove both opt-in paths tolerate that gap, then await the visible control.
+        expect(voiceButton(chat.container)).toBeNull();
+        releaseCatalog();
+        await waitFor(() => voiceButton(chat.container) !== null, "live voice did not render");
+        expect(voiceButton(chat.container)).not.toBeNull();
+      } finally {
+        releaseCatalog();
+        await unmountChat();
+      }
     }
     const refused = await mountStockChat(
       { realtimeVoice: false },
