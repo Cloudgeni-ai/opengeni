@@ -14621,6 +14621,16 @@ export function accessContextHasInbox(
   );
 }
 
+/**
+ * The signed-in person's mute on one session. Muted replies neither reach the
+ * inbox nor alert the phone; the agent's notifications, questions and
+ * approvals still do.
+ */
+export const SessionInboxMute = z.object({
+  repliesMuted: z.boolean(),
+});
+export type SessionInboxMute = z.infer<typeof SessionInboxMute>;
+
 export const ToolAuthNeededPayload = z
   .object({
     serverId: z.string().min(1),

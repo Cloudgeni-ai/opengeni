@@ -3,7 +3,8 @@
 // any action refreshes immediately.
 import { accessContextHasInbox } from "@opengeni/contracts";
 import type { InboxItem, ListInboxResponse, OpenGeniClient } from "@opengeni/sdk";
-import { useCallback, useEffect, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { toast } from "sonner";
 
 import { useAppContext } from "@/context";
 
@@ -192,4 +193,60 @@ export function useReadSessionInbox(sessionId: string) {
     void read();
     return () => void read();
   }, [client, personal, sessionId]);
+}
+
+export type SessionRepliesMute = { muted: boolean; busy: boolean; toggle: () => void };
+
+/**
+ * The signed-in person's mute on a top-level session's replies. Null when it
+ * does not apply (a sub-agent, no inbox) or the server cannot say, so the
+ * menu offers it only where it works.
+ */
+export function useSessionRepliesMute(session: {
+  workspaceId: string;
+  id: string;
+  parentSessionId: string | null;
+}): SessionRepliesMute | null {
+  const context = useAppContext();
+  const client = context.client;
+  const applies = hasInbox(context.accessContext) && session.parentSessionId === null;
+  const [muted, setMuted] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    setMuted(null);
+    if (!applies) return;
+    let current = true;
+    client
+      .getSessionInboxMute(session.workspaceId, session.id)
+      .then((value) => {
+        if (current) setMuted(value.repliesMuted);
+      })
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [applies, client, session.id, session.workspaceId]);
+  const toggle = useCallback(() => {
+    if (muted === null || busy) return;
+    const next = !muted;
+    setBusy(true);
+    client
+      .setSessionInboxMute(session.workspaceId, session.id, { repliesMuted: next })
+      .then((value) => {
+        setMuted(value.repliesMuted);
+        void storeFor(client).refresh();
+        toast.success(
+          value.repliesMuted
+            ? "Replies muted. Notifications and questions still reach you."
+            : "Replies unmuted.",
+        );
+      })
+      .catch((error: unknown) => {
+        toast.error(next ? "Couldn't mute replies." : "Couldn't unmute replies.", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => setBusy(false));
+  }, [busy, client, muted, session.id, session.workspaceId]);
+  return applies && muted !== null ? { muted, busy, toggle } : null;
 }

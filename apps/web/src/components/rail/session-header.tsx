@@ -19,6 +19,8 @@ import { SiteOriginLink } from "@/components/session/site-origin-link";
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
+  BellIcon,
+  BellOffIcon,
   CalendarClockIcon,
   LockIcon,
   MoreHorizontalIcon,
@@ -55,6 +57,7 @@ import {
   type InlineRename,
 } from "@/lib/session-rename";
 import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
+import type { SessionRepliesMute } from "@/lib/inbox";
 import { labelEffort, type IntelligenceEffort } from "@/lib/session-tools";
 import type { LatencyMode, Session } from "@/types";
 
@@ -73,6 +76,7 @@ export function SessionHeader({
   onRename,
   onPin,
   onArchive,
+  repliesMute,
   sandboxSlot,
   codexSlot,
   accessSlot,
@@ -105,6 +109,11 @@ export function SessionHeader({
   onPin: (session: Session, pinned: boolean) => Promise<Session | null>;
   /** Archives or restores this root session. Absent hides the action. */
   onArchive?: (session: Session, archived: boolean) => Promise<void>;
+  /**
+   * The signed-in person's mute on this session's replies. Absent hides the
+   * action (sub-agents, people without an inbox, servers without it).
+   */
+  repliesMute?: SessionRepliesMute | null;
   /** The "Run on <machine>" control — a live component in production. */
   sandboxSlot?: ReactNode;
   /**
@@ -383,6 +392,12 @@ export function SessionHeader({
               <div className="flex min-h-9 items-center px-2 empty:hidden lg:hidden">
                 {sandboxSlot}
               </div>
+            ) : null}
+            {repliesMute ? (
+              <DropdownMenuItem disabled={repliesMute.busy} onSelect={() => repliesMute.toggle()}>
+                {repliesMute.muted ? <BellIcon /> : <BellOffIcon />}
+                {repliesMute.muted ? "Unmute replies" : "Mute replies"}
+              </DropdownMenuItem>
             ) : null}
             {canArchive ? (
               <>

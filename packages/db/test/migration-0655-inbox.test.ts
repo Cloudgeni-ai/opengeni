@@ -13,9 +13,11 @@ import {
   getInboxItem,
   getInboxSettings,
   getInboxTidyPolicy,
+  getSessionRepliesMuted,
   listInboxItems,
   setInboxSettings,
   setInboxTidyPolicy,
+  setSessionRepliesMuted,
   updateInboxItemAttention,
   type DbClient,
 } from "../src/index";
@@ -346,8 +348,41 @@ describe("0655 inbox", () => {
     expect((await inbox(person)).map((item) => [item.title, item.unread])).toEqual([
       ["Round 6 is in", true],
     ]);
-    await setInboxSettings(db(), { ...owner, replies: false });
+    // Muting the session takes its reply away and keeps new ones out, while
+    // what the agent sends on purpose still arrives (0678).
+    const muteFor = {
+      workspaceId: person.scope.workspaceId,
+      sessionId: person.session.id,
+      subjectId: person.subjectId,
+    };
+    expect(await getSessionRepliesMuted(db(), muteFor)).toBe(false);
+    expect(await setSessionRepliesMuted(db(), { ...muteFor, muted: true })).toBe(true);
+    expect(await getSessionRepliesMuted(db(), muteFor)).toBe(true);
     expect(await inbox(person)).toHaveLength(0);
+    await reply("Muted reply");
+    await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+      {
+        type: "session.notification.posted",
+        payload: { key: "muted-note", title: "Still worth knowing", body: "", replaced: false },
+      },
+    ]);
+    expect((await inbox(person)).map((item) => [item.kind, item.title])).toEqual([
+      ["notification", "Still worth knowing"],
+    ]);
+    // Someone else's mute does nothing for the person the session works for.
+    expect(
+      await getSessionRepliesMuted(db(), { ...muteFor, subjectId: `user:${crypto.randomUUID()}` }),
+    ).toBe(false);
+    expect(await setSessionRepliesMuted(db(), { ...muteFor, muted: false })).toBe(false);
+    await reply("Unmuted reply");
+    expect(
+      (await inbox(person)).filter((item) => item.kind === "reply").map((item) => item.title),
+    ).toEqual(["Unmuted reply"]);
+    expect(
+      await getSessionRepliesMuted(db(), { ...muteFor, sessionId: crypto.randomUUID() }),
+    ).toBeNull();
+    await setInboxSettings(db(), { ...owner, replies: false });
+    expect((await inbox(person)).map((item) => item.kind)).toEqual(["notification"]);
   });
 
   test("an agent's pause waits on the person until the goal resumes", async () => {

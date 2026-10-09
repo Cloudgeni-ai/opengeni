@@ -554,3 +554,51 @@ export async function markSessionInboxRead(
     ),
   });
 }
+
+/**
+ * The person's mute on a top-level session's replies: muted, its replies stop
+ * reaching the inbox and the phone, while its notifications, questions and
+ * approvals still arrive. Null where it doesn't apply or the server can't say,
+ * so the menu only offers it where it works.
+ */
+export function useSessionRepliesMute(
+  client: OpenGeniClient,
+  workspaceId: string,
+  sessionId: string,
+  topLevel: boolean,
+): { muted: boolean; toggle: () => Promise<boolean | null> } | null {
+  const [muted, setMuted] = useState<boolean | null>(null);
+  const busy = useRef(false);
+  useEffect(() => {
+    setMuted(null);
+    if (!topLevel) return;
+    let current = true;
+    client
+      .getSessionInboxMute(workspaceId, sessionId)
+      .then((value) => {
+        if (current) setMuted(value.repliesMuted);
+      })
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [client, sessionId, topLevel, workspaceId]);
+  const toggle = useCallback(async () => {
+    if (muted === null || busy.current) return null;
+    busy.current = true;
+    try {
+      const value = await client.setSessionInboxMute(workspaceId, sessionId, {
+        repliesMuted: !muted,
+      });
+      setMuted(value.repliesMuted);
+      const inbox = await client.listInbox().catch(() => null);
+      if (inbox) await syncInboxBadge(inbox);
+      return value.repliesMuted;
+    } catch {
+      return null;
+    } finally {
+      busy.current = false;
+    }
+  }, [client, muted, sessionId, workspaceId]);
+  return topLevel && muted !== null ? { muted, toggle } : null;
+}

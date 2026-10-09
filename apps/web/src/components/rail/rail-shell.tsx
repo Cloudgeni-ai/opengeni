@@ -52,6 +52,7 @@ import { PrivateSessionIndicator } from "@/components/session/private-session-in
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { isCodexProductModel } from "@/lib/session-model";
 import { isIntelligenceEffort } from "@/lib/session-tools";
+import { useSessionRepliesMute } from "@/lib/inbox";
 import { applySessionArchiveProjection } from "@/lib/session-pagination";
 import { notifySessionListChanged } from "@/lib/session-list-invalidation";
 import type { Session } from "@/types";
@@ -491,6 +492,7 @@ function SessionRouteHeader({
   const catalog = useWorkspaceModelCatalog(session.workspaceId);
   const selectedRow = findPickerRow(catalog.rows, displayModelId);
   const policyLoading = lastStarted.loading || catalog.loading;
+  const repliesMute = useSessionRepliesMute(session);
   const archiveInFlight = useRef(false);
   const onArchive = useCallback(
     async (target: Session, archived: boolean) => {
@@ -557,6 +559,7 @@ function SessionRouteHeader({
         context.updateSessionPin(target.workspaceId, target.id, pinned, target.pinVersion ?? 0)
       }
       onArchive={onArchive}
+      repliesMute={repliesMute}
       leading={hamburger}
       lastStartedModel={lastStartedModel}
       lastStartedReasoningEffort={lastStartedReasoningEffort}

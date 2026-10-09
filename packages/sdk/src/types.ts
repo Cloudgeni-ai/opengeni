@@ -5528,6 +5528,15 @@ export type InboxSettings = {
   replies?: boolean;
 };
 
+/**
+ * The signed-in person's mute on one session. Muted replies neither reach the
+ * inbox nor alert the phone; the agent's notifications, questions and
+ * approvals still do.
+ */
+export type SessionInboxMute = {
+  repliesMuted: boolean;
+};
+
 // --- Native app sign-in (authorization code + PKCE over the app's scheme) ----------------------
 
 export type NativeAppPlatform = "ios" | "android";

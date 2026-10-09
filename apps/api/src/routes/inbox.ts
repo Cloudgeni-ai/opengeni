@@ -5,6 +5,7 @@
 import {
   InboxSettings,
   ListInboxResponse,
+  SessionInboxMute,
   UpdateInboxItemRequest,
   type AccessContext,
   type InboxItem,
@@ -18,10 +19,12 @@ import {
 import {
   getInboxItem,
   getInboxSettings,
+  getSessionRepliesMuted,
   getSessionTitles,
   listInboxItems,
   listWorkspacesForSubject,
   setInboxSettings,
+  setSessionRepliesMuted,
   updateInboxItemAttention,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
@@ -187,5 +190,39 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     return c.json(InboxSettings.parse(settings));
+  });
+
+  // The person's own mute on one session: its replies stop reaching their
+  // inbox and phone; its notifications, questions and approvals still arrive.
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/inbox-mute", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const subjectId = requirePerson(context);
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const muted = await getSessionRepliesMuted(deps.db, {
+      workspaceId,
+      sessionId: c.req.param("sessionId"),
+      subjectId,
+    });
+    if (muted === null) throw new HTTPException(404, { message: "Session not found" });
+    c.header("cache-control", "private, no-store");
+    return c.json(SessionInboxMute.parse({ repliesMuted: muted }));
+  });
+
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/inbox-mute", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const subjectId = requirePerson(context);
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const parsed = SessionInboxMute.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "Invalid session mute" });
+    const muted = await setSessionRepliesMuted(deps.db, {
+      workspaceId,
+      sessionId: c.req.param("sessionId"),
+      subjectId,
+      muted: parsed.data.repliesMuted,
+    });
+    if (muted === null) throw new HTTPException(404, { message: "Session not found" });
+    return c.json(SessionInboxMute.parse({ repliesMuted: muted }));
   });
 }
