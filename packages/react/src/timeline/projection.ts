@@ -22,7 +22,6 @@ import {
   isCreditExhaustion,
   tryParseJson,
 } from "../lib/format";
-import { timelineGroupContainsPresentedImage } from "./presented-image";
 import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 import type {
   AgentMessageItem,
@@ -2385,8 +2384,26 @@ function isQuietWork(group: TimelineGroup): group is WorkGroup {
       : entry.kind === "activity"
         ? (entry.work?.details ?? []).every(quiet)
         : false;
+  return !publishesOutput(group) && quiet(group) && group.work.details.every(quiet);
+}
+
+/**
+ * Work that generated an image or published a file produced output worth
+ * seeing. Checked by tool name only, so the projection stays free of the
+ * renderer's image presentation rules.
+ */
+function publishesOutput(group: TimelineGroup): boolean {
+  if (group.kind !== "activity") return false;
   return (
-    !timelineGroupContainsPresentedImage(group) && quiet(group) && group.work.details.every(quiet)
+    group.items.some((item) => {
+      if (item.kind !== "tool-call") return false;
+      const name = mcpToolLeaf(item.name);
+      return (
+        name === "generate_image" ||
+        name === "image_generation_call" ||
+        name === "sandbox_file_publish"
+      );
+    }) || (group.work?.details ?? []).some(publishesOutput)
   );
 }
 

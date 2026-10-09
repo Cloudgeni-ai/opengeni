@@ -177,6 +177,24 @@ describe("quiet wait cycles", () => {
     expect(cycleRows(readable(events))).toHaveLength(0);
   });
 
+  test("a cycle that publishes a file or generates an image is not quiet", () => {
+    for (const name of ["opengeni__sandbox_file_publish", "generate_image"]) {
+      const events = [
+        ...opening(),
+        ...quietCycle("turn-1"),
+        update("turn-2"),
+        event("turn.started", {}, "turn-2"),
+        event("agent.toolCall.created", { id: "turn-2-out", name, arguments: {} }, "turn-2"),
+        event("agent.toolCall.output", { id: "turn-2-out", output: "ok" }, "turn-2"),
+        ...waitAndSettle("turn-2", "Waiting for the worker (turn-2)."),
+        ...quietCycle("turn-3"),
+        update("turn-4"),
+      ];
+      // Without turn-2 the run would hold three cycles; it breaks into two single cycles.
+      expect(cycleRows(readable(events))).toHaveLength(0);
+    }
+  });
+
   test("a visible reply ends the run and keeps its own work row", () => {
     const events = [
       ...opening(),
