@@ -355,6 +355,11 @@ For sandbox configuration work, read `references/sandbox-configuration.md`. Use 
 
 ## Tools And MCP Discovery
 
+Conversation target context is non-authoritative: inspect
+`packages/db/src/session-target.ts` and `docs/session-monitoring-mcp.md` for
+`session_target_get/set` and exact Send/Steer receipt tracking. Selection must
+never transfer voice, dispatch work, or replace live session authorization.
+
 For unified Skills work, start with `docs/design/skills-system.md`. Server-side
 file primitives and packaged guidance live in `packages/runtime/src/skill-files.ts`,
 `skill-library.ts`, and `runtime-skills.ts`; worker gateway adapters live under

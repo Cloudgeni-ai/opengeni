@@ -1,4 +1,7 @@
 import {
+  getSessionSystemUpdateById,
+  getSessionMessageOutcomeEvent,
+  setSessionTargetContext,
   getAttemptToolCatalog,
   createChannel,
   listChannels,
@@ -19,6 +22,8 @@ import {
   workspaceArtifactDownloads,
 } from "../site-uploads";
 import {
+  sessionTargetContext,
+  SetSessionTargetRequest,
   CreateScheduledTaskRequest,
   ScheduledTaskAgentConfigInput,
   ResourceRef,
@@ -4641,6 +4646,126 @@ function registerWorkspaceOrchestrationTools(
         )
       : await listOutstandingSessionSystemUpdates(deps.db, grant.workspaceId, ownSessionId);
   };
+  if (callerSessionId && can("sessions:read")) {
+    server.registerTool(
+      "session_target_get",
+      {
+        description:
+          "Read this conversation's optional selected session. Selection is context, not permission to send, steer, resume or transfer a call. Access is checked live; clear an unavailable target with session_target_set(sessionId=null).",
+        inputSchema: {},
+      },
+      async () => {
+        await authorizeFirstPartySession(deps, grant, callerSessionId, "session.read");
+        const own = await getSession(deps.db, grant.workspaceId, callerSessionId);
+        if (!own) throw new Error("Calling session is unavailable");
+        const target = sessionTargetContext(own.metadata);
+        if (target.sessionId) {
+          try {
+            await authorizeFirstPartySession(deps, grant, target.sessionId, "session.read");
+          } catch (error) {
+            if (!(error instanceof SessionAuthorizationDeniedError)) throw error;
+            return json({
+              version: target.version,
+              sessionId: null,
+              unavailable: true,
+              selectionOnly: true,
+            });
+          }
+          const selected = await getSession(deps.db, grant.workspaceId, target.sessionId);
+          if (!selected) throw new Error("Selected session is unavailable");
+          return json({ ...target, title: selected.title, selectionOnly: true });
+        }
+        return json({ ...target, title: null, selectionOnly: true });
+      },
+    );
+    server.registerTool(
+      "session_message_status",
+      {
+        description:
+          "Follow the exact update ID returned by session_send_message or session_steer. Returns delivery state, consuming turn and an exact outcome read when present; acceptance or another turn finishing is not completion. Never resends. Use session_wait for changes, then read again. A paused pending target requires an explicitly authorized resume; do not silently steer it.",
+        inputSchema: { sessionId: z4.string().uuid(), updateId: z4.string().uuid() },
+      },
+      async ({ sessionId, updateId }) => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.events.read");
+        const update = await getSessionSystemUpdateById(
+          deps.db,
+          grant.workspaceId,
+          sessionId,
+          updateId,
+        );
+        if (
+          !update ||
+          update.sourceId !== callerSessionId ||
+          !["agent_message", "agent_steer_instruction"].includes(update.kind)
+        )
+          throw new Error("Message receipt not found for this caller and target");
+        const turn = update.deliveredTurnId
+          ? await getSessionTurn(deps.db, grant.workspaceId, update.deliveredTurnId)
+          : null;
+        if (turn && turn.sessionId !== sessionId) throw new Error("Message receipt turn mismatch");
+        const outcome = turn
+          ? await getSessionMessageOutcomeEvent(
+              deps.db,
+              grant.workspaceId,
+              sessionId,
+              turn.id,
+              turn.executionGeneration,
+            )
+          : null;
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.events.read");
+        return json({
+          sessionId,
+          updateId,
+          delivery: update.state,
+          turnId: turn?.id ?? null,
+          turnStatus: turn?.status ?? null,
+          outcome: outcome ? { type: outcome.type, sequence: outcome.sequence } : null,
+          nextAction: outcome
+            ? {
+                tool: "session_events",
+                arguments: {
+                  sessionId,
+                  view: "results",
+                  after: outcome.sequence - 1,
+                  before: outcome.sequence + 1,
+                  limit: 1,
+                },
+              }
+            : { tool: "session_get", arguments: { sessionId } },
+        });
+      },
+    );
+    if (can("sessions:control"))
+      server.registerTool(
+        "session_target_set",
+        {
+          description:
+            "Select an accessible session as conversational context, or clear with sessionId=null. Read session_target_get first and pass its version. Does not dispatch work, change authority or transfer/restart voice. Keep the same operationId for an exact retry.",
+          inputSchema: SetSessionTargetRequest.shape,
+        },
+        async (request) => {
+          await authorizeFirstPartySession(
+            deps,
+            grant,
+            callerSessionId,
+            "session.first_party_mcp.call",
+          );
+          const claims = exactAgentAttemptClaims(grant);
+          if (!claims || claims.sessionId !== callerSessionId)
+            throw new Error("Exact caller attempt required");
+          return json(
+            await setSessionTargetContext(deps.db, {
+              workspaceId: grant.workspaceId,
+              actor: { type: "agent_attempt", ...claims },
+              request,
+              authorizeTarget: async (db, sessionId) => {
+                await authorizeFirstPartySession({ ...deps, db }, grant, sessionId, "session.read");
+              },
+            }),
+          );
+        },
+      );
+  }
   if (can("sessions:read")) {
     server.registerTool(
       "sessions_list",

@@ -47,6 +47,23 @@ The new-chat and follow-up composers follow the web composer:
 The home header names the current workspace and organization; tapping it opens
 the workspace switcher.
 
+## Calls and other sessions
+
+Generic Siri, Shortcuts and Phone calls start a fresh conversation by default.
+Previously saved **Continue your last session** and **Call a chosen session**
+preferences remain effective; clearing a pin returns to the fresh default.
+Calling from a session (or a link naming it) still calls that session. New generic
+calls record a generic Phone-recents handle; older recents with session handles
+remain explicit session calls.
+
+Ask the call to find an accessible session, check its status, send it a message,
+or change its direction. The call stays in the fresh conversation: selecting a
+target never transfers or restarts voice and does not authorize sending, steering
+or resuming it. The session agent remembers/clears the selected target through
+`session_target_get/set` and follows Send/Steer receipts with
+`session_message_status` before reading and relaying the actual result. Existing
+session access and approval boundaries still apply. Calls never delete sessions.
+
 ## Notifications
 
 When a session the person started asks a question or needs an approval, a turn

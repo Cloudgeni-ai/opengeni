@@ -72,7 +72,7 @@ export type NativeOutsideCallContext = {
   requested: string | null;
   /** Whether a session still exists (deleted sessions answer false). */
   sessionExists(sessionId: string): Promise<boolean>;
-  /** The default: the newest top-level session, or a new voice-first session. */
+  /** Optional host policy: the newest top-level session, or a new voice-first session. */
   latestOrNew(): Promise<string>;
 };
 
@@ -85,7 +85,7 @@ export type NativeAgentCallProviderProps = {
   /** The system call integration (CallKit), or null where there is none. */
   callAdapter: NativeCallAdapter | null;
   webrtc: NativeWebRtcAdapter;
-  /** Where a call from outside the app goes; defaults to the requested, latest or a new session. */
+  /** Where a call from outside the app goes; defaults to the requested or a fresh session. */
   resolveOutsideCall?(context: NativeOutsideCallContext): Promise<string>;
   /** Runs as a call starts (for example a haptic). */
   onCallStarting?(): void;
@@ -132,7 +132,7 @@ function defaultError(title: string, message?: string): void {
   Alert.alert(title, message);
 }
 
-type CallTarget = { workspaceId: string; sessionId: string };
+type CallTarget = { workspaceId: string; sessionId: string; systemTarget: string | null };
 
 /**
  * One call with an agent at a time, above navigation: it keeps talking while the
@@ -157,7 +157,9 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
     (sessionId: string) => {
       if (!workspaceId) return;
       setTarget((current) =>
-        current?.sessionId === sessionId ? current : { workspaceId, sessionId },
+        current?.sessionId === sessionId
+          ? current
+          : { workspaceId, sessionId, systemTarget: sessionId },
       );
       setExpanded(true);
     },
@@ -190,8 +192,19 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
         const context = { client, workspaceId, requested, sessionExists, latestOrNew };
         const sessionId = resolveOutsideCall
           ? await resolveOutsideCall(context)
-          : (requested ?? (await latestOrNew()));
-        callSession(sessionId);
+          : (requested ?? (await client.createSession(workspaceId, { startMode: "realtime" })).id);
+        // Generic Phone recents must remain generic on the next call. Only
+        // explicit session calls record a session handle with CallKit.
+        setTarget((current) =>
+          current?.sessionId === sessionId
+            ? current
+            : {
+                workspaceId,
+                sessionId,
+                systemTarget: requested,
+              },
+        );
+        setExpanded(true);
       } catch (error) {
         onErrorRef.current(
           messages.couldNotStart,
@@ -199,7 +212,7 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
         );
       }
     },
-    [callSession, client, messages.couldNotStart, resolveOutsideCall, workspaceId],
+    [client, messages.couldNotStart, resolveOutsideCall, workspaceId],
   );
 
   const outsideRef = useRef(callFromOutside);
@@ -312,7 +325,7 @@ function ActiveAgentCall(
     realtime,
     call: props.callAdapter,
     title,
-    target: sessionId,
+    target: props.target.systemTarget,
   });
 
   // Start once, as soon as the session and voice model are ready. The voice
