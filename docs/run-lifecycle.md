@@ -145,8 +145,8 @@ that was never adopted as a retained process and whose provider outcome is still
 unknown (`crashedWorkerOrphanAdmissionSql`) has no owner that can admit more work,
 and nothing reliably settles it. It used to refuse every capture, idle drain,
 idle containment and provider-deadline containment of its box, and to hold its
-attempt's quiescence open, until the provider killed the box uncaptured (staging
-session 5040c525). The predicate does not prove the worker is dead; safety comes
+attempt's quiescence open, until the provider killed the box uncaptured.
+The predicate does not prove the worker is dead; safety comes
 from what each caller does with it. Only a point-in-time (Modal native) capture
 may run around such a request: a drain, which terminates the box right after, and
 a warm capture, which records itself as having run around writers so the archive
@@ -1153,7 +1153,7 @@ Opengeni is moving the workspace to a fresh sandbox…", or a saving, recovering
 moving sentence chosen from the recorded `transitionReason`/`rotationReason`,
 with "The turn continues automatically as soon as the sandbox is ready." It has
 no attempt counter because the wait has no retry budget; the turn resumes on the
-lifecycle wake. Before, the session showed only "Recovering" for up to an hour.
+lifecycle wake.
 
 **Durable recovery observability.** The control worker reads one content-free,
 cross-workspace aggregate per minute,
@@ -3353,9 +3353,9 @@ that set is proven closed and `archive_generation === workspace_generation`.
 **Warm checkpoints run around background commands.** A retained
 background command keeps its process holder and parent admission until exit or
 loss proof, which for a server or a long benchmark can be the box's whole
-provider lifetime. Treating those as in-flight writers refused every warm
-checkpoint for that long, so an uncaptured provider death (staging session
-5040c525 at the 24h Modal deadline) lost every change since the box started.
+provider lifetime. Treating those as in-flight writers can prevent warm
+checkpoints for that entire interval, leaving later changes without a recovery
+point if the provider instance is lost.
 When the provider capture is a point-in-time image of a paused box (Modal native
 filesystem or directory snapshots), a warm (turn heartbeat or turn-end) capture
 therefore excludes exactly the process holders and parent admissions of active,

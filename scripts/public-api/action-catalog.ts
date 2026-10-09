@@ -60,6 +60,10 @@ export function isActionCatalogExempt(path: string): boolean {
  */
 export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
   {
+    pattern: /^\w+ \/v1\/inbox(\/|$)/,
+    reason: "the person's inbox requires their own signed-in browser session",
+  },
+  {
     pattern:
       /^(POST \/v1\/organizations(\/additional)?|GET \/v1\/organization-(memberships|invitations)|POST \/v1\/organization-invitations\/:invitationId\/accept)$/,
     reason:

@@ -19033,3 +19033,5 @@ export * from "./sandbox-recovery";
 export * from "./modal-native-proof-v2";
 export { toolPolicyActionName, executableToolSchema } from "./tool-policy";
 export * from "./tool-action-review";
+
+export * from "./cua-desktop-tools";

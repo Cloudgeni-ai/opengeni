@@ -161,6 +161,9 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
       if (!isCurrentSource() || requestRef.current.id !== id) return;
       const targets = sortComputerTargets(targetResponse.targets);
       const selected = chooseTarget(targets, selectedTargetIdRef.current);
+      // A closed window must not silently redirect viewing or input to another
+      // application. Retain the choice until the person selects a new target.
+      const selectedId = selected?.id ?? selectedTargetIdRef.current;
       // Discovery is useful independently of semantic observation. Publish it
       // now so a slow/unresponsive application cannot block the frame stream
       // or prevent the person from choosing a different window or screen.
@@ -173,7 +176,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
         previous.target.targetGeneration === selected.targetGeneration
           ? previous
           : null;
-      selectedTargetIdRef.current = selected?.id ?? null;
+      selectedTargetIdRef.current = selectedId;
       targetsRef.current = { source, computerSessionId, targets };
       observationRef.current = { source, computerSessionId, observation: retainedObservation };
       setState((current) =>
@@ -184,7 +187,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
               ...current,
               session,
               targets,
-              selectedTargetId: selected?.id ?? null,
+              selectedTargetId: selectedId,
               observation: retainedObservation,
               loading: false,
               error: null,
@@ -198,7 +201,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
           })
         : null;
       if (!isCurrentSource() || requestRef.current.id !== id) return;
-      selectedTargetIdRef.current = selected?.id ?? null;
+      selectedTargetIdRef.current = selectedId;
       targetsRef.current = { source, computerSessionId, targets };
       observationRef.current = { source, computerSessionId, observation };
       setState((current) =>
@@ -209,7 +212,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
               ...current,
               session,
               targets,
-              selectedTargetId: selected?.id ?? null,
+              selectedTargetId: selectedId,
               observation,
               loading: false,
               error: null,
@@ -723,8 +726,7 @@ function chooseTarget(
   targets: readonly ComputerTarget[],
   preferredId: string | null,
 ): ComputerTarget | null {
-  const preferred = targets.find((target) => target.id === preferredId);
-  if (preferred) return preferred;
+  if (preferredId !== null) return targets.find((target) => target.id === preferredId) ?? null;
   return (
     targets.find((target) => target.focused && target.kind === "screen") ??
     targets.find((target) => target.kind === "screen") ??

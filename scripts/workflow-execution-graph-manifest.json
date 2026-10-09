@@ -6,7 +6,7 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "e0ef92904d5adf0f132a72ca7cbf432ca358af7f375357ea3d77999ab178dd25"
+      "sha256": "dd17e6ba9f634bc75efd7ec682b719b8a3247940d75835d6d5dc695cb0311cbf"
     },
     {
       "path": ".github/workflows/agent-release.yml",
@@ -227,7 +227,7 @@
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "test",
       "step": "Verify both macOS CUA packages and the isolated compiled loader",
-      "sha256": "5d30afa99298eacc15749e8d76b987a522e6ca905c6c3f0dbbffddd065e680ba"
+      "sha256": "ab529b0064af18341c79092b4f2d93a9adfcf9398cb0e3fb9d72b5c09f1e3567"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",

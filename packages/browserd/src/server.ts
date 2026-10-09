@@ -1,3 +1,5 @@
+import { ComputerNativeCommand } from "@opengeni/contracts";
+import { boundComputerNativeReceipt } from "@opengeni/interaction";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { connect, type Socket } from "node:net";
 import {
@@ -783,6 +785,18 @@ export class BrowserControlServer {
       if (request.method === "GET") return success(await supervisor.clipboard(reference));
       throw new ProtocolError("invalid_action", "method not allowed", 405);
     }
+    if (segments.length === 4 && segments[3] === "native-calls") {
+      if (request.method !== "POST")
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      const command = ComputerNativeCommand.parse(await readJson(request));
+      if (command.computerSessionId !== computerSessionId)
+        throw new ProtocolError(
+          "operation_conflict",
+          "native call targets another computer session",
+          409,
+        );
+      return success(boundComputerNativeReceipt(await supervisor.nativeCall(command)));
+    }
     if (segments.length === 4 && segments[3] === "actions") {
       if (request.method !== "POST") {
         throw new ProtocolError("invalid_action", "method not allowed", 405);
@@ -811,7 +825,7 @@ export class BrowserControlServer {
       const operationId = requireUuid(segments[4], "operation id");
       const receipt = supervisor.receipt(reference, operationId);
       if (!receipt) throw new ProtocolError("resource_not_found", "operation not found", 404);
-      return success(receipt);
+      return success(boundComputerNativeReceipt(receipt));
     }
     if (segments.length !== 6 || segments[3] !== "targets") {
       throw new ProtocolError("resource_not_found", "route not found", 404);
@@ -2061,7 +2075,7 @@ function routeNeedsControl(segments: readonly string[], request: Request): boole
 }
 
 function routeNeedsComputerControl(segments: readonly string[]): boolean {
-  return segments[3] === "actions" || segments[3] === "heartbeat";
+  return segments[3] === "actions" || segments[3] === "native-calls" || segments[3] === "heartbeat";
 }
 
 async function readJson(request: Request): Promise<unknown> {

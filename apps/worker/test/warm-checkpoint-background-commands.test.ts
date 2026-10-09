@@ -1,8 +1,6 @@
 // Regression: a background command that keeps running across the warm
-// checkpoint interval must not starve workspace snapshots. Staging session
-// 5040c525 kept 35 commands "running" for a whole day; every checkpoint was
-// refused while any of them held the box, so the provider's 24h deadline lost
-// about 10 hours of files. Drives the real warm-snapshot path
+// checkpoint interval must not starve workspace snapshots. Drives the real
+// warm-snapshot path
 // (maybePersistWarmWorkspaceSnapshot -> claimWorkspaceArchiveCapture ->
 // persistWarmSnapshot) and the real lease/process ledger against PostgreSQL;
 // only the provider snapshot RPC is faked.
@@ -261,7 +259,7 @@ describe("warm checkpoints while background commands run", () => {
     const { skipped, metrics } = skipRecorder();
 
     // Previously this returned false (holder_in_progress) for as long as the
-    // command ran, which in the incident was the box's whole 24h lifetime.
+    // command ran, potentially preventing periodic recovery points indefinitely.
     expect(await checkpoint(fixture, provider.session, metrics)).toBe(true);
     expect(provider.calls()).toBe(1);
     expect(skipped).toEqual([]);

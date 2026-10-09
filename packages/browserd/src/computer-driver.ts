@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { UnsettledCleanupError } from "./cleanup-error";
 import {
+  ComputerNativeResult,
+  type ComputerNativeCommand,
   ComputerClipboard,
   ComputerObservation,
   ComputerTarget,
@@ -141,6 +143,46 @@ export class ComputerDriver implements ComputerInteractionDriver {
       return this.projectObservation(observation);
     } catch (error) {
       throw predispatchError(error);
+    }
+  }
+
+  async validateNative(command: ComputerNativeCommand): Promise<void> {
+    this.assertOpen();
+    try {
+      const client = await this.activeClient();
+      if (!client.validateNative || !client.callNative)
+        throw new InteractionControllerError(
+          "unsupported",
+          "Native CUA tools require a CUA ComputerSession",
+        );
+      await client.validateNative(command);
+    } catch (error) {
+      throw predispatchError(error);
+    }
+  }
+
+  async dispatchNative(command: ComputerNativeCommand): Promise<ComputerNativeResult> {
+    this.assertOpen();
+    try {
+      const client = await this.activeClient();
+      if (!client.callNative)
+        throw new InteractionDefiniteDriverError("unsupported", "Native CUA tools are unavailable");
+      return ComputerNativeResult.parse({
+        target: null,
+        computerSessionId: this.computerSessionId,
+        controllerGeneration: this.controllerGeneration,
+        tool: command.tool,
+        ...(await client.callNative(command)),
+      });
+    } catch (error) {
+      if (error instanceof ComputerBackendError) {
+        const code = interactionErrorCode(error.code);
+        if (!error.dispatched) {
+          throw new InteractionDefiniteDriverError(code, error.message, error.retryable);
+        }
+        throw new InteractionOutcomeUnknownDriverError(code, error.message, false);
+      }
+      throw error;
     }
   }
 

@@ -1,10 +1,10 @@
 import { ComputerDriver } from "../computer-driver";
 import type { ComputerSupervisorDriverContext } from "../computer-supervisor";
 import { CuaComputerBackend } from "./backend";
-import { loadCuaDriver } from "./sdk";
+import { createCuaRuntime } from "./sdk";
 
-// The released SDK owns process-global native state. One physical desktop has
-// one runtime; never let closing one session shut down another session's SDK.
+// One physical desktop has one runtime. Separate cursor overlays do not make
+// simultaneous input into the same desktop safe.
 let occupied = false;
 
 export async function createCuaComputerDriver(
@@ -19,11 +19,11 @@ export async function createCuaComputerDriver(
   try {
     // Lazy loading keeps the browser engine and normal native backend independent
     // of CUA's Node-API runtime. Never expose CUA browser tools or its raw SDK.
-    const CuaDriver = await loadCuaDriver();
-    const sdk = CuaDriver.create(undefined);
+    const sdk = await createCuaRuntime();
     let closed = false;
     const backend = await CuaComputerBackend.open(
       {
+        listToolsJson: () => sdk.listToolsJson(),
         callTool: (name, args) => sdk.callTool(name, args),
         shutdown: async () => {
           if (closed) return;

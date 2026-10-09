@@ -2,6 +2,7 @@ import { copyFile, mkdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildCuaWorker, cuaSourceRevision } from "./build-cua-worker";
 
 const packageRoot = resolve(import.meta.dir, "..");
 
@@ -42,6 +43,20 @@ export async function stageCuaRuntime(architecture: string): Promise<string> {
   const nativeDirectory = join(output, "node_modules", nativeName);
   await mkdir(nativeDirectory, { recursive: true });
   const assets = ["cua-sdk/index.js"];
+  const worker = join(output, "cua-driver");
+  await copyFile(await buildCuaWorker(architecture), worker);
+  for (const args of [
+    ["--force", "--sign", "-", "--timestamp=none", worker],
+    ["--verify", "--strict", worker],
+  ]) {
+    const signed = Bun.spawn(["codesign", ...args], {
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    if ((await signed.exited) !== 0) throw new Error("CUA worker signing failed");
+  }
+  await Bun.write(join(output, "cua-source.json"), JSON.stringify({ revision: cuaSourceRevision }));
+  assets.push("cua-driver", "cua-source.json");
   for (const file of ["LICENSE.md", "THIRD-PARTY-NOTICES.md"]) {
     await copyFile(join(packageRoot, "src", "cua", file), join(sdkDirectory, file));
     assets.push(`cua-sdk/${file}`);
@@ -59,7 +74,10 @@ export async function stageCuaRuntime(architecture: string): Promise<string> {
         ["--force", "--sign", "-", "--timestamp=none", path],
         ["--verify", "--strict", path],
       ]) {
-        const signed = Bun.spawn(["codesign", ...args], { stdout: "inherit", stderr: "inherit" });
+        const signed = Bun.spawn(["codesign", ...args], {
+          stdout: "inherit",
+          stderr: "inherit",
+        });
         if ((await signed.exited) !== 0)
           throw new Error(`CUA native asset signing failed: ${file}`);
       }

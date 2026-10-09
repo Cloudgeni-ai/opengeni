@@ -34,6 +34,44 @@ const BROWSER_DOWNLOAD_SAVE_OPERATION_ID = "00000000-0000-4000-8000-000000000024
 const BROWSER_DOWNLOAD_FILE_ID = "00000000-0000-4000-8000-000000000025";
 
 describe("interaction control failure projection", () => {
+  test.each([null, "window-1"])(
+    "receipt accessors refuse the other operation kind (%s)",
+    async (targetId) => {
+      const operationId = "00000000-0000-4000-8000-000000000015";
+      const receipt = {
+        protocolVersion: 1 as const,
+        operationId,
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-2",
+        targetId,
+        state: "completed" as const,
+        dispatchedAt: "2026-08-10T10:01:00.000Z",
+        settledAt: "2026-08-10T10:01:00.100Z",
+        observation: null,
+        error: null,
+      };
+      const client = new OpenGeniClient({
+        baseUrl: "https://api.example.test",
+        fetch: async () => json(receipt),
+      });
+      const args = [WORKSPACE_ID, COMPUTER_SESSION_ID, operationId] as const;
+      if (targetId === null) {
+        expect(await client.getNativeComputerToolReceipt(...args)).toEqual({
+          ...receipt,
+          targetId: null,
+        });
+        await expect(client.getComputerActionReceipt(...args)).rejects.toThrow(
+          "Expected a computer action receipt",
+        );
+      } else {
+        expect(await client.getComputerActionReceipt(...args)).toEqual({ ...receipt, targetId });
+        await expect(client.getNativeComputerToolReceipt(...args)).rejects.toThrow(
+          "Expected a native computer receipt",
+        );
+      }
+    },
+  );
+
   test("decodes typed control detail while retaining outer and inner correlation", () => {
     const error = new OpenGeniApiError(
       502,

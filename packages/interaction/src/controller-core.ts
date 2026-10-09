@@ -45,7 +45,7 @@ export class InteractionOutcomeUnknownDriverError extends Error {
 export type InteractionCoreCommand = {
   operationId: string;
   controllerGeneration: string;
-  targetId: string;
+  targetId: string | null;
 };
 
 export type InteractionCoreTarget = {
@@ -54,13 +54,13 @@ export type InteractionCoreTarget = {
 };
 
 export type InteractionCoreObservation<TTarget extends InteractionCoreTarget> = {
-  target: TTarget;
+  target: TTarget | null;
 };
 
 export type InteractionCoreReceipt<TObservation> = {
   operationId: string;
   controllerGeneration: string;
-  targetId: string;
+  targetId: string | null;
   state: InteractionOperationState;
   dispatchedAt: string | null;
   settledAt: string | null;
@@ -82,6 +82,7 @@ type InteractionDriver<
   target(targetId: string): Promise<TTarget | null>;
   observe(targetId: string): Promise<TObservation>;
   validate?(command: TCommand, target: TTarget): Promise<void> | void;
+  validateSession?(command: TCommand): Promise<void> | void;
   dispatch(command: TCommand): Promise<TObservation | null>;
 };
 
@@ -99,7 +100,11 @@ type InteractionCoreAdapter<
   assertCommandAuthority(command: TCommand): void;
   assertTargetAuthority(target: TTarget): void;
   assertExpectedGenerations(command: TCommand, target: TTarget): void;
-  assertObservationAuthority(observation: TObservation, targetId: string): void;
+  assertObservationAuthority(observation: TObservation, targetId: string | null): void;
+  outcome?(observation: TObservation): {
+    state: "completed" | "failed" | "outcome_unknown";
+    error: InteractionError | null;
+  };
   makeReceipt(input: {
     command: TCommand;
     state: InteractionOperationState;
@@ -199,7 +204,7 @@ export class InteractionControllerCore<
     string,
     JournalEntry<TReceipt> | CompactJournalEntry | PersistedJournalEntry
   >();
-  private readonly targetTails = new Map<string, Promise<void>>();
+  private readonly targetTails = new Map<string | null, Promise<void>>();
 
   constructor(
     options: InteractionControllerCoreOptions<TCommand, TTarget, TObservation, TReceipt>,
@@ -306,9 +311,18 @@ export class InteractionControllerCore<
 
     try {
       await this.authority?.authorizeDispatch(command);
-      const target = await this.requireCurrentTarget(command.targetId);
-      this.adapter.assertExpectedGenerations(command, target);
-      await this.driver.validate?.(command, target);
+      if (command.targetId === null) {
+        if (!this.driver.validateSession)
+          throw new InteractionControllerError(
+            "invalid_action",
+            "session-scoped commands are unsupported",
+          );
+        await this.driver.validateSession(command);
+      } else {
+        const target = await this.requireCurrentTarget(command.targetId);
+        this.adapter.assertExpectedGenerations(command, target);
+        await this.driver.validate?.(command, target);
+      }
     } catch (error) {
       return await this.settle(
         entry,
@@ -343,13 +357,14 @@ export class InteractionControllerCore<
           ? null
           : this.adapter.parseObservation(dispatchedObservation);
       if (observation) this.adapter.assertObservationAuthority(observation, command.targetId);
+      const outcome = observation ? this.adapter.outcome?.(observation) : undefined;
       const completed = this.makeReceipt(
         command,
-        "completed",
+        outcome?.state ?? "completed",
         dispatchedAt,
         this.timestamp(),
         observation,
-        null,
+        outcome?.error ?? null,
       );
       try {
         await this.publish(entry.operationId, entry.commandDigest, completed);

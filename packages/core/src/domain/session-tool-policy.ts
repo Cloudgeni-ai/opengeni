@@ -10,6 +10,7 @@ import {
   AGENT_SKILL_MANAGE_TOOL_NAMES,
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   bundledSkillSelectionForAgentConfig,
+  CUA_DESKTOP_TOOLS,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   FIRST_PARTY_IN_PROCESS_TOOL_NAMES,
   FirstPartyMcpToolName,
@@ -559,6 +560,16 @@ export function sessionEffectiveToolProjectionInput(
       firstPartyMcpTools.splice(index, 1);
   }
   const codex = model?.provider.kind === "codex-subscription";
+  const nativeComputerTools = Boolean(
+    context &&
+    resolveFirstPartyDelegationSecret(context.settings) &&
+    permissionAllowed("sessions:control") &&
+    ["computer_open", "computer_act"].every((name) =>
+      resolveAgentToolFamilies(session.agent, { sandboxAttached: sandboxAvailable })
+        .firstPartyTools(selectedFirstPartyMcpTools)
+        .includes(name as FirstPartyMcpToolName),
+    ),
+  );
   const retainedRouter =
     context?.routerInHistory === true || context?.routerHistorySessionIds?.has(session.id) === true;
   const progressiveDisclosure =
@@ -580,6 +591,9 @@ export function sessionEffectiveToolProjectionInput(
       ? firstPartyMcpTools.filter((name) => !interactionNames.has(name) || !progressiveDisclosure)
       : []),
     ...(!progressiveDisclosure ? runtimeToolNames : []),
+    ...(nativeComputerTools && !progressiveDisclosure
+      ? CUA_DESKTOP_TOOLS.map((tool) => `interaction__cua_${tool.name}`)
+      : []),
   ]);
   const environment: AgentToolEnvironment = {
     productServerIds: new Set([
@@ -599,6 +613,7 @@ export function sessionEffectiveToolProjectionInput(
   };
   const families = resolveAgentToolFamilies(session.agent, environment);
   environment.hasDeferredTools =
+    (nativeComputerTools && progressiveDisclosure) ||
     toolRefs.some(
       (ref) => ref.id !== "opengeni" && ref.eager !== true && families.allowsMcpServer(ref.id),
     ) ||
@@ -623,6 +638,7 @@ export function sessionEffectiveToolProjectionInput(
     config: session.agent,
     firstPartyMcpTools,
     firstPartyModelNames,
+    nativeComputerTools,
     mcpServerIds: toolRefs.map((ref) => ref.id),
     productServerIds: environment.productServerIds ?? new Set<string>(),
     environment,

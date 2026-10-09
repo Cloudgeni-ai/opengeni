@@ -19,6 +19,7 @@
  * re-exports it); only types cross that edge.
  */
 import { z } from "zod";
+import { CUA_DESKTOP_TOOLS, isCuaDesktopModelTool } from "./cua-desktop-tools";
 import type { FirstPartyMcpToolName, SessionToolPolicy, ToolRef } from "./index";
 
 export const AGENT_CAPABILITY_IDS = [
@@ -599,6 +600,8 @@ export function resolveAgentToolFamilies(
           ];
     },
     allowsFunctionTool(name: string): boolean {
+      if (isCuaDesktopModelTool(name))
+        return !environment.unavailable?.includes("browser") && enabled("browser");
       if (!config) return true;
       const owner = (AGENT_FUNCTION_TOOL_CAPABILITIES as Record<string, AgentFunctionToolClass>)[
         name
@@ -1491,6 +1494,8 @@ export function projectAgentEffectiveTools(input: {
   /** Raw first-party names; other entries use model-facing names. */
   upfrontToolNames?: ReadonlySet<string>;
   firstPartyModelNames?: ReadonlyMap<FirstPartyMcpToolName, string>;
+  /** Native tools are attached only after selection and control-authority checks. */
+  nativeComputerTools?: boolean;
   mediaAttachment?: AgentMediaAttachment | undefined;
 }): AgentEffectiveTools {
   const { capabilities } = input.config;
@@ -1509,6 +1514,18 @@ export function projectAgentEffectiveTools(input: {
       source: "first_party",
       visibility: input.upfrontToolNames?.has(tool) ? "upfront" : "search",
     }));
+  if (input.nativeComputerTools) {
+    for (const tool of CUA_DESKTOP_TOOLS) {
+      const name = `interaction__cua_${tool.name}`;
+      if (!families.allowsFunctionTool(name)) continue;
+      tools.push({
+        name,
+        capability: "browser",
+        source: "first_party",
+        visibility: input.upfrontToolNames?.has(name) ? "upfront" : "search",
+      });
+    }
+  }
   const functionTool = (name: AgentFunctionToolName, source: AgentEffectiveToolEntry["source"]) => {
     const owner = AGENT_FUNCTION_TOOL_CAPABILITIES[name];
     if (owner === "media" && !mediaNames.has(name)) return;
