@@ -33,6 +33,104 @@ const rotatedControlToken = `control.${"d".repeat(48)}`;
 const rotatedViewToken = `view.${"w".repeat(48)}`;
 
 describe("Computer routes on the placement interaction server", () => {
+  test("native calls require control tokens, bind the URL resource, and replay through the shared journal", async () => {
+    await withServer(async ({ server, reference, getDriver }) => {
+      expect(
+        (
+          await request(server, "/v1/computer-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          })
+        ).status,
+      ).toBe(201);
+      let dispatches = 0;
+      const driver = getDriver() as ComputerSupervisorDriver;
+      driver.validateNative = async () => {};
+      driver.dispatchNative = async (call) => {
+        dispatches++;
+        return {
+          target: null,
+          ...reference,
+          tool: call.tool,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: call.arguments.large ? "A".repeat(41 * 1024 * 1024) : "native",
+              },
+            ],
+          },
+          outcome: "completed",
+          error: null,
+        };
+      };
+      const body = {
+        protocolVersion: 1,
+        operationId: randomUUID(),
+        ...reference,
+        targetId: null,
+        actor: { kind: "agent", subjectId: "agent:fixture" },
+        tool: "list_apps",
+        arguments: {},
+      };
+      const path = `/v1/computer-sessions/${reference.computerSessionId}/native-calls`;
+      expect((await request(server, path, { method: "POST", token: viewToken, body })).status).toBe(
+        401,
+      );
+      expect(
+        (
+          await request(server, path, {
+            method: "POST",
+            token: controlToken,
+            body: { ...body, computerSessionId: randomUUID() },
+          })
+        ).status,
+      ).toBe(409);
+      const first = await json(
+        await request(server, path, { method: "POST", token: controlToken, body }),
+      );
+      expect(first.data).toMatchObject({
+        state: "completed",
+        targetId: null,
+        observation: { tool: "list_apps" },
+      });
+      expect(
+        await json(await request(server, path, { method: "POST", token: controlToken, body })),
+      ).toEqual(first);
+      expect(dispatches).toBe(1);
+      expect(
+        (
+          await json(
+            await request(
+              server,
+              `/v1/computer-sessions/${reference.computerSessionId}/operations/${body.operationId}`,
+              { token: viewToken },
+            ),
+          )
+        ).data,
+      ).toEqual(first.data);
+      const largeBody = { ...body, operationId: randomUUID(), arguments: { large: true } };
+      const large = await json(
+        await request(server, path, { method: "POST", token: controlToken, body: largeBody }),
+      );
+      expect(large.data.state).toBe("completed");
+      expect(large.data.observation.result._meta.opengeniOutputTruncated).toBe(true);
+      expect(JSON.stringify(large).length).toBeLessThan(12 * 1024 * 1024);
+      expect(
+        (
+          await json(
+            await request(
+              server,
+              `/v1/computer-sessions/${reference.computerSessionId}/operations/${largeBody.operationId}`,
+              { token: viewToken },
+            ),
+          )
+        ).data,
+      ).toEqual(large.data);
+      expect(dispatches).toBe(2);
+    });
+  });
   test("closed RFB work remains busy until its queued native validation settles", async () => {
     await withRfbServer(async ({ server, reference, driver, received }) => {
       const grant = rfbGrantBody(reference, true);

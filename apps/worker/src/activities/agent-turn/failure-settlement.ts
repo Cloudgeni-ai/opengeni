@@ -21,6 +21,8 @@ import {
   SandboxLeaseSupersededError,
   isSessionEventPersistenceError,
   SANDBOX_SETUP_RECOVERY_LIMIT,
+  SubscriptionCoreCodexAccessLostError,
+  SubscriptionCoreCodexLeaseLostError,
   type CodexLeaseAccountStatus,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -43,6 +45,7 @@ import {
 } from "./subscription-capacity-arming";
 import { TurnExecutionPolicyDefinitionMismatchError, type Settings } from "@opengeni/config";
 import {
+  CodexReloginRequired,
   classifyCodexEncryptedArtifactRejection,
   classifyCodexEntitlementRejection,
   classifyCodexUsageLimitError,
@@ -65,6 +68,15 @@ import type {
   RunAgentTurnResult,
 } from "../types";
 import { CodexCredentialLeaseLostError, createTurnCredentialLeases } from "./credential-leases";
+import {
+  SubscriptionCoreCodexTurnError,
+  subscriptionCoreAccountRefusedFailure,
+  subscriptionCoreLeaseBusyChain,
+  subscriptionCoreLeaseBusyDelayMs,
+  subscriptionCoreLeaseBusyExhaustedFailure,
+} from "./codex-core-errors";
+import { recordCoreCodexRefusal } from "./codex-core-settlement";
+import { failOverCoreCodexTurn } from "./codex-core-failover";
 import { createTurnHistorySink } from "./history-sink";
 
 import { BudgetExhaustedError } from "./admission";
@@ -840,9 +852,18 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // generic terminal path: the DB transaction marks a still-current turn
   // recoverable, but a successor attempt or worker recovery makes this activity
   // stale and unable to clobber the shared turn/session.
+  // A turn placed by the shared subscription core never reaches the legacy
+  // Codex settlement below: its connection id is not a legacy credential row.
+  const coreCodex = billingState.isCodexTurn ? (providerTurn.codexSubscriptionCore ?? null) : null;
+  const legacyCodexTurn = billingState.isCodexTurn && coreCodex === null;
+  const coreCodexLeaseLost =
+    coreCodex !== null &&
+    (leases.codex.lost ||
+      error instanceof CodexCredentialLeaseLostError ||
+      error instanceof SubscriptionCoreCodexLeaseLostError);
   if (
     (leases.codex.lost || error instanceof CodexCredentialLeaseLostError) &&
-    billingState.isCodexTurn &&
+    legacyCodexTurn &&
     eventing.publish &&
     attempt.turnId &&
     eventing.turnStartedPublished &&
@@ -860,7 +881,9 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       ? "claude"
       : billingState.isXaiTurn && leases.xai.lost
         ? "xai"
-        : null;
+        : coreCodexLeaseLost
+          ? "codex"
+          : null;
   if (scopedLeaseLost && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
     await flushRuntimeBatcher();
     await historySink.reconcileConversationTruth({ requireDurable: true });
@@ -871,7 +894,12 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       attemptId: input.attemptId,
       reason: scopedLeaseLost + "_lease_lost",
       detail: {
-        provider: scopedLeaseLost === "claude" ? "claude-subscription" : "supergrok-subscription",
+        provider:
+          scopedLeaseLost === "claude"
+            ? "claude-subscription"
+            : scopedLeaseLost === "codex"
+              ? "codex-subscription"
+              : "supergrok-subscription",
       },
     });
     if (recovery.action === "stale") {
@@ -893,8 +921,49 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // 5xx does not classify here and therefore cannot consume another
   // subscription or duplicate a side effect.
   const usageLimit = isCodexTransportError(error) ? classifyCodexUsageLimitError(error) : null;
+  // A definitive account refusal on a core turn becomes a typed terminal
+  // failure that idles the session (settled below).
+  let coreAccountRefusal: SubscriptionCoreCodexTurnError | null = null;
+  if (coreCodex) {
+    // Core turns record the refusal against the leased connection (failure
+    // receipt, plus the quota, health or model-cooldown state that keeps
+    // placement away from it) and re-place the same turn within the per-turn
+    // failover bound (M3 PR 2a). Without a recorded refusal or a durable
+    // checkpoint they settle through the typed paths below instead.
+    const coreFailure = classifyCodexCredentialFailure(error);
+    // Only explicit plan evidence is an entitlement refusal; an unexplained
+    // 400 keeps the generic typed "request rejected" copy.
+    const planEntitlement =
+      !coreFailure && classifyCodexEntitlementRejection(error)?.evidence === "plan_entitlement";
+    const refusal =
+      coreFailure ??
+      (planEntitlement ? { kind: "plan_entitlement" as const, cooldownSeconds: null } : null);
+    if (refusal) {
+      const recorded = await recordCoreCodexRefusal({
+        db,
+        core: coreCodex,
+        lease: leases.codex,
+        failure: refusal,
+        credentialVersion: providerTurn.effectiveCodexCredentialVersion,
+        modelId: providerTurn.codexProductModelId ?? null,
+      }).catch(() => ({ receipt: false, health: false }));
+      if (recorded.receipt && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
+        const settled = await failOverCoreCodexTurn(deps, coreCodex, refusal);
+        if (settled) return settled;
+      }
+    }
+    coreAccountRefusal = hasErrorInCauseChain(error, SubscriptionCoreCodexAccessLostError)
+      ? subscriptionCoreAccountRefusedFailure("access_lost")
+      : refusal?.kind === "auth" || hasErrorInCauseChain(error, CodexReloginRequired)
+        ? subscriptionCoreAccountRefusedFailure("sign_in")
+        : refusal?.kind === "forbidden"
+          ? subscriptionCoreAccountRefusedFailure("forbidden")
+          : refusal?.kind === "plan_entitlement"
+            ? subscriptionCoreAccountRefusedFailure("entitlement")
+            : null;
+  }
   let codexCredentialFailure: CodexCredentialFailure | null =
-    billingState.isCodexTurn && providerTurn.effectiveCodexCredentialId
+    legacyCodexTurn && providerTurn.effectiveCodexCredentialId
       ? classifyCodexCredentialFailure(error)
       : null;
   // Plan entitlement evidence (an explicit plan refusal, or an HTTP 400 with no
@@ -915,7 +984,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     waitPayload: CodexPlanEntitlementFailurePayload;
   } | null = null;
   const codexEntitlementRejection =
-    billingState.isCodexTurn && providerTurn.effectiveCodexCredentialId && !codexCredentialFailure
+    legacyCodexTurn && providerTurn.effectiveCodexCredentialId && !codexCredentialFailure
       ? classifyCodexEntitlementRejection(error)
       : null;
   if (
@@ -1845,6 +1914,130 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // fallback covers failures before a credential lease existed, or a failed
   // durable checkpoint where replay would be unsafe. Keep the session usable,
   // but never synthesize another turn or walk an unfenced legacy pointer.
+  // A lease-busy chain that outlived its bound becomes a terminal failure.
+  const leaseBusyChain =
+    error instanceof SubscriptionCoreCodexTurnError &&
+    error.payload.code === "subscription_lease_busy" &&
+    error.payload.retryable
+      ? subscriptionCoreLeaseBusyChain(
+          attempt.subscriptionLeaseBusy,
+          attempt.executionGeneration,
+          Date.now(),
+        )
+      : null;
+  // An older attempt of this turn still holds its core lease. Retry right
+  // after that lease can expire, outside the provider recovery budget: this
+  // is ownership handover, not provider backpressure. The chain is bounded
+  // above (SUBSCRIPTION_CORE_LEASE_BUSY_MAX_MS).
+  let leaseBusyNotRecoverable = false;
+  if (
+    leaseBusyChain &&
+    !leaseBusyChain.exhausted &&
+    error instanceof SubscriptionCoreCodexTurnError &&
+    eventing.publish &&
+    attempt.turnId &&
+    eventing.turnStartedPublished
+  ) {
+    const continueDelayMs = subscriptionCoreLeaseBusyDelayMs(
+      error.payload.resetsAt,
+      Date.now(),
+      Math.random(),
+    );
+    let recovery: Awaited<ReturnType<typeof requestSessionTurnRecovery>>;
+    try {
+      await flushRuntimeBatcher();
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+      recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+        sessionId: input.sessionId,
+        turnId: attempt.turnId,
+        triggerEventId: attempt.triggerEventId!,
+        attemptId: input.attemptId,
+        reason: "subscription_lease_busy",
+        subscriptionLeaseBusy: {
+          startedAt: new Date(leaseBusyChain.startedAt).toISOString(),
+          executionGeneration: leaseBusyChain.executionGeneration,
+        },
+        detail: { ...error.payload, continueDelayMs },
+      });
+    } catch (recoveryError) {
+      // Keep the turn recoverable across a transient database failure, as
+      // the provider recovery path does.
+      const postClaimRecovery = postClaimDatabaseRecoveryFailure({
+        error: recoveryError,
+        turnId: attempt.turnId,
+        triggerEventId: attempt.triggerEventId!,
+        executionGeneration: attempt.executionGeneration,
+      });
+      if (postClaimRecovery) {
+        control.activityStatus = "recovering";
+        control.turnMetricOutcome = "recovering";
+        control.activityError = error;
+        throw postClaimRecovery;
+      }
+      throw recoveryError;
+    }
+    if (recovery.action === "stale") {
+      acknowledgeLostAttemptOwnership();
+      control.activityStatus = "cancelled";
+      control.turnMetricOutcome = "cancelled";
+      return claimedResult({ status: "cancelled" });
+    }
+    if (recovery.action === "recovering") {
+      acknowledgeRecoveryQuiescence();
+      await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+      control.turnMetricOutcome = "recovering";
+      control.activityStatus = "recovering";
+      control.activityError = error;
+      return claimedResult({ status: "recovering", continueDelayMs });
+    }
+    leaseBusyNotRecoverable = true;
+  }
+  // A shared-core placement outcome (no capacity, a waiting explicit choice,
+  // a paused cutover, or a consumer not yet on the core) or a definitive
+  // refusal from the leased account fails this turn with its typed copy and
+  // keeps the session usable for the next message.
+  const coreTurnFailure =
+    leaseBusyChain?.exhausted || leaseBusyNotRecoverable
+      ? subscriptionCoreLeaseBusyExhaustedFailure()
+      : error instanceof SubscriptionCoreCodexTurnError
+        ? error
+        : coreAccountRefusal;
+  if (
+    coreTurnFailure &&
+    !coreTurnFailure.payload.retryable &&
+    eventing.publish &&
+    attempt.turnId &&
+    eventing.turnStartedPublished
+  ) {
+    await flushRuntimeBatcher();
+    await historySink.reconcileConversationTruth();
+    if (
+      !(await eventing.settle!({
+        events: [
+          {
+            type: "turn.failed",
+            payload: { ...coreTurnFailure.payload, recovery: "user_message" },
+          },
+          { type: "session.status.changed", payload: { status: "idle" } },
+        ],
+        turnStatus: "failed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+      }))
+    ) {
+      return claimedResult({ status: "cancelled" });
+    }
+    control.turnMetricOutcome = "failed";
+    control.activityStatus = "idle";
+    control.activityError = error;
+    await deliverFailedChildTurnToParent(
+      { db, bus, settings, observability, wakeSessionWorkflow },
+      input.workspaceId,
+      input.sessionId,
+      attempt.turnId,
+    );
+    return claimedResult({ status: "idle" });
+  }
   if (usageLimit && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
     await flushRuntimeBatcher();
     await historySink.reconcileConversationTruth();
@@ -2253,4 +2446,17 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     attempt.turnId,
   );
   return claimedResult({ status: "failed" });
+}
+
+/** An error of the given class, directly or anywhere in the cause chain. */
+function hasErrorInCauseChain(
+  error: unknown,
+  type: abstract new (...args: never[]) => Error,
+): boolean {
+  let current = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (current instanceof type) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
 }

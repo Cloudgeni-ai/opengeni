@@ -1,10 +1,17 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { MaxTurnsExceededError, Runner, shellTool, tool } from "@openai/agents";
 import { SandboxAgent } from "@openai/agents/sandbox";
-import { functionCall, shellCall, ScriptedModel, testSettings } from "@opengeni/testing";
+import {
+  assistantMessage,
+  functionCall,
+  shellCall,
+  ScriptedModel,
+  testSettings,
+} from "@opengeni/testing";
 import {
   buildOpenGeniAgent,
   CompactionNeededError,
+  modelResponseHasVisibleText,
   prepareAgentTools,
   runAgentStream,
 } from "../src/index";
@@ -32,6 +39,7 @@ async function fixture(
     deferred?: boolean;
     siblingIsError?: boolean;
     beforeWaitResult?: () => Promise<void>;
+    inputWaitReplyGuard?: () => Promise<string | null>;
   } = {},
 ) {
   const calls: string[] = [];
@@ -55,6 +63,7 @@ async function fixture(
   const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: serverId }], {
     ...attemptScope,
     deferNonEagerUntilToolDemand: options.deferred,
+    ...(options.inputWaitReplyGuard ? { inputWaitReplyGuard: options.inputWaitReplyGuard } : {}),
     mcpFetchImpl: async (_url, init) => {
       if (init?.method !== "POST") return new Response(null, { status: 405 });
       const request = JSON.parse(String(init.body));
@@ -970,14 +979,16 @@ describe("trusted input wait runtime yield", () => {
         const model = new ScriptedModel([
           {
             output: [
+              // wait_for_input is a harness control tool: visible in the first
+              // request on every transport. The sibling stays deferred.
+              functionCall("opengeni__wait_for_input", {}, "wait-call"),
               deferred
                 ? functionCall(
                     "tool_invoke",
-                    { name: "opengeni__wait_for_input", arguments: {} },
-                    "wait-call",
+                    { name: "opengeni__sibling", arguments: {} },
+                    "sibling-call",
                   )
-                : functionCall("opengeni__wait_for_input", {}, "wait-call"),
-              functionCall("opengeni__sibling", {}, "sibling-call"),
+                : functionCall("opengeni__sibling", {}, "sibling-call"),
             ],
           },
           { error: new Error("a successful wait must never request another model step") },
@@ -989,7 +1000,9 @@ describe("trusted input wait runtime yield", () => {
           ...(deferred
             ? {
                 lazyToolTransport: "generic_dispatch",
-                toolPreparationReady: f.prepared.ready!.then(() => undefined),
+                ...(f.prepared.ready
+                  ? { toolPreparationReady: f.prepared.ready.then(() => undefined) }
+                  : {}),
               }
             : {}),
         });
@@ -998,6 +1011,14 @@ describe("trusted input wait runtime yield", () => {
         for await (const event of stream) events.push(event);
         await stream.completed;
         expect(model.calls).toBe(1);
+        if (deferred) {
+          // The first-party server lists wait_for_input, so it joins the
+          // first-request barrier instead of preparing in the background.
+          expect(f.prepared.ready).toBeUndefined();
+          const names = model.requests[0]!.tools.map((entry) => entry.name);
+          expect(names).toContain("opengeni__wait_for_input");
+          expect(names).not.toContain("opengeni__sibling");
+        }
         expect(stream.finalOutput).toBe("");
         expect(stream.cancelled).toBe(false);
         expect(stream.error).toBeNull();
@@ -1110,6 +1131,80 @@ describe("trusted input wait runtime yield", () => {
       }
     });
   }
+
+  test("a wait before any visible reply is refused, then registers after the model answers", async () => {
+    const refusal = "wait_for_input was not registered: write your reply first.";
+    let stream: Awaited<ReturnType<typeof runAgentStream>> | undefined;
+    const f = await fixture({
+      // The worker's guard: refuse while the response that asked to wait has no text.
+      inputWaitReplyGuard: async () =>
+        modelResponseHasVisibleText(
+          (stream?.state as { _lastTurnResponse?: unknown } | undefined)?._lastTurnResponse,
+        )
+          ? null
+          : refusal,
+    });
+    try {
+      const answer = "Two more pieces merged; the worker is on the next one.";
+      const model = new ScriptedModel([
+        // The status drafted only in reasoning: the wait alone would end the turn silently.
+        { output: [functionCall("opengeni__wait_for_input", {}, "silent-wait")] },
+        {
+          output: [assistantMessage(answer), functionCall("opengeni__wait_for_input", {}, "wait")],
+        },
+        { error: new Error("an accepted wait must never request another model step") },
+      ]);
+      const agent = buildOpenGeniAgent(f.settings, [], {
+        model,
+        mcpServers: f.prepared.mcpServers,
+        inputWaitYield: f.prepared.inputWaitYield,
+      });
+      stream = await runAgentStream(agent, "Status?", f.settings);
+      await consumeStream(stream);
+      expect(stream.error).toBeNull();
+      expect(model.calls).toBe(2);
+      // Only the answered wait reached the server; the refused one changed nothing.
+      expect(f.calls).toEqual(["wait_for_input"]);
+      expect(f.prepared.inputWaitYield?.requested).toBe(true);
+      expect(f.prepared.inputWaitYield?.yielded).toBe(true);
+      const results = stream.history.filter((item) => item.type === "function_call_result");
+      const refused = results.find((item) => item.callId === "silent-wait");
+      expect(JSON.stringify(refused?.output)).toContain(refusal);
+      expect(JSON.stringify(results.find((item) => item.callId === "wait"))).toContain(
+        "canonical wait receipt",
+      );
+      expect(JSON.stringify(stream.history)).toContain(answer);
+    } finally {
+      await f.prepared.close();
+    }
+  });
+
+  test("a reply guard that cannot decide lets the wait proceed", async () => {
+    const f = await fixture({
+      inputWaitReplyGuard: async () => {
+        throw new Error("history read failed");
+      },
+    });
+    try {
+      const model = new ScriptedModel([
+        { output: [functionCall("opengeni__wait_for_input", {}, "wait")] },
+        { error: new Error("an accepted wait must never request another model step") },
+      ]);
+      const agent = buildOpenGeniAgent(f.settings, [], {
+        model,
+        mcpServers: f.prepared.mcpServers,
+        inputWaitYield: f.prepared.inputWaitYield,
+      });
+      const stream = await runAgentStream(agent, "Status?", f.settings);
+      await consumeStream(stream);
+      expect(stream.error).toBeNull();
+      expect(model.calls).toBe(1);
+      expect(f.calls).toEqual(["wait_for_input"]);
+      expect(f.prepared.inputWaitYield?.yielded).toBe(true);
+    } finally {
+      await f.prepared.close();
+    }
+  });
 
   test("unrelated trusted tool cannot yield by returning a wait-shaped result", async () => {
     const f = await fixture();

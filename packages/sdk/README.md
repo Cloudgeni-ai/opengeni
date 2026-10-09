@@ -1160,6 +1160,19 @@ single-use capability after the catalog digest changes; instead it throws
 `OpenGeniToolReapprovalRequiredError` with the refreshed identity and digest so
 the trusted host can show approval again for the same operation id.
 
+Concurrent callers share one in-flight catalog request (`$catalog` and every
+call path). Each caller's `signal` cancels only its own wait; the shared request
+is cancelled only when every waiter has aborted, and a failed load is not
+cached. Calls rejected as stale on the same digest share one refresh started
+after the first such rejection while it remains the current catalog, and an
+explicit `$catalog({ refresh: true })` always starts a new request.
+
+A call's `catalogDigest` is checked against the exact catalog entry it invokes:
+the API may accept an unchanged entry from a catalog digest whose unrelated
+entries have since changed, and then echoes that digest in the response. A
+changed, removed, or no-longer-authorized target entry still returns
+`catalog_stale` before execution.
+
 Reapproval is valid only before the original capability is consumed. Once a
 call crosses that boundary, the server retains a hash-only tombstone for the
 operation id and rejects another approval with

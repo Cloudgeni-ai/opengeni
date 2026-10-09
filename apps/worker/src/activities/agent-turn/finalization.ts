@@ -42,6 +42,8 @@ import {
   type ResumedTurnSandbox,
 } from "../../sandbox-resume";
 import { createTurnCredentialLeases } from "./credential-leases";
+import { coreCodexModelCallCompletedAt, finalizeCoreCodexUsage } from "./codex-core-settlement";
+import { wakeSubscriptionCoreCodexWaitersAndDeliver } from "../subscription-core-codex-waits";
 import { drainPhysicalSandboxResumes } from "./sandbox-provision";
 import { safeErrorDiagnostic, safeErrorForTelemetry } from "./errors";
 import {
@@ -453,7 +455,36 @@ async function finalizeTurnAttemptSteps(
         );
       }
     }
-    if (providerTurn.effectiveCodexCredentialId) {
+    const coreCodex = providerTurn.codexSubscriptionCore;
+    if (coreCodex) {
+      // Shared-core turn: usage headers become a quota observation on the
+      // leased connection and a completed model call advances the binding's
+      // cache clock. The legacy Codex usage cache never sees a core id.
+      if (attempt.turnId && leases.codex.held) {
+        const finalized = await waitForTurnFinalizerStep(
+          finalizeCoreCodexUsage({
+            db,
+            core: coreCodex,
+            lease: leases.codex,
+            usage: providerTurn.latestCodexUsage,
+            credentialVersion: providerTurn.effectiveCodexCredentialVersion,
+            modelCallCompletedAt: coreCodexModelCallCompletedAt(providerTurn),
+          }).catch(() => undefined),
+          finalizerSignal,
+        );
+        // An observation that ended a stored exhaustion is a capacity change
+        // for every core waiter of the account (EP-T10).
+        if (finalized?.capacityRecovered) {
+          await waitForTurnFinalizerStep(
+            wakeSubscriptionCoreCodexWaitersAndDeliver(
+              { db, signalCodexCapacityWorkflow },
+              { accountId: input.accountId, reason: "quota_observed_available" },
+            ),
+            finalizerSignal,
+          ).catch(() => undefined);
+        }
+      }
+    } else if (providerTurn.effectiveCodexCredentialId) {
       // Part A: the latest scraped usage-header snapshot → the P2 usage cache. A
       // full duration-identified snapshot (parseCodexUsageHeaders gates on both),
       // so untyped response headers cannot mislabel weekly-only quota.

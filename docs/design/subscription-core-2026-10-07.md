@@ -247,7 +247,17 @@ request; it marks the lease for failover at the next model-call boundary.
   private sessions or Personal workspace. The check is a `SECURITY DEFINER`
   function that takes the session owner and the turn's human as explicit
   arguments and reads memberships through the existing per-transaction
-  capability pattern (0234), never through an empty subject.
+  capability pattern (0234), never through an empty subject. The v2 personal
+  placement helper also requires that provider's cutover row to be enabled,
+  the exact `session_access` capability to exist, effective personal access to
+  be enabled, and the frozen resource-authority generation to match an active,
+  non-revoked resource. It leaves only per-connection, owner/provider-scoped
+  capabilities in the transaction. Before drained cutover, this helper is
+  inert and v1 remains authoritative.
+- Ownerless sessions are shared-only: they may use organization- or
+  workspace-scoped shared connections only. The database rejects personal and
+  people-scoped connections for ownerless turns. Bindings remain denied because
+  they do not carry an exact accepted-turn identity.
 - Binding, lease, waiter and failure rows reference the session and inherit
   `session_visibility_isolation`. Core operations run with the acting turn's
   initiating human (`withSubscriptionPoolSessionAccess`, SUB-ACCESS-02..04).
@@ -339,6 +349,102 @@ Claude and SuperGrok continue through their existing paths and retain the M1
 shadow comparison. No web UI redesign or new visible control is in scope. The
 existing Codex account/session surfaces must continue to work through the
 compatibility projections and event aliases below.
+
+#### Rolling precursor and drained cutover sequence
+
+M3 begins with a rolling-compatible precursor that adds only nullable v2
+accepted-authority storage and an inactive Codex credential-refresh seam whose
+authorization is exact-turn and live-lease fenced before the provider call. It
+performs no backfill, secret copy, data move, or
+cutover-gate activation. Every provider continues to read its existing v1
+accepted authority, and old API/worker binaries remain compatible. The
+selector/materializer can be deployed only after this precursor is present;
+the final one-way migration still requires the complete runtime drain described
+below, then backfills v2 authority and activates the Codex cutover together.
+
+The precursor also repairs the gated ownerless-session authorization seam: an
+ownerless session is shared-only, must be workspace-visible, and may lease only
+shared organization- or workspace-scoped connections. Private sessions,
+human-initiated turns, personal connections, people-scoped connections, and
+ownerless session bindings remain rejected. This is a database authorization
+fix, not a v2 authority writer or an early selector activation.
+
+The nullable v2 accepted-authority slot is immutable to application sessions
+after acceptance, matching the existing v1 snapshot contract. Only the
+`session_turns` table owner can populate it during the later drained backfill;
+ordinary app-role writes, including writes nested under `SECURITY DEFINER`,
+cannot rewrite accepted authority. The precursor itself does not write v2
+snapshots.
+
+Accepted v2 snapshots store canonical lowercase membership UUIDs only. The
+`session_turns` CHECK and the TypeScript schema both reject other spellings,
+and the placement reader compares as `uuid`, so a stored snapshot can never
+look valid while silently failing to match.
+
+The v2 personal-placement helper never rewrites or removes a capability the
+caller already held in the same transaction (for example an earlier v1 Claude
+authorization for the same owner). It inserts with `ON CONFLICT DO NOTHING`
+and limits every cleanup to the rows it inserted itself.
+
+##### Codex credential refresh seam
+
+Codex OAuth refresh tokens rotate: once the provider accepts the old refresh
+token, only the returned token is valid. Refresh is therefore split into two
+calls inside one transaction around the provider request.
+
+1. `begin_subscription_codex_refresh` authorizes before the network call. It
+   takes the per-connection advisory key `subscription-refresh:<connection
+   id>`, then checks the exact accepted session and turn, session access
+   (owned, service or ownerless), the live lease holder and generation,
+   shared-only scope for ownerless turns, the frozen personal authority for
+   personal connections (through the same helper the lease guard uses, whose
+   authority source the drained cutover switches to v2), whether personal
+   connections are allowed now, and current visibility. It requires an active
+   `subscription`-kind Codex connection, returns the credential to rotate, and
+   mints a one-shot `codex_refresh_authorized` capability that no RLS policy
+   reads. A second `begin` for the same connection in one transaction is
+   refused, and a personal capability the caller already holds for another
+   turn is left untouched and refuses the refresh.
+2. `persist_subscription_codex_refresh` runs as soon as the provider returns.
+   It consumes that capability and writes under the still-held advisory lock and
+   the `refresh_generation` compare-and-swap only. A short-lived
+   `codex_refresh_write` capability exposes the exact row to that one UPDATE
+   (SELECT and UPDATE policies) and is removed before the function returns.
+   It runs with no lock timeout so a briefly held row delays rather than aborts
+   the write, and it does not bump the metadata `version`.
+
+`refresh_generation` is enforced for every writer by a trigger: it never
+moves backwards, it advances by at most one per write (so its safe-integer
+CHECK ceiling is unreachable), and any change to the stored credential
+advances it. An administrator replacing a credential during an in-flight
+refresh therefore makes that refresh's compare-and-swap fail instead of being
+overwritten. No writer may advance the generation without changing the
+credential: that would only make an in-flight refresh discard its rotated
+token.
+
+Decision (strictest design that does not strand a shared credential):
+persistence deliberately does not repeat lease-expiry, visibility, settings or
+authority checks. Refusing the write after rotation would leave the connection
+needing a fresh login for every user, while writing it back gives the turn
+nothing it does not already hold. Authorization for the turn's own use of the
+credential is still decided before the call; the rotated token is only stored.
+A connection disabled during the call keeps a usable token; a deleted row
+matches nothing. The caller must persist before any other fallible work,
+because a rolled-back transaction also discards the rotated token.
+
+Lock order: the advisory key first, then the connection row (taken
+`FOR NO KEY UPDATE` by the UPDATE, which does not block foreign-key checks).
+Neither function locks the lease row, and no row lock is held across the
+provider call, so lease renewal, release, takeover and connection
+administration never wait on a refresh. Any future writer that replaces a
+Codex credential, such as reconnect, should also take the same advisory key so
+it does not race the provider call itself.
+
+Residual risk, accepted for now: a rotated token is still lost if the
+surrounding transaction fails after `persist` (commit failure, a dropped
+connection, or an idle-in-transaction timeout during a slow provider call).
+Moving refresh to a session-level advisory lock with its own short persist
+transaction would remove it; that belongs with the refresh consumer.
 
 #### Runtime and consumer entry points
 
@@ -603,26 +709,47 @@ passing production-path tests.
 
 #### Focused implementation PR sequence
 
-Keep the implementation reviewable in three dependent changesets: (1) the
-provider-neutral production runtime repository, operation-lease support,
-assignment-policy relation, effective `inference_source` resolver and generic
-capacity wait/recovery/wake path on the new tables, with Codex still disabled
-behind the switch; (2) the Codex adapter, every listed Codex consumer, compatibility
-route/SDK/event projections and removal of the legacy Codex selector/branches;
-(3) the drained maintenance migration, cutover switch activation semantics,
-release-schema registration and deployment runbook. The migration and
-consumer code ship as one matched release and are activated only after the
-required drain. Retire legacy Codex executable paths in M3; retain old tables
-only where needed for later provider cutovers or the planned M6 schema cleanup.
+The provider-neutral runtime repository, operation leases, assignment-policy
+relation, effective `inference_source` resolver, generic wait/recovery path and
+gated placement-world foundation are delivered in the earlier M1/M2 PRs; they
+remain non-authoritative for Codex while the provider switch is disabled. Keep
+the remaining M3 implementation reviewable in five dependent changesets:
+(0) this rolling-compatible additive precursor: nullable v2 accepted-authority
+storage plus inactive exact-turn personal-placement and Codex refresh-write
+helpers; no v2 reader/writer, data move, or gate enablement, and v1 remains
+authoritative for every provider. Older workers continue unchanged. This
+precursor also supplies the ownerless shared-only authorization routines
+referenced by the already-merged gated foundation; those routines are exercised
+against migrated PostgreSQL rather than left as fail-closed placeholders;
+(1) the Codex chat selector plus credential materialization and refresh through
+the shared core, dormant behind the disabled provider switch;
+(2) the remaining Codex-specific consumers (compaction, transcription,
+realtime, media, tool gateway and billing attribution) and their compatibility
+route/SDK/event projections, still behind the switch;
+(3) the drained maintenance migration: v2 backfill, cutover row activation, no
+dual write, release-schema registration and deployment runbook; and
+(4) deletion of the legacy Codex decision path once (3) has made it
+unreachable. The selector and migration ship as one matched release and
+activate only after the required drain. Retire legacy Codex executable paths in
+M3; retain old tables only where needed for later provider cutovers or the
+planned M6 schema cleanup.
 
-The PR1 runtime-store migration is also maintenance-mode, although it moves no
-records and opens no `NO FORCE` window: the standalone runtime-posture contract
-is exact, so an older binary rejects the newly added FORCE-RLS relations and
-grants. Drain old API, control-worker, and turn-worker processes before applying
-0645, then start only binaries that include its matching runtime-posture and
-repository contract. The provider switch remains disabled; it cannot make this
-schema change a per-organization rolling rollout. PR3 remains the separate
-one-way Codex data-move and switch-activation maintenance cutover.
+The precursor corrects two authorization gaps found while reviewing the
+already-merged gated foundation: the ownerless-session authorization function
+was referenced but not defined, and its lease guard rejected the intended
+ownerless shared-only path. It also defines (but does not activate) the v2
+personal-placement helper. These repairs do not enable routing or change v1
+authority; the exact provider cutover gate remains off until the drained step.
+
+The earlier M2 runtime-store migration 0645 is maintenance-mode, although it
+moves no records and opens no `NO FORCE` window: the standalone runtime-posture
+contract is exact, so an older binary rejects the newly added FORCE-RLS
+relations and grants. Drain old API, control-worker, and turn-worker processes
+before applying 0645, then start only binaries that include its matching
+runtime-posture and repository contract. The provider switch remains disabled;
+it cannot make that schema change a per-organization rolling rollout. M3's
+final migration remains the separate one-way Codex data-move and
+switch-activation maintenance cutover.
 
 Do not merge a partial Codex caller cutover that can strand Codex on the
 core-disabled path. Each
@@ -630,6 +757,759 @@ implementation PR follows the repository's complex-change process: two
 independent reviews (authorization/RLS and correctness/compatibility), validated
 findings fixed, exact-head re-review, full green CI, head-SHA recheck, then
 protected merge. Rerun only failed jobs for verified transient failures.
+
+##### PR 1: Codex chat selector and credential materialization (dormant)
+
+PR 1 implements inventory EP-T01..T08 for Codex chat turns only: turn claim
+and model policy, placement, credential materialization, leases and dispatch
+fencing, failure settlement, finalization, usage and release. The EP-T09/T10
+wait, recovery and wake path is deferred to PR 2; until then a placement wait
+fails closed (below). PR 1 is reachable only when an organization's Codex
+cutover row is enabled, which no migration does before PR 3; the legacy
+selector is unchanged when no row exists. Each strict default below is the
+fail-closed reading of this plan and the contract where they were silent.
+
+- **Gate.** No row: the legacy path, byte-for-byte. Disabled row: the turn
+  fails with typed copy (`subscription_core_cutover_disabled`) and reads no
+  legacy Codex table. Enabled row: the core places the turn. Placement,
+  credential reads, refresh, quota observations and failure receipts re-check
+  the gate in their own transaction, so switch-off fails closed mid-turn. At
+  claim, an accepted Codex turn of an organization with any row no longer
+  reads the legacy active-credential flag (the catalog provider is installed
+  when enabled), and no turn of such an organization, whatever its model,
+  resolves the legacy Codex Apps designation. The claim reads the row with the
+  legacy read's bounded retry.
+- **Accepted authority.** Placement reads only the exact turn's immutable
+  `subscription_authority`; NULL is no personal authority. The owner tuple is
+  the session's recorded owner and membership and the turn's initiating human,
+  never a viewer, creator or live-membership inference. The core service
+  actor shows the session owner as its initiating human for a
+  service-initiated turn only so the owner's session rows are visible;
+  personal access follows the stored turn human, which stays NULL, so a
+  service turn never leases, reads or refreshes a personal connection. PR 1
+  adds no v2 writer, so post-cutover turns run on shared capacity only.
+- **Placement.** `withSubscriptionCorePlacementWorld` + `decidePlacement` over
+  the turn's accepted product model only (provider `codex`), with
+  cross-provider failover and fallback order forced off. Explicit choices run
+  on their account or wait (D-24); stickiness uses the binding's
+  `last_model_call_at`.
+- **Lease.** The lease generation is the turn's execution generation and the
+  holder is the existing per-attempt holder id. A retry of the same attempt
+  reuses its live lease while the connection can still serve (an expired one
+  is released and acquired afresh); any other holder of the same or a newer
+  generation is fenced; an older attempt's live lease is never taken over
+  before it expires (the core contract). That case
+  (`subscription_lease_busy`) recovers the same turn with its own pacing, at
+  the older lease's expiry plus up to five seconds of jitter and never more
+  than one lease TTL, outside the provider recovery budget. Lease renewal is
+  not fenced on the turn's current attempt, so the chain is bounded: the turn
+  records when a consecutive lease-busy chain started (it continues only from
+  the immediately previous execution generation), and after about three
+  lease TTLs the turn stops with typed copy and an idle session. A database
+  failure while recording that recovery keeps the turn recoverable, as on the
+  provider recovery path. Legacy took over immediately; this is the stricter
+  reading. Renewal, the pre-dispatch check
+  and release run under the core service actor for the exact turn.
+- **Binding.** Written only through the version compare-and-swap, only when
+  the connection or model changes, preserving `choice` and `only_this_model`;
+  a conflict retries placement at most three times. Ownerless sessions never
+  write a binding (the database refuses one without an exact turn).
+  Finalization advances `last_model_call_at` only after a model call that
+  produced a response.
+- **Events.** `codex.credential.selected` and `codex.account.switched` keep
+  their payload shape and attempt-fenced idempotency; the previous account
+  comes from the binding and `strategy` is the rotation mode. The legacy
+  `sessions.codex_last_credential_id` pointer is never written with a core id.
+- **Credential plaintext (the PR 3 mapping target).** `credential_encrypted`
+  is the same `encryptEnvironmentValue` blob as the legacy tables over the JSON
+  object `{access_token, refresh_token, id_token}`; `provider_account_id` is
+  the ChatGPT account id, `provider_state.isFedramp` the FedRAMP flag (absent
+  means false) and `plan_type` the recorded plan. The bearer snapshot keeps
+  the legacy `CodexCredentialTokenSnapshot` shape; its `credentialVersion` is
+  the connection's `refresh_generation`, which fences quota observations. A
+  credential that cannot be decoded fails with fixed text and no cause, so no
+  plaintext reaches an error message (the legacy decoder is fixed the same
+  way).
+- **Reads and refresh.** Every credential read requires the exact accepted
+  turn, the live lease and, for a personal connection, the frozen v2 entry
+  (through the v2 personal-placement helper). Ownerless turns never read a
+  personal or people-scoped connection. Refresh goes only through the
+  begin/persist seam, persisting immediately after the provider returns.
+  Concurrent refreshes in one process share one provider call per connection
+  and generation, but only connection-level outcomes (refreshed, superseded,
+  revoked sign-in, provider error) are shared; a lost lease or refused
+  authorization belongs to the turn that hit it, and a waiting turn refreshes
+  under its own lease instead. A permanent OAuth refusal marks the connection
+  `needs_relogin` through `fail_subscription_codex_refresh` (migration
+  0668), which consumes the same one-shot authorization as persist and writes
+  under the refresh-generation compare-and-swap.
+- **Personal authority repair.** The lease guard and
+  `begin_subscription_codex_refresh` authorized personal connections only
+  from the v1 Codex snapshot, so a v2-authorized personal placement could
+  never lease or refresh. Migration 0668 makes
+  `authorize_subscription_personal_access` use the exact v2 entry (owner
+  membership and current authority generation, personal connections allowed)
+  for Codex once its cutover is enabled. A Codex cutover row that exists but
+  is disabled grants no personal authority at all. Every other provider, and
+  Codex while no cutover row exists, keep the v1 check.
+- **Wait.** No core wake delivery loop exists yet, so a placement wait fails
+  the turn with typed copy (`subscription_capacity_unavailable` with the wait
+  reason and known reset), leaves the session idle for the next message and
+  wakes a waiting parent, instead of parking on a waiter nothing would wake.
+  No core waiter row is written. (Superseded by PR 2a, below: the turn now
+  parks on a durable core waiter.)
+- **Failure, usage and release.** Core turns never reach the legacy Codex
+  settlement. Lease loss recovers the same turn (`codex_lease_lost`), as for
+  Claude and SuperGrok. Quota and rate-limit refusals record a
+  generation-fenced quota observation and a turn failure receipt on the leased
+  connection (both require the live lease and the enabled gate), then settle
+  through the existing typed copy. A revoked sign-in, a 403 that survives
+  refresh, or an explicit plan-entitlement refusal records a receipt and fails
+  the turn with typed copy (`subscription_account_refused`), idling the
+  session and waking a waiting parent. Losing access mid-turn (the connection
+  or the turn's authority over it is no longer visible, enabled or usable) is
+  a distinct typed error with its own copy, never reported as a revoked
+  sign-in. Usage headers become a quota
+  observation at finalization, and the lease is released through
+  `releaseCurrent()`.
+- **Consumers still on PR 2.** A core Codex compaction turn fails closed
+  (`subscription_core_unsupported`); the Codex image tool is not exposed on a
+  core turn; the worker resolves no legacy Apps designation for a cutover
+  organization; the legacy model-connection check is skipped because placement
+  already enforced the connection and workspace model policy. In-turn remote
+  compaction and title generation use the core bearer and touch no legacy
+  table.
+
+Deferred to PR 2 (all behind the same gate; PR 2a below takes the first
+six items, PR 2b and PR 2c the rest):
+
+- core capacity waiters, the wake delivery loop and both-shape workflow
+  reconciliation (EP-T09/T10);
+- in-turn re-placement after a refusal, with the per-turn failover bound;
+- connection health and quarantine for 403 and plan-entitlement refusals
+  (today the connection stays active and sticky placement can return to it;
+  the next turn fails again with the same typed copy);
+- the v2 accepted-authority writer at acceptance;
+- persisting the plan carried by a rotated id_token (the refresh seam has no
+  plan column);
+- re-selection points (compaction completed, model changed);
+- the Codex Apps designation on the core;
+- the "Running on" session display and the legacy
+  `sessions.codex_last_credential_id` pointer, which core turns do not write;
+- compaction, transcription, realtime, image/video, reset credits, billing
+  attribution and the route/SDK/React compatibility projections.
+
+PR 3 precondition: `apps/api/src/workspace-tool-gateway.ts` and the
+`packages/core` capability overlays still resolve the legacy Codex Apps
+designation and active-credential state. PR 2 must move them to the core (or
+gate them on the cutover row as the worker does) before PR 3 enables any
+organization. PR 2b moves both, and the worker claim, onto the core
+designation (see "PR 2b" below).
+
+Migration 0668 follows the precursor's 0667; renumber with
+`scripts/renumber-migration.ts` if the shared ledger moves again.
+
+##### PR 2a: Codex chat waits, wakes, re-placement and health (dormant)
+
+PR 2 is split. PR 2a completes the Codex chat path on the core: EP-T06
+(in-turn re-placement), EP-T09/T10 (durable waits and wakes), connection
+health for refusals, re-selection points, plan persistence on refresh, and
+the v2 accepted-authority writer (EP-T11..T15). PR 2b takes everything else
+from the PR 2 list: compaction, transcription, realtime, media, the Apps
+gateway and designation, reset credits, billing attribution and the
+route/SDK/React compatibility projections. Everything below is reached only
+with an enabled Codex cutover row; without a row the legacy path is
+unchanged apart from a few extra reads: one indexed read of the (empty) core
+waiter table per workflow peek, `getCodexCapacityWait` and legacy Codex
+reconcile; one cutover-row read per non-edit human prompt and per non-child
+initial message (after a once-per-process `to_regprocedure` check that the
+writer routine exists); and one read of the causal turn per pure
+goal-continuation claim (not gated on the cutover, since the copy is a
+no-op when the causal value is NULL). Migration 0669 is rolling: nullable
+columns on tables the legacy path never reads, a trigger that only acts on
+the new `health_retry_at` column, and `SECURITY DEFINER` routines that
+refuse unless the cutover is enabled. It directly follows the stack's
+0667/0668 in dependency order; if those are renumbered again, this branch is
+rebased onto them and 0669 is renumbered with `--next` (no gaps), so it
+always stays after them.
+
+- **Waiter row.** A placement wait no longer fails the turn: the attempt is
+  closed and the same logical turn parks on the session's
+  `subscription_capacity_waiters` row, with the legacy Codex arm's lock order,
+  events (`codex.capacity.waiting`, `session.status.changed`), tool closure,
+  child "waiting for capacity" notice, goal fence (new `goal_id` and
+  `goal_version` columns) and false-resumption budget (the same
+  `codexCapacityRecoveryV1` turn metadata, ten resumptions with persisted
+  backoff). The row exists only while the turn waits: resuming or
+  superseding deletes it (and, by cascade, its outbox rows), so a timer or
+  signal that still carries an older waiter id finds nothing and is stale.
+  The next check is the earliest reset placement knows (authoritative); else
+  the earliest end of a health quarantine, if sooner than the bounded
+  control-plane backoff (1 minute doubling to 15). A check never calls the
+  provider; it only evaluates placement.
+- **Reconcile.** Two steps. Placement is evaluated for the exact accepted
+  turn without leasing or writing (`evaluateSubscriptionCoreCodexPlacement`),
+  then the waiter is settled under the session row locks: `run` makes the
+  blocked turn `recovering` (its next attempt places and leases normally);
+  `wait` updates the reason and schedule and acknowledges only the wake
+  revision the evaluation saw, so a capacity change that lands during the
+  evaluation is checked again at once; a turn whose accepted identity or
+  authority no longer admits core use is superseded
+  (`subscription_access_revoked`); a disabled cutover keeps the work parked
+  with the bounded backoff (maintenance behavior, never the legacy tables).
+  Pause leaves the waiter alone; a changed goal, session or turn supersedes
+  it at the next reconcile.
+- **Steer and Cancel.** As with the legacy waiter, the Steer and Cancel
+  transactions end the wait themselves: they delete the blocked turn's core
+  waiter (and, by cascade, its pending outbox rows) in the same commit that
+  supersedes or cancels the turn, so the Steer turn runs at once and a
+  cancelled session receives no further wakes. As defense in depth, the
+  workflow peek and `getCodexCapacityWait` treat a core row that no longer
+  belongs to the session's active turn in `waiting_capacity` as an immediate
+  check, whose reconcile supersedes and deletes it without placing; the
+  workflow never sleeps on such a row until its next check.
+- **Workflow compatibility.** The session workflow is unchanged. A core
+  waiter is addressed by the legacy Codex reference
+  `{ waiterId, generation, nextCheckAt, wakeRevision }` without a `provider`
+  field, so activity names, signal names and argument shapes are identical.
+  `getCodexCapacityWait`, `reconcileCodexCapacityWait` and the
+  `peekSessionWork` capacity branch look the waiter id up in the core table
+  first and fall back to the legacy Codex table; SuperGrok and Claude waits
+  never consult the core. An unobserved wake revision is reported as an
+  immediate check, which carries a lost signal across restart and
+  continue-as-new. The pinned legacy history and recorded core histories
+  (signal before peek, peek before signal, continue-as-new with a pending
+  wake, outbox retry) replay against the current bundle
+  (`test/integration/subscription-core-codex-wait.integration.ts`).
+- **Wakes.** `wakeSubscriptionCoreCodexCapacityWaiters` advances the wake
+  revision of every waiting core Codex waiter of the account. It enumerates
+  the organization's workspaces with the existing content-free
+  `list_organization_codex_workspace_ids` and writes in the trusted
+  empty-subject worker scope the outbox policy requires, never through legacy
+  active pointers. Each woken waiter gets a provider-neutral outbox row and a
+  generic session workflow wake in the same commit; the generic wake is the
+  crash-safe backstop the global dispatcher always delivers. Typed delivery
+  claims due rows (claim-generation fenced), signals `codexCapacityChanged`
+  with the waiter's wake revision through `signalWithStart`, then marks the
+  row delivered; a failed signal retries after 1 second doubling to 5
+  minutes and is given up after 8 attempts (the generic wake still reaches
+  the workflow). The retry is opportunistic, not scheduled: a row whose
+  retry time has come is delivered by the next wake or reconcile that drains
+  its workspace (every core reconcile drains its workspace's due rows first,
+  which also repairs a crash between the database wake and the signal); until
+  then the generic wake committed with the row is what reaches the workflow.
+  A host without a typed signaler claims nothing and leaves the rows pending
+  for a worker that has one. Producers in
+  this PR: a usage observation that ended a stored exhaustion
+  (finalization), a quarantine that returned to service, and a plan change
+  on refresh. A reached reset is the waiter's own timer. Wakes are
+  account-wide hints (no per-connection filter); every waiter re-places
+  under its own accepted turn, and the workflow's jitter spreads the herd.
+  Binding/pin, assignment and administrator health changes belong to the
+  PR 2b route adapters, which must call the same function.
+- **In-turn re-placement and bound (EP-T06).** A definitive refusal on a core
+  turn records a failure receipt and the state that keeps placement away from
+  the connection (below). After a durable checkpoint the lease is released
+  and the same accepted turn recovers with a new attempt
+  (`codex_credential_failover`), whose placement chooses again: another
+  eligible account (the binding moves and the existing
+  `codex.account.switched` is emitted), or a durable wait. An explicit choice
+  never fails over: its next placement waits on the chosen account (D-24).
+  The contract requires a bound but fixes none; **the bound is four refusals
+  per turn (at most three switches)**, counted over every refusal by any
+  account including repeats (the receipt keeps a per-connection `refusals`
+  count), so a turn cannot alternate between failing accounts (SUB-FAIL-11).
+  The recovery detail keeps the legacy switch counters (`failoverCount` n of
+  `maxFailovers` 3); the refusal that reaches the bound fails the turn with
+  `subscription_failover_exhausted`, `refusals: 4, maxRefusals: 4`, and an
+  idle session. The explicit-pin rule itself is PR 1's placement; PR 2a's
+  Postgres suite also proves a pin refused mid-turn (a 403) re-places to a
+  `pinned_account_unavailable` wait with the quarantine's end, never to
+  another account. A refusal whose
+  receipt could not be recorded, or whose checkpoint did not become durable,
+  is not replayed: the turn keeps PR 1's typed terminal copy. Mid-turn loss of
+  access (`subscription_core_access_lost`) stays terminal, the stricter
+  reading; re-placing it is left to a later change.
+- **Connection health.** Written only by `SECURITY DEFINER` routines that
+  require the enabled cutover, the exact accepted turn's session-access
+  capability in the same transaction and that turn's live lease on the
+  connection, under the refresh-generation compare-and-swap of the refused
+  credential (a refusal seen with an older token family cannot quarantine a
+  renewed one). They reuse the existing one-statement `codex_refresh_write`
+  capability; the application role has no other write path.
+  - A 401 that survived refresh marks the connection `needs_relogin`
+    (cleared only by a new sign-in; the refresh seam already marks a refused
+    OAuth refresh).
+  - A 403 refusal (only a 401 triggers a refresh first) sets
+    `status = 'error'` with `health_retry_at` one hour later. The next
+    placement or waiter check that could lease the connection returns due
+    quarantines to service and wakes the account's waiters; a waiter's next
+    check includes the quarantine's end. The recovery routine filters
+    explicitly rather than relying on row-level security (its owner may
+    bypass it): shared rows by `subscription_connection_visible` for the
+    turn's workspace, personal rows only for the owner's own turn (the
+    stored turn human is the owner, so a service or API-key turn in the
+    owner's session never qualifies) whose frozen v2 authority names the
+    row's owner membership and authority generation, exactly as placement
+    decides. Only quarantines this mechanism wrote are cleared: a
+    `BEFORE UPDATE` trigger drops `health_retry_at` whenever another write
+    changes the status or the error without setting it (an administrator, a
+    sign-in failure, or a failed refresh that marks the connection; a
+    successful refresh changes neither, so the quarantine stands), so an
+    unrelated later `error` is never cleared by a leftover retry time.
+  - A plan-entitlement refusal becomes a 24-hour cooldown of that model on
+    the connection's quota state (legacy 0524 parity), so placement excludes
+    only that model there and a waiter learns when it returns.
+- **Plan persistence.** `persist_subscription_codex_refresh_with_plan` is the
+  persist seam plus the plan from the rotated id_token, under the same
+  one-shot authorization and compare-and-swap; a missing plan keeps the
+  recorded one. A changed plan clears the connection's model cooldowns in
+  the same commit and the worker wakes the account's waiters.
+- **Re-selection points.** `model_changed` (the turn's accepted model is not
+  the bound model) and `compaction_completed` (the session's latest durable
+  `session.context.compacted` or `session.context.cleared` event occurred
+  after the binding's last recorded model call; an unknown input-token count
+  is not a compaction) are passed to placement and to waiter evaluation.
+  Both release only an automatic binding.
+- **v2 accepted-authority writer (EP-T11..T15).** With the Codex cutover
+  enabled, acceptance freezes the Codex entry of
+  `session_turns.subscription_authority` through
+  `subscription_codex_acceptance_authority_v2`; without an enabled cutover
+  nothing is computed and the column stays NULL (v1 authoritative). A
+  personal entry is written only for exact owner-caused acceptance: the
+  authenticated request subject (or, in the trusted session-start context,
+  the session's frozen subject creator) is the session owner, the owner
+  membership is active, and the session is private or in the owner's
+  Personal workspace. The generation is the single authority generation
+  across the owner's own personal Codex connections that can serve without
+  a human (`active`, or `error` under a time-bound quarantine), each joined
+  to its exact active authority as placement joins it; other providers'
+  authorities and connections waiting for a new sign-in or disabled do not
+  count. When those Codex connections still carry different generations (a
+  re-grant not yet applied to all of them), or there are none, the value is
+  empty (strictest: never a wider grant). Every other acceptance writes the
+  empty v2 value. Acceptance calls the routine only once
+  `to_regprocedure` finds it, so an enabled cutover row on a database that
+  predates 0669 writes nothing instead of failing the prompt.
+  Claude and SuperGrok keep v1. Coverage:
+  - human prompts (`submitHumanPromptInTransaction`): resolved for the human;
+    an edit copies its source turn's value; operator, service and API-key
+    actors get the empty value;
+  - the initial session message (`initializeSessionStartAtomically`):
+    resolved for the owner creator; a child session's first turn gets none;
+  - goal continuations: a delivery made only of goal continuations copies
+    its exact causal turn's value when that turn's human is this turn's human
+    (the claim derives the continuation's human from that causal turn, so the
+    human check is a defensive fence rather than a reachable branch).
+  Kept empty (shared capacity only) and left to PR 3, with the reason:
+  agent messages and Steer (EP-T14 asks for the receiving session's value,
+  which has no single frozen v2 source yet); batched internal updates and
+  child-result notices; child agents' first turns (EP-T13); scheduled tasks
+  and their firings (EP-T15: `scheduled_tasks`,
+  `scheduled_task_revision_authorities`, `session_system_updates`, the outbox
+  and `sessions.initial_*` have no v2 column yet); compaction turns (moved
+  with compaction in PR 2b).
+
+Known gaps after PR 2a: an ownerless session has no binding, so its
+re-placement emits no `codex.account.switched`; wakes are not filtered by
+connection; the core reconcile acknowledges at most the revision it
+evaluated, so a burst of wakes may cost one extra check; the "Running on"
+display and the legacy pointer stay PR 2b; the PR 3 precondition above
+(gateway and capability overlays) is unchanged.
+
+##### PR 2b: Codex Apps, session display, route projections and wakes (dormant)
+
+PR 2b is split again along a clean seam. **PR 2b** (this change) takes the
+Apps designation with the tool gateway and capability overlays, the "Running
+on" session display and the legacy pointer, the route/SDK/React compatibility
+projections and the wake triggers for pin, assignment and administrator health
+changes. **PR 2c** (stacked on PR 2b) takes compaction turns' accepted
+authority, transcription, realtime, image/video, reset credits, usage
+refresh and billing attribution, which share a connection-level credential
+seam that PR 2b does not need. Everything below is reached only with a Codex
+cutover row. Migration 0670 is rolling: one widened capability CHECK on the
+transaction-local capability table and `SECURITY DEFINER` routines that return
+nothing unless the account's Codex cutover is enabled.
+
+- **Disposition.** Every Codex route, the tool gateway, the capability
+  overlays and the worker claim read the account's cutover row first
+  (`readCodexCutoverDisposition`). No row: the legacy code runs unchanged,
+  after one extra primary-key read. Disabled row (maintenance): Codex routes
+  answer `503 upstream_unavailable` with `details.reason =
+  subscription_core_cutover_disabled`, no Apps designation resolves, session
+  reads show null Codex pointers, and nothing reads a legacy Codex table.
+  Enabled row: the core handlers below. The public error envelope is reused
+  (no new `ErrorCode`), so `check.ts` sees no contract change.
+- **Apps designation (PR 3 precondition).** Apps load by designation, never
+  through placement (§6.3). `subscription_codex_apps_designation_target`
+  returns the designated connection only while the designation still names
+  it, the connection is a shared Codex subscription connection, and it is
+  organization-scoped or assigned to this exact workspace. Decision (strict
+  fail-closed): a people-scoped or personal designation resolves nothing,
+  even though the merged 0642 write policy can store one, because Apps serve
+  every caller in the workspace, including ownerless and service sessions
+  and the tool gateway, which may use organization or workspace capacity
+  only. That helper returns a full connection row, so it is never executable
+  by the runtime role: 0670 and role provisioning revoke it after the
+  schema-wide grant, and the runtime posture check rejects a runtime role
+  that can execute it. On top of it:
+  `resolve_subscription_codex_apps_designation` (id and health only),
+  `read_subscription_codex_apps_credential` (ciphertext only while active)
+  and `begin/persist/fail_subscription_codex_apps_refresh`, which take the
+  same per-connection advisory key as chat refresh (so Apps and chat
+  refreshes of one connection serialize), persist only under the
+  refresh-generation compare-and-swap through the existing one-statement
+  `codex_refresh_write` capability (widened to allow a workspace-scoped write
+  with no session or turn), and mark `needs_relogin` on a permanent OAuth
+  refusal. Each request rechecks the designation under the existing
+  `codex-apps-settings:<workspace>` advisory lock that designate/clear also
+  take, so a clear cannot commit between the recheck and the request.
+  `apps/api/src/workspace-tool-gateway.ts`, both `packages/core` overlays
+  (`buildCapabilityCatalog` and the runtime capability settings) and the
+  worker claim use `resolveCodexAppsDesignationForRun` (legacy designation,
+  core designation, or none); `resolveCodexAppsCredentialIdForRun` is now
+  legacy-only and returns nothing for an organization with any cutover row.
+  The designate route authenticates the managed human before it reads the
+  cutover row, so an unauthenticated caller learns nothing about it.
+  Designate/clear on the core use the designation table's own policy: an
+  organization administrator, or a workspace administrator for a connection
+  that workspace manages, in any inference source mode. The core row is
+  deleted on clear, so the projected version returns to 0. Decision: a new
+  designation's version is the transaction-clock microsecond (never below
+  the stored version + 1), so it is greater than every earlier designation
+  of that workspace (designate and clear serialize on the settings lock) and
+  a stale clear always conflicts instead of removing a newer designation; no
+  tombstone or schema change is needed. Designate refuses (as not found,
+  404) every target the resolver could never serve: a personal connection,
+  a people-scoped shared one, or a workspace-scoped one not assigned to this
+  workspace, so settings never show an inert designation; the catalog still
+  requires an active connection. The in-process Apps refresh flight is keyed by
+  workspace, connection and refresh generation, because one
+  organization-scoped connection can be designated by several workspaces
+  and one workspace's `unavailable` must never reach another's request.
+  Authorization in every 0670 routine is an explicit predicate (account and
+  workspace equal the caller's context, enabled cutover, a designation row
+  for this workspace naming the connection, shared Codex subscription
+  connection, organization scope or an exact workspace assignment, active
+  status, and begin's one-shot authorization for persist/fail), never row
+  visibility, so the routines are equally safe when their owner bypasses RLS
+  (a superuser-owned routine) and when it is subject to FORCE RLS; the
+  authorization tests run under both the shared template and an
+  owner-migrated database. Gate-off cost: `resolveCodexAppsDesignationForRun`
+  takes what the caller knows (the organization, skipping the workspace
+  lookup; the cutover disposition, skipping the cutover read). The claim
+  reads its cutover row once and resolves the designation once for both the
+  capability overlay and the Apps credential; the overlay resolves nothing
+  while Apps are off for the deployment.
+- **Running on and the legacy pointer.** `GET .../sessions/:id/codex-accounts`
+  projects from the session's core binding, the active turn's live core
+  lease and the workspace's core pool: a running turn shows its leased
+  connection, a waiting turn only an explicit choice. Every response that
+  returns a Session (GET, list, lineage ancestors and children, and every
+  mutation that answers with the session, through the routes' one shared
+  response projection; the organization-wide session list; and MCP
+  `session_get`) fills
+  `codexPinnedCredentialId`/`codexLastCredentialId` by disposition
+  (`apps/api/src/codex-session-pointers.ts`): legacy ids unchanged without a
+  row; from the binding (explicit choice and bound connection) with an
+  enabled row, nulls for a core session without a binding; nulls in
+  maintenance. A session read never fails on Codex state: an unreadable
+  cutover or binding shows nulls and is logged. `sessions.codex_last_credential_id` is still never
+  written with a core id (it carries a legacy-table guard), and legacy reads
+  of it are unchanged for organizations without a row.
+- **Route projections (SUB-COMPAT-02).** Same paths, verbs, request fields
+  and response keys, from `subscription-core-codex-compat.ts` under the
+  caller's own RLS context: workspace status, accounts (with Apps), source
+  (get/set), activate, rotation settings, rename and allocator; organization
+  accounts, activate, settings and rename; session pin. Mappings: the
+  account pool lists shared subscription connections in the workspace's
+  scope and in its effective pool, as legacy did (nothing while Codex is
+  disabled there; only workspace-classified connections for the workspace
+  source and only organization-classified ones for the organization source;
+  both shared pools for automatic, which the core admits; an administrator's
+  wider visibility is filtered explicitly);
+  `source` is `workspace` when the connection has a workspace-pool
+  assignment here (or, without assignment rows, is managed here);
+  `activeCredentialId` is the effective primary connection; rotation on is
+  `spread`, off is `primary_first` (D-13); source modes are the workspace's
+  Codex provider override (`automatic` removes it, `workspace`/`organization`
+  set `inferenceSource`, `disabled` sets `enabled = false`), never connection
+  scope; the allocator toggle is the connection's `allocator_enabled` with
+  the legacy optimistic concurrency on `allocator_version`. Workspace
+  activate, rename and allocator accept only a connection in the
+  workspace's projected pool (the pool the accounts route lists), and
+  organization activate and rename only an organization account (shared,
+  managed by no workspace), as legacy did; both are checked before anything
+  is written. Settings writes update the existing row in place. Decision: a
+  missing organization row is inserted with the defaults the settings
+  resolver applies to absent values (empty rotation, providers and fallback
+  order, no cross-provider failover, personal connections allowed, no
+  personal fallback), because the organization row's CHECK requires them;
+  an upsert's proposed row would be refused before ON CONFLICT. A workspace
+  rotation override carries the effective primary (the organization's while
+  rotation is inherited), so toggling rotation never drops the account
+  unpinned sessions prefer. Status readiness
+  comes from the core pool with no live provider model probe (`valid` means
+  a serviceable account exists; `models` is the configured catalog), because
+  a connection-level credential read for the API belongs to PR 2c. A session
+  pin writes the binding (`explicit`, or back to `automatic` without touching
+  the connection so an unhealthy connection does not block "auto"), through
+  the binding guard: the connection must be active and eligible for that
+  session, and a personal connection only in its owner's own session. It
+  emits the legacy `codex.account.selection.changed` receipt under the
+  legacy pin's session-events lock contract (the canonical session lock
+  without the workspace control prefix, since a preference change admits no
+  inference and waiter reconciliation rechecks Pause). The pin locks
+  the binding row (`FOR UPDATE`) before its version compare-and-swap, so a
+  running turn's concurrent binding write makes it wait, not report the
+  choice as not found. Management
+  authority is the core tables' policies: an organization administrator, or
+  a workspace administrator for what that workspace manages (stricter than
+  the legacy `connections:write` alone, which the route still requires).
+  SDK and React types are unchanged because the wire shapes are.
+- **Wakes.** Pin, allocator, primary, rotation and source changes return a
+  wake that the route delivers after commit through PR 2a's
+  `wakeSubscriptionCoreCodexCapacityWaiters` (workspace-scoped for workspace
+  changes, account-wide for organization changes, and session-scoped for a
+  session pin, which wakes only that session's waiter as legacy did, with
+  the same outbox and generic-wake mechanics). No existing Codex route edits
+  workspace assignment; the M5 scope editor must call the same wake. A
+  failed wake never fails the committed change (every core waiter has its
+  own bounded recheck, 1 minute doubling to 15) and is logged.
+- **Not served on the core yet** (typed `409 conflict` with
+  `details.reason = subscription_core_route_unsupported`, no legacy state
+  read): live usage reads and refresh, the overview and reset-credit
+  prepare/redeem (all served by PR 2c); connect start/poll, disconnect one
+  or all (PR 3).
+
+Known gaps after PR 2b: personal connections are not listed in any account
+pool view (their rows are visible only inside the owner's exact accepted
+turn), so a private session running on one shows its id in
+`currentSelection` but a null `currentAccount`; plan-entitlement cooldowns
+are not projected into `planExcludedModels`; the projections do not show the
+legacy plan-change history.
+
+##### PR 2c: compaction, media, transcription, realtime, usage and billing attribution (dormant)
+
+PR 2c (stacked on PR 2b) moves the remaining Codex consumers that need a
+connection-level credential outside the chat-turn lease, including reset
+credits and the overview. Everything is
+reached only with a Codex cutover row; without one the legacy code runs
+unchanged after at most one extra cutover-row read (transcription
+availability without an account in its context also reads the workspace row
+to find the account). A disabled row is maintenance: these consumers fail
+closed and read no legacy Codex table. Migration 0671 is rolling: one widened
+capability CHECK on the transaction-local capability table, `SECURITY
+DEFINER` routines that return nothing unless the account's Codex cutover is
+enabled, and one added branch in the operation-lease guard.
+
+- **Connection-level credential seam (0671).**
+  `read_subscription_codex_connection_credential` and
+  `begin/persist/fail_subscription_codex_connection_refresh` read and rotate
+  one Codex subscription connection for an explicit account/workspace
+  context. With an operation id they require the caller's exact live
+  `subscription_operation_leases` row (operation, attempt, holder,
+  generation, connection), read under the caller's own row-level security;
+  a stale generation, holder or attempt can neither read, renew, refresh nor
+  release. A turn-bound operation sees the connection through that exact
+  accepted turn's visibility (a personal connection only under the turn's
+  frozen v2 entry); a session-bound or sessionless operation, and a read
+  without an operation (usage), are limited to shared organization- or
+  workspace-scoped connections in the workspace's scope. Refresh takes the
+  same advisory key as chat and Apps refresh (`subscription-refresh:<id>`),
+  persists only under the refresh-generation compare-and-swap through the
+  existing one-statement `codex_refresh_write` capability (minted in the
+  workspace-only form 0670 added), and marks `needs_relogin` on a permanent
+  OAuth refusal. Like the Apps seam it does not persist the plan carried by
+  a rotated id_token (chat refresh does).
+- **Compaction turns (EP-T16).** A core compaction turn places, leases,
+  refreshes and settles exactly like a chat turn; the fail-closed branch is
+  gone. The born-running compaction turn copies the immutable v2
+  `subscription_authority` of the turn it compacts after (NULL without a
+  cutover, so legacy is a no-op; a session with no started turn gets none).
+  An existing `remote_v2` session keeps its Codex model lock because PR 1
+  placement uses only the accepted model with cross-provider failover off.
+  Decision: a core placement wait does not park compaction on a capacity
+  waiter. As on the legacy path, the compaction turn is cancelled with
+  `requestPreserved: true`, reason `subscription_capacity_unavailable` and
+  the wait reason, and the session goes idle until its next work. The rest
+  of the compaction path (remote compaction, history sanitization, usage)
+  already ran on the core bearer and reads no legacy table; the serving
+  credential id it passes is the core connection id, used only for the
+  content-free account hash.
+- **Image operations (EP-T17, EP-N08..N10).** A core turn exposes the Codex
+  image tool again. Placement is the strictest available: the turn's own
+  live chat connection, under the turn's accepted authority. Each call holds
+  its own `image` operation lease keyed by the ledger's turn/tool-call
+  operation id (stable across retries), holder `image:<attempt>:<call>` and
+  the turn's execution generation, and renews it as the pre-dispatch fence.
+  The lease is taken inside the ledger's `provider_started` window, so a
+  lease that cannot be taken (busy, refused, cutover off) is a verified
+  pre-dispatch rejection that returns the ledger row to `prepared`; nothing
+  is reissued after an uncertain upstream write. The chat-turn lease and the
+  session binding are never read or written, so concurrent image calls do
+  not contend with the chat turn or each other. Video (EP-N11..N14): no
+  Codex video adapter exists and no video path reads Codex state, so nothing
+  changes.
+- **Transcription (EP-N01..N04).** On the core the Codex provider is a
+  sessionless operation for the authenticated caller with an explicit
+  account/workspace context: candidates are the workspace's shared
+  organization- or workspace-scoped connections that are active, allocatable
+  and in the effective inference pool, primary first. Each request takes a
+  `transcription` operation lease (generation 1, holder
+  `transcription:<request id>`), renews it before each upstream request and
+  releases it afterwards; a 401 permits one forced refresh and retry, as on
+  the legacy path. Decision: personal connections are refused for
+  transcription (the M2 guard already requires an exact turn for personal
+  operation leases, and no frozen owner authority exists for a sessionless
+  request); a people-scoped shared connection is refused for the same
+  reason. Provider ordering selects the initial provider only: once the
+  core provider is selected, every failure is `fallbackSafe: false`, so the
+  audio is never retried through another provider. Subscription
+  transcription stays non-chargeable (the provider has no deployment
+  funding). Availability is "a candidate exists"; maintenance reports
+  unavailable.
+- **Realtime (EP-N05..N07, EP-S17).** Each realtime negotiation resolves the
+  session's recorded owner (never the viewer), places one shared
+  organization- or workspace-scoped connection (the session binding's
+  explicit choice first, then the effective primary, then pool order,
+  preferring a plan with voice), and holds a `realtime` operation lease
+  (session-bound, no turn) through negotiation, with the operation renewal
+  as its pre-dispatch fence and refresh under the per-connection lock. The
+  broker, client protocol and HTTP error translation are the legacy ones; a
+  fence refusal surfaces as `credential_unavailable`; maintenance as
+  `subscription_disabled`. The chat binding is never written. Decision:
+  realtime uses shared capacity only, also for an owned session (the guard
+  admits personal connections only for an exact turn). 0671 adds one guard
+  branch so an ownerless session's realtime operation (no turn, no
+  initiating human) may lease shared organization- or workspace-scoped
+  capacity, matching ownerless turns; an ownerless session cannot borrow a
+  person's context. Catalog readiness for Codex Live on the core is "a
+  candidate exists in this workspace"; maintenance is not ready.
+- **Usage (EP-N21..N23).** Live usage (`GET .../codex/usage`, the effective
+  primary), per-account usage (by canonical id or legacy alias) and the
+  batched refresh run through the connection seam with the caller's
+  explicit organization/workspace context, read `/wham/usage`, and record the
+  windows as a quota observation fenced on the refresh generation of the
+  bearer that read them (`applyQuotaObservation`; an older generation does
+  not apply). An observation that ends a stored exhaustion wakes the
+  account's core waiters through PR 2a's wake. Response shapes and 404 copy
+  are the legacy ones. Plan and reset-credit summaries in the usage body are
+  returned but not persisted on the connection.
+- **Billing attribution (EP-N19..N20).** `recordModelCallFact` takes an
+  optional `connectionId`, written (and coalesced on conflict) into
+  `model_call_facts.connection_id`. Core Codex turns pass the leased core
+  connection for streamed responses, the aggregate fallback, compaction
+  summaries and session titles; legacy and non-subscription calls leave it
+  NULL. The subscription-use billing bypass is unchanged.
+
+- **Reset credits (EP-N18).** Prepare and redeem keep their routes,
+  payloads, HMAC confirmation, single-use ledger fences and
+  ambiguous-outcome recovery, over the same `codex_reset_redemption_attempts`
+  ledger (it has no foreign key on `credential_id`, so it holds the canonical
+  core id; legacy ids kept as canonical by the drained migration keep their
+  in-flight attempts and upstream idempotency keys). The route id may be the
+  canonical id or a legacy alias; it resolves to the canonical connection
+  before any check, and the confirmation binds the canonical id.
+  - Authority (design 6.3) is decided in SQL by
+    `subscription_codex_reset_authority`: the authenticated RLS subject must
+    be an organization administrator or an administrator of the workspace
+    that manages the shared Codex connection, and only with the cutover
+    enabled. The routine share-locks the connection through the
+    connection's own UPDATE policies (which admit exactly those
+    principals), so disconnect and credential replacement wait for the
+    ledger step. The claim, adopt and send-fence ledger functions take this
+    reader in place of the legacy `connected_by_subject_id` rule (an
+    injected authority; legacy callers pass nothing and are unchanged);
+    release and abandon touch only the attempt and are shared.
+  - Only a same-origin managed browser human may prepare or redeem: bearer,
+    MCP/service and scheduled callers are refused by the existing guard,
+    and an agent acting as a person, which the legacy route accepts, is
+    refused on the core.
+  - Decision: redemption is served only for a connection managed by the
+    requesting workspace. An organization-managed connection answers the
+    legacy 409 ("managed in Organization settings"), because the ledger's
+    per-credit fence is per workspace and an organization-level redemption
+    route does not exist yet.
+  - The bearer is read and refreshed through the 0671 connection seam under
+    `subscription-refresh:<id>`. Preflight, the DB-time send fence, the one
+    upstream idempotency key and claim release on an uncertain outcome are
+    the legacy sequence: an uncertain send is retried only with the same key.
+  - Completion (`completeSubscriptionCoreCodexResetRedemption`) records the
+    outcome and audit event and, for `reset` or `alreadyRedeemed`, clears
+    the stored exhaustion only when it was observed with the connection's
+    current refresh generation, then delivers a core wake after commit. The
+    legacy exhaustion columns and capacity outbox are never touched.
+- **Overview (EP-N21).** The core overview projects the workspace's core
+  pool. Each account's live usage (through the seam, as above) and reset
+  details (the seam bearer plus the provider inventory) settle
+  independently through a limiter of four provider calls, under the legacy
+  route deadline with a fallback from persisted core quota. Redemption flags
+  and recoveries come from the same SQL authority, for a same-origin browser
+  human only; any other caller sees `managed_human_unavailable` and no
+  redemption actions.
+
+Review fixes (round 1):
+
+- **Image operations are tied to the live turn attempt.** Both layers check
+  it. The worker calls the chat lease's dispatch fence
+  (`assertCurrentForDispatch`) before taking the image lease and again before
+  the provider call. In SQL, the operation-lease guard (at creation) and the
+  connection target (on every read, refresh and renewal) require the turn to
+  be `running` on exactly the lease's attempt and execution generation, with
+  a live chat-turn lease on the same connection. A cancelled turn, a
+  superseded generation or an attempt that was never active can neither
+  lease, read nor renew.
+- **No reliance on the routine owner's row-level security.** The target
+  routine's turn-bound branch checks visibility explicitly through
+  `subscription_connection_visible`. A personal connection additionally
+  needs the in-transaction `personal_access` capability for this exact turn
+  and personal connections allowed now, and an ownerless turn is limited to
+  shared organization- or workspace-scoped capacity. Leased sessions must be
+  visible. Renewal re-runs the full target check before extending a lease,
+  because a renewal touches only the expiry and the guard does not rerun.
+  The reset-authority routine and the refresh persist/fail routines already
+  decide explicitly. The suite runs the personal and revocation cases under
+  both the shared superuser-owned template and a `NOBYPASSRLS` migration
+  owner.
+- **Owner-only target helper.** `subscription_codex_connection_target` is
+  revoked from the application role in 0671 and again after role
+  provisioning's schema-wide grant, and the runtime posture check rejects an
+  executable helper.
+- **Image pre-dispatch failures.** Any failure before dispatch (a thrown or
+  refused lease acquisition, a lost chat lease, a failed renewal) is a
+  verified pre-dispatch rejection: the ledger row returns to `prepared` and
+  is never marked outcome-unknown. The holder id is a fixed-length hash of
+  the attempt and tool-call id.
+- **Attribution survives a deleted connection.** A foreign-key violation on
+  `connection_id` (the connection deleted mid-turn) retries the fact without
+  the attribution instead of dropping it.
+- **Realtime requires its account.** The broker takes the account
+  explicitly, so a disabled cutover always fails closed.
+- **Wake hints never fail a committed read.** Usage routes catch a failed
+  core wake delivery, as the overview does.
+- **Unreadable connections report no data.** A connection the caller's
+  workspace context may not read (personal or people-scoped) yields usage
+  `status: "no-data"` and reset details reported as unsupported, not an
+  error, keeping the response shape.
+
+Left to PR 3:
+
+- **Connect start/poll and disconnect (one or all).** Their core writers must
+  respect the redemption share lock (a disconnect waits on it) and, for a
+  credential replacement, take the `subscription-refresh:<id>` key.
+- **Organization-level reset redemption** for organization-managed
+  connections (see the decision above).
+- **One ledger across the legacy and core paths for reset redemption.** The
+  advisory locks and the per-credit lookup key on the credential id. While a
+  legacy id and its canonical core id differ (an alias), a legacy attempt and
+  a core attempt for the same credit do not see each other. The drained
+  migration must resolve ledger rows through aliases, or key the fence on
+  the provider account, so a credit can never be redeemed twice across the
+  cutover.
+- **Facts repair.** The Insights repair that recreates a missing model-call
+  fact from its usage event does not know the connection; a repaired fact
+  has a NULL `connection_id`.
 
 #### Verification plan
 

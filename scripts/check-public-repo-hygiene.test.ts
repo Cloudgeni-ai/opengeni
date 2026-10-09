@@ -7,10 +7,78 @@ import {
 } from "./check-public-repo-hygiene";
 
 describe("public repository hygiene", () => {
-  test("bounds upstream random-label exemptions to exact paths and bytes", () => {
+  test("preserves only the four byte-exact upstream license copyright contacts", () => {
+    const file = "packages/runtime/THIRD_PARTY_NOTICES";
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    const copyrightLines = [
+      `Copyright(c) 2012 - 2015 fengmk2 <${["fengmk2@", "gmail.com"].join("")}>`,
+      `Copyright (c) 2015-2020, Matteo Collina <${["matteo.collina@", "gmail.com"].join("")}>`,
+      `Copyright 2014–present Olivier Lalonde <${["olalonde@", "gmail.com"].join("")}>, James Talmage <james@talmage.io>, Ruben Verborgh`,
+      `Copyright (c) 2018 Zejin Zhuang <${["heineiuo@", "gmail.com"].join("")}>`,
+    ];
+    expect(auditPublicText(file, source)).toEqual([]);
+    for (const line of copyrightLines) {
+      expect(source.split("\n")).toContain(line);
+      // A copied contact line alone is not the reviewed license context.
+      expect(auditPublicText(file, line)).toEqual([
+        { file, line: 1, reason: "personal email address" },
+      ]);
+    }
+  });
+
+  test("bounds upstream license contacts to the exact notices path and all reviewed bytes", () => {
+    const file = "packages/runtime/THIRD_PARTY_NOTICES";
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    for (const [path, text] of [
+      ["fixture.txt", source],
+      ["packages/runtime/src/THIRD_PARTY_NOTICES", source],
+      [file, source.replace("agentkeepalive 4.6.0", "agentkeepalive 4.6.1")],
+      [file, `${source} `],
+      [file, source.slice(1)],
+      [file, source.replaceAll("\n", "\r\n")],
+    ]) {
+      expect(
+        auditPublicText(path!, text!).some(
+          (finding) => finding.reason === "personal email address",
+        ),
+      ).toBe(true);
+    }
+    const contacts = [...source.matchAll(/\b[\w.+-]+@gmail\.com\b/g)];
+    expect(contacts).toHaveLength(4);
+    for (const [contact] of contacts) {
+      const altered = source.replace(contact, `x${contact.slice(1)}`);
+      expect(Buffer.byteLength(altered, "utf8")).toBe(Buffer.byteLength(source, "utf8"));
+      expect(
+        auditPublicText(file, altered).some(
+          (finding) => finding.reason === "personal email address",
+        ),
+      ).toBe(true);
+    }
+  });
+
+  test("does not exempt private workspace metadata added to upstream license notices", () => {
+    const file = "packages/runtime/THIRD_PARTY_NOTICES";
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    for (const [metadata, reason] of [
+      [["private-user@", "gmail.com"].join(""), "personal email address"],
+      [["/home/", "private-license-owner/repo"].join(""), "non-generic home path"],
+      [[".claude/", "worktrees/private-branch"].join(""), "private worktree path"],
+      [[".agent/", "private-plan.md"].join(""), "private .agent document reference"],
+      [["OPE", "-123"].join(""), "internal issue reference"],
+    ]) {
+      expect(auditPublicText(file, `${source}\nworkspace metadata: ${metadata}`)).toContainEqual({
+        file,
+        line: source.split("\n").length + 1,
+        reason,
+      });
+    }
+  });
+
+  test("bounds upstream label exemptions to exact paths and bytes", () => {
     for (const file of [
       "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_010000.txt",
       "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_100000.txt",
+      "packages/contracts/src/cua-desktop-tools.gen.json",
     ]) {
       const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
       expect(auditPublicText(file, source)).toEqual([]);

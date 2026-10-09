@@ -1,4 +1,5 @@
 import type {
+  InboxSettings,
   ListInboxResponse,
   NativePushDevice,
   NativePushRule,
@@ -34,6 +35,14 @@ export interface PushData {
   subjectId?: string;
   rule?: NativePushRule;
   eventType?: string;
+  /** The session event the push is about; opening lands on it. */
+  sequence?: number;
+}
+
+function sessionPath(data: PushData): string {
+  return data.sequence
+    ? `/session/${data.sessionId}?at=${data.sequence}`
+    : `/session/${data.sessionId}`;
 }
 
 /*
@@ -127,7 +136,13 @@ export async function syncInboxBadge(inbox: ListInboxResponse): Promise<void> {
   const awake = inbox.items.filter(
     (item) => item.snoozedUntil === null || Date.parse(item.snoozedUntil) <= now,
   );
-  const count = awake.filter((item) => item.kind !== "notification" || item.unread).length;
+  const count = awake.filter(
+    (item) =>
+      item.kind === "question" ||
+      item.kind === "approval" ||
+      item.kind === "goal_paused" ||
+      item.unread,
+  ).length;
   await Notifications.setBadgeCountAsync(count).catch(() => undefined);
   const presented = await Notifications.getPresentedNotificationsAsync().catch(() => []);
   for (const notification of presented) {
@@ -326,7 +341,7 @@ export function NotificationRouting() {
         return;
       }
       if (data.workspaceId) setWorkspaceId(data.workspaceId);
-      router.push(`/session/${data.sessionId}`);
+      router.push(sessionPath(data));
     },
     [account, accounts, setWorkspaceId, switchAccount],
   );
@@ -338,7 +353,7 @@ export function NotificationRouting() {
     pending.current = null;
     const data = target.data;
     if (data.workspaceId) setWorkspaceId(data.workspaceId);
-    router.push(`/session/${data.sessionId}`);
+    router.push(sessionPath(data));
   }, [account?.id, setWorkspaceId, status]);
 
   // Each tapped notification opens once: one subscription for the app's life
@@ -431,4 +446,159 @@ export function NotificationRouting() {
   }, [client, status]);
 
   return null;
+}
+
+/**
+ * The Inbox section of Settings: what besides questions, approvals and agents'
+ * notes the active account's inbox keeps. The same settings as the web Inbox page.
+ */
+export function useInboxSettingsSection(): SettingsSection | null {
+  const { account, client, status } = useAccount();
+  const [settings, setSettings] = useState<InboxSettings | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  useEffect(() => {
+    if (status !== "ready") return;
+    let live = true;
+    client
+      .getInboxSettings()
+      .then((next) => {
+        if (live) setSettings(next);
+      })
+      .catch(() => {
+        if (live) setSettings(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [client, status, account?.id]);
+  const change = useCallback(
+    async (next: Partial<InboxSettings>) => {
+      if (!settings) return;
+      const previous = settings;
+      const wanted = { ...settings, ...next };
+      setSettings(wanted);
+      setProblem(null);
+      try {
+        setSettings(await client.updateInboxSettings(wanted));
+      } catch {
+        setSettings(previous);
+        setProblem("That setting couldn't be saved. Try again.");
+      }
+    },
+    [client, settings],
+  );
+  // A server that doesn't know these settings yet leaves them out: show only what it keeps.
+  const supportsReplies = typeof settings?.replies === "boolean";
+  const supportsPausedGoals = typeof settings?.pausedGoals === "boolean";
+  if (status !== "ready" || !settings || (!supportsReplies && !supportsPausedGoals)) return null;
+  return {
+    id: "inbox",
+    title: "Inbox",
+    footer:
+      problem ??
+      "Questions, approvals and agents' notes always reach your inbox. Replies stay until you swipe them away.",
+    rows: [
+      ...(supportsReplies
+        ? [
+            {
+              kind: "toggle" as const,
+              id: "replies",
+              title: "Replies",
+              subtitle: "Each session's latest reply",
+              value: settings.replies ?? false,
+              onChange: (on: boolean) => void change({ replies: on }),
+            },
+          ]
+        : []),
+      ...(supportsPausedGoals
+        ? [
+            {
+              kind: "toggle" as const,
+              id: "paused-goals",
+              title: "Paused goals",
+              subtitle: "When an agent pauses a goal",
+              value: settings.pausedGoals ?? false,
+              onChange: (on: boolean) => void change({ pausedGoals: on }),
+            },
+          ]
+        : []),
+    ],
+  };
+}
+
+/**
+ * Looking at a session reads its replies and agent notes in the inbox (they
+ * stay there until cleared). Needs-you items are untouched: those leave only
+ * when answered.
+ */
+export async function markSessionInboxRead(
+  client: OpenGeniClient,
+  sessionId: string,
+): Promise<void> {
+  const inbox = await client.listInbox().catch(() => null);
+  if (!inbox) return;
+  const unread = inbox.items.filter(
+    (item) =>
+      item.sessionId === sessionId &&
+      item.unread &&
+      (item.kind === "reply" || item.kind === "notification"),
+  );
+  if (unread.length === 0) return;
+  await Promise.all(
+    unread.map((item) => client.updateInboxItem(item.id, { seen: true }).catch(() => undefined)),
+  );
+  await syncInboxBadge({
+    ...inbox,
+    items: inbox.items.map((item) =>
+      unread.some((each) => each.id === item.id) ? { ...item, unread: false } : item,
+    ),
+  });
+}
+
+/**
+ * The person's mute on a top-level session's replies: muted, its replies stop
+ * reaching the inbox and the phone, while its notifications, questions and
+ * approvals still arrive. Null where it doesn't apply or the server can't say,
+ * so the menu only offers it where it works.
+ */
+export function useSessionRepliesMute(
+  client: OpenGeniClient,
+  workspaceId: string,
+  sessionId: string,
+  topLevel: boolean,
+): { muted: boolean; toggle: () => Promise<boolean | null> } | null {
+  const [muted, setMuted] = useState<boolean | null>(null);
+  const busy = useRef(false);
+  useEffect(() => {
+    setMuted(null);
+    if (!topLevel) return;
+    let current = true;
+    client
+      .getSessionInboxMute(workspaceId, sessionId)
+      .then((value) => {
+        if (current) setMuted(value.repliesMuted);
+      })
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [client, sessionId, topLevel, workspaceId]);
+  const toggle = useCallback(async () => {
+    if (muted === null || busy.current) return null;
+    busy.current = true;
+    try {
+      const value = await client.setSessionInboxMute(workspaceId, sessionId, {
+        repliesMuted: !muted,
+      });
+      setMuted(value.repliesMuted);
+      const inbox = await client.listInbox().catch(() => null);
+      if (inbox) await syncInboxBadge(inbox);
+      return value.repliesMuted;
+    } catch {
+      return null;
+    } finally {
+      busy.current = false;
+    }
+  }, [client, muted, sessionId, workspaceId]);
+  return topLevel && muted !== null ? { muted, toggle } : null;
 }

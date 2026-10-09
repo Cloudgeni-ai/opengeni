@@ -49,6 +49,39 @@ If a model has no explicit automatic limit, Opengeni uses
 0.9 and is clamped to 0.3–0.9. An explicit limit is capped at 90% of the raw
 window, matching Codex core.
 
+### Workspace preferences
+
+Open **Organization settings → Models → your workspace → Context & compaction**
+(including your Personal workspace). Pick the model and enter an input-token
+threshold, or leave it empty / choose **Use model default**. The page shows the
+model default, saved workspace override and effective value. Only workspace
+settings administrators can save; readers can inspect. Selecting a model here
+does not change any session's model or reasoning effort.
+
+Preferences apply when a subsequent turn attempt prepares its model, including
+existing sessions. An in-flight model call is unchanged. They never change the
+session's frozen portable/remote-v2 mode. The worker resolves the preference once
+for all model-facing paths in that attempt, including same-turn continuation.
+Provider usage anchors are still cleared after a checkpoint; a lowered threshold
+does not restore stale usage or cause an immediate compaction loop.
+
+The setting is `modelCompactionThresholds`, keyed by the exact product model ID
+(so API and subscription routes can differ). PATCH `/v1/workspaces/:workspaceId/settings`
+merges model keys atomically. Omission preserves a model; `null` removes only its
+override. Writes require whole numbers of at least 16,000 tokens. The effective
+value is bounded by both 90% of the raw window and the provider-safe input window.
+If a model's limits change, the saved preference remains visible but is clamped
+at execution. Malformed read values are ignored per model, not by resetting the
+whole workspace settings bag. The model catalog exposes `compactionPolicy` with
+default/override/effective/minimum/maximum tokens, separately from immutable model
+execution metadata.
+
+Haiku 5.5 defaults to 95,000 tokens; Opus 5.5 retains its 800,000-token default
+unless overridden (for example, to 250,000). These are proactive thresholds, not
+hard spending caps: checks run between steps and include provider-accounted
+context, so newly appended content or a large response may cross a price boundary.
+The independent request-byte guard described below always remains active.
+
 The Codex subscription catalog verified with Codex CLI 0.146.0 on 2026-07-29
 has the following limits, and billed GPT-5.6 Sol/Terra/Luna pin the same
 triple instead of the 1.05M deployment fallback:
@@ -96,6 +129,58 @@ CRC32 over its type and 13-byte data. The dimension-aware estimate is capped, an
 conservative bounded fallback. Inline image bytes or data-URL base64 therefore
 do not grow the text estimate linearly. A data URL inside ordinary textual
 content is still text and receives ordinary text accounting.
+
+## Claude request bytes and image-heavy recovery
+
+Request bytes are independent of model context tokens. Claude's Messages API
+accepts a 32 MB body; Opengeni checks the **final UTF-8 JSON**, after subscription
+identity additions, against a conservative 24,000,000-byte transport budget.
+This is not a local token estimate or an automatic-compaction preference.
+Each inline raster is independently bounded to 2,000 pixels per side and
+512 KiB of base64. Compression and, when necessary, further resizing depend
+only on that image, never the number of later images. Originals stay retained;
+coordinate-mapping notes describe the request-local rendition. A per-image
+limit alone cannot bound an accumulating conversation.
+
+On models with prefix-bound thinking, a checkpoint or resized-image projection
+opts into the documented `thinking-binding-controls-2026-08-01` beta with
+`prefix_mismatch_behavior: "drop_block"`. The provider, not the client, may omit
+only reasoning invalidated by the changed prefix. Signed blocks remain verbatim
+in durable history and in requests. The retained checkpoint/image makes that
+choice stable after restart; ordinary unchanged prefixes keep strict behavior.
+Responses expose only counts of dropped blocks by closed reason, not signatures
+or prompt data. This reset can lose old reasoning and cost new reasoning tokens;
+it is not a claim that a client-generated checkpoint preserves prefix binding.
+See Anthropic's [preserved thinking](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking).
+
+Both the preflight refusal and a real HTTP 413 before a response stream use the
+same worker-owned recovery. The worker checkpoints the largest complete earlier
+prefix that fits both the summary's token budget and at most half the rejected
+body's bytes (also capped at 24 MB). Fitting uses the same serializer and image
+projection as dispatch, without making inference calls. The complete remaining
+suffix stays verbatim, including unread images and paired tool calls/results;
+cuts never separate signed reasoning from its assistant/tool batch. The durable
+replacement appends that suffix after the checkpoint. Historical tool actions
+are not executed again, and neither a queue entry nor a new turn is created.
+
+The exact turn-attempt fence claims one size-recovery allowance in logical-turn
+metadata before requesting the summary. It survives worker restart, attempt
+replacement, and successful checkpointing. A second size refusal is terminal,
+not another automatic summary or replay. An irreducible prefix, empty/failed
+summary, non-shrinking replacement, cancellation, or stale attempt cannot replace
+active history. Explicit subsequent input or compaction can create a new attempt
+at the task; no automatic retry promises that irreducibly large new input fits.
+Portable Claude compaction also uses exact-byte prefix fitting when its normal
+checkpoint would otherwise be too large. Other provider protocols are unchanged.
+
+Diagnostics retain only total UTF-8 bytes, image count/base64 bytes, system/tool
+schema bytes, the budget, and an available provider request ID; they do not retain
+prompt/image contents or depend on full request capture. A stream error after HTTP
+200 and an unrelated file-upload 413 do not enter this pre-dispatch recovery.
+
+See `packages/runtime/src/anthropic-request-size.ts`,
+`packages/runtime/src/anthropic-compaction.ts`, and Anthropic's
+[request-size limits](https://platform.claude.com/docs/en/api/errors#request-size-limits).
 
 ## Model-facing tool output
 

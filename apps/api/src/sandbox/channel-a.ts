@@ -77,6 +77,7 @@ import {
   ChannelANotFoundError,
   ChannelAUnsupportedError,
   ChannelAUnavailableError,
+  SynchronousCommandOutcomeUnknownError,
   ChannelAValidationError,
   BrowserControlRequestError,
   BrowserControlTransportError,
@@ -1277,6 +1278,8 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
   }
   if (error instanceof ChannelAUnavailableError)
     return new HTTPException(503, { message: error.message });
+  if (error instanceof SynchronousCommandOutcomeUnknownError)
+    return new HTTPException(409, { message: error.message });
   if (error instanceof ChannelAValidationError)
     return new HTTPException(400, { message: error.message });
   if (error instanceof ChannelANotFoundError)

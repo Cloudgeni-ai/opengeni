@@ -102,6 +102,11 @@ const ICONS: Record<string, string> = {
   "shield-check": "ShieldCheckIcon",
   inbox: "InboxIcon",
   "circle-pause": "CirclePauseIcon",
+  "bell-ring": "BellRingIcon",
+  "alarm-clock": "AlarmClockIcon",
+  "arrow-up-right": "ArrowUpRightIcon",
+  camera: "CameraIcon",
+  "image-plus": "ImagePlusIcon",
 };
 
 const out: Record<string, Array<[string, Record<string, string | number>]>> = {};

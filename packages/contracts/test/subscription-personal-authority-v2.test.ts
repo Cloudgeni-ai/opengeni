@@ -56,6 +56,11 @@ describe("subscription personal authority v2", () => {
       { version: 1, personal: [] },
       { version: 2, personal: [{ ...validEntry, authorityGeneration: 0 }] },
       { version: 2, personal: [{ ...validEntry, ownerMembershipId: "not-a-uuid" }] },
+      // Uppercase would never match PostgreSQL uuid::text, so it is rejected.
+      {
+        version: 2,
+        personal: [{ ...validEntry, ownerMembershipId: "AAAAAAAA-1111-4111-8111-111111111111" }],
+      },
       { version: 2, personal: [validEntry, validEntry] },
       { version: 2, personal: [{ ...validEntry, subjectId: "user:someone" }] },
       { version: 2, personal: [{ ...validEntry, credentialId: "credential" }] },

@@ -9,6 +9,9 @@
     "ios": {
       "bundleIdentifier": "ai.opengeni.app",
       "supportsTablet": true,
+      "entitlements": {
+        "com.apple.developer.usernotifications.time-sensitive": true
+      },
       "infoPlist": {
         "UIApplicationShortcutItems": [
           {
@@ -31,6 +34,14 @@
       "expo-router",
       "expo-secure-store",
       "expo-web-browser",
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "Opengeni uses the camera so you can take a photo and send it to your agent.",
+          "photosPermission": "Opengeni lets you pick photos to send to your agent.",
+          "microphonePermission": "Opengeni uses the microphone for voice calls with your agent and to dictate your messages."
+        }
+      ],
       [
         "expo-notifications",
         {

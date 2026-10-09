@@ -1204,13 +1204,18 @@ Progressive disclosure is selected explicitly per resolved provider:
 Classification is origin, not transport. The same first-request set is eager on
 every path: the closed non-MCP allowlist (`exec_command`, `write_stdin`,
 `apply_patch`, `view_image`, `skill_read`, `request_human_input`, `list_models`,
-and `code_search` / provider `web_search` / `web_fetch` when enabled) plus MCP
-tools whose session `ToolRef.eager` is true. Every other function tool —
-deferred MCP, Browser/Computer, `generate_image`, `generate_video`,
-`get_video_generation_capabilities`, and later first-party additions — is
-searchable on Codex, OpenAI, and generic dispatch alike. Native hosted image
+and `code_search` / provider `web_search` / `web_fetch` when enabled), MCP
+tools whose session `ToolRef.eager` is true, and the authorized first-party
+harness control tools (goal lifecycle `opengeni__goal_set`, `goal_update`,
+`goal_complete`, `goal_pause`, `goal_resume`; `opengeni__command_read`,
+`opengeni__command_wait`; `opengeni__wait_for_input`). Those exact names are
+matched on the first-party server id only; a same-named tool on another server
+stays deferred. Every other function tool (deferred MCP, Browser/Computer,
+`generate_image`, `generate_video`, `get_video_generation_capabilities`, and
+later first-party additions) is searchable on Codex, OpenAI, and generic dispatch alike. Native hosted image
 generation stays a `hosted_tool` and is not in this function-tool hide set.
-`ToolRef.eager` remains a per-session MCP choice and is untouched.
+`ToolRef.eager` remains a per-session MCP choice and is untouched; the harness
+exception does not make the rest of the `opengeni` server eager.
 
 The sandbox's hosted-vs-function structured-tool setting does not select any of
 these modes. `OPENGENI_CODEX_TOOL_SEARCH_ENABLED` controls only Codex native
@@ -1847,7 +1852,7 @@ bounded to 2,000 pixels from their first use. The bound does not depend on image
 count, so crossing the many-image threshold never changes an older image's cached
 representation. Images within both dimension and encoded-byte limits remain
 byte-identical. Resized images preserve orientation and aspect ratio, use lossless
-PNG when it fits both the original byte size and the 10 MiB encoded limit, and
+PNG when it fits both the original byte size and the 512 KiB base64 limit, and
 otherwise use WebP with deterministic quality steps. Image payloads never grow.
 Dimension notes describe the transport image; coordinate tools must also account
 for any provider-side resizing. Original uploads, retained artifacts and canonical
@@ -1860,10 +1865,20 @@ cache-write rate, which must match its configured TTL (do not use a 5-minute wri
 price with `cacheTtl: "1h"`). Managed connections use 5-minute caching and external
 billing; Opengeni does not debit these tokens as credits.
 Managed Claude connections use per-model native profiles from
-`claudeNativeModelProfile` in `packages/config/src/index.ts`. Opus and Sonnet 5.5
+`claudeNativeModelProfile` in `packages/config/src/index.ts`. Opus, Sonnet and Haiku 5.5
 expose low, medium, high, xhigh and max, with medium as the new-selection default.
 Supported adaptive models use a 1M context window, 872k safe input, 800k compaction
 threshold and up to 128k output; the native request includes the 1M-context beta.
+Haiku 5.5 instead defaults to compaction at 95k tokens, with the same 1M/872k/128k
+context/input/output limits. Workspaces can override each exact model's threshold
+under Models → Context & compaction; see [the preference contract](context-compaction.md#workspace-preferences).
+Haiku's reviewed comparison rates change strictly above 100,000 prompt tokens
+(including cached input): $0.10/$0.50 input/output per million below or at that
+boundary, $0.50/$2.50 above it. Five-minute cache writes are 1.25× base input,
+one-hour writes 2×, and cache reads 10%, at both tiers. The threshold is not a hard
+price guarantee. [Official Haiku specifications](https://platform.claude.com/docs/en/models/haiku-5-5/overview)
+and [effort levels](https://platform.claude.com/docs/en/build-with-claude/effort)
+were checked on 2026-10-08. Comparison prices never alter debit authority.
 Smaller models retain their own output ceiling. Unknown IDs keep conservative
 200k context / 168k input / 150k compaction / 32k output and no adaptive thinking.
 Registry providers can explicitly declare additional verified model capabilities

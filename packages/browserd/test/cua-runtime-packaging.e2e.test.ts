@@ -12,11 +12,17 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_PACKAGING_
     const root = await mkdtemp(join(tmpdir(), "opengeni-cua-package-"));
     try {
       const staged = dirname(await stageCuaRuntime(process.arch));
-      for (const directory of ["cua-sdk", "node_modules"])
+      for (const directory of ["cua-sdk", "node_modules", "cua-driver", "cua-source.json"])
         await cp(join(staged, directory), join(root, directory), { recursive: true });
       const binary = join(root, "probe");
       const run = async (args: string[]) => {
-        const child = Bun.spawn(args, { cwd: root, stdout: "pipe", stderr: "pipe" });
+        const child = Bun.spawn(args, {
+          cwd: root,
+          stdout: "pipe",
+          stderr: "pipe",
+          // Development overrides must not bypass the immutable compiled assets.
+          env: { ...process.env, OPENGENI_CUA_DRIVER_BINARY: join(staged, "cua-driver") },
+        });
         const [stdout, stderr, exitCode] = await Promise.all([
           new Response(child.stdout).text(),
           new Response(child.stderr).text(),
@@ -37,7 +43,15 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_PACKAGING_
       if (signed.exitCode !== 0) throw new Error(signed.stderr);
       const loaded = await run([binary]);
       if (loaded.exitCode !== 0) throw new Error(loaded.stderr);
-      expect(JSON.parse(loaded.stdout)).toEqual({ permissionsRead: true });
+      expect(JSON.parse(loaded.stdout)).toEqual({
+        permissionsRead: true,
+        cursorEnabled: true,
+        workerStopped: true,
+      });
+      await rm(join(root, "cua-driver"));
+      const missingWorker = await run([binary]);
+      expect(missingWorker.exitCode).not.toBe(0);
+      expect(missingWorker.stderr).toContain("does not contain the CUA worker");
       await rm(join(root, "cua-sdk"), { recursive: true });
       const absent = await run([binary]);
       expect(absent.exitCode).not.toBe(0);

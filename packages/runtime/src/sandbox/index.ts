@@ -145,6 +145,7 @@ export {
   providerSupportsImmutableImageBuild,
   renewSandboxProviderExpiration,
   providerWorkspaceCapturePolicy,
+  providerWorkspaceCaptureIsPointInTime,
   type ProviderRegistration,
   type ProviderConstructionContext,
   type ProviderExactResumeMode,
@@ -441,6 +442,7 @@ export {
 // (FileSystem + Git + Terminal) over a live, resumed-by-id session handle. The
 // API constructs one per request around the box it just resumed; no ownership.
 // Agent-loop-free, so the API-direct control plane imports it from this leaf.
+export { SynchronousCommandOutcomeUnknownError } from "./synchronous-command";
 export {
   SandboxChannelAService,
   ChannelAPartialMutationError,

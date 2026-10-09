@@ -741,6 +741,39 @@ describe("embedded worker lifecycle contract", () => {
           public_execute: false,
           security_definer: true,
         },
+        ...[
+          "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
+          "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
+          "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)",
+          "begin_subscription_codex_refresh(uuid, uuid, uuid, uuid, text, text, uuid, text, bigint)",
+          "persist_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+          "fail_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text)",
+          "quarantine_subscription_codex_connection(uuid, uuid, uuid, uuid, uuid, text, bigint, bigint, text, text, timestamp with time zone)",
+          "recover_subscription_codex_connection_health(uuid, uuid, uuid, uuid)",
+          "persist_subscription_codex_refresh_with_plan(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone, text)",
+          "subscription_codex_acceptance_authority_v2(uuid, uuid, uuid, text)",
+          "resolve_subscription_codex_apps_designation(uuid, uuid)",
+          "read_subscription_codex_apps_credential(uuid, uuid, uuid)",
+          "begin_subscription_codex_apps_refresh(uuid, uuid, uuid)",
+          "persist_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+          "fail_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text)",
+          "read_subscription_codex_connection_credential(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+          "begin_subscription_codex_connection_refresh(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+          "persist_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+          "fail_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text)",
+          "subscription_codex_reset_authority(uuid, uuid, uuid, text)",
+        ].map((name) => ({
+          name,
+          owner: "opengeni_migrator",
+          can_execute: true,
+          public_execute: false,
+          security_definer: true,
+          configuration: [
+            name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)"
+              ? "search_path=pg_catalog, opengeni_private, pg_temp"
+              : "search_path=pg_catalog, public, opengeni_private, pg_temp",
+          ],
+        })),
       ],
     ];
     const db = {

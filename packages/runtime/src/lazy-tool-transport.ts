@@ -10,7 +10,11 @@ import {
   type StreamEvent,
   type Tool,
 } from "@openai/agents";
-import { isSearchableMcpFunctionTool, searchToolPool } from "./codex-tool-search";
+import {
+  isHarnessControlMcpFunctionTool,
+  isSearchableMcpFunctionTool,
+  searchToolPool,
+} from "./codex-tool-search";
 import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "./mcp-network";
 import {
   beforeModelRequest,
@@ -330,6 +334,10 @@ export class LazyToolRuntime {
       this.functionTools.set(tool.name, tool);
       if (ALWAYS_VISIBLE_BASE_TOOL_NAMES.has(tool.name)) continue;
       if (this.preparationIndependentToolNames.has(tool.name)) continue;
+      // Exact first-party harness control tools (goal lifecycle, command
+      // polling, wait_for_input) stay visible on every transport when the
+      // authorized opengeni server listed them; its other tools stay deferred.
+      if (isHarnessControlMcpFunctionTool(tool, this.mcpServerIds, modelServerIds)) continue;
       // Origin, not transport: deferred MCP plus every non-MCP function tool
       // outside the base set. ToolRef.eager still decides the MCP arm.
       const lazy =
@@ -628,8 +636,10 @@ export function lazyToolRuntimeForAgent(agent: object): LazyToolRuntime | undefi
  * Install native OpenAI/Azure or generic progressive disclosure on an agent.
  * Deferred schemas stay off the first-request tool block. A remembered raw
  * name binds through resolveMissingFunctionTool after the catalog is ready.
- * Classification is origin, not transport: the always-visible base set and
- * eager MCP tools stay in the first request; everything else is searchable.
+ * Classification is origin, not transport: the always-visible base set, eager
+ * MCP tools, and the first-party harness control tools (goal lifecycle,
+ * command polling, wait_for_input) stay in the first request when listed;
+ * everything else is searchable.
  * Generic dispatch adds stable ordinary tool_search/tool_invoke schemas.
  */
 export function installLazyToolRuntime(

@@ -70,6 +70,25 @@ export const SANDBOX_READINESS_REPLACEMENT_OUTCOMES = [
 export type SandboxReadinessReplacementOutcome =
   (typeof SANDBOX_READINESS_REPLACEMENT_OUTCOMES)[number];
 
+/**
+ * Closed reasons a due warm workspace checkpoint did not start. A capture that
+ * is merely not due yet (the interval throttle) or whose archive already covers
+ * the current generation is normal and never reported.
+ */
+export const WORKSPACE_CAPTURE_SKIP_REASONS = [
+  "no_persist_primitive",
+  "lease_not_warm",
+  "capture_policy",
+  "lease_fenced",
+  "attempt_fenced",
+  "reaper_held",
+  "capture_in_progress",
+  "holder_in_progress",
+  "mutation_in_progress",
+] as const;
+
+export type WorkspaceCaptureSkipReason = (typeof WORKSPACE_CAPTURE_SKIP_REASONS)[number];
+
 export type McpLifecyclePhase = (typeof MCP_LIFECYCLE_PHASES)[number];
 export type McpLifecyclePolicy = (typeof MCP_LIFECYCLE_POLICIES)[number];
 export type McpLifecycleOutcome = (typeof MCP_LIFECYCLE_OUTCOMES)[number];
@@ -117,6 +136,11 @@ export type RuntimeMetricsHooks = {
     backend: string;
     outcome: "completed" | "failed";
     durationSeconds: number;
+  }) => void;
+  /** A due warm checkpoint that could not start; see WORKSPACE_CAPTURE_SKIP_REASONS. */
+  onWorkspaceCaptureSkipped?: (input: {
+    backend: string;
+    reason: WorkspaceCaptureSkipReason;
   }) => void;
   /**
    * One physical MCP tools/call invocation. `tool` is the bounded

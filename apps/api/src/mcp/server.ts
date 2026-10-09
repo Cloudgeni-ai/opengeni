@@ -183,6 +183,7 @@ import {
   scheduledTaskCreateToolValidation,
 } from "./scheduled-task-input";
 import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
+import { readOnlySessionRefusal } from "../routes/session-history-imports";
 import { registerKnowledgeEntryTools } from "./knowledge-entries";
 import {
   FIRST_PARTY_TOOL_AUTHORIZATION,
@@ -355,6 +356,7 @@ import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { orchestrationFailureDiagnostic } from "./orchestration-failure-diagnostic";
+import { loadCodexSessionPointerProjection } from "../codex-session-pointers";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -449,7 +451,7 @@ function sessionCreateValidationFailureResult(error: z4.ZodError) {
   };
 }
 
-function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknown) {
+export function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknown) {
   if (
     tool === "session_create" &&
     error instanceof SessionCreateConnectionSelectionUnavailableError
@@ -458,6 +460,19 @@ function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknow
       error: {
         code: "session_create_connection_selection_unavailable",
         message: error.message,
+        retryable: false,
+      },
+    };
+  }
+  // An archived or imported session is read-only: say so, so the calling agent
+  // starts a new session instead of retrying.
+  const readOnly = readOnlySessionRefusal(error);
+  if (readOnly) {
+    return {
+      error: {
+        code: `${tool}_session_read_only`,
+        message: readOnly.message,
+        reason: readOnly.code,
         retryable: false,
       },
     };
@@ -4863,7 +4878,15 @@ function registerWorkspaceOrchestrationTools(
         }
         return json(
           boundSessionDetailMcp(
-            await withMcpEffectivePolicy(deps, grant.workspaceId, grant.subjectId, projected),
+            await withMcpEffectivePolicy(
+              deps,
+              grant.workspaceId,
+              grant.subjectId,
+              // The Codex pointers by cutover disposition, as REST shows them.
+              (await loadCodexSessionPointerProjection(deps.db, grant.workspaceId, [projected]))(
+                projected,
+              ),
+            ),
           ),
         );
       },

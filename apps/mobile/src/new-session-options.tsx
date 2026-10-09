@@ -280,11 +280,13 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
 }
 
 /**
- * The composer's + as a native menu (web's mobile + panel): photos and files,
+ * The composer's + as a native menu (web's mobile + panel): camera, photos and files,
  * then the new chat's repositories, where it runs and who can see it. Options
  * this app does not edit natively open on the web.
  */
 export function ComposerPlusMenu(props: {
+  /** Take a photo with the camera; the item shows only when this is given. */
+  onTakePhoto?: (() => void) | undefined;
   onPickImages: () => void;
   onPickFiles: () => void;
   options?: NewSessionOptions | undefined;
@@ -298,6 +300,9 @@ export function ComposerPlusMenu(props: {
       title: "",
       displayInline: true,
       subactions: [
+        ...(props.onTakePhoto
+          ? [{ id: "camera", title: "Take Photo", image: "camera" } satisfies MenuAction]
+          : []),
         { id: "photos", title: "Photo Library", image: "photo.on.rectangle" },
         { id: "files", title: "Files", image: "folder" },
       ],
@@ -427,7 +432,8 @@ export function ComposerPlusMenu(props: {
         const event = nativeEvent.event;
         const [kind, value] = event.split(/:(.*)/su);
         void Haptics.selectionAsync().catch(() => undefined);
-        if (event === "photos") props.onPickImages();
+        if (event === "camera") props.onTakePhoto?.();
+        else if (event === "photos") props.onPickImages();
         else if (event === "files") props.onPickFiles();
         else if (kind === "repository" && value) options?.toggleRepository(Number(value));
         else if (kind === "project" && value)

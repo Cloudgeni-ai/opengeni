@@ -11,6 +11,36 @@ describe("hasInbox", () => {
     expect(hasInbox({ subjectId: "dev" })).toBe(false);
     expect(hasInbox(null)).toBe(false);
   });
+
+  test("a local install's built-in human has an inbox; keys, agents and other modes do not", () => {
+    const human = { principalKind: "human_session" };
+    expect(hasInbox({ mode: "local", subjectId: "dev", workspaceGrants: [human] })).toBe(true);
+    expect(hasInbox({ mode: "local", subjectId: "dev", workspaceGrants: [] })).toBe(false);
+    expect(hasInbox({ mode: "configured", subjectId: "dev", workspaceGrants: [human] })).toBe(
+      false,
+    );
+    expect(
+      hasInbox({
+        mode: "local",
+        subjectId: "dev",
+        workspaceGrants: [human],
+        credential: { kind: "workspace_api_key" },
+      }),
+    ).toBe(false);
+    expect(
+      hasInbox({ mode: "local", subjectId: "dev", workspaceGrants: [{ principalKind: "agent" }] }),
+    ).toBe(false);
+    expect(
+      hasInbox({
+        mode: "local",
+        subjectId: "dev",
+        workspaceGrants: [{ ...human, metadata: { delegated: true } }],
+      }),
+    ).toBe(false);
+    expect(
+      hasInbox({ mode: "local", subjectId: "configured:host-user", workspaceGrants: [human] }),
+    ).toBe(false);
+  });
 });
 
 describe("InboxStore", () => {

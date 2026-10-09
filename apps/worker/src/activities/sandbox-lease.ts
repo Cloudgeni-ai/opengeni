@@ -28,6 +28,7 @@ import {
   retainedProviderCommandPersistence,
   adoptLegacyModalCheckpointArtifact,
   confirmDrainCold,
+  markWarmLeaseInstanceLost,
   appendSessionEventToSandboxGroup,
   bindRetainedProcessProviderIdentity,
   claimWorkspaceArchiveCapture,
@@ -67,6 +68,7 @@ import {
   reapStaleLeaseHoldersGlobal,
   requestDueSandboxRotationsGlobal,
   readSandboxRotationBacklog,
+  readSandboxCheckpointStaleness,
   readRecentSandboxRecoveryObservations,
   workspaceArchiveCaptureDeadlineElapsed,
   retainedProcessReconciliationProof,
@@ -92,7 +94,10 @@ import {
   type ConnectedMachineBackgroundCommandClaim,
   type ConnectedMachineBackgroundCommandProof,
 } from "@opengeni/db/session-background-commands";
-import { sandboxWarmRateMicrosPerSecond } from "@opengeni/config";
+import {
+  sandboxDeadlineMandatoryCaptureLeadMs,
+  sandboxWarmRateMicrosPerSecond,
+} from "@opengeni/config";
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import { captureConnectedCommandOutput } from "../sandbox-routing";
 import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
@@ -124,6 +129,7 @@ import {
   parseExecBannerExitCode,
   prepareProviderForTeardownAfterCapture,
   providerWorkspaceCapturePolicy,
+  providerWorkspaceCaptureIsPointInTime,
   resolveModalCheckpointProviderBindingForLiveSandbox,
   resolveModalCheckpointProviderBinding,
   findModalProviderCreateReceipt,
@@ -181,6 +187,7 @@ import {
   recordSandboxProviderMissingBeforeCapture,
   recordSandboxRecoveryObservationGauges,
   recordSandboxRotationBacklogGauges,
+  recordSandboxCheckpointStalenessGauges,
   recordTurnsQueuedGauge,
   recordVerifiedSignupTrialDeploymentFlagGauge,
   recordManagedAuthNewSignupsSwitchGauge,
@@ -581,6 +588,7 @@ export function createSandboxLeaseActivities(
       const timing = sandboxDrainTiming(settings);
       const commandContainment = {
         idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
+        deadlineMandatoryCaptureLeadMs: sandboxDeadlineMandatoryCaptureLeadMs(settings),
         onCommandContainment: (outcome: Parameters<typeof recordSandboxCommandContainment>[1]) =>
           recordSandboxCommandContainment(observability, outcome),
         onCommandContainmentError: (error: unknown) => {
@@ -1642,10 +1650,18 @@ async function reconcileTerminalRetainedProcesses(
   const drainBudget: RetainedProcessDrainBudget = {
     until: Date.now() + RETAINED_PROCESS_OUTPUT_DRAIN_SWEEP_BUDGET_MS,
   };
+  // Boxes already retired as lost in this batch: their other commands were
+  // settled by that same transaction and need no probe of their own.
+  const lostBoxes = new Set<string>();
   for (const claim of claims) {
     let process = claim.process;
+    if (lostBoxes.has(`${process.leaseId}:${process.leaseEpoch}:${process.providerInstanceId}`))
+      continue;
     const expected = retainedProcessSettlementIdentity(process);
     let proof = retainedProcessReconciliationProof(process);
+    // The exact current box itself answered NotFound to this probe: that is
+    // loss proof for the whole box, not just this command.
+    let wholeBoxGone = false;
     const processScope = {
       accountId: process.accountId,
       workspaceId: process.workspaceId,
@@ -1911,6 +1927,10 @@ async function reconcileTerminalRetainedProcesses(
               throw new Error("Deadline cancellation no longer owns its rotating lease");
             if (!probeOutcome.ok) throw probeOutcome.error;
             observation = probeOutcome.value;
+            wholeBoxGone =
+              observation.status === "proved" &&
+              observation.proof.outcome === "lost" &&
+              observation.proof.reason === "provider_instance_not_found";
             if (supervised) {
               supervisionMetric(
                 (await commandPersistence.loadSupervisionReceipt())
@@ -1988,6 +2008,79 @@ async function reconcileTerminalRetainedProcesses(
       }
     }
 
+    if (wholeBoxGone) {
+      // Settle every blocker of the exact lost box in one transaction: all its
+      // commands, open requests, PTYs and process holders, then cold the lease
+      // and wake waiters. Settling one command per probe took a 20-per-sweep
+      // queue 11 minutes for 35 commands in staging session 5040c525 and kept
+      // the session waiting on a box that was already gone.
+      // Commands of this box that a closed turn never adopted get their
+      // session background record first, exactly as their own claim would
+      // have, so the agent hears about them when the box settles below.
+      const boxKey = `${process.leaseId}:${process.leaseEpoch}:${process.providerInstanceId}`;
+      for (const other of claims) {
+        const sibling = other.process;
+        if (
+          other === claim ||
+          `${sibling.leaseId}:${sibling.leaseEpoch}:${sibling.providerInstanceId}` !== boxKey ||
+          sibling.ownerActorKind !== "turn" ||
+          sibling.providerBackend !== "modal" ||
+          other.ownerState.startsWith("background_") ||
+          retainedProcessReconciliationProof(sibling)
+        )
+          continue;
+        try {
+          await recoverManagedSessionBackgroundCommand(db, {
+            accountId: sibling.accountId,
+            workspaceId: sibling.workspaceId,
+            sessionId: sibling.sessionId,
+            processId: sibling.id,
+            expected: retainedProcessSettlementIdentity(sibling),
+            reconciliationClaimId: other.claimId,
+          });
+        } catch (error) {
+          observability.warn("sandbox reaper: retained-command background recovery failed", {
+            processId: sibling.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      try {
+        const marked = await markWarmLeaseInstanceLost(db, {
+          accountId: process.accountId,
+          workspaceId: process.workspaceId,
+          sandboxGroupId: process.sandboxGroupId,
+          expectedEpoch: process.leaseEpoch,
+          expectedInstanceId: process.providerInstanceId,
+          expectedBackend: process.providerBackend,
+        });
+        if (marked.status === "marked") {
+          lostBoxes.add(`${process.leaseId}:${process.leaseEpoch}:${process.providerInstanceId}`);
+          recordRetainedProcessReconciliation(observability, "provider_lost_whole_box");
+          if (marked.backgroundCommandEvents?.length) {
+            await publishDurableSessionEvents(
+              bus,
+              process.workspaceId,
+              marked.backgroundCommandEvents,
+              (error) => {
+                observability.warn("sandbox reaper: lost-box command event fanout failed", {
+                  sandboxGroupId: process.sandboxGroupId,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              },
+            );
+          }
+          continue;
+        }
+      } catch (error) {
+        observability.warn("sandbox reaper: whole-box loss settlement failed", {
+          processId: process.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      // Stale (a draining drain or another observer owns the box): fall back
+      // to this command's own exact settlement below.
+    }
     try {
       const settlement = await settleRetainedProcess(db, {
         accountId: process.accountId,
@@ -2688,6 +2781,17 @@ async function refreshQueueLeaseAndCreditGauges(
     ),
     refreshSandboxInventoryGauge(
       observability,
+      "checkpoint_staleness",
+      "checkpoint-staleness",
+      async () => {
+        recordSandboxCheckpointStalenessGauges(
+          observability,
+          await readSandboxCheckpointStaleness(db),
+        );
+      },
+    ),
+    refreshSandboxInventoryGauge(
+      observability,
       "retained_processes",
       "retained-process",
       async () => {
@@ -3332,6 +3436,8 @@ async function terminateDrainableBox(
         liveness: "draining",
         captureTimeoutMs,
         minIntervalMs: 0,
+        pointInTimeCapture: providerWorkspaceCaptureIsPointInTime(backend, lease.resumeState),
+        deadlineMandatoryCaptureLeadMs: sandboxDeadlineMandatoryCaptureLeadMs(settings),
         providerReplaySafe: capturePolicy?.takeover === "same_request",
         takeoverSafe: capturePolicy !== null && capturePolicy.takeover !== "exclusive",
       });
@@ -3619,6 +3725,9 @@ async function terminateDrainableBox(
       ...(captureClaim ? { expectedCaptureId: captureClaim.id } : {}),
       providerMissingBeforeCapture: providerMissing,
       idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
+      // Mirrors terminateProviderBox: a selfhosted machine is never stopped.
+      providerStopped:
+        managedProvider && lease.backend !== "selfhosted" && lease.resumeBackendId !== "selfhosted",
     },
   );
   // The command terminal events and agent inputs are already durable in the

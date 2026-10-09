@@ -83,6 +83,18 @@ type DirectRetainedProcessRoute = {
   routeEpoch: number;
 };
 
+/** Inline filesystem subprocesses stay durably retained for cancellation and
+ * recovery, but are not model-visible session background commands. */
+export function directRetainedProcessBackgroundCommand(
+  process: Pick<RoutingRetainedProcess, "id">,
+  operation: string,
+  purpose?: "synchronous_filesystem",
+): { commandId: string; command: string } | undefined {
+  return purpose === "synchronous_filesystem"
+    ? undefined
+    : { commandId: process.id, command: operation };
+}
+
 /** API-direct requests always use active-route authority. The default active
  * pointer is represented by a null target id; it is not a home-route write. */
 export function directRetainedProcessMatchesBackend(
@@ -297,6 +309,7 @@ export function wrapChannelABoxWithRouting(
         admission,
         outcome,
         retainedProcess,
+        retainedProcessPurpose,
       }: {
         op: string;
         backend: ResolvedActiveBackend;
@@ -304,6 +317,7 @@ export function wrapChannelABoxWithRouting(
         outcome: "resolved" | "rejected" | "outcome_unknown";
         result?: unknown;
         retainedProcess?: RoutingRetainedProcess;
+        retainedProcessPurpose?: "synchronous_filesystem";
       }): Promise<void> => {
         if (admission === null) return;
         if (
@@ -326,6 +340,11 @@ export function wrapChannelABoxWithRouting(
           throw new Error("API-direct workspace mutation settlement lacked its bound admission");
         }
         if ((outcome === "resolved" || outcome === "outcome_unknown") && retainedProcess) {
+          const backgroundCommand = directRetainedProcessBackgroundCommand(
+            retainedProcess,
+            op,
+            retainedProcessPurpose,
+          );
           await retainWorkspaceProviderCommand(db, {
             accountId: ids.accountId,
             workspaceId: ids.workspaceId,
@@ -339,10 +358,7 @@ export function wrapChannelABoxWithRouting(
             admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
             operation: op,
             providerBinding: boundAdmission.providerBinding ?? null,
-            backgroundCommand: {
-              commandId: retainedProcess.id,
-              command: op,
-            },
+            ...(backgroundCommand ? { backgroundCommand } : {}),
             owner: {
               kind: "direct",
               requestId: ids.directRequest.requestId,

@@ -657,6 +657,44 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     });
   }, 60_000);
 
+  test("a child naming its creator's own group inherits the creator's machine route", async () => {
+    if (!available) return;
+    const selfhostedOnly = testSettings({
+      ...settings,
+      sandboxBackend: "selfhosted",
+    });
+    const { accountId, workspaceId, sandboxId, bus } = await seedMachine("linux");
+    const parent = await createSessionForRequest(
+      deps(bus, selfhostedOnly),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "manager on the connected machine",
+        targetSandboxId: sandboxId,
+        workingDir: "workers/parent",
+      },
+    );
+    expect(parent.activeSandboxId).toBe(sandboxId);
+
+    const child = await createSessionForRequest(
+      deps(bus, selfhostedOnly),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      {
+        initialMessage: "share my box by naming its group",
+        sandbox: { groupId: parent.sandboxGroupId },
+      },
+    );
+
+    expect(child).toMatchObject({
+      parentSessionId: parent.id,
+      sandboxBackend: "selfhosted",
+      sandboxGroupId: parent.sandboxGroupId,
+      activeSandboxId: sandboxId,
+      workingDir: parent.workingDir,
+    });
+  }, 60_000);
+
   test("an omitted child placement inherits a backend:'none' parent's active machine route", async () => {
     if (!available) return;
     const { accountId, workspaceId, sandboxId, bus } = await seedMachine();

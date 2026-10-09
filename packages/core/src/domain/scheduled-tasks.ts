@@ -14,6 +14,7 @@ import {
 } from "@opengeni/contracts";
 import {
   allowedFirstPartyMcpToolsForSession,
+  resolveSessionFirstPartyMcpTools,
   resolveFirstPartyMcpToolPolicy,
   type FirstPartyMcpToolPolicySettings,
   type Settings,
@@ -231,9 +232,19 @@ export async function scheduledConnectionTools(
 
 export function scheduledConnectionSurfaceEligibility(
   settings: Settings,
-  target: Pick<Session, "firstPartyMcpTools" | "firstPartyMcpPermissions"> | null,
+  target:
+    | (Pick<Session, "firstPartyMcpTools" | "firstPartyMcpPermissions"> &
+        Partial<Pick<Session, "toolPolicy" | "agent">>)
+    | null,
+  workspaceSettings: unknown = {},
 ): { googleDrivePublicationEnabled: boolean; atlassianEnabled: boolean } {
-  const tools = allowedFirstPartyMcpToolsForSession(settings, target?.firstPartyMcpTools);
+  const tools = target?.toolPolicy
+    ? resolveSessionFirstPartyMcpTools(
+        settings,
+        { ...target, toolPolicy: target.toolPolicy },
+        workspaceSettings,
+      )
+    : allowedFirstPartyMcpToolsForSession(settings, target?.firstPartyMcpTools);
   const permissions = target?.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
   return {
     googleDrivePublicationEnabled:
@@ -489,7 +500,11 @@ export async function createValidatedScheduledTask(input: {
           resources: mergeResourceRefs(target?.resources ?? [], agentConfig.resources),
           source: personalConnectionDelegationSourceForGrant(input.grant),
           authoritySelections: input.payload.connectionAccounts,
-          ...scheduledConnectionSurfaceEligibility(effectiveRuntimeSettings, target),
+          ...scheduledConnectionSurfaceEligibility(
+            effectiveRuntimeSettings,
+            target,
+            (await requireWorkspace(input.db, input.grant.workspaceId)).settings,
+          ),
         });
   const { personalConnectionDelegations, mcpAccountBindings } = acceptedConnections;
   if (!knowledgeAction) {
@@ -673,10 +688,15 @@ export async function frozenScheduledTaskCreatorPolicy(input: {
     (sessionPolicy.kind === "valid" &&
       sessionPolicy.policy.credentialRestriction === "developer_setup"),
   );
-  const firstPartyMcpTools = allowedFirstPartyMcpToolsForSession(
+  const currentSelection = resolveSessionFirstPartyMcpTools(
     input.settings,
-    session.firstPartyMcpTools,
+    session,
+    (await requireWorkspace(input.db, input.grant.workspaceId)).settings,
   );
+  const signedSelection = input.grant.metadata?.["firstPartyMcpTools"];
+  const firstPartyMcpTools = Array.isArray(signedSelection)
+    ? currentSelection.filter((name) => signedSelection.includes(name))
+    : currentSelection;
   const firstPartyMcpPermissions = (
     session.firstPartyMcpPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]
   ).filter((permission) =>
@@ -1826,6 +1846,7 @@ export async function validatedScheduledTaskUpdate(input: {
     const nextSurfaceEligibility = scheduledConnectionSurfaceEligibility(
       runtimeSettings,
       nextTarget,
+      (await requireWorkspace(input.db, input.grant.workspaceId)).settings,
     );
     if (nextSurfaceEligibility.googleDrivePublicationEnabled)
       nextAccountSurfaceIds.add(GOOGLE_DRIVE_PUBLICATION_SERVER_ID);

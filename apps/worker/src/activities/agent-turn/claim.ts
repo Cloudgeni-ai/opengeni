@@ -2,6 +2,14 @@ import { withDirectModelProviders } from "@opengeni/config";
 import { loadDirectModelProviderConnection } from "@opengeni/db";
 import { FILESYSTEM_DISCONTINUITY_PROTOCOL } from "./recovery-warning";
 import {
+  claimCodexActiveFromCutover,
+  claimMayResolveCoreCodexApps,
+  claimMayResolveLegacyCodexApps,
+  readClaimCodexCutoverState,
+  readSubscriptionLeaseBusyChain,
+  type ClaimCodexCutoverState,
+} from "./codex-core-claim";
+import {
   applySessionTurnSettlement,
   claimSessionWorkForAttempt,
   getSessionEvent,
@@ -38,7 +46,7 @@ import { validateIncidentTelemetrySystemUpdateAuthority } from "../incident-tele
 import {
   assertSessionAllowsProductModel,
   resolveCatalogSettings,
-  resolveCodexAppsCredentialIdForRun,
+  resolveCodexAppsDesignationForRun,
 } from "@opengeni/core";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { currentActivityContext, startActivityHeartbeat } from "../streaming";
@@ -117,6 +125,8 @@ export type ClaimTurnOk = {
   fileAuthoritySubjectId: string | null;
   capabilitySettings: Settings;
   codexAppsCredentialId: string | null;
+  /** The core Codex Apps designation (enabled Codex cutover only). */
+  codexAppsCoreConnectionId?: string | null;
   turnExecutionPolicy: TurnExecutionPolicyV1;
   trigger: NonNullable<Awaited<ReturnType<typeof getSessionEvent>>>;
   humanInputResume: Awaited<ReturnType<typeof getHumanInputResumeForEvent>>;
@@ -262,6 +272,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
         }
       : undefined;
   attempt.triggerEventId = turn.triggerEventId;
+  attempt.subscriptionLeaseBusy = readSubscriptionLeaseBusyChain(turn.metadata);
   // The durable attempt UUID is stable for a Temporal retry of this activity
   // input and freshly generated for worker-death redispatch/continue-as-new.
   // Keep dispatchId separate: it remains the Temporal activity identity used
@@ -278,6 +289,29 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   let installedApiIntegrations: readonly ApiIntegrationRuntime[] = [];
   const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
   const fileAuthoritySubjectId = turn.initiatingHumanSubjectId ?? null;
+  // An organization whose Codex cutover row exists (enabled or disabled)
+  // reads no legacy Codex table at claim. The row is read once, with the
+  // legacy read's bounded retry, and serves the capability overlay, the Apps
+  // designation and the Codex availability below.
+  let codexCutoverRead: Promise<ClaimCodexCutoverState> | null = null;
+  const codexCutoverState = () =>
+    (codexCutoverRead ??= readClaimCodexCutoverState(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+    }));
+  // The Apps designation for this claim, resolved once: legacy without a
+  // cutover row, the core designation (rechecked by the database on every
+  // Apps request) with an enabled one, none with a disabled one. The
+  // organization and cutover are known here, so neither is read again.
+  const codexAppsDesignationRead = deploymentCatalogSettings.codexConnectedAppsEnabled
+    ? resolveCodexAppsDesignationForRun(db, input.workspaceId, {
+        accountId: input.accountId,
+        disposition: codexCutoverState().then((cutover) =>
+          cutover === "not_configured" ? "legacy" : cutover === "enabled" ? "core" : "maintenance",
+        ),
+      })
+    : Promise.resolve(null);
+  void codexAppsDesignationRead.catch(() => undefined);
   // Both are fresh scoped reads on the root pool after exact claim ownership.
   // Neither consumes the other's result; retain the capability helper's own
   // subject/delegation authority and await both before credential/policy gates.
@@ -308,18 +342,28 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
           onResolvedApiIntegrations: (integrations) => {
             installedApiIntegrations = integrations;
           },
+          codexApps: codexAppsDesignationRead,
         }),
     ),
   ]);
   // Read the active-credential flag once for the runtime capability overlay.
   // Accepted billing/provider identity comes from the turn policy below,
   // never from this mutable health snapshot.
-  const codexSubscriptionActive = await workspaceCodexSubscriptionActive(
-    db,
-    mcpSettings,
-    input.workspaceId,
-    turn.id,
-  );
+  // An organization whose Codex cutover row exists (enabled or disabled)
+  // reads no legacy Codex table at claim. For its accepted Codex turns the
+  // shared core decides availability at placement, so the catalog provider is
+  // installed when the cutover is enabled; a disabled cutover fails closed at
+  // placement. The row is read once, with the legacy read's bounded retry.
+  const codexPolicyTurn =
+    claimedPolicy.kind === "valid" && claimedPolicy.policy.providerId === "codex-subscription";
+  const codexActive =
+    mcpSettings.codexSubscriptionEnabled && codexPolicyTurn
+      ? claimCodexActiveFromCutover(await codexCutoverState())
+      : "read_legacy";
+  const codexSubscriptionActive =
+    codexActive === "read_legacy"
+      ? await workspaceCodexSubscriptionActive(db, mcpSettings, input.workspaceId, turn.id)
+      : codexActive;
   const codexSettings = await settingsWithCodexCredential(
     db,
     input.workspaceId,
@@ -368,9 +412,29 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   if (selectedDirectConnection) {
     capabilitySettings = withDirectModelProviders(capabilitySettings, [selectedDirectConnection]);
   }
-  const codexAppsCredentialId = capabilitySettings.codexConnectedAppsEnabled
-    ? await resolveCodexAppsCredentialIdForRun(db, input.workspaceId)
+  // No turn of an organization with a Codex cutover row, whatever its model,
+  // resolves the legacy Apps designation. With an enabled cutover the core
+  // designation (rechecked by the database on every Apps request) is used; a
+  // disabled cutover resolves none.
+  const codexAppsDesignation = capabilitySettings.codexConnectedAppsEnabled
+    ? await codexAppsDesignationRead
     : null;
+  const codexAppsCoreConnectionId =
+    codexAppsDesignation?.source === "core" &&
+    claimMayResolveCoreCodexApps({
+      codexConnectedAppsEnabled: true,
+      cutover: await codexCutoverState(),
+    })
+      ? codexAppsDesignation.connectionId
+      : null;
+  const codexAppsCredentialId =
+    codexAppsDesignation?.source === "legacy" &&
+    claimMayResolveLegacyCodexApps({
+      codexConnectedAppsEnabled: true,
+      cutover: await codexCutoverState(),
+    })
+      ? codexAppsDesignation.credentialId
+      : null;
   const candidatePolicy =
     claimedPolicy.kind === "valid"
       ? claimedPolicy.policy
@@ -762,6 +826,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       fileAuthoritySubjectId,
       capabilitySettings,
       codexAppsCredentialId,
+      codexAppsCoreConnectionId,
       turnExecutionPolicy,
       trigger,
       humanInputResume,

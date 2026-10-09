@@ -5,29 +5,41 @@
 import {
   InboxSettings,
   ListInboxResponse,
+  SessionInboxMute,
   UpdateInboxItemRequest,
   type AccessContext,
   type InboxItem,
 } from "@opengeni/contracts";
-import { requireAccessContext, requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  inboxSubjectForContext,
+  requireAccessContext,
+  requireAccessGrant,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   getInboxItem,
-  getInboxTidyPolicy,
+  getInboxSettings,
+  getSessionRepliesMuted,
   getSessionTitles,
   listInboxItems,
   listWorkspacesForSubject,
-  setInboxTidyPolicy,
+  setInboxSettings,
+  setSessionRepliesMuted,
   updateInboxItemAttention,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 
-/** Only a person has an inbox; keys and agents act through sessions. */
+/**
+ * Only a person has an inbox: a signed-in person, or the one human of a local
+ * install. Keys, services and agents act through sessions.
+ */
 function requirePerson(context: AccessContext): string {
-  if (!context.subjectId.startsWith("user:") || context.credential) {
+  const subjectId = inboxSubjectForContext(context);
+  if (!subjectId) {
     throw new HTTPException(403, { message: "Only a signed-in person has an inbox" });
   }
-  return context.subjectId;
+  return subjectId;
 }
 
 async function personAccounts(deps: ApiRouteDeps, context: AccessContext): Promise<string[]> {
@@ -64,7 +76,7 @@ async function readableWorkspaces(
 }
 
 function isNeedsYou(kind: InboxItem["kind"]): boolean {
-  return kind !== "notification";
+  return kind === "question" || kind === "approval" || kind === "goal_paused";
 }
 
 export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -149,12 +161,12 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
     const context = await requireAccessContext(c, deps);
     const subjectId = requirePerson(context);
     const accountId = context.defaultAccountId ?? (await personAccounts(deps, context))[0];
-    if (!accountId) return c.json(InboxSettings.parse({ tidyPolicy: "own_sessions" }));
-    return c.json(
-      InboxSettings.parse({
-        tidyPolicy: await getInboxTidyPolicy(deps.db, { accountId, subjectId }),
-      }),
-    );
+    if (!accountId) {
+      return c.json(
+        InboxSettings.parse({ tidyPolicy: "own_sessions", pausedGoals: false, replies: false }),
+      );
+    }
+    return c.json(InboxSettings.parse(await getInboxSettings(deps.db, { accountId, subjectId })));
   });
 
   app.put("/v1/inbox/settings", async (c) => {
@@ -163,13 +175,54 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
     const parsed = InboxSettings.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HTTPException(400, { message: "Invalid inbox settings" });
     // The setting is the person's own; apply it in every organization they belong to.
+    let settings: InboxSettings = {
+      tidyPolicy: "own_sessions",
+      pausedGoals: false,
+      replies: false,
+    };
     for (const accountId of await personAccounts(deps, context)) {
-      await setInboxTidyPolicy(deps.db, {
+      settings = await setInboxSettings(deps.db, {
         accountId,
         subjectId,
-        policy: parsed.data.tidyPolicy,
+        tidyPolicy: parsed.data.tidyPolicy,
+        pausedGoals: parsed.data.pausedGoals,
+        replies: parsed.data.replies,
       });
     }
-    return c.json(InboxSettings.parse(parsed.data));
+    return c.json(InboxSettings.parse(settings));
+  });
+
+  // The person's own mute on one session: its replies stop reaching their
+  // inbox and phone; its notifications, questions and approvals still arrive.
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/inbox-mute", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const subjectId = requirePerson(context);
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const muted = await getSessionRepliesMuted(deps.db, {
+      workspaceId,
+      sessionId: c.req.param("sessionId"),
+      subjectId,
+    });
+    if (muted === null) throw new HTTPException(404, { message: "Session not found" });
+    c.header("cache-control", "private, no-store");
+    return c.json(SessionInboxMute.parse({ repliesMuted: muted }));
+  });
+
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/inbox-mute", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const subjectId = requirePerson(context);
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const parsed = SessionInboxMute.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "Invalid session mute" });
+    const muted = await setSessionRepliesMuted(deps.db, {
+      workspaceId,
+      sessionId: c.req.param("sessionId"),
+      subjectId,
+      muted: parsed.data.repliesMuted,
+    });
+    if (muted === null) throw new HTTPException(404, { message: "Session not found" });
+    return c.json(SessionInboxMute.parse({ repliesMuted: muted }));
   });
 }

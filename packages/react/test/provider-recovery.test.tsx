@@ -82,6 +82,53 @@ test("live retry status names the model, provider condition and attempt", () => 
   );
 });
 
+test("a turn parked behind a sandbox rotation says why it is waiting", () => {
+  const facts = parseProviderRecovery({
+    reason: "sandbox_deadline_rotation",
+    sandboxGroupId: "group",
+    leaseEpoch: 5,
+    rotationReason: "provider_deadline",
+    transitionReason: "rotation_in_progress",
+  });
+  expect(facts).toMatchObject({ sandboxWait: true, modelRoute: false });
+  expect(providerRecoveryRetryingText(facts!)).toBe(
+    "The sandbox reached its maximum lifetime, so Opengeni is moving the workspace to a fresh sandbox…",
+  );
+  const lifecycle = (detail: Record<string, unknown>) =>
+    providerRecoveryRetryingText(
+      parseProviderRecovery({ reason: "sandbox_lifecycle_transition", ...detail })!,
+    );
+  expect(lifecycle({ transitionReason: "capture_in_progress" })).toBe(
+    "Opengeni is saving the sandbox workspace…",
+  );
+  expect(lifecycle({ transitionReason: "provider_recovery_in_progress" })).toBe(
+    "Opengeni is recovering the sandbox…",
+  );
+  expect(lifecycle({ rotationReason: "operator" })).toBe(
+    "Opengeni is moving the workspace to a fresh sandbox…",
+  );
+  expect(
+    providerRecoveryRetryingText(
+      parseProviderRecovery({ reason: "sandbox_lease_superseded", rotationReason: "operator" })!,
+    ),
+  ).toBe("Opengeni is moving the workspace to a fresh sandbox…");
+  // A superseded lease with no recorded pending transition is not a wait.
+  expect(parseProviderRecovery({ reason: "sandbox_lease_superseded" })).toBeNull();
+});
+
+test("the sandbox wait notice promises no retry budget", async () => {
+  const facts = parseProviderRecovery({ reason: "sandbox_deadline_rotation" });
+  const view = await renderComponent(<ProviderRecoveryNotice recovery={facts} />);
+  try {
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("moving the workspace to a fresh sandbox");
+    expect(text).toContain("continues automatically as soon as the sandbox is ready");
+    expect(text).not.toContain("retrying");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("other recovery reasons are never presented as provider outages", () => {
   for (const payload of [
     { reason: "human_retry", failureEventId: "x" },

@@ -35,6 +35,8 @@ export const subscriptionConnections = pgTable(
     version: integer("version").notNull().default(1),
     status: text("status").notNull().default("active"),
     lastError: text("last_error"),
+    /** When a time-bound health quarantine (status error) ends. */
+    healthRetryAt: timestamp("health_retry_at", { withTimezone: true }),
     allocatorEnabled: boolean("allocator_enabled").notNull().default(true),
     allocatorVersion: integer("allocator_version").notNull().default(1),
     excludedModels: text("excluded_models").array().notNull().default([]),
@@ -346,6 +348,10 @@ export const subscriptionCapacityWaiters = pgTable(
     observedWakeRevision: bigint("observed_wake_revision", { mode: "number" }).notNull().default(0),
     nextCheckAt: timestamp("next_check_at", { withTimezone: true }),
     blockedTurnGeneration: bigint("blocked_turn_generation", { mode: "number" }),
+    /** Goal fence for a waiting goal continuation; both or neither. */
+    goalId: uuid("goal_id"),
+    goalVersion: bigint("goal_version", { mode: "number" }),
+    lastWakeReason: text("last_wake_reason"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

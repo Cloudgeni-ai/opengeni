@@ -35,6 +35,7 @@ import {
 import {
   MCP_TOOL_METRIC_EXTERNAL_LABEL,
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
+  WORKSPACE_CAPTURE_SKIP_REASONS,
   isMcpToolMetricLabel,
   modelUsageTokenCountOrNull,
   type RuntimeMetricsHooks,
@@ -244,6 +245,17 @@ export function runtimeMetricsHooksForObservability(
         help: "Physical warm workspace capture and publication duration, including late settlement after caller timeout.",
         labels: { backend: safeBackend, outcome },
         value: durationSeconds,
+      });
+    },
+    onWorkspaceCaptureSkipped: ({ backend, reason }) => {
+      const safeBackend = SandboxBackend.safeParse(backend).success ? backend : "unknown";
+      const safeReason = (WORKSPACE_CAPTURE_SKIP_REASONS as readonly string[]).includes(reason)
+        ? reason
+        : "unknown";
+      observability.incrementCounter({
+        name: "opengeni_workspace_capture_skipped_total",
+        help: "Due warm workspace checkpoints that could not start, by backend and fixed reason. Not-yet-due (throttled) and already-complete checkpoints are excluded.",
+        labels: { backend: safeBackend, reason: safeReason },
       });
     },
     onWorkspaceArchiveObject: ({ outcome, backend }) => {
@@ -1233,6 +1245,7 @@ export const SANDBOX_INVENTORY_PROJECTION_DOMAINS = [
   "opensandbox_kubernetes",
   "modal_provider",
   "interaction_idle",
+  "checkpoint_staleness",
 ] as const;
 
 export type SandboxInventoryProjectionDomain =
@@ -1515,6 +1528,7 @@ export function recordSandboxDeadlineRotationsRequested(
 export const SANDBOX_COMMAND_CONTAINMENT_OUTCOMES = [
   "idle_enrolled",
   "deadline_enrolled",
+  "forced_deadline_enrolled",
   "quiescence_enrolled",
   "resumed_enrolled",
   "not_eligible",
@@ -1800,6 +1814,31 @@ export function recordSandboxAutomaticRecoverySelected(
   });
 }
 
+/** How long live boxes have held changes no checkpoint covers yet. */
+export function recordSandboxCheckpointStalenessGauges(
+  observability: Observability,
+  staleness: { dirty: number; stale4h: number; stale12h: number; maxAgeSeconds: number },
+): void {
+  const values = {
+    dirty: staleness.dirty,
+    stale_4h: staleness.stale4h,
+    stale_12h: staleness.stale12h,
+  } as const;
+  for (const [kind, value] of Object.entries(values)) {
+    observability.setGauge({
+      name: "opengeni_sandbox_checkpoint_staleness",
+      help: "Live Modal sandboxes holding a write their last checkpoint did not capture, by age of the first such write.",
+      labels: { kind },
+      value,
+    });
+  }
+  observability.setGauge({
+    name: "opengeni_sandbox_checkpoint_age_max_seconds",
+    help: "Age in seconds of the oldest write a live Modal sandbox's last checkpoint did not capture.",
+    value: Number.isFinite(staleness.maxAgeSeconds) ? Math.max(0, staleness.maxAgeSeconds) : 0,
+  });
+}
+
 export function recordSandboxRotationBacklogGauges(
   observability: Observability,
   backlog: {
@@ -1928,6 +1967,7 @@ export const RETAINED_PROCESS_RECONCILIATION_OUTCOMES = [
   "proof_checkpoint_failed",
   "settled_exited",
   "settled_lost",
+  "provider_lost_whole_box",
   "settlement_failed",
   "identity_mismatch",
   "resume_state_missing",

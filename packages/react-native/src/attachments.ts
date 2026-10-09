@@ -27,6 +27,8 @@ export interface NativeFileAttachmentsResult {
   error: Error | null;
   pickDocuments(): Promise<void>;
   pickImages(): Promise<void>;
+  /** Take a photo with the camera and attach it. Absent when the host's adapter has no camera. */
+  takePhoto?: (() => Promise<void>) | undefined;
   addFiles(files: NativePickedFile[]): Promise<void>;
   retry(id: string): Promise<void>;
   remove(id: string): void;
@@ -321,6 +323,11 @@ export function useNativeFileAttachments(input: {
     [input.files, pickFiles],
   );
 
+  const cameraPicker = input.files.takePhoto?.bind(input.files);
+  const takePhoto = useCallback(async () => {
+    if (cameraPicker) await pickFiles(cameraPicker);
+  }, [cameraPicker, pickFiles]);
+
   const retry = useCallback(
     async (id: string) => {
       const source = sources.current.get(id);
@@ -386,6 +393,7 @@ export function useNativeFileAttachments(input: {
     error: visibleError,
     pickDocuments,
     pickImages,
+    ...(cameraPicker ? { takePhoto } : {}),
     addFiles,
     retry,
     remove,

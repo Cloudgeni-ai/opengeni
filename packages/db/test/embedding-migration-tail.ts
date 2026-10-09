@@ -115,4 +115,34 @@ export const embeddingMigrationTail = [
   "0651_session_event_delta_folding.sql",
   "0652_session_archive_guard_search_path.sql",
   "0653_session_archive_tenancy_fence.sql",
+  "0657_session_archive_purge_retained_evidence.sql",
+  "0660_session_archive_preference_snapshot_export.sql",
+  // The inbox person resolver compiles against scheduled_tasks.owner_subject_id
+  // from withheld 0478; replay after it.
+  "0661_inbox_subagent_goals_and_schedules.sql",
+  // Takes the session-tenancy fence inventory helpers from withheld 0345.
+  "0662_session_first_party_default_intent.sql",
+  // Replaces the inbox projection trigger from withheld 0661; replay after it
+  // so the replayed 0661 body does not overwrite the newer one.
+  "0663_inbox_paused_goal_setting.sql",
+  // Each rewrites the inbox projection trigger and reads inbox_settings.paused_goals
+  // from 0663; replay them after it, in order, so the newest trigger body wins.
+  "0664_inbox_rich_notifications.sql",
+  "0665_inbox_replies.sql",
+  "0666_inbox_reply_current_turn.sql",
+  "0667_subscription_authority_refresh_contract.sql",
+  "0668_subscription_core_codex_chat_authority.sql",
+  "0669_subscription_core_codex_waits.sql",
+  "0670_subscription_core_codex_apps.sql",
+  "0671_subscription_core_codex_operations.sql",
+  // session_hands_back_v1 compiles against sessions.input_wait_turn_id from
+  // withheld 0402; replay after it.
+  "0674_inbox_reply_hands_back.sql",
+  // Redefines 0661's inbox person resolver, which reads
+  // scheduled_tasks.owner_subject_id from withheld 0478; replay after 0661.
+  "0677_local_human_inbox_recipient.sql",
+
+  // Rewrites the inbox projection and push triggers after 0674 and resolves
+  // the session's person through 0661; replay after both so its bodies win.
+  "0678_inbox_mute_session_replies.sql",
 ];

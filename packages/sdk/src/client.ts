@@ -1,3 +1,4 @@
+import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
 import type {
   ClaudeSubscriptionAccountsResponse,
   ClaudeSubscriptionAccount,
@@ -326,6 +327,7 @@ import type {
   NativeAppToken,
   InboxItem,
   InboxSettings,
+  SessionInboxMute,
   ListInboxResponse,
   UpdateInboxItemInput,
   NativePushDevice,
@@ -4740,6 +4742,21 @@ export class OpenGeniClient {
     return { ...metadata, data: bytes };
   }
 
+  async callNativeComputerTool(
+    workspaceId: string,
+    computerSessionId: string,
+    request: ComputerNativeCallRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerNativeReceipt> {
+    return await this.requestJson<ComputerNativeReceipt>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/native-calls`,
+      request,
+      {},
+      options,
+    );
+  }
+
   async actInComputer(
     workspaceId: string,
     computerSessionId: string,
@@ -4755,19 +4772,41 @@ export class OpenGeniClient {
     );
   }
 
-  async getComputerActionReceipt(
+  async getNativeComputerToolReceipt(
     workspaceId: string,
     computerSessionId: string,
     operationId: string,
     options: OpenGeniRequestOptions = {},
-  ): Promise<ComputerActionReceipt> {
-    return await this.requestJson<ComputerActionReceipt>(
+  ): Promise<ComputerNativeReceipt> {
+    const receipt = await this.requestJson<ComputerNativeReceipt>(
       "GET",
       `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/operations/${encodeURIComponent(operationId)}`,
       undefined,
       {},
       options,
     );
+    // The shared receipt endpoint can return either operation kind. Keep the
+    // SDK's native/browser bundle schema-free while refusing the wrong kind.
+    if (receipt?.targetId !== null) throw new Error("Expected a native computer receipt");
+    return receipt;
+  }
+
+  async getComputerActionReceipt(
+    workspaceId: string,
+    computerSessionId: string,
+    operationId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerActionReceipt> {
+    const receipt = await this.requestJson<ComputerActionReceipt>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/operations/${encodeURIComponent(operationId)}`,
+      undefined,
+      {},
+      options,
+    );
+    if (typeof receipt?.targetId !== "string")
+      throw new Error("Expected a computer action receipt");
+    return receipt;
   }
 
   async attachComputerSession(
@@ -8977,6 +9016,30 @@ export class OpenGeniClient {
 
   async updateInboxSettings(input: InboxSettings): Promise<InboxSettings> {
     return await this.requestJson<InboxSettings>("PUT", "/v1/inbox/settings", input);
+  }
+
+  /** Whether the signed-in person muted this session's replies. */
+  async getSessionInboxMute(workspaceId: string, sessionId: string): Promise<SessionInboxMute> {
+    return await this.requestJson<SessionInboxMute>(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/inbox-mute`,
+    );
+  }
+
+  /**
+   * Mute or unmute this session's replies for the signed-in person. Its
+   * notifications, questions and approvals still arrive.
+   */
+  async setSessionInboxMute(
+    workspaceId: string,
+    sessionId: string,
+    input: SessionInboxMute,
+  ): Promise<SessionInboxMute> {
+    return await this.requestJson<SessionInboxMute>(
+      "PUT",
+      `${sessionPath(workspaceId, sessionId)}/inbox-mute`,
+      input,
+    );
   }
 
   // --- Native app sign-in ------------------------------------------------------------------------

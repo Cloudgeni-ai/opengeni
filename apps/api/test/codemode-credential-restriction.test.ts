@@ -31,7 +31,16 @@ afterEach(() => {
 });
 
 describe("Codemode SDK proxy inherited setup restriction", () => {
-  test.each(["bearer", "turn", "session", "none", "untrustedMetadata"] as const)(
+  test.each([
+    "bearer",
+    "turn",
+    "session",
+    "none",
+    "untrustedMetadata",
+    "following",
+    "pinned",
+    "frozenEmpty",
+  ] as const)(
     "%s provenance reaches the actual proxy signer without changing the permission ceiling",
     async (source) => {
       const authority = {
@@ -55,6 +64,13 @@ describe("Codemode SDK proxy inherited setup restriction", () => {
       // setup provenance is resolved from a genuinely signed incoming bearer.
       track(spyOn(core, "requireSessionAuthorization").mockResolvedValue(null));
       track(
+        spyOn(db, "requireWorkspace").mockResolvedValue({
+          settings: {
+            sessionToolDefaults: { firstPartyMcpTools: ["session_create", "session_pause"] },
+          },
+        } as never),
+      );
+      track(
         spyOn(db, "getActiveSessionTurnForExecution").mockResolvedValue({
           id: authority.turnId,
           status: "running",
@@ -70,13 +86,26 @@ describe("Codemode SDK proxy inherited setup restriction", () => {
           generation: 1,
           digest: "0".repeat(64),
           createdAt: new Date().toISOString(),
-          entries: [],
+          entries:
+            source === "frozenEmpty"
+              ? []
+              : [{ identity: { serverId: "opengeni", toolName: "session_create" } }],
         } as never),
       );
       track(
         spyOn(db, "getSession").mockResolvedValue({
           id: authority.sessionId,
-          firstPartyMcpTools: ["session_create"],
+          firstPartyMcpTools:
+            source === "following" || source === "pinned" || source === "frozenEmpty"
+              ? []
+              : ["session_create"],
+          toolPolicy: {
+            mode: "workspace_default",
+            inheritedFromSessionId: null,
+            ...(source === "following" || source === "frozenEmpty"
+              ? { firstPartyMode: "workspace_default" }
+              : {}),
+          },
           firstPartyMcpPermissions: ["workspace:read", "sessions:create"],
           metadata:
             source === "session"
@@ -116,9 +145,15 @@ describe("Codemode SDK proxy inherited setup restriction", () => {
       });
       expect(response.status).toBe(200);
       expect(proxyClaims).not.toBeNull();
-      expect(proxyClaims!.permissions).toEqual(["workspace:read", "sessions:create"]);
+      expect(proxyClaims!.permissions).toEqual(
+        source === "pinned" || source === "frozenEmpty"
+          ? ["workspace:read"]
+          : ["workspace:read", "sessions:create"],
+      );
       expect(proxyClaims!.credentialRestriction).toBe(
-        source === "none" || source === "untrustedMetadata" ? undefined : "developer_setup",
+        source === "bearer" || source === "turn" || source === "session"
+          ? "developer_setup"
+          : undefined,
       );
       expect(proxyClaims).toMatchObject(authority);
     },

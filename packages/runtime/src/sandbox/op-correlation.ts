@@ -28,14 +28,31 @@ interface ToolCallCorrelation {
   callId: string;
   /** The next sub-op ordinal within this tool invocation (mutable). */
   ordinal: number;
-  /** Called before the durable adoption transaction starts. From this point
-   * the op-stream yield path owns exact cancellation if adoption is rejected. */
+  /** Called before durable adoption starts. The live op-stream client owns
+   * cancellation during the transaction, but joined cleanup is not settled. */
   onDurableOpOwnershipTransferStarted?: (opId: string) => void;
+  /** The live transfer/cleanup rejected without committed session ownership. */
+  onDurableOpOwnershipTransferFailed?: (opId: string) => void;
   /** Called synchronously after durable session adoption commits. This lets
    * observers distinguish a completed transfer from its earlier cancellation
-   * handoff; the turn fence has already relinquished cancellation authority. */
+   * delegation; only this completed handoff releases the turn fence. */
   onDurableOpOwnershipTransferred?: (opId: string) => void;
+  /** Trusted provider-local proof that preflight rejected this exact command
+   * before physical dispatch. Remote error codes/text are never this proof. */
+  onRemoteOperationNotDispatched?: (opId: string) => void;
+  /** Pins cancellation/observation to the exact backend selected for this op. */
+  onRemoteOperationTransportSelected?: (transport: RemoteOperationControl) => void;
 }
+
+export type RemoteOperationObservation =
+  | { status: "running"; result?: unknown }
+  | { status: "completed"; result: unknown; failure?: unknown };
+
+/** Exact provider control surface for one already-dispatched operation. */
+export type RemoteOperationControl = {
+  cancelExecCommand?(opId: string): Promise<boolean>;
+  observeExecCommand?(opId: string): Promise<RemoteOperationObservation>;
+};
 
 const storage = new AsyncLocalStorage<ToolCallCorrelation>();
 
@@ -62,7 +79,10 @@ export function runWithToolCallCorrelation<T>(
   fn: () => T,
   options: {
     onDurableOpOwnershipTransferStarted?: (opId: string) => void;
+    onDurableOpOwnershipTransferFailed?: (opId: string) => void;
     onDurableOpOwnershipTransferred?: (opId: string) => void;
+    onRemoteOperationNotDispatched?: (opId: string) => void;
+    onRemoteOperationTransportSelected?: (transport: RemoteOperationControl) => void;
   } = {},
 ): T {
   return storage.run(
@@ -73,8 +93,17 @@ export function runWithToolCallCorrelation<T>(
       ...(options.onDurableOpOwnershipTransferStarted
         ? { onDurableOpOwnershipTransferStarted: options.onDurableOpOwnershipTransferStarted }
         : {}),
+      ...(options.onDurableOpOwnershipTransferFailed
+        ? { onDurableOpOwnershipTransferFailed: options.onDurableOpOwnershipTransferFailed }
+        : {}),
       ...(options.onDurableOpOwnershipTransferred
         ? { onDurableOpOwnershipTransferred: options.onDurableOpOwnershipTransferred }
+        : {}),
+      ...(options.onRemoteOperationNotDispatched
+        ? { onRemoteOperationNotDispatched: options.onRemoteOperationNotDispatched }
+        : {}),
+      ...(options.onRemoteOperationTransportSelected
+        ? { onRemoteOperationTransportSelected: options.onRemoteOperationTransportSelected }
         : {}),
     },
     fn,
@@ -103,15 +132,31 @@ export function nextDurableOpId(): string | null {
   return `${context.callId}:${ordinal}`;
 }
 
-/** Relinquish attempt-level cancellation before durable adoption starts. The
- * op-stream yield path exact-cancels the provider op if the transaction later
- * rejects, so there is never a period with no cancellation owner. */
+/** Delegate cancellation to the live transfer path without settling joined
+ * cleanup. A pending transaction is not durable ownership evidence. */
 export function notifyDurableOpOwnershipTransferStarted(opId: string): void {
   storage.getStore()?.onDurableOpOwnershipTransferStarted?.(opId);
+}
+
+/** Restore turn cancellation when the live transfer/cleanup rejected without
+ * committed adoption. The exact operation remains retained and observable. */
+export function notifyDurableOpOwnershipTransferFailed(opId: string): void {
+  storage.getStore()?.onDurableOpOwnershipTransferFailed?.(opId);
 }
 
 /** Report that one exact provider operation completed its transfer into
  * durable session ownership. Failed adoption deliberately emits no signal. */
 export function notifyDurableOpOwnershipTransferred(opId: string): void {
   storage.getStore()?.onDurableOpOwnershipTransferred?.(opId);
+}
+
+/** Provider-owned local preflight proof only: no physical command was issued.
+ * Never call this based on an RPC error or an uncertain observation outcome. */
+export function notifyRemoteOperationNotDispatched(opId: string): void {
+  storage.getStore()?.onRemoteOperationNotDispatched?.(opId);
+}
+
+/** Bind the current operation to its already-resolved physical backend. */
+export function notifyRemoteOperationTransportSelected(transport: RemoteOperationControl): void {
+  storage.getStore()?.onRemoteOperationTransportSelected?.(transport);
 }

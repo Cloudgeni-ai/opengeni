@@ -10,12 +10,14 @@ import {
   completeConnectorActionExecution,
   getScheduledVariableSetExpectedGenerationForAttempt,
   persistAttemptToolCatalog,
+  requireWorkspace,
   prepareConnectorActionApproval,
   recordUsageEvent,
   previewConnectorActionApproval,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
   codexAppsRequestAuth,
+  subscriptionCoreCodexAppsRequestAuth,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -49,7 +51,11 @@ import { buildGitHubRestMcpForTurn } from "../../github-rest-mcp";
 import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
 import { materializeGmailFile, readGmailFileFromChannel } from "../gmail-files";
 import { objectStorageForSandboxDownloads } from "./file-resources";
-import { allowedFirstPartyMcpToolsForSession, type Settings } from "@opengeni/config";
+import {
+  allowedFirstPartyMcpToolsForSession,
+  resolveSessionFirstPartyMcpTools,
+  type Settings,
+} from "@opengeni/config";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { mergeResourceRefs } from "../common";
 import {
@@ -63,6 +69,7 @@ import {
   withFrozenPersonalConnectionDelegations,
   resolveTurnToolPolicy,
   scheduledTurnMcpServerIds,
+  scheduledTurnFirstPartyMcpTools,
   hasPermission,
   requireExplicitPermissionDelegation,
   createWebSearchBilling,
@@ -174,6 +181,7 @@ export type PrepareTurnToolRuntimeDeps = {
   capabilitySettings: ClaimTurnOk["capabilitySettings"];
   installedApiIntegrations: ClaimTurnOk["installedApiIntegrations"];
   codexAppsCredentialId: ClaimTurnOk["codexAppsCredentialId"];
+  codexAppsCoreConnectionId?: ClaimTurnOk["codexAppsCoreConnectionId"];
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
   trigger: ClaimTurnOk["trigger"];
   runSettings: GovernanceModelOk["runSettings"];
@@ -402,6 +410,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     session,
     installedApiIntegrations,
     codexAppsCredentialId,
+    codexAppsCoreConnectionId,
     turnExecutionPolicy,
     trigger,
     runSettings: canonicalRunSettings,
@@ -557,12 +566,20 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     resolveCredential,
   });
   const localMcpServers = [...apiIntegrationMcpServers, ...githubRestMcp.localMcpServers];
-  const codexAppsAuth = codexAppsCredentialId
-    ? codexAppsRequestAuth(db, runSettings, {
+  // A core designation (enabled Codex cutover) and a legacy one are mutually
+  // exclusive: claim resolves at most one of them.
+  const codexAppsAuth = codexAppsCoreConnectionId
+    ? subscriptionCoreCodexAppsRequestAuth(db, runSettings, {
+        accountId: input.accountId,
         workspaceId: input.workspaceId,
-        credentialId: codexAppsCredentialId,
+        connectionId: codexAppsCoreConnectionId,
       })
-    : undefined;
+    : codexAppsCredentialId
+      ? codexAppsRequestAuth(db, runSettings, {
+          workspaceId: input.workspaceId,
+          credentialId: codexAppsCredentialId,
+        })
+      : undefined;
   const linkedAuthority = await getExternalLinkTurnAuthorization(
     db,
     {
@@ -583,7 +600,16 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     sandboxAttached: (activeSandboxBackend ?? groupBoxBackend) !== "none",
   });
   const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
-    allowedFirstPartyMcpToolsForSession(runSettings, session.firstPartyMcpTools),
+    scheduledTurnMcpServerIds(turn) !== null
+      ? allowedFirstPartyMcpToolsForSession(
+          runSettings,
+          scheduledTurnFirstPartyMcpTools(turn) ?? session.firstPartyMcpTools,
+        )
+      : resolveSessionFirstPartyMcpTools(
+          runSettings,
+          session,
+          (await requireWorkspace(db, input.workspaceId)).settings,
+        ),
   );
   // Frozen with the selection and ceiling above; instructions only.
   const promptToolAvailability = promptToolAvailabilityForTurn({
@@ -730,6 +756,14 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       const runAs = sandboxRunAs(runSettings);
       const channel = new SandboxChannelAService({
         session: access.session,
+        commandRunner: async (commandSession, args) => {
+          const fence = eventing.toolCancellationFenceRef.current;
+          if (!fence)
+            throw new Error(
+              "Skill filesystem execution requires the active turn cancellation controller.",
+            );
+          return await fence.runSandboxCommandSynchronous(commandSession, args);
+        },
         workspaceRoot: machineRoot ?? "/workspace",
         ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
         leaseEpoch: access.leaseEpoch,
@@ -1057,6 +1091,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     eventing.preparedTools = await waitForTurnOperation(
       runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {
         ...(credentialRestriction ? { credentialRestriction } : {}),
+        inputWaitReplyGuard: async () => (await eventing.inputWaitReplyGuard?.()) ?? null,
         mcpAccountLabels: accountRoutes.accountLabels,
         accountId: input.accountId,
         workspaceId: input.workspaceId,

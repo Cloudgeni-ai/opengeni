@@ -10,6 +10,7 @@ import {
   assertSubscriptionTurnLeaseCurrent,
   renewSubscriptionTurnLease,
   withRlsContext,
+  withSessionRlsActorContext,
 } from "@opengeni/db";
 import type { SharedActivityServices } from "../types";
 import {
@@ -29,6 +30,9 @@ export class CodexCredentialLeaseLostError extends Error {
   }
 }
 
+/** Core service actor for one exact accepted turn (see subscriptionCoreTurnActor). */
+export type CoreLeaseActor = { subjectId: string; initiatingHumanSubjectId: string | null };
+
 export type TurnCredentialLeaseDeps = {
   db: SharedActivityServices["db"];
   observability: SharedActivityServices["observability"];
@@ -47,6 +51,7 @@ export type TurnCredentialLeaseDeps = {
 export class CodexTurnLease extends SubscriptionTurnLease {
   private readonly codexDeps: TurnCredentialLeaseDeps;
   private subscriptionCoreConnectionId: string | null = null;
+  private subscriptionCoreActor: CoreLeaseActor | null = null;
 
   constructor(deps: TurnCredentialLeaseDeps) {
     super({
@@ -57,21 +62,23 @@ export class CodexTurnLease extends SubscriptionTurnLease {
         if (connectionId) {
           const sessionId = deps.getSessionId?.();
           if (!sessionId) return Promise.resolve(null);
-          return withRlsContext(
-            deps.db,
-            { accountId: deps.accountId, workspaceId: deps.workspaceId },
-            (scoped) =>
-              renewSubscriptionTurnLease(scoped, {
-                accountId: deps.accountId,
-                workspaceId: deps.workspaceId,
-                sessionId,
-                turnId,
-                provider: "codex",
-                connectionId,
-                holderId,
-                generation,
-                ttlMs: CODEX_CREDENTIAL_LEASE_TTL_MS,
-              }),
+          return this.inCoreScope(() =>
+            withRlsContext(
+              deps.db,
+              { accountId: deps.accountId, workspaceId: deps.workspaceId },
+              (scoped) =>
+                renewSubscriptionTurnLease(scoped, {
+                  accountId: deps.accountId,
+                  workspaceId: deps.workspaceId,
+                  sessionId,
+                  turnId,
+                  provider: "codex",
+                  connectionId,
+                  holderId,
+                  generation,
+                  ttlMs: CODEX_CREDENTIAL_LEASE_TTL_MS,
+                }),
+            ),
           );
         }
         return heartbeatCodexCredentialLeaseUntil(
@@ -120,15 +127,32 @@ export class CodexTurnLease extends SubscriptionTurnLease {
     this.codexDeps = deps;
   }
 
-  /** Route heartbeat renewal to the canonical per-turn lease after core placement. */
-  useSubscriptionCoreLease(connectionId: string): void {
+  /**
+   * Route heartbeat renewal, dispatch fencing and release to the canonical
+   * per-turn lease after core placement. The actor is the core service actor
+   * for the exact accepted turn, so the lease row's session isolation does
+   * not depend on whatever ambient actor the caller happens to run under.
+   */
+  useSubscriptionCoreLease(connectionId: string, actor?: CoreLeaseActor): void {
     if (!connectionId.trim()) throw new Error("Core Codex lease connection id is required");
     this.subscriptionCoreConnectionId = connectionId;
+    this.subscriptionCoreActor = actor ?? null;
   }
 
   /** Keep legacy routing explicit when placement has not crossed cutover. */
   useLegacyCodexLease(): void {
     this.subscriptionCoreConnectionId = null;
+    this.subscriptionCoreActor = null;
+  }
+
+  /** The core connection this lease holds, or null on the legacy path. */
+  get subscriptionCoreConnection(): string | null {
+    return this.subscriptionCoreConnectionId;
+  }
+
+  private inCoreScope<T>(operation: () => Promise<T>): Promise<T> {
+    const actor = this.subscriptionCoreActor;
+    return actor ? withSessionRlsActorContext(actor, operation) : operation();
   }
 
   /** Recheck the canonical lease at the last boundary before Codex network I/O. */
@@ -145,20 +169,22 @@ export class CodexTurnLease extends SubscriptionTurnLease {
     }
     const holderId = this.holderId;
     const generation = this.generation;
-    const current = await withRlsContext(
-      this.codexDeps.db,
-      { accountId: this.codexDeps.accountId, workspaceId: this.codexDeps.workspaceId },
-      (scoped) =>
-        assertSubscriptionTurnLeaseCurrent(scoped, {
-          accountId: this.codexDeps.accountId,
-          workspaceId: this.codexDeps.workspaceId,
-          sessionId,
-          turnId,
-          provider: "codex",
-          connectionId,
-          holderId,
-          generation,
-        }),
+    const current = await this.inCoreScope(() =>
+      withRlsContext(
+        this.codexDeps.db,
+        { accountId: this.codexDeps.accountId, workspaceId: this.codexDeps.workspaceId },
+        (scoped) =>
+          assertSubscriptionTurnLeaseCurrent(scoped, {
+            accountId: this.codexDeps.accountId,
+            workspaceId: this.codexDeps.workspaceId,
+            sessionId,
+            turnId,
+            provider: "codex",
+            connectionId,
+            holderId,
+            generation,
+          }),
+      ),
     );
     // The DB round trip can outlive the local lease deadline or a heartbeat
     // can mark this holder lost while it is in flight. A stale positive reply
@@ -195,20 +221,22 @@ export class CodexTurnLease extends SubscriptionTurnLease {
     }
     const sessionId = this.codexDeps.getSessionId?.();
     if (!sessionId) return false;
-    return await withRlsContext(
-      this.codexDeps.db,
-      { accountId: this.codexDeps.accountId, workspaceId: this.codexDeps.workspaceId },
-      (scoped) =>
-        releaseSubscriptionTurnLease(scoped, {
-          accountId: this.codexDeps.accountId,
-          workspaceId: this.codexDeps.workspaceId,
-          sessionId,
-          turnId,
-          provider: "codex",
-          connectionId,
-          holderId: this.holderId!,
-          generation: this.generation!,
-        }),
+    return await this.inCoreScope(() =>
+      withRlsContext(
+        this.codexDeps.db,
+        { accountId: this.codexDeps.accountId, workspaceId: this.codexDeps.workspaceId },
+        (scoped) =>
+          releaseSubscriptionTurnLease(scoped, {
+            accountId: this.codexDeps.accountId,
+            workspaceId: this.codexDeps.workspaceId,
+            sessionId,
+            turnId,
+            provider: "codex",
+            connectionId,
+            holderId: this.holderId!,
+            generation: this.generation!,
+          }),
+      ),
     );
   }
 }

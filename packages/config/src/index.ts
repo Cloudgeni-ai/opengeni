@@ -14,10 +14,14 @@ import {
   BillingMode,
   CAPABILITY_DESCRIPTORS,
   agentConfigDeploymentLimitsFromAllowlist,
+  agentConfigFirstPartyMcpTools,
   type AgentConfigDeploymentLimits,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   DEFAULT_OPENGENI_DOCUMENTATION_URL,
   currentAgentLearningToolSelection,
+  resolveWorkspaceSessionToolDefaults,
+  workspaceModelCompactionThreshold,
+  type ModelCompactionPolicy,
   Entitlements,
   EntitlementsMode,
   KnowledgeSourceSyncLimits,
@@ -40,6 +44,7 @@ import {
   type TurnExecutionReasoningSourceV1,
   type VideoGenerationResolution,
   type FirstPartyMcpToolName as FirstPartyMcpToolNameType,
+  type Session,
 } from "@opengeni/contracts";
 import type { CodeSearchDeploymentPolicy } from "@opengeni/contracts/code-search";
 import { CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS } from "@opengeni/codex";
@@ -4178,14 +4183,14 @@ export const reviewedModelListPricing: Record<string, ModelPricingScheduleV1> = 
   ),
   // Every reviewed native Claude profile. Standard/global prices include
   // 5-minute cache writes; 1-hour native routes are projected separately.
-  // https://platform.claude.com/docs/en/about-claude/pricing (2026-10-03).
-  // Opus 5.5 cache reads are 5%, unlike the older models' 10%; none of these
+  // https://platform.claude.com/docs/en/about-claude/pricing (2026-10-08).
+  // Opus/Sonnet 5.5 cache reads are 5%, unlike the older models' 10%; none of these
   // models has a long-context premium.
   ...Object.fromEntries(
     (
       [
         ["claude-opus-5-5", 4_000_000, 200_000, 5_000_000, 20_000_000],
-        ["claude-sonnet-5-5", 2_000_000, 200_000, 2_500_000, 10_000_000],
+        ["claude-sonnet-5-5", 2_000_000, 100_000, 2_500_000, 10_000_000],
         ["claude-opus-5", 5_000_000, 500_000, 6_250_000, 25_000_000],
         ["claude-sonnet-5", 2_000_000, 200_000, 2_500_000, 10_000_000],
         ["claude-opus-4-8", 5_000_000, 500_000, 6_250_000, 25_000_000],
@@ -4207,6 +4212,30 @@ export const reviewedModelListPricing: Record<string, ModelPricingScheduleV1> = 
       },
     ]),
   ),
+  // https://platform.claude.com/docs/en/models/haiku-5-5/overview (2026-10-08).
+  // The higher rate applies to the WHOLE request strictly above 100,000 input
+  // tokens, including cached input. These are comparison prices, not a quota.
+  "claude-haiku-5-5": {
+    default: {
+      inputMicrosPerMillionTokens: 100_000,
+      cachedInputMicrosPerMillionTokens: 10_000,
+      cacheWriteMicrosPerMillionTokens: 125_000,
+      outputMicrosPerMillionTokens: 500_000,
+      marginBps: 500,
+    },
+    inputTokenTiers: [
+      {
+        minimumInputTokens: 100_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 500_000,
+          cachedInputMicrosPerMillionTokens: 50_000,
+          cacheWriteMicrosPerMillionTokens: 625_000,
+          outputMicrosPerMillionTokens: 2_500_000,
+          marginBps: 500,
+        },
+      },
+    ],
+  },
 };
 
 // Explicitly priced free variant, not an unknown rate. List-only metadata
@@ -4993,6 +5022,20 @@ export function allowedFirstPartyMcpToolsForSession(
   return [...tools].filter((tool) => allowed.has(tool));
 }
 
+/** Resolve durable selection intent before freezing a new attempt's catalog. */
+export function resolveSessionFirstPartyMcpTools(
+  settings: FirstPartyMcpToolPolicySettings,
+  session: Pick<Session, "firstPartyMcpTools" | "toolPolicy"> & Partial<Pick<Session, "agent">>,
+  workspaceSettings: unknown,
+): FirstPartyMcpToolNameType[] {
+  const selected =
+    session.toolPolicy.firstPartyMode === "workspace_default"
+      ? resolveWorkspaceSessionToolDefaults(workspaceSettings)?.firstPartyMcpTools
+      : session.firstPartyMcpTools;
+  const allowed = allowedFirstPartyMcpToolsForSession(settings, selected);
+  return session.agent ? agentConfigFirstPartyMcpTools(session.agent, allowed) : allowed;
+}
+
 /**
  * The Modal sandbox idle timeout (seconds) the provider actually passes as
  * idleTimeoutMs (sandbox-file-persistence). When the operator did not pin
@@ -5070,6 +5113,35 @@ export function effectiveSandboxDrainSnapshotTimeoutMs(
   settings: Pick<Settings, "sandboxSnapshotTimeoutMs" | "sandboxDrainSnapshotTimeoutMs">,
 ): number {
   return settings.sandboxDrainSnapshotTimeoutMs ?? settings.sandboxSnapshotTimeoutMs;
+}
+
+/**
+ * How long before a finite provider deadline the deadline save stops waiting
+ * for an orderly shutdown and becomes mandatory. Past this point the
+ * reaper captures and terminates the box around anything that cannot finish in
+ * time (pending owner quiescence, sibling attempts that do not hold the box,
+ * in-flight requests whose holders are gone, commands that ignored their stop
+ * request) instead of letting the provider kill it uncaptured. It leaves the
+ * legacy command stop grace, the full drain capture budget and two reaper
+ * periods before the deadline, and never exceeds the rotation lead.
+ */
+export function sandboxDeadlineMandatoryCaptureLeadMs(
+  settings: Pick<
+    Settings,
+    | "sandboxRotationLeadMs"
+    | "sandboxSnapshotTimeoutMs"
+    | "sandboxDrainSnapshotTimeoutMs"
+    | "sandboxLeaseReaperPeriodMs"
+  >,
+): number {
+  return Math.min(
+    settings.sandboxRotationLeadMs,
+    SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS +
+      sandboxArchiveCaptureTimeoutMs({
+        sandboxSnapshotTimeoutMs: effectiveSandboxDrainSnapshotTimeoutMs(settings),
+      }) +
+      2 * settings.sandboxLeaseReaperPeriodMs,
+  );
 }
 
 export function sandboxLifecycleTransitionWaitMs(
@@ -7728,12 +7800,21 @@ function reviewedProviderModelPricing(
   if (!schedule) return undefined;
   if (!nativeClaude || provider.anthropic?.cacheTtl !== "1h") return schedule;
   // Anthropic's 1-hour cache writes are 2x base input, rather than 5m's 1.25x.
+  const hourCacheWrite = (price: ModelPricing) => ({
+    ...price,
+    cacheWriteMicrosPerMillionTokens: price.inputMicrosPerMillionTokens * 2,
+  });
   return {
     ...schedule,
-    default: {
-      ...schedule.default,
-      cacheWriteMicrosPerMillionTokens: schedule.default.inputMicrosPerMillionTokens * 2,
-    },
+    default: hourCacheWrite(schedule.default),
+    ...(schedule.inputTokenTiers
+      ? {
+          inputTokenTiers: schedule.inputTokenTiers.map((tier) => ({
+            ...tier,
+            pricing: hourCacheWrite(tier.pricing),
+          })),
+        }
+      : {}),
   };
 }
 
@@ -7792,10 +7873,11 @@ export function settingsWithResolvedModelContext(
     | "effectiveContextWindowTokens"
     | "autoCompactTokenLimit"
     | "toolOutputTruncationTokens"
-  >,
+  > & { id?: string },
+  workspaceSettings?: unknown,
 ): Settings {
   const contextWindowTokens = model.contextWindowTokens ?? settings.contextWindowTokens;
-  return {
+  const resolved = {
     ...settings,
     contextWindowTokens,
     ...(model.effectiveContextWindowTokens === undefined
@@ -7812,6 +7894,48 @@ export function settingsWithResolvedModelContext(
     ...(model.toolOutputTruncationTokens === undefined
       ? {}
       : { modelToolOutputTruncationTokens: model.toolOutputTruncationTokens }),
+  };
+  if (workspaceSettings === undefined || !model.id) return resolved;
+  return {
+    ...resolved,
+    contextAutoCompactThresholdTokens: workspaceModelCompactionPolicy(
+      settings,
+      { ...model, id: model.id },
+      workspaceSettings,
+    ).effectiveTokens,
+  };
+}
+
+/** One policy projection for settings UI and all model-facing worker paths. */
+export function workspaceModelCompactionPolicy(
+  settings: Settings,
+  model: Pick<
+    ConfiguredModel,
+    "id" | "contextWindowTokens" | "effectiveContextWindowTokens" | "autoCompactTokenLimit"
+  >,
+  workspaceSettings: unknown,
+): ModelCompactionPolicy {
+  const resolved = settingsWithResolvedModelContext(settings, model);
+  const maximumTokens = Math.max(
+    0,
+    Math.floor(Math.min(resolved.contextWindowTokens * 0.9, contextInputBudgetTokens(resolved))),
+  );
+  const minimumTokens = Math.min(16_000, maximumTokens);
+  // Preserve deployment defaults below the UI's custom minimum. A new
+  // preference must not silently raise an existing operator-set trigger.
+  const clamp = (value: number) => Math.max(0, Math.min(maximumTokens, Math.floor(value)));
+  const defaultTokens = clamp(
+    resolved.contextAutoCompactThresholdTokens ??
+      resolved.contextWindowTokens *
+        Math.max(0.3, Math.min(0.9, resolved.contextCompactionThresholdRatio)),
+  );
+  const overrideTokens = workspaceModelCompactionThreshold(workspaceSettings, model.id);
+  return {
+    defaultTokens,
+    overrideTokens,
+    effectiveTokens: clamp(overrideTokens ?? defaultTokens),
+    minimumTokens,
+    maximumTokens,
   };
 }
 
@@ -10378,12 +10502,15 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
       defaultEffort: ReasoningEffort | null;
       contextWindowTokens: number;
       maxOutputTokens: number;
+      autoCompactTokenLimit?: number;
+      prefixBoundThinking?: boolean;
     }>
   >
 > = Object.fromEntries([
   ...[
     ["claude-opus-5-5", "medium"],
     ["claude-sonnet-5-5", "medium"],
+    ["claude-haiku-5-5", "medium"],
     ["claude-opus-5", "high"],
     ["claude-sonnet-5", "high"],
     ["claude-opus-4-8", "high"],
@@ -10395,6 +10522,9 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
       defaultEffort,
       contextWindowTokens: 1_000_000,
       maxOutputTokens: 128_000,
+      prefixBoundThinking:
+        id === "claude-opus-5-5" || id === "claude-sonnet-5-5" || id === "claude-haiku-5-5",
+      ...(id === "claude-haiku-5-5" ? { autoCompactTokenLimit: 95_000 } : {}),
     },
   ]),
   ...["claude-opus-4-6", "claude-sonnet-4-6"].map((id) => [
@@ -10474,9 +10604,10 @@ export function withClaudeConnectionCatalog(
           contextWindowTokens,
           effectiveContextWindowTokens: contextWindowTokens - outputReserve,
           autoCompactTokenLimit:
-            contextWindowTokens === 1_000_000
+            profile?.autoCompactTokenLimit ??
+            (contextWindowTokens === 1_000_000
               ? 800_000
-              : Math.min(150_000, contextWindowTokens - outputReserve - 18_000),
+              : Math.min(150_000, contextWindowTokens - outputReserve - 18_000)),
           id: id + "/" + model.upstreamModelId,
           upstreamModelId: model.upstreamModelId,
           label:
@@ -10485,7 +10616,9 @@ export function withClaudeConnectionCatalog(
               ? "Claude Opus 5.5"
               : model.upstreamModelId === "claude-sonnet-5-5"
                 ? "Claude Sonnet 5.5"
-                : model.upstreamModelId),
+                : model.upstreamModelId === "claude-haiku-5-5"
+                  ? "Claude Haiku 5.5"
+                  : model.upstreamModelId),
           reasoningEffort: adaptiveThinking,
           hostedWebSearch: false,
           capabilities: {

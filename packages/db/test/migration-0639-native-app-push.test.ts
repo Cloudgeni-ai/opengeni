@@ -13,6 +13,7 @@ import {
   enqueueNativePush,
   getNativePushDevice,
   registerNativePushDevice,
+  setSessionRepliesMuted,
   settleNativePushDelivery,
   unregisterNativePushDevice,
   type DbClient,
@@ -142,7 +143,8 @@ describe("0639 native app push", () => {
       from pg_proc procedure
       join pg_namespace namespace on namespace.oid = procedure.pronamespace
       where namespace.nspname = 'opengeni_private' and procedure.proname like '%native_push%'`;
-    expect(rows.length).toBe(8);
+    // Eight from 0639, plus enqueue_native_push_v2 (0664).
+    expect(rows.length).toBe(9);
     for (const row of rows) {
       expect(row.securityDefiner).toBe(true);
       expect(row.publicExecute).toBe(false);
@@ -223,6 +225,83 @@ describe("0639 native app push", () => {
     });
     // Someone else's devices never receive this session's events.
     expect(await pendingFor(other.authSessionId)).toHaveLength(0);
+  });
+
+  test("a sub-agent's turns end with its parent; only its questions alert the person (0675)", async () => {
+    if (!client) return;
+    const person = await personWithAppSession("sub-agent");
+    await registerNativePushDevice(db(), {
+      authSessionId: person.authSessionId,
+      platform: "ios",
+      appId: "ai.opengeni.app",
+      environment: "development",
+      token: "9".repeat(64),
+      rules: ["needs_input", "reply_ready", "failed"],
+    });
+    const child = await createSession(db(), {
+      ...person.scope,
+      initialMessage: "child",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+      parentSessionId: person.session.id,
+      createdBy: { kind: "subject", subjectId: person.subjectId, label: "User sub-agent" },
+      createdByContext: { label: "User sub-agent" },
+    });
+    await appendSessionEvents(db(), person.scope.workspaceId, child.id, [
+      { type: "turn.completed", payload: {} },
+      { type: "turn.failed", payload: { error: "boom" } },
+      {
+        type: "session.humanInput.requested",
+        payload: { request: { questions: [{ prompt: "Which region?" }] } },
+      },
+    ]);
+    const pending = await pendingFor(person.authSessionId);
+    expect(pending.map((row) => [row.rule, row.payload.sessionId])).toEqual([
+      ["needs_input", child.id],
+    ]);
+    // The person's own session still alerts when its turn ends.
+    await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+      { type: "turn.completed", payload: {} },
+    ]);
+    expect((await pendingFor(person.authSessionId)).map((row) => row.rule)).toEqual([
+      "needs_input",
+      "reply_ready",
+    ]);
+  });
+
+  test("a session whose replies the person muted still asks them questions (0678)", async () => {
+    if (!client) return;
+    const person = await personWithAppSession("muted");
+    await registerNativePushDevice(db(), {
+      authSessionId: person.authSessionId,
+      platform: "ios",
+      appId: "ai.opengeni.app",
+      environment: "development",
+      token: "8".repeat(64),
+      rules: ["needs_input", "reply_ready", "failed"],
+    });
+    await setSessionRepliesMuted(db(), {
+      workspaceId: person.scope.workspaceId,
+      sessionId: person.session.id,
+      subjectId: person.subjectId,
+      muted: true,
+    });
+    await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+      { type: "turn.completed", payload: {} },
+      {
+        type: "session.humanInput.requested",
+        payload: { request: { questions: [{ prompt: "Which region?" }] } },
+      },
+      { type: "turn.failed", payload: { error: "boom" } },
+    ]);
+    expect((await pendingFor(person.authSessionId)).map((row) => row.rule)).toEqual([
+      "needs_input",
+      "failed",
+    ]);
   });
 
   test("claims, settles, and forgets a device the provider no longer knows", async () => {

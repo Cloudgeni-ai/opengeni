@@ -114,6 +114,26 @@ capability may be replaced when catalog or provider authority changes, but a
 consumed capability leaves a durable hash-only operation tombstone: the same
 operation id cannot be approved again after execution may have started.
 
+Workspace HTTP/SDK/Site calls avoid re-preparing every connector per request.
+Each complete catalog preparation (`tools/catalog`, `tools/declarations`, or a
+complete call fallback) leaves a bounded, per-process, content-free attestation:
+the complete digest plus only the canonical digest of each entry, keyed by the
+exact caller scope (account, workspace, subject, principal kind, permissions,
+and service/external actor), with a fixed ten-minute lifetime and a global
+entry budget. A later call without an approval token whose `catalogDigest` is
+attested constructs and connects only its target identity's connector, through
+the same live account binding, credential, connector-policy, approval,
+Site-version, and argument validation path; first-party tool handlers still see
+the caller's complete authorized server settings. It executes only when that
+live entry is identical to the attested one, and the response echoes the
+caller's digest. An unknown or expired digest, another
+API replica, an approval token, or a missing, changed, or no-longer-authorized
+target falls back to complete preparation and the unchanged `catalog_stale`
+contract. Attestations never hold credentials or prepared gateways and grant no
+authority. `Server-Timing` (`gw-prepare`, `gw-call`) and
+`opengeni_tool_gateway_preparation_duration_seconds` expose the
+preparation/execution split without content.
+
 First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Projects, pins and order are workspace-shared. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/opengeni-projects/SKILL.md) explains the sidebar model. No new ownership model or database migration is needed.
 
 For lossless scheduled-task model edits, use
@@ -328,7 +348,22 @@ agent access uses its hosted MCP connector. Explicit `[]` means
 no tools from the broad server. Unknown names fail validation. This field does
 not grant authority: every catalog entry also has an explicit registration-time
 permission predicate, and target-scoped authorization still runs on calls.
-Child omission inherits the parent's exact effective selection.
+Omitting the field on a new top-level session follows the workspace's current
+built-in defaults (or the deployment defaults when no workspace override exists).
+`toolPolicy.firstPartyMode: "workspace_default"` records this intent independently
+of connector selection. New defaults are resolved when preparing the next attempt,
+under the deployment allowlist, configured capability families, and permissions.
+An already prepared catalog or signed delegation does not gain tools mid-attempt.
+Child omission inherits both the parent's effective selection and its default or
+pinned intent; an explicit child list can only narrow that selection.
+
+An explicit list, including `[]`, remains pinned. The existing **Reset to workspace
+defaults** action opts an older session into following defaults; editing connector
+exclusions alone preserves its built-in intent. Legacy sessions without that
+intent remain pinned unless their latest retained tool-policy event proves a full
+reset and still matches the stored selection. Migration does not infer intent from
+connector mode or similarity to today's defaults. Scheduled accepted selections
+remain exact snapshots; they are never re-resolved during recovery.
 
 GitHub App installation credentials are deliberately absent from this catalog.
 Repository discovery and browser connect status remain model-visible, but token

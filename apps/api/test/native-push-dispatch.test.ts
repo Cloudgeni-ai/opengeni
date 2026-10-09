@@ -4,6 +4,7 @@ import type { ClaimedNativePushDelivery } from "@opengeni/db";
 import {
   createFcmSender,
   nativePushAlert,
+  nativePushInterruptionLevel,
   nativePushCategory,
   nativePushData,
 } from "../src/native-push-dispatch";
@@ -55,6 +56,43 @@ describe("native push presentation", () => {
     expect(nativePushAlert({ ...payload, title: "Fix the build" }).title).toBe("Fix the build");
   });
 
+  test("an agent notification shows its subtitle, a plain message and its facts", () => {
+    const agent = {
+      ...payload,
+      rule: "agent" as const,
+      title: "Release is out",
+      subtitle: "v2.4.0 on production",
+      body: "Deployed **all** services:\n- api\n- web with [notes](https://example.com)\n\nRun `smoke` next.",
+      facts: [
+        { label: "Tests", value: "412 passed" },
+        { label: "Duration", value: "6m 12s" },
+      ],
+    };
+    expect(nativePushAlert(agent)).toEqual({
+      title: "Release is out",
+      subtitle: "v2.4.0 on production",
+      body: "Deployed all services:\n• api\n• web with notes\n\nRun smoke next.\n\nTests: 412 passed\nDuration: 6m 12s",
+    });
+    // A title-only notification doesn't repeat its title as the body.
+    expect(
+      nativePushAlert({ ...agent, subtitle: undefined, body: "Release is out", facts: [] }),
+    ).toEqual({ title: "Release is out" });
+  });
+
+  test("only notifications the agent marked time-sensitive break through Focus", () => {
+    expect(nativePushInterruptionLevel(payload)).toBe("active");
+    expect(nativePushInterruptionLevel({ ...payload, rule: "agent" })).toBe("active");
+    expect(nativePushInterruptionLevel({ ...payload, rule: "agent", urgency: "normal" })).toBe(
+      "active",
+    );
+    expect(
+      nativePushInterruptionLevel({ ...payload, rule: "agent", urgency: "time_sensitive" }),
+    ).toBe("time-sensitive");
+    // Urgency only counts on an agent notification.
+    expect(nativePushInterruptionLevel({ ...payload, urgency: "time_sensitive" })).toBe("active");
+    expect(nativePushInterruptionLevel({ ...payload, rule: "reply_ready" })).toBe("active");
+  });
+
   test("carries exactly what a tap needs to open the session in its account", () => {
     expect(nativePushData(payload)).toEqual({
       sessionId: payload.sessionId,
@@ -62,6 +100,7 @@ describe("native push presentation", () => {
       subjectId: "user:abc",
       rule: "needs_input",
     });
+    expect(nativePushData({ ...payload, sequence: 42 })).toMatchObject({ sequence: 42 });
   });
 });
 

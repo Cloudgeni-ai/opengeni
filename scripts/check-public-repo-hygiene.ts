@@ -67,6 +67,12 @@ const REVIEWED_UPSTREAM_LABEL_MATCHES: Record<
   string,
   { bytes: number; sha256: string; offsets: "all" | readonly number[] }
 > = {
+  // Upstream affine matrix field names in the generated desktop schema.
+  "packages/contracts/src/cua-desktop-tools.gen.json": {
+    bytes: 208_598,
+    sha256: "c767b4329424e7e5ae2cbcf91901742263c0a44f2ac9bf97cac21b37d3737cf3",
+    offsets: "all",
+  },
   "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_010000.txt": {
     bytes: 10_000,
     sha256: "460689f95489b6336f81772e8c2288bda85e897ffa19109c7dd4589c0715cb7f",
@@ -82,6 +88,20 @@ const REVIEWED_UPSTREAM_LABEL_MATCHES: Record<
     sha256: "d87f015a7be4c3abffa9df0366e59e2b6dfd64c89bee26d2437f50f280f296fe",
     // Only the signed-byte field primitive, not a string or comment.
     offsets: [9_379],
+  },
+};
+// Preserve the four published copyright contacts from agentkeepalive, fastq,
+// follow-redirects and isomorphic-ws. Only these personal-mail matches are
+// suppressed, at this exact notices path, UTF-8 size, hash and string offsets.
+// Every other rule still runs; changed license bytes require renewed review.
+const REVIEWED_UPSTREAM_LICENSE_CONTACT_MATCHES: Record<
+  string,
+  { bytes: number; sha256: string; offsets: readonly number[] }
+> = {
+  "packages/runtime/THIRD_PARTY_NOTICES": {
+    bytes: 153_257,
+    sha256: "9707320e0eb9229ed6689610215129d10463c91a79e15d8a65ad748265e62870",
+    offsets: [84_593, 101_439, 102_325, 124_221],
   },
 };
 const RUST_SIGNED_BYTE_TYPE = ["i", "8"].join("");
@@ -128,7 +148,15 @@ const PUBLIC_FITNESS_NAME = ["Pelo", "ton"].join("");
 
 export function auditPublicText(file: string, source: string): Finding[] {
   const findings: Finding[] = [];
-  collectMatches(file, source, PERSONAL_MAIL, "personal email address", findings);
+  const reviewedContacts = reviewedUpstreamLicenseContactOffsets(file, source);
+  collectMatches(
+    file,
+    source,
+    PERSONAL_MAIL,
+    "personal email address",
+    findings,
+    (match) => reviewedContacts?.includes(match.index ?? -1) === true,
+  );
   collectMatches(file, source, PRIVATE_WORKTREE_PATH, "private worktree path", findings);
   collectMatches(file, source, PRIVATE_ISSUE_REFERENCE, "private issue reference", findings);
   collectMatches(file, source, INTERNAL_WORK_LABEL, "internal work label", findings);
@@ -474,6 +502,18 @@ function reviewedUpstreamLabelOffsets(
   source: string,
 ): "all" | readonly number[] | undefined {
   const reviewed = REVIEWED_UPSTREAM_LABEL_MATCHES[file];
+  if (!reviewed || Buffer.byteLength(source, "utf8") !== reviewed.bytes) return undefined;
+  if (createHash("sha256").update(source, "utf8").digest("hex") !== reviewed.sha256) {
+    return undefined;
+  }
+  return reviewed.offsets;
+}
+
+function reviewedUpstreamLicenseContactOffsets(
+  file: string,
+  source: string,
+): readonly number[] | undefined {
+  const reviewed = REVIEWED_UPSTREAM_LICENSE_CONTACT_MATCHES[file];
   if (!reviewed || Buffer.byteLength(source, "utf8") !== reviewed.bytes) return undefined;
   if (createHash("sha256").update(source, "utf8").digest("hex") !== reviewed.sha256) {
     return undefined;

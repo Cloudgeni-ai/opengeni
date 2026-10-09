@@ -55,6 +55,7 @@ import {
   withLosslessContentWriteVersion,
 } from "./lossless-json";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
+import { deleteSubscriptionCoreCodexWaitersForTurns } from "./subscription-core-codex-waiter-cleanup";
 import { cancelTurnInteractionInterventionsInTransaction } from "./browser-auth";
 import {
   assertAgentCommandAuthorityInTransaction,
@@ -91,6 +92,7 @@ import {
   type FrozenTurnInitiator,
 } from "./turn-initiator";
 import { resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./xai-subscription";
+import { codexSubscriptionAuthorityV2ForAcceptanceInTransaction } from "./subscription-core-acceptance-authority";
 import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
 import { acceptTurnPersonalResourceAttachmentInTransaction } from "./user-resource-authority";
 
@@ -766,6 +768,13 @@ export async function supersedeSessionCurrentDirectionInTransaction(
           ),
         );
     }
+    // The shared subscription core's Codex waiter exists only while its turn
+    // waits; the Steer ends that wait, so the row goes with it (its pending
+    // wake deliveries cascade).
+    await deleteSubscriptionCoreCodexWaitersForTurns(db, {
+      workspaceId: input.workspaceId,
+      turnIds: [current.id],
+    });
   }
   return {
     interruptionCount: 0,
@@ -2146,6 +2155,20 @@ export async function submitHumanPromptInTransaction(
       (await resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction(db, {
         workspaceId: input.workspaceId,
       })));
+  // Codex v2 accepted authority (M3 PR 2a): an edit keeps its source turn's
+  // frozen value; a human prompt, whether sent or steered, resolves that
+  // human's own owner-caused authority; every other actor (service, operator,
+  // API key, and an agent's message or Steer) freezes none. NULL until the
+  // account's Codex cutover is enabled. Reads the cutover row on every
+  // non-edit prompt (one indexed lookup).
+  const subscriptionAuthority = editedSourceTurn
+    ? (editedSourceTurn.subscriptionAuthority ?? null)
+    : await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        acceptingSubjectId: input.actor.type === "human" ? acceptedInitiatingHumanSubjectId : null,
+      });
   await input.beforeFreshPromptCommit?.(db, { claudeProviderAccountAuthoritySnapshot });
   const acceptedEventId = crypto.randomUUID();
   const turnId = crypto.randomUUID();
@@ -2241,6 +2264,7 @@ export async function submitHumanPromptInTransaction(
             : parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
           xaiProviderAccountAuthoritySnapshot,
           claudeProviderAccountAuthoritySnapshot,
+          subscriptionAuthority,
           createdAt: now,
           updatedAt: now,
         },

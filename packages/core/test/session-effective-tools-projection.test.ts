@@ -2,6 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { configuredModels, withXaiSubscriptionCatalogProvider } from "@opengeni/config";
 import {
   AgentEffectiveTools,
+  CUA_DESKTOP_TOOLS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   resolveAgentConfig,
   type AgentCapabilities,
@@ -70,6 +71,86 @@ function projected(row = session(), env = context()) {
 }
 
 describe("server effectiveTools environment projection", () => {
+  test("native computer projection matches eager and deferred interaction tools", () => {
+    for (const lazy of [true, false]) {
+      const env = context({ settings: { ...settings, lazyToolSearchEnabled: lazy } });
+      const row = session("all", {
+        firstPartyMcpTools: ["computer_open", "computer_act"],
+        tools: [{ id: "opengeni", eager: true }],
+        toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      });
+      const result = projected(row, env).effectiveTools!;
+      const native = result.tools.filter((tool) => tool.name.startsWith("interaction__cua_"));
+      expect(native).toEqual(
+        CUA_DESKTOP_TOOLS.map((tool) => ({
+          name: `interaction__cua_${tool.name}`,
+          capability: "browser",
+          source: "first_party",
+          visibility: lazy ? "search" : "upfront",
+        })),
+      );
+      expect(AgentEffectiveTools.safeParse(result).success).toBe(true);
+      expect(result.tools.some((tool) => tool.name === "tool_search")).toBe(lazy);
+    }
+  });
+
+  test("native computer projection follows current defaults only for opted-in sessions", () => {
+    const row = session("all", {
+      firstPartyMcpTools: [],
+      toolPolicy: {
+        mode: "workspace_default",
+        inheritedFromSessionId: null,
+        firstPartyMode: "workspace_default",
+      },
+    });
+    const env = context({
+      workspaceSettings: {
+        sessionToolDefaults: { firstPartyMcpTools: ["computer_open", "computer_act"] },
+      },
+    });
+    const nativeCount = (current: typeof row, currentEnv = env) =>
+      projected(current, currentEnv).effectiveTools!.tools.filter((tool) =>
+        tool.name.startsWith("interaction__cua_"),
+      ).length;
+    expect(nativeCount(row)).toBe(CUA_DESKTOP_TOOLS.length);
+    expect(
+      nativeCount({ ...row, toolPolicy: { ...row.toolPolicy, firstPartyMode: "explicit" } }),
+    ).toBe(0);
+    expect(
+      nativeCount(
+        { ...row, firstPartyMcpTools: ["computer_open", "computer_act"] },
+        context({ workspaceSettings: { sessionToolDefaults: { firstPartyMcpTools: [] } } }),
+      ),
+    ).toBe(0);
+  });
+
+  test("native computer projection cannot restore missing selection or authority", () => {
+    const row = session("all", { firstPartyMcpTools: ["computer_open", "computer_act"] });
+    const noSecret = context({
+      settings: {
+        ...settings,
+        productAccessMode: "managed",
+        delegationSecret: undefined,
+      },
+    });
+    const unavailable = { ...row, agent: { ...row.agent, unavailable: ["browser" as const] } };
+    for (const [current, env] of [
+      [{ ...row, firstPartyMcpTools: ["computer_open"] }, context()],
+      [{ ...row, firstPartyMcpTools: ["computer_act"] }, context()],
+      [{ ...row, firstPartyMcpPermissions: ["sessions:read"] }, context()],
+      [{ ...row, firstPartyMcpPermissions: [] }, context()],
+      [row, noSecret],
+      [session({ from: "all", browser: false }), context()],
+      [unavailable, context()],
+      [row, context({ settings: { ...settings, allowedFirstPartyMcpTools: ["computer_open"] } })],
+    ] as const) {
+      expect(
+        projected(current as typeof row, env).effectiveTools!.tools.some((tool) =>
+          tool.name.startsWith("interaction__cua_"),
+        ),
+      ).toBe(false);
+    }
+  });
   test("browser downloads follow capability selection and both save permissions", () => {
     for (const permissions of [
       ["sessions:read"],

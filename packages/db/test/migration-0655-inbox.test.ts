@@ -11,9 +11,13 @@ import {
   createSession,
   dismissInboxNotification,
   getInboxItem,
+  getInboxSettings,
   getInboxTidyPolicy,
+  getSessionRepliesMuted,
   listInboxItems,
+  setInboxSettings,
   setInboxTidyPolicy,
+  setSessionRepliesMuted,
   updateInboxItemAttention,
   type DbClient,
 } from "../src/index";
@@ -227,9 +231,168 @@ describe("0655 inbox", () => {
     expect(bySource.get("multi")).toEqual([]);
   });
 
+  test("paused goals stay out of the inbox until the person turns them on (0663)", async () => {
+    if (!client) return;
+    const person = await personWithSession("goal-off");
+    const owner = { accountId: person.scope.accountId, subjectId: person.subjectId };
+    expect(await getInboxSettings(db(), owner)).toEqual({
+      tidyPolicy: "own_sessions",
+      pausedGoals: false,
+      replies: false,
+    });
+    await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+      {
+        type: "goal.paused",
+        payload: { actor: "agent", reason: "agent", rationale: "Done for now" },
+      },
+    ]);
+    expect(await inbox(person)).toHaveLength(0);
+    // A partial change keeps the other setting.
+    await setInboxSettings(db(), { ...owner, tidyPolicy: "any_agent" });
+    expect(await setInboxSettings(db(), { ...owner, pausedGoals: true })).toEqual({
+      tidyPolicy: "any_agent",
+      pausedGoals: true,
+      replies: false,
+    });
+  });
+
+  test("replies keep one item per session until cleared, only when turned on (0665)", async () => {
+    if (!client) return;
+    const person = await personWithSession("replies");
+    const owner = { accountId: person.scope.accountId, subjectId: person.subjectId };
+    let position = 0;
+    const reply = async (text: string | null, holds: { waiting?: boolean } = {}) => {
+      const turnId = crypto.randomUUID();
+      position += 1;
+      await owned!.admin.begin(async (tx) => {
+        await tx`select set_config('opengeni.session_inference_claim', '1', true)`;
+        await tx`select set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
+        await tx`select set_config('opengeni.account_id', ${person.scope.accountId}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${person.scope.workspaceId}, true)`;
+        await tx`
+          insert into session_turns (
+            id, account_id, workspace_id, session_id, trigger_event_id,
+            temporal_workflow_id, status, source, position, prompt, model,
+            reasoning_effort, sandbox_backend, execution_generation,
+            initiator_kind, initiator_subject_id, initiator_context,
+            initiating_human_subject_id
+          ) values (
+            ${turnId}, ${person.scope.accountId}, ${person.scope.workspaceId},
+            ${person.session.id}, ${crypto.randomUUID()}, ${`inbox-reply-${turnId}`},
+            'queued', 'user', ${position}, 'work', 'test-model', 'medium', 'none', 1,
+            'subject', ${person.subjectId}, '{}'::jsonb, ${person.subjectId}
+          )`;
+        // The agent called wait_for_input in this turn: it still holds the session.
+        if (holds.waiting) {
+          await tx`update sessions set input_wait_turn_id = ${turnId},
+            input_wait_until = now() + interval '1 hour', input_wait_reason = 'round 6',
+            input_wait_set_at = now() where id = ${person.session.id}`;
+        }
+      });
+      const events = await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+        ...(text === null
+          ? []
+          : [{ type: "agent.message.completed" as const, turnId, payload: { text } }]),
+        { type: "turn.completed", turnId, payload: {} },
+      ]);
+      await owned!.admin.begin(async (tx) => {
+        await tx`select set_config('opengeni.session_inference_claim', '1', true)`;
+        await tx`select set_config('opengeni.account_id', ${person.scope.accountId}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${person.scope.workspaceId}, true)`;
+        await tx`update session_turns set status = 'completed' where id = ${turnId}`;
+        await tx`update sessions set input_wait_turn_id = null, input_wait_until = null,
+          input_wait_reason = null, input_wait_set_at = null where id = ${person.session.id}`;
+      });
+      return events;
+    };
+    await reply("Off by default");
+    expect(await inbox(person)).toHaveLength(0);
+    await setInboxSettings(db(), { ...owner, replies: true });
+    const [message] = await reply("## Deployed **2.4**\nAll services are green.");
+    let items = await inbox(person);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "reply",
+      title: "Deployed 2.4",
+      body: "All services are green.",
+      unread: true,
+      eventSequence: message!.sequence,
+    });
+    // Seen, it stays; a new reply updates the same item and is unread again.
+    await updateInboxItemAttention(db(), { itemId: items[0]!.id, ...owner, seen: true });
+    expect((await inbox(person))[0]).toMatchObject({ unread: false });
+    await reply("Second reply");
+    items = await inbox(person);
+    expect(items.map((item) => [item.kind, item.title, item.unread])).toEqual([
+      ["reply", "Second reply", true],
+    ]);
+    // Cleared, a later reply brings it back; turning replies off takes it away.
+    await updateInboxItemAttention(db(), { itemId: items[0]!.id, ...owner, dismissed: true });
+    expect(await inbox(person)).toHaveLength(0);
+    await reply("Third reply");
+    expect((await inbox(person)).map((item) => item.title)).toEqual(["Third reply"]);
+    // A turn without a reply of its own leaves the item as it was (0666).
+    const [seen] = await inbox(person);
+    await updateInboxItemAttention(db(), { itemId: seen!.id, ...owner, seen: true });
+    await reply(null);
+    expect((await inbox(person)).map((item) => [item.title, item.unread])).toEqual([
+      ["Third reply", false],
+    ]);
+    // While the agent still holds the session (waiting on its own work), its
+    // interim messages are not replies to the person (0674).
+    await reply("Waiting for round 6:", { waiting: true });
+    expect((await inbox(person)).map((item) => [item.title, item.unread])).toEqual([
+      ["Third reply", false],
+    ]);
+    await reply("Round 6 is in");
+    expect((await inbox(person)).map((item) => [item.title, item.unread])).toEqual([
+      ["Round 6 is in", true],
+    ]);
+    // Muting the session takes its reply away and keeps new ones out, while
+    // what the agent sends on purpose still arrives (0678).
+    const muteFor = {
+      workspaceId: person.scope.workspaceId,
+      sessionId: person.session.id,
+      subjectId: person.subjectId,
+    };
+    expect(await getSessionRepliesMuted(db(), muteFor)).toBe(false);
+    expect(await setSessionRepliesMuted(db(), { ...muteFor, muted: true })).toBe(true);
+    expect(await getSessionRepliesMuted(db(), muteFor)).toBe(true);
+    expect(await inbox(person)).toHaveLength(0);
+    await reply("Muted reply");
+    await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+      {
+        type: "session.notification.posted",
+        payload: { key: "muted-note", title: "Still worth knowing", body: "", replaced: false },
+      },
+    ]);
+    expect((await inbox(person)).map((item) => [item.kind, item.title])).toEqual([
+      ["notification", "Still worth knowing"],
+    ]);
+    // Someone else's mute does nothing for the person the session works for.
+    expect(
+      await getSessionRepliesMuted(db(), { ...muteFor, subjectId: `user:${crypto.randomUUID()}` }),
+    ).toBe(false);
+    expect(await setSessionRepliesMuted(db(), { ...muteFor, muted: false })).toBe(false);
+    await reply("Unmuted reply");
+    expect(
+      (await inbox(person)).filter((item) => item.kind === "reply").map((item) => item.title),
+    ).toEqual(["Unmuted reply"]);
+    expect(
+      await getSessionRepliesMuted(db(), { ...muteFor, sessionId: crypto.randomUUID() }),
+    ).toBeNull();
+    await setInboxSettings(db(), { ...owner, replies: false });
+    expect((await inbox(person)).map((item) => item.kind)).toEqual(["notification"]);
+  });
+
   test("an agent's pause waits on the person until the goal resumes", async () => {
     if (!client) return;
     const person = await personWithSession("goal");
+    await setInboxSettings(db(), {
+      accountId: person.scope.accountId,
+      subjectId: person.subjectId,
+      pausedGoals: true,
+    });
     await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
       { type: "goal.paused", payload: { actor: "user", reason: "user" } },
     ]);
@@ -246,6 +409,80 @@ describe("0655 inbox", () => {
       { type: "goal.resumed", payload: { actor: "user" } },
     ]);
     expect(await inbox(person)).toHaveLength(0);
+  });
+
+  test("a sub-agent's paused goal waits on its parent, but its questions reach the person (0661)", async () => {
+    if (!client) return;
+    const person = await personWithSession("sub-agent");
+    const child = await createSession(db(), {
+      ...person.scope,
+      initialMessage: "child",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+      parentSessionId: person.session.id,
+      createdBy: { kind: "subject", subjectId: person.subjectId, label: "User sub-agent" },
+      createdByContext: { label: "User sub-agent" },
+    });
+    await appendSessionEvents(db(), person.scope.workspaceId, child.id, [
+      {
+        type: "goal.paused",
+        payload: { actor: "agent", reason: "agent", rationale: "Waiting for the parent" },
+      },
+      {
+        type: "session.humanInput.requested",
+        payload: { request: { id: "child-question", questions: [{ prompt: "Which region?" }] } },
+      },
+    ]);
+    const items = await inbox(person);
+    expect(items.map((item) => [item.kind, item.sessionId])).toEqual([["question", child.id]]);
+  });
+
+  test("a notification carries its subtitle, message, facts and link; every item its moment (0664)", async () => {
+    if (!client) return;
+    const person = await personWithSession("notify-rich");
+    const [question] = await appendSessionEvents(
+      db(),
+      person.scope.workspaceId,
+      person.session.id,
+      [
+        {
+          type: "session.humanInput.requested",
+          payload: { request: { id: "rich-q", questions: [{ prompt: "Ship it?" }] } },
+        },
+      ],
+    );
+    const body = `Deployed **all** services:\n- api\n- web\n${"x".repeat(600)}`;
+    const [posted] = await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+      {
+        type: "session.notification.posted",
+        payload: {
+          key: "release",
+          title: "Release is out",
+          subtitle: "v2.4.0",
+          body,
+          facts: [{ label: "Tests", value: "412 passed" }],
+          link: { url: "https://example.com/pr/1", label: "Pull request" },
+          urgency: "time_sensitive",
+          replaced: false,
+        },
+      },
+    ]);
+    const items = await inbox(person);
+    const note = items.find((item) => item.kind === "notification");
+    expect(note).toMatchObject({
+      subtitle: "v2.4.0",
+      body,
+      facts: [{ label: "Tests", value: "412 passed" }],
+      link: { url: "https://example.com/pr/1", label: "Pull request" },
+      urgency: "time_sensitive",
+      eventSequence: posted!.sequence,
+    });
+    // Every item remembers the moment that raised it (0664).
+    expect(items.find((item) => item.kind === "question")?.eventSequence).toBe(question!.sequence);
   });
 
   test("notifications update in place, keep the person's dismissal, and can be withdrawn", async () => {

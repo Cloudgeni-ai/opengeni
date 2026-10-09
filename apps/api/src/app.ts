@@ -198,12 +198,16 @@ import { buildOpenGeniMcpServer } from "./mcp/server";
 import {
   buildWorkspaceToolGatewayMcpServer,
   approveWorkspaceToolGatewayCall,
-  callWorkspaceToolGateway,
+  callWorkspaceToolGatewayForCaller,
   grantUsesAttemptScopedMcp,
+  prepareAttestedWorkspaceToolGateway,
   prepareMcpOAuthWorkspaceToolGateway,
   prepareWorkspaceToolGateway,
   workspaceToolGatewayDeclarations,
+  workspaceToolGatewayServerTiming,
 } from "./workspace-tool-gateway";
+import { createWorkspaceToolGatewayCatalogAttestations } from "./workspace-tool-gateway-attestations";
+import { recordWorkspaceToolGatewayPreparation } from "./workspace-tool-gateway-observability";
 import {
   isMcpOAuthResourcePath,
   mcpOAuthAuthenticateHeader,
@@ -1742,6 +1746,9 @@ export function createAppComposition(deps: AppDependencies): {
     );
   });
 
+  // Content-free, per-process catalog attestations: they let a call prepare
+  // only its target connector while preserving the stale-catalog contract.
+  const toolGatewayCatalogAttestations = createWorkspaceToolGatewayCatalogAttestations();
   app.get("/v1/workspaces/:workspaceId/tools/catalog", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
@@ -1750,9 +1757,22 @@ export function createAppComposition(deps: AppDependencies): {
       workspaceId,
       "workspace:read",
     );
-    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    const startedAt = performance.now();
+    const prepared = await prepareAttestedWorkspaceToolGateway(
+      routeDeps,
+      authorization,
+      toolGatewayCatalogAttestations,
+    );
     try {
+      const prepareMs = performance.now() - startedAt;
+      recordWorkspaceToolGatewayPreparation(routeDeps.observability, {
+        operation: "catalog",
+        scope: "complete",
+        attestation: "record",
+        durationSeconds: prepareMs / 1_000,
+      });
       c.header("cache-control", "no-store");
+      c.header("server-timing", workspaceToolGatewayServerTiming({ prepareMs, scope: "complete" }));
       return c.json(prepared.toolGatewayCatalog);
     } finally {
       await prepared.close();
@@ -1767,26 +1787,28 @@ export function createAppComposition(deps: AppDependencies): {
       workspaceId,
       "workspace:read",
     );
-    const grant = authorization.grant;
     const parsed = ToolGatewayCallRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       throw new HTTPException(400, { message: "Invalid tool gateway call" });
     }
-    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
-    try {
-      return c.json(
-        await callWorkspaceToolGateway(
-          prepared,
-          grant,
-          parsed.data,
-          routeDeps.db,
-          undefined,
-          routeDeps.observability,
-        ),
-      );
-    } finally {
-      await prepared.close();
-    }
+    const { response, timing } = await callWorkspaceToolGatewayForCaller(
+      routeDeps,
+      authorization,
+      parsed.data,
+      {
+        attestations: toolGatewayCatalogAttestations,
+        ...(routeDeps.observability ? { observability: routeDeps.observability } : {}),
+        onPreparation: (preparation) =>
+          recordWorkspaceToolGatewayPreparation(routeDeps.observability, {
+            operation: "call",
+            scope: preparation.scope,
+            attestation: preparation.attestation,
+            durationSeconds: preparation.prepareMs / 1_000,
+          }),
+      },
+    );
+    c.header("server-timing", workspaceToolGatewayServerTiming(timing));
+    return c.json(response);
   });
 
   app.post("/v1/workspaces/:workspaceId/tools/approvals", async (c) => {
@@ -1827,7 +1849,11 @@ export function createAppComposition(deps: AppDependencies): {
       workspaceId,
       "workspace:read",
     );
-    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    const prepared = await prepareAttestedWorkspaceToolGateway(
+      routeDeps,
+      authorization,
+      toolGatewayCatalogAttestations,
+    );
     try {
       c.header("cache-control", "no-store");
       return c.json(workspaceToolGatewayDeclarations(prepared));
@@ -2942,7 +2968,7 @@ const routeLabelPatterns: Array<{
   },
   {
     pattern:
-      /^\/v1\/workspaces\/[^/]+\/computer-sessions\/[^/]+\/(actions|attachments|clipboard|end|heartbeat|targets)$/,
+      /^\/v1\/workspaces\/[^/]+\/computer-sessions\/[^/]+\/(actions|native-calls|attachments|clipboard|end|heartbeat|targets)$/,
     label: (match) =>
       `/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/${match[1]}`,
   },

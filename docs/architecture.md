@@ -179,6 +179,35 @@ Docker/local SDK processes expose bounded-wait, turn-scoped handles, stay
 cancellation-fenced and stop before finalization; agents can test preview
 servers without awaiting exit.
 
+Internal filesystem completion is owned by
+`packages/runtime/src/sandbox/synchronous-command.ts`: one invocation,
+complete separate-stream pages and provider terminal/EOF proof. SDK-native
+collection in `sandbox/native-synchronous-collection.ts` begins before Start,
+on the original process streams, rather than parsing bounded shell presentation.
+Provider adapters own trusted page identities and cursors; routing captures
+those pages before acknowledging or settling the original process. Physical
+exit can settle process custody without proving complete output, but cannot
+authorize a successful filesystem result. Channel A and routing
+keep this separate from interactive/background shell execution; the worker
+reuses its turn cancellation registration for Skill filesystem commands.
+
+Registered Daytona clients bind the same authenticated native sandbox before
+filesystem dispatch (`sandbox/providers/daytona-command-binding.ts`). Framed
+native sessions preserve exact stream bytes and require original-command exit
+plus both stream EOFs; lossy native log projections are not completion proof.
+Routing awaits retryable namespace cleanup only after durable output settlement.
+Session deletion or absence cannot prove cancellation or output completeness.
+
+OpenSandbox's `sandbox/providers/opensandbox-command-stream.ts` validates the
+original SSE/NDJSON frames before SDK projection and records invocation-local
+dispatch evidence at the bound transport. The adapter pins the first execution
+identity and launch client. Its control-only observer can reconcile physical
+exit after output loss without reading or acknowledging retained output.
+Attempted dispatch without an authenticated execution identity remains unknown
+and joined; absent headers, ambiguous HTTP errors or a missing ID cannot create
+terminal proof. Only a genuinely bound, unchanged default SDK command path that
+failed before command transport grants local non-dispatch proof.
+
 `wait_for_input` retains its turn/deadline until input/timeout; acknowledgment
 cannot strand eligible input/due waits. `Session.inputWait` drives working/recheck
 UI, not unread. `session_wait`/`command_wait` read in-turn; child results carry
@@ -413,6 +442,17 @@ catalog/billing. `openrouter/*` and `workspace-openrouter/*` (likewise `opper/*`
 identities for identical slugs. Claude setup:
 `apps/api/src/routes/workspace-model-providers.ts`; transport:
 `packages/runtime/src/anthropic-messages.ts`.
+Claude request-byte and independent image bounds live in
+`packages/runtime/src/anthropic-request-size.ts`; exact checkpoint-prefix fitting
+is in `packages/runtime/src/anthropic-compaction.ts`. The worker claims a fenced,
+durable one-per-turn byte-recovery allowance before summarizing a prefix and
+preserving its complete suffix. See [context compaction](context-compaction.md).
+Workspace `modelCompactionThresholds` preferences resolve through
+`workspaceModelCompactionPolicy` in config at model preparation. The API catalog
+and Models → Context & compaction page expose the same default/override/effective
+values without changing immutable model definitions or frozen compaction modes.
+Per-model PATCH/reset is atomic in the workspace settings store; request-byte
+guards remain independent of the token preference.
 The shared `claudeNativeModelProfile` in `packages/config/src/index.ts` owns
 native model effort vocabularies, defaults, context windows and output ceilings;
 both catalog projection and request shaping consume it.
@@ -1040,7 +1080,10 @@ Always-visible first-request local tools (closed set): `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
 `request_human_input`, `list_models` (lists, never switches models), optional
 [`code_search`](code-search.md), and optional provider
-[`web_search`/`web_fetch`](web-search.md). Other non-MCP functions/non-eager MCP schemas require search.
+[`web_search`/`web_fetch`](web-search.md). Authorized first-party harness control
+tools (`opengeni__goal_*` lifecycle, `opengeni__command_read`/`command_wait`,
+`opengeni__wait_for_input`) are also always visible; the `opengeni` server then
+joins the first-request barrier. Other non-MCP functions/non-eager MCP schemas require search.
 
 Web search is hosted by the model provider where the catalog declares it, or
 worker-run through one deployment-configured search API (`web_search` /
@@ -1432,7 +1475,11 @@ never a retry of an existing or ambiguous operation. Submission conflicts never
 reconcile to an existing row; ambiguous failures adopt one only after exact
 scope, catalog, identity and argument comparison. Recovery never replays the
 tool ([run lifecycle](run-lifecycle.md#codemode-recovery)). The current-human
-gateway rebuilds live authority per request. Native connection-backed providers
+gateway rebuilds live authority per request. HTTP calls may rebuild only the
+target identity's connector when their complete catalog digest has a
+content-free per-process attestation for the same caller scope and the live
+entry is identical; otherwise they prepare the complete catalog
+([MCP surfaces](mcp-surfaces.md)). Native connection-backed providers
 use the same account-qualified identities as agent catalogs. Shared projection
 lives in `packages/core/src/domain/mcp-account-routes.ts`; services see workspace
 accounts only, and human transports may see their own eligible accounts.

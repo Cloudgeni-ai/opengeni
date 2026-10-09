@@ -122,6 +122,10 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "claude_subscription_pool_protocol_v1_active()",
+  // M3 PR 2b: run only by the Codex Apps routines as their owner.
+  "subscription_codex_apps_designation_target(uuid, uuid)",
+  // M3 PR 2c: run only by the Codex connection-seam routines as their owner.
+  "subscription_codex_connection_target(uuid, uuid, uuid, uuid, uuid, text, bigint)",
   "read_sender_connection(uuid, uuid, uuid, text)",
   // Lifecycle fact writers (migrations 0532 and 0565): owner-run trigger
   // functions and the migration-owner backfill. Runtime roles may still hold
@@ -673,6 +677,39 @@ export const SUBSCRIPTION_ACCOUNT_CAPABILITY_ROUTINES = [
   ...CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES,
 ];
 const CLAUDE_AUTHORITY_ROUTINE_SET = new Set(CLAUDE_AUTHORITY_ROUTINES);
+export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
+  "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
+  "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
+  "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)",
+  "begin_subscription_codex_refresh(uuid, uuid, uuid, uuid, text, text, uuid, text, bigint)",
+  "persist_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text)",
+  // M3 PR 2a: Codex chat waits, connection health and v2 acceptance.
+  "quarantine_subscription_codex_connection(uuid, uuid, uuid, uuid, uuid, text, bigint, bigint, text, text, timestamp with time zone)",
+  "recover_subscription_codex_connection_health(uuid, uuid, uuid, uuid)",
+  "persist_subscription_codex_refresh_with_plan(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone, text)",
+  "subscription_codex_acceptance_authority_v2(uuid, uuid, uuid, text)",
+  // M3 PR 2b: the Codex Apps designation on the core.
+  "resolve_subscription_codex_apps_designation(uuid, uuid)",
+  "read_subscription_codex_apps_credential(uuid, uuid, uuid)",
+  "begin_subscription_codex_apps_refresh(uuid, uuid, uuid)",
+  "persist_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text)",
+  // M3 PR 2c: the connection-level Codex credential seam for operations.
+  "read_subscription_codex_connection_credential(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "begin_subscription_codex_connection_refresh(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "persist_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text)",
+  "subscription_codex_reset_authority(uuid, uuid, uuid, text)",
+] as const;
+
+/** Owner-only private helpers the runtime role must never be able to execute. */
+export const SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES = [
+  // M3 PR 2b: returns a full connection row to the Apps routines that run as its owner.
+  "subscription_codex_apps_designation_target(uuid, uuid)",
+  // M3 PR 2c: returns a full connection row to the connection-seam routines.
+  "subscription_codex_connection_target(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+] as const;
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [
   "knowledge_index_claim(text, integer, integer)",
@@ -2451,6 +2488,39 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const tableByName = new Map(posture.tables.map((table) => [table.name, table]));
+  const privateSchemaOwner = posture.schemas.find(
+    (schema) => schema.name === "opengeni_private",
+  )?.owner;
+  const quotedTargetSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+  const precursorSearchPaths = new Set([
+    `search_path=pg_catalog, ${quotedTargetSchema}, opengeni_private, pg_temp`,
+    `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedTargetSchema}, opengeni_private, pg_temp`,
+  ]);
+  for (const expectedRoutine of SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES) {
+    const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
+    const safeSearchPath = (routine: RuntimeRoutinePosture) =>
+      routine.name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)"
+        ? routine.configuration?.includes("search_path=pg_catalog, opengeni_private, pg_temp")
+        : routine.configuration?.some((configuration) => precursorSearchPaths.has(configuration));
+    if (
+      matches.length !== 1 ||
+      !matches[0]!.execute ||
+      matches[0]!.publicExecute ||
+      !matches[0]!.securityDefiner ||
+      (privateSchemaOwner && matches[0]!.owner !== privateSchemaOwner) ||
+      !safeSearchPath(matches[0]!)
+    ) {
+      violations.push(
+        `subscription M3 precursor private routine ${expectedRoutine} is missing or unsafe`,
+      );
+    }
+  }
+  for (const ownerOnly of SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES) {
+    const routine = posture.privateRoutines.find((candidate) => candidate.name === ownerOnly);
+    if (routine && (routine.execute || routine.publicExecute)) {
+      violations.push(`subscription M3 owner-only private routine ${ownerOnly} is executable`);
+    }
+  }
   if (tableByName.has("organization_integration_policies")) {
     for (const name of [
       "update_organization_integration_policy(uuid, text, jsonb)",

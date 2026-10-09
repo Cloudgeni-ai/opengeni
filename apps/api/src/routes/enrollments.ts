@@ -110,7 +110,8 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // poll). The relay tier owns the heavy stream rate-limiting; this
   // is the application-tier abuse cap on the device-flow endpoints. Per-IP buckets
   // are pruned lazily. Not a distributed limiter (one replica per bucket) — that is
-  // acceptable for a bounded, access-key-gated, short-TTL flow.
+  // acceptable for a bounded, short-TTL flow. These routes are public even behind
+  // the deployment key, because a machine never holds that key.
   const startLimiter = new TokenBucket({ capacity: 10, refillPerSecond: 0.5 });
   const pollLimiter = new TokenBucket({ capacity: 60, refillPerSecond: 2 });
   // The click-Grant approve-page lookup (authenticated, but capped against a

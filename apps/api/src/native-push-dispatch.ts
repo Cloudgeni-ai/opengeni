@@ -33,10 +33,25 @@ export type NativePushDispatchDeps = {
   senders?: Partial<Record<"ios" | "android", NativePushSender>>;
 };
 
-/** The visible text of a push. */
+/**
+ * A notification message as plain text for the lock screen: links keep their
+ * text, emphasis and code marks go, and "- " bullets become "•".
+ */
+export function plainNotificationText(markdown: string): string {
+  return markdown
+    .replace(/\[([^\]]+)\]\((?:[^)]+)\)/gu, "$1")
+    .replace(/(\*\*|__)(.+?)\1/gu, "$2")
+    .replace(/`([^`]+)`/gu, "$1")
+    .replace(/^[ \t]*[-*][ \t]+/gmu, "• ")
+    .replace(/\n{3,}/gu, "\n\n")
+    .trim();
+}
+
+/** The visible text of a push: title, optional subtitle, and the message with its facts. */
 export function nativePushAlert(payload: ClaimedNativePushDelivery["payload"]): {
   title: string;
-  body: string;
+  subtitle?: string;
+  body?: string;
 } {
   const fallback =
     payload.rule === "needs_input"
@@ -46,7 +61,32 @@ export function nativePushAlert(payload: ClaimedNativePushDelivery["payload"]): 
         : payload.rule === "reply_ready"
           ? "Reply ready"
           : "Opengeni";
-  return { title: payload.title ?? fallback, body: payload.body ?? fallback };
+  const facts = (payload.facts ?? [])
+    .slice(0, 4)
+    .map((fact) => `${fact.label}: ${fact.value}`)
+    .join("\n");
+  const message = payload.body ? plainNotificationText(payload.body) : "";
+  // A notification with no message of its own carries its title as the body;
+  // show the title once.
+  const lines = [message === payload.title ? "" : message, facts].filter(Boolean);
+  const body = lines.join("\n\n");
+  return {
+    title: payload.title ?? fallback,
+    ...(payload.subtitle ? { subtitle: payload.subtitle } : {}),
+    ...(body || payload.rule !== "agent" ? { body: body || fallback } : {}),
+  };
+}
+
+/**
+ * Only an agent notification the agent marked time-sensitive breaks through
+ * Focus. Questions, approvals, replies and failures arrive as ordinary alerts,
+ * so Focus and the person's own notification settings decide when they show.
+ */
+export function nativePushInterruptionLevel(
+  payload: ClaimedNativePushDelivery["payload"],
+): "time-sensitive" | "active" {
+  if (payload.rule === "agent" && payload.urgency === "time_sensitive") return "time-sensitive";
+  return "active";
 }
 
 /** What the app reads on tap: enough to open the session in the right account. */
@@ -57,6 +97,7 @@ export function nativePushData(payload: ClaimedNativePushDelivery["payload"]) {
     subjectId: payload.subjectId,
     rule: payload.rule,
     ...(payload.eventType ? { eventType: payload.eventType } : {}),
+    ...(payload.sequence ? { sequence: payload.sequence } : {}),
   };
 }
 
@@ -141,7 +182,7 @@ export function createApnsSender(input: {
         alert,
         sound: "default",
         "thread-id": delivery.payload.sessionId,
-        "interruption-level": delivery.payload.rule === "needs_input" ? "time-sensitive" : "active",
+        "interruption-level": nativePushInterruptionLevel(delivery.payload),
         ...(category ? { category } : {}),
       },
       body: nativePushData(delivery.payload),
@@ -248,7 +289,7 @@ export function createFcmSender(input: {
               android: { priority: "HIGH", collapse_key: delivery.payload.sessionId },
               data: {
                 title: alert.title,
-                message: alert.body,
+                message: [alert.subtitle, alert.body].filter(Boolean).join("\n") || alert.title,
                 body: JSON.stringify(nativePushData(delivery.payload)),
               },
             },

@@ -167,6 +167,64 @@ describe("subscription-core accepted-turn guard", () => {
       [],
       [],
       [{ current: true }],
+      [{ refresh_generation: "4", credential_encrypted: "v1:current", expires_at: null }],
+    ]);
+    const sessionActor = spyOn(database, "withSessionRlsActorContext").mockImplementation(
+      async (_value, run) => await run(),
+    );
+    const rls = spyOn(database, "withRlsContext").mockImplementation(
+      async (_db, _value, run) => await run(db),
+    );
+    restores.push(
+      () => sessionActor.mockRestore(),
+      () => rls.mockRestore(),
+    );
+    let operationCalls = 0;
+    let received: unknown;
+
+    await expect(
+      withSubscriptionCoreCodexRefreshLock(
+        db,
+        { ...identity, connectionId, holderId, generation: 7 },
+        async (_tx, credential) => {
+          operationCalls += 1;
+          received = credential;
+          return "refreshed";
+        },
+      ),
+    ).resolves.toEqual({ status: "completed", value: "refreshed" });
+    expect(operationCalls).toBe(1);
+    expect(received).toEqual({
+      refreshGeneration: 4,
+      credentialEncrypted: "v1:current",
+      expiresAt: null,
+    });
+    expect(
+      statements.some((statement) => statement.includes("begin_subscription_codex_refresh")),
+    ).toBe(true);
+    expect(statements.some((statement) => statement.includes("pg_advisory_xact_lock"))).toBe(true);
+    expect(
+      statements.filter((statement) => statement.includes("subscription_leases")),
+    ).toHaveLength(2);
+    expect(parameters.flat()).toContain(`subscription-refresh:${connectionId}`);
+  });
+
+  test("does not enter the refresh callback when the database refuses refresh authorization", async () => {
+    const { db } = transaction([
+      [{ authorized: true }],
+      [
+        {
+          owner_subject_id: identity.sessionOwnerSubjectId,
+          owner_membership_id: identity.sessionOwnerMembershipId,
+          initiating_human_subject_id: identity.initiatingHumanSubjectId,
+          visibility: "shared",
+        },
+      ],
+      [{ current: true }],
+      [],
+      [],
+      [{ current: true }],
+      [],
     ]);
     const sessionActor = spyOn(database, "withSessionRlsActorContext").mockImplementation(
       async (_value, run) => await run(),
@@ -183,19 +241,19 @@ describe("subscription-core accepted-turn guard", () => {
     await expect(
       withSubscriptionCoreCodexRefreshLock(
         db,
-        { ...identity, connectionId, holderId, generation: 7 },
+        {
+          ...identity,
+          connectionId: "66666666-6666-4666-8666-666666666666",
+          holderId: "worker:refused",
+          generation: 3,
+        },
         async () => {
           operationCalls += 1;
-          return "refreshed";
+          return "must not refresh";
         },
       ),
-    ).resolves.toEqual({ status: "completed", value: "refreshed" });
-    expect(operationCalls).toBe(1);
-    expect(statements.some((statement) => statement.includes("pg_advisory_xact_lock"))).toBe(true);
-    expect(
-      statements.filter((statement) => statement.includes("subscription_leases")),
-    ).toHaveLength(2);
-    expect(parameters.flat()).toContain(`subscription-refresh:${connectionId}`);
+    ).resolves.toEqual({ status: "refused" });
+    expect(operationCalls).toBe(0);
   });
 
   test("rechecks the lease after waiting for the refresh lock", async () => {

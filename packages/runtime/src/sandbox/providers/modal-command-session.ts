@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { truncateOutput } from "@openai/agents-core/sandbox/internal";
 import type { ChannelASession } from "../channel-a";
+import { aliasNativeSynchronousCommandOutput } from "../native-synchronous-collection";
 import { ModalProcessObservationUnavailableError } from "../errors";
 import { classifyProviderSandboxFailure } from "../provider-errors";
 import { markTypedExecHandleLoss, parseExecResponseBanner } from "../exec-banner";
@@ -160,10 +161,12 @@ export function installModalCommandSession(
       throw new ModalProcessObservationUnavailableError(handle);
     // The parser validated the unique status in the metadata header, before
     // command-controlled Output. Replace only that first trusted status line.
-    return raw.replace(
+    const aliased = raw.replace(
       /^Process running with session ID \d+(?=\r?$)/mu,
       `Process running with session ID ${handle}`,
     );
+    aliasNativeSynchronousCommandOutput(session, raw, aliased, handle);
+    return aliased;
   };
 
   const formatPage = (

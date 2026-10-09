@@ -134,9 +134,32 @@ retain their own lifetime and do not hold this turn-cleanup gate.
 Inference alone may resume on the same machine for a closed lease-lost attempt's
 legacy Modal home-route `execCommand` admission with unknown provider outcome
 and no retained locator. Exact actor, turn and execution generation must match.
-The admission, physical quiescence and capture/rotation fences remain unresolved;
-recovery tool results tell the model to inspect actual state before replay.
-Accepted Pause/Steer interruptions retain their independent receipt gate.
+The admission and physical quiescence remain unresolved; recovery tool results
+tell the model to inspect actual state before replay. Accepted Pause/Steer
+interruptions retain their independent receipt gate.
+
+**Requests a crashed worker left behind no longer pin the box.** A
+turn admission whose attempt closed `lease_lost_recoverable` or `failed` (worker
+death, redispatch exhaustion, credential-lease loss), whose turn holder is gone,
+that was never adopted as a retained process and whose provider outcome is still
+unknown (`crashedWorkerOrphanAdmissionSql`) has no owner that can admit more work,
+and nothing reliably settles it. It used to refuse every capture, idle drain,
+idle containment and provider-deadline containment of its box, and to hold its
+attempt's quiescence open, until the provider killed the box uncaptured.
+The predicate does not prove the worker is dead; safety comes
+from what each caller does with it. Only a point-in-time (Modal native) capture
+may run around such a request: a drain, which terminates the box right after, and
+a warm capture, which records itself as having run around writers so the archive
+stays one generation behind. Tar-style captures keep it as a blocker. Containment
+enrollment and the containment/deadline quiescence checks ignore it. The drain's
+cold commit rejects the exact request only after the reaper stopped the box (or
+proved it gone), so a late settlement by a still-running owner is fenced, and
+wakes the closed, unquiesced owner of every rejected request (its session is
+locked in the canonical prefix first) so the ordinary quiescence receipt
+reconciliation can complete. Attempts closed by Pause, Steer or cancellation keep
+their requests as writers because the replacement attempt resumes the same box;
+the holder clause is defence in depth. The physical quiescence receipt itself
+keeps the strict predicate.
 
 A resumed attempt may attach another atomic internal-update batch to the same
 logical turn after its resolved open suffix. Each delivered update retains its
@@ -928,8 +951,11 @@ and partial response for a later drain. Rejection never proves quiescence or
 permits numeric-PID fallback or another possibly dispatched helper Start.
 
 Fresh progressive-disclosure attempts complete only session-marked eager MCP
-connection and schema admission before inference. All non-eager MCPs—strict or
-optional—connect/list concurrently with the first provider request. A plain
+connection and schema admission before inference, plus the first-party
+`opengeni` server when it can list an authorized harness control tool (goal
+lifecycle, `command_read`, `command_wait`, `wait_for_input`; only those exact
+schemas become first-request visible). All other non-eager MCPs, strict or
+optional, connect/list concurrently with the first provider request. A plain
 terminal model response does not join that background work. Configured agents
 decide router visibility from authorized pending server identities without
 joining preparation. Once exposed, that router stays in the request tool prefix
@@ -1119,6 +1145,15 @@ the live `ProviderRecoveryNotice` above the composer ("… — retrying (attempt
 of 5)…", shown only while the active turn is `recovering`, never as timeline
 rows) and for failure text, including legacy events without labels. Two indexed latest-event reads select this
 projection; detail polling never aggregates the session's lifetime event log.
+The same notice explains a turn parked behind a sandbox lifecycle transition
+(`turn.recovery.requested` reason `sandbox_deadline_rotation`,
+`sandbox_lifecycle_transition`, or `sandbox_lease_superseded` with a recorded
+pending transition): for example "The sandbox reached its maximum lifetime, so
+Opengeni is moving the workspace to a fresh sandbox…", or a saving, recovering or
+moving sentence chosen from the recorded `transitionReason`/`rotationReason`,
+with "The turn continues automatically as soon as the sandbox is ready." It has
+no attempt counter because the wait has no retry budget; the turn resumes on the
+lifecycle wake.
 
 **Durable recovery observability.** The control worker reads one content-free,
 cross-workspace aggregate per minute,
@@ -1321,6 +1356,13 @@ record its control receipt, and request a capacity recheck atomically. Ordinary
 lease claim reads that same revised selection; no new turn or automatic model
 retry is created by the switch itself.
 
+Claude's exact serialized-byte preflight and a first pre-stream HTTP 413 use
+the same activity-local checkpoint boundary. One durable logical-turn allowance
+survives attempt replacement; a byte-fitted earlier prefix becomes a checkpoint
+and its complete latest suffix remains active. A second size rejection stops
+instead of replaying tools or looping. The checkpoint uses the ordinary Claude
+serializer too; see [Claude byte recovery](context-compaction.md#claude-request-bytes-and-image-heavy-recovery).
+
 Provider context-window overflow is also handled inside the activity, not by a
 Temporal retry. When an OpenAI/Azure context overflow is classified,
 `runAgentTurn` invokes compaction for the session's frozen mode: portable
@@ -1479,7 +1521,11 @@ trigger, including a result already consumed before worker loss. Capacity waits,
 recoverable pause/maintenance, provider failover, graceful shutdown, and worker
 death all follow that rule. Terminal failure/cancellation and superseding Steer
 close the entire turn ledger. Recovery never reconstructs this authority from
-history or `agent_run_states`.
+history or `agent_run_states`. Successful completion consumes every receipt
+of the turn whose attempt has settled (closed, and quiesced or never
+interrupted), deleting only ledger rows without new history or events: a
+completed turn owns no live tool call. Rolling migration 0673 removed
+receipts that earlier releases left on completed turns with settled attempts.
 
 For MCP, the runtime reads the complete provider `CallToolResult` through the
 SDK's `callToolResult` seam and carries a private duplicate only until the exact
@@ -2086,6 +2132,62 @@ original tool call, while an explicitly short yield or a command still running
 after the requested window returns the retained session id. Empty internal
 polls use the exact process-control route and never create another model turn or
 workspace mutation admission.
+
+Internal synchronous filesystem commands use `sandbox/synchronous-command.ts`
+to collect complete output from the same invocation until provider terminal/EOF
+proof. Routing retains and atomically captures the raw initial receipt before
+observation; read-only setup handles stay on their resolved backend for the
+whole wait. Composite imports keep an enclosing admission and backend pin;
+admitted Modal shell subcommands receive fresh exact retained admissions rather
+than reusing the enclosing command alias. Worker Skill operations use the turn
+cancellation controller's non-PTY, lossless runner, with no background adoption.
+Markers never substitute for original exit proof. An unobservable command
+remains pending/unknown and is not replayed through another write path.
+Existing interrupted-command recovery and physical settlement gates still apply.
+
+Complete output is a separate requirement from physical exit. Trusted adapter
+pages bind separate stdout/stderr bytes to the original identity and contiguous
+cursors; a truncated or merged presentation banner is not a collection receipt.
+The SDK-native collection scope starts before dispatch and tees the original
+process streams without replacing its child, handle, or ordinary shell behavior.
+Shared terminal reads and custody retries preserve the trusted page until
+capture and settlement succeed. A status query may prove physical quiescence
+after stream loss, but must not turn incomplete output into filesystem success.
+
+Daytona filesystem collection uses a runtime-owned binding to the registered
+client's exact authenticated sandbox and one framed native command session.
+`daytona-command-frames.ts` validates nonce/source-bound separate-stream frames,
+both EOFs and matching original exit; `daytona-framed-command.ts` recovers only
+that session and command. Existing marker/PGID control owns physical cancellation.
+After durable output capture and settlement, routing awaits native namespace
+cleanup before releasing the route. Cleanup failure remains retryable; deletion
+or a missing session never substitutes for exit/EOF proof. Ordinary shell and PTY
+execution stay outside this collection scope.
+
+OpenSandbox validates original SSE/NDJSON framing, UTF-8, error data and execution
+identity in `sandbox/providers/opensandbox-command-stream.ts` before the SDK can
+project or discard events. The adapter retains the first execution ID and launch
+transport. Its control-only observer accepts matching terminal status and caches
+that physical proof across native alias retirement, without consuming output,
+advancing cursors, acknowledging pages or releasing routed output custody.
+Malformed output can therefore reject filesystem completion while independent
+physical cleanup still reconciles the exact command.
+
+An attempted command transport that loses its first execution ID remains
+outcome-unknown, including response-header loss and ambiguous HTTP failures.
+It cannot manufacture exit 1, replay Start or invent a control target; physical
+cleanup remains joined when exact recovery authority is unavailable. Local
+non-dispatch proof is restricted to the unchanged default SDK command binding
+failing before its command transport is invoked. A custom factory's absent
+fetch, remote error classification or missing init is not that proof.
+
+Remote cancellation joins survive observation loss and transfer-start. Only
+exact terminal proof or committed durable adoption releases the join; failed
+adoption restores cleanup through the original launch client. Locally proven
+pre-dispatch refusal retires a provisional join without inventing a remote
+process. Offline RPC errors are not that proof. The synchronous runner checks
+won cancellation before returning a terminal result, including exit-zero races.
+
 If that process's durable row already records exit or loss, a later model-visible
 `write_stdin` remains fenced before provider dispatch but returns the stored
 terminal exit/loss banner. It never labels a permanently dead handle as a
@@ -2664,7 +2766,8 @@ provider promise is physically settled as `resolved` or `rejected`; a resolved
 result then passes the matching authority/lease/provider/route acceptance fences
 before its output is accepted. Only a turn admission can use authoritative
 `session_turn_attempts.quiesced_at` for its exact attempt; direct and process
-authority remain capture blockers until settled.
+authority remain capture blockers until settled. The one exception is a warm
+checkpoint around a running background command (below).
 
 A resolved exact admission whose transaction committed before output acceptance
 failed raises `SandboxWorkspaceMutationOutputRejectedError` with its immutable
@@ -2768,6 +2871,21 @@ UUID, parent admission, process holder, lease/group, provider backend/instance,
 lease epoch, route target/epoch, and provider session; exact replays are
 idempotent and cannot touch a successor. This reconciliation never calls a
 provider terminate/kill API and never captures or rotates a workspace snapshot.
+When a probe of a command on the lease's exact current warm box resumes that box
+and the provider answers NotFound, the box itself is gone, not just the command.
+The reconciler then retires the whole box in one transaction through
+the same `markWarmLeaseInstanceLost` path routing uses: every active command,
+open request, PTY and process holder of that exact epoch and instance is settled,
+the lease goes cold with loss evidence, lifecycle waiters (including a turn
+parked behind the rotation) are woken, and the other commands of that box in the
+same batch are not probed again (any of them a closed turn never adopted first
+gets its session background record, so the agent hears about it). Before, each command needed its own probe, at
+most 20 per sweep, so 35 commands took 11 extra minutes. A lease already
+draining is left to its drain, whose capture finds the box missing and settles
+the same set. Their agent notices say the command "is no longer running because its
+sandbox was shut down or lost; whether it finished is unknown" and to check its
+effects before running it again, instead of the generic "result unavailable".
+The session's Incoming panel shows several such results as one row.
 Repeated Modal binding-missing or binding-mismatch observations enter a durable
 24-hour reconciliation quarantine after five claimed probes. Quarantine is
 only backoff: the process remains active, retains every blocker, carries no
@@ -3078,6 +3196,37 @@ gate. A prior explicit stop remains immutable; deadline intent starts its own
 grace. The two-minute grace applies only to provider-deadline rotation; any
 lease may still meet the idle rule above.
 
+**The pre-deadline save is mandatory.** The orderly backstop above
+can wait forever: a command whose stop request or reconciliation never ran, an
+owner whose quiescence receipt is still pending, a sibling attempt that holds no
+holder, or a request whose owner vanished each refused enrollment (and an open
+request refused the zero-holder drain's capture) until the provider killed the
+box uncaptured. Inside `sandboxDeadlineMandatoryCaptureLeadMs` before the
+stamped provider deadline of a lease with any requested rotation (an earlier
+operator rotation keeps the due deadline rotation from being stamped separately) (the
+legacy command stop grace, the full drain capture budget and two reaper periods,
+never more than the rotation lead; about 13 minutes with a 10-minute
+drain capture budget), the save no longer waits for any of that. Enrollment then needs
+only that every holder is a process holder of an active, unsupervised process
+on the exact box route (a live turn, viewer, direct request or interaction still
+owns the box, supervised commands keep their separate proof gate, and an
+operator reaper hold still pauses it), and records
+mode `forced_deadline` (`opengeni_sandbox_command_containment_total` outcome
+`forced_deadline_enrolled`; the reason stays `provider_deadline_containment`).
+A zero-holder drain claim in the same window does the same for its open
+requests. Every request still open on the exact box is recorded in
+`sandbox_leases.deadline_forced_admission_ids` (migration 0676), which drain
+publication excludes like enrolled command parents; the cold commit rejects
+exactly those requests only after the box was terminated, and a trigger clears
+the set on a new epoch or instance and on cold. Drain publication also ignores
+open requests left on an older epoch or instance of the lease, which cannot race
+this box's capture. A command that exited but was never reconciled settles as
+contained rather than with its exit code. A file being written
+at that instant may be saved half-written, and unlike a warm checkpoint this
+also applies to tar-style captures, which then read files one by one while such
+a request may still run; the box would otherwise die with everything since the
+last checkpoint.
+
 Historical containment cannot reconstruct an execution ID the old adapter never
 retained. A command whose owner cannot recover its terminal receipt remains a visible capture blocker;
 operators must reconcile the exact command/provider identity rather than replay
@@ -3200,6 +3349,43 @@ or other durable owners leaves that history intact.
 Capture preflight and archive fold block on every unsettled admission and live
 direct/process holder in the closed write set. Publication is complete only when
 that set is proven closed and `archive_generation === workspace_generation`.
+
+**Warm checkpoints run around background commands.** A retained
+background command keeps its process holder and parent admission until exit or
+loss proof, which for a server or a long benchmark can be the box's whole
+provider lifetime. Treating those as in-flight writers can prevent warm
+checkpoints for that entire interval, leaving later changes without a recovery
+point if the provider instance is lost.
+When the provider capture is a point-in-time image of a paused box (Modal native
+filesystem or directory snapshots), a warm (turn heartbeat or turn-end) capture
+therefore excludes exactly the process holders and parent admissions of active,
+unsupervised retained processes on the same lease epoch and provider instance.
+Modal pauses the whole box while it snapshots, so such a command is frozen during
+the read, but a file it was in the middle of writing can be saved half-written;
+that trade-off is deliberate, because a possibly torn file beats losing everything
+since the last capture. Tar-style captures read files one by one from a running
+box and keep every command as a blocker. Every other holder (viewer, direct,
+sibling turn), every in-flight request (including a command's own stdin write),
+and supervised commands still block.
+
+A claim taken while such a command was running records itself in
+`archive_capture_concurrent_capture_id` (migration 0659). No new process or
+admission can appear while a claim is held, so this is exactly the condition under
+which the snapshot may miss later writes. Only the warm publication may publish
+such a claim, and it records the archive one generation behind the workspace
+(`archive_generation = workspace_generation - 1`): the checkpoint is a real
+recovery point but never complete, so periodic captures continue at the
+configured interval, and a restore after provider loss takes the ordinary
+checkpoint-continuity lane with its discontinuity warning instead of claiming the
+newest files. A draining publication refuses it (the claim is released and the
+drain recaptures the now-quiet box), a drain takeover requests a fresh provider
+snapshot instead of replaying it, and a provider loss never records it for late
+adoption. Drain capture is otherwise unchanged: it captures the final state and
+terminates the box, and only enrolled contained commands are excluded there.
+A warm checkpoint attempt that cannot start increments
+`opengeni_workspace_capture_skipped_total{backend,reason}` (once per blocked
+attempt, which is every heartbeat while it stays blocked); an attempt that is not
+due yet, or whose archive already covers the generation, is not counted.
 Admission, ordinary settlement, and yielded-process promotion acquire the
 canonical workspace/session/attempt-or-process prefix before the admission and
 lease rows. A provider-terminal settlement retries only its idempotent database

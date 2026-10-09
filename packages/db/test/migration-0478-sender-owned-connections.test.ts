@@ -19,6 +19,29 @@ const admissionRefusalsMigration = "0539_scheduled_admission_refusals.sql";
 // 0608 rewrites the MCP receipt fence installed by withheld 0494 and preserves
 // its 0501 sharing behavior. Replay it only after both prerequisites exist.
 const receiverExecutionContextMigration = "0608_receiver_execution_context.sql";
+// 0661 compiles its inbox person resolver against scheduled_tasks.owner_subject_id
+// from this cutover, and 0663-0666 replace 0661's inbox projection trigger and
+// read the paused-goal setting 0663 adds. 0677 redefines 0661's resolver.
+const inboxScheduleOwnerMigration = "0661_inbox_subagent_goals_and_schedules.sql";
+const inboxPausedGoalSettingMigration = "0663_inbox_paused_goal_setting.sql";
+const inboxTriggerTailMigrations = [
+  "0664_inbox_rich_notifications.sql",
+  "0665_inbox_replies.sql",
+  "0666_inbox_reply_current_turn.sql",
+  // Redefines 0661's person resolver, which reads scheduled_tasks.owner_subject_id.
+  "0677_local_human_inbox_recipient.sql",
+];
+const withheldMigrations = [
+  migration,
+  accountBindingsMigration,
+  sharingMigration,
+  admissionDiagnosticsMigration,
+  admissionRefusalsMigration,
+  receiverExecutionContextMigration,
+  inboxScheduleOwnerMigration,
+  inboxPausedGoalSettingMigration,
+  ...inboxTriggerTailMigrations,
+];
 let database: OwnerMigratedTestDatabase | null = null;
 
 beforeAll(async () => {
@@ -39,7 +62,7 @@ test("maintenance cutover backfills proven owners under FORCE RLS without rewrit
     await owner.unsafe(
       `CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`,
     );
-    await owner`insert into schema_migrations (name) values (${migration}), (${accountBindingsMigration}), (${sharingMigration}), (${admissionDiagnosticsMigration}), (${admissionRefusalsMigration}), (${receiverExecutionContextMigration})`;
+    await owner`insert into schema_migrations (name) select unnest(${withheldMigrations}::text[])`;
     // The allowance guard patch must wait for the withheld refusal lifecycle.
     for (const name of allowanceMigrationTail)
       await owner`insert into schema_migrations(name) values(${name})`;
@@ -47,7 +70,7 @@ test("maintenance cutover backfills proven owners under FORCE RLS without rewrit
     const [historicalBindings] =
       await owner`select to_regprocedure('opengeni_private.fence_mcp_account_bindings()') as receipt_fence`;
     expect(historicalBindings!.receipt_fence).toBeNull();
-    await owner`delete from schema_migrations where name in (${migration}, ${accountBindingsMigration}, ${sharingMigration}, ${admissionDiagnosticsMigration}, ${admissionRefusalsMigration}, ${receiverExecutionContextMigration})`;
+    await owner`delete from schema_migrations where name = any(${withheldMigrations}::text[])`;
     for (const name of allowanceMigrationTail)
       await owner`delete from schema_migrations where name=${name}`;
     const [posture] =

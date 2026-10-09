@@ -2082,6 +2082,26 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
     FOREACH routine_signature IN ARRAY ARRAY[
       'subscription_connection_visible(uuid,uuid,uuid,text,text,uuid,text,text)',
+      'authorize_subscription_ownerless_session_access(uuid,uuid,uuid,uuid)',
+      'authorize_subscription_personal_placement_access(uuid,uuid,uuid,uuid,text,uuid,bigint,text,text)',
+      'subscription_codex_refresh_write_allowed(uuid,uuid,uuid)',
+      'begin_subscription_codex_refresh(uuid,uuid,uuid,uuid,text,text,uuid,text,bigint)',
+      'persist_subscription_codex_refresh(uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)',
+      'fail_subscription_codex_refresh(uuid,uuid,uuid,uuid,uuid,bigint,text)',
+      'quarantine_subscription_codex_connection(uuid,uuid,uuid,uuid,uuid,text,bigint,bigint,text,text,timestamptz)',
+      'recover_subscription_codex_connection_health(uuid,uuid,uuid,uuid)',
+      'persist_subscription_codex_refresh_with_plan(uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz,text)',
+      'subscription_codex_acceptance_authority_v2(uuid,uuid,uuid,text)',
+      'resolve_subscription_codex_apps_designation(uuid,uuid)',
+      'read_subscription_codex_apps_credential(uuid,uuid,uuid)',
+      'begin_subscription_codex_apps_refresh(uuid,uuid,uuid)',
+      'persist_subscription_codex_apps_refresh(uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)',
+      'fail_subscription_codex_apps_refresh(uuid,uuid,uuid,bigint,text)',
+      'read_subscription_codex_connection_credential(uuid,uuid,uuid,uuid,uuid,text,bigint)',
+      'begin_subscription_codex_connection_refresh(uuid,uuid,uuid,uuid,uuid,text,bigint)',
+      'persist_subscription_codex_connection_refresh(uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)',
+      'fail_subscription_codex_connection_refresh(uuid,uuid,uuid,bigint,text)',
+      'subscription_codex_reset_authority(uuid,uuid,uuid,text)',
       'subscription_organization_admin(uuid)',
       'subscription_people_assignment_visible(uuid,uuid,uuid,text,text)',
       'subscription_person_preference_visible(uuid,uuid,text,text)',
@@ -2100,6 +2120,21 @@ BEGIN
         );
       END IF;
     END LOOP;
+    -- The Codex Apps designation target helper returns a full connection row;
+    -- only its owner-run callers may execute it, never the runtime role.
+    -- The Codex connection target helper (M3 PR 2c) is owner-only for the same reason.
+    IF to_regprocedure('opengeni_private.subscription_codex_connection_target(uuid,uuid,uuid,uuid,uuid,text,bigint)') IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.subscription_codex_connection_target(uuid,uuid,uuid,uuid,uuid,text,bigint) FROM %I',
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure('opengeni_private.subscription_codex_apps_designation_target(uuid,uuid)') IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.subscription_codex_apps_designation_target(uuid,uuid) FROM %I',
+        ${literal(role)}
+      );
+    END IF;
     -- This exact content-free repair inventory shares the existing global
     -- wake dispatcher's authority. Converge custom-role and migrate-then-
     -- provision installs without opening a generic owner/posture exception.

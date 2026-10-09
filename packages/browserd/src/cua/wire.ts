@@ -4,6 +4,7 @@ import { ComputerBackendError, type ComputerBackendErrorCode } from "../computer
 
 /** Only the desktop tool seam is exposed. Browser tools never enter this adapter. */
 export interface CuaDesktopRuntime {
+  listToolsJson?(): Promise<string>;
   callTool(name: string, argumentsJson: string): Promise<ToolResult>;
   shutdown(): Promise<void>;
 }

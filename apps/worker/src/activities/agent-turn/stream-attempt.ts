@@ -39,9 +39,13 @@ import {
   interruptionKindForCallItem,
   releaseMcpResultCustomDataFromSdkEvent,
   findCompactionNeededError,
+  findAnthropicRequestSizeError,
+  type AnthropicRequestSizeError,
+  ANTHROPIC_REQUEST_MAX_BYTES,
   compactionProviderRejection,
   withRunCredentialsSession,
   runOwnedSandboxSetup,
+  modelResponseHasVisibleText,
   type SandboxFileDownload,
   type OpenGeniRuntime,
   type HistoryProviderApi,
@@ -158,7 +162,11 @@ import {
   assertSuccessfulAgentStreamCompletion,
   requireAgentStreamFinalOutput,
 } from "./quiescence";
-import { inputWaitReply, latestDurableTurnMessageText } from "./input-wait-reply";
+import {
+  inputWaitReply,
+  inputWaitReplyRefusal,
+  latestDurableTurnMessageText,
+} from "./input-wait-reply";
 import { waitForTurnOperation } from "./sandbox-provision";
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
 import { finalReplyNudge, needsFinalReply } from "./final-reply";
@@ -429,6 +437,7 @@ export async function runTurnStreamAttempt(
         countsTowardTokenCap: billingState.countsTowardTokenCap,
         servingCredentialId: providerTurn.effectiveCodexCredentialId,
         priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
+        subscriptionConnectionId: providerTurn.codexSubscriptionCore?.connectionId ?? null,
         emittedSourceKeys: emittedModelUsageSourceKeys,
         renewLease: () => leases.renewServing("model_usage"),
         leaseLost: leases.servingLost,
@@ -562,6 +571,7 @@ export async function runTurnStreamAttempt(
   const forceContextCompaction = async (
     triggerLabel: "overflow" | "proactive" | "operator",
     recoverySignalTokens: number | null,
+    requestSizeError?: AnthropicRequestSizeError | null,
   ) => {
     const outcome = await waitForTurnOperation(
       maybeCompactContext(
@@ -586,6 +596,19 @@ export async function runTurnStreamAttempt(
           force: true,
           ...(triggerLabel === "operator" ? { clearRequestedCompaction: true } : {}),
           trigger: triggerLabel,
+          ...(requestSizeError
+            ? {
+                requestSizeRecovery: {
+                  // A proxy may reject below the documented API maximum. The
+                  // checkpoint uses at most half the rejected payload size.
+                  maxBytes: Math.min(
+                    ANTHROPIC_REQUEST_MAX_BYTES,
+                    Math.floor(requestSizeError.requestSize.requestBytes / 2),
+                  ),
+                  size: requestSizeError.requestSize,
+                },
+              }
+            : {}),
           materializeHistory: media.materializeScreenshotHistory,
           projectModelInput: compactionModelHistoryProjector,
           ...compactionModeOptions,
@@ -611,6 +634,8 @@ export async function runTurnStreamAttempt(
   // Text of the newest assistant message any stream of this activity completed
   // durably: the reply a wait-ended human turn records on turn.completed.
   let latestAssistantMessageText: string | null = null;
+  // Waits refused because they would leave a person's message unanswered.
+  let inputWaitReplyRefusals = 0;
   let workerPreparationTotalRecorded = false;
   let toolsExecuted = false;
   let finalReplyNudged = false;
@@ -1038,6 +1063,29 @@ export async function runTurnStreamAttempt(
     }
     try {
       eventing.stream = await withProviderRequestContext(runStreamOnce);
+      const stream = eventing.stream;
+      eventing.inputWaitReplyGuard = async () => {
+        const refusal = await inputWaitReplyRefusal({
+          turn,
+          refusalsSoFar: inputWaitReplyRefusals,
+          hasVisibleReply: async () =>
+            Boolean(latestAssistantMessageText?.trim()) ||
+            modelResponseHasVisibleText(
+              (stream.state as { _lastTurnResponse?: unknown })._lastTurnResponse,
+            ) ||
+            Boolean(
+              (
+                await latestDurableTurnMessageText(db, {
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                })
+              )?.trim(),
+            ),
+        });
+        if (refusal) inputWaitReplyRefusals += 1;
+        return refusal;
+      };
     } catch (error) {
       modelCallAdmission.fail(error);
       modelCallAdmission.close();
@@ -1137,6 +1185,7 @@ export async function runTurnStreamAttempt(
           countsTowardTokenCap: billingState.countsTowardTokenCap,
           servingCredentialId: providerTurn.effectiveCodexCredentialId,
           priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
+          subscriptionConnectionId: providerTurn.codexSubscriptionCore?.connectionId ?? null,
           emittedSourceKeys: emittedModelUsageSourceKeys,
           renewLease: () => leases.renewServing("model_usage"),
           leaseLost: leases.servingLost,
@@ -1705,6 +1754,7 @@ export async function runTurnStreamAttempt(
                 providerApi: aggregateProviderApi,
                 model: turn.model,
                 billing,
+                subscriptionConnectionId: providerTurn.codexSubscriptionCore?.connectionId ?? null,
                 contextContributions: eventing.companyBrainContextContributions,
               });
               recordAuthoritativeModelUsageMetrics({
@@ -2162,13 +2212,14 @@ export async function runTurnStreamAttempt(
         }
         return result;
       } catch (attemptError) {
+        const requestSizeError = findAnthropicRequestSizeError(attemptError);
         const overflow = classifyContextWindowOverflowError(attemptError);
         const compactionNeeded = findCompactionNeededError(attemptError);
         const recoveryKind = compactionNeeded
           ? compactionNeeded.trigger === "operator"
             ? "operator"
             : "proactive"
-          : overflow
+          : overflow || requestSizeError
             ? "overflow"
             : null;
         if (!recoveryKind || !eventing.publish || !eventing.turnStartedPublished) {
@@ -2183,6 +2234,7 @@ export async function runTurnStreamAttempt(
           ...safeErrorDiagnostic(attemptError),
           signalTokens: compactionNeeded?.signalTokens,
           thresholdTokens: compactionNeeded?.thresholdTokens,
+          ...(requestSizeError ? { ...requestSizeError.requestSize } : {}),
         });
         let compacted = false;
         let compactionHandled = false;
@@ -2193,6 +2245,7 @@ export async function runTurnStreamAttempt(
           const outcome = await forceContextCompaction(
             recoveryKind,
             compactionNeeded?.signalTokens ?? null,
+            requestSizeError,
           );
           compacted = outcome.compacted;
           if (outcome.compacted) {

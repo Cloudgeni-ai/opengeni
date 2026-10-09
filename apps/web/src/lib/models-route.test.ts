@@ -11,6 +11,12 @@ import {
 } from "./models-route";
 
 describe("Models URLs", () => {
+  test("workspace compaction preferences keep a reloadable settings URL", () => {
+    expect(parseModelsView("compaction")).toBe("compaction");
+    expect(
+      workspaceModelsRedirect({ workspaceId: "ws-1", account: undefined, view: "compaction" }),
+    ).toEqual({ section: "models", workspace: "ws-1", view: "compaction" });
+  });
   test("organization accounts and connect steps have their own keys", () => {
     expect(parseModelsAccount("org:codex:acct-1")).toBe("org:codex:acct-1");
     expect(parseModelsAccount("org:gateway:openrouter")).toBe("org:gateway:openrouter");

@@ -10,6 +10,7 @@ import {
   inspectPersistentAgentInstructions,
   requestRemoteCompactionV2,
   preparedCompactionRequest,
+  createAnthropicCompactionSizer,
   queuePreparedCompaction,
   compactionThresholdTokens,
   CompactionNeededError,
@@ -263,6 +264,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       turnAttemptId: input.attemptId,
       servingCredentialId: providerTurn.effectiveCodexCredentialId,
       priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
+      subscriptionConnectionId: providerTurn.codexSubscriptionCore?.connectionId ?? null,
       emittedSourceKeys: emittedModelUsageSourceKeys,
       renewLease: () => leases.renewServing("model_usage"),
       leaseLost: leases.servingLost,
@@ -323,6 +325,19 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
         (prepared ? estimateSerializedValueTokens(prepared.tools) : 0)
       );
     };
+    if (resolvedModel?.provider.api === "anthropic-messages") {
+      const measure = createAnthropicCompactionSizer(
+        resolvedModel.provider,
+        turnExecutionPolicy.upstreamModelId,
+      );
+      summarize.measureInputBytes = (s, items) =>
+        measure(items, {
+          maxOutputTokens: compactionSummaryOutputTokens(s.contextWindowTokens),
+          ...(systemInstructions ? { systemInstructions } : {}),
+          ...(promptCacheKey ? { promptCacheKey } : {}),
+          ...(cancellationSignal ? { signal: cancellationSignal } : {}),
+        });
+    }
     return summarize;
   };
   // Prompt-cache prefix for remote_v2 MUST match ordinary turns:

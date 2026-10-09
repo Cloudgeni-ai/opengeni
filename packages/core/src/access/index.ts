@@ -6,6 +6,7 @@ import {
   type ExternalIdentity,
 } from "@opengeni/contracts/external-identities";
 import {
+  accessContextHasInbox,
   verifyDelegatedAccessToken,
   DEVELOPER_SETUP_API_KEY_PRESET,
   organizationAccessPresetPermissions,
@@ -1216,6 +1217,23 @@ function isCanonicalManagedHumanSession(context: AccessContext, grant: AccessGra
     grant.subjectId === context.subjectId &&
     grant.subjectId.startsWith("user:")
   );
+}
+
+/**
+ * The subject whose inbox this request may read, or null when it has none.
+ * A signed-in person (`user:`, no key) keeps the original rule. The local
+ * install's human qualifies only when the in-process local bootstrap produced
+ * this context (so a delegated bearer naming `dev` cannot borrow it), with the
+ * human-session, non-delegated, non-service, keyless shape of
+ * {@link accessContextHasInbox}.
+ */
+export function inboxSubjectForContext(context: AccessContext): string | null {
+  if (!accessContextHasInbox(context)) return null;
+  if (context.subjectId.startsWith("user:")) return context.subjectId;
+  return canonicalLocalHumanContexts.has(context) &&
+    context.workspaceGrants.every((grant) => isCanonicalLocalHumanSession(context, grant))
+    ? context.subjectId
+    : null;
 }
 
 function isCanonicalLocalHumanSession(context: AccessContext, grant: AccessGrant): boolean {

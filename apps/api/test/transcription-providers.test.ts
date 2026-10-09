@@ -238,6 +238,8 @@ describe("transcription providers", () => {
   });
 
   test("prefers Codex when subscription is attached even if OpenAI is configured", async () => {
+    // No Codex cutover row: the legacy path, after one cutover-row read.
+    const disposition = spyOn(dbModule, "readCodexCutoverDisposition").mockResolvedValue("legacy");
     const accounts = spyOn(dbModule, "listCodexAccountStatuses").mockResolvedValue([
       {
         id: "cred-1",
@@ -280,6 +282,7 @@ describe("transcription providers", () => {
       expect(result.providerId).toBe("codex-subscription");
       expect(url).toContain("/backend-api/transcribe");
     } finally {
+      disposition.mockRestore();
       accounts.mockRestore();
       resolver.mockRestore();
     }

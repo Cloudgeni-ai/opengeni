@@ -401,6 +401,7 @@ try {
       "packages/codex",
       "packages/config",
       "packages/contracts",
+      "packages/interaction",
       "packages/network",
       "packages/observability",
       "packages/tool-gateway",

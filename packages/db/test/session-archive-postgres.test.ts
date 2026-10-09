@@ -196,19 +196,35 @@ describe("idle-session archive lifecycle", () => {
     );
 
     // Every export table is readable for the bundle while archiving.
+    // A fresh pool: no connection carries a human subject from earlier calls,
+    // like the archive worker's own pool.
+    const exporter = createDb(shared.appUrl);
     const exported: Record<string, number> = {};
     for (const spec of SESSION_ARCHIVE_EXPORT_TABLES) {
-      const page = await readSessionArchiveRows(client.db, scope, spec, {
+      const page = await readSessionArchiveRows(exporter.db, scope, spec, {
         after: null,
         limit: 1000,
       });
       exported[spec.table] = page.rows.length;
       for (const row of page.rows) expect(typeof JSON.parse(row)).toBe("object");
+      // The rendering carries exactly the values jsonb would, column for column.
+      const order = spec.keys.map((key) => `t."${key.column}"`).join(", ");
+      const reference = await shared.admin.unsafe(
+        `select to_jsonb(t)::text as row from "${spec.table}" t
+          where t.workspace_id = $1 and t.session_id = $2 order by ${order} limit 1000`,
+        [scope.workspaceId, scope.sessionId],
+      );
+      expect(page.rows.map((row) => JSON.parse(row))).toEqual(
+        reference.map((row) => JSON.parse((row as unknown as { row: string }).row)),
+      );
     }
     expect(exported.session_events).toBeGreaterThan(3);
     expect(exported.session_history_items).toBeGreaterThanOrEqual(1);
     expect(exported.session_attempt_model_context_snapshots).toBe(1);
     expect(exported.session_turns).toBeGreaterThanOrEqual(1);
+    // Visible only to the initiating human under RLS, yet part of the bundle.
+    expect(exported.preference_registry_snapshots).toBe(1);
+    await exporter.close();
 
     const transcript = await readSessionArchiveTranscriptEvents(client.db, scope, {
       afterSequence: 0,
@@ -372,5 +388,63 @@ describe("idle-session archive lifecycle", () => {
       limit: 1000,
     });
     expect(claims.map((claim) => claim.objectKey)).toContain(keys[0]!);
+  }, 120_000);
+
+  test("purge completes around retained evidence and settles leftover pending tool output", async () => {
+    const { scope } = await idleSession();
+    const [turn] = await shared.admin`select id, execution_generation from session_turns
+      where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId} limit 1`;
+    const evidenceItem = crypto.randomUUID();
+    const deliveredItem = crypto.randomUUID();
+    const evidenceUpdate = crypto.randomUUID();
+    const json = shared.admin.json;
+    // Fixture only: a scheduled run's delivered occurrence (immutable evidence),
+    // an ordinary delivered update, and a pending call that kept its event output.
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      for (const [id, position] of [
+        [evidenceItem, 10],
+        [deliveredItem, 11],
+      ] as const)
+        await sql`insert into session_history_items
+          (id, account_id, workspace_id, session_id, turn_id, position, item, created_at, active)
+          values (${id}, ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, ${turn!.id},
+            ${position}, ${json({ type: "message", role: "user" })}, now(), true)`;
+      for (const [id, kind, runId, itemId] of [
+        [evidenceUpdate, "scheduled_occurrence", crypto.randomUUID(), evidenceItem],
+        [crypto.randomUUID(), "agent_message", null, deliveredItem],
+      ] as const)
+        await sql`insert into session_system_updates
+          (id, account_id, workspace_id, session_id, kind, source_id, dedupe_key, summary, payload,
+            state, delivered_history_item_id, scheduled_task_run_id)
+          values (${id}, ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, ${kind},
+            ${id}, ${id}, 'update', ${json({ type: kind })}, 'delivered', ${itemId}, ${runId})`;
+      await sql`insert into session_pending_tool_calls
+        (account_id, workspace_id, session_id, turn_id, execution_generation, attempt_id, call_id,
+          call_type, call_item, event_output, event_output_codec_version)
+        values (${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, ${turn!.id},
+          ${turn!.execution_generation}, ${crypto.randomUUID()}, 'call-1', 'function_call',
+          ${json({ type: "function_call" })}, ${json({ value: "exact output" })}, 1)`;
+    });
+
+    const keys = [`archive/${scope.sessionId}/bundle`, `archive/${scope.sessionId}/transcript`];
+    expect(
+      await beginSessionArchive(client.db, scope, { idleSeconds: IDLE_SECONDS, objectKeys: keys }),
+    ).toBe(true);
+    expect(await completeSessionArchive(client.db, scope, manifest(keys))).toBe(true);
+    let step = await purgeArchivedSessionContent(client.db, scope, { batchSize: 1 });
+    while (!step.complete)
+      step = await purgeArchivedSessionContent(client.db, scope, { batchSize: 1 });
+
+    const [purged] = await shared.admin`select content_archive_purged_at from sessions
+      where id = ${scope.sessionId}`;
+    expect(purged!.content_archive_purged_at).not.toBeNull();
+    const updates = await shared.admin`select id from session_system_updates
+      where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}`;
+    expect(updates.map((row) => row.id)).toEqual([evidenceUpdate]);
+    const items = await shared.admin`select id from session_history_items
+      where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}`;
+    expect(items.map((row) => row.id)).toEqual([evidenceItem]);
+    expect(await countRows("session_pending_tool_calls", scope)).toBe(0);
   }, 120_000);
 });

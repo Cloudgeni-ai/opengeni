@@ -6,6 +6,11 @@
 // question or decide an approval on the person's behalf.
 import {
   NOTIFICATION_BODY_MAX_CHARS,
+  NOTIFICATION_FACT_LABEL_MAX_CHARS,
+  NOTIFICATION_FACT_VALUE_MAX_CHARS,
+  NOTIFICATION_FACTS_MAX,
+  NOTIFICATION_LINK_LABEL_MAX_CHARS,
+  NOTIFICATION_SUBTITLE_MAX_CHARS,
   NOTIFICATION_TITLE_MAX_CHARS,
   NotificationKey,
   SessionNotificationPostedPayload,
@@ -93,11 +98,31 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
   server.registerTool(
     "notify_user",
     {
-      description:
-        "Notify the person who started this session: it goes to their inbox and, when new, to their phone. Use it sparingly, for something they would want to know while away: a long task finished, a result is ready, or you are blocked on them. Questions and approvals already reach them; do not duplicate those. Give each notification a stable key: posting the same key again updates it in place without a new alert (for progress such as '7 of 10 done'). Use urgency time_sensitive only for what cannot wait. Keep the title short and the message to one sentence, with no secrets. Withdraw it with notification_withdraw when it no longer applies.",
+      description: [
+        "Notify the person who owns this session: it goes to their inbox and, when new, to their phone. It always links back to this point in this session, so never add a link to the session yourself.",
+        "Use it sparingly, for something they would want to know while away: a long task finished, a result is ready, or you are blocked on them. Questions and approvals already reach them; don't duplicate those.",
+        "Write it like a good phone notification. title: what happened, a few words ('Release 2.4 is live'). subtitle (optional): what it's about ('Billing service'). message (optional): one or two short sentences or up to four '- ' bullets; **bold**, `code` and [links](https://…) render in the inbox and become plain text on the lock screen. facts (optional): up to four short label/value pairs for the numbers that matter ('Tests' / '412 passed'). link (optional): one https place outside the session worth opening, such as a pull request or dashboard. Keep secrets out.",
+        "Give each notification a stable key: posting the same key again updates it in place without a new alert (for progress such as '7 of 10 done'). urgency time_sensitive breaks through Focus on their phone; use it only for what cannot wait. Withdraw it with notification_withdraw when it no longer applies.",
+      ].join(" "),
       inputSchema: {
         title: z.string().trim().min(1).max(NOTIFICATION_TITLE_MAX_CHARS),
+        subtitle: z.string().trim().max(NOTIFICATION_SUBTITLE_MAX_CHARS).optional(),
         message: z.string().trim().max(NOTIFICATION_BODY_MAX_CHARS).default(""),
+        facts: z
+          .array(
+            z.object({
+              label: z.string().trim().min(1).max(NOTIFICATION_FACT_LABEL_MAX_CHARS),
+              value: z.string().trim().min(1).max(NOTIFICATION_FACT_VALUE_MAX_CHARS),
+            }),
+          )
+          .max(NOTIFICATION_FACTS_MAX)
+          .optional(),
+        link: z
+          .object({
+            url: z.string().trim().max(2000).describe("An https URL outside this session."),
+            label: z.string().trim().min(1).max(NOTIFICATION_LINK_LABEL_MAX_CHARS),
+          })
+          .optional(),
         key: z
           .string()
           .max(120)
@@ -106,7 +131,7 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
         urgency: z.enum(["normal", "time_sensitive"]).default("normal"),
       },
     },
-    async ({ title, message, key, urgency }) => {
+    async ({ title, subtitle, message, facts, link, key, urgency }) => {
       await authorize();
       const resolvedKey = NotificationKey.parse(key ?? `n-${crypto.randomUUID().slice(0, 8)}`);
       const owner = await sessionOwner(deps, grant.workspaceId, sessionId);
@@ -123,13 +148,23 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
               item.sourceKey === resolvedKey,
           )
         : undefined;
-      const payload = SessionNotificationPostedPayload.parse({
+      const parsed = SessionNotificationPostedPayload.safeParse({
         key: resolvedKey,
         title,
+        ...(subtitle ? { subtitle } : {}),
         body: message,
+        ...(facts && facts.length > 0 ? { facts } : {}),
+        ...(link ? { link } : {}),
         urgency,
         replaced: Boolean(existing),
       });
+      if (!parsed.success) {
+        const issue = parsed.error.issues[0];
+        throw new Error(
+          `Invalid notification${issue ? ` (${issue.path.join(".") || "input"}): ${issue.message}` : ""}`,
+        );
+      }
+      const payload = parsed.data;
       await appendOwn([{ type: "session.notification.posted", payload }]);
       return json({
         ok: true,

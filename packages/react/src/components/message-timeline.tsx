@@ -1,4 +1,5 @@
 import { QUESTION_NAV_MARGIN_PX, questionNavTarget } from "../timeline/question-nav-model";
+import { timelineGroupIndexAtSequence } from "../timeline/focus-sequence";
 import { RollingActivity } from "../timeline/rolling-activity";
 import {
   clusterIsSettled,
@@ -188,6 +189,12 @@ const TimelineAnnotationMarkers = lazy(() => import("./timeline-annotation-marke
 export type MessageTimelineProps = {
   /** Exact durable search hit; clearing it removes highlighting without moving the reader. */
   searchTarget?: TimelineSearchTarget | null | undefined;
+  /**
+   * A durable event sequence to open on once (an inbox item's or notification's
+   * moment): the timeline lands on the row that holds it, or the nearest row
+   * before it, instead of the latest message. Load the window around it first.
+   */
+  focusSequence?: number | null | undefined;
   /** Localized user-message disclosure actions, including custom UserMessageBody renderers. */
   userMessageDisclosureLabels?: UserMessageDisclosureLabels | undefined;
   /** Raw session events (projected internally) … */
@@ -583,6 +590,7 @@ export function MessageTimeline({
   renderInteractiveBlock,
   userMessageDisclosureLabels,
   searchTarget,
+  focusSequence,
   events,
   items,
   status: _status,
@@ -1639,6 +1647,26 @@ export function MessageTimeline({
     syncScrollBaseline(node);
     scheduleQuestionNav();
   };
+
+  // Land once on the moment an inbox item or a notification points at.
+  // Deliberately dependency-free: it retries after every commit until the
+  // target row is laid out, and the ref guard makes the state update run once
+  // per focus sequence, so it cannot chain renders.
+  const focusedSequenceRef = useRef<number | null>(null);
+  // oxlint-disable-next-line react-hooks/exhaustive-deps -- retries each commit; ref-guarded to run once
+  useLayoutEffect(() => {
+    if (!focusSequence || focusedSequenceRef.current === focusSequence) return;
+    const index = timelineGroupIndexAtSequence(
+      groups.map((entry) => entry.group),
+      focusSequence,
+    );
+    const key = index >= 0 ? groups[index]?.key : undefined;
+    const node = scrollRef.current;
+    if (!key || !node || contentTopOf(node, key) === null) return;
+    focusedSequenceRef.current = focusSequence;
+    setRevealed(true);
+    jumpToQuestion(key);
+  });
 
   const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(
     requestOlderIfUnderfilled as (node: HTMLElement, now?: number) => void,
