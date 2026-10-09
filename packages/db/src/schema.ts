@@ -8708,7 +8708,7 @@ export const sessionSystemUpdates = pgTable(
       .$type<ClaudeProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
-    // M3 v2 slot (0680): the Codex entry frozen with the update; copied, never
+    // M3 v2 slot (0682): the Codex entry frozen with the update; copied, never
     // recomputed, by the turn that delivers it. NULL before the cutover.
     subscriptionAuthority: jsonb(
       "subscription_authority",
@@ -8820,7 +8820,7 @@ export const sessionSystemUpdateOutbox = pgTable(
       .$type<ClaudeProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
-    // M3 v2 slot (0680), copied onto the update the outbox row delivers.
+    // M3 v2 slot (0682), copied onto the update the outbox row delivers.
     subscriptionAuthority: jsonb(
       "subscription_authority",
     ).$type<SubscriptionPersonalAuthorityV2 | null>(),
@@ -9940,7 +9940,7 @@ export const sandboxLeases = pgTable(
     // (migration 0659). Equal to archive_capture_id only for that claim.
     archiveCaptureConcurrentCaptureId: uuid("archive_capture_concurrent_capture_id"),
     // Exact admissions a mandatory pre-deadline save may capture around and
-    // settle after termination (migration 0680).
+    // settle after termination (migration 0682).
     deadlineForcedAdmissionIds: uuid("deadline_forced_admission_ids").array(),
     // Bounded operator preservation gate. Unlike rotation/capture, this blocks
     // only reaper teardown: a user may still re-arm a resumable draining lease.
@@ -11741,7 +11741,7 @@ export const scheduledTasks = pgTable(
       .$type<ClaudeProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
-    // M3 v2 slot (0680): frozen at task creation; a firing copies it (or its
+    // M3 v2 slot (0682): frozen at task creation; a firing copies it (or its
     // current revision authority's value), never recomputes it.
     subscriptionAuthority: jsonb(
       "subscription_authority",
