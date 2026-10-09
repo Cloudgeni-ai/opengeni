@@ -63,6 +63,15 @@ evidence under the exact turn fence, rather than trusting a new process's empty
 in-memory tracker. Without supported provider reconciliation the outcome stays
 unresolved; expiry is never permission to replay it.
 
+The fence does not outlive the attempt that owned the ambiguous request. An
+attempt from an earlier execution generation that closed as `failed` (rerun
+only through an explicit Retry) or as `interrupted_recoverable` or
+`lease_lost_recoverable` (worker shutdown, worker loss or a lost lease) can no
+longer write, so its response is never consumed and the new generation's
+requests are not a replay of it (migrations 0697 and 0699). The request rows
+keep their recorded outcome. A capacity or approval resume, and an attempt
+without a closed record, stay fenced.
+
 Non-chat consumers use the same request seam: images, realtime negotiation,
 transcription, usage, discovery, Apps and reset redemption. A returned Response
 header is not body completion; in particular transcription must consume its
