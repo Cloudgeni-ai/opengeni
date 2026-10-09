@@ -1286,7 +1286,28 @@ nothing unless the account's Codex cutover is enabled.
   `details.reason = subscription_core_route_unsupported`, no legacy state
   read): live usage reads and refresh, the overview and reset-credit
   prepare/redeem (all served by PR 2c); connect start/poll, disconnect one
-  or all (PR 3).
+  or all (PR 3). The connection access editor (models and workspaces) was
+  the last such route; migration 0702 serves it on the core (see "Codex
+  access editor" below) and the typed refusal is gone.
+
+##### Codex access editor (migration 0702)
+
+`PUT .../model-connections/codex/:id/access` writes the core in one
+transaction, guarded by a dedicated `access_version` (the row `version` also
+moves on every credential refresh, which would make routine refreshes look
+like edit conflicts). At organization scope, "every shared and Personal
+workspace" is `organization` scope; anything else is `workspaces` scope over
+the chosen shared workspaces (all of today's for "all, including new ones")
+plus every Personal workspace when allowed, with matching organization-pool
+rows and the owner-only auto-assignment row from 0689 kept as the reach for
+workspaces created later (read and replaced only through
+`subscription_codex_reach` / `set_subscription_codex_reach`, organization
+administrators only). A workspace's own local copy keeps its assignment and
+workspace-pool row whatever the organization chooses. In a workspace, a
+workspace administrator changes only the models of the account that
+workspace manages (the scope guard admits exactly that change). The route
+delivers an account-wide wake after commit. An organization rotation switch
+also switches the organization-pool copies and the reach's copy.
 
 Known gaps after PR 2b: personal connections are not listed in any account
 pool view (their rows are visible only inside the owner's exact accepted

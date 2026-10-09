@@ -45,7 +45,6 @@ import {
 } from "./codex";
 
 export const SUBSCRIPTION_CORE_CUTOVER_DISABLED = "subscription_core_cutover_disabled";
-export const SUBSCRIPTION_CORE_ROUTE_UNSUPPORTED = "subscription_core_route_unsupported";
 
 /** The public error envelope with the core reason in `details.reason`. */
 function typedHttpError(status: 409 | 503, reason: string, message: string): ApiHttpError {
@@ -75,15 +74,6 @@ export async function codexRouteDisposition(
     );
   }
   return disposition;
-}
-
-/** An operation the shared core does not serve yet (listed as a PR 3 leftover). */
-export function coreCodexRouteUnsupported(): never {
-  throw typedHttpError(
-    409,
-    SUBSCRIPTION_CORE_ROUTE_UNSUPPORTED,
-    "This Codex operation is not available yet for this organization",
-  );
 }
 
 function projection(
