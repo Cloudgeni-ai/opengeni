@@ -79,6 +79,67 @@ describe("production composer machine and path keyboard navigation", () => {
   });
 
   for (const width of [1280, 390])
+    for (const theme of ["light", "dark"]) {
+      test(`queue recall, ${width}px, ${theme}`, async () => {
+        const page = await browser.newPage({ viewport: { width, height: 800 } });
+        const errors: string[] = [];
+        page.on("pageerror", (error) => errors.push(error.message));
+        try {
+          await page.goto(`${url}?queue&theme=${theme}`);
+          const input = page.getByRole("textbox", { name: "Message the agent" });
+          await input.waitFor();
+          await page.getByRole("button", { name: "2 queued prompts", exact: true }).waitFor();
+          await input.fill("Draft\nsecond line");
+          await input.press("ArrowUp");
+          expect(await input.inputValue()).toBe("Draft\nsecond line");
+          await input.fill("");
+          for (const key of ["Shift+ArrowUp", "Control+ArrowUp", "Alt+ArrowUp", "Meta+ArrowUp"]) {
+            await input.press(key);
+            expect(await input.inputValue()).toBe("");
+          }
+          if (screenshots)
+            await page.screenshot({ path: `${screenshots}/queue-${width}-${theme}-before.png` });
+          await input.press("ArrowUp");
+          await page.waitForFunction(
+            () => document.querySelector("textarea")?.value === "Add keyboard regression tests.",
+          );
+          await focused(input);
+          await page.getByRole("button", { name: "1 queued prompt", exact: true }).waitFor();
+          await input.press("ArrowUp");
+          expect(await input.inputValue()).toBe("Add keyboard regression tests.");
+          expect(
+            await page.evaluate(
+              () =>
+                (window as typeof window & { composerQueue: { edits: string[]; sends: number } })
+                  .composerQueue.edits.length,
+            ),
+          ).toBe(1);
+          if (screenshots)
+            await page.screenshot({ path: `${screenshots}/queue-${width}-${theme}-editing.png` });
+          expect(errors).toEqual([]);
+        } finally {
+          await page.close();
+        }
+      }, 30_000);
+    }
+
+  test("queue recall preserves the composer and displays checkout race errors", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.goto(`${url}?queue&race`);
+      const input = page.getByRole("textbox", { name: "Message the agent" });
+      await input.press("ArrowUp");
+      await page.getByTestId("queue-error-message").waitFor();
+      expect(await page.getByTestId("queue-error-message").textContent()).not.toBe("");
+      expect(await input.inputValue()).toBe("");
+      await focused(input);
+      await page.getByRole("button", { name: "2 queued prompts", exact: true }).waitFor();
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+
+  for (const width of [1280, 390])
     for (const theme of ["light", "dark"])
       for (const chat of ["existing", "new"])
         for (const presentation of ["menu", "dialog"])

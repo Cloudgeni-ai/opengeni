@@ -3355,6 +3355,7 @@ function SessionChatPane(props: {
                 workspaceId={props.session.workspaceId}
                 usageRefreshKey={props.session.status}
                 composer={composer}
+                queue={props.queue}
                 attachments={attachments}
                 effectiveControl={composer.effectiveControl}
                 queuedAheadCount={props.queue.queue.length}

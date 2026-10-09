@@ -7,6 +7,7 @@ import {
   type ComposerState,
   type SlashCommandContext,
   type UseFileAttachmentsResult,
+  type UseTurnQueueResult,
 } from "@opengeni/react";
 import { resolveWorkspaceVoiceInputEnabled } from "@opengeni/sdk/browser";
 import type { EffectiveSessionControl } from "@opengeni/sdk";
@@ -24,6 +25,7 @@ export function useDraftAttachments(
 export function ConsoleComposer(props: {
   workspaceId: string;
   composer: ComposerState;
+  queue?: UseTurnQueueResult;
   attachments: UseFileAttachmentsResult;
   effectiveControl?: EffectiveSessionControl | null;
   queuedAheadCount?: number;
@@ -58,6 +60,7 @@ export function ConsoleComposer(props: {
     <ChatComposer
       responsiveBasis="container"
       composer={props.composer}
+      queue={props.queue}
       effectiveControl={props.effectiveControl}
       queuedAheadCount={props.queuedAheadCount}
       canControlWorkspace={props.canControlWorkspace}

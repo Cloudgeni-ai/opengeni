@@ -92,11 +92,13 @@ export type ComposerDelivery = Pick<
 export type ComposerDraftState = Pick<
   ComposerState,
   | "draftConflict"
+  | "draftCheckoutBlocked"
   | "draftSaving"
   | "resolveDraftConflict"
   | "restoredResources"
   | "removeRestoredResource"
->;
+> &
+  Partial<Pick<ComposerState, "reloadDraft">>;
 
 export type ComposerControlState = Pick<
   ComposerState,
@@ -146,6 +148,8 @@ export type UseChatComposerControllerOptions = {
   commandContext?: SlashCommandContext | undefined;
   onClearView?: (() => void) | undefined;
   onPaste?: ((event: ClipboardEvent<HTMLTextAreaElement>) => void) | undefined;
+  /** Return true only when an empty-composer queue checkout was started. */
+  onEditLatestQueuedMessage?: (() => boolean) | undefined;
   messages?: Partial<ChatComposerMessages> | undefined;
   /** Run control presentation. Defaults to `pause`. */
   runControl?: ComposerRunControl | undefined;
@@ -256,6 +260,7 @@ export function useChatComposerController({
   commandContext,
   onClearView,
   onPaste,
+  onEditLatestQueuedMessage,
   messages: messageOverrides,
   runControl = "pause",
   running = false,
@@ -526,11 +531,41 @@ export function useChatComposerController({
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>) => {
       if (paletteEnabled && paletteMounted && palette.onKeyDown(event)) return;
+      if (
+        event.key === "ArrowUp" &&
+        !event.defaultPrevented &&
+        !event.nativeEvent.isComposing &&
+        event.nativeEvent.keyCode !== 229 &&
+        !event.repeat &&
+        !event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.shiftKey &&
+        !disabled &&
+        !delivery.sending &&
+        !submittingRef.current &&
+        liveValueRef.current.length === 0 &&
+        event.currentTarget.value.length === 0 &&
+        !attachments?.attachments.length &&
+        onEditLatestQueuedMessage?.()
+      ) {
+        event.preventDefault();
+        return;
+      }
       if (!shouldSubmitOnKey(event)) return;
       event.preventDefault();
       void submit(shouldSteerOnKey(event) ? "steer" : "queue");
     },
-    [palette, paletteEnabled, paletteMounted, submit],
+    [
+      attachments,
+      delivery.sending,
+      disabled,
+      onEditLatestQueuedMessage,
+      palette,
+      paletteEnabled,
+      paletteMounted,
+      submit,
+    ],
   );
   const handlePaste = useCallback(
     (event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -647,6 +682,8 @@ export function useChatComposerController({
     clearError: delivery.clearError,
     hasDraftState: draft !== undefined,
     draftConflict: draft?.draftConflict ?? null,
+    draftCheckoutBlocked: draft?.draftCheckoutBlocked ?? false,
+    reloadDraft: draft?.reloadDraft,
     draftSaving: draft?.draftSaving ?? false,
     restoredResources: draft?.restoredResources ?? [],
     removeRestoredResource: draft?.removeRestoredResource,
@@ -1382,7 +1419,18 @@ export function Status() {
           </motion.p>
         ) : null}
       </AnimatePresence>
-      {controller.draftConflict ? (
+      {controller.draftCheckoutBlocked ? (
+        <div className="mt-1.5 flex flex-wrap items-center gap-2 px-1 text-og-xs text-og-status-failed">
+          <span className="min-w-0 flex-1">{controller.messages.queueCheckoutUnconfirmed}</span>
+          <button
+            type="button"
+            className="underline underline-offset-2"
+            onClick={() => void controller.reloadDraft?.()}
+          >
+            {controller.messages.retryDraftSync}
+          </button>
+        </div>
+      ) : controller.draftConflict ? (
         <div className="mt-1.5 flex flex-wrap items-center gap-2 px-1 text-og-xs text-og-status-failed">
           <span className="min-w-0 flex-1">{controller.messages.draftConflict}</span>
           <button
@@ -1414,7 +1462,13 @@ function ComposerAnnouncements() {
           {controller.activeNotice.message}
         </p>
       ) : null}
-      {controller.draftConflict ? <p role="alert">{controller.messages.draftConflict}</p> : null}
+      {controller.draftConflict ? (
+        <p role="alert">
+          {controller.draftCheckoutBlocked
+            ? controller.messages.queueCheckoutUnconfirmed
+            : controller.messages.draftConflict}
+        </p>
+      ) : null}
     </div>
   );
 }

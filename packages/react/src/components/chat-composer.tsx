@@ -2,6 +2,8 @@ import type { ClientModel, EffectiveSessionControl } from "@opengeni/sdk";
 import { LayoutGroup, motion } from "motion/react";
 import {
   useImperativeHandle,
+  useRef,
+  useState,
   type ClipboardEvent,
   type ComponentProps,
   type ReactNode,
@@ -9,6 +11,8 @@ import {
 } from "react";
 import type { SlashCommand } from "../commands/types";
 import type { ComposerState } from "../hooks/use-composer";
+import type { UseTurnQueueResult } from "../hooks/use-turn-queue";
+import { checkoutQueueDraft, latestEditableQueuedTurn } from "./queue-draft-policy";
 import type { UseFileAttachmentsResult } from "../hooks/use-file-attachments";
 import type { SlashCommandContext } from "../hooks/use-slash-commands";
 import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
@@ -49,6 +53,8 @@ export { OPEN_WORKSTREAM_CONTROL_EVENT };
 
 export type ChatComposerProps = {
   composer: ComposerState;
+  /** Enables Arrow Up checkout of the latest queued prompt from an empty draft. */
+  queue?: UseTurnQueueResult | undefined;
   /** Replace only the normal footer, inside the shared composer context.
    * Confirmation, drafts, annotations and attachments remain native. */
   footer?: ReactNode;
@@ -122,6 +128,7 @@ export type ChatComposerProps = {
  */
 export function ChatComposer({
   composer,
+  queue,
   responsiveBasis,
   effectiveControl,
   queuedAheadCount,
@@ -156,6 +163,8 @@ export function ChatComposer({
   runControl,
   running,
 }: ChatComposerProps) {
+  const checkoutPending = useRef(false);
+  const [checkingOut, setCheckingOut] = useState(false);
   const controller = useChatComposerController({
     delivery: composer,
     draft: composer,
@@ -164,7 +173,33 @@ export function ChatComposer({
     queuedAheadCount,
     canControlWorkspace,
     controlLinks,
-    disabled,
+    disabled: disabled || checkingOut,
+    onEditLatestQueuedMessage: () => {
+      if (
+        !queue ||
+        queue.loading ||
+        queue.mutating ||
+        checkoutPending.current ||
+        composer.draftPersistence === "disabled" ||
+        composer.draftLoading ||
+        composer.draftSaving ||
+        composer.draftConflict ||
+        composer.hasDraftContent()
+      )
+        return false;
+      const turn = latestEditableQueuedTurn(queue.queue);
+      if (!turn) return false;
+      checkoutPending.current = true;
+      setCheckingOut(true);
+      // Freeze this input during checkout, just as Send does, so newly typed
+      // text cannot be overwritten by the authoritative draft receipt.
+      void checkoutQueueDraft(composer, queue, turn.id, false).finally(() => {
+        checkoutPending.current = false;
+        setCheckingOut(false);
+        window.requestAnimationFrame(() => controller.focusInput());
+      });
+      return true;
+    },
     attachments,
     commands,
     commandContext,

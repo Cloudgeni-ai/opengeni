@@ -46,7 +46,7 @@ import {
   usePortalTokenSource,
   usePortalTokenStyle,
 } from "../lib/use-portal-token-style";
-import { requestQueueDraftEdit } from "./queue-draft-policy";
+import { checkoutQueueDraft, requestQueueDraftEdit } from "./queue-draft-policy";
 import {
   projectPendingQueueMove,
   QUEUE_COLLAPSED_PREVIEW_CHARACTERS,
@@ -243,15 +243,11 @@ export function QueueSurface({
     async (turn: SessionTurn, replaceDraft: boolean) => {
       if (!composer || !canEditInComposer) return;
       setAnnouncement("Moving queued prompt to the composer…");
-      const restored = await queue.editTurn(turn.id, {
-        expectedDraftRevision: composer.draftRevision,
-        replaceDraft,
-      });
+      const restored = await checkoutQueueDraft(composer, queue, turn.id, replaceDraft);
       if (!restored) {
         setAnnouncement("That prompt changed before it could be moved to the composer.");
         return;
       }
-      composer.applyDraft(restored);
       setReplaceDraftFor(null);
       setAnnouncement("Queued prompt moved back to the composer for editing.");
       window.requestAnimationFrame(() => {

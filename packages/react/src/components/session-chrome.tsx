@@ -84,7 +84,7 @@ import {
   queuedTurnPresentation,
   queueNeighborAnchors,
 } from "../queue-presentation-model";
-import { requestQueueDraftEdit } from "./queue-draft-policy";
+import { checkoutQueueDraft, requestQueueDraftEdit } from "./queue-draft-policy";
 import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./queue-item-content";
 import { TimelineAnnotationsChip, type TimelineAnnotationLike } from "./timeline-annotations";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
@@ -852,12 +852,8 @@ export function SessionChrome({
                 const turnId = replaceDraftFor;
                 setReplaceDraftFor(null);
                 void (async () => {
-                  const checkedOut = await queue.editTurn(turnId, {
-                    expectedDraftRevision: composer.draftRevision,
-                    replaceDraft: true,
-                  });
+                  const checkedOut = await checkoutQueueDraft(composer, queue, turnId, true);
                   if (checkedOut) {
-                    composer.applyDraft(checkedOut);
                     onComposerFocus?.();
                   }
                 })();
@@ -872,12 +868,8 @@ export function SessionChrome({
                   () => setReplaceDraftFor(turn.id),
                   () => {
                     void (async () => {
-                      const checkedOut = await queue.editTurn(turn.id, {
-                        expectedDraftRevision: composer.draftRevision,
-                        replaceDraft: false,
-                      });
+                      const checkedOut = await checkoutQueueDraft(composer, queue, turn.id, false);
                       if (checkedOut) {
-                        composer.applyDraft(checkedOut);
                         onComposerFocus?.();
                       }
                     })();

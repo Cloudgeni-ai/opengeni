@@ -312,6 +312,7 @@ export function ScenarioStack({
     <ChatComposer
       responsiveBasis="container"
       composer={composer}
+      queue={queue}
       effectiveControl={scenario.session.effectiveControl}
       queuedAheadCount={queue.queue.length}
       placeholder="Send a follow-up…"
