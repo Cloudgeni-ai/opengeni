@@ -746,6 +746,7 @@ async function personalCase(): Promise<void> {
     await connect(org, member.subjectId, member.personalWorkspaceId, "personal-one"),
   ).toMatchObject({ kind: "connected", id: first.id, isNew: false });
   expect((await row(first.id))!.refresh_generation).toBe("2");
+  expect((await row(first.id))!.connected_by_subject_id).toBeNull();
 
   // Listed to the owner in their Personal workspace, and to nobody else.
   const own = await personalAccounts(org, member.subjectId, member.personalWorkspaceId);

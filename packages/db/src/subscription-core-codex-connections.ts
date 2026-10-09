@@ -156,7 +156,8 @@ async function connectPersonal(
         ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId},
         ${input.credentialEncrypted}, ${input.providerAccountId}, ${input.planType},
         ${JSON.stringify(providerState(input))}::jsonb, ${iso(input.expiresAt)}::timestamptz,
-        ${iso(input.lastRefreshAt)}::timestamptz, ${input.accountEmail}, ${input.label}
+        ${iso(input.lastRefreshAt)}::timestamptz, ${input.accountEmail}, ${input.label},
+        ${input.connectedBySubjectId ?? null}
       )`,
   );
   if (row?.outcome === "connected" && row.connection_id) {

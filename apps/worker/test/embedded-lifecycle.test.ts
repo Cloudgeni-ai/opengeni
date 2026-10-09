@@ -762,7 +762,7 @@ describe("embedded worker lifecycle contract", () => {
           "persist_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
           "fail_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text)",
           "subscription_codex_reset_authority(uuid, uuid, uuid, text)",
-          "connect_subscription_codex_personal(uuid, uuid, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text)",
+          "connect_subscription_codex_personal(uuid, uuid, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text)",
           "disconnect_subscription_codex_connection(uuid, uuid, text, uuid)",
           "subscription_codex_personal_connections(uuid, uuid, text)",
           "subscription_codex_reset_credit_fence(uuid, uuid, uuid, text, text, uuid)",

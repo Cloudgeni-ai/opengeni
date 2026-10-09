@@ -2102,7 +2102,7 @@ BEGIN
       'persist_subscription_codex_connection_refresh(uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)',
       'fail_subscription_codex_connection_refresh(uuid,uuid,uuid,bigint,text)',
       'subscription_codex_reset_authority(uuid,uuid,uuid,text)',
-      'connect_subscription_codex_personal(uuid,uuid,text,text,text,text,jsonb,timestamptz,timestamptz,text,text)',
+      'connect_subscription_codex_personal(uuid,uuid,text,text,text,text,jsonb,timestamptz,timestamptz,text,text,text)',
       'disconnect_subscription_codex_connection(uuid,uuid,text,uuid)',
       'subscription_codex_personal_connections(uuid,uuid,text)',
       'subscription_codex_reset_credit_fence(uuid,uuid,uuid,text,text,uuid)',

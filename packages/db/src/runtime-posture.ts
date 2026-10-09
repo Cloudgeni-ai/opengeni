@@ -710,7 +710,7 @@ export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   // M3 PR 3b: Codex writers, the owner's personal-connection reader, the
   // cross-workspace reset-credit fence, the scheduled-task v2 writer and the
   // owner-only policies' capability helpers.
-  "connect_subscription_codex_personal(uuid, uuid, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text)",
+  "connect_subscription_codex_personal(uuid, uuid, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text)",
   "disconnect_subscription_codex_connection(uuid, uuid, text, uuid)",
   "subscription_codex_personal_connections(uuid, uuid, text)",
   "subscription_codex_reset_credit_fence(uuid, uuid, uuid, text, text, uuid)",

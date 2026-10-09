@@ -432,7 +432,7 @@ BEGIN
       p_account_id uuid, p_workspace_id uuid, p_subject_id text,
       p_credential_encrypted text, p_provider_account_id text, p_plan_type text,
       p_provider_state jsonb, p_expires_at timestamptz, p_last_refresh_at timestamptz,
-      p_account_email text, p_label text
+      p_account_email text, p_label text, p_connected_by_subject_id text
     ) RETURNS TABLE (outcome text, connection_id uuid, is_new boolean)
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
@@ -503,7 +503,7 @@ BEGIN
           provider_state = connection.provider_state || coalesce(p_provider_state, '{}'::jsonb),
           account_email = coalesce(p_account_email, connection.account_email),
           label = coalesce(connection.label, p_label),
-          connected_by_subject_id = p_subject_id, updated_at = clock_timestamp()
+          connected_by_subject_id = p_connected_by_subject_id, updated_at = clock_timestamp()
         WHERE connection.account_id = p_account_id AND connection.id = existing_id;
         PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
         outcome := 'connected'; connection_id := existing_id; is_new := false;
@@ -549,7 +549,7 @@ BEGIN
         new_id, p_account_id, 'codex', 'subscription', p_provider_account_id, p_account_email,
         p_label, p_plan_type, p_credential_encrypted, 'v1', p_expires_at, p_last_refresh_at,
         'active', 'personal', owner_membership, p_subject_id, authority,
-        'subscription_connection', authority_gen, p_subject_id, 'people', true, NULL,
+        'subscription_connection', authority_gen, p_connected_by_subject_id, 'people', true, NULL,
         coalesce(p_provider_state, '{}'::jsonb)
       );
       PERFORM opengeni_private.drop_subscription_codex_owner_capabilities(p_account_id);
@@ -988,7 +988,7 @@ REVOKE ALL ON FUNCTION opengeni_private.manage_subscription_codex_personal(uuid,
 REVOKE ALL ON FUNCTION opengeni_private.grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.drop_subscription_codex_owner_capabilities(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.connect_subscription_codex_personal(
-  uuid, uuid, text, text, text, text, jsonb, timestamptz, timestamptz, text, text) FROM PUBLIC;
+  uuid, uuid, text, text, text, text, jsonb, timestamptz, timestamptz, text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.disconnect_subscription_codex_connection(uuid, uuid, text, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.subscription_codex_personal_connections(uuid, uuid, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.subscription_codex_reset_authority(uuid, uuid, uuid, text) FROM PUBLIC;
@@ -1002,7 +1002,7 @@ BEGIN
     GRANT EXECUTE ON FUNCTION opengeni_private.subscription_codex_revision_authority_v2(uuid, uuid, uuid, bigint) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION opengeni_private.manage_subscription_codex_personal(uuid, uuid, text, uuid, text, text, boolean, integer) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION opengeni_private.connect_subscription_codex_personal(
-      uuid, uuid, text, text, text, text, jsonb, timestamptz, timestamptz, text, text) TO opengeni_app;
+      uuid, uuid, text, text, text, text, jsonb, timestamptz, timestamptz, text, text, text) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION opengeni_private.disconnect_subscription_codex_connection(
       uuid, uuid, text, uuid) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION opengeni_private.subscription_codex_personal_connections(
