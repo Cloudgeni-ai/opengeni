@@ -400,6 +400,21 @@ describe("compact list model policy", () => {
       model: "next-model",
       reasoningEffort: "high",
     });
+
+    // Imported history carries start events without turn rows. The projection
+    // probes only the latest start, so it falls back to the stored defaults
+    // instead of scanning back for an older start that has a turn row.
+    await appendSessionEvents(
+      client.db,
+      workspaceId,
+      value.session.id,
+      Array.from({ length: 50 }, () => ({
+        type: "turn.started",
+        turnId: crypto.randomUUID(),
+        payload: {},
+      })),
+    );
+    expect(await listPolicy()).toEqual({ model: "settings-model", reasoningEffort: "low" });
   });
 });
 

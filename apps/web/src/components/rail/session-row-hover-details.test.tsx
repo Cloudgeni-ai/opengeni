@@ -4,7 +4,12 @@ import type { SessionListEntry } from "@opengeni/sdk";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { formatAbsoluteTime } from "@/components/ui/relative-time";
-import { formatWaitDuration, nextCheckLabel, sessionHoverFacts } from "@/lib/session-hover-facts";
+import {
+  formatWaitDuration,
+  nextCheckLabel,
+  sessionHoverDescription,
+  sessionHoverFacts,
+} from "@/lib/session-hover-facts";
 
 import { SessionRowHoverDetails } from "./session-row-hover-details";
 
@@ -261,8 +266,15 @@ describe("session hover facts", () => {
       }).commands;
     expect(facts({ state: "running", count: 1 })).toBe("1 background command running");
     expect(facts({ state: "stopping", count: 2 })).toBe("Stopping 2 background commands");
+    // Unavailable statuses are never counted as running.
     expect(facts({ state: "running", count: 3, unavailableCount: 1 })).toBe(
-      "3 background commands running · 1 status unavailable",
+      "2 background commands running · 1 command status unavailable",
+    );
+    expect(facts({ state: "running", count: 1, unavailableCount: 1 })).toBe(
+      "1 command status unavailable",
+    );
+    expect(facts({ state: "stopping", count: 2, unavailableCount: 2 })).toBe(
+      "Stop requested · 2 command statuses unavailable",
     );
   });
 
@@ -277,6 +289,75 @@ describe("session hover facts", () => {
     );
     expect(facts.status.label).toBe("Needs you");
     expect(facts.context).toEqual(["Waiting on you for 5 min", "Paused directly"]);
+  });
+
+  test("a needs-you session keeps its status and says it is pausing", () => {
+    const facts = sessionHoverFacts(
+      entry({
+        status: "requires_action",
+        effectiveControl: {
+          ...activeControl,
+          state: "paused",
+          directState: "paused",
+          settlement: {
+            state: "stopping",
+            attemptCount: 1,
+            interruptionPendingCount: 1,
+            quiescencePendingCount: 0,
+          },
+        },
+      }),
+      { descendantCount: 0, descendantCountTruncated: false, now: NOW },
+    );
+    expect(facts.status.label).toBe("Needs you");
+    expect(facts.context).toEqual(["Pausing"]);
+
+    const settling = sessionHoverFacts(
+      entry({
+        status: "running",
+        effectiveControl: {
+          ...activeControl,
+          state: "paused",
+          settlement: {
+            state: "stopping",
+            attemptCount: 1,
+            interruptionPendingCount: 1,
+            quiescencePendingCount: 0,
+          },
+        },
+      }),
+      { descendantCount: 0, descendantCountTruncated: false, now: NOW },
+    );
+    expect(settling.status.label).toBe("Pausing");
+    expect(settling.context).toEqual([]);
+  });
+
+  test("the accessible description carries what the card adds, without timestamps", () => {
+    const facts = sessionHoverFacts(
+      entry({
+        status: "idle",
+        inputWait: {
+          deadlineAt: new Date(NOW + 30 * 60_000).toISOString(),
+          reason: "Waiting for the deploy.",
+        },
+        model: "codex/gpt-6-astra",
+        reasoningEffort: "max",
+        backgroundCommandActivity: { state: "running", count: 1 },
+      }),
+      { descendantCount: 2, descendantCountTruncated: false, now: NOW },
+    );
+    expect(sessionHoverDescription(facts)).toBe(
+      `${nextCheckLabel(new Date(NOW + 30 * 60_000).toISOString(), NOW)}. Waiting for the deploy. GPT-6 Astra, Max reasoning. 2 sub-agents. 1 background command running`,
+    );
+    expect(
+      sessionHoverDescription(
+        sessionHoverFacts(entry(), {
+          descendantCount: 0,
+          descendantCountTruncated: false,
+          now: NOW,
+        }),
+      ),
+    ).toBe("");
   });
 
   test("a cancelled session is never shown as paused", () => {

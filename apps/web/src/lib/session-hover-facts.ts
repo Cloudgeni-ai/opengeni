@@ -1,3 +1,4 @@
+import { modelDisplayName } from "@opengeni/react";
 import { labelReasoningEffort } from "@opengeni/react/model-policy";
 
 import type { SemanticTone } from "@/components/ui/status-dot";
@@ -129,17 +130,32 @@ function subAgentFacts(
   };
 }
 
+/**
+ * Background commands, never claiming more than is observable: commands whose
+ * status is unavailable are named as such, not counted as running.
+ */
 function commandFacts(session: RailSession): string | null {
   const activity = session.backgroundCommandActivity;
   if (!activity || activity.count <= 0) return null;
   const unavailable = Math.min(activity.count, activity.unavailableCount ?? 0);
-  const main =
-    activity.state === "stopping"
-      ? `Stopping ${plural(activity.count, "background command")}`
-      : `${plural(activity.count, "background command")} running`;
-  return unavailable > 0
-    ? `${main} · ${plural(unavailable, "status", "statuses")} unavailable`
-    : main;
+  const known = activity.count - unavailable;
+  const unknown =
+    unavailable === 0
+      ? null
+      : unavailable === 1
+        ? "1 command status unavailable"
+        : `${unavailable.toLocaleString("en-US")} command statuses unavailable`;
+  if (known > 0) {
+    const main =
+      activity.state === "stopping"
+        ? `Stopping ${plural(known, "background command")}`
+        : `${plural(known, "background command")} running`;
+    return unknown ? `${main} · ${unknown}` : main;
+  }
+  if (!unknown) return null;
+  return activity.state === "stopping"
+    ? `Stop requested · ${unknown}`
+    : `${unknown.charAt(0).toUpperCase()}${unknown.slice(1)}`;
 }
 
 export function sessionHoverFacts(
@@ -173,7 +189,9 @@ export function sessionHoverFacts(
     const nextCheck = nextCheckLabel(wait.deadlineAt, now);
     if (nextCheck) context.push(nextCheck);
   }
-  if (paused && paused !== "Pausing") context.push(paused);
+  // The badge already says "Pausing" or "Paused" unless a needs-you or failed
+  // status kept its place; then the pause (or its settlement) is spelled out.
+  if (paused && (paused !== "Pausing" || status.label !== "Pausing")) context.push(paused);
 
   const pauseReason = paused ? session.effectiveControl?.primaryBlocker?.reason?.trim() : null;
   const reason = wait?.reason.trim() || pauseReason || null;
@@ -203,4 +221,27 @@ export function sessionHoverFacts(
     subAgents: subAgentFacts(session, descendantCount, descendantCountTruncated),
     commands: commandFacts(session),
   };
+}
+
+/**
+ * The hover's facts as one plain sentence list, for the row's accessible
+ * description. The row's name already carries its title, state and creator, so
+ * this adds only what the card adds, in the same order.
+ */
+export function sessionHoverDescription(facts: SessionHoverFacts): string {
+  const model = facts.model
+    ? [modelDisplayName(facts.model.id), facts.model.effort].filter(Boolean).join(", ")
+    : null;
+  const subAgents = facts.subAgents
+    ? [facts.subAgents.total, ...facts.subAgents.parts.map((part) => part.label)].join(", ")
+    : null;
+  const parts = [
+    ...facts.context,
+    facts.reason,
+    facts.origin?.label,
+    model,
+    subAgents,
+    facts.commands,
+  ].filter((part): part is string => Boolean(part));
+  return parts.map((part) => part.replace(/[.\s]+$/u, "")).join(". ");
 }

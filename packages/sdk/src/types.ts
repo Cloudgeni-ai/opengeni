@@ -1795,9 +1795,11 @@ export type SessionListEntry = Pick<
   scheduledTaskId: string | null;
   siteOrigin: { siteId: string; title: string } | null;
   /**
-   * The latest started turn's model, or the session's stored default when an
-   * explicit settings change is newer or no turn has started. Detail reads
-   * remain authoritative for the composer default. Omitted by older servers.
+   * Display-only: the latest started turn's model, or the session's stored
+   * default when an explicit settings change is newer or no turn has started.
+   * Rows the SDK projects from an older server's full pages carry the
+   * session's effective model instead. `getSession` remains authoritative for
+   * the composer default.
    */
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;

@@ -675,6 +675,15 @@ test("the row hover explains status, model and activity from the compact list ro
   expect(working).toContain("2 background commands running");
   expect(working).not.toMatch(/\b0 /);
   await capture("hover-working");
+  // The card is not announced; the row describes the same facts instead.
+  const description = await row(3001).evaluate((link) =>
+    (link.getAttribute("aria-describedby") ?? "")
+      .split(" ")
+      .map((id) => document.getElementById(id)?.textContent ?? "")
+      .join(" "),
+  );
+  expect(description).toContain("GPT-6 Astra, Max reasoning");
+  expect(description).toContain("5 sub-agents, 1 needs you, 1 unread failure, 2 running, 1 paused");
 
   // Keyboard focus opens the same card for the roving row.
   await page.mouse.move(1150, 10);

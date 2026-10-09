@@ -35,6 +35,7 @@ import { toast } from "sonner";
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -55,6 +56,7 @@ import {
 import { SessionRowHoverDetails } from "@/components/rail/session-row-hover-details";
 export { RailTrailingMetadata } from "@/components/rail/session-row-content";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import { sessionHoverDescription, sessionHoverFacts } from "@/lib/session-hover-facts";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
@@ -4020,6 +4022,18 @@ function SessionRow(props: {
     null,
   );
   const stateLabel = sessionStateLabel(props.session);
+  const hoverDescendantCount = props.session.treeStats?.totalDescendants ?? props.childCount;
+  const hoverDescendantCountTruncated =
+    props.session.treeStats?.truncated ?? props.childCountTruncated;
+  // The hover card is pointer/focus-only and not announced, so the row also
+  // describes the same facts to assistive technology.
+  const hoverDescriptionId = `session-hover-${useId().replaceAll(":", "")}`;
+  const hoverDescription = sessionHoverDescription(
+    sessionHoverFacts(props.session, {
+      descendantCount: hoverDescendantCount,
+      descendantCountTruncated: hoverDescendantCountTruncated,
+    }),
+  );
   const waiting = Boolean(sessionInputWait(props.session));
   const [, refreshWaitClock] = useState(0);
   useEffect(() => {
@@ -4149,6 +4163,7 @@ function SessionRow(props: {
                     : null,
                   creator,
                 })}
+                aria-describedby={hoverDescription ? hoverDescriptionId : undefined}
                 onFocus={props.onFocus}
                 onClick={(event) => {
                   if (isModifiedNavigationClick(event)) return;
@@ -4236,14 +4251,17 @@ function SessionRow(props: {
               <SessionRowHoverDetails
                 session={props.session}
                 title={title}
-                descendantCount={props.session.treeStats?.totalDescendants ?? props.childCount}
-                descendantCountTruncated={
-                  props.session.treeStats?.truncated ?? props.childCountTruncated
-                }
+                descendantCount={hoverDescendantCount}
+                descendantCountTruncated={hoverDescendantCountTruncated}
                 showCreator={!personalWorkspace}
               />
             </HoverCardContent>
           </HoverCard>
+          {hoverDescription ? (
+            <span id={hoverDescriptionId} hidden>
+              {hoverDescription}
+            </span>
+          ) : null}
           <RowQuickActions
             session={props.session}
             onPin={props.onPin}
