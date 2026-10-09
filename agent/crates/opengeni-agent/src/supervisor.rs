@@ -96,9 +96,9 @@ pub enum SupervisorError {
 
 /// Heuristically classify a NATS connect error as an AUTHENTICATION denial (the
 /// callout rejected the bearer) vs a generic transport disconnect. async-nats
-/// surfaces an auth failure as an error whose message names "authorization"
-/// /"authentication"; we match on that so the agent can log the auth denial clearly
-/// instead of treating a deny as an indistinguishable blip.
+/// surfaces both denials and handshake timeouts using "authorization" or
+/// "authentication". A timeout does not establish a credential rejection, so
+/// exclude it before recognizing denial messages.
 fn is_authentication_error(err: &async_nats::ConnectError) -> bool {
     message_is_authentication_denial(&err.to_string())
 }
@@ -107,6 +107,9 @@ fn is_authentication_error(err: &async_nats::ConnectError) -> bool {
 /// unit-testable without constructing an `async_nats::ConnectError`.
 fn message_is_authentication_denial(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
+    if lower.contains("timeout") || lower.contains("timed out") {
+        return false;
+    }
     lower.contains("authorization")
         || lower.contains("authentication")
         || lower.contains("auth violation")
@@ -3506,9 +3509,21 @@ mod tests {
             "user authentication expired"
         ));
         assert!(message_is_authentication_denial("AUTH VIOLATION"));
+        assert!(message_is_authentication_denial(
+            "nats: authentication error"
+        ));
         // A plain transport drop is NOT an auth denial.
         assert!(!message_is_authentication_denial("connection refused"));
         assert!(!message_is_authentication_denial("broken pipe"));
+        // An unfinished auth handshake does not prove the credentials were rejected.
+        for message in [
+            "IO error: nats: Authentication Timeout",
+            "authentication timed out",
+            "authorization timeout",
+            "authorization timed out",
+        ] {
+            assert!(!message_is_authentication_denial(message), "{message}");
+        }
     }
 
     #[test]
