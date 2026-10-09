@@ -30,6 +30,8 @@ const inboxTriggerTailMigrations = [
   "0666_inbox_reply_current_turn.sql",
   // Redefines 0661's person resolver, which reads scheduled_tasks.owner_subject_id.
   "0677_local_human_inbox_recipient.sql",
+  // Compiles SQL bodies against 0661's session person resolver.
+  "0678_inbox_mute_session_replies.sql",
 ];
 const withheldMigrations = [
   migration,

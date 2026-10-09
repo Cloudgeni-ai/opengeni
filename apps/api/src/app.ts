@@ -1990,10 +1990,13 @@ export function createAppComposition(deps: AppDependencies): {
   registerPrReviewRoutes(app, routeDeps);
   registerPluginRoutes(app, routeDeps);
   registerSkillRoutes(app, routeDeps);
+  // The inbox's per-session mute routes call the session seam themselves, so
+  // they register before the session module's fail-closed middleware, which
+  // only classifies the session module's own paths.
+  registerInboxRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
   registerSessionHistoryImportRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);
-  registerInboxRoutes(app, routeDeps);
   registerWorkspaceIntegrationRoutes(app, routeDeps);
   registerOrganizationIntegrationRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
