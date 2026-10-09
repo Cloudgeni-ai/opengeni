@@ -23,7 +23,7 @@ the reservation. An authentication retry is another physical request.
 
 The shared core is the sole lifecycle owner. No second legacy ledger or
 chat-only drain is introduced. The deployment requires matching request-aware
-binaries and the existing core cutover; migration 0690 is maintenance-only.
+binaries and the existing core cutover; migration 0691 is maintenance-only.
 
 ## Local removal and request custody
 

@@ -74,7 +74,7 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0690_subscription_core_codex_disconnect.sql",
+        (migration) => migration.path === "0691_subscription_core_codex_disconnect.sql",
       ),
     ).toMatchObject({ deploymentMode: "maintenance" });
   });
@@ -346,7 +346,7 @@ describe("release schema contract", () => {
       expect(subscriptionCoreCodexCutover.deploymentMode).toBe("maintenance");
     }
     const subscriptionCoreCodexDisconnect = sourceContract.migrations.find(
-      (migration) => migration.path === "0690_subscription_core_codex_disconnect.sql",
+      (migration) => migration.path === "0691_subscription_core_codex_disconnect.sql",
     );
     if (subscriptionCoreCodexDisconnect) {
       expect(subscriptionCoreCodexDisconnect.deploymentMode).toBe("maintenance");
@@ -2261,7 +2261,7 @@ describe("release schema contract", () => {
     const appendedMigrationPaths = [
       "0686_target_tool_approval_bindings.sql",
       "0689_subscription_core_codex_cutover.sql",
-      "0690_subscription_core_codex_disconnect.sql",
+      "0691_subscription_core_codex_disconnect.sql",
       "0671_subscription_core_codex_operations.sql",
       "0688_subscription_core_codex_writers.sql",
       "0670_subscription_core_codex_apps.sql",
