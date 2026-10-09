@@ -14,6 +14,7 @@ import {
   type XaiProviderAccountAuthoritySnapshotV1,
   type ClaudeProviderAccountAuthoritySnapshotV1,
   type BillingBalance,
+  type OrganizationModelDefaults,
 } from "@opengeni/contracts";
 import {
   getScheduledTaskXaiProviderAccountAuthoritySnapshot,
@@ -27,6 +28,7 @@ import {
   listWorkspaceProviderCustomModelsByKind,
   workspaceProviderApiKeyConnectionMetadataFromConnections,
   getBillingBalance,
+  getOrganizationModelDefaults,
   spendableCreditMicros,
   workspaceXaiSubscriptionActive,
   workspaceXaiSubscriptionActiveForAuthority,
@@ -104,6 +106,8 @@ export type DefaultSessionModelInput = {
   /** This workspace's selection, in operator catalog order. */
   selections: readonly WorkspaceModelSelection[];
   workspaceDefaults: WorkspaceSessionDefaults | null;
+  /** The organization's default every workspace follows until it saves its own. */
+  organizationDefaults?: WorkspaceSessionDefaults | null | undefined;
   /**
    * True while the organization holds a positive Opengeni credit balance from
    * any source, the verified-signup trial grant included (see
@@ -170,6 +174,8 @@ function creditsCandidate(
  * 1. `workspace`: the saved workspace default (`settings.sessionDefaults`)
  *    while it is selectable in this workspace, its saved effort clamped to
  *    what the model supports today.
+ * 1b. `organization`: the organization's default, the same way, for a
+ *    workspace that saved none (or whose own default can't run here).
  * 2. `subscription`: the first selectable connected-subscription model
  *    (ChatGPT/Codex, then SuperGrok) in operator catalog order. The
  *    deployment default wins inside this step when it is itself a selectable
@@ -192,17 +198,21 @@ function creditsCandidate(
  */
 export function selectDefaultSessionModel(input: DefaultSessionModelInput): DefaultModelSelection {
   const fallbackEffort = input.settings.openaiReasoningEffort;
-  if (input.workspaceDefaults) {
-    const saved = findSelection(input.selections, input.workspaceDefaults.model);
-    if (saved?.availability.selectable) {
+  for (const [saved, source] of [
+    [input.workspaceDefaults, "workspace"],
+    [input.organizationDefaults ?? null, "organization"],
+  ] as const) {
+    if (!saved) continue;
+    const selection = findSelection(input.selections, saved.model);
+    if (selection?.availability.selectable) {
       return {
-        model: saved.model.id,
+        model: selection.model.id,
         reasoningEffort: clampReasoningEffortForConfiguredModel(
-          saved.model,
-          input.workspaceDefaults.reasoningEffort,
+          selection.model,
+          saved.reasoningEffort,
           fallbackEffort,
         ),
-        source: "workspace",
+        source,
       };
     }
   }
@@ -251,6 +261,7 @@ export function creditsDefaultSessionModel(input: {
   settings: Settings;
   selections: readonly WorkspaceModelSelection[];
   workspaceSettings: unknown;
+  organizationDefaults?: Pick<OrganizationModelDefaults, "sessionDefaults"> | null;
   creditBalance?: BillingBalance;
 }): DefaultModelSelection | null {
   if (input.settings.billingMode !== "stripe") return null;
@@ -258,6 +269,7 @@ export function creditsDefaultSessionModel(input: {
     settings: input.settings,
     selections: input.selections,
     workspaceDefaults: resolveWorkspaceSessionDefaults(input.workspaceSettings),
+    organizationDefaults: input.organizationDefaults?.sessionDefaults ?? null,
     creditsAvailable: true,
     ...(input.creditBalance ? { creditBalance: input.creditBalance } : {}),
   });
@@ -274,12 +286,20 @@ export async function resolveDefaultSessionModelForSelections(
     accountId: string;
     workspaceSettings: unknown;
     selections: readonly WorkspaceModelSelection[];
+    /** Already-read organization defaults; read here when omitted. */
+    organizationDefaults?: Pick<OrganizationModelDefaults, "sessionDefaults"> | null;
   },
 ): Promise<DefaultModelSelection> {
+  const workspaceDefaults = resolveWorkspaceSessionDefaults(input.workspaceSettings);
+  const organizationDefaults =
+    input.organizationDefaults !== undefined
+      ? (input.organizationDefaults?.sessionDefaults ?? null)
+      : (await getOrganizationModelDefaults(db, input.accountId)).sessionDefaults;
   const decision = {
     settings: input.settings,
     selections: input.selections,
-    workspaceDefaults: resolveWorkspaceSessionDefaults(input.workspaceSettings),
+    workspaceDefaults,
+    organizationDefaults,
   };
   const withoutCredits = selectDefaultSessionModel({ ...decision, creditsAvailable: false });
   if (

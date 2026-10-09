@@ -19,12 +19,34 @@ const model = {
 };
 
 describe("workspace model compaction", () => {
+  test("a workspace follows its organization's limit until it sets its own", () => {
+    const organization = { modelCompactionThresholds: { [model.id]: 300_000 } };
+    const following = workspaceModelCompactionPolicy(settings, model, {}, organization);
+    expect(following.overrideTokens).toBeNull();
+    expect(following.organizationTokens).toBe(300_000);
+    expect(following.effectiveTokens).toBe(300_000);
+    expect(
+      settingsWithResolvedModelContext(settings, model, {}, organization)
+        .contextAutoCompactThresholdTokens,
+    ).toBe(300_000);
+    const own = { modelCompactionThresholds: { [model.id]: 120_000 } };
+    expect(workspaceModelCompactionPolicy(settings, model, own, organization).effectiveTokens).toBe(
+      120_000,
+    );
+    // The organization's limit for another model doesn't apply.
+    expect(
+      workspaceModelCompactionPolicy(settings, { ...model, id: "other/model" }, {}, organization)
+        .effectiveTokens,
+    ).toBe(800_000);
+  });
+
   test("default, exact-model override and reset have one runtime/catalog policy", () => {
     expect(workspaceModelCompactionPolicy(settings, model, {}).effectiveTokens).toBe(800_000);
     const workspace = { modelCompactionThresholds: { [model.id]: 250_000 } };
     expect(workspaceModelCompactionPolicy(settings, model, workspace)).toEqual({
       defaultTokens: 800_000,
       overrideTokens: 250_000,
+      organizationTokens: null,
       effectiveTokens: 250_000,
       minimumTokens: 16_000,
       maximumTokens: 872_000,

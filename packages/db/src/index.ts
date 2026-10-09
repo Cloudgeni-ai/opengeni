@@ -3604,10 +3604,20 @@ export async function updateWorkspaceSettings(
         }),
     );
   }
+  // A null default model removes the workspace's own choice, so it follows
+  // its organization's default (or the automatic default) again.
+  const clearSessionDefaults = ordinaryPatch.sessionDefaults === null;
+  const plainPatch = { ...ordinaryPatch };
+  if (clearSessionDefaults) delete plainPatch.sessionDefaults;
   const [row] = await db
     .update(schema.workspaces)
     .set({
-      settings: settingsPatch(schema.workspaces.settings, ordinaryPatch),
+      settings: settingsPatch(
+        clearSessionDefaults
+          ? sql`(${schema.workspaces.settings} - 'sessionDefaults')`
+          : schema.workspaces.settings,
+        plainPatch,
+      ),
       updatedAt: new Date(),
     })
     .where(eq(schema.workspaces.id, workspaceId))
@@ -33451,41 +33461,104 @@ async function mutateCodexAccountUsage(
 }
 
 /**
- * Per-workspace model/provider availability policy. NULL fields = unrestricted
- * (identical to no row — the default for every workspace). Non-null
- * allowedProviders is a strict allowlist over resolved provider identities;
- * non-null allowedModels an additional exact model-id allowlist. Consumers:
- * the API model choke points (fail 422) and the worker's post-resolution gate
- * (a blocked provider never reaches a model call and never silently remaps).
+ * Per-workspace model/provider availability policy. NULL fields = unrestricted.
+ * Non-null allowedProviders is a strict allowlist over resolved provider
+ * identities; non-null allowedModels an additional exact model-id allowlist.
+ * Consumers: the API model choke points (fail 422) and the worker's
+ * post-resolution gate (a blocked provider never reaches a model call and
+ * never silently remaps).
+ *
+ * A workspace row is the workspace's own choice. Without one, the workspace
+ * follows its organization's default allowlist (organization_model_defaults);
+ * with neither, every model is allowed.
  */
 export type WorkspaceModelPolicy = {
   allowedProviders: string[] | null;
   allowedModels: string[] | null;
 };
 
-/** The per-workspace model policy row (null when none exists = unrestricted). */
-export async function getWorkspaceModelPolicy(
+function restrictsAnything(policy: WorkspaceModelPolicy | null | undefined): boolean {
+  return Boolean(policy && (policy.allowedProviders !== null || policy.allowedModels !== null));
+}
+
+/**
+ * The workspace's own policy row and the organization default it would
+ * follow without one. `organization` is null when the organization allows
+ * every model.
+ */
+export async function getWorkspaceModelPolicyLayers(
   db: Database,
   workspaceId: string,
-): Promise<WorkspaceModelPolicy | null> {
+): Promise<{ workspace: WorkspaceModelPolicy | null; organization: WorkspaceModelPolicy | null }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select({
-        allowedProviders: schema.workspaceModelPolicies.allowedProviders,
-        allowedModels: schema.workspaceModelPolicies.allowedModels,
+        workspaceAllowedProviders: schema.workspaceModelPolicies.allowedProviders,
+        workspaceAllowedModels: schema.workspaceModelPolicies.allowedModels,
+        workspacePolicyId: schema.workspaceModelPolicies.id,
+        organizationAllowedProviders: schema.organizationModelDefaults.allowedProviders,
+        organizationAllowedModels: schema.organizationModelDefaults.allowedModels,
       })
-      .from(schema.workspaceModelPolicies)
-      .where(eq(schema.workspaceModelPolicies.workspaceId, workspaceId))
+      .from(schema.workspaces)
+      .leftJoin(
+        schema.workspaceModelPolicies,
+        eq(schema.workspaceModelPolicies.workspaceId, schema.workspaces.id),
+      )
+      .leftJoin(
+        schema.organizationModelDefaults,
+        eq(schema.organizationModelDefaults.accountId, schema.workspaces.accountId),
+      )
+      .where(eq(schema.workspaces.id, workspaceId))
       .limit(1);
-    return row ?? null;
+    if (!row) return { workspace: null, organization: null };
+    const organization = {
+      allowedProviders: row.organizationAllowedProviders ?? null,
+      allowedModels: row.organizationAllowedModels ?? null,
+    };
+    return {
+      workspace: row.workspacePolicyId
+        ? {
+            allowedProviders: row.workspaceAllowedProviders ?? null,
+            allowedModels: row.workspaceAllowedModels ?? null,
+          }
+        : null,
+      organization: restrictsAnything(organization) ? organization : null,
+    };
   });
 }
 
 /**
- * Create or replace the workspace's model policy. Passing null for a field
- * clears that restriction; a policy of {null, null} is kept as an explicit
- * "unrestricted" row (delete is not needed for correctness — it reads the same
- * as no row).
+ * The policy this workspace runs with: its own row, else its organization's
+ * default, else null (unrestricted).
+ */
+export async function getWorkspaceModelPolicy(
+  db: Database,
+  workspaceId: string,
+): Promise<WorkspaceModelPolicy | null> {
+  const layers = await getWorkspaceModelPolicyLayers(db, workspaceId);
+  return layers.workspace ?? layers.organization;
+}
+
+/** Remove the workspace's own policy so it follows its organization's default. */
+export async function deleteWorkspaceModelPolicy(
+  db: Database,
+  input: { accountId: string; workspaceId: string },
+): Promise<void> {
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb
+        .delete(schema.workspaceModelPolicies)
+        .where(eq(schema.workspaceModelPolicies.workspaceId, input.workspaceId));
+    },
+  );
+}
+
+/**
+ * Create or replace the workspace's own model policy. Passing null for a field
+ * clears that restriction; a policy of {null, null} is kept as the workspace's
+ * explicit choice to allow every model even when its organization restricts.
  */
 export async function upsertWorkspaceModelPolicy(
   db: Database,
@@ -92839,6 +92912,7 @@ export * from "./session-tenancy";
 export * from "./governed-learning-activation";
 export * from "./automations";
 export * from "./organization-model-providers";
+export * from "./organization-model-defaults";
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-tokens";
 

@@ -32,6 +32,7 @@ import {
   DeleteWorkspaceGatewayCustomModelRequest,
   DeleteWorkspaceOpenRouterCustomModelRequest,
   UpdateWorkspaceModelPolicyRequest,
+  WorkspaceModelPolicyResponse,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
@@ -65,6 +66,9 @@ import {
   getManagedUserProfilesByIds,
   getWorkspace,
   getWorkspaceModelPolicy,
+  getWorkspaceModelPolicyLayers,
+  getOrganizationModelDefaults,
+  deleteWorkspaceModelPolicy,
   grantWorkspaceAccess,
   listWorkspaceMembers,
   listWorkspaceMemberManagementCandidates,
@@ -633,6 +637,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       }),
       getWorkspace(deps.db, workspaceId),
     ]);
+    const organizationDefaults = await getOrganizationModelDefaults(deps.db, grant.accountId);
     const claudeConnections: ClaudeConnectionCatalog = {};
     const workspaceClaudeConnections: ClaudeConnectionCatalog = {};
     const workspaceConnectionActive = (kind: WorkspaceCustomModelProviderKind) =>
@@ -691,6 +696,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountId: grant.accountId,
       workspaceSettings,
       selections,
+      organizationDefaults,
     });
     const catalog = projectWorkspaceModelCatalog(selections, {
       defaultSelection,
@@ -698,6 +704,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         settings: workspaceCatalogSettings,
         selections,
         workspaceSettings,
+        organizationDefaults,
       }),
     });
     for (const model of catalog.models) {
@@ -712,6 +719,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           autoCompactTokenLimit: model.executionLimits?.autoCompactTokenLimit ?? undefined,
         },
         workspaceSettings,
+        organizationDefaults,
       );
     }
     if (creditBalance) {
@@ -1241,14 +1249,20 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(WorkspaceRealtimeModelCatalogResponse.parse({ models }));
   });
 
+  // The policy the workspace runs with and where it comes from: its own
+  // saved policy, else its organization's default, else no restriction.
   app.get("/v1/workspaces/:workspaceId/model-policy", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const policy = await getWorkspaceModelPolicy(deps.db, workspaceId);
-    return c.json({
-      allowedProviders: policy?.allowedProviders ?? null,
-      allowedModels: policy?.allowedModels ?? null,
-    });
+    return c.json(await workspaceModelPolicyResponse(deps, workspaceId));
+  });
+
+  // Remove the workspace's own policy so it follows the organization default.
+  app.delete("/v1/workspaces/:workspaceId/model-policy", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    await deleteWorkspaceModelPolicy(deps.db, { accountId: grant.accountId, workspaceId });
+    return c.json(await workspaceModelPolicyResponse(deps, workspaceId));
   });
 
   // Full replace (PUT, not merge): null/omitted = unrestricted for that
@@ -1263,13 +1277,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountId: grant.accountId,
       workspaceId,
     });
-    const policy = await upsertWorkspaceModelPolicy(deps.db, {
+    await upsertWorkspaceModelPolicy(deps.db, {
       accountId: grant.accountId,
       workspaceId,
       allowedProviders: payload.allowedProviders ?? null,
       allowedModels: canonicalWorkspacePolicyModelIds(catalog.settings, payload.allowedModels),
     });
-    return c.json(policy);
+    return c.json(await workspaceModelPolicyResponse(deps, workspaceId));
   });
 
   app.post("/v1/workspaces/:workspaceId/pause-timer", async (c) => {
@@ -1563,6 +1577,20 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         : {}),
     });
     return c.body(null, 204);
+  });
+}
+
+async function workspaceModelPolicyResponse(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+): Promise<WorkspaceModelPolicyResponse> {
+  const layers = await getWorkspaceModelPolicyLayers(deps.db, workspaceId);
+  const effective = layers.workspace ?? layers.organization;
+  return WorkspaceModelPolicyResponse.parse({
+    allowedProviders: effective?.allowedProviders ?? null,
+    allowedModels: effective?.allowedModels ?? null,
+    source: layers.workspace ? "workspace" : layers.organization ? "organization" : "none",
+    organization: layers.organization,
   });
 }
 

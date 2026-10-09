@@ -797,6 +797,8 @@ export type {
   CreateOrganizationProviderCustomModelRequest,
   DeleteOrganizationProviderCustomModelRequest,
   WorkspaceModelAccessPolicy,
+  OrganizationModelDefaults,
+  UpdateOrganizationModelDefaultsRequest,
   WorkspaceRealtimeModelCatalogItem,
   WorkspaceRealtimeModelCatalogResponse,
   CodexAccount,

@@ -1,6 +1,7 @@
 import {
   materializeRigVersionForAttempt,
   getWorkspaceModelPolicy,
+  getOrganizationModelDefaults,
   getFilesForSubject,
   getWorkspace,
   resolveCompanyBrainContextSelection,
@@ -216,6 +217,7 @@ export async function prepareGovernanceAndModel(
     rigMaterialization,
     [workspace, companyProfileSnapshot, instructionPolicySnapshot, preferenceSnapshot],
     workspaceModelPolicy,
+    organizationModelDefaults,
   ] = await Promise.all([
     session.rigId && session.rigVersionId
       ? (async () =>
@@ -239,6 +241,7 @@ export async function prepareGovernanceAndModel(
       ),
     ]),
     getWorkspaceModelPolicy(db, input.workspaceId),
+    getOrganizationModelDefaults(db, input.accountId),
   ]);
   const rigVersion = rigMaterialization?.version ?? null;
   // Rig display name for the doctrine block + setup events/errors (only on a
@@ -436,7 +439,12 @@ export async function prepareGovernanceAndModel(
   // catalog values and must reach pre-turn compaction, history guards, and
   // every model call together.
   eventing.modelRunSettings = resolvedModel
-    ? settingsWithResolvedModelContext(runSettings, resolvedModel.configured, workspace.settings)
+    ? settingsWithResolvedModelContext(
+        runSettings,
+        resolvedModel.configured,
+        workspace.settings,
+        organizationModelDefaults,
+      )
     : runSettings;
   // WORKSPACE MODEL POLICY — the authoritative hard gate. Runs immediately
   // after resolution and BEFORE any model call (the compaction summarizer
