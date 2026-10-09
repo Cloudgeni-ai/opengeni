@@ -188,7 +188,11 @@ export function createCodexSubscriptionTranscriptionProvider(input: {
         (await getWorkspace(input.db, context.workspaceId))?.accountId;
       // An unresolvable account fails closed rather than guessing a path.
       if (!accountId) return false;
-      const disposition = await readCodexCutoverDisposition(input.db, accountId);
+      const disposition = await readCodexCutoverDisposition(
+        input.db,
+        accountId,
+        context.workspaceId,
+      );
       // A disabled cutover row is maintenance: unavailable, no legacy read.
       if (disposition === "maintenance") return false;
       if (disposition === "core") {
@@ -217,7 +221,7 @@ export function createCodexSubscriptionTranscriptionProvider(input: {
       requestId,
       signal,
     }) {
-      const disposition = await readCodexCutoverDisposition(input.db, organizationId);
+      const disposition = await readCodexCutoverDisposition(input.db, organizationId, workspaceId);
       if (disposition === "maintenance") throw coreTranscriptionUnavailable();
       if (disposition === "core") {
         const response = await transcribeOnCore(

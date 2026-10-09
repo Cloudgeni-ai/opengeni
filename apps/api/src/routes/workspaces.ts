@@ -288,7 +288,7 @@ async function workspaceCodexRealtimeReady(
   grant: { accountId: string; subjectId: string },
   workspaceId: string,
 ): Promise<boolean> {
-  const disposition = await readCodexCutoverDisposition(routeDeps.db, grant.accountId);
+  const disposition = await readCodexCutoverDisposition(routeDeps.db, grant.accountId, workspaceId);
   if (disposition === "legacy") {
     return await workspaceCodexSubscriptionActive(routeDeps.db, routeDeps.settings, workspaceId);
   }

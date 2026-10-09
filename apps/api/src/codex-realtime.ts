@@ -414,7 +414,9 @@ export function buildSessionCodexRealtimeBroker(
   accountId?: string,
 ): (input: Omit<CodexRealtimeBrokerInput, "sessionId">) => Promise<CodexRealtimeProviderAnswer> {
   return async (input) => {
-    const disposition = accountId ? await readCodexCutoverDisposition(db, accountId) : "legacy";
+    const disposition = accountId
+      ? await readCodexCutoverDisposition(db, accountId, workspaceId)
+      : "legacy";
     if (disposition === "maintenance") {
       // A disabled cutover row is maintenance: fail closed, no legacy read.
       throw new CodexRealtimeBrokerError(
