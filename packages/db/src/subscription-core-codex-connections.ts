@@ -217,7 +217,7 @@ async function connectShared(
     );
     if (unidentified) return { kind: "refused", reason: "identity_unverified" };
   }
-  const [existing] =
+  let [existing] =
     input.providerAccountId === null
       ? []
       : await rawRows<{ id: string; managed_by_workspace_id: string | null }>(
@@ -229,6 +229,28 @@ async function connectShared(
               and provider_account_id = ${input.providerAccountId}
               and provider_subject_id is not distinct from ${input.providerSubjectId}`,
         );
+  if (existing) {
+    // Preserve the existing non-takeover refusal before an UPDATE policy can
+    // hide a source managed elsewhere from the row-lock query.
+    if (!admin && existing.managed_by_workspace_id !== input.workspaceId) {
+      return { kind: "refused", reason: "managed_elsewhere" };
+    }
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`subscription-refresh:${existing.id}`}, 0))`,
+    );
+    // Disconnect may have scrubbed the identity while this caller waited.
+    // The connect key still serializes replacement creation; never reactivate
+    // the old tombstone or reuse its assignment/management authority.
+    [existing] = await rawRows<{ id: string; managed_by_workspace_id: string | null }>(
+      tx,
+      sql`select id::text as id, managed_by_workspace_id::text as managed_by_workspace_id
+        from subscription_connections where account_id = ${input.accountId}::uuid
+          and id = ${existing.id}::uuid and disconnected_at is null
+          and provider_account_id = ${input.providerAccountId}
+          and provider_subject_id is not distinct from ${input.providerSubjectId}
+        for update`,
+    );
+  }
   // Only a managed human is recorded as the connecting person (legacy
   // parity): local administration and service principals own no reset credit.
   const connectedBySubjectId = input.connectedBySubjectId ?? null;
@@ -255,9 +277,6 @@ async function connectShared(
     if (!admin && existing.managed_by_workspace_id !== input.workspaceId) {
       return { kind: "refused", reason: "managed_elsewhere" };
     }
-    await tx.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${`subscription-refresh:${existing.id}`}, 0))`,
-    );
     let replaced: { id: string }[];
     try {
       replaced = await tx.transaction(async (savepoint) => {

@@ -10,6 +10,8 @@ import {
   getSessionGoal,
   CodexCredentialLeaseAttemptFencedError,
   SubscriptionCoreCodexLeaseLostError,
+  SubscriptionCoreCodexSourceDisconnectedError,
+  isSubscriptionCoreCodexSourceDisconnected,
   buildSubscriptionCoreCodexTokenResolver,
   placeSubscriptionCoreCodexTurn,
   readSubscriptionCoreTurnIdentity,
@@ -36,6 +38,25 @@ import {
 } from "./codex-core-errors";
 import type { CodexTurnLease } from "./credential-leases";
 import type { CodexSubscriptionCoreTurn, ProviderTurnState } from "./turn-context";
+
+export function isCoreCodexSourceDisconnectedError(error: unknown): boolean {
+  let current = error;
+  for (let depth = 0; depth < 8 && current instanceof Error; depth++) {
+    if (current instanceof SubscriptionCoreCodexSourceDisconnectedError) return true;
+    current = current.cause;
+  }
+  return false;
+}
+
+/** Lifecycle disappearance is not an auth refusal or an ordinary account pause. */
+export async function assertCoreCodexSourceConnected(
+  db: Database,
+  core: CodexSubscriptionCoreTurn,
+): Promise<void> {
+  if (await isSubscriptionCoreCodexSourceDisconnected(db, core.identity, core.connectionId)) {
+    throw new SubscriptionCoreCodexSourceDisconnectedError();
+  }
+}
 
 /**
  * The turn's model-connection check. A shared-core Codex placement already
@@ -96,10 +117,14 @@ export function buildCoreCodexRequestTokenResolver(
   const guarded =
     (resolve: () => Promise<CodexCredentialTokenSnapshot>) =>
     async (): Promise<CodexCredentialTokenSnapshot> => {
-      lease.assertUsable();
+      await assertCoreCodexSourceConnected(db, core);
       try {
+        lease.assertUsable();
         return await resolve();
       } catch (error) {
+        // The loader/refresh may have raced secret scrubbing or lease expiry.
+        // Reclassify only a proven lifecycle disconnect, never ordinary pause.
+        await assertCoreCodexSourceConnected(db, core);
         if (error instanceof SubscriptionCoreCodexLeaseLostError) {
           lease.markLost("not_found");
           lease.assertUsable();

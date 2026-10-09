@@ -19,6 +19,7 @@ import { CODEX_FIVE_HOUR_WINDOW_SECONDS, CODEX_WEEKLY_WINDOW_SECONDS } from "./u
 import {
   codexRequestStorage,
   type CodexModelRequestEvent,
+  type CodexProviderRequestSettlement,
   type CodexRequestPreparationPhase,
   type CodexRequestContext,
   type CodexResponseTimeoutPolicy,
@@ -247,9 +248,31 @@ type RequestAudit = {
   attemptStartedAtMonotonic: number;
   policy: CodexResponseTimeoutPolicy;
   terminalOutcome: RequestTerminalOutcome | null;
+  admitted: boolean;
+  settlement: Promise<void> | null;
 };
 
 type RequestTerminalOutcome = "completed" | "failed" | "timed_out";
+
+function settleProviderRequest(
+  audit: RequestAudit,
+  outcome: CodexProviderRequestSettlement["outcome"],
+): Promise<void> {
+  if (!audit.admitted) return Promise.resolve();
+  if (!audit.settlement) {
+    audit.settlement = (async () => {
+      await audit.ctx.onProviderRequestSettled?.({
+        requestId: audit.requestId,
+        transportAttempt: audit.transportAttempt,
+        outcome,
+      });
+    })();
+    // Semantic response observation is synchronous, before bytes reach the
+    // SDK. Its observer is joined by the terminal path, independently of audit.
+    void audit.settlement.catch(() => undefined);
+  }
+  return audit.settlement;
+}
 
 type SemanticTerminalState = {
   phase: "completed" | "failed" | null;
@@ -275,6 +298,30 @@ type CodexSseTerminalClassification =
       fallbackMessage: string;
     }
   | null;
+
+/** Explicit account refusal in a terminal stream, before any completed output. */
+function isDefiniteCodexRefusal(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const value = error as Record<string, unknown>;
+  const status = Number(value.status ?? value.statusCode);
+  const code = value.code ?? value.type;
+  return (
+    status === 401 ||
+    status === 403 ||
+    status === 429 ||
+    (typeof code === "string" &&
+      [
+        "unauthorized",
+        "invalid_api_key",
+        "usage_limit_reached",
+        "insufficient_quota",
+        "quota_exceeded",
+        "billing_hard_limit_reached",
+        "rate_limit_exceeded",
+        "too_many_requests",
+      ].includes(code))
+  );
+}
 
 function classifyCodexSseTerminal(ev: CodexSseEvent): CodexSseTerminalClassification {
   if (ev.type === "response.failed") {
@@ -392,6 +439,18 @@ async function emitRequestEvent(
     // but a later transport callback must never turn that one terminal into a
     // contradictory second terminal.
     audit.terminalOutcome = terminalOutcome;
+    await settleProviderRequest(
+      audit,
+      event.status !== undefined &&
+        event.status >= 400 &&
+        event.status < 500 &&
+        event.status !== 408 &&
+        event.status !== 409
+        ? "refused"
+        : event.phase === "completed"
+          ? "response_received"
+          : "unknown",
+    );
   }
   const observed = requestEventFor(audit, event);
   try {
@@ -427,7 +486,30 @@ async function fetchBeforeHeaders(
   const controller = new AbortController();
   const forwardAbort = () => controller.abort(externalSignal?.reason);
   externalSignal?.addEventListener("abort", forwardAbort, { once: true });
-  const basePromise = base(input, { ...init, signal: controller.signal });
+  // The one-shot admission is the last awaited step before the physical fetch.
+  // Neither a diagnostic `started` nor token loading is dispatch authority.
+  let basePromise: Promise<Response>;
+  try {
+    await audit.ctx.beforeProviderDispatch?.({
+      requestId: audit.requestId,
+      transportAttempt: audit.transportAttempt,
+    });
+    audit.admitted = true;
+    // A cancellation/deadline during DB admission is known pre-dispatch, not
+    // an ambiguous physical request. Do not spend the newly admitted permit.
+    if (
+      controller.signal.aborted ||
+      Date.now() - audit.logicalStartedAt >= audit.policy.wholeRequestTimeoutMs
+    ) {
+      await settleProviderRequest(audit, "refused");
+      controller.signal.throwIfAborted();
+      throw new CodexResponseTimeoutError("whole_request", audit.requestId, false);
+    }
+    basePromise = base(input, { ...init, redirect: "error", signal: controller.signal });
+  } catch (error) {
+    externalSignal?.removeEventListener("abort", forwardAbort);
+    throw error;
+  }
   let deadlineError: CodexResponseTimeoutError | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
@@ -585,7 +667,12 @@ async function observedResponse(
         armIdle();
         controller.enqueue(chunk.value);
       } catch (error) {
-        if (terminal) return;
+        // EOF sets terminal before awaiting the durable observer. If that
+        // observer rejects, do not leave the consumer waiting on an open body.
+        if (terminal) {
+          controller.error(error);
+          return;
+        }
         terminal = true;
         clearTimers();
         const semanticPhase = semanticTerminal?.phase;
@@ -782,6 +869,8 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         attemptStartedAtMonotonic: performance.now(),
         policy,
         terminalOutcome: null,
+        admitted: false,
+        settlement: null,
       };
       emitRequestPreparationDiagnostic(ctx, "wire_request_ready");
       await emitRequestEvent(audit, {
@@ -792,7 +881,6 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         phase: null,
       };
       try {
-        await ctx.beforeProviderDispatch?.();
         res = await fetchBeforeHeaders(base, rewritten, nextInit, audit);
         const upstreamRequestId = providerRequestId(res.headers);
         await emitRequestEvent(audit, {
@@ -877,9 +965,11 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       if (callerWantsStream) {
         res = validateCodexStream(
           res,
-          (phase, meaningfulOutput) => {
+          (phase, meaningfulOutput, refused) => {
             markSemanticTerminal(semanticTerminal, phase);
             semanticTerminal.meaningfulOutput = meaningfulOutput === true;
+            if (phase === "completed") void settleProviderRequest(audit, "response_received");
+            else if (refused) void settleProviderRequest(audit, "refused");
           },
           async () => {
             const upstreamRequestId = providerRequestId(res.headers);
@@ -1073,6 +1163,7 @@ async function sseToJsonResponse(
   const text = await res.text();
   let final: Record<string, unknown> | null = null;
   let terminalError: Response | null = null;
+  let terminalRefusal = false;
   const items: unknown[] = []; // assembled from output_item.done (the codex backend
   // leaves response.completed.response.output empty and emits the items separately).
   for (const data of sseDataPayloads(text)) {
@@ -1086,6 +1177,7 @@ async function sseToJsonResponse(
       } else {
         const terminal = classifyCodexSseTerminal(ev);
         if (terminal?.phase === "failed") {
+          terminalRefusal = isDefiniteCodexRefusal(terminal.rawError);
           terminalError = codexSseFailureResponse(
             res,
             terminal.rawError,
@@ -1107,6 +1199,9 @@ async function sseToJsonResponse(
   }
   if (terminalError) {
     markSemanticTerminal(semanticTerminal, "failed");
+    if (terminalRefusal && !hasMeaningfulCodexOutput(items)) {
+      await settleProviderRequest(audit, "refused");
+    }
     await emitRequestEvent(audit, {
       phase: "failed",
       responseObserved: true,
@@ -1423,7 +1518,11 @@ function codexSseFailureError(
  */
 function validateCodexStream(
   res: Response,
-  onSemanticTerminal?: (phase: "completed" | "failed", meaningfulOutput?: boolean) => void,
+  onSemanticTerminal?: (
+    phase: "completed" | "failed",
+    meaningfulOutput?: boolean,
+    refused?: boolean,
+  ) => void,
   onParsedEof?: () => Promise<void>,
 ): Response {
   if (!res.body) {
@@ -1455,8 +1554,12 @@ function validateCodexStream(
   const observeOutput = (output: unknown) => {
     meaningfulOutput ||= hasMeaningfulCodexOutput(output);
   };
-  const observeTerminal = (phase: "completed" | "failed") =>
-    onSemanticTerminal?.(phase, phase === "completed" && meaningfulOutput);
+  const observeTerminal = (phase: "completed" | "failed", error?: unknown) =>
+    onSemanticTerminal?.(
+      phase,
+      phase === "completed" && meaningfulOutput,
+      phase === "failed" && !meaningfulOutput && isDefiniteCodexRefusal(error),
+    );
   const emitCompleteBlocks = (
     controller: TransformStreamDefaultController<Uint8Array>,
     final: boolean,
@@ -1563,7 +1666,7 @@ const CODEX_TERMINAL_TYPE_HINTS = [
 function inspectCodexSseBlock(
   block: string,
   source: Response,
-  onSemanticTerminal?: (phase: "completed" | "failed") => void,
+  onSemanticTerminal?: (phase: "completed" | "failed", error?: unknown) => void,
   onOutput?: (output: unknown) => void,
 ): boolean {
   const lines = block.split(/\r\n|\r|\n/);
@@ -1589,7 +1692,7 @@ function inspectCodexSseBlock(
   const terminal = classifyCodexSseTerminal(ev);
   if (ev.type === "response.output_item.done") onOutput?.([ev.item]);
   if (terminal?.phase === "failed") {
-    onSemanticTerminal?.("failed");
+    onSemanticTerminal?.("failed", terminal.rawError);
     throw codexSseFailureError(
       source,
       terminal.rawError,

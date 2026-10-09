@@ -50,6 +50,7 @@ import {
   rlsContextForWorkspace,
   subscriptionCoreCodexAppsRequestAuth,
   type CodexAppsRequestAuth,
+  type SubscriptionCoreCodexAppsRequestAuth,
   type CodexCutoverDisposition,
   getStoredCapabilityHeaderCiphertext,
   listCapabilityCatalogItems,
@@ -1109,7 +1110,7 @@ export function codexAppsRequestAuthForDesignation(
   settings: Settings,
   workspaceId: string,
   designation: CodexAppsDesignationForRun,
-): CodexAppsRequestAuth {
+): CodexAppsRequestAuth | SubscriptionCoreCodexAppsRequestAuth {
   return designation.source === "core"
     ? subscriptionCoreCodexAppsRequestAuth(db, settings, {
         accountId: designation.accountId,

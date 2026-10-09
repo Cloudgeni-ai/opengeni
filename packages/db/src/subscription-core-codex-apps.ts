@@ -29,6 +29,10 @@ import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import * as schema from "./schema";
 import { resolveSubscriptionConnectionId } from "./subscription-core-repository";
+import {
+  reserveSubscriptionCoreCodexAppsRequest,
+  settleSubscriptionCoreCodexAppsRequest,
+} from "./subscription-core-codex-requests";
 
 /** The designated core connection is no longer usable for Apps. */
 export class SubscriptionCoreCodexAppsUnavailableError extends CodexAppsCredentialUnavailable {
@@ -395,6 +399,9 @@ type AppsRefreshOutcome =
 export type SubscriptionCoreCodexAppsDeps = {
   refresh?: typeof refreshCodexToken;
   now?: () => Date;
+  resolveToken?: () => Promise<SubscriptionCoreCodexAppsToken>;
+  reserveRequest?: typeof reserveSubscriptionCoreCodexAppsRequest;
+  settleRequest?: typeof settleSubscriptionCoreCodexAppsRequest;
 };
 
 /**
@@ -524,19 +531,71 @@ export function buildSubscriptionCoreCodexAppsTokenResolver(
   };
 }
 
+type SubscriptionCoreCodexAppsToken = { accessToken: string; chatgptAccountId: string | null };
+
 export type SubscriptionCoreCodexAppsRequestAuth = {
   clientVersion: string;
-  withAuthorization: <T>(
-    use: (token: { accessToken: string; chatgptAccountId: string | null }) => Promise<T>,
-  ) => Promise<T>;
+  withAuthorization: <T>(use: (token: SubscriptionCoreCodexAppsToken) => Promise<T>) => Promise<T>;
+  /** The runtime must put its physical fetch inside this callback, not extract a bearer. */
+  withRequest: (
+    use: (token: SubscriptionCoreCodexAppsToken) => Promise<Response>,
+    options?: { signal?: AbortSignal | null | undefined },
+  ) => Promise<Response>;
 };
 
+/** Observe the consumer's actual EOF, without buffering an Apps MCP/SSE stream. */
+function trackAppsResponse(
+  response: Response,
+  finish: (outcome: "response_received" | "refused" | "unknown") => Promise<void>,
+): Response {
+  if (!response.body) return response;
+  const reader = response.body.getReader();
+  let released = false;
+  const release = () => {
+    if (!released) {
+      released = true;
+      reader.releaseLock();
+    }
+  };
+  const body = new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        try {
+          const next = await reader.read();
+          if (next.done) {
+            await finish("response_received");
+            release();
+            controller.close();
+          } else controller.enqueue(next.value);
+        } catch (error) {
+          await finish("unknown");
+          release();
+          controller.error(error);
+        }
+      },
+      async cancel(reason) {
+        await finish("unknown");
+        try {
+          await reader.cancel(reason);
+        } finally {
+          release();
+        }
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
 /**
- * Runtime Apps authentication for one core designation: resolve (and
- * refresh) the bearer, then recheck under the designation lock that the
- * workspace still designates exactly this active connection while `use` runs.
- * Every failure that means the designation cannot be used is a
- * `CodexAppsCredentialUnavailable` (or `CodexReloginRequired`).
+ * Runtime Apps authentication for one core designation. Physical requests use
+ * withRequest, whose native reservation atomically checks the designation and
+ * disconnect fence before dispatch. withAuthorization is an access-only check;
+ * its callback is not a physical request permit.
  */
 export function subscriptionCoreCodexAppsRequestAuth(
   db: Database,
@@ -544,9 +603,42 @@ export function subscriptionCoreCodexAppsRequestAuth(
   target: AppsTarget,
   deps: SubscriptionCoreCodexAppsDeps = {},
 ): SubscriptionCoreCodexAppsRequestAuth {
-  const resolve = buildSubscriptionCoreCodexAppsTokenResolver(db, settings, target, deps);
+  const resolve =
+    deps.resolveToken ?? buildSubscriptionCoreCodexAppsTokenResolver(db, settings, target, deps);
   return {
     clientVersion: CODEX_CLIENT_VERSION,
+    withRequest: async (use, options = {}) => {
+      const signal = options.signal;
+      signal?.throwIfAborted();
+      const token = await resolve();
+      const { operationId } = await (
+        deps.reserveRequest ?? reserveSubscriptionCoreCodexAppsRequest
+      )(db, target, { requestId: crypto.randomUUID(), transportAttempt: 1 });
+      let settled = false;
+      const finish = async (outcome: "response_received" | "refused" | "unknown") => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", onAbort);
+        await (deps.settleRequest ?? settleSubscriptionCoreCodexAppsRequest)(db, target, {
+          operationId,
+          outcome,
+        }).catch(() => undefined);
+      };
+      const onAbort = () => void finish("unknown");
+      if (signal?.aborted) {
+        await finish("refused");
+        signal.throwIfAborted();
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+      try {
+        const response = await use(token);
+        if (!response.body) await finish("response_received");
+        return trackAppsResponse(response, finish);
+      } catch (error) {
+        await finish("unknown");
+        throw error;
+      }
+    },
     withAuthorization: async (use) => {
       const token = await resolve();
       return await withRlsContext(

@@ -16,6 +16,7 @@ const VOICE = "11111111-0000-4000-8000-000000000001";
 const VOICELESS = "11111111-0000-4000-8000-000000000002";
 const settings = testSettings({ codexSubscriptionEnabled: true });
 const db = {} as opengeniDb.Database;
+const realOperationFetch = opengeniDb.buildSubscriptionCoreCodexOperationFetch;
 
 const restores: Array<() => void> = [];
 afterEach(() => {
@@ -49,6 +50,18 @@ function coreLease() {
   }));
   const released = mock("releaseSubscriptionCoreCodexOperationLease", async () => true);
   mock("renewSubscriptionCoreCodexOperationLease", async () => new Date(Date.now() + 60_000));
+  const reserved = mock("reserveSubscriptionCoreCodexOperationRequest", async () => ({
+    operationId: crypto.randomUUID(),
+  }));
+  const settled = mock("settleSubscriptionCoreCodexOperationRequest", async () => undefined);
+  mock("buildSubscriptionCoreCodexOperationFetch", (...args) => {
+    const [targetDb, scope, ref, connectionId, fetchImpl, options] = args;
+    return realOperationFetch(targetDb, scope, ref, connectionId, fetchImpl, {
+      ...(options as NonNullable<Parameters<typeof realOperationFetch>[5]>),
+      reserve: opengeniDb.reserveSubscriptionCoreCodexOperationRequest,
+      settle: opengeniDb.settleSubscriptionCoreCodexOperationRequest,
+    });
+  });
   mock("buildSubscriptionCoreCodexConnectionTokenResolver", () => ({
     getToken: async () => ({
       accessToken: "core-access",
@@ -65,7 +78,13 @@ function coreLease() {
       planType: "pro",
     }),
   }));
-  return { acquired, released };
+  return { acquired, released, reserved, settled };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => (resolve = done));
+  return { promise, resolve };
 }
 
 const audio = new Uint8Array([1, 2, 3]);
@@ -85,7 +104,7 @@ describe("Codex transcription on the shared core", () => {
     const candidates = mock("listSubscriptionCoreCodexOperationCandidates", async () => [
       { connectionId: VOICE, planType: "pro", explicit: false },
     ]);
-    const { acquired, released } = coreLease();
+    const { acquired, released, reserved, settled } = coreLease();
     const seen: string[] = [];
     const provider = createCodexSubscriptionTranscriptionProvider({
       settings,
@@ -118,6 +137,13 @@ describe("Codex transcription on the shared core", () => {
       generation: 1,
     });
     expect(released.mock.calls).toHaveLength(1);
+    expect(reserved.mock.calls).toHaveLength(1);
+    expect(reserved.mock.calls[0]?.slice(1, 4)).toEqual([
+      scope,
+      acquired.mock.calls[0]?.[2],
+      VOICE,
+    ]);
+    expect(settled.mock.calls[0]?.[2]).toMatchObject({ outcome: "response_received" });
   });
 
   test("a selected core operation that fails is never retried through another provider", async () => {
@@ -125,7 +151,7 @@ describe("Codex transcription on the shared core", () => {
     mock("listSubscriptionCoreCodexOperationCandidates", async () => [
       { connectionId: VOICE, planType: "pro", explicit: false },
     ]);
-    const { released } = coreLease();
+    const { released, reserved, settled } = coreLease();
     let calls = 0;
     const provider = createCodexSubscriptionTranscriptionProvider({
       settings,
@@ -141,6 +167,104 @@ describe("Codex transcription on the shared core", () => {
     // One forced refresh and retry, as on the legacy path; then final.
     expect(calls).toBe(2);
     expect(released.mock.calls).toHaveLength(1);
+    expect(reserved.mock.calls.map((call) => call[4])).toEqual([
+      { requestId: "transcription:request-1", transportAttempt: 1 },
+      { requestId: "transcription:request-1", transportAttempt: 2 },
+    ]);
+    expect(settled.mock.calls).toHaveLength(2);
+  });
+
+  test("disconnect after dispatch preserves the whole transcription body before lease release", async () => {
+    cutover("core");
+    mock("listSubscriptionCoreCodexOperationCandidates", async () => [
+      { connectionId: VOICE, planType: "pro", explicit: false },
+    ]);
+    const { released, settled } = coreLease();
+    const started = deferred<void>();
+    let body!: ReadableStreamDefaultController<Uint8Array>;
+    const provider = createCodexSubscriptionTranscriptionProvider({
+      settings,
+      db,
+      fetch: (async () => {
+        const response = new Response(new ReadableStream<Uint8Array>({ start: (c) => (body = c) }));
+        started.resolve();
+        return response;
+      }) as typeof fetch,
+    });
+    const result = provider.transcribe(request);
+    await started.promise;
+    // The persisted source disappears; already-dispatched response is owned.
+    mock("renewSubscriptionCoreCodexOperationLease", async () => null);
+    mock("reserveSubscriptionCoreCodexOperationRequest", async () => {
+      throw new Error("source disconnected");
+    });
+    body.enqueue(new TextEncoder().encode('{"text":"complete audio",'));
+    expect(released.mock.calls).toHaveLength(0);
+    expect(settled.mock.calls).toHaveLength(0);
+    body.enqueue(new TextEncoder().encode('"language":"en"}'));
+    body.close();
+    expect(await result).toEqual({ text: "complete audio", languages: ["en"] });
+    expect(settled.mock.calls[0]?.[2]).toMatchObject({ outcome: "response_received" });
+    expect(released.mock.calls).toHaveLength(1);
+  });
+
+  test("a 401 after disconnect cannot reuse its bearer for a retry", async () => {
+    cutover("core");
+    mock("listSubscriptionCoreCodexOperationCandidates", async () => [
+      { connectionId: VOICE, planType: "pro", explicit: false },
+    ]);
+    const { released, settled } = coreLease();
+    let disconnected = false;
+    const admissions = mock("reserveSubscriptionCoreCodexOperationRequest", async () => {
+      if (disconnected) throw new Error("source disconnected");
+      return { operationId: "first-request" };
+    });
+    let calls = 0;
+    const provider = createCodexSubscriptionTranscriptionProvider({
+      settings,
+      db,
+      fetch: (async () => {
+        calls++;
+        disconnected = true;
+        return new Response("expired", { status: 401 });
+      }) as typeof fetch,
+    });
+    const failure = await provider.transcribe(request).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(TranscriptionServiceError);
+    expect((failure as TranscriptionServiceError).fallbackSafe).toBe(false);
+    expect(calls).toBe(1);
+    expect(admissions.mock.calls).toHaveLength(2);
+    expect(settled.mock.calls).toHaveLength(1);
+    expect(released.mock.calls).toHaveLength(1);
+  });
+
+  test("a truncated transcription body is unknown and not replayed", async () => {
+    cutover("core");
+    mock("listSubscriptionCoreCodexOperationCandidates", async () => [
+      { connectionId: VOICE, planType: "pro", explicit: false },
+    ]);
+    const { reserved, released, settled } = coreLease();
+    let calls = 0;
+    const provider = createCodexSubscriptionTranscriptionProvider({
+      settings,
+      db,
+      fetch: (async () => {
+        calls++;
+        return new Response(
+          new ReadableStream({
+            start(c) {
+              c.error(new Error("truncated"));
+            },
+          }),
+        );
+      }) as typeof fetch,
+    });
+    const failure = await provider.transcribe(request).catch((error: unknown) => error);
+    expect((failure as TranscriptionServiceError).fallbackSafe).toBe(false);
+    expect(calls).toBe(1);
+    expect(reserved.mock.calls).toHaveLength(1);
+    expect(settled.mock.calls[0]?.[2]).toMatchObject({ outcome: "unknown" });
+    expect(released.mock.calls).toHaveLength(1);
   });
 
   test("a disabled cutover row is unavailable and reads no legacy table", async () => {
@@ -153,6 +277,76 @@ describe("Codex transcription on the shared core", () => {
 });
 
 describe("Codex realtime on the shared core", () => {
+  function realtimeFixture() {
+    cutover("core");
+    mock("readSubscriptionCoreSessionOwner", async () => ({ ownerSubjectId: "user:owner" }));
+    mock("listSubscriptionCoreCodexOperationCandidates", async () => [
+      { connectionId: VOICE, planType: "pro", explicit: false },
+    ]);
+    mock("getActiveSessionHistoryItems", async () => []);
+    mock("getSessionRealtimeContinuityEntries", async () => []);
+    return coreLease();
+  }
+  const rtcRequest = { sdp: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n", version: "v3" as const };
+
+  test("configuration and call creation reserve separately and hold the final SDP body", async () => {
+    const { reserved, settled, released } = realtimeFixture();
+    const started = deferred<void>();
+    let body!: ReadableStreamDefaultController<Uint8Array>;
+    const broker = buildSessionCodexRealtimeBroker(
+      db,
+      settings,
+      { accountId: ACCOUNT, workspaceId: WS, sessionId: SESSION },
+      async (url) => {
+        if (String(url).includes("statsig")) return Response.json({});
+        const response = new Response(
+          new ReadableStream<Uint8Array>({ start: (c) => (body = c) }),
+          {
+            headers: { location: "/realtime/calls/rtc_fake" },
+          },
+        );
+        started.resolve();
+        return response;
+      },
+    );
+    const answer = broker({ request: rtcRequest });
+    await started.promise;
+    expect(reserved.mock.calls).toHaveLength(2);
+    expect(settled.mock.calls).toHaveLength(1);
+    expect(released.mock.calls).toHaveLength(0);
+    mock("renewSubscriptionCoreCodexOperationLease", async () => null);
+    body.enqueue(new TextEncoder().encode(rtcRequest.sdp));
+    body.close();
+    expect(await answer).toMatchObject({ sdp: rtcRequest.sdp, version: "v3" });
+    expect(settled.mock.calls).toHaveLength(2);
+    expect(released.mock.calls).toHaveLength(1);
+  });
+
+  test("disconnect between config and call fences the second physical request", async () => {
+    const { settled, released } = realtimeFixture();
+    let disconnected = false;
+    const reserved = mock("reserveSubscriptionCoreCodexOperationRequest", async () => {
+      if (disconnected) throw new Error("source disconnected");
+      return { operationId: "config-request" };
+    });
+    let calls = 0;
+    const broker = buildSessionCodexRealtimeBroker(
+      db,
+      settings,
+      { accountId: ACCOUNT, workspaceId: WS, sessionId: SESSION },
+      async () => {
+        calls++;
+        disconnected = true;
+        return Response.json({});
+      },
+    );
+    await expect(broker({ request: rtcRequest })).rejects.toBeInstanceOf(CodexRealtimeBrokerError);
+    expect(calls).toBe(1);
+    expect(reserved.mock.calls).toHaveLength(2);
+    expect(settled.mock.calls).toHaveLength(1);
+    expect(released.mock.calls).toHaveLength(1);
+  });
+
   test("places a voice-capable shared connection under the session owner with a realtime lease", async () => {
     cutover("core");
     mock("readSubscriptionCoreSessionOwner", async () => ({ ownerSubjectId: "user:owner" }));

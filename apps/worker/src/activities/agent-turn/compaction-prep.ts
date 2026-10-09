@@ -368,6 +368,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     if (events.some((event) => event.type === "session.context.compacted")) {
       // The summary and recovery reset already committed under the attempt
       // fence. Skipped compaction does not prove successful model progress.
+      await providerTurn.codexSubscriptionCore?.requests?.checkpoint();
       attempt.providerRecoveryCount = 0;
       if (attempt.providerRecoveryObservation) {
         recordProviderRecoveryOutcome(observability, {

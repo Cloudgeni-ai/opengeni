@@ -41,6 +41,7 @@ import {
   adoptCodexResetRedemptionAttempt,
   buildCodexTokenResolver,
   buildSubscriptionCoreCodexConnectionTokenResolver,
+  buildSubscriptionCoreCodexOperationFetch,
   completeSubscriptionCoreCodexResetRedemption,
   deliverSubscriptionCoreCodexWake,
   fenceSubscriptionCoreCodexResetCredit,
@@ -2995,8 +2996,15 @@ async function coreCodexResetRedeem(c: Context, deps: ApiRouteDeps, input: CoreR
       isFedramp: token.isFedramp,
       clientVersion: CODEX_CLIENT_VERSION,
     };
+    const requestFetch = buildSubscriptionCoreCodexOperationFetch(
+      db,
+      coreCodexConnectionScope(input, human.subjectId),
+      null,
+      credentialId,
+      fetchImpl,
+    );
     if (attempt.status === "processing") {
-      const details = await fetchCodexRateLimitResetCredits(auth, fetchImpl);
+      const details = await fetchCodexRateLimitResetCredits(auth, requestFetch);
       if (!details.ok) {
         await abandonCodexResetRedemptionBeforeProvider(db, ledger);
         return c.json(
@@ -3040,7 +3048,7 @@ async function coreCodexResetRedeem(c: Context, deps: ApiRouteDeps, input: CoreR
     const consumed = await consumeCodexRateLimitResetCredit(
       auth,
       { idempotencyKey: sendAttempt.upstreamIdempotencyKey, creditId: sendAttempt.creditId },
-      fetchImpl,
+      requestFetch,
     );
     if (!consumed.ok) {
       await releaseCodexResetRedemptionClaim(db, {
@@ -3148,7 +3156,7 @@ async function coreCodexOverview(
           isFedramp: token.isFedramp,
           clientVersion: CODEX_CLIENT_VERSION,
         },
-        fetchImpl,
+        buildSubscriptionCoreCodexOperationFetch(deps.db, scope, null, connectionId, fetchImpl),
       );
     },
   };
