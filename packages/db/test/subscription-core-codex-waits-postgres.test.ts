@@ -1122,6 +1122,40 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     expect(await place(next)).toMatchObject({ kind: "run", connectionId });
   });
 
+  test("a plan cooldown on a connection whose quota row holds only the model catalog still excludes the model", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    const connectionId = await sharedConnection(org, "plan-catalog-first");
+    // The model catalog writer creates the quota row without a quota
+    // observation (no observed refresh generation).
+    await shared!.admin`insert into subscription_connection_quota (
+        account_id, connection_id, model_catalog_slugs, model_catalog_refresh_generation,
+        model_catalog_observed_at, model_catalog_expires_at)
+      values (${org.accountId}::uuid, ${connectionId}::uuid, ARRAY[${MODEL}]::text[], 1,
+        now(), now() + interval '1 hour')`;
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect(await place(turn)).toMatchObject({ kind: "run", connectionId });
+    const until = new Date(Date.now() + 86_400_000);
+    expect(
+      await recordSubscriptionCoreCodexModelCooldown(
+        client!.db,
+        turn.identity,
+        leaseOf(turn, connectionId),
+        { modelId: MODEL, until, refreshGeneration: 1 },
+      ),
+    ).toBe(true);
+    const [stored] = await shared!.admin<{ generation: number | null; catalog: string[] }[]>`
+      select observed_refresh_generation::int as generation, model_catalog_slugs as catalog
+      from subscription_connection_quota where connection_id = ${connectionId}::uuid`;
+    expect(stored).toEqual({ generation: 1, catalog: [MODEL] });
+    const next = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect(await place(next)).toMatchObject({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+      earliestResetAt: until,
+    });
+  });
+
   test("an explicit pin refused mid-turn waits on the pinned account instead of failing over", async () => {
     const org = await organization();
     await enableCodexCutover(org.accountId);

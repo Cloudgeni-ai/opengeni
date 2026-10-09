@@ -1522,7 +1522,7 @@ describe("worker activities integration", () => {
     const leaseRows = await withWorkspaceRls(dbClient.db, grant.workspaceId, async (db) =>
       db.execute<{ count: number }>(dbSql`
         select count(*)::int as count
-        from subscription_turn_leases
+        from subscription_leases
         where workspace_id = ${grant.workspaceId}
           and turn_id = ${turn.id}
       `),

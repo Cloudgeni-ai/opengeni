@@ -827,17 +827,33 @@ export async function recordSubscriptionCoreCodexModelCooldown(
           ${input.refreshGeneration}, 1, clock_timestamp()
         )
         on conflict (connection_id) do update
-          set quota = jsonb_set(
-                case when jsonb_typeof(subscription_connection_quota.quota->'modelCooldowns') = 'object'
-                  then subscription_connection_quota.quota
-                  else jsonb_set(subscription_connection_quota.quota, '{modelCooldowns}', '{}'::jsonb)
-                end,
-                array['modelCooldowns', ${input.modelId}],
-                to_jsonb(greatest(
-                  coalesce((subscription_connection_quota.quota->'modelCooldowns'->>${input.modelId})::bigint, 0),
-                  ${input.until.getTime()}::bigint
-                ))
-              ),
+          -- A row without quota for this refresh generation (for example one
+          -- the model catalog created) holds no observation to merge into:
+          -- the cooldown becomes its observation. Readers ignore quota whose
+          -- observed generation is missing.
+          set quota = case
+                when subscription_connection_quota.observed_refresh_generation
+                  is distinct from excluded.observed_refresh_generation
+                then excluded.quota
+                else jsonb_set(
+                  case when jsonb_typeof(subscription_connection_quota.quota->'modelCooldowns') = 'object'
+                    then subscription_connection_quota.quota
+                    else jsonb_set(subscription_connection_quota.quota, '{modelCooldowns}', '{}'::jsonb)
+                  end,
+                  array['modelCooldowns', ${input.modelId}],
+                  to_jsonb(greatest(
+                    coalesce((subscription_connection_quota.quota->'modelCooldowns'->>${input.modelId})::bigint, 0),
+                    ${input.until.getTime()}::bigint
+                  ))
+                )
+              end,
+              updated_at = case
+                when subscription_connection_quota.observed_refresh_generation
+                  is distinct from excluded.observed_refresh_generation
+                then excluded.updated_at
+                else subscription_connection_quota.updated_at
+              end,
+              observed_refresh_generation = excluded.observed_refresh_generation,
               revision = subscription_connection_quota.revision + 1
           where subscription_connection_quota.account_id = excluded.account_id
         returning connection_id::text as connection_id`,

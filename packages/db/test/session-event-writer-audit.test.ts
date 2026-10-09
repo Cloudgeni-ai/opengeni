@@ -110,28 +110,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "owned_suffix",
   },
-  "packages/db/src/index.ts#switchSessionCodexAccount": {
-    inserts: 1,
-    contract: "canonical",
-  },
   // The shared-core session pin (M3 PR 2b) keeps the legacy pin's contract.
   "packages/db/src/index.ts#pinSubscriptionCoreSessionCodexAccount": {
     inserts: 1,
     contract: "canonical",
-  },
-  "packages/db/src/index.ts#armCodexCapacityWait": {
-    inserts: 1,
-    contract: "canonical",
-    requiresControlRevalidation: true,
-  },
-  "packages/db/src/index.ts#supersedeCodexCapacityWaitInTransaction": {
-    inserts: 1,
-    contract: "owned_suffix",
-  },
-  "packages/db/src/index.ts#reconcileCodexCapacityWait": {
-    inserts: 1,
-    contract: "canonical",
-    requiresControlRevalidation: true,
   },
   // The shared-core Codex waiter (M3 PR 2a) mirrors the legacy Codex arm,
   // reconcile and supersession lock contracts exactly.
@@ -279,14 +261,6 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#settleCodexCredentialLeaseLoss": {
-    inserts: 2,
-    contract: "canonical",
-  },
-  "packages/db/src/index.ts#settleCodexCredentialFailover": {
-    inserts: 2,
-    contract: "canonical",
-  },
   "packages/db/src/index.ts#requestSessionTurnRecovery": {
     inserts: 1,
     contract: "canonical",
@@ -395,7 +369,6 @@ const expectedWriters: Record<string, ExpectedWriter> = {
 
 const genericControlWriters = new Set([
   // Preference changes do not admit inference; waiter reconciliation rechecks Pause.
-  "packages/db/src/index.ts#switchSessionCodexAccount",
   "packages/db/src/index.ts#pinSubscriptionCoreSessionCodexAccount",
   "packages/db/src/index.ts#acceptSessionApprovalDecision",
   "packages/db/src/index.ts#acceptSessionHumanInputResponse",
@@ -412,7 +385,6 @@ const callerOwnedControlWriters = new Set([
 const expectedOwnedSuffixCallers: Record<string, string[]> = {
   appendTimeline: ["importArchivedSession", "appendArchivedSessionEvents"],
   cancelSessionSubtreeInTransaction: ["mutateSessionControlInTransaction"],
-  supersedeCodexCapacityWaitInTransaction: ["reconcileCodexCapacityWait"],
   supersedeSubscriptionCoreCodexCapacityWaitInTransaction: [
     "reconcileSubscriptionCoreCodexCapacityWait",
   ],
@@ -428,7 +400,6 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
     "submitHumanPromptInTransaction",
   ],
   closePendingSessionToolCallsInTransaction: [
-    "armCodexCapacityWait",
     "armSubscriptionCoreCodexCapacityWait",
     "armXaiCapacityWait",
     "cancelSessionSubtreeInTransaction",
@@ -436,8 +407,6 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
     "supersedeSessionCurrentDirectionInTransaction",
     "settleSessionAttemptInterruptions",
     "applySessionTurnSettlement",
-    "settleCodexCredentialLeaseLoss",
-    "settleCodexCredentialFailover",
     "requestSessionTurnRecovery",
     "recoverSessionOwner",
   ],
@@ -470,11 +439,9 @@ const expectedFailedChildOutboxCallers = [
   "applySessionTurnSettlement",
   // arm owns the canonical child-lifecycle prefix (including parent session)
   // before atomically emitting a false-capacity-recovery terminal boundary.
-  "armCodexCapacityWait",
   "armSubscriptionCoreCodexCapacityWait",
   "failSessionWorkBeforeAttemptClaim",
   "recoverSessionOwner",
-  "settleCodexCredentialFailover",
 ];
 const expectedSharedFailedChildOutboxCallers = [
   "enqueueFailedChildOutboxForTurnTx",
@@ -506,7 +473,6 @@ const expectedChildLifecycleNoticeProducers: Record<string, string[]> = {
     "failSessionWorkBeforeAttemptClaim",
   ],
   enqueueChildWaitingCapacityOutboxTx: [
-    "armCodexCapacityWait",
     "armSubscriptionCoreCodexCapacityWait",
     "armXaiCapacityWait",
   ],
@@ -1326,7 +1292,14 @@ describe("session_events writer inventory", () => {
       };
       visit(sourceFile.program);
     }
-    expect([...discovered].sort()).toEqual([...Object.values(tenancyQuiescenceTables)].sort());
+    // The legacy Codex waiter table stays fenced in the database, but the
+    // retired runtime no longer writes it from TypeScript.
+    const retiredTables = new Set<string>([tenancyQuiescenceTables.codexCapacityWaiters]);
+    expect([...discovered].sort()).toEqual(
+      Object.values(tenancyQuiescenceTables)
+        .filter((table) => !retiredTables.has(table))
+        .sort(),
+    );
     expect(writers.size).toBeGreaterThanOrEqual(61);
     const database = readFileSync(join(repoRoot, "packages/db/src/database.ts"), "utf8");
     expect(database).toMatch(

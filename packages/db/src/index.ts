@@ -84610,12 +84610,15 @@ async function mapSessionWithControl(
       lastError: pending ? wake.lastError : null,
     };
   }
-  const selections = await getSubscriptionCoreCodexCurrentSelections(db, {
-    accountId: row.accountId,
-    workspaceId: row.workspaceId,
-    sessionIds: [row.id],
-  });
-  mapped.codexCurrentSelection = selections.get(row.id) ?? null;
+  // A selection belongs to the active turn; without one there is none to read.
+  const selections = row.activeTurnId
+    ? await getSubscriptionCoreCodexCurrentSelections(db, {
+        accountId: row.accountId,
+        workspaceId: row.workspaceId,
+        sessionIds: [row.id],
+      })
+    : null;
+  mapped.codexCurrentSelection = selections?.get(row.id) ?? null;
   return mapped;
 }
 

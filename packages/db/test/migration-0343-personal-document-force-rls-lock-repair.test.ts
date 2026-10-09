@@ -181,6 +181,28 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     const runtimeOwner = postgres(ownerUrl, { max: 1, onnotice: () => undefined });
     const db = createDb(adminUrl, { max: 1 });
 
+    // Reading a session back also reads the active turn's core Codex
+    // selection. Supply only the later row shapes that read joins, then
+    // remove them before the deferred chain creates the real tables.
+    await admin`
+      create table subscription_leases (
+        account_id uuid not null,
+        workspace_id uuid not null,
+        turn_id uuid not null,
+        provider text not null,
+        connection_id uuid not null,
+        leased_until timestamptz not null
+      )`;
+    await admin`
+      create table subscription_session_bindings (
+        account_id uuid not null,
+        workspace_id uuid not null,
+        session_id uuid not null,
+        provider text not null,
+        connection_id uuid not null,
+        choice text not null
+      )`;
+    await admin`grant select on subscription_leases, subscription_session_bindings to public`;
     const session = await createSession(db.db, {
       requestedSessionId: crypto.randomUUID(),
       accountId,
@@ -308,6 +330,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     await app.end({ timeout: 5 });
     expect(await applicationSessionCount()).toBe(0);
     await admin`drop table session_event_cursors`;
+    await admin`drop table subscription_leases, subscription_session_bindings`;
     await admin`drop trigger fixture_0343_history_write on session_history_items`;
     await admin`drop function fixture_0343_history_write()`;
     await admin`alter table session_history_items drop column item_ordered`;
