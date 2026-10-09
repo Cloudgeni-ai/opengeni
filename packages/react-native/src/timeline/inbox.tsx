@@ -491,10 +491,14 @@ export function NativeInboxList({
   const snoozed = items.filter((item) => snoozedNow(item, now));
   const spansWorkspaces = new Set(items.map((item) => item.workspaceId)).size > 1;
 
-  // Seen once shown: the server learns, the dot stays for this visit.
+  // An agent's note is read once shown in full here (the dot stays for this
+  // visit). A reply shows only its start, so it is read once opened, here or
+  // in its session; reading never removes it.
   const shownUnread = useRef(new Set<string>());
   useEffect(() => {
-    const unseen = items.filter((item) => item.unread && !shownUnread.current.has(item.id));
+    const unseen = items.filter(
+      (item) => item.unread && item.kind !== "reply" && !shownUnread.current.has(item.id),
+    );
     if (unseen.length === 0) return;
     for (const item of unseen) shownUnread.current.add(item.id);
     const timer = setTimeout(() => {
@@ -506,6 +510,17 @@ export function NativeInboxList({
 
   const leave = (item: InboxItem) =>
     inbox.patch((current) => current.filter((each) => each.id !== item.id));
+
+  // Opening an item reads it.
+  const open = (item: InboxItem) => {
+    if (item.unread) {
+      inbox.patch((current) =>
+        current.map((each) => (each.id === item.id ? { ...each, unread: false } : each)),
+      );
+      void client.updateInboxItem(item.id, { seen: true }).catch(() => undefined);
+    }
+    onOpenSession(item);
+  };
 
   const run = async (item: InboxItem, label: string, action: () => Promise<void>) => {
     setBusy((current) => ({ ...current, [item.id]: label }));
@@ -607,7 +622,7 @@ export function NativeInboxList({
   const openMenu = (item: InboxItem) => {
     const isSnoozed = snoozedNow(item, Date.now());
     const actions: Array<{ label: string; run: () => void; destructive?: boolean }> = [
-      { label: "Open session", run: () => onOpenSession(item) },
+      { label: "Open session", run: () => open(item) },
       ...(isSnoozed
         ? [{ label: "Unsnooze", run: () => snooze(item, null) }]
         : [
@@ -729,7 +744,7 @@ export function NativeInboxList({
               if (event.nativeEvent.actionName === "snooze") swipeSnooze(item);
               if (event.nativeEvent.actionName === "dismiss") dismiss(item);
             }}
-            onPress={() => onOpenSession(item)}
+            onPress={() => open(item)}
             onLongPress={() => openMenu(item)}
             style={({ pressed }) => ({
               flexDirection: "row",

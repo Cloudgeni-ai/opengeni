@@ -355,7 +355,9 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   const snoozed = scoped.filter((item) => isSnoozed(item, now));
 
   useEffect(() => {
-    const unseen = items.filter((item) => item.unread);
+    // An agent's note is read once shown in full; a reply shows only its start,
+    // so it is read once opened (here or in its session).
+    const unseen = items.filter((item) => item.unread && item.kind !== "reply");
     if (unseen.length === 0) return;
     for (const item of unseen) unreadThisVisit.current.add(item.id);
     const timer = window.setTimeout(() => {
@@ -372,12 +374,19 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   }, [items, context.client, patchItems]);
 
   // Opens on the moment the item was raised, not just the latest message.
-  const openSession = (item: InboxItem) =>
+  const openSession = (item: InboxItem) => {
+    if (item.unread) {
+      patchItems((current) =>
+        current.map((each) => (each.id === item.id ? { ...each, unread: false } : each)),
+      );
+      void context.client.updateInboxItem(item.id, { seen: true }).catch(() => undefined);
+    }
     void navigate({
       to: "/workspaces/$workspaceId/sessions/$sessionId",
       params: { workspaceId: item.workspaceId, sessionId: item.sessionId },
       search: item.eventSequence ? { at: item.eventSequence } : {},
     });
+  };
 
   const leave = (item: InboxItem) =>
     inbox.patchItems((current) => current.filter((candidate) => candidate.id !== item.id));

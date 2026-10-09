@@ -30,6 +30,7 @@ import {
   useOutsideCallPreferences,
 } from "@/call-preferences";
 import { copyText } from "@/clipboard";
+import { markSessionInboxRead } from "@/notifications";
 import { useSessionComputeLabel } from "@/compute-label";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
 import { ComposerPlusMenu } from "@/new-session-options";
@@ -76,6 +77,14 @@ function LiveSession(props: {
 }) {
   const theme = useNativeTimelineTheme();
   const insets = useSafeAreaInsets();
+  // Reading the session reads its replies in the inbox, on arrival and on leaving.
+  const { client: inboxClient, sessionId: readSessionId } = props;
+  useFocusEffect(
+    useCallback(() => {
+      void markSessionInboxRead(inboxClient, readSessionId);
+      return () => void markSessionInboxRead(inboxClient, readSessionId);
+    }, [inboxClient, readSessionId]),
+  );
   useEffect(() => {
     rememberOpenedSession({ workspaceId: props.workspaceId, sessionId: props.sessionId });
   }, [props.workspaceId, props.sessionId]);

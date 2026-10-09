@@ -19,6 +19,7 @@ import {
 import { loadSessionFeedback } from "../lib/session-feedback";
 import { turnRatingsFromFeedback } from "@opengeni/react/session-feedback-model";
 import { PersonalResourceAttachmentSurface } from "@/components/personal-resource-attachment-surface";
+import { useReadSessionInbox } from "@/lib/inbox";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
 import { isEditableArtifactKind } from "@/lib/artifact-catalog";
@@ -343,6 +344,7 @@ export function SessionRoute({
   realtimeAutostartModel?: SessionRealtimeModel | undefined;
   searchTarget?: SessionSearchRoute;
 }) {
+  useReadSessionInbox(sessionId);
   const context = useAppContext();
   const rail = useRail();
   const navigate = useNavigate();

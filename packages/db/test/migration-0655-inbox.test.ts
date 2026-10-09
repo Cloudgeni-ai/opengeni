@@ -259,7 +259,7 @@ describe("0655 inbox", () => {
     const person = await personWithSession("replies");
     const owner = { accountId: person.scope.accountId, subjectId: person.subjectId };
     let position = 0;
-    const reply = async (text: string | null) => {
+    const reply = async (text: string | null, holds: { waiting?: boolean } = {}) => {
       const turnId = crypto.randomUUID();
       position += 1;
       await owned!.admin.begin(async (tx) => {
@@ -280,13 +280,28 @@ describe("0655 inbox", () => {
             'queued', 'user', ${position}, 'work', 'test-model', 'medium', 'none', 1,
             'subject', ${person.subjectId}, '{}'::jsonb, ${person.subjectId}
           )`;
+        // The agent called wait_for_input in this turn: it still holds the session.
+        if (holds.waiting) {
+          await tx`update sessions set input_wait_turn_id = ${turnId},
+            input_wait_until = now() + interval '1 hour', input_wait_reason = 'round 6',
+            input_wait_set_at = now() where id = ${person.session.id}`;
+        }
       });
-      return await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+      const events = await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
         ...(text === null
           ? []
           : [{ type: "agent.message.completed" as const, turnId, payload: { text } }]),
         { type: "turn.completed", turnId, payload: {} },
       ]);
+      await owned!.admin.begin(async (tx) => {
+        await tx`select set_config('opengeni.session_inference_claim', '1', true)`;
+        await tx`select set_config('opengeni.account_id', ${person.scope.accountId}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${person.scope.workspaceId}, true)`;
+        await tx`update session_turns set status = 'completed' where id = ${turnId}`;
+        await tx`update sessions set input_wait_turn_id = null, input_wait_until = null,
+          input_wait_reason = null, input_wait_set_at = null where id = ${person.session.id}`;
+      });
+      return events;
     };
     await reply("Off by default");
     expect(await inbox(person)).toHaveLength(0);
@@ -320,6 +335,16 @@ describe("0655 inbox", () => {
     await reply(null);
     expect((await inbox(person)).map((item) => [item.title, item.unread])).toEqual([
       ["Third reply", false],
+    ]);
+    // While the agent still holds the session (waiting on its own work), its
+    // interim messages are not replies to the person (0674).
+    await reply("Waiting for round 6:", { waiting: true });
+    expect((await inbox(person)).map((item) => [item.title, item.unread])).toEqual([
+      ["Third reply", false],
+    ]);
+    await reply("Round 6 is in");
+    expect((await inbox(person)).map((item) => [item.title, item.unread])).toEqual([
+      ["Round 6 is in", true],
     ]);
     await setInboxSettings(db(), { ...owner, replies: false });
     expect(await inbox(person)).toHaveLength(0);

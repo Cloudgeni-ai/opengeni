@@ -525,3 +525,32 @@ export function useInboxSettingsSection(): SettingsSection | null {
     ],
   };
 }
+
+/**
+ * Looking at a session reads its replies and agent notes in the inbox (they
+ * stay there until cleared). Needs-you items are untouched: those leave only
+ * when answered.
+ */
+export async function markSessionInboxRead(
+  client: OpenGeniClient,
+  sessionId: string,
+): Promise<void> {
+  const inbox = await client.listInbox().catch(() => null);
+  if (!inbox) return;
+  const unread = inbox.items.filter(
+    (item) =>
+      item.sessionId === sessionId &&
+      item.unread &&
+      (item.kind === "reply" || item.kind === "notification"),
+  );
+  if (unread.length === 0) return;
+  await Promise.all(
+    unread.map((item) => client.updateInboxItem(item.id, { seen: true }).catch(() => undefined)),
+  );
+  await syncInboxBadge({
+    ...inbox,
+    items: inbox.items.map((item) =>
+      unread.some((each) => each.id === item.id) ? { ...item, unread: false } : item,
+    ),
+  });
+}
