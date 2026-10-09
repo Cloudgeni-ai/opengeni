@@ -1,36 +1,63 @@
-import { ModelPicker } from "@opengeni/react";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
-import { useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ErrorMessage } from "@/components/ui/error-message";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
+import { TextInput } from "@/components/ui/field";
+import { Notice } from "@/components/ui/notice";
 import { useAppContext } from "@/context";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
-import { ModelsFormPage, payerShortLabel } from "./models-ui";
+import {
+  filterModelGroups,
+  groupModelsByProvider,
+  ModelGroup,
+  MODEL_LIST_SEARCH_AT,
+  ModelSearchField,
+} from "./model-list";
+import { ModelsFormPage } from "./models-ui";
 
+/* ----------------------------------------------------------------------------
+   Context & compaction: per model, how long a chat may get before its earlier
+   messages are summarized. One row per usable model, grouped like Allowed
+   models. An empty field follows the model's default; a number is this
+   workspace's own limit. Choosing a limit never changes a chat's model.
+   -------------------------------------------------------------------------- */
+
+type CompactionPolicy = NonNullable<WorkspaceModelCatalogModel["compactionPolicy"]>;
+type CompactionModel = WorkspaceModelCatalogModel & { compactionPolicy: CompactionPolicy };
+/** Edits by model ID: the typed text, or null to follow the default again. */
 type Draft = Record<string, string | null>;
-const count = (value: number) => value.toLocaleString("en-US");
 
-export function compactionDraftError(
-  value: string | null,
-  model: WorkspaceModelCatalogModel,
-): string | null {
-  if (value === null) return null;
-  const policy = model.compactionPolicy;
-  if (!policy) return "Refresh to load this model’s context limits.";
-  const tokens = Number(value);
-  if (
-    !/^\d+$/.test(value) ||
-    !Number.isSafeInteger(tokens) ||
-    tokens < Math.max(16_000, policy.minimumTokens) ||
-    tokens > policy.maximumTokens
-  ) {
-    return `Enter a whole number from ${count(Math.max(16_000, policy.minimumTokens))} to ${count(policy.maximumTokens)}.`;
-  }
-  return null;
+const tokens = (value: number) => value.toLocaleString("en-US");
+
+/** "300000", "300,000", "300 000" and "300k" all read as 300,000. */
+export function parseTokenLimit(text: string): number | null {
+  const compact = text
+    .trim()
+    .replace(/[\s,_']/g, "")
+    .toLowerCase();
+  const thousands = /^(\d+(?:\.\d+)?)k$/.exec(compact);
+  const value = thousands
+    ? Math.round(Number(thousands[1]) * 1000)
+    : /^\d+$/.test(compact)
+      ? Number(compact)
+      : Number.NaN;
+  return Number.isSafeInteger(value) ? value : null;
 }
 
-/** Workspace-only preferences; selecting a model here never changes a session's model. */
+/** Why this text can't be saved as the model's limit, or null when it can. */
+export function compactionLimitError(text: string, policy: CompactionPolicy): string | null {
+  const value = parseTokenLimit(text);
+  const minimum = Math.max(16_000, policy.minimumTokens);
+  return value === null || value < minimum || value > policy.maximumTokens
+    ? `Use a number from ${tokens(minimum)} to ${tokens(policy.maximumTokens)}.`
+    : null;
+}
+
+/** The saved choice an edit is compared with: a number, or null for the default. */
+function editedValue(text: string | null): number | null {
+  return text === null ? null : parseTokenLimit(text);
+}
+
 export function ModelCompactionPage({
   workspaceId,
   canManage,
@@ -42,79 +69,135 @@ export function ModelCompactionPage({
 }) {
   const context = useAppContext();
   const catalog = useWorkspaceModelCatalog(workspaceId);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft>({});
+  const [query, setQuery] = useState("");
   const [saving, setSaving] = useState(false);
-  const model =
-    catalog.models.find((candidate) => candidate.id === selectedId) ??
-    catalog.models.find((candidate) => candidate.id === catalog.defaultSelection?.model) ??
-    catalog.models[0];
-  const policy = model?.compactionPolicy;
-  const value =
-    model && Object.hasOwn(draft, model.id)
-      ? draft[model.id]!
-      : policy?.overrideTokens === null || !policy
-        ? null
-        : String(policy.overrideTokens);
-  const error = model && Object.hasOwn(draft, model.id) ? compactionDraftError(value, model) : null;
-  const invalidDraft = Object.entries(draft).some(([id, input]) => {
-    const candidate = catalog.models.find((row) => row.id === id);
-    return !candidate || Boolean(compactionDraftError(input, candidate));
+
+  const models = useMemo(
+    () =>
+      catalog.models.filter(
+        (model): model is CompactionModel =>
+          model.compactionPolicy !== undefined && model.credentialReadiness.status === "ready",
+      ),
+    [catalog.models],
+  );
+  const groups = useMemo(() => groupModelsByProvider(models), [models]);
+  const shown = filterModelGroups(groups, query);
+  const changes = models.filter(
+    (model) =>
+      Object.hasOwn(draft, model.id) &&
+      editedValue(draft[model.id]!) !== model.compactionPolicy.overrideTokens,
+  );
+  const invalid = changes.some((model) => {
+    const text = draft[model.id]!;
+    return text !== null && compactionLimitError(text, model.compactionPolicy) !== null;
   });
-  const dirty = Object.keys(draft).length > 0;
-  const disabled = !canManage || saving;
-  const edit = (next: string | null) => {
-    if (!model) return;
-    setDraft((current) => {
-      const changed = { ...current };
-      const saved = policy?.overrideTokens == null ? null : String(policy.overrideTokens);
-      if (next === saved) delete changed[model.id];
-      else changed[model.id] = next;
-      return changed;
-    });
-  };
+  const unsupported =
+    !catalog.loading &&
+    catalog.models.length > 0 &&
+    catalog.models.every((model) => model.compactionPolicy === undefined);
+  const edit = (modelId: string, text: string | null) =>
+    setDraft((current) => ({ ...current, [modelId]: text }));
+
+  let body;
+  if (catalog.error) {
+    body = (
+      <ErrorMessage
+        title="Couldn’t load this workspace’s models."
+        action={
+          <Button type="button" size="sm" variant="outline" onClick={() => void catalog.refresh()}>
+            Try again
+          </Button>
+        }
+      >
+        Nothing was changed.
+      </ErrorMessage>
+    );
+  } else if (unsupported) {
+    body = (
+      <Notice tone="waiting" title="Not available on this server yet">
+        Compaction limits can be changed once this Opengeni server is updated. Until then each model
+        uses its default.
+      </Notice>
+    );
+  } else if (models.length === 0) {
+    body = (
+      <p className="m-0 text-sm text-fg-muted">
+        Connect a subscription or API key to set limits for its models.
+      </p>
+    );
+  } else {
+    body = (
+      <div className="flex min-w-0 flex-col gap-5">
+        {canManage ? null : (
+          <p className="m-0 text-sm text-fg-muted">
+            Only workspace admins can change compaction limits. Ask a workspace admin.
+          </p>
+        )}
+        {models.length >= MODEL_LIST_SEARCH_AT ? (
+          <ModelSearchField value={query} onChange={setQuery} />
+        ) : null}
+        {shown.length === 0 ? (
+          <p className="m-0 text-sm text-fg-muted">No models match “{query.trim()}”.</p>
+        ) : (
+          shown.map(([providerLabel, providerModels]) => (
+            <ModelGroup key={providerLabel} label={providerLabel}>
+              {providerModels.map((model) => (
+                <CompactionRow
+                  key={model.id}
+                  model={model}
+                  text={
+                    Object.hasOwn(draft, model.id)
+                      ? draft[model.id]!
+                      : model.compactionPolicy.overrideTokens === null
+                        ? null
+                        : tokens(model.compactionPolicy.overrideTokens)
+                  }
+                  edited={Object.hasOwn(draft, model.id)}
+                  disabled={!canManage || saving}
+                  onEdit={(text) => edit(model.id, text)}
+                />
+              ))}
+            </ModelGroup>
+          ))
+        )}
+        <p className="m-0 text-xs leading-4.5 text-fg-muted">
+          Changes apply from the next message in every chat in this workspace. The limit is checked
+          between steps, so a single step can go past it.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <ModelsFormPage
       title="Context & compaction"
-      description="Choose when long conversations are summarized. Lower thresholds use less context; higher thresholds keep more detail."
+      description="When a chat reaches a model’s limit, its earlier messages are summarized so the model can keep going. A lower limit costs less per message; a higher one keeps more detail."
       onClose={onClose}
       loading={catalog.loading}
-      loadingFields={2}
-      submitLabel="Save changes"
+      loadingFields={4}
+      submitLabel="Save"
       pendingLabel="Saving…"
       pending={saving}
-      submitDisabled={disabled || !dirty || invalidDraft || Boolean(catalog.error) || !policy}
-      disabledReason={
-        !canManage
-          ? "Only workspace admins can change these preferences."
-          : invalidDraft
-            ? "Check the threshold for each edited model."
-            : undefined
-      }
-      footerStart={
-        dirty
-          ? `${Object.keys(draft).length} model preference${Object.keys(draft).length === 1 ? "" : "s"} changed`
-          : undefined
-      }
+      submitDisabled={!canManage || saving || changes.length === 0 || invalid}
+      // Cancel and Save show only once something changed.
+      className={canManage && changes.length > 0 ? undefined : "[&>form>footer]:hidden"}
+      footerStart={`${changes.length} ${changes.length === 1 ? "model" : "models"} changed`}
       onSubmit={async () => {
-        if (disabled || !dirty || invalidDraft) return false;
+        if (!canManage || changes.length === 0 || invalid) return false;
         const transition = context.captureWorkspaceInvocation(workspaceId);
         if (!transition) return false;
         setSaving(true);
         try {
           const updated = await context.updateWorkspaceSettings(workspaceId, {
             modelCompactionThresholds: Object.fromEntries(
-              Object.entries(draft).map(([id, input]) => [
-                id,
-                input === null ? null : Number(input),
-              ]),
+              changes.map((model) => [model.id, editedValue(draft[model.id]!)]),
             ),
           });
           if (!context.ownsWorkspaceInvocation(workspaceId, transition)) return false;
           if (!updated)
             throw new Error(
-              "Couldn’t confirm the save. Your edits are kept. Reload to check the saved value before trying again.",
+              "Couldn’t confirm the save. Your edits are kept; reload to check the saved limits before trying again.",
             );
           return true;
         } finally {
@@ -123,102 +206,96 @@ export function ModelCompactionPage({
       }}
       onSubmitted={onClose}
     >
-      {catalog.error ? (
-        <ErrorMessage
-          title="Couldn’t load model preferences."
-          action={
-            <Button type="button" variant="outline" onClick={() => void catalog.refresh()}>
-              Try again
-            </Button>
-          }
-        >
-          {catalog.error}
-        </ErrorMessage>
-      ) : !model ? (
-        <p className="text-sm text-fg-muted">Connect a model account to configure compaction.</p>
-      ) : (
-        <FieldStack>
-          <Field
-            label="Model"
-            hint={payerShortLabel(
-              catalog.rows.find((row) => row.id === model.id) ?? {
-                billingClass: "",
-                providerLabel: model.providerLabel,
-              },
-            )}
-          >
-            <ModelPicker
-              rows={catalog.rows.map((row) => ({
-                ...row,
-                selectable: true,
-                unavailableReason: null,
-              }))}
-              value={model.id}
-              onChange={setSelectedId}
-              disabled={saving}
-              label="Model for compaction preference"
-              className="w-full [&>select]:w-full [&>select]:max-w-none"
-            />
-          </Field>
-          {policy ? (
-            <>
-              <Field
-                label="Compact after"
-                hint={`Model default: ${count(policy.defaultTokens)} input tokens. Leave empty to follow the default.`}
-                error={error ?? undefined}
-                aside="tokens"
-              >
-                <TextInput
-                  type="text"
-                  inputMode="numeric"
-                  value={value ?? ""}
-                  placeholder={String(policy.defaultTokens)}
-                  disabled={disabled}
-                  onChange={(event) => edit(event.target.value === "" ? null : event.target.value)}
-                />
-              </Field>
-              <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
-                <p className="m-0 text-fg-muted" aria-live="polite">
-                  {Object.hasOwn(draft, model.id) ? "After saving" : "Effective now"}:{" "}
-                  {error
-                    ? "check threshold"
-                    : `${count(value === null ? policy.defaultTokens : Math.min(Number(value), policy.maximumTokens))} tokens`}
-                  {value === null ? " · model default" : " · workspace override"}
-                </p>
-                {value !== null && (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    disabled={disabled}
-                    onClick={() => edit(null)}
-                  >
-                    Use model default
-                  </Button>
-                )}
-              </div>
-              {policy.overrideTokens !== null &&
-                policy.overrideTokens !== policy.effectiveTokens &&
-                !Object.hasOwn(draft, model.id) && (
-                  <p className="m-0 text-sm text-fg-muted">
-                    Your saved threshold is outside this model’s current range. The effective
-                    threshold above respects its input limit.
-                  </p>
-                )}
-              <p className="m-0 text-sm leading-6 text-fg-muted">
-                Applies to subsequent turns in this workspace, including existing sessions.
-                Compaction is checked between steps, so a request can exceed this threshold. It is
-                not a hard token or spending limit; request-size safety checks remain active.
-              </p>
-            </>
-          ) : (
-            <p className="text-sm text-fg-muted">
-              This server does not expose model compaction preferences yet. Update the server before
-              changing them.
-            </p>
-          )}
-        </FieldStack>
-      )}
+      {body}
     </ModelsFormPage>
+  );
+}
+
+/**
+ * One model: its name, then the limit field. An empty field shows the
+ * default as its placeholder; a number is this workspace's own limit, with
+ * the default and a way back to it underneath.
+ */
+function CompactionRow({
+  model,
+  text,
+  edited,
+  disabled,
+  onEdit,
+}: {
+  model: CompactionModel;
+  /** What the field holds: typed or saved text, or null to follow the default. */
+  text: string | null;
+  edited: boolean;
+  disabled: boolean;
+  onEdit: (text: string | null) => void;
+}) {
+  const id = useId();
+  const policy = model.compactionPolicy;
+  const error = edited && text !== null ? compactionLimitError(text, policy) : null;
+  const clamped =
+    !edited && policy.overrideTokens !== null && policy.overrideTokens !== policy.effectiveTokens;
+  const custom = text !== null;
+  return (
+    <li className="flex min-h-14 min-w-0 items-center gap-3 py-2">
+      <div className="min-w-0 flex-1">
+        <label htmlFor={`${id}-limit`} className="block truncate text-sm text-fg" title={model.id}>
+          {model.label}
+          <span className="sr-only"> compaction limit in tokens</span>
+        </label>
+        {error ? (
+          <p id={`${id}-note`} className="m-0 text-xs leading-4.5 text-danger">
+            {error}
+          </p>
+        ) : custom ? (
+          <p id={`${id}-note`} className="m-0 text-xs leading-4.5 text-fg-muted">
+            {clamped
+              ? `Above this model’s maximum, so ${tokens(policy.effectiveTokens)} is used`
+              : `Default ${tokens(policy.defaultTokens)}`}
+            {disabled ? null : (
+              <>
+                {" · "}
+                <button
+                  type="button"
+                  onClick={() => onEdit(null)}
+                  className="rounded-sm font-medium text-fg underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring/55"
+                >
+                  Use default
+                  <span className="sr-only"> for {model.label}</span>
+                </button>
+              </>
+            )}
+          </p>
+        ) : (
+          <p id={`${id}-note`} className="sr-only">
+            Follows the model’s default.
+          </p>
+        )}
+      </div>
+      <div className="relative w-36 shrink-0">
+        <TextInput
+          id={`${id}-limit`}
+          inputMode="numeric"
+          suppressAutofill
+          value={text ?? ""}
+          placeholder={tokens(policy.defaultTokens)}
+          disabled={disabled}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={`${id}-note`}
+          onChange={(event) => onEdit(event.target.value.trim() === "" ? null : event.target.value)}
+          onBlur={() => {
+            const value = text === null ? null : parseTokenLimit(text);
+            if (value !== null && !error) onEdit(tokens(value));
+          }}
+          className="pr-14 text-right tabular-nums"
+        />
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-xs text-fg-subtle"
+        >
+          tokens
+        </span>
+      </div>
+    </li>
   );
 }

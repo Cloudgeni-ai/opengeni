@@ -550,7 +550,7 @@ test("workspace Models exposes a reloadable compaction page to admins and reader
       await flush();
       expect(lastNavigation?.search.view).toBe("compaction");
       expect(view.container.textContent).toContain(
-        "Connect a model account to configure compaction.",
+        "Connect a subscription or API key to set limits for its models.",
       );
     } finally {
       await cleanup(view);

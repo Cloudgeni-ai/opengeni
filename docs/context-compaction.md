@@ -52,11 +52,14 @@ window, matching Codex core.
 ### Workspace preferences
 
 Open **Organization settings → Models → your workspace → Context & compaction**
-(including your Personal workspace). Pick the model and enter an input-token
-threshold, or leave it empty / choose **Use model default**. The page shows the
-model default, saved workspace override and effective value. Only workspace
-settings administrators can save; readers can inspect. Selecting a model here
-does not change any session's model or reasoning effort.
+(including your Personal workspace); its row there shows "Model defaults" or how
+many models have a custom limit. The page lists every model the workspace can use,
+grouped by provider. An empty field follows the model's default, shown as its
+placeholder; a number is the workspace's own limit (`300k` and `300,000` both
+work), with the default and **Use default** under it. A saved limit above the
+model's current maximum says which value is used. Only workspace settings
+administrators can save; readers can inspect. Setting a limit does not change any
+session's model or reasoning effort.
 
 Preferences apply when a subsequent turn attempt prepares its model, including
 existing sessions. An in-flight model call is unchanged. They never change the

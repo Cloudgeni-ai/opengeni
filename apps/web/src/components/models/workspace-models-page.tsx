@@ -1381,6 +1381,7 @@ function ModelsList({
           <SettingNavRow
             label="Context & compaction"
             description="When to summarize long conversations, by model."
+            value={compactionSummary(policy.models)}
             onOpen={onEditCompaction}
           />
         </SettingRowGroup>
@@ -1414,6 +1415,21 @@ function ModelsList({
       {providerSections}
     </SectionStack>
   );
+}
+
+/**
+ * The Context & compaction row's value, counting the models that page lists:
+ * "Model defaults" or "2 custom limits". Nothing until the catalog is known.
+ */
+export function compactionSummary(
+  models: readonly WorkspaceModelCatalogModel[],
+): string | undefined {
+  const listed = models.filter(
+    (model) => model.compactionPolicy && model.credentialReadiness.status === "ready",
+  );
+  if (listed.length === 0) return undefined;
+  const custom = listed.filter((model) => model.compactionPolicy!.overrideTokens !== null).length;
+  return custom === 0 ? "Model defaults" : `${custom} custom ${custom === 1 ? "limit" : "limits"}`;
 }
 
 type ConnectChoice =

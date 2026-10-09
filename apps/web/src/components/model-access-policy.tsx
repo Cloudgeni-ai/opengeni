@@ -1,8 +1,15 @@
 import type { WorkspaceModelAccessPolicy, WorkspaceModelCatalogModel } from "@opengeni/sdk";
-import { PlusIcon, SearchIcon, XIcon } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { PlusIcon, XIcon } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
+import {
+  filterModelGroups,
+  groupModelsByProvider,
+  ModelGroup,
+  MODEL_LIST_SEARCH_AT,
+  ModelSearchField,
+} from "@/components/models/model-list";
 import { ModelsFormPage } from "@/components/models/models-ui";
 import { RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
@@ -86,19 +93,6 @@ export function modelAccessPolicyRequest(
 
 function policyDraftKey(draft: ModelAccessPolicyDraft): string {
   return JSON.stringify(modelAccessPolicyRequest(draft));
-}
-
-function groupedModels(models: readonly WorkspaceModelCatalogModel[]) {
-  const groups = new Map<string, WorkspaceModelCatalogModel[]>();
-  for (const model of [...models].sort((left, right) => {
-    const provider = left.providerLabel.localeCompare(right.providerLabel);
-    return provider === 0 ? left.label.localeCompare(right.label) : provider;
-  })) {
-    const group = groups.get(model.providerLabel) ?? [];
-    group.push(model);
-    groups.set(model.providerLabel, group);
-  }
-  return [...groups.entries()];
 }
 
 /** The saved policy and the catalog it applies to, reloaded when a connection changes. */
@@ -262,7 +256,8 @@ export function AllowedModelsFormPage({
   }, [saved]);
 
   const groups = useMemo(
-    () => groupedModels(models.filter((model) => model.credentialReadiness.status === "ready")),
+    () =>
+      groupModelsByProvider(models.filter((model) => model.credentialReadiness.status === "ready")),
     [models],
   );
   const catalogIds = useMemo(() => new Set(models.map((model) => model.id)), [models]);
@@ -463,10 +458,6 @@ export function AllowedModelsFormPage({
     </>
   );
 }
-
-/** At this many models the list gets a search field. */
-const SEARCH_AT = 9;
-
 /** Models grouped by provider, one row each, with a checkbox on the right. */
 function ModelChecklist({
   groups,
@@ -489,20 +480,7 @@ function ModelChecklist({
   const [addError, setAddError] = useState<string | null>(null);
   const addInput = useRef<HTMLInputElement>(null);
   const total = groups.reduce((count, [, models]) => count + models.length, 0);
-  const words = query.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
-  const shown = groups
-    .map(
-      ([label, models]) =>
-        [
-          label,
-          models.filter((model) =>
-            words.every((word) =>
-              `${model.label} ${model.id} ${label}`.toLocaleLowerCase().includes(word),
-            ),
-          ),
-        ] as const,
-    )
-    .filter(([, models]) => models.length > 0);
+  const shown = filterModelGroups(groups, query);
 
   useEffect(() => {
     if (adding) addInput.current?.focus();
@@ -522,22 +500,8 @@ function ModelChecklist({
 
   return (
     <div role="group" aria-label="Models" className="flex min-w-0 flex-col gap-5">
-      {total >= SEARCH_AT ? (
-        <label className="relative block min-w-0">
-          <span className="sr-only">Search models</span>
-          <SearchIcon
-            aria-hidden="true"
-            className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-fg-subtle"
-          />
-          <TextInput
-            type="search"
-            value={query}
-            placeholder="Search models"
-            suppressAutofill
-            onChange={(event) => setQuery(event.target.value)}
-            className="pl-9"
-          />
-        </label>
+      {total >= MODEL_LIST_SEARCH_AT ? (
+        <ModelSearchField value={query} onChange={setQuery} />
       ) : null}
       {groups.length === 0 ? (
         <p className="text-sm text-fg-muted">
@@ -547,7 +511,7 @@ function ModelChecklist({
         <p className="text-sm text-fg-muted">No models match “{query.trim()}”.</p>
       ) : (
         shown.map(([providerLabel, providerModels]) => (
-          <ChecklistGroup key={providerLabel} label={providerLabel}>
+          <ModelGroup key={providerLabel} label={providerLabel}>
             {providerModels.map((model) => (
               <li key={model.id} className="min-w-0">
                 <label
@@ -569,11 +533,11 @@ function ModelChecklist({
                 </label>
               </li>
             ))}
-          </ChecklistGroup>
+          </ModelGroup>
         ))
       )}
       {customIds.length > 0 ? (
-        <ChecklistGroup label="Added by ID">
+        <ModelGroup label="Added by ID">
           {customIds.map((modelId) => (
             <li key={modelId} className="flex min-h-11 min-w-0 items-center gap-3">
               <code className="min-w-0 flex-1 truncate font-mono text-xs text-fg">{modelId}</code>
@@ -591,7 +555,7 @@ function ModelChecklist({
               ) : null}
             </li>
           ))}
-        </ChecklistGroup>
+        </ModelGroup>
       ) : null}
       {canManage ? (
         adding ? (
@@ -654,17 +618,5 @@ function ModelChecklist({
         )
       ) : null}
     </div>
-  );
-}
-
-function ChecklistGroup({ label, children }: { label: string; children: ReactNode }) {
-  const id = useId();
-  return (
-    <section aria-labelledby={id} className="min-w-0">
-      <h3 id={id} className="pb-1 text-xs leading-4.5 font-medium text-fg">
-        {label}
-      </h3>
-      <ul className="m-0 flex min-w-0 list-none flex-col divide-y divide-border p-0">{children}</ul>
-    </section>
   );
 }
