@@ -315,28 +315,47 @@ the operator without deleting durable evidence; see
 
 `CreateSessionRequest.firstPartyMcpTools` is an exact allowlist over the exported
 `FIRST_PARTY_MCP_TOOL_NAMES` catalog. Omission selects the safe default catalog,
-which excludes connector-wide `social_*`, `slack_bot_*` and `fiken_*` tools; those require
-explicit selection plus their normal connection permission. Historical native
+which excludes connector-wide `social_*` and `fiken_*` tools and most `slack_bot_*`
+tools. `slack_bot_list_channels`, `slack_bot_prepare_message`, and
+`slack_bot_send_prepared_message` are default-selected; other Slack bot tools
+require explicit selection plus their normal connection permission. Historical native
 `atlassian_*` names remain parseable but are excluded from execution; Atlassian
 agent access uses its hosted MCP connector. Explicit `[]` means
 no tools from the broad server. Unknown names fail validation. This field does
 not grant authority: every catalog entry also has an explicit registration-time
 permission predicate, and target-scoped authorization still runs on calls.
-Child omission inherits the parent's exact effective selection. An explicit
-array replaces that entire selection rather than adding to it, so omitted
-browser, computer, or scheduling names become unavailable even when
-needed by the task. Keep the selection omitted for an ordinary specialist.
-For a worker that must not start, message, or follow other sessions, use the
-existing `agent: { capabilities: { from: "all", subagents: false } }` and omit
-tool lists. Other parent-selected tools remain inherited, and the final answer
-still reaches the parent automatically. This guidance changes no inheritance,
-permission, or explicit-empty semantics and adds no tool-enablement UI.
+Omitting the field on a new top-level session follows the workspace's current
+built-in defaults (or the deployment defaults when no workspace override exists).
+`toolPolicy.firstPartyMode: "workspace_default"` records this intent independently
+of connector selection. New defaults are resolved when preparing the next attempt,
+under the deployment allowlist, configured capability families, and permissions.
+An already prepared catalog or signed delegation does not gain tools mid-attempt.
+Child omission inherits both the parent's effective selection and its default or
+pinned intent; an explicit child list can only narrow that selection.
+
+An explicit list, including `[]`, remains pinned. The existing **Reset to workspace
+defaults** action opts an older session into following defaults; editing connector
+exclusions alone preserves its built-in intent. Legacy sessions without that
+intent remain pinned unless their latest retained tool-policy event proves a full
+reset and still matches the stored selection. Migration does not infer intent from
+connector mode or similarity to today's defaults. Scheduled accepted selections
+remain exact snapshots; they are never re-resolved during recovery.
 
 GitHub App installation credentials are deliberately absent from this catalog.
 Repository discovery and browser connect status remain model-visible, but token
 minting and credential-file renewal stay host-side in the worker/runtime. No
 first-party MCP, Codemode, API, SDK, event, or audit projection returns a live
 installation token to the model or sandbox command surface.
+
+For a child, an explicit array replaces the entire inherited selection rather
+than adding to it, so omitted browser, computer, or scheduling names become
+unavailable even when needed by the task. Keep the selection omitted for an
+ordinary specialist.
+For a worker that must not start, message, or follow other sessions, use the
+existing `agent: { capabilities: { from: "all", subagents: false } }` and omit
+tool lists. Other parent-selected tools remain inherited, and the final answer
+still reaches the parent automatically. This guidance changes no inheritance,
+permission, or explicit-empty semantics and adds no tool-enablement UI.
 
 File and document resources are independent from this broad-server selection.
 Attaching a resource still materializes it for the session when
