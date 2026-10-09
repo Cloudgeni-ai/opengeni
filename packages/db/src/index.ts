@@ -48619,6 +48619,7 @@ type LeaseRow = {
   archive_capture_remaining_ms?: number | string | null;
   archive_capture_published_at: Date | string | null;
   archive_capture_concurrent_capture_id?: string | null;
+  untracked_writer_since?: Date | string | null;
   deadline_forced_admission_ids?: string[] | null;
   reaper_hold_id: string | null;
   reaper_hold_until: Date | string | null;
@@ -48689,6 +48690,10 @@ export interface LeaseSnapshot {
   /** True only when the current verified archive represents the exact current
    * workspace generation. This is numeric/boolean truth, never archive content. */
   archiveComplete: boolean;
+  /** Earliest attach of a viewer or interaction (writers that bypass
+   * generation admissions) that no capture taken with none attached has
+   * covered yet. Null when every such write is in the archive. */
+  untrackedWriterSince: Date | null;
   /** Exact provider capture currently holding the lease-local admission gate. */
   archiveCapture: {
     id: string;
@@ -49380,6 +49385,23 @@ export class SandboxRigConflictError extends Error {
   }
 }
 
+/** True when `/workspace` may hold writes that bypassed generation
+ * admissions and no capture covers yet: a viewer or interaction attached since
+ * the last capture taken with none attached (`untrackedWriterSince`), or a
+ * viewer, or a holder that is neither a turn nor a viewer (an interaction
+ * controller among them), attached now. Such a box is not proven clean by a
+ * complete archive; the capture claim decides exactly. */
+export function leaseMayHaveUntrackedWriters(
+  lease: Pick<LeaseSnapshot, "refcount" | "turnHolders" | "viewerHolders"> &
+    Partial<Pick<LeaseSnapshot, "untrackedWriterSince">>,
+): boolean {
+  return (
+    (lease.untrackedWriterSince ?? null) !== null ||
+    lease.viewerHolders > 0 ||
+    lease.refcount > lease.turnHolders + lease.viewerHolders
+  );
+}
+
 function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
   const workspaceGeneration = Number(row.workspace_generation);
   const archiveGeneration = row.archive_generation === null ? null : Number(row.archive_generation);
@@ -49409,6 +49431,12 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
       recovery.archive.status === "available" &&
       archiveGeneration !== null &&
       archiveGeneration === workspaceGeneration,
+    untrackedWriterSince:
+      row.untracked_writer_since === null || row.untracked_writer_since === undefined
+        ? null
+        : row.untracked_writer_since instanceof Date
+          ? row.untracked_writer_since
+          : new Date(row.untracked_writer_since),
     archiveCapture:
       row.archive_capture_id === null ||
       row.archive_capture_operation_id === null ||
@@ -50136,10 +50164,12 @@ async function recomputeAndStampLease(
     total: number;
     turns: number;
     viewers: number;
+    untracked_writers: number;
   }>(sql`
     select count(*)::int as total,
            count(*) filter (where kind = 'turn')::int   as turns,
-           count(*) filter (where kind = 'viewer')::int as viewers
+           count(*) filter (where kind = 'viewer')::int as viewers,
+           count(*) filter (where kind in ('viewer', 'interaction'))::int as untracked_writers
     from sandbox_lease_holders where lease_id = ${leaseId}
   `);
   const c = counts[0]!;
@@ -50148,6 +50178,15 @@ async function recomputeAndStampLease(
       refcount       = ${c.total},
       turn_holders   = ${c.turns},
       viewer_holders = ${c.viewers},
+      -- A viewer or interaction can write /workspace without a generation
+      -- admission. Remember the earliest such attach until a capture taken
+      -- with none attached covers it, so a writer that detached before the
+      -- next capture still leaves the box dirty.
+      ${
+        c.untracked_writers > 0
+          ? sql`untracked_writer_since = coalesce(untracked_writer_since, now()),`
+          : sql``
+      }
       expires_at     = now() + (${String(leaseTtlMs)} || ' milliseconds')::interval,
       ${setLiveness ? sql`liveness = ${setLiveness},` : sql``}
       updated_at     = now()
@@ -57757,6 +57796,84 @@ export async function enrollRetainedCommandContainment(
   });
 }
 
+export type IdleCheckpointCandidate = {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  leaseEpoch: number;
+  instanceId: string;
+};
+
+/** Global inventory of warm Modal boxes that no turn holds and that viewers,
+ * browser/computer interactions or running unsupervised background commands
+ * keep warm, whose workspace has writes the newest archive may not cover, and
+ * whose last capture attempt and last idle checkpoint attempt are both at least
+ * `intervalMs` old (least recently tried first). Discovery only: the exact
+ * warm capture claim (`claimWorkspaceArchiveCapture` with `idleCheckpoint`)
+ * re-checks every fact under the lease lock before any provider capture. */
+export async function listIdleCheckpointCandidates(
+  db: Database,
+  input: { limit: number; intervalMs: number },
+): Promise<IdleCheckpointCandidate[]> {
+  if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
+    throw new Error("Idle checkpoint batch is invalid");
+  }
+  if (!Number.isSafeInteger(input.intervalMs) || input.intervalMs < 1) {
+    throw new Error("Idle checkpoint interval is invalid");
+  }
+  const rows = await rawRows<{
+    account_id: string;
+    workspace_id: string;
+    sandbox_group_id: string;
+    lease_epoch: number | string;
+    instance_id: string;
+  }>(
+    db,
+    sql`select * from opengeni_private.list_idle_checkpoint_candidates(
+      ${input.limit}::integer, ${input.intervalMs}::bigint)`,
+  );
+  return rows.map((row) => ({
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    sandboxGroupId: row.sandbox_group_id,
+    leaseEpoch: Number(row.lease_epoch),
+    instanceId: row.instance_id,
+  }));
+}
+
+/** Stamp an idle checkpoint attempt on the exact warm box before the sweep
+ * tries it, whatever the outcome. The inventory lists a box again only after
+ * the snapshot interval, so a box whose claim is refused or whose provider
+ * fails cannot hold a batch slot on every sweep and starve the others. */
+export async function recordIdleCheckpointAttempt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ id: string }>(sql`
+        update sandbox_leases set idle_checkpoint_attempted_at = now()
+        where account_id = ${input.accountId}
+          and workspace_id = ${input.workspaceId}
+          and sandbox_group_id = ${input.sandboxGroupId}
+          and liveness = 'warm'
+          and lease_epoch = ${input.expectedEpoch}
+          and instance_id = ${input.expectedInstanceId}
+        returning id
+      `);
+      return rows.length === 1;
+    },
+  );
+}
+
 // §4.6 (global) — the cross-workspace reaper sweep (OD-3). Calls the
 // SECURITY-DEFINER opengeni_private.reap_sandbox_leases() fn so the global
 // reaper Temporal Schedule (P1.3) sees stale rows across ALL workspaces in ONE
@@ -61800,6 +61917,17 @@ function concurrentCommandHolder(
   ))`;
 }
 
+/** A holder whose writes a warm point-in-time checkpoint may run around: a
+ * background command (see `concurrentCommandHolder`), or a viewer / browser
+ * interaction attach. A viewer's noVNC/PTY tunnel and a browser controller can
+ * change `/workspace` without a generation admission, so their presence marks
+ * the claim concurrent (archive one generation behind) instead of refusing it.
+ * Refusing it starved every checkpoint for as long as a desktop or terminal tab
+ * stayed open. `direct` and other process holders still block. */
+function concurrentWriterHolder(holder: SQL, lease: { id: SQL; epoch: SQL; instanceId: SQL }): SQL {
+  return sql`(${holder}.kind in ('viewer', 'interaction') or ${concurrentCommandHolder(holder, lease)})`;
+}
+
 /** The parent admission of a background command that may run through a warm
  * checkpoint. It stays open for the command's lifetime; it is not an in-flight
  * request, and treating it as one starved checkpoints for hours. */
@@ -62193,7 +62321,10 @@ export type ClaimWorkspaceArchiveCaptureResult =
         | "capture_in_progress"
         | "holder_in_progress"
         | "mutation_in_progress"
-        | "throttled";
+        | "throttled"
+        // A warm point-in-time capture found the archive already complete and
+        // no writer that bypasses generation admissions on the box.
+        | "clean";
     };
 
 /**
@@ -62239,6 +62370,14 @@ export async function claimWorkspaceArchiveCapture(
      * exact box are recorded in deadline_forced_admission_ids, captured
      * around, and settled with the box after termination. */
     deadlineMandatoryCaptureLeadMs?: number;
+    /** Warm point-in-time checkpoint of a box no turn holds, kept warm by
+     * viewers, browser/computer interactions or active unsupervised background
+     * commands (e.g. while the session waits for one or for input). Requires
+     * `pointInTimeCapture` and no `warmAttempt`: with no turn attempt to fence,
+     * no other holder may be on the box, at least one of those must be (a box
+     * no holder keeps warm belongs to the idle drain), and every other open
+     * request still blocks. */
+    idleCheckpoint?: boolean;
   },
 ): Promise<ClaimWorkspaceArchiveCaptureResult> {
   if (
@@ -62271,7 +62410,16 @@ export async function claimWorkspaceArchiveCapture(
   ) {
     throw new Error("Workspace archive capture interval is invalid");
   }
-  if ((input.liveness === "warm") !== (input.warmAttempt !== undefined)) {
+  const idleCheckpoint = input.idleCheckpoint === true;
+  if (
+    idleCheckpoint &&
+    (input.liveness !== "warm" ||
+      input.warmAttempt !== undefined ||
+      input.pointInTimeCapture !== true)
+  ) {
+    throw new Error("Idle workspace checkpoint must be a warm point-in-time capture");
+  }
+  if ((input.liveness === "warm") !== (input.warmAttempt !== undefined || idleCheckpoint)) {
     throw new Error("Warm workspace archive capture requires its exact turn attempt");
   }
   return await withRlsContext(
@@ -62381,6 +62529,11 @@ export async function claimWorkspaceArchiveCapture(
       if (input.liveness === "draining" && row.reaper_hold_active) {
         return { status: "reaper_held" as const };
       }
+      // A box no holder keeps warm belongs to the idle drain, which captures
+      // it before teardown; an idle checkpoint would duplicate that capture.
+      if (idleCheckpoint && Number(row.refcount) === 0) {
+        return { status: "lease_fenced" as const };
+      }
       const [supervision] = await scopedDb.execute<{ safe: boolean }>(sql`
         select ${noActiveSupervisedProcesses(sql`${row.id}::uuid`)} as safe
       `);
@@ -62399,30 +62552,32 @@ export async function claimWorkspaceArchiveCapture(
       // Neither a new process nor a new admission can appear while this claim
       // is held, so "a command was running at claim time" is exactly the
       // condition under which the snapshot may miss later writes.
-      const aroundCommands = input.warmAttempt !== undefined && input.pointInTimeCapture === true;
-      const holderCounts = input.warmAttempt
-        ? await scopedDb.execute<{
-            total: number;
-            exact: number;
-          }>(sql`
+      const aroundCommands =
+        (input.warmAttempt !== undefined || idleCheckpoint) && input.pointInTimeCapture === true;
+      const holderCounts =
+        input.liveness === "warm"
+          ? await scopedDb.execute<{
+              total: number;
+              exact: number;
+            }>(sql`
             select
               count(*)::integer as total,
               count(*) filter (
                 where kind = 'turn'
-                  and holder_id = ${input.warmAttempt.holderId}
+                  and holder_id = ${input.warmAttempt?.holderId ?? null}
               )::integer as exact
             from sandbox_lease_holders
             where lease_id = ${row.id}
               ${
                 aroundCommands
-                  ? sql`and not ${concurrentCommandHolder(sql`sandbox_lease_holders`, leaseIdentity)}`
+                  ? sql`and not ${concurrentWriterHolder(sql`sandbox_lease_holders`, leaseIdentity)}`
                   : sql``
               }
           `)
-        : await scopedDb.execute<{
-            total: number;
-            exact: number;
-          }>(sql`
+          : await scopedDb.execute<{
+              total: number;
+              exact: number;
+            }>(sql`
             select count(*)::integer as total, 0::integer as exact
             from sandbox_lease_holders
             where lease_id = ${row.id}
@@ -62437,16 +62592,19 @@ export async function claimWorkspaceArchiveCapture(
         return { status: "attempt_fenced" as const };
       }
       // The durable claim blocks new acquisitions. Requiring the warm owner to
-      // be the sole holder means every other worker/session has relinquished its
-      // provider handle before capture can pause the box. A viewer is not
-      // passive: its scoped noVNC/PTY tunnel can mutate the workspace without a
-      // control-plane generation admission. Never delete a live viewer receipt
-      // and snapshot behind that still-valid tunnel. A skipped turn-end capture
-      // is recovered by the zero-holder drain capture after the viewer detaches.
-      // A running background command is the one exception (warm only): its
-      // holder and parent admission never release before it exits, and waiting
-      // for that starved checkpoints for the box's whole lifetime. See
-      // `activeUnsupervisedLeaseProcess` for the accepted trade-off.
+      // be the sole blocking holder means every other worker/session has
+      // relinquished its provider handle before capture can pause the box.
+      // A warm point-in-time capture runs around writers that never release on
+      // their own schedule: an active unsupervised background command, and a
+      // viewer or browser-interaction attach. A viewer is not passive (its
+      // noVNC/PTY tunnel can mutate the workspace without a generation
+      // admission), so the claim is marked concurrent below and the archive is
+      // published one generation behind; the next capture after the writer
+      // leaves completes it. Waiting for them instead starved checkpoints for as
+      // long as a tab stayed open or a command ran. See
+      // `activeUnsupervisedLeaseProcess` for the torn-file trade-off. An idle
+      // checkpoint has no owner holder of its own. Tar-style and drain captures
+      // keep requiring every holder gone.
       const expectedHolderCount = input.warmAttempt ? 1 : 0;
       if ((holderCounts[0]?.total ?? 0) !== expectedHolderCount) {
         return { status: "holder_in_progress" as const };
@@ -62487,7 +62645,7 @@ export async function claimWorkspaceArchiveCapture(
                 : sql``
             }
             ${
-              input.warmAttempt === undefined
+              input.liveness === "draining"
                 ? sql`and not (admission.id = any(${`{${forcedAdmissionIds.join(",")}}`}::uuid[]))`
                 : sql``
             }
@@ -62530,6 +62688,10 @@ export async function claimWorkspaceArchiveCapture(
               select 1 from sandbox_retained_processes concurrent_process
               where ${activeUnsupervisedLeaseProcess(sql`concurrent_process`, leaseIdentity)}
             ) or exists (
+              select 1 from sandbox_lease_holders concurrent_writer
+              where concurrent_writer.lease_id = ${row.id}
+                and concurrent_writer.kind in ('viewer', 'interaction')
+            ) or exists (
               select 1 from sandbox_workspace_mutation_admissions orphaned_request
               where orphaned_request.lease_id = ${row.id}
                 and orphaned_request.lease_epoch = ${input.expectedEpoch}
@@ -62550,6 +62712,21 @@ export async function claimWorkspaceArchiveCapture(
         archiveGeneration !== null &&
         archiveGeneration === Number(row.workspace_generation) &&
         recoveryStateFromLeaseRow(row).archive.status === "available";
+      // Every admitted write advances the generation, and a capture taken
+      // while an untracked writer was attached is published one generation
+      // behind, so a complete archive with no such writer attached now, and
+      // none attached since the last capture taken with none attached, has
+      // nothing new to save. A viewer that attached after that capture keeps
+      // the box dirty even after it detached, though the generation did not
+      // move.
+      if (
+        aroundCommands &&
+        archiveComplete &&
+        concurrentCommands?.present !== true &&
+        (row.untracked_writer_since ?? null) === null
+      ) {
+        return { status: "clean" as const };
+      }
       if (
         input.minIntervalMs > 0 &&
         Number.isFinite(priorAtMs) &&
@@ -62635,6 +62812,13 @@ export async function releaseWorkspaceArchiveCapture(
     captureId: string;
     expectedEpoch: number;
     expectedInstanceId: string;
+    /** Take over a warm claim whose owner died: release it only when it is
+     * past its database deadline, was recorded takeover-safe (a late provider
+     * result can never publish under a replacement capture id), and no turn
+     * holds the box. A box kept warm by background commands never drains, so
+     * without this a dead checkpoint worker's claim fenced every later turn
+     * and checkpoint until the provider deadline. */
+    onlyExpiredWarmTakeover?: boolean;
   },
 ): Promise<boolean> {
   return await withRlsContext(
@@ -62653,6 +62837,14 @@ export async function releaseWorkspaceArchiveCapture(
             and instance_id = ${input.expectedInstanceId}
             and archive_capture_id = ${input.captureId}::uuid
             and archive_capture_published_at is null
+            ${
+              input.onlyExpiredWarmTakeover === true
+                ? sql`and liveness = 'warm'
+                  and archive_capture_deadline_at <= now()
+                  and archive_capture_takeover_safe
+                  and turn_holders = 0`
+                : sql``
+            }
           for update
         )
         update sandbox_leases set
@@ -64208,6 +64400,14 @@ async function foldWorkspaceArchiveOntoLease(
                   then lease.workspace_generation + 1
                 else lease.workspace_generation
               end,
+              -- A capture claimed with no viewer or interaction attached (none
+              -- can attach while the claim is held) covers every write they
+              -- made before it.
+              untracked_writer_since = case
+                when ${captureRanAroundCommands(sql`lease`)}
+                  then lease.untracked_writer_since
+                else null
+              end,
               archive_capture_concurrent_capture_id = null,
               archive_capture_id = null,
               archive_capture_operation_id = null,
@@ -64221,7 +64421,9 @@ async function foldWorkspaceArchiveOntoLease(
               archive_capture_published_at = null,
             `
           : input.livenessGuard === "draining"
-            ? sql`archive_capture_published_at = now(),`
+            ? // A drain claims with no holder at all, so it covers every
+              // earlier viewer or interaction write.
+              sql`archive_capture_published_at = now(), untracked_writer_since = null,`
             : sql``
       }
       updated_at = now()
@@ -64351,9 +64553,6 @@ export async function persistWarmSnapshot(
   input: {
     accountId: string;
     workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    attemptId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
     expectedInstanceId: string;
@@ -64375,7 +64574,17 @@ export async function persistWarmSnapshot(
      *  and landed late must never overwrite a fresher turn-end snapshot or refresh
      *  the throttle clock). Defaults to Date.now() for legacy callers/tests. */
     capturedAtMs?: number;
-  },
+  } & (
+    | { sessionId: string; turnId: string; attemptId: string; idleCheckpoint?: never }
+    | {
+        /** The capture was claimed with `idleCheckpoint`: no turn attempt
+         * owns it, and the exact capture claim is the only owner fence. */
+        idleCheckpoint: true;
+        sessionId?: never;
+        turnId?: never;
+        attemptId?: never;
+      }
+  ),
 ): Promise<{
   wrote: boolean;
   throttled: boolean;
@@ -64406,43 +64615,47 @@ export async function persistWarmSnapshot(
       // interruption first and the late snapshot becomes a no-op. An in-process
       // AbortSignal cannot close this database race.
       await lockWorkspaceInferenceControl(scopedDb, input.workspaceId, "share");
-      const [attempt] = await scopedDb
-        .select({
-          accountId: schema.sessionTurnAttempts.accountId,
-          state: schema.sessionTurnAttempts.state,
-          outcome: schema.sessionTurnAttempts.outcome,
-          sandboxGroupId: schema.sessions.sandboxGroupId,
-        })
-        .from(schema.sessionTurnAttempts)
-        .innerJoin(
-          schema.sessions,
-          and(
-            eq(schema.sessions.id, schema.sessionTurnAttempts.sessionId),
-            eq(schema.sessions.workspaceId, schema.sessionTurnAttempts.workspaceId),
-          ),
-        )
-        .where(
-          and(
-            eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
-            eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
-            eq(schema.sessionTurnAttempts.turnId, input.turnId),
-            eq(schema.sessionTurnAttempts.id, input.attemptId),
-          ),
-        )
-        .limit(1);
-      const [interruption] = attempt
-        ? await scopedDb
-            .select({ id: schema.sessionAttemptInterruptions.id })
-            .from(schema.sessionAttemptInterruptions)
-            .where(
+      const turnOwner = input.idleCheckpoint === true ? null : input;
+      const [attempt] = !turnOwner
+        ? []
+        : await scopedDb
+            .select({
+              accountId: schema.sessionTurnAttempts.accountId,
+              state: schema.sessionTurnAttempts.state,
+              outcome: schema.sessionTurnAttempts.outcome,
+              sandboxGroupId: schema.sessions.sandboxGroupId,
+            })
+            .from(schema.sessionTurnAttempts)
+            .innerJoin(
+              schema.sessions,
               and(
-                eq(schema.sessionAttemptInterruptions.workspaceId, input.workspaceId),
-                eq(schema.sessionAttemptInterruptions.sessionId, input.sessionId),
-                eq(schema.sessionAttemptInterruptions.attemptId, input.attemptId),
+                eq(schema.sessions.id, schema.sessionTurnAttempts.sessionId),
+                eq(schema.sessions.workspaceId, schema.sessionTurnAttempts.workspaceId),
               ),
             )
-            .limit(1)
-        : [];
+            .where(
+              and(
+                eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+                eq(schema.sessionTurnAttempts.sessionId, turnOwner.sessionId),
+                eq(schema.sessionTurnAttempts.turnId, turnOwner.turnId),
+                eq(schema.sessionTurnAttempts.id, turnOwner.attemptId),
+              ),
+            )
+            .limit(1);
+      const [interruption] =
+        attempt && turnOwner
+          ? await scopedDb
+              .select({ id: schema.sessionAttemptInterruptions.id })
+              .from(schema.sessionAttemptInterruptions)
+              .where(
+                and(
+                  eq(schema.sessionAttemptInterruptions.workspaceId, input.workspaceId),
+                  eq(schema.sessionAttemptInterruptions.sessionId, turnOwner.sessionId),
+                  eq(schema.sessionAttemptInterruptions.attemptId, turnOwner.attemptId),
+                ),
+              )
+              .limit(1)
+          : [];
       const attemptMayPersistWorkspace =
         attempt !== undefined &&
         (attempt.state === "claimed" || attempt.state === "running"
@@ -64472,11 +64685,12 @@ export async function persistWarmSnapshot(
         candidateLease[0]?.resume_state,
       );
       if (
-        !attempt ||
-        attempt.accountId !== input.accountId ||
-        attempt.sandboxGroupId !== input.sandboxGroupId ||
-        interruption ||
-        !attemptMayPersistWorkspace
+        turnOwner &&
+        (!attempt ||
+          attempt.accountId !== input.accountId ||
+          attempt.sandboxGroupId !== input.sandboxGroupId ||
+          interruption ||
+          !attemptMayPersistWorkspace)
       ) {
         return {
           wrote: false,

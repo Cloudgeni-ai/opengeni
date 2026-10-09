@@ -24,7 +24,9 @@ import {
   sandboxDrainActivityTimeoutMs,
   sandboxDrainTimeoutClass,
   sandboxDrainWorkflowId,
+  sandboxIdleCheckpointWorkflowId,
   sandboxLifecycleTaskQueue,
+  SANDBOX_IDLE_CHECKPOINT_SWEEP_WORKFLOW_ID,
 } from "../src/sandbox-reaper-contract";
 
 describe("sandbox reaper per-box timeout contract", () => {
@@ -165,9 +167,26 @@ describe("sandbox reaper per-box timeout contract", () => {
     );
   });
 
+  test("idle checkpoints coalesce into one child per exact lease epoch", () => {
+    const target = {
+      workspaceId: "workspace-a",
+      sandboxGroupId: "group-b",
+      instanceId: "instance-c",
+      leaseEpoch: 17,
+    };
+    expect(sandboxIdleCheckpointWorkflowId(target)).toBe(
+      "sandbox-idle-checkpoint:workspace-a:group-b:17",
+    );
+    expect(sandboxIdleCheckpointWorkflowId(target)).not.toBe(sandboxDrainWorkflowId(target));
+    expect(sandboxIdleCheckpointWorkflowId({ ...target, leaseEpoch: 18 })).not.toBe(
+      sandboxIdleCheckpointWorkflowId(target),
+    );
+  });
+
   test("the lifecycle queue is stable and idempotent", () => {
     expect(SANDBOX_REAPER_CHILD_DISPATCH_LIMIT).toBe(500);
     expect(SANDBOX_REAPER_MAINTENANCE_WORKFLOW_ID).toBe("opengeni-sandbox-lease-maintenance-v1");
+    expect(SANDBOX_IDLE_CHECKPOINT_SWEEP_WORKFLOW_ID).toBe("opengeni-sandbox-idle-checkpoints-v1");
     expect(sandboxLifecycleTaskQueue("opengeni-runs-ts")).toBe(
       "opengeni-runs-ts-sandbox-lifecycle-v1",
     );
@@ -333,5 +352,22 @@ describe("sandbox reaper per-box timeout contract", () => {
     expect(maintenanceStart).toBeGreaterThan(childStart);
     expect(workflowSource).toContain("parentClosePolicy: ParentClosePolicy.ABANDON");
     expect(workflowSource).toContain("sandbox reaper maintenance child start deferred");
+    // Idle checkpoints run in their own sweep workflow type, started from the
+    // same tick, so the V2 drain inventory's command history is unchanged.
+    const v2Source = workflowSource.slice(
+      workflowSource.indexOf("export async function sandboxReaperWorkflowV2()"),
+    );
+    expect(v2Source).not.toContain("sandboxIdleCheckpoint");
+    const sweepSource = workflowSource.slice(
+      workflowSource.indexOf("export async function sandboxIdleCheckpointSweepWorkflow()"),
+      workflowSource.indexOf("export async function sandboxReaperMaintenanceWorkflow("),
+    );
+    expect(sweepSource).toContain("listIdleSandboxCheckpoints()");
+    expect(sweepSource).toContain("await startChild(sandboxIdleCheckpointWorkflow");
+    expect(sweepSource).toContain("workflowId: sandboxIdleCheckpointWorkflowId(target)");
+    expect(sweepSource).toContain("parentClosePolicy: ParentClosePolicy.ABANDON");
+    expect(sweepSource).toContain("if (alreadyRunningChild(error)) return;");
+    expect(workerSource).toContain('temporal.workflow.start("sandboxIdleCheckpointSweepWorkflow"');
+    expect(workerSource).toContain("workflowId: SANDBOX_IDLE_CHECKPOINT_SWEEP_WORKFLOW_ID");
   });
 });

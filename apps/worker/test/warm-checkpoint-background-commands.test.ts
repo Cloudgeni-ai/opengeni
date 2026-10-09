@@ -466,7 +466,23 @@ describe("warm checkpoints while background commands run", () => {
     ).toEqual({ status: "holder_in_progress" });
   }, 60_000);
 
-  test("a viewer or a sibling turn still holds capture off", async () => {
+  test("a sibling turn or a direct request still holds capture off", async () => {
+    for (const kind of ["turn", "direct"] as const) {
+      const fixture = await runningTurnWithBackgroundCommand();
+      const provider = modalSession();
+      const { skipped, metrics } = skipRecorder();
+      await admin`insert into sandbox_lease_holders
+        (account_id, lease_id, workspace_id, kind, holder_id, subject_id, last_heartbeat_at)
+        values (${fixture.accountId}, ${fixture.leaseId}, ${fixture.workspaceId}, ${kind},
+          ${`${kind === "turn" ? "turn-attempt" : kind}:${crypto.randomUUID()}`},
+          ${fixture.attempt.sessionId}, now())`;
+      expect(await checkpoint(fixture, provider.session, metrics), kind).toBe(false);
+      expect(provider.calls(), kind).toBe(0);
+      expect(skipped, kind).toEqual(["holder_in_progress"]);
+    }
+  }, 60_000);
+
+  test("an open viewer no longer holds capture off; the archive stays one generation behind", async () => {
     const fixture = await runningTurnWithBackgroundCommand();
     const provider = modalSession();
     const { skipped, metrics } = skipRecorder();
@@ -474,8 +490,10 @@ describe("warm checkpoints while background commands run", () => {
       (account_id, lease_id, workspace_id, kind, holder_id, subject_id, last_heartbeat_at)
       values (${fixture.accountId}, ${fixture.leaseId}, ${fixture.workspaceId}, 'viewer',
         ${`viewer:${crypto.randomUUID()}`}, ${fixture.attempt.sessionId}, now())`;
-    expect(await checkpoint(fixture, provider.session, metrics)).toBe(false);
-    expect(provider.calls()).toBe(0);
-    expect(skipped).toEqual(["holder_in_progress"]);
+    expect(await checkpoint(fixture, provider.session, metrics)).toBe(true);
+    expect(provider.calls()).toBe(1);
+    expect(skipped).toEqual([]);
+    const lease = await readLease(db, fixture.workspaceId, fixture.attempt.sandboxGroupId);
+    expect(lease!.archiveGeneration).toBe(lease!.workspaceGeneration - 1);
   }, 60_000);
 });

@@ -9902,6 +9902,17 @@ export const sandboxLeases = pgTable(
     archiveCaptureLastAttemptAt: timestamp("archive_capture_last_attempt_at", {
       withTimezone: true,
     }),
+    // The reaper's idle checkpoint sweep last tried this box, whatever the
+    // outcome, so refused or failing boxes yield the batch to others.
+    idleCheckpointAttemptedAt: timestamp("idle_checkpoint_attempted_at", {
+      withTimezone: true,
+    }),
+    // Earliest attach of a viewer or interaction (writers that bypass
+    // generation admissions) not yet covered by a capture claimed with none
+    // attached. Cleared by such a capture and when the lease epoch changes.
+    untrackedWriterSince: timestamp("untracked_writer_since", {
+      withTimezone: true,
+    }),
     archiveCaptureGeneration: integer("archive_capture_generation"),
     archiveCaptureStartedAt: timestamp("archive_capture_started_at", {
       withTimezone: true,

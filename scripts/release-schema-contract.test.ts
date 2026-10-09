@@ -131,6 +131,18 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers the idle sandbox checkpoint inventory as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0680_sandbox_idle_checkpoint.sql",
+      ),
+    ).toMatchObject({
+      path: "0680_sandbox_idle_checkpoint.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("checks complete ledger metadata against migration files", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     const sourceMigrationPaths = (
@@ -2574,6 +2586,7 @@ describe("release schema contract", () => {
       "0677_local_human_inbox_recipient.sql",
       "0678_inbox_mute_session_replies.sql",
       "0679_codex_extra_credit_consent.sql",
+      "0680_sandbox_idle_checkpoint.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

@@ -104,6 +104,7 @@ import {
 import { assertSandboxReaperActivityTimeout } from "./sandbox-reaper-timeout";
 import { installWorkerUnhandledRejectionBoundary } from "./unhandled-rejection-boundary";
 import {
+  SANDBOX_IDLE_CHECKPOINT_SWEEP_WORKFLOW_ID,
   SANDBOX_REAPER_V2_WORKFLOW_ID,
   sandboxLifecycleTaskQueue,
 } from "./sandbox-reaper-contract";
@@ -542,6 +543,13 @@ export async function createWorkerWorkflowSignaler(
         temporal.workflow.start("browserDeadlineCheckpointSweepWorkflow", {
           taskQueue: browserDeadlineCheckpointTaskQueue(settings.temporalTaskQueue),
           workflowId: BROWSER_DEADLINE_CHECKPOINT_SWEEP_ID,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [],
+        }),
+        // Its own workflow type, so the drain workflow's history is unchanged.
+        temporal.workflow.start("sandboxIdleCheckpointSweepWorkflow", {
+          taskQueue: sandboxLifecycleTaskQueue(settings.temporalTaskQueue),
+          workflowId: SANDBOX_IDLE_CHECKPOINT_SWEEP_WORKFLOW_ID,
           workflowIdReusePolicy: "ALLOW_DUPLICATE",
           args: [],
         }),

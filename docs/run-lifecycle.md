@@ -3364,14 +3364,22 @@ Modal pauses the whole box while it snapshots, so such a command is frozen durin
 the read, but a file it was in the middle of writing can be saved half-written;
 that trade-off is deliberate, because a possibly torn file beats losing everything
 since the last capture. Tar-style captures read files one by one from a running
-box and keep every command as a blocker. Every other holder (viewer, direct,
-sibling turn), every in-flight request (including a command's own stdin write),
-and supervised commands still block.
+box and keep every command as a blocker. The same warm point-in-time capture
+also runs around viewer and interaction holders (a desktop or terminal tab, a
+browser or computer controller): their tunnels can write `/workspace` without a
+generation admission and they never release on the capture's schedule, so
+waiting for them starved every checkpoint for as long as a tab stayed open.
+Every other holder (direct request, sibling turn, any other process), every
+in-flight request (including a command's own stdin write), and supervised
+commands still block.
 
-A claim taken while such a command was running records itself in
-`archive_capture_concurrent_capture_id` (migration 0659). No new process or
-admission can appear while a claim is held, so this is exactly the condition under
-which the snapshot may miss later writes. Only the warm publication may publish
+A claim taken while such a command, viewer or interaction was attached records
+itself in `archive_capture_concurrent_capture_id` (migration 0659). No new process
+or admission can appear while a claim is held, so this is exactly the condition
+under which the snapshot may miss later writes. Because viewer writes do not move
+the generation, a complete archive is not proof of a clean box while a viewer or
+interaction is attached: the claim returns `clean` (no capture) only when the
+archive is complete and no such writer is attached. Only the warm publication may publish
 such a claim, and it records the archive one generation behind the workspace
 (`archive_generation = workspace_generation - 1`): the checkpoint is a real
 recovery point but never complete, so periodic captures continue at the
@@ -3382,6 +3390,65 @@ drain recaptures the now-quiet box), a drain takeover requests a fresh provider
 snapshot instead of replaying it, and a provider loss never records it for late
 adoption. Drain capture is otherwise unchanged: it captures the final state and
 terminates the box, and only enrolled contained commands are excluded there.
+**Boxes no turn holds are checkpointed too.** Turn heartbeat and turn-end
+captures only run while a turn is open. Between turns a box stays warm for as
+long as something else holds it: an open desktop or terminal viewer, a browser or
+computer controller, or a running background command (a server, a build, or a
+command the agent waits on with `wait_for_input`). Such a box is neither drainable
+nor captured by a turn, so before this change it went uncaptured until the
+provider deadline's mandatory save. The same reaper tick that starts the drain
+inventory now also starts `sandboxIdleCheckpointSweepWorkflow` (fixed id
+`opengeni-sandbox-idle-checkpoints-v1`) on the lifecycle queue. It is a separate
+workflow type so the drain workflow's command history does not change across a
+rolling deploy. Its DB-only inventory
+(`opengeni_private.list_idle_checkpoint_candidates`, migration 0680) lists warm
+Modal boxes with point-in-time capture where:
+
+- at least one holder keeps the box warm (a zero-holder box belongs to its drain),
+  no turn holds it, and every holder is a viewer, an interaction, or the
+  process holder of an active, unsupervised retained process on the exact lease
+  epoch and instance (a direct request or any other process holder blocks);
+- no supervised process is active, no rotation or operator hold is set, and no
+  unobservable command drain is open;
+- the workspace is dirty: `archive_generation` is null or behind
+  `workspace_generation`, or `untracked_writer_since` is set;
+- no capture and no idle checkpoint attempt (`idle_checkpoint_attempted_at`)
+  happened within `sandboxSnapshotIntervalMs`, the same interval that paces turn
+  heartbeats. The child stamps its attempt before it does anything else, so a
+  box whose claim is refused (an open request, a fenced lease) waits one interval
+  instead of being relisted on every tick; the least recently tried boxes are
+  listed first.
+
+`untracked_writer_since` records the first time a viewer or interaction holder
+was attached since the last successful capture. Lease recompute sets it whenever
+such a holder is present and keeps the oldest value; only a capture that did not
+run around writers (or a new lease epoch) clears it. A tab opened and closed
+between two captures therefore still marks the box dirty, where checking only the
+currently attached holders missed it, and the warm-snapshot short circuit
+(`leaseMayHaveUntrackedWriters`) honours the same stamp.
+
+So the rule is one invariant for every warm box: a workspace with changes since
+its last capture is captured at most one snapshot interval after the change,
+whichever holder keeps it warm. A turn owns that while it holds the box; the
+idle sweep owns it otherwise; a zero-holder box is captured by its drain within
+the idle grace. Each listed box gets one child per exact lease epoch
+(`sandbox-idle-checkpoint:<workspace>:<group>:<epoch>`), so a sweep that finds
+the previous child still running coalesces into it. The child resumes the exact
+box by id, never restoring or replacing it, and runs the ordinary warm checkpoint
+with an idle owner. In the embedded (single-process) worker the reaper starts
+the same children in the background, keyed by the same id, so a slow capture
+never blocks the reaper tick. `claimWorkspaceArchiveCapture` with
+`idleCheckpoint: true` expects zero turn holders and at least one holder, runs around the same holders and parent admissions as
+a warm turn capture, and refuses if any other holder or open request exists.
+Publication lands one generation behind the workspace whenever a writer was
+attached, as above. A clean box, a box no longer warm on that epoch and
+instance, and any capture policy other than point-in-time are skipped without a
+snapshot. A warm claim whose owner died is left alone until its deadline, and is
+then released only if it is unpublished, takeover-safe and no turn holds the
+box, so the idle child can recapture it. While a writer stays attached the box
+is recaptured once per interval even if nothing changed, because nothing records
+whether a tunnel or command wrote.
+
 A warm checkpoint attempt that cannot start increments
 `opengeni_workspace_capture_skipped_total{backend,reason}` (once per blocked
 attempt, which is every heartbeat while it stays blocked); an attempt that is not
