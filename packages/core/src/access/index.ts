@@ -1221,7 +1221,8 @@ function isCanonicalManagedHumanSession(context: AccessContext, grant: AccessGra
 
 /**
  * The subject whose inbox this request may read, or null when it has none.
- * A signed-in person (`user:`, no key) keeps the original rule. The local
+ * A signed-in person (`user:`, no key) requires verified managed-human
+ * provenance, including approved native app credentials. The local
  * install's human qualifies only when the in-process local bootstrap produced
  * this context (so a delegated bearer naming `dev` cannot borrow it), with the
  * human-session, non-delegated, non-service, keyless shape of
@@ -1229,7 +1230,9 @@ function isCanonicalManagedHumanSession(context: AccessContext, grant: AccessGra
  */
 export function inboxSubjectForContext(context: AccessContext): string | null {
   if (!accessContextHasInbox(context)) return null;
-  if (context.subjectId.startsWith("user:")) return context.subjectId;
+  if (context.subjectId.startsWith("user:")) {
+    return canonicalManagedCookieContexts.has(context) ? context.subjectId : null;
+  }
   return canonicalLocalHumanContexts.has(context) &&
     context.workspaceGrants.every((grant) => isCanonicalLocalHumanSession(context, grant))
     ? context.subjectId

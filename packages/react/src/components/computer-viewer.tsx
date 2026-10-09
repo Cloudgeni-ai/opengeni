@@ -759,6 +759,12 @@ export function ComputerViewer({
                 mutating={computer.mutating}
                 backgroundActions={computer.session?.capabilities?.backgroundActions === true}
                 backgroundInput={computer.session?.capabilities?.backgroundInput === true}
+                allowForegroundInputWithinOwnedSeat={
+                  computer.session?.platform === "linux" &&
+                  computer.session.adapter === "opengeni.cua.linux.v1" &&
+                  computer.session.seatId === `linux-virtual:${computer.session.id}` &&
+                  Boolean(computer.session.displayId)
+                }
                 clipboardEnabled={
                   attachmentInputAllowed && computer.session?.capabilities?.clipboard === true
                 }
@@ -1231,6 +1237,7 @@ function ComputerViewport(props: {
   mutating: boolean;
   backgroundActions: boolean;
   backgroundInput: boolean;
+  allowForegroundInputWithinOwnedSeat: boolean;
   clipboardEnabled: boolean;
   pointerInput: boolean;
   pointerClickContinuation: boolean;
@@ -1300,6 +1307,9 @@ function ComputerViewport(props: {
     !props.controlUnavailable &&
     !props.machineLocked &&
     (props.backgroundInput ||
+      // CUA may activate within its allocated Linux desktop. This does not
+      // grant foreground input to an attached physical desktop.
+      props.allowForegroundInputWithinOwnedSeat ||
       !props.backgroundActions ||
       props.target?.kind === "screen" ||
       props.target?.focused === true);

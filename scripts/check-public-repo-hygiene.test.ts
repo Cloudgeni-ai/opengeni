@@ -79,6 +79,7 @@ describe("public repository hygiene", () => {
       "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_010000.txt",
       "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_100000.txt",
       "packages/contracts/src/cua-desktop-tools.gen.json",
+      "packages/contracts/src/cua-desktop-tools.linux.gen.json",
     ]) {
       const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
       expect(auditPublicText(file, source)).toEqual([]);

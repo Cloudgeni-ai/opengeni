@@ -153,6 +153,8 @@ describe("organization MCP action catalog", () => {
         "GET /v1/inbox/settings",
         "PATCH /v1/inbox/items/:itemId",
         "PUT /v1/inbox/settings",
+        "GET /v1/workspaces/:workspaceId/sessions/:sessionId/inbox-mute",
+        "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/inbox-mute",
         "POST /v1/organizations",
         "POST /v1/organizations/additional",
         "GET /v1/organization-memberships",

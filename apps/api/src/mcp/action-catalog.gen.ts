@@ -2761,7 +2761,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SessionInboxMute"
-    ]
+    ],
+    "browserOnly": "the person's session mute requires their own signed-in browser session"
   },
   {
     "id": "getSessionLineage",
@@ -5813,7 +5814,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionInboxMute"
-    ]
+    ],
+    "browserOnly": "the person's session mute requires their own signed-in browser session"
   },
   {
     "id": "setSuperGrokAccountAllocator",

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
+import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
   appendSessionEvents,
   bootstrapWorkspace,
@@ -12,10 +12,12 @@ import {
 } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
+  MemoryEventBus,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { Hono } from "hono";
+import { createApp } from "../src/app";
 import { registerInboxRoutes } from "../src/routes/inbox";
 
 const SECRET = "inbox-local-access-test-secret";
@@ -160,6 +162,80 @@ describe("inbox access on a local install", () => {
       });
       expect(response.status).toBe(403);
     }
+  });
+
+  test("session mute passes the full API visibility gate and remains personal", async () => {
+    if (!client || !local) return;
+    const session = await createSession(client.db, {
+      ...local,
+      initialMessage: "A session with personal reply preferences",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: "dev", label: "Local dev" },
+      createdByContext: { label: "Local dev" },
+    });
+    let allowSession = true;
+    const operations: string[] = [];
+    const app = createApp({
+      db: client.db,
+      settings: testSettings({ productAccessMode: "local", delegationSecret: SECRET }),
+      bus: new MemoryEventBus(),
+      workflowClient: {} as SessionWorkflowClient,
+      sessionAuthorization: {
+        authorizeSession: async ({ operation }) => {
+          operations.push(operation);
+          return allowSession ? { allowed: true } : { allowed: false, reason: "not_found" };
+        },
+        resolveListScope: async () => ({ kind: "all" }),
+      },
+    });
+    const path = `/v1/workspaces/${local.workspaceId}/sessions/${session.id}/inbox-mute`;
+    const write = (repliesMuted: boolean, headers: Record<string, string> = {}) =>
+      app.request(path, {
+        method: "PUT",
+        headers: { "content-type": "application/json", ...headers },
+        body: JSON.stringify({ repliesMuted }),
+      });
+    const initial = await app.request(path);
+    expect(initial.status).toBe(200);
+    expect(await initial.json()).toEqual({ repliesMuted: false });
+    const muted = await write(true);
+    expect(muted.status).toBe(200);
+    expect(await muted.json()).toEqual({ repliesMuted: true });
+    expect(await (await app.request(path)).json()).toEqual({ repliesMuted: true });
+    expect(operations).toEqual(["session.read", "session.attention.write", "session.read"]);
+
+    const delegatedUser = `user:${crypto.randomUUID()}`;
+    await bootstrapWorkspace(client.db, {
+      accountExternalSource: "opengeni:local",
+      accountExternalId: "default",
+      accountName: "Local",
+      workspaceExternalSource: "opengeni:local",
+      workspaceExternalId: "default",
+      workspaceName: "Local",
+      subjectId: delegatedUser,
+    });
+    for (const subjectId of ["dev", delegatedUser]) {
+      for (const principalKind of ["human_session", "service"] as const) {
+        const headers = await delegated({ ...local, subjectId, principalKind });
+        expect((await app.request(path, { headers })).status).toBe(403);
+        expect((await write(false, headers)).status).toBe(403);
+        expect((await app.request("/v1/inbox", { headers })).status).toBe(403);
+      }
+    }
+    allowSession = false;
+    expect((await app.request(path)).status).toBe(404);
+    expect((await write(false)).status).toBe(404);
+    allowSession = true;
+    // Refused callers and revoked visibility cannot change the person's preference.
+    expect(await (await app.request(path)).json()).toEqual({ repliesMuted: true });
+    expect((await write(false)).status).toBe(200);
+    expect(await (await app.request(path)).json()).toEqual({ repliesMuted: false });
+    expect((await app.request(path.replace(session.id, crypto.randomUUID()))).status).toBe(404);
   });
 
   test("API keys and configured `dev` subjects have no inbox", async () => {

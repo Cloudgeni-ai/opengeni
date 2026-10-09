@@ -32,7 +32,7 @@ const roles: Record<string, string> = {
 
 export function projectElements(
   elements: z.infer<typeof Element>[],
-  platform: "macos" | "windows" = "macos",
+  platform: "macos" | "windows" | "linux" = "macos",
 ): InteractionSemanticNodeValue[] {
   // CUA may omit non-actionable parents. A flat, bounded forest preserves every
   // returned node without inventing ancestry or dropping orphaned children.
@@ -50,19 +50,25 @@ export function projectElements(
       opaqueWindowsEdit && element.value !== undefined && element.label === String(element.value);
     const actions: string[] = [];
     if (element.element_token) {
-      if (element.actions.includes(platform === "windows" ? "invoke" : "AXPress"))
+      if (
+        platform === "linux"
+          ? element.actions.some((action) => ["click", "press", "activate"].includes(action))
+          : element.actions.includes(platform === "windows" ? "invoke" : "AXPress")
+      )
         actions.push("invoke");
       if (platform === "macos" && element.actions.includes("AXShowMenu")) actions.push("show_menu");
       if (
-        platform === "windows"
-          ? element.actions.includes("set_value")
-          : [
-              "AXTextField",
-              "AXTextArea",
-              "AXSecureTextField",
-              "AXSlider",
-              "AXPopUpButton",
-            ].includes(element.role)
+        platform === "linux"
+          ? ["text", "entry", "password text", "combo box", "slider"].includes(element.role)
+          : platform === "windows"
+            ? element.actions.includes("set_value")
+            : [
+                "AXTextField",
+                "AXTextArea",
+                "AXSecureTextField",
+                "AXSlider",
+                "AXPopUpButton",
+              ].includes(element.role)
       )
         actions.push("set_value");
     }

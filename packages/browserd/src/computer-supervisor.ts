@@ -498,25 +498,33 @@ export class ComputerSupervisor {
     } catch (error) {
       if (error instanceof UnsettledCleanupError) this.cleanupUncertain = true;
       const failures: unknown[] = [error];
+      let driverClosed = !(error instanceof UnsettledCleanupError);
       try {
         await driver?.close();
       } catch (cleanupError) {
+        driverClosed = false;
         failures.push(cleanupError);
       }
-      try {
-        await environmentLease?.close();
-      } catch (cleanupError) {
-        failures.push(cleanupError);
+      let environmentClosed = false;
+      if (driverClosed) {
+        try {
+          await environmentLease?.close();
+          environmentClosed = true;
+        } catch (cleanupError) {
+          failures.push(cleanupError);
+        }
       }
       try {
         journal.close();
       } catch (cleanupError) {
         failures.push(cleanupError);
       }
-      try {
-        await rm(sessionDirectory, { recursive: true, force: true });
-      } catch (cleanupError) {
-        failures.push(cleanupError);
+      if (driverClosed && environmentClosed && failures.length === 1) {
+        try {
+          await rm(sessionDirectory, { recursive: true, force: true });
+        } catch (cleanupError) {
+          failures.push(cleanupError);
+        }
       }
       if (failures.length > 1) {
         this.cleanupUncertain = true;
@@ -590,11 +598,15 @@ export class ComputerSupervisor {
     } catch (error) {
       failures.push(error);
     }
-    try {
-      await runtime.environmentLease.close();
-      environmentClosed = true;
-    } catch (error) {
-      failures.push(error);
+    // A still-running driver may be using this display and profile. Preserve
+    // them until its process cleanup is confirmed.
+    if (driverClosed) {
+      try {
+        await runtime.environmentLease.close();
+        environmentClosed = true;
+      } catch (error) {
+        failures.push(error);
+      }
     }
     if (removeState && driverClosed && environmentClosed && journalClosed) {
       try {

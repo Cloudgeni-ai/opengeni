@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { CUA_DESKTOP_TOOLS, type ComputerNativeCommand } from "@opengeni/contracts";
+import {
+  CUA_DESKTOP_TOOLS,
+  CUA_LINUX_DESKTOP_TOOLS,
+  type ComputerNativeCommand,
+} from "@opengeni/contracts";
 import {
   ComputerInteractionController,
   recoverComputerOperationJournalRecord,
@@ -10,6 +14,25 @@ import { CuaNativeTools } from "../src/cua/native-tools";
 import type { CuaDesktopRuntime } from "../src/cua/wire";
 
 const computerSessionId = randomUUID();
+
+test("Linux native admission uses the Linux release schema without accepting a Mac worker", async () => {
+  const runtime: CuaDesktopRuntime = {
+    listToolsJson: async () => JSON.stringify({ tools: CUA_LINUX_DESKTOP_TOOLS }),
+    callTool: async () => {
+      throw new Error("Validation must not dispatch");
+    },
+    shutdown: async () => {},
+  };
+  const input = {
+    operationId: randomUUID(),
+    tool: "launch_app",
+    arguments: { launch_path: "fixture-app" },
+  };
+  await new CuaNativeTools(runtime, "owned", "linux").validate(input);
+  await expect(new CuaNativeTools(runtime, "owned", "macos").validate(input)).rejects.toThrow(
+    "schema differs",
+  );
+});
 const command = (): ComputerNativeCommand => ({
   protocolVersion: 1,
   operationId: randomUUID(),
