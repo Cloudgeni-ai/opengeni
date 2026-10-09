@@ -3,7 +3,6 @@ import {
   SESSION_SCOPE_HEADER,
   type ClientVoiceInputConfig,
   type OpenGeniClient,
-  type SendMessageInput,
 } from "@opengeni/sdk";
 import {
   lazy,
@@ -17,30 +16,26 @@ import {
   type CSSProperties,
 } from "react";
 import type { SiteSnapshotClient } from "./artifacts/chat-interactive-block";
-import { useOpenGeni, type ClientOverride } from "../session-context";
-import { useWorkspaceModelCatalog } from "../hooks/use-available-models";
+import type { ClientOverride } from "../session-context";
 import { ModelPolicyPicker, type ModelPolicyPickerProps } from "./model-policy-picker";
-import { useSessionEvents } from "../hooks/use-session-events";
-import { useSession } from "../hooks/use-session";
-import { useTurnQueue } from "../hooks/use-turn-queue";
-import { useComposer } from "../hooks/use-composer";
-import { useHumanInputRequests } from "../hooks/use-human-input";
-import { useFileAttachments } from "../hooks/use-file-attachments";
-import { useSessionControl } from "../hooks/use-session-control";
+import {
+  useSessionConversation,
+  type SessionConversationController,
+  type UseSessionConversationOptions,
+} from "../hooks/use-session-conversation";
 import { useGoal, type UseGoalOptions } from "../hooks/use-goal";
-import { useClientConfigFlags } from "../hooks/use-client-config-flags";
 import {
   createSessionRetainedScreenshotLoader,
   createWorkspaceRetainedArtifactLoader,
   createWorkspaceRetainedVideoLoader,
 } from "../timeline/retained-loaders";
 import { useRealtimeVoiceModels } from "../hooks/use-realtime-voice-models";
+import type { SessionRealtimeControl } from "../realtime/realtime-control";
 import { EMBEDDED_GENIE_LOADING, type GenieLoadingOptions } from "../timeline/genie-loading";
-import { projectPendingApprovals } from "../approvals";
 import { ApprovalSurface } from "./approval-surface";
 import { ChatComposer, type ChatComposerProps } from "./chat-composer";
 import type { ComposerTranscriptionControlProps } from "./composer-transcription-control";
-import { SessionChrome } from "./session-chrome";
+import { SessionChrome, type SessionChromeProps } from "./session-chrome";
 import { HumanInputSurface, type HumanInputSurfaceProps } from "./human-input-surface";
 import { MessageTimeline, type MessageTimelineProps } from "./message-timeline";
 import { ProviderRecoveryNotice } from "./provider-recovery-notice";
@@ -54,7 +49,6 @@ import {
   type OpenGeniViewerTarget,
 } from "./open-geni-links";
 import type { UserMessageDisclosureLabels } from "./user-message-body";
-import { conversationTimeline } from "../conversation-timeline";
 import { cn } from "../lib/cn";
 import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-scope";
 import { useErrorMessage } from "../lib/error-message";
@@ -147,6 +141,19 @@ export type SessionConversationProps = ClientOverride &
      * proxy has not turned voice off (`realtimeVoice: false`).
      */
     realtimeVoice?: boolean | undefined;
+    /** Optional connection/voice handoff; the stock control owns call lifecycle and admission. */
+    realtimeVoiceProps?:
+      | Partial<
+          Pick<
+            ComponentProps<typeof SessionRealtimeControl>,
+            | "codexConnected"
+            | "realtimeAutostartModel"
+            | "onRealtimeAutostartConsumed"
+            | "onVoiceActiveChange"
+            | "modelMenu"
+          >
+        >
+      | undefined;
     /**
      * Copy and visual for the "working" indicator before the first reply.
      * Defaults to neutral copy ("Thinking…"); omitted fields keep those
@@ -186,7 +193,39 @@ export type SessionConversationProps = ClientOverride &
       ChatComposerProps,
       "composer" | "effectiveControl" | "queuedAheadCount" | "attachments"
     >;
+    /** Optional host context and notifications; stock delivery remains authoritative. */
+    composerOptions?: UseSessionConversationOptions["composerOptions"];
+    /** Extra status panels without replacing stock queue/goal behavior. */
+    chromeProps?: Omit<
+      SessionChromeProps,
+      "queue" | "composer" | "goal" | "sessionStatus" | "readOnly" | "onComposerFocus"
+    >;
+    /** Localized questions and presentation; responses remain stock. */
+    humanInputProps?: Pick<
+      HumanInputSurfaceProps,
+      "messages" | "autoFocus" | "decisionButtons" | "className"
+    >;
+    /** Product approval presentation; permission decisions remain stock. */
+    approvalProps?: Omit<
+      ComponentProps<typeof ApprovalSurface>,
+      "approvals" | "onApprove" | "onReject" | "responding" | "error"
+    >;
   };
+
+export type SessionConversationViewProps = Omit<
+  SessionConversationProps,
+  | "sessionId"
+  | "client"
+  | "workspaceId"
+  | "baseUrl"
+  | "headers"
+  | "fetch"
+  | "attachments"
+  | "modelPicker"
+  | "composerOptions"
+> & {
+  conversation: SessionConversationController;
+};
 
 /** Complete existing-session conversation. Uses the provider's normal SDK client
  * (including Site clients), one shared event feed, and authoritative queue state.
@@ -225,8 +264,18 @@ function RetryingConversation(props: Omit<SessionConversationProps, "baseUrl">) 
   );
 }
 
-function Conversation({
-  sessionId,
+function Conversation(props: SessionConversationProps & { onRetry: () => void }) {
+  const conversation = useSessionConversation(props.sessionId, props);
+  return <ConversationView {...props} conversation={conversation} />;
+}
+
+/** Stock view for a controller mounted in a stable host. No second event feed or draft. */
+export function SessionConversationView(props: SessionConversationViewProps) {
+  return <ConversationView {...props} onRetry={() => void props.conversation.retry()} />;
+}
+
+function ConversationView({
+  conversation,
   renderMessageText,
   resolveLink,
   onOpenArtifact,
@@ -236,65 +285,47 @@ function Conversation({
   toolRegistry,
   renderAllowanceExhausted,
   allowanceExhaustedLabels,
-  attachments: attachmentsRequested = true,
   voiceInput: voiceInputRequested = true,
   realtimeVoice: realtimeVoiceProp,
+  realtimeVoiceProps,
   genieLoading,
-  modelPicker,
   modelPickerProps,
   userMessageDisclosureLabels,
   loadSkillReview,
-  client,
-  workspaceId,
   className,
   height = "100%",
   theme,
   surface,
   labels: labelOverrides,
   composerProps,
+  chromeProps,
+  humanInputProps,
+  approvalProps,
   onRetry,
-}: SessionConversationProps & { onRetry: () => void }) {
-  const scope = { client, workspaceId };
-  const context = useOpenGeni(scope);
+}: SessionConversationViewProps & { onRetry: () => void }) {
+  const {
+    sessionId,
+    config,
+    showModelPicker,
+    catalog,
+    feed,
+    detail,
+    queue,
+    human,
+    control,
+    approvals,
+    files,
+    uploadsEnabled,
+    status,
+    terminal,
+    importedArchive,
+    composer,
+    running,
+    error,
+    loadFailed,
+  } = conversation;
+  const context = conversation;
   const formatError = useErrorMessage();
-  const config = useClientConfigFlags(context.client);
-  const showModelPicker = modelPicker ?? config.modelSelection;
-  const catalog = useWorkspaceModelCatalog({
-    client: context.client,
-    workspaceId: context.workspaceId,
-    enabled: showModelPicker,
-  });
-  const feed = useSessionEvents(sessionId, scope);
-  const options = { ...scope, events: feed.events };
-  const detail = useSession(sessionId, options);
-  const queue = useTurnQueue(sessionId, options);
-  const human = useHumanInputRequests(sessionId, options);
-  const control = useSessionControl(sessionId, scope);
-  const approvals = useMemo(() => projectPendingApprovals(feed.events), [feed.events]);
-  const files = useFileAttachments(scope);
-  const uploadsEnabled = attachmentsRequested && config.uploads;
-  const status = feed.sessionStatus ?? detail.session?.status;
-  const terminal = status === "cancelled";
-  const importedArchive = detail.session?.importedArchive?.readOnly === true;
-  const releaseSentFiles = (input: SendMessageInput) =>
-    files.removeReadyFiles(
-      (input.resources ?? []).flatMap((resource) =>
-        resource.kind === "file" ? [resource.fileId] : [],
-      ),
-    );
-  const composer = useComposer(sessionId, {
-    ...options,
-    effectiveControl: queue.effectiveControl ?? detail.session?.effectiveControl,
-    sendDestination: () => (queue.queue.length > 0 || status === "running" ? "queue" : "chat"),
-    ...(uploadsEnabled
-      ? {
-          sendExtras: () => ({ resources: files.readyResources }),
-          sendBlocked: () => files.hasUnresolved,
-          onSubmitted: (_text, input) => releaseSentFiles(input),
-          onSent: (_text, input) => releaseSentFiles(input),
-        }
-      : {}),
-  });
   const region = useRef<HTMLDivElement>(null);
   const hostTheme = useHostTheme(region, { theme, surface });
   const defaultInteractiveBlock = useDefaultInteractiveBlock(
@@ -339,16 +370,7 @@ function Conversation({
     [resolveLink, viewerLinks, inheritedLinks, defaultLinks],
   );
   const labels = { ...DEFAULT_CONVERSATION_LABELS, ...labelOverrides };
-  const error = detail.error ?? feed.error ?? human.error;
-  // Only an event feed that never loaded replaces the timeline; anything else
-  // is a refresh failure shown above a conversation that stays usable.
-  const loadFailed = Boolean(feed.error) && feed.events.length === 0;
-  const retryInPlace = () => {
-    if (detail.error) void detail.refresh();
-    if (human.error) void human.refresh();
-    if (feed.error) void feed.jumpToLatest();
-  };
-  const running = status === "running" || status === "recovering" || status === "waiting_capacity";
+  const retryInPlace = () => void conversation.retry();
   const realtimeVoiceRequested = realtimeVoiceProp ?? config.realtimeVoiceOffered;
   const loadingOptions = useMemo(() => embeddedGenieLoading(genieLoading), [genieLoading]);
   const providerRecovery = useMemo(
@@ -373,21 +395,33 @@ function Conversation({
     realtimeVoiceRequested && config.realtimeVoice && !importedArchive,
   );
   const [voiceActive, setVoiceActive] = useState(false);
+  const notifyVoiceActive = realtimeVoiceProps?.onVoiceActiveChange;
+  const onVoiceActiveChange = useCallback(
+    (active: boolean) => {
+      setVoiceActive(active);
+      notifyVoiceActive?.(active);
+    },
+    [notifyVoiceActive],
+  );
   const voiceControl =
     composer.effectiveControl ?? queue.effectiveControl ?? detail.session?.effectiveControl;
   const voice =
     voiceModels.length > 0 && status && !terminal && voiceControl ? (
       <Suspense fallback={null}>
         <LazyEmbeddedRealtimeVoice
-          client={context.client}
+          {...realtimeVoiceProps}
+          client={
+            context.client as unknown as ComponentProps<typeof SessionRealtimeControl>["client"]
+          }
           workspaceId={context.workspaceId}
-          models={voiceModels}
+          codexConnected={realtimeVoiceProps?.codexConnected ?? false}
           sessionId={sessionId}
           sessionStatus={status}
           effectiveControl={voiceControl}
           events={feed.events}
           eventsReady={!feed.initialLoading}
-          onVoiceActiveChange={setVoiceActive}
+          getModelContext={conversation.getModelContext}
+          onVoiceActiveChange={onVoiceActiveChange}
         />
       </Suspense>
     ) : null;
@@ -454,7 +488,7 @@ function Conversation({
           {...(onOpenSession ? { onOpenSession } : {})}
           {...(resolveSessionTitle ? { resolveSessionTitle } : {})}
           events={feed.events}
-          items={conversationTimeline(feed.timeline, queue, composer)}
+          items={conversation.timeline}
           turnSummary={{ rolling: true }}
           status={status}
           hasOlder={feed.hasOlder}
@@ -488,6 +522,7 @@ function Conversation({
             {approvals.length > 0 && !terminal ? (
               <ApprovalSurface
                 className="mx-auto max-w-3xl"
+                {...approvalProps}
                 approvals={approvals}
                 onApprove={async (approval) => {
                   await control.approve(approval.id);
@@ -505,6 +540,9 @@ function Conversation({
             />
             <HumanInputSurface
               className="mx-auto max-w-3xl"
+              autoFocus={false}
+              decisionButtons
+              {...humanInputProps}
               loadSkillReview={loadSkillReview}
               requests={human.requests}
               onSubmit={async (id, response) => {
@@ -512,8 +550,6 @@ function Conversation({
               }}
               respondingRequestId={human.respondingRequestId}
               error={human.mutationError ? formatError(human.mutationError) : null}
-              autoFocus={false}
-              decisionButtons
             />
             <ConversationChrome
               sessionId={sessionId}
@@ -522,8 +558,9 @@ function Conversation({
               events={feed.events}
               chrome={
                 terminal
-                  ? { queue, sessionStatus: status, readOnly: true, onOpenSession }
+                  ? { ...chromeProps, queue, sessionStatus: status, readOnly: true, onOpenSession }
                   : {
+                      ...chromeProps,
                       queue,
                       composer,
                       sessionStatus: status,

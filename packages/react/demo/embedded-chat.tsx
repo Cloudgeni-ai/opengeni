@@ -10,8 +10,14 @@
    long, empty, error). `&explicit=1` pins the legacy `data-og-theme` wrapper;
    `&hostile=1` adds global host element CSS. */
 import { createRoot } from "react-dom/client";
-import type { Session, SessionEvent, SessionQueueSnapshot } from "@opengeni/sdk";
-import { OpenGeniChat, OpenGeniProvider } from "@opengeni/react";
+import { useState } from "react";
+import type { SendMessageInput, Session, SessionEvent, SessionQueueSnapshot } from "@opengeni/sdk";
+import {
+  OpenGeniChat,
+  OpenGeniProvider,
+  SessionConversationView,
+  useSessionConversation,
+} from "@opengeni/react";
 import { fakeClient, WORKSPACE_ID } from "../test/fake-client";
 import "@opengeni/react/compiled.css";
 
@@ -259,6 +265,10 @@ const control: SessionQueueSnapshot["effectiveControl"] = {
 };
 
 const base = fakeClient({});
+const controllerFixture = { streams: 0, sent: [] as SendMessageInput[] };
+if (params.get("controller") === "1") {
+  Object.assign(window, { embeddedConversationHarness: controllerFixture });
+}
 const client = fakeClient({
   getClientConfig: async () =>
     ({
@@ -292,7 +302,21 @@ const client = fakeClient({
     return id === SELECTED ? events : [];
   },
   pauseSession: async () => ({ effectiveControl: control }) as never,
+  sendMessage: async (_workspace, sessionId, input) => {
+    const message = typeof input === "string" ? { text: input } : input;
+    controllerFixture.sent.push(message);
+    return {
+      id: crypto.randomUUID(),
+      workspaceId: WORKSPACE_ID,
+      sessionId,
+      sequence: ++sequence,
+      type: "user.message",
+      payload: message,
+      occurredAt: new Date().toISOString(),
+    };
+  },
   streamEvents: async function* (_workspace, _session, options) {
+    controllerFixture.streams++;
     await new Promise<void>((resolve) =>
       options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
     );
@@ -309,6 +333,59 @@ const palette =
 document.documentElement.classList.toggle("dark", theme === "dark");
 document.body.style.background = palette.page;
 document.body.style.color = palette.ink;
+
+function PersistentConversationDemo() {
+  const [expanded, setExpanded] = useState(false);
+  const [visible, setVisible] = useState(true);
+  const conversation = useSessionConversation(SELECTED, {
+    composerOptions: { sendExtras: () => ({ modelContext: "Current record: ticket T-4821" }) },
+  });
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", gap: 12 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 12, fontSize: 13 }}>
+        <button type="button" onClick={() => setExpanded((value) => !value)}>
+          Toggle panel layout
+        </button>
+        <button type="button" onClick={() => setVisible((value) => !value)}>
+          {visible ? "Hide conversation" : "Show conversation"}
+        </button>
+        <button
+          type="button"
+          onClick={() =>
+            conversation.composer.addAnnotation?.({
+              id: crypto.randomUUID(),
+              source: {
+                kind: "user_message",
+                eventId: "evt-2",
+                eventType: "user.message",
+                sequence: 2,
+                turnId: TURN,
+                startOffset: 0,
+                endOffset: 8,
+                contextBefore: "",
+                contextAfter: " on T-4821",
+              },
+              quote: "Customer",
+              note: "Check this exact source.",
+            })
+          }
+        >
+          Add example annotation
+        </button>
+      </div>
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          width: expanded ? "100%" : "min(460px, 100%)",
+          alignSelf: "flex-end",
+        }}
+      >
+        {visible ? <SessionConversationView conversation={conversation} /> : null}
+      </div>
+    </div>
+  );
+}
 
 /** A plain host product around the stock component, as a customer would ship it. */
 function HostApp() {
@@ -376,7 +453,11 @@ function HostApp() {
         style={{ flex: 1, minHeight: 0, padding: narrow ? 0 : "16px 24px 24px" }}
       >
         <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
-          <OpenGeniChat defaultSessionId={scenario === "empty" ? null : SELECTED} />
+          {params.get("controller") === "1" ? (
+            <PersistentConversationDemo />
+          ) : (
+            <OpenGeniChat defaultSessionId={scenario === "empty" ? null : SELECTED} />
+          )}
         </OpenGeniProvider>
       </div>
     </div>

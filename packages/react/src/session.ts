@@ -30,6 +30,11 @@ export type {
 } from "./embedded-session-client";
 
 export { useSession, isTitleEvent } from "./hooks/use-session";
+export { useSessionConversation } from "./hooks/use-session-conversation";
+export type {
+  SessionConversationController,
+  UseSessionConversationOptions,
+} from "./hooks/use-session-conversation";
 export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";
 export { useSessionEvents } from "./hooks/use-session-events";
 export type {

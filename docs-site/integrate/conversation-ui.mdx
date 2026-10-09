@@ -75,6 +75,52 @@ Import from `@opengeni/react/session-ui` for the smallest bundle; it has no opti
 
 Remount the component when the signed-in user or tenant changes.
 
+## Keep a conversation across layouts
+
+The default component needs no controller setup. If a conversation moves between
+a side panel and a full-page view, mount `useSessionConversation` in a stable
+parent and pass it to `SessionConversationView`. These are the same state and
+view used by `SessionConversation`, not a second chat implementation.
+
+```tsx
+import { useSessionConversation, SessionConversationView } from "@opengeni/react/session-ui";
+
+function PersistentConversation({ sessionId, recordContext, expanded, refreshRecord }) {
+  // Under your OpenGeniProvider; explicit client/workspaceId also work.
+  const conversation = useSessionConversation(sessionId, {
+    composerOptions: {
+      sendExtras: () => ({ modelContext: recordContext }),
+      onSent: () => refreshRecord(),
+    },
+  });
+
+  return (
+    <section className={expanded ? "conversation-page" : "conversation-panel"}>
+      <SessionConversationView conversation={conversation} />
+    </section>
+  );
+}
+```
+
+Keep the controller mounted to retain the event stream, annotations, draft,
+model policy and uploads when a view is replaced. Keep the view mounted too
+while using live voice: the stock voice control owns the browser microphone
+and call lifetime. Change layout with CSS rather than moving it between React
+parents. Remount both on a signed-in user or tenant change.
+
+Use `composerOptions.sendExtras` for application context and `onSent` for
+post-acceptance notifications, not a custom `send` wrapper. The stock composer
+continues to validate annotation-only messages, upload readiness, queueing and
+retry identity. The same `modelContext` is captured for durable voice messages.
+Notification exceptions are reported as browser errors; they cannot make an
+accepted send appear failed. Context is ordinary model-visible content, not an
+authorization mechanism or a place for secrets.
+
+`chromeProps`, `humanInputProps` and `approvalProps` customize stock status
+panels and decision presentation without replacing their action handlers.
+`realtimeVoiceProps` provides optional connected-account state and voice
+autostart handoff; live voice remains opt-in as before.
+
 ## Brand it
 
 `compiled.css` is scoped to the components and needs no Tailwind. Out of the box it needs no extra cosmetic host CSS. To match your product, override the `--og-*` CSS variables on any ancestor:
