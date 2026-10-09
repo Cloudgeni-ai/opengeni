@@ -15,7 +15,7 @@ import {
   shardCredentialForSession,
   type CodexRotationStrategy,
   selectCodexCredentialLeaseForTurn,
-} from "../src/activities/codex-rotation";
+} from "./fixtures/legacy-codex/rotation";
 
 // Multi-account P3 — the PURE rotation ranker. All rotation correctness (most_remaining
 // selection, healthy-active no-op, cooldown exclusion, all-capped earliest-reset,

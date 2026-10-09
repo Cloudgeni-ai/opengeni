@@ -160,12 +160,12 @@ async function claimWithCutover(
 }
 
 describe("claim-time Codex cutover", () => {
-  test("without a cutover row the claim keeps both legacy Codex reads", async () => {
+  test("without a cutover row the claim fails closed without Codex reads", async () => {
     const result = await claimWithCutover("not_configured", codexPolicy);
-    expect(result.legacyActiveCalls).toBe(1);
-    expect(result.legacyAppsCalls).toBe(1);
+    expect(result.legacyActiveCalls).toBe(0);
+    expect(result.legacyAppsCalls).toBe(0);
     expect(result.coreAppsCalls).toBe(0);
-    expect(result.codexActive).toBe(true);
+    expect(result.codexActive).toBe(false);
   });
 
   test.each(["not_configured", "enabled", "disabled"] as const)(
@@ -177,7 +177,7 @@ describe("claim-time Codex cutover", () => {
       expect(result.dispositionReads).toBe(0);
       // The capability overlay reuses the claim's one Apps designation read.
       expect(result.overlayCodexApps).toBeInstanceOf(Promise);
-      expect(result.legacyAppsCalls).toBe(cutover === "not_configured" ? 1 : 0);
+      expect(result.legacyAppsCalls).toBe(0);
       expect(result.coreAppsCalls).toBe(cutover === "enabled" ? 1 : 0);
     },
   );
@@ -211,10 +211,10 @@ describe("claim-time Codex cutover", () => {
     },
   );
 
-  test("without a cutover row a non-Codex turn keeps the legacy overlay read", async () => {
+  test("without a cutover row a non-Codex turn disables the Codex overlay", async () => {
     const result = await claimWithCutover("not_configured", ordinaryPolicy);
-    expect(result.legacyActiveCalls).toBe(1);
-    expect(result.codexActive).toBe(true);
+    expect(result.legacyActiveCalls).toBe(0);
+    expect(result.codexActive).toBe(false);
   });
 
   test("the claim carries the stored lease-busy chain onto the attempt", async () => {

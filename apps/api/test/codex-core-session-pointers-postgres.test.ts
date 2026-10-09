@@ -284,12 +284,12 @@ afterEach(async () => {
 });
 
 describe.skipIf(!realDb)("Codex session pointers on every Session response", () => {
-  test("without a cutover row every response keeps the legacy pointers", async () => {
+  test("without a cutover row every response clears the legacy pointers", async () => {
     // Migration 0680 seeds every organization on the core; this case
     // reproduces the pre-cutover world (no Codex row).
     await setCutover(null);
-    const legacy = { codexPinnedCredentialId: LEGACY_PINNED, codexLastCredentialId: LEGACY_LAST };
-    expectEverywhere(await everySessionResponse(), legacy, legacy);
+    const none = { codexPinnedCredentialId: null, codexLastCredentialId: null };
+    expectEverywhere(await everySessionResponse(), none, none);
   });
 
   test("an enabled cutover projects the core binding everywhere", async () => {

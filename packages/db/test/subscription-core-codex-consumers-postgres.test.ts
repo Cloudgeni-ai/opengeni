@@ -305,7 +305,7 @@ function authorizationCases(harness: "template" | "owner-migrated") {
     await shared!.admin`
       insert into subscription_apps_designations (account_id, workspace_id, connection_id, updated_by_subject_id)
       values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${connectionId}::uuid, ${org.ownerSubjectId})`;
-    expect(await readCodexCutoverDisposition(client!.db, org.accountId)).toBe("legacy");
+    expect(await readCodexCutoverDisposition(client!.db, org.accountId)).toBe("maintenance");
     const scope = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };
     expect(await resolveSubscriptionCoreCodexAppsDesignation(client!.db, scope)).toBeNull();
     expect(await readCredential(org, org.sharedWorkspaceId, connectionId)).toEqual([]);

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { configuredModels, withCodexCatalogProvider } from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
@@ -27,9 +27,7 @@ const settings = testSettings({
 describe("fresh model admission versus live discovery", () => {
   let active: boolean;
   let mocks: { mockRestore(): void }[];
-  let availability: ReturnType<
-    typeof spyOn<typeof codexAvailability, "loadWorkspaceCodexModelAvailability">
-  >;
+  let availability: ReturnType<typeof mock<() => Promise<Record<string, any>>>>;
   let restrictions: ReturnType<
     typeof spyOn<typeof opengeniDb, "getWorkspaceConnectionModelRestrictions">
   >;
@@ -43,10 +41,7 @@ describe("fresh model admission versus live discovery", () => {
       {},
     );
     policy = spyOn(opengeniDb, "getWorkspaceModelPolicy").mockResolvedValue(null);
-    availability = spyOn(
-      codexAvailability,
-      "loadWorkspaceCodexModelAvailability",
-    ).mockResolvedValue({});
+    availability = mock(async () => ({}));
     balance = spyOn(opengeniDb, "getBillingBalance").mockResolvedValue({
       accountId: context.accountId,
       balanceMicros: 0,
@@ -74,14 +69,15 @@ describe("fresh model admission versus live discovery", () => {
       spyOn(opengeniDb, "workspaceClaudeSubscriptionActiveForAuthority").mockResolvedValue(false),
       restrictions,
       policy,
-      availability,
+      spyOn(codexAvailability, "loadWorkspaceCodexCatalogReadiness").mockImplementation(
+        async (_db, _settings, _context, options) => ({
+          active,
+          observations: options?.observeAvailability === false ? {} : await availability(),
+        }),
+      ),
       balance,
       allowance,
-      // The pre-cutover world (no Codex cutover row): the legacy readers decide.
-      spyOn(opengeniDb, "readCodexCutoverDisposition").mockResolvedValue("legacy"),
-      spyOn(opengeniDb, "legacyWorkspaceCodexSubscriptionActive").mockImplementation(
-        async () => active,
-      ),
+
       spyOn(opengeniDb, "workspaceXaiSubscriptionActive").mockResolvedValue(false),
       spyOn(opengeniDb, "listConnectionsMetadata").mockResolvedValue([]),
       spyOn(opengeniDb, "listWorkspaceProviderCustomModelsByKind").mockResolvedValue({
@@ -101,7 +97,7 @@ describe("fresh model admission versus live discovery", () => {
   });
 
   afterEach(() => {
-    for (const mock of mocks) mock.mockRestore();
+    for (const mocked of mocks) mocked.mockRestore();
   });
 
   test("stable admission cannot refresh a subscription onto the zero-credit billing rail", async () => {

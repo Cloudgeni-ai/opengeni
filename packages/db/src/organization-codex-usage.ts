@@ -25,25 +25,19 @@ type AdministratorScope = <T>(db: Database, use: (tx: Database) => Promise<T>) =
 export async function readOrganizationCodexUsage(
   db: Database,
   settings: Settings,
-  input: { organizationId: string; credentialId: string; mode: "legacy" | "core" },
+  input: { organizationId: string; credentialId: string; mode: "core" },
   withAdministrator: AdministratorScope,
   fetchImpl: CodexFetch = fetch,
   refresh: CodexAuthDeps["refresh"] = refreshCodexToken,
 ): Promise<CodexUsagePayload> {
   let credentialId = input.credentialId;
-  const core = input.mode === "core";
-  const table = core ? sql`subscription_connections` : sql`codex_subscription_credentials`;
-  const version = core ? sql`refresh_generation` : sql`version`;
   const condition = () =>
-    core
-      ? sql`account_id = ${input.organizationId}::uuid and id = ${credentialId}::uuid
+    sql`account_id = ${input.organizationId}::uuid and id = ${credentialId}::uuid
         and provider = 'codex' and kind = 'subscription' and ownership = 'shared'
-        and managed_by_workspace_id is null`
-      : sql`account_id = ${input.organizationId}::uuid and id = ${credentialId}::uuid
-        and organization_id = ${input.organizationId}::uuid and authority_scope = 'organization'`;
+        and managed_by_workspace_id is null`;
   const scoped: AdministratorScope = (targetDb, use) =>
     withAdministrator(targetDb, async (tx) => {
-      if ((await readCodexCutoverDisposition(tx, input.organizationId)) !== input.mode) {
+      if ((await readCodexCutoverDisposition(tx, input.organizationId)) !== "core") {
         throw new Error("Codex usage is unavailable during subscription maintenance");
       }
       return await use(tx);
@@ -58,11 +52,11 @@ export async function readOrganizationCodexUsage(
         const rows = await rawRows<Record<string, unknown>>(
           tx,
           sql`
-          select id, ${version} as version, credential_encrypted, status, last_error,
+          select id, refresh_generation as version, credential_encrypted, status, last_error,
             expires_at, last_refresh_at, plan_type,
-            ${core ? sql`provider_account_id` : sql`chatgpt_account_id`} as provider_account_id,
-            ${core ? sql`coalesce((provider_state->>'isFedramp')::boolean, false)` : sql`is_fedramp`} as is_fedramp
-          from ${table} where ${condition()}
+            provider_account_id,
+            coalesce((provider_state->>'isFedramp')::boolean, false) as is_fedramp
+          from subscription_connections where ${condition()}
         `,
         );
         const row = rows[0];
@@ -108,7 +102,7 @@ export async function readOrganizationCodexUsage(
     withRefreshLock: (targetDb, _scope, refreshCredentialId, use) =>
       scoped(targetDb, async (tx) => {
         await tx.execute(sql`set local lock_timeout = '30s'`);
-        const key = `${core ? "subscription-refresh" : "codex-refresh"}:${refreshCredentialId}`;
+        const key = `subscription-refresh:${refreshCredentialId}`;
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
         return await use(tx);
       }),
@@ -121,12 +115,12 @@ export async function readOrganizationCodexUsage(
         const rows = await rawRows<Record<string, unknown>>(
           tx,
           sql`
-          update ${table} set credential_encrypted = ${next.credentialEncrypted},
-            ${core ? sql`credential_format = split_part(${next.credentialEncrypted}, ':', 1),` : sql``}
+          update subscription_connections set credential_encrypted = ${next.credentialEncrypted},
+            credential_format = split_part(${next.credentialEncrypted}, ':', 1),
             expires_at = ${next.expiresAt?.toISOString() ?? null}::timestamptz,
             last_refresh_at = ${next.lastRefreshAt.toISOString()}::timestamptz,
-            ${version} = ${version} + 1, updated_at = clock_timestamp()
-          where ${condition()} and ${version} = ${next.version}
+            refresh_generation = refresh_generation + 1, updated_at = clock_timestamp()
+          where ${condition()} and refresh_generation = ${next.version}
           returning id
         `,
         );
@@ -137,9 +131,9 @@ export async function readOrganizationCodexUsage(
         const rows = await rawRows<Record<string, unknown>>(
           tx,
           sql`
-          update ${table} set status = ${status},
+          update subscription_connections set status = ${status},
             last_error = 'Sign in to ChatGPT again', updated_at = clock_timestamp()
-          where ${condition()} and ${version} = ${target.version} and status = 'active'
+          where ${condition()} and refresh_generation = ${target.version} and status = 'active'
           returning id
         `,
         );
@@ -147,7 +141,7 @@ export async function readOrganizationCodexUsage(
       }),
   };
   try {
-    if (core) {
+    {
       // Resolve under current administrator authority, then freeze this exact
       // identity for reads, refresh locking and generation-fenced writes.
       const canonical = await scoped(db, (tx) =>

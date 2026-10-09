@@ -4582,7 +4582,10 @@ describe("Codex credential lease deadline fence", () => {
     let now = performance.now();
     const clock = spyOn(performance, "now").mockImplementation(() => now);
     let resolveHeartbeat!: (value: Date | null) => void;
-    const heartbeat = spyOn(opengeniDb, "heartbeatCodexCredentialLeaseUntil").mockImplementation(
+    const scope = spyOn(opengeniDb, "withRlsContext").mockImplementation(
+      async (db, _context, fn) => await fn(db),
+    );
+    const heartbeat = spyOn(opengeniDb, "renewSubscriptionTurnLease").mockImplementation(
       () =>
         new Promise<Date | null>((resolve) => {
           resolveHeartbeat = resolve;
@@ -4599,7 +4602,9 @@ describe("Codex credential lease deadline fence", () => {
         workspaceId: "workspace-1",
         codexWorkspaceKey: "workspace-key",
         getTurnId: () => "turn-1",
+        getSessionId: () => "session-1",
       } as never);
+      lease.useSubscriptionCoreLease("connection-1");
       lease.held = true;
       lease.holderId = "holder-1";
       lease.generation = 1;
@@ -4617,6 +4622,7 @@ describe("Codex credential lease deadline fence", () => {
       expect(lease.confirmedUntilMs).toBe(priorDeadline);
     } finally {
       heartbeat.mockRestore();
+      scope.mockRestore();
       clock.mockRestore();
     }
   });

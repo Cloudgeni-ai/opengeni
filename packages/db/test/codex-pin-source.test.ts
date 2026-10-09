@@ -11,13 +11,15 @@ import {
   withWorkspaceSessionActivityRls,
   createDb,
   createSession,
+  type Database,
+  type DbClient,
+} from "../src/index";
+import {
   getSessionCodexState,
   recordSessionActiveCodexCredential,
   setSessionCodexPin,
   setWorkspaceCodexSubscriptionMode,
-  type Database,
-  type DbClient,
-} from "../src/index";
+} from "./fixtures/legacy-codex";
 
 // AM-2 — the per-session codex pin SOURCE discriminator (sessions.codex_pin_source).
 // Driven through the REAL packages/db accessors against a throwaway postgres under the

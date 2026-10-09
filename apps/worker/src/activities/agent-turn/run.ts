@@ -1,7 +1,6 @@
 import { withClaudeConnectionCredential } from "@opengeni/config";
 import {
   getSessionAuthorityProjection,
-  canSpendCodexExtraCreditsForTurn,
   canSpendSubscriptionCoreCodexExtraCredits,
   readActiveSandbox,
   getWorkspaceCredentialProvider,
@@ -38,7 +37,7 @@ import {
   type SandboxFileDownloadFailure,
   type CodemodeTokenWriterSession,
 } from "@opengeni/runtime";
-import { buildCodexTokenResolver } from "../codex-auth";
+
 import {
   buildModelResolver,
   CODEX_CLIENT_VERSION,
@@ -100,12 +99,7 @@ import { finalizeTurnAttempt } from "./finalization";
 import { settleTurnFailure } from "./failure-settlement";
 import { runTurnStreamAttempt } from "./stream-attempt";
 import { claimTurnAttempt } from "./claim";
-import {
-  selectCodexTurnCapacity,
-  selectCodexTurnAccount,
-  codexAccountsLackingTurnModel,
-  type CapacityPhaseDeps,
-} from "./codex-capacity";
+import { selectCodexTurnCapacity, type CapacityPhaseDeps } from "./codex-capacity";
 import {
   assertTurnModelConnection,
   buildCoreCodexRequestTokenResolver,
@@ -470,7 +464,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         credentialSubjectId,
         fileAuthoritySubjectId,
         capabilitySettings,
-        codexAppsCredentialId,
         codexAppsCoreConnectionId,
         turnExecutionPolicy,
         trigger,
@@ -679,26 +672,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const codexContext: CodexRequestContext | null =
             resolvedModel?.provider.kind === "codex-subscription"
               ? ((): CodexRequestContext => {
-                  // The empty-string fallback yields no row → null credential → the
-                  // existing CodexReloginRequired path (a codex turn with no usable
-                  // account fails closed, exactly as before multi-account).
                   const coreCodex = providerTurn.codexSubscriptionCore;
-                  const resolver = coreCodex
-                    ? buildCoreCodexRequestTokenResolver(db, runSettings, coreCodex, leases.codex, {
-                        signalCodexCapacityWorkflow,
-                      })
-                    : buildCodexTokenResolver(
-                        db,
-                        runSettings,
-                        input.workspaceId,
-                        providerTurn.effectiveCodexCredentialId ?? "",
-                        undefined,
-                        {
-                          turnId: turn.id,
-                          holderId: leases.codex.holderId!,
-                          generation: leases.codex.generation!,
-                        },
-                      );
+                  if (!coreCodex) throw new Error("Codex core placement is required for dispatch");
+                  const resolver = buildCoreCodexRequestTokenResolver(
+                    db,
+                    runSettings,
+                    coreCodex,
+                    leases.codex,
+                    {
+                      signalCodexCapacityWorkflow,
+                    },
+                  );
                   let resolvedToken: Awaited<ReturnType<typeof resolver.getToken>> | null = null;
                   const trackToken = (token: Awaited<ReturnType<typeof resolver.getToken>>) => {
                     providerTurn.effectiveCodexCredentialVersion = token.credentialVersion;
@@ -708,45 +692,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   const creditGuard = createCodexCreditGuard({
                     canSpendCredits: async () => {
                       if (!leases.codex.holderId || leases.codex.generation === null) return false;
-                      if (coreCodex)
-                        return await canSpendSubscriptionCoreCodexExtraCredits(db, {
-                          identity: coreCodex.identity,
-                          connectionId: coreCodex.connectionId,
-                          attemptId: input.attemptId,
-                          executionGeneration: attempt.executionGeneration!,
-                          holderId: leases.codex.holderId,
-                          productModelId: providerTurn.codexProductModelId!,
-                          reasoningLevel: turnExecutionPolicy.reasoningEffort,
-                          leaseTtlMs: 60_000,
-                        });
-                      const lackingModel = await codexAccountsLackingTurnModel(
-                        db,
-                        runSettings,
-                        input.workspaceId,
-                        turnExecutionPolicy.upstreamModelId,
-                      );
-                      return await canSpendCodexExtraCreditsForTurn(
-                        db,
-                        {
-                          accountId: input.accountId,
-                          workspaceId: input.workspaceId,
-                          sessionId: input.sessionId,
-                          turnId: turn.id,
-                          attemptId: input.attemptId,
-                          executionGeneration: attempt.executionGeneration!,
-                          credentialId: providerTurn.effectiveCodexCredentialId!,
-                          holderId: leases.codex.holderId,
-                          generation: leases.codex.generation,
-                        },
-                        (context, acceptedSession) =>
-                          selectCodexTurnAccount({
-                            context,
-                            session: acceptedSession,
-                            sessionId: input.sessionId,
-                            productModelId: turnExecutionPolicy.productModelId,
-                            lackingModel,
-                          }),
-                      );
+                      return await canSpendSubscriptionCoreCodexExtraCredits(db, {
+                        identity: coreCodex.identity,
+                        connectionId: coreCodex.connectionId,
+                        attemptId: input.attemptId,
+                        executionGeneration: attempt.executionGeneration!,
+                        holderId: leases.codex.holderId,
+                        productModelId: providerTurn.codexProductModelId!,
+                        reasoningLevel: turnExecutionPolicy.reasoningEffort,
+                        leaseTtlMs: 60_000,
+                      });
                     },
                     refreshToken: async () => trackToken(await resolver.refresh()),
                     onUsage: (snapshot) => {
@@ -1571,7 +1526,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             fileAuthoritySubjectId,
             capabilitySettings,
             installedApiIntegrations,
-            codexAppsCredentialId,
             codexAppsCoreConnectionId,
             turnExecutionPolicy,
             trigger,

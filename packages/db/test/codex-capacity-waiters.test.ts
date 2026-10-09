@@ -13,7 +13,6 @@ import {
   readCodexCapacityRecovery,
 } from "../src/codex-capacity-recovery";
 import {
-  armCodexCapacityWait,
   appendSessionEventsForTurnAttempt,
   evaluateGoalContinuation,
   getSessionTurn,
@@ -22,24 +21,12 @@ import {
   createDb,
   encryptEnvironmentValue,
   enqueueSessionTurn,
-  ensureCodexRotationSettings,
-  getCodexCapacityWaitForSession,
-  listPendingCodexCapacityWakeTargets,
   mutateSessionControlInTransaction,
-  reconcileCodexCapacityWait,
   requestSessionTurnRecovery,
   retryFailedSessionInTransaction,
-  recordCodexAccountUsageWithWakeTargets,
   registerPendingSessionToolCall,
-  setCodexCredentialExhausted,
-  setSessionCodexPinInTransaction,
-  setWorkspaceCodexSubscriptionMode,
   submitHumanPromptInTransaction,
-  updateCodexRotationSettings,
-  upsertCodexSubscriptionCredential,
   withSessionActivityRlsContext,
-  withCodexCapacityMutation,
-  withSessionCodexCapacityMutation,
   type CodexCapacityAvailabilityDecision,
   type CodexCapacitySelectionContext,
   type CodexLeaseAccountStatus,
@@ -47,6 +34,21 @@ import {
   type DbClient,
   type SessionActivityDatabase,
 } from "../src/index";
+import {
+  armCodexCapacityWait,
+  ensureCodexRotationSettings,
+  getCodexCapacityWaitForSession,
+  listPendingCodexCapacityWakeTargets,
+  reconcileCodexCapacityWait,
+  recordCodexAccountUsageWithWakeTargets,
+  setCodexCredentialExhausted,
+  setSessionCodexPinInTransaction,
+  setWorkspaceCodexSubscriptionMode,
+  updateCodexRotationSettings,
+  upsertCodexSubscriptionCredential,
+  withCodexCapacityMutation,
+  withSessionCodexCapacityMutation,
+} from "./fixtures/legacy-codex";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -1653,7 +1655,7 @@ describe("durable Codex capacity waits", () => {
     });
   });
 
-  test("Steer atomically supersedes an ownerless capacity wait", async () => {
+  test("Steer supersedes the ownerless turn without mutating a frozen legacy waiter", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     await connectCredential(ws, false);
@@ -1702,7 +1704,7 @@ describe("durable Codex capacity waits", () => {
         active_turn_id
       from sessions where id = ${scenario.sessionId}`;
     expect(state).toEqual({
-      waiter_status: "superseded",
+      waiter_status: "waiting",
       blocked_status: "superseded",
       replacement_status: "queued",
       session_status: "queued",
@@ -1719,7 +1721,9 @@ describe("durable Codex capacity waits", () => {
       },
       () => availableDecision("unused"),
     );
-    expect(staleWake.action).toBe("stale");
+    // The historical reconciler retires its untouched legacy row on observing
+    // the superseded turn; production no longer writes that row during Steer.
+    expect(staleWake.action).toBe("superseded");
   });
 
   test("deleting a fenced goal preserves the waiter long enough to supersede safely", async () => {

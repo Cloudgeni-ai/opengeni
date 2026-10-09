@@ -4,7 +4,6 @@ import {
   CODEX_CLIENT_VERSION,
   CodexRealtimeError,
   CodexReloginRequired,
-  codexPlanKey,
   createCodexRealtimeCall,
   fetchCodexRealtimeProviderConfig,
   selectCodexCredentialId,
@@ -15,7 +14,6 @@ import {
 } from "@opengeni/codex";
 import {
   acquireSubscriptionCoreCodexOperationLease,
-  buildCodexTokenResolver,
   buildSubscriptionCoreCodexConnectionTokenResolver,
   listSubscriptionCoreCodexOperationCandidates,
   readCodexCutoverDisposition,
@@ -26,10 +24,7 @@ import {
   type SubscriptionCoreCodexOperationLeaseRef,
   type SubscriptionCoreCodexOperationScope,
   getActiveSessionHistoryItems,
-  getCodexCredentialStatus,
   getSessionRealtimeContinuityEntries,
-  getSessionCodexState,
-  listCodexAccountStatuses,
   type Database,
 } from "@opengeni/db";
 import { projectSessionRealtimeInitialItems } from "./session-realtime-context";
@@ -279,11 +274,6 @@ export async function brokerSessionCodexRealtime(
   }
 }
 
-/** ChatGPT Free has no voice: its realtime calls are refused. */
-function hasVoice(account: { planType: string | null }): boolean {
-  return codexPlanKey(account.planType) !== "free";
-}
-
 async function loadRealtimeInitialItems(
   db: Database,
   workspaceId: string,
@@ -424,61 +414,12 @@ export function buildSessionCodexRealtimeBroker(
         "Connected Codex subscription realtime is disabled",
       );
     }
-    if (disposition === "core") {
-      return await brokerSessionCoreCodexRealtime(
-        db,
-        settings,
-        { accountId, workspaceId, sessionId },
-        input,
-        fetchImpl,
-      );
-    }
-    return await brokerSessionCodexRealtime(
-      {
-        enabled: settings.codexSubscriptionEnabled,
-        loadSelection: async () => {
-          const [sessionState, status, accounts] = await Promise.all([
-            getSessionCodexState(db, workspaceId, sessionId),
-            getCodexCredentialStatus(db, workspaceId),
-            listCodexAccountStatuses(db, workspaceId),
-          ]);
-          if (!sessionState) {
-            throw new CodexRealtimeBrokerError(
-              "credential_unavailable",
-              "Session is unavailable for Codex realtime",
-            );
-          }
-          const connected = accounts.filter((account) => account.status === "active");
-          return {
-            pinnedCredentialId: sessionState.pinnedCredentialId,
-            activeCredentialId: status?.credentialId ?? null,
-            connectedCredentialIds: new Set(connected.map((account) => account.id)),
-            voicelessCredentialIds: new Set(
-              connected.filter((account) => !hasVoice(account)).map((account) => account.id),
-            ),
-            voiceCredentialIds: connected
-              .filter((account) => account.allocatorEnabled && hasVoice(account))
-              .map((account) => account.id),
-          };
-        },
-        loadInitialItems: async () => {
-          const [history, continuity] = await Promise.all([
-            getActiveSessionHistoryItems(db, workspaceId, sessionId),
-            getSessionRealtimeContinuityEntries(db, workspaceId, sessionId),
-          ]);
-          return projectSessionRealtimeInitialItems(history, continuity);
-        },
-        tokenResolver: (credentialId) =>
-          buildCodexTokenResolver(db, settings, workspaceId, credentialId),
-        createCall: async (auth, callInput, options) => {
-          const providerConfig = await fetchCodexRealtimeProviderConfig(auth, fetchImpl, options);
-          return await createCodexRealtimeCall(auth, callInput, fetchImpl, {
-            ...options,
-            providerConfig,
-          });
-        },
-      },
-      { ...input, sessionId },
+    return await brokerSessionCoreCodexRealtime(
+      db,
+      settings,
+      { accountId, workspaceId, sessionId },
+      input,
+      fetchImpl,
     );
   };
 }

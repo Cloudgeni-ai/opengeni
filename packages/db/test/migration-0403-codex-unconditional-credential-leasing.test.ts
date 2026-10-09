@@ -11,7 +11,6 @@ const migrationUrl = new URL(
   "../drizzle/0403_codex_unconditional_credential_leasing.sql",
   import.meta.url,
 );
-const dbIndexUrl = new URL("../src/index.ts", import.meta.url);
 const schemaUrl = new URL("../src/schema.ts", import.meta.url);
 const deploymentDocUrl = new URL("../../../docs/deployment.md", import.meta.url);
 const rotationDocUrl = new URL("../../../docs/codex-subscription-rotation.md", import.meta.url);
@@ -75,7 +74,7 @@ describe("migration 0403 unconditional Codex credential leasing", () => {
 
   test("keeps the lease index and 0403 role-list runbooks aligned", async () => {
     const [dbIndex, schema, deployment, rotation] = await Promise.all([
-      readFile(dbIndexUrl, "utf8"),
+      readFile(new URL("./fixtures/legacy-codex.ts", import.meta.url), "utf8"),
       readFile(schemaUrl, "utf8"),
       readFile(deploymentDocUrl, "utf8"),
       readFile(rotationDocUrl, "utf8"),

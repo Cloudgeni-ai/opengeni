@@ -6,8 +6,9 @@ import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
 
-import { selectCodexCredentialLeaseForTurn } from "../../../apps/worker/src/activities/codex-rotation";
-import { acquireCodexCredentialLease, createDb, withSessionActivityRlsContext } from "../src/index";
+import { selectCodexCredentialLeaseForTurn } from "../../../apps/worker/test/fixtures/legacy-codex/rotation";
+import { createDb, withSessionActivityRlsContext } from "../src/index";
+import { acquireCodexCredentialLease } from "./fixtures/legacy-codex";
 import { migrate } from "../src/migrate";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");

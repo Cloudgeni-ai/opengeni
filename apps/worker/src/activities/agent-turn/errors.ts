@@ -55,7 +55,7 @@ import {
   type McpTransportRequestFailureDiagnostic,
 } from "@opengeni/runtime/mcp-network";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
-import { CODEX_USAGE_EXHAUSTED_PCT } from "../codex-rotation";
+import { CODEX_USAGE_EXHAUSTED_PCT } from "./codex-usage-policy";
 import { RetainedAttachmentTransportLimitError } from "../run-input";
 import type { CodexAccountStatus } from "@opengeni/db";
 import {

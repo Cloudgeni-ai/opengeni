@@ -2,8 +2,11 @@
 
 Since maintenance migration `0689_subscription_core_codex_cutover.sql`, Codex
 (ChatGPT subscription) accounts run on the shared subscription core. The legacy
-selector, leases, refresh and failover path is unreachable and is deleted in M3
-PR 4. Its historical text remains in git history.
+selector, leases, refresh and failover path is removed in M3 PR 4. Missing or
+disabled cutover rows fail closed; neither permits a legacy-table fallback.
+Its historical text remains in git history, and historical database regression
+setup lives only in test fixtures. The reset-redemption ledger remains a live
+core fence. `bun run check:no-legacy-codex-runtime` enforces this boundary.
 
 | Topic | Now |
 | --- | --- |
@@ -31,7 +34,7 @@ Reported exhausted feature allowances also block spending conservatively;
 provider feature identifiers have no authoritative model mapping yet.
 
 Observed exhaustion is a local admission refusal, not a fabricated HTTP error.
-Both allocators checkpoint durable progress before switching the same turn.
+Core placement checkpoints durable progress before switching the same turn.
 Manual pins, rotation policy and capacity waits still apply. Local observations
 do not consume the provider-refusal budget. Resets are never redeemed automatically.
 Each account's **Use extra credits** switch defaults off. Automatic routing
@@ -64,9 +67,9 @@ Organization administrators can pause new chats and schedules without removing
 the connection, workspace access, primary choice, health or running leases.
 `PATCH /v1/organizations/:organizationId/codex/accounts/:accountId/allocator`
 requires same-origin human administration and the current allocator version.
-Same-state requests are idempotent; conflicting stale writes return 409. Legacy
-changes and capacity wakes commit atomically; the core uses its canonical policy
-mutation. Pause does not cancel an accepted running turn.
+Same-state requests are idempotent; conflicting stale writes return 409. Core
+policy mutations and capacity wakes commit atomically. Pause does not cancel an
+accepted running turn.
 
 ## Same-turn capacity recovery
 

@@ -42,9 +42,6 @@ import {
   getCapabilityCatalogItem,
   getCapabilityInstallation,
   getConnectionMetadata,
-  codexAppsRequestAuth,
-  getCodexAppsCredentialAuthorizationForRun,
-  getWorkspaceGrant,
   readCodexCutoverDisposition,
   resolveSubscriptionCoreCodexAppsDesignation,
   rlsContextForWorkspace,
@@ -71,7 +68,7 @@ import {
   withOrganizationIntegrationAcquisition,
   withOrganizationIntegrationPolicyFence,
 } from "@opengeni/db/organization-integration-policy";
-import { hasPermission } from "../access";
+
 import { isFikenConnection, preferredFikenConnection } from "./fiken";
 import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
 import { assertNativeMcpConnectionRef } from "./native-mcp-connection-admission";
@@ -1062,9 +1059,11 @@ export function settingsWithApiIntegrationServers(
  * scope, active). A disabled cutover row designates nothing and reads no
  * legacy Codex table.
  */
-export type CodexAppsDesignationForRun =
-  | { source: "legacy"; credentialId: string }
-  | { source: "core"; accountId: string; connectionId: string };
+export type CodexAppsDesignationForRun = {
+  source: "core";
+  accountId: string;
+  connectionId: string;
+};
 
 /**
  * What the caller already knows, so the resolver does not read it again: the
@@ -1089,18 +1088,14 @@ export async function resolveCodexAppsDesignationForRun(
       ? await known.disposition
       : await readCodexCutoverDisposition(db, await accountId(), workspaceId);
   if (disposition === "maintenance") return null;
-  if (disposition === "core") {
-    const coreAccountId = await accountId();
-    const designation = await resolveSubscriptionCoreCodexAppsDesignation(db, {
-      accountId: coreAccountId,
-      workspaceId,
-    });
-    return designation?.status === "active"
-      ? { source: "core", accountId: coreAccountId, connectionId: designation.connectionId }
-      : null;
-  }
-  const credentialId = await resolveLegacyCodexAppsCredentialIdForRun(db, workspaceId);
-  return credentialId ? { source: "legacy", credentialId } : null;
+  const coreAccountId = await accountId();
+  const designation = await resolveSubscriptionCoreCodexAppsDesignation(db, {
+    accountId: coreAccountId,
+    workspaceId,
+  });
+  return designation?.status === "active"
+    ? { source: "core", accountId: coreAccountId, connectionId: designation.connectionId }
+    : null;
 }
 
 /** Runtime Apps authentication for whichever designation `resolveCodexAppsDesignationForRun` returned. */
@@ -1110,13 +1105,11 @@ export function codexAppsRequestAuthForDesignation(
   workspaceId: string,
   designation: CodexAppsDesignationForRun,
 ): CodexAppsRequestAuth {
-  return designation.source === "core"
-    ? subscriptionCoreCodexAppsRequestAuth(db, settings, {
-        accountId: designation.accountId,
-        workspaceId,
-        connectionId: designation.connectionId,
-      })
-    : codexAppsRequestAuth(db, settings, { workspaceId, credentialId: designation.credentialId });
+  return subscriptionCoreCodexAppsRequestAuth(db, settings, {
+    accountId: designation.accountId,
+    workspaceId,
+    connectionId: designation.connectionId,
+  });
 }
 
 /**
@@ -1129,23 +1122,7 @@ export async function resolveCodexAppsCredentialIdForRun(
   workspaceId: string,
 ): Promise<string | null> {
   const designation = await resolveCodexAppsDesignationForRun(db, workspaceId);
-  return designation?.source === "legacy" ? designation.credentialId : null;
-}
-
-/**
- * The legacy designation: the connector must remain active and its exact
- * owner must still hold workspace connection-management permission.
- */
-async function resolveLegacyCodexAppsCredentialIdForRun(
-  db: Database,
-  workspaceId: string,
-): Promise<string | null> {
-  const authorization = await getCodexAppsCredentialAuthorizationForRun(db, workspaceId);
-  if (!authorization) return null;
-  const grant = await getWorkspaceGrant(db, authorization.ownerSubjectId, workspaceId);
-  return grant && hasPermission(grant.permissions, "connections:write")
-    ? authorization.credentialId
-    : null;
+  return designation?.connectionId ?? null;
 }
 
 /**

@@ -1987,6 +1987,44 @@ branch behind `readCodexCutoverDisposition`/`codexRouteDisposition`, the
 recreate the pre-cutover world to exercise them. The legacy tables stay
 read-only for forensics until M6.
 
+#### PR 4: runtime-only legacy Codex deletion
+
+The PR 3 description above is the point-in-time rollout record. PR 4 removes
+its no-row compatibility path: missing and disabled Codex cutover rows now fail
+closed, while generic Claude/SuperGrok gating is unchanged. Legacy Codex
+selector/rotation, fleet-shadow production, lease heartbeat/release fallback,
+settlement/plan recheck, catalog/media/Apps routing and database accessor
+families are removed. Core orchestration, credential refresh, credit consent,
+quota attribution, binding clock, recovery and exact waiter/goal/claim fences
+remain. Session current-selection projection reads only the core.
+
+Public paths, payloads, types and canonical/legacy aliases remain. The generic
+token resolver still supports the core organization-administration usage reader:
+admin-scoped alias resolution freezes a canonical id before its refresh lock
+and generation CAS; no routing or consent changes accompany that read. The
+reset-redemption ledger is intentionally live, with explicit core authority
+required by claim/adopt/send helpers, not a legacy routing store. Core operation
+leases and accepted funding remain, as does connection-policy PUT 409 until M5.
+Personal-fallback catalog precision and the scope editor are not expanded.
+
+`check:no-legacy-codex-runtime` is also run by `check:subscription-contract`.
+It rejects executable legacy table/schema references and imports of historical
+Codex fixtures. Exceptions are exact declarations: retained schema/FKs,
+declarative deployed-schema posture inventories, and the codec stage of 0689.
+Historical SQL is untouched. Test-only snapshots retain old schema regressions
+and the real pre-cutover peek; they are not reachable by production code.
+
+Temporal activity names `getCodexCapacityWait`/`reconcileCodexCapacityWait`, the
+`codexCapacityChanged` signal, workflow patch markers and omitted-provider
+meaning Codex remain unchanged. Missing migrated core waiters return the
+established stale result. Validation includes both live Temporal wait scenarios
+and pinned historical replay, plus the actual old peek followed by migration
+and current reconciliation of the same waiter id/generation/revision.
+
+This source merge is not deployment activation. The PR 4 binary may start only
+after drained codec-aware 0689 receipt/readiness; no old binary restart or
+legacy fallback is possible after scrub. Table/column removal is still M6.
+
 #### Verification plan
 
 - Run `bun install` first. Test Codex adapter conformance without network using

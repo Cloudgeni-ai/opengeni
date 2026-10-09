@@ -13,7 +13,6 @@ import {
 } from "../src/activities/agent-turn/codex-core-capacity";
 import {
   claimCodexActiveFromCutover,
-  claimMayResolveLegacyCodexApps,
   readClaimCodexCutoverState,
   readSubscriptionLeaseBusyChain,
 } from "../src/activities/agent-turn/codex-core-claim";
@@ -157,13 +156,15 @@ function gate(state: "not_configured" | "disabled" | "enabled") {
 }
 
 describe("Codex cutover gate dispositions", () => {
-  test("no cutover row keeps the legacy selector and never touches the core", async () => {
+  test("no cutover row fails closed and never touches either selector", async () => {
     gate("not_configured");
     const sentinel = new Error("legacy selector reached");
     const legacy = spy(db, "acquireCodexCredentialLease").mockRejectedValue(sentinel);
     const core = spy(db, "placeSubscriptionCoreCodexTurn");
-    await expect(selectCodexTurnCapacity(capacityDeps())).rejects.toBe(sentinel);
-    expect(legacy).toHaveBeenCalledTimes(1);
+    await expect(selectCodexTurnCapacity(capacityDeps())).rejects.toMatchObject({
+      code: "subscription_core_cutover_disabled",
+    });
+    expect(legacy).not.toHaveBeenCalled();
     expect(core).not.toHaveBeenCalled();
   });
 
@@ -492,7 +493,10 @@ describe("core Codex credential materialization in the worker", () => {
 
   test("refuses to materialize for a lease that does not hold the placed connection", () => {
     const held = heldLease();
-    held.codex.useLegacyCodexLease();
+    held.codex.useSubscriptionCoreLease(
+      "different-connection",
+      db.subscriptionCoreTurnActor(identity),
+    );
     expect(() =>
       buildCoreCodexRequestTokenResolver({} as db.Database, {} as never, core, held.codex),
     ).toThrow("Core Codex lease does not hold the placed connection");
@@ -1231,28 +1235,14 @@ describe("core Codex lease-busy pacing", () => {
 });
 
 describe("claim-time Codex cutover handling", () => {
-  test("a cutover row of any state stops legacy Apps resolution for every turn", () => {
-    expect(
-      claimMayResolveLegacyCodexApps({
-        codexConnectedAppsEnabled: true,
-        cutover: "not_configured",
-      }),
-    ).toBe(true);
-    for (const cutover of ["enabled", "disabled"] as const) {
-      expect(claimMayResolveLegacyCodexApps({ codexConnectedAppsEnabled: true, cutover })).toBe(
-        false,
-      );
+  test("only an explicitly enabled cutover permits Codex claim authority", () => {
+    for (const state of ["not_configured", "disabled", "enabled"] as const) {
+      expect(claimCodexActiveFromCutover(state)).toBe(state === "enabled");
     }
-    expect(
-      claimMayResolveLegacyCodexApps({
-        codexConnectedAppsEnabled: false,
-        cutover: "not_configured",
-      }),
-    ).toBe(false);
   });
 
-  test("the legacy active-credential flag is read only without a cutover row", () => {
-    expect(claimCodexActiveFromCutover("not_configured")).toBe("read_legacy");
+  test("missing and disabled cutovers do not read an active-credential flag", () => {
+    expect(claimCodexActiveFromCutover("not_configured")).toBe(false);
     expect(claimCodexActiveFromCutover("enabled")).toBe(true);
     expect(claimCodexActiveFromCutover("disabled")).toBe(false);
   });

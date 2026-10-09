@@ -5,6 +5,7 @@ import type { SQL } from "drizzle-orm";
 import type { Database } from "../src/database";
 import { encryptEnvironmentValue, decryptEnvironmentValue } from "../src/environment-crypto";
 import { readOrganizationCodexUsage } from "../src/organization-codex-usage";
+import * as aliases from "../src/subscription-core-repository";
 import * as compatibility from "../src/subscription-core-codex-compat";
 
 test("a concurrently replaced bearer cannot dispatch after its refresh enters maintenance", async () => {
@@ -58,8 +59,9 @@ test("a concurrently replaced bearer cannot dispatch after its refresh enters ma
     },
   } as unknown as Database;
   const disposition = spyOn(compatibility, "readCodexCutoverDisposition").mockImplementation(
-    async () => (maintenance ? "maintenance" : "legacy"),
+    async () => (maintenance ? "maintenance" : "core"),
   );
+  const alias = spyOn(aliases, "resolveSubscriptionConnectionId").mockResolvedValue(credentialId);
   const provider = mock(async () => new Response("{}"));
   const refresh = mock(async () => {
     maintenance = true;
@@ -73,7 +75,7 @@ test("a concurrently replaced bearer cannot dispatch after its refresh enters ma
     const result = await readOrganizationCodexUsage(
       db,
       { environmentsEncryptionKey: key.toString("base64") } as Settings,
-      { organizationId, credentialId, mode: "legacy" },
+      { organizationId, credentialId, mode: "core" },
       async (target, use) => use(target),
       provider,
       refresh,
@@ -86,5 +88,6 @@ test("a concurrently replaced bearer cannot dispatch after its refresh enters ma
     );
   } finally {
     disposition.mockRestore();
+    alias.mockRestore();
   }
 });

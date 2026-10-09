@@ -5,9 +5,8 @@ import { fileURLToPath } from "node:url";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 
+import { createDb, createSession, type DbClient } from "../src";
 import {
-  createDb,
-  createSession,
   disconnectOrganizationCodexAccount,
   getWorkspaceCodexSubscriptionSource,
   setWorkspaceCodexSubscriptionMode,
@@ -17,8 +16,7 @@ import {
   updateCodexAllocatorEligibility,
   updateCodexExtraCreditsPolicy,
   withSessionCodexCapacityMutation,
-  type DbClient,
-} from "../src";
+} from "./fixtures/legacy-codex";
 import { FORCE_RLS_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
 
 const migrationPath = join(
@@ -63,7 +61,10 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
 beforeAll(async () => {
   [migration, dbIndexSource, apiCodexRouteSource] = await Promise.all([
     readFile(migrationPath, "utf8"),
-    readFile(dbIndexPath, "utf8"),
+    Promise.all([
+      readFile(dbIndexPath, "utf8"),
+      readFile(new URL("./fixtures/legacy-codex.ts", import.meta.url), "utf8"),
+    ]).then((parts) => parts.join("\n")),
     readFile(apiCodexRoutePath, "utf8"),
   ]);
   if (!requireRealDatabase) return;
@@ -142,12 +143,9 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
     expect(dbIndexSource).toMatch(
       /wakeOrganizationCodexCapacityWaitersInTransaction[\s\S]*?list_organization_codex_workspace_ids[\s\S]*?session-tenancy:/u,
     );
-    expect(apiCodexRouteSource).toMatch(
-      /withSessionCodexCapacityMutation[\s\S]*?sourceBeforeConnect = await getWorkspaceCodexSubscriptionSource[\s\S]*?upsertCodexSubscriptionCredential[\s\S]*?ensureCodexRotationSettings[\s\S]*?setInitialActiveCodexCredential[\s\S]*?setWorkspaceCodexSubscriptionModeInTransaction[\s\S]*?effectiveSourceBeforeMutation: sourceBeforeConnect\.effectiveSource/u,
-    );
-    expect(apiCodexRouteSource).toMatch(
-      /organizations\/:organizationId\/codex\/connect\/poll[\s\S]*?upsertOrganizationCodexSubscriptionCredential[\s\S]*?active turns are using it[\s\S]*?HTTPException\(409/u,
-    );
+    expect(apiCodexRouteSource).not.toContain("withSessionCodexCapacityMutation");
+    expect(apiCodexRouteSource).toContain("coreCodexConnected");
+    expect(apiCodexRouteSource).toContain("coreOrganizationCodexAccounts");
     for (const table of [
       "organization_codex_rotation_settings",
       "workspace_codex_subscription_preferences",

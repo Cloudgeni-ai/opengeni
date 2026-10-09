@@ -10,7 +10,6 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import {
   addSessionSystemUpdate,
   addSessionSystemUpdateWithSourceMutation,
-  armCodexCapacityWait,
   armSubscriptionCoreCodexCapacityWait,
   appendSessionEventsForTurnAttempt,
   applySessionTurnSettlement,
@@ -22,7 +21,6 @@ import {
   createScheduledTask,
   createScheduledTaskRun,
   createSession,
-  ensureCodexRotationSettings,
   evaluateGoalContinuation,
   getSessionGoalWithContinuation,
   getSession,
@@ -52,12 +50,16 @@ import {
   setSessionGoalStatusWithEvent,
   steerAgentSessionInTransaction,
   submitHumanPromptInTransaction,
-  updateCodexRotationSettings,
   updateSessionGoalWithEvent,
   upsertSessionGoalWithEvent,
   withWorkspaceSessionActivityRls as withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
+import {
+  armCodexCapacityWait,
+  ensureCodexRotationSettings,
+  updateCodexRotationSettings,
+} from "./fixtures/legacy-codex";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -1914,7 +1916,7 @@ describe("durable active-goal wake", () => {
     });
   });
 
-  test("provider capacity wait blocks synthesis and exposes its durable retry time", async () => {
+  test("a frozen legacy waiter never supplies the runtime retry deadline", async () => {
     const ctx = await runningGoalFixture();
     await ensureCodexRotationSettings(client.db, ctx.grant.accountId, ctx.grant.workspaceId!);
     await updateCodexRotationSettings(client.db, ctx.grant.workspaceId!, {
@@ -1952,8 +1954,11 @@ describe("durable active-goal wake", () => {
     ).toMatchObject({
       state: "blocked",
       reason: "provider_backpressure",
-      nextAttemptAt: armed.waiter.nextCheckAt.toISOString(),
     });
+    expect(
+      (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
+        ?.continuation?.nextAttemptAt,
+    ).not.toBe(armed.waiter.nextCheckAt.toISOString());
     expect((await materialize(ctx)).action).toBe("none");
     expect(await counts(ctx)).toEqual({
       autoContinuations: 0,

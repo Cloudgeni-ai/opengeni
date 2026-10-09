@@ -35,11 +35,10 @@ import type {
 } from "./codex-account-types";
 
 /**
- * `legacy`: no cutover row, the legacy Codex path is unchanged. `core`: the
- * cutover is enabled. `maintenance`: a disabled cutover row; callers fail
+ * `core`: the cutover is enabled. `maintenance`: a missing or disabled row; callers fail
  * closed and read no legacy Codex table.
  */
-export type CodexCutoverDisposition = "legacy" | "core" | "maintenance";
+export type CodexCutoverDisposition = "core" | "maintenance";
 
 export async function readCodexCutoverDisposition(
   db: Database,
@@ -57,7 +56,7 @@ export async function readCodexCutoverDisposition(
     { accountId, workspaceId },
     async (tx) => await readSubscriptionProviderCutoverState(tx, { accountId, provider: "codex" }),
   );
-  return state === "not_configured" ? "legacy" : state === "enabled" ? "core" : "maintenance";
+  return state === "enabled" ? "core" : "maintenance";
 }
 
 /** A wake the caller delivers after its mutation committed. */

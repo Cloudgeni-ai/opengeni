@@ -35,7 +35,6 @@ import {
   resolveCompanyBrainContextSelection,
   SessionControlInvariantError,
   SessionRealtimeConflictError,
-  settleCodexCredentialLeaseLoss,
   settleSessionAttemptInterruptions,
   submitHumanPromptInTransaction,
   syncSessionRealtimeLedgerInTransaction,
@@ -45,6 +44,7 @@ import {
   withWorkspaceSessionActivityRls as withWorkspaceRls,
   type SessionActivityDatabase,
 } from "../src/index";
+import { settleCodexCredentialLeaseLoss } from "./fixtures/legacy-codex";
 import * as schema from "../src/schema";
 import { realtimeConnectionFixture } from "./realtime-connection-fixture";
 

@@ -408,9 +408,7 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
     const scope = workspaceScope(org);
     for (const state of ["absent", "disabled"] as const) {
       if (state === "disabled") await setCutover(org.accountId, false);
-      expect(await readCodexCutoverDisposition(client!.db, org.accountId)).toBe(
-        state === "absent" ? "legacy" : "maintenance",
-      );
+      expect(await readCodexCutoverDisposition(client!.db, org.accountId)).toBe("maintenance");
       expect(await listSubscriptionCoreCodexOperationCandidates(client!.db, scope)).toEqual([]);
       const lease = ref(connectionId, { operationKind: "transcription" });
       expect(await acquireSubscriptionCoreCodexOperationLease(client!.db, scope, lease)).toEqual({

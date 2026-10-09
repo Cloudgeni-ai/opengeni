@@ -784,6 +784,11 @@ Drain every old and new runtime login, run the codec-aware migrator with the
 existing environments encryption key, and start only binaries that carry the
 0689 receipt; never restart an older image, never roll back (fix forward). Every
 organization is born with an enabled Codex cutover row; turning it off is
-fail-closed maintenance, never the legacy tables. Legacy Codex code is
-unreachable and is deleted in M3 PR 4. Runbook: docs/deployment.md; design:
-docs/design/subscription-core-2026-10-07.md (PR 3).
+fail-closed maintenance, never the legacy tables. M3 PR 4 removes the runtime
+legacy selector, stores and no-row fallback; a missing gate also fails closed.
+Run `bun run check:no-legacy-codex-runtime` after subscription changes. Keep the
+codec-aware migration, schema/posture history, reset-redemption live ledger and
+Temporal names/omitted-provider decoding. Historical fixtures are test-only.
+Source merge is not activation: the PR 4 binary requires drained 0689 receipt
+and readiness first. Runbook: docs/deployment.md; design:
+docs/design/subscription-core-2026-10-07.md (PR 3 and PR 4).

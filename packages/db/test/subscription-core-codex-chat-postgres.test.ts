@@ -899,6 +899,68 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
     ).toMatchObject({ kind: "loaded", credential: { connectionId: sharedId } });
   });
 
+  test("ownerless authorization cleans only its own lifecycle capability and preserves the caller transaction", async () => {
+    const org = await organization();
+    const unrelated = await organization();
+    const turn = await runningTurn(org, {
+      workspaceId: org.sharedWorkspaceId,
+      owner: "none",
+      initiator: { kind: "service" },
+    });
+    for (const preexisting of [false, true]) {
+      for (const validTurn of [false, true]) {
+        let transaction: { pid: number; xid: string } | undefined;
+        try {
+        await withSessionRlsActorContext(subscriptionCoreTurnActor(turn.identity), () =>
+          withRlsContext(client!.db, { accountId: org.accountId, workspaceId: org.sharedWorkspaceId }, async (tx) => {
+            const [identity] = await rawRows<{ pid: number; xid: string; role: string; privileged: boolean }>(tx,
+              sql`select pg_backend_pid() as pid, pg_current_xact_id()::text as xid,
+                current_user as role, (rolsuper or rolbypassrls) as privileged
+                from pg_roles where rolname = current_user`);
+            transaction = identity;
+            expect(identity!.role).toBe("opengeni_app");
+            expect(identity!.privileged).toBe(false);
+            await tx.execute(sql`select set_config('opengeni.pr4_cleanup_probe', 'retained', true)`);
+            // Administrative fixture setup only: the restricted connection has
+            // no grant to forge/read capabilities. Seed its exact pid/xid so
+            // the real SECURITY DEFINER helper observes prior transaction state.
+            for (const accountId of [unrelated.accountId, ...(preexisting ? [org.accountId] : [])]) {
+              await shared!.admin`insert into opengeni_private.subscription_runtime_capabilities
+                (backend_pid, transaction_id, capability_kind, account_id)
+                values (${identity!.pid}, ${identity!.xid}::xid8, 'lifecycle', ${accountId})`;
+            }
+              const [result] = await rawRows<{ authorized: boolean }>(tx,
+                sql`select opengeni_private.authorize_subscription_ownerless_session_access(
+                  ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid,
+                  ${turn.identity.sessionId}::uuid,
+                  ${validTurn ? turn.identity.turnId : crypto.randomUUID()}::uuid) as authorized`);
+              expect(result!.authorized).toBe(validTurn);
+              const [after] = await rawRows<{ xid: string; probe: string; account_id: string; workspace_id: string; subject_id: string }>(tx,
+                sql`select pg_current_xact_id()::text as xid,
+                  current_setting('opengeni.pr4_cleanup_probe') as probe,
+                  current_setting('opengeni.account_id') as account_id,
+                  current_setting('opengeni.workspace_id') as workspace_id,
+                  current_setting('opengeni.subject_id') as subject_id`);
+              expect(after).toEqual({ xid: identity!.xid, probe: "retained", account_id: org.accountId,
+                workspace_id: org.sharedWorkspaceId, subject_id: "service:subscription-core" });
+          }),
+        );
+        // Observe AFTER commit: another connection cannot see the helper's
+        // uncommitted insert/delete, so an in-transaction read is insufficient.
+        const retained = await shared!.admin<{ account_id: string }[]>`
+          select account_id::text from opengeni_private.subscription_runtime_capabilities
+          where backend_pid = ${transaction!.pid} and transaction_id = ${transaction!.xid}::xid8
+            and capability_kind = 'lifecycle' order by account_id`;
+        expect(retained.map(row => row.account_id).sort()).toEqual(
+          [unrelated.accountId, ...(preexisting ? [org.accountId] : [])].sort());
+        } finally {
+          if (transaction) await shared!.admin`delete from opengeni_private.subscription_runtime_capabilities
+            where backend_pid = ${transaction.pid} and transaction_id = ${transaction.xid}::xid8`;
+        }
+      }
+    }
+  });
+
   test("concurrent refreshes of one generation persist one rotation and call the provider once", async () => {
     const org = await organization();
     await enableCodexCutover(org.accountId);

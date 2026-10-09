@@ -1,7 +1,6 @@
 // Codex routes for organizations whose Codex cutover row exists (M3 PR 2b).
 //
-// `codexRouteDisposition` is read first by every Codex route. Without a
-// cutover row the legacy handler runs unchanged. A disabled row answers a
+// `codexRouteDisposition` is read first by every Codex route. A missing or disabled row answers a
 // typed 503 and reads no legacy Codex table. An enabled row runs the
 // handlers below: the same paths, verbs, request fields and response shapes,
 // projected from the shared subscription core (SUB-COMPAT-02). Operations the
@@ -60,13 +59,13 @@ function typedHttpError(status: 409 | 503, reason: string, message: string): Api
 }
 
 /**
- * `legacy` without a Codex cutover row, `core` with an enabled one. A
- * disabled row is maintenance: fail closed, never fall back to legacy state.
+ * Only an enabled Codex cutover admits a request. Missing and disabled rows
+ * are maintenance: fail closed, never fall back to legacy state.
  */
 export async function codexRouteDisposition(
   deps: ApiRouteDeps,
   accountId: string,
-): Promise<"legacy" | "core"> {
+): Promise<"core"> {
   const disposition = await readCodexCutoverDisposition(deps.db, accountId);
   if (disposition === "maintenance") {
     throw typedHttpError(

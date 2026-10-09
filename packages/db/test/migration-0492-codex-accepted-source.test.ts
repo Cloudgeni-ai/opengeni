@@ -9,17 +9,19 @@ import { sql } from "drizzle-orm";
 import {
   createDb,
   createSession,
+  withSessionRlsActorContext,
+  withRlsContext,
+  nestedPostgresSqlState,
+  type DbClient,
+} from "../src";
+import {
   setWorkspaceCodexSubscriptionMode,
   setWorkspaceCodexSubscriptionModeInTransaction,
   upsertOrganizationCodexSubscriptionCredential,
   disconnectOrganizationCodexAccount,
   upsertCodexSubscriptionCredential,
   withSessionCodexCapacityMutation,
-  withSessionRlsActorContext,
-  withRlsContext,
-  nestedPostgresSqlState,
-  type DbClient,
-} from "../src";
+} from "./fixtures/legacy-codex";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
@@ -34,7 +36,7 @@ const migration = await readFile(
   new URL("../drizzle/0492_codex_accepted_source_authority.sql", import.meta.url),
   "utf8",
 );
-const db = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+const db = await readFile(new URL("./fixtures/legacy-codex.ts", import.meta.url), "utf8");
 const api = await readFile(
   new URL("../../../apps/api/src/routes/codex.ts", import.meta.url),
   "utf8",
@@ -85,7 +87,8 @@ describe("accepted Codex source authority rollout contract", () => {
     expect(db).toContain("lease.generation = ${authority.generation}");
     expect(db).toContain("lease.leased_until > clock_timestamp()");
     expect(db).toContain("session.active_turn_id = accepted.id");
-    expect(api).toContain("mode: sourceBeforeConnect.mode");
+    expect(api).not.toContain("mode: sourceBeforeConnect.mode");
+    expect(api).toContain("coreCodexConnected");
   });
 });
 

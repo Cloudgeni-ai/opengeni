@@ -6,8 +6,8 @@ import {
 } from "../src/activities/agent-turn/codex-capacity";
 
 describe("Codex provider cutover routing", () => {
-  test("permits the legacy path only when no one-way cutover row exists", () => {
-    expect(codexCutoverDisposition("not_configured")).toBe("legacy");
+  test("fails closed when the one-way cutover row is missing", () => {
+    expect(codexCutoverDisposition("not_configured")).toBe("fail_closed");
     expect(codexCutoverDisposition("disabled")).toBe("fail_closed");
     expect(codexCutoverDisposition("enabled")).toBe("core");
   });

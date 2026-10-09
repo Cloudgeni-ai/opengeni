@@ -1158,7 +1158,7 @@ describe("the Codex Apps designation for a run", () => {
     expect(lookup.mock.calls.length).toBe(2);
   });
 
-  test("core uses only an active core designation; legacy only the legacy one", async () => {
+  test("uses only an active core designation and preserves the credential-ID alias", async () => {
     const { legacy, core, lookup } = leaves();
     mock("readCodexCutoverDisposition", async () => "core");
     expect(await resolveCodexAppsDesignationForRun(poison, WS, { accountId: ACCOUNT })).toEqual({
@@ -1166,7 +1166,7 @@ describe("the Codex Apps designation for a run", () => {
       accountId: ACCOUNT,
       connectionId: CONNECTION,
     });
-    expect(await resolveCodexAppsCredentialIdForRun(poison, WS)).toBeNull();
+    expect(await resolveCodexAppsCredentialIdForRun(poison, WS)).toBe(CONNECTION);
     mock("resolveSubscriptionCoreCodexAppsDesignation", async () => ({
       connectionId: CONNECTION,
       status: "needs_relogin",
@@ -1174,19 +1174,14 @@ describe("the Codex Apps designation for a run", () => {
     expect(await resolveCodexAppsDesignationForRun(poison, WS, { accountId: ACCOUNT })).toBeNull();
     expect(legacy.mock.calls.length).toBe(0);
 
-    const dispositionRead = mock("readCodexCutoverDisposition", async () => "legacy");
-    expect(await resolveCodexAppsDesignationForRun(poison, WS, { accountId: ACCOUNT })).toEqual({
-      source: "legacy",
-      credentialId: "legacy-apps",
-    });
-    expect(await resolveCodexAppsCredentialIdForRun(poison, WS)).toBe("legacy-apps");
-    // A known disposition skips both the cutover read and the organization lookup.
+    const dispositionRead = mock("readCodexCutoverDisposition", async () => "maintenance");
+    expect(await resolveCodexAppsDesignationForRun(poison, WS, { accountId: ACCOUNT })).toBeNull();
+    expect(await resolveCodexAppsCredentialIdForRun(poison, WS)).toBeNull();
     const lookupsBefore = lookup.mock.calls.length;
     const readsBefore = dispositionRead.mock.calls.length;
-    expect(await resolveCodexAppsDesignationForRun(poison, WS, { disposition: "legacy" })).toEqual({
-      source: "legacy",
-      credentialId: "legacy-apps",
-    });
+    expect(
+      await resolveCodexAppsDesignationForRun(poison, WS, { disposition: "maintenance" }),
+    ).toBeNull();
     expect(lookup.mock.calls.length).toBe(lookupsBefore);
     expect(dispositionRead.mock.calls.length).toBe(readsBefore);
     expect(core.mock.calls.length).toBeGreaterThan(0);
@@ -1194,7 +1189,6 @@ describe("the Codex Apps designation for a run", () => {
 
   test("request authentication follows the designation's source", () => {
     const coreAuth = mock("subscriptionCoreCodexAppsRequestAuth", () => ({ kind: "core" }));
-    const legacyAuth = mock("codexAppsRequestAuth", () => ({ kind: "legacy" }));
     expect(
       codexAppsRequestAuthForDesignation(poison, settings, WS, {
         source: "core",
@@ -1207,12 +1201,5 @@ describe("the Codex Apps designation for a run", () => {
       workspaceId: WS,
       connectionId: CONNECTION,
     });
-    expect(
-      codexAppsRequestAuthForDesignation(poison, settings, WS, {
-        source: "legacy",
-        credentialId: "legacy-apps",
-      }),
-    ).toEqual({ kind: "legacy" } as never);
-    expect(legacyAuth.mock.calls[0]![2]).toEqual({ workspaceId: WS, credentialId: "legacy-apps" });
   });
 });

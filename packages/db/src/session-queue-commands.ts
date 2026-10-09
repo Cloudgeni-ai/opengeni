@@ -745,17 +745,6 @@ export async function supersedeSessionCurrentDirectionInTransaction(
     })
     .where(eq(schema.sessionTurns.id, current.id));
   if (current.status === "waiting_capacity") {
-    await db
-      .update(schema.codexCapacityWaiters)
-      .set({ status: "superseded", updatedAt: now })
-      .where(
-        and(
-          eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
-          eq(schema.codexCapacityWaiters.sessionId, input.sessionId),
-          eq(schema.codexCapacityWaiters.blockedTurnId, current.id),
-          eq(schema.codexCapacityWaiters.status, "waiting"),
-        ),
-      );
     for (const waiters of [schema.xaiCapacityWaiters, schema.claudeCapacityWaiters]) {
       await db
         .update(waiters)

@@ -1,5 +1,11 @@
 # Subscription accounts: entry-point inventory and Codex audit
 
+> Historical inventory: M3 PR4 removes the executable Codex allocator and fleet
+> shadow producer. Their references below now point to test-only historical
+> fixtures; they are not current runtime authority. Current deployment requires
+> the drained, codec-aware 0689 receipt/readiness gate.
+
+
 Baseline: `origin/main` at `0d7075e` (7 October 2026). Research and documentation only; no product code was changed.
 
 This document is the evidence base for the provider-neutral subscription behaviour contract. It records what the code does today for Codex (ChatGPT subscription), Claude (Claude subscription) and SuperGrok (xAI subscription, `xai` in code), and where that differs from the documented Codex contract and from the agreed target model recorded in [subscription-accounts.md](subscription-accounts.md) (agreed 2026-10-07).
@@ -334,7 +340,7 @@ Scope: every place outside the chat-turn path (`apps/worker/src/activities/agent
 - Asymmetry: no frozen Codex authority on schedules (Codex follows the live workspace source). There is **no scheduled token-refresh or quota-polling job** for any provider (no subscription references in `apps/worker/src/workflows/*` except Codex capacity wait).
 
 ##### EP-N28 — Codex fleet shadow telemetry
-- Refs: `apps/worker/src/activities/codex-fleet-shadow.ts:102` `publishCodexFleetShadowDecisionV1`, `:146` `buildCodexFleetShadowPayloadV1`. Shadow comparison of allocator decisions; no credential use. Codex only.
+- Refs: `apps/worker/test/fixtures/legacy-codex/fleet-shadow.ts:102` `publishCodexFleetShadowDecisionV1`, `:146` `buildCodexFleetShadowPayloadV1`. Shadow comparison of allocator decisions; no credential use. Codex only.
 
 ### 1.3 API, SDK, React and web surfaces (EP-S)
 
@@ -774,11 +780,11 @@ Provider-specific facts that should become capability flags rather than conditio
 Sources compared:
 
 - Docs: `docs/codex-subscription-rotation.md` (cited as `rot.md:<line>` plus section), `docs/codex-provider-account-authority.md` (`auth.md:<line>`), `AGENTS.md` Codex bullets (`AGENTS.md:<line>`).
-- Code: `apps/worker/src/activities/codex-rotation.ts`, `apps/worker/src/activities/codex-capacity.ts`, `apps/worker/src/activities/agent-turn/{codex-capacity,credential-leases,subscription-lease,failure-settlement}.ts`, Codex accessors in `packages/db/src/index.ts`, `packages/db/src/codex-*.ts`, `packages/contracts/src/codex-provider-account-authority.ts`, `packages/config/src/subscription-account-selection.ts`, plus the helpers and migrations they call (`packages/db/src/database.ts`, migrations 0225, 0304, 0345, 0422 and 0492 in `packages/db/drizzle/`, `apps/worker/src/workflows/session.ts`, `apps/worker/src/activities/agent-turn/run.ts`, `apps/api/src/routes/codex.ts`).
+- Code: `apps/worker/test/fixtures/legacy-codex/rotation.ts`, `apps/worker/src/activities/codex-capacity.ts`, `apps/worker/src/activities/agent-turn/{codex-capacity,credential-leases,subscription-lease,failure-settlement}.ts`, Codex accessors in `packages/db/src/index.ts`, `packages/db/src/codex-*.ts`, `packages/contracts/src/codex-provider-account-authority.ts`, `packages/config/src/subscription-account-selection.ts`, plus the helpers and migrations they call (`packages/db/src/database.ts`, migrations 0225, 0304, 0345, 0422 and 0492 in `packages/db/drizzle/`, `apps/worker/src/workflows/session.ts`, `apps/worker/src/activities/agent-turn/run.ts`, `apps/api/src/routes/codex.ts`).
 
 Flags: **CONTRADICTION** = the doc says one thing and the code does another. **TARGET-CONFLICT** = current behaviour conflicts with the agreed target model. **uncertain** = not fully confirmed; reason given.
 
-Abbreviations: `db` = `packages/db/src/index.ts`; `rot.ts` = `apps/worker/src/activities/codex-rotation.ts`; `cap.ts` = `apps/worker/src/activities/codex-capacity.ts`; `turncap.ts` = `apps/worker/src/activities/agent-turn/codex-capacity.ts`; `fs.ts` = `apps/worker/src/activities/agent-turn/failure-settlement.ts`.
+Abbreviations: `db` = `packages/db/src/index.ts`; `rot.ts` = `apps/worker/test/fixtures/legacy-codex/rotation.ts`; `cap.ts` = `apps/worker/src/activities/codex-capacity.ts`; `turncap.ts` = `apps/worker/src/activities/agent-turn/codex-capacity.ts`; `fs.ts` = `apps/worker/src/activities/agent-turn/failure-settlement.ts`.
 
 ---
 
@@ -1104,7 +1110,7 @@ What it is: a default-off observer (`OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED`
 Where the code is:
 
 - Call site: `turncap.ts:479-532`, once per `selectCodexTurnCapacity` (proactive admission only), after the lease is acquired and the selection receipt written.
-- Payload builder and publisher: `apps/worker/src/activities/codex-fleet-shadow.ts:102-245` (`publishCodexFleetShadowDecisionV1`, `buildCodexFleetShadowPayloadV1`; `compareDecision` at `247-267`).
+- Payload builder and publisher: `apps/worker/test/fixtures/legacy-codex/fleet-shadow.ts:102-245` (`publishCodexFleetShadowDecisionV1`, `buildCodexFleetShadowPayloadV1`; `compareDecision` at `247-267`).
 - Pure policy, record and replay: `packages/contracts/src/codex-fleet-policy.ts` (`createCodexFleetReplayRecordV1` `277`, `replayCodexFleetDecisionV1` `298`, `readCodexFleetReplayRecordV1` `338`, `evaluateCodexFleetDecisionV1` `391`, `DEFAULT_CODEX_FLEET_POLICY_V1` `161`).
 - Persistence: the attempt-fenced `eventing.publish` (session event, workspace RLS); SDK type at `packages/sdk/src/types.ts:2217`; a React timeline projection. Tests: `apps/worker/test/codex-fleet-shadow.test.ts`, `packages/contracts/test/codex-fleet-policy.test.ts`, `packages/db/test/codex-fleet-shadow-events.test.ts`. The repo has no offline replay script or job; `replayCodexFleetDecisionV1` is only called from tests.
 

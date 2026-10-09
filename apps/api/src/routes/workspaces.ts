@@ -89,7 +89,6 @@ import {
   updateWorkspace,
   upsertWorkspaceMemberAsWorkspaceManager,
   upsertWorkspaceModelPolicy,
-  legacyWorkspaceCodexSubscriptionActive,
   readCodexCutoverDisposition,
   listSubscriptionCoreCodexOperationCandidates,
   workspaceControlRequestLockTimeoutMs,
@@ -289,13 +288,6 @@ async function workspaceCodexRealtimeReady(
   workspaceId: string,
 ): Promise<boolean> {
   const disposition = await readCodexCutoverDisposition(routeDeps.db, grant.accountId, workspaceId);
-  if (disposition === "legacy") {
-    return await legacyWorkspaceCodexSubscriptionActive(
-      routeDeps.db,
-      routeDeps.settings,
-      workspaceId,
-    );
-  }
   if (disposition === "maintenance" || !routeDeps.settings.codexSubscriptionEnabled) return false;
   const candidates = await listSubscriptionCoreCodexOperationCandidates(routeDeps.db, {
     kind: "workspace",

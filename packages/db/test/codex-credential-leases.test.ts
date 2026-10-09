@@ -1,3 +1,4 @@
+import { legacyWorkspaceCodexSubscriptionActive as workspaceCodexSubscriptionActive } from "./fixtures/legacy-codex";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireSharedTestDatabase,
@@ -11,19 +12,32 @@ import {
   chooseRotationActive,
   selectCodexCredentialLeaseForTurn,
   type RotationDecision,
-} from "../../../apps/worker/src/activities/codex-rotation";
+} from "../../../apps/worker/test/fixtures/legacy-codex/rotation";
 import { codexCredentialLeaseHolderId } from "../../../apps/worker/src/activities/agent-turn/claim";
-import { codexCapacityDecision } from "../../../apps/worker/src/activities/codex-capacity";
+import { codexCapacityDecision } from "../../../apps/worker/test/fixtures/legacy-codex/capacity";
 import * as schema from "../src/schema";
 import {
-  acquireCodexCredentialLease,
   applySessionTurnSettlement,
-  armCodexCapacityWait,
   claimSessionWorkForAttempt,
   CodexCredentialLeaseAttemptFencedError,
   createDb,
   createSessionGoal,
   encryptEnvironmentValue,
+  mutateSessionControlInTransaction,
+  materializeGoalContinuation,
+  requestSessionTurnRecovery,
+  getSession,
+  withSessionActivityRlsContext,
+  withRlsContext,
+  type CodexCredentialLeaseSessionState,
+  type CodexCredentialLeaseSelectionContext,
+  type Database,
+  type DbClient,
+  type SessionActivityDatabase,
+} from "../src/index";
+import {
+  acquireCodexCredentialLease,
+  armCodexCapacityWait,
   ensureCodexRotationSettings,
   getSessionCodexState,
   getSessionCodexAccounts,
@@ -31,14 +45,11 @@ import {
   heartbeatCodexCredentialLeaseUntil,
   listCodexAccountStatuses,
   loadCodexCredentialForRun,
-  mutateSessionControlInTransaction,
-  materializeGoalContinuation,
   quarantineCodexCredentialForLease,
   recordCodexAccountUsage,
   recordCodexAccountUsageForFinalization,
   recordCodexAccountUsageWithWakeTargets,
   recordSessionCodexSelectionForTurnAttempt,
-  requestSessionTurnRecovery,
   recordCodexTokenRefresh,
   settleCodexCredentialLeaseLoss,
   settleCodexCredentialFailover,
@@ -51,20 +62,11 @@ import {
   setSessionCodexPinInTransaction,
   setWorkspaceCodexSubscriptionMode,
   switchSessionCodexAccount,
-  getSession,
   updateCodexRotationSettings,
   upsertCodexSubscriptionCredential,
   withCodexCredentialRefreshLock,
   withSessionCodexCapacityMutation,
-  withSessionActivityRlsContext,
-  withRlsContext,
-  workspaceCodexSubscriptionActive,
-  type CodexCredentialLeaseSessionState,
-  type CodexCredentialLeaseSelectionContext,
-  type Database,
-  type DbClient,
-  type SessionActivityDatabase,
-} from "../src/index";
+} from "./fixtures/legacy-codex";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -1209,9 +1211,10 @@ describe("credential allocator atomic Codex credential allocation", () => {
   ] as const) {
     test(`explicit ${selection} overrides a snapshot-bearing wait through reconciliation and reacquisition`, async () => {
       if (!available) return;
-      const { ws, turnId, fence, exhausted, healthy, waiter } = await pinnedCapacityWait();
+      const { ws, turnId, fence, healthy, waiter } = await pinnedCapacityWait();
       const before = await getSession(dbA, ws.workspaceId, fence.sessionId);
-      expect(before?.codexCurrentSelection).toEqual({ credentialId: exhausted, waiting: true });
+      // The current Session projection never reconstructs a selection from historical decision rows.
+      expect(before?.codexCurrentSelection).toEqual({ credentialId: null, waiting: true });
       if (selection.startsWith("legacy_")) {
         await admin`update session_turns set metadata = metadata #- '{codexCredentialPolicySnapshotV1,source}' where id = ${turnId}`;
       }
@@ -1313,7 +1316,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
       expect(rows[0]!.id).toBe(turnId);
       expect(
         (await getSession(dbA, ws.workspaceId, fence.sessionId))?.codexCurrentSelection,
-      ).toEqual({ credentialId: healthy, waiting: false });
+      ).toEqual({ credentialId: null, waiting: false });
     }, 60_000);
   }
 
