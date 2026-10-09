@@ -74,6 +74,17 @@ Stop, tool approvals, attachments, human-input forms, live voice, optimistic del
 `ChatComposer` alone is only the input surface. Hosts with deliberately custom
 flows can still compose the individual hooks and components.
 
+`NewConversation` exposes the same new-chat flow that `OpenGeniChat` uses.
+For a persistent shell, `useNewConversation`/`NewConversationView` and
+`useSessionConversation`/`SessionConversationView` separate ownership from
+layout without introducing another send implementation. A host creation
+adapter returns the session ID; stock keeps the immutable retry request,
+preserves newer unsent content, and supplies an `initialDraft` handoff for the
+native composer. Voice-first creation uses `startMode: "realtime"` with no
+synthetic prompt. See the [conversation UI guide](../docs-site/integrate/conversation-ui.mdx)
+for optional hooks and their scope/lifetime boundaries. Simple embeds still
+use one `OpenGeniChat` component.
+
 Embedded defaults keep Opengeni's own product choices out of the host's
 product. The Opengeni web app does not mount these surfaces and keeps its own
 behavior. Existing explicit settings keep working.

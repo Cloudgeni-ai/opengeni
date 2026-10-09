@@ -1767,6 +1767,17 @@ composer hooks, never a replacement Send/Steer validator. Observer failures do
 not change accepted delivery. The lazy embedded voice entry reuses
 `SessionRealtimeControl` and its catalog rather than owning another call flow.
 
+`OpenGeniChat` uses the reusable `useNewConversation`/`NewConversationView`
+pair (`NewConversation` is the standalone assembled component). The stock
+controller owns a click's immutable request/idempotency key, uncertain retry,
+scope fences, and unsent draft/file/policy handoff. `initialDraft` on the native
+composer seeds local content without inventing its server revision. Host
+creation adapters own only application admission/configuration and durable
+application records. Live voice uses explicit empty `startMode: "realtime"`
+creation and the existing voice-autostart control, never a synthetic first
+message. The session proxy preserves browser retry keys unless the server
+hook supplies its own; authority remains server-owned.
+
 `conversationTimeline`/`SessionChrome`/`SessionCommands`/`ChatComposer`
 share reconciliation/controls. Commands mount only in open activity drawers.
 `SessionConnectionRequest` requires exact native identities, failing closed on
