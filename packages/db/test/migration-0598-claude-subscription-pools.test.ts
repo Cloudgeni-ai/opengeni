@@ -34,6 +34,8 @@ const subscriptionCoreMigrations = [
   "0689_subscription_core_codex_cutover.sql",
   "0691_subscription_core_codex_disconnect.sql",
   "0695_subscription_model_catalog_observations.sql",
+  // Patches the request guard created by withheld 0691.
+  "0697_codex_retry_after_unknown_outcome.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {
