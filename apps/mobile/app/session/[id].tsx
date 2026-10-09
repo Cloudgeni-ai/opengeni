@@ -338,6 +338,14 @@ function LiveSession(props: {
         composer={{
           onActionFeedback: () => void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light),
           voice,
+          // An empty composer calls this session, as its header button does.
+          call: {
+            active: onCall,
+            onPress: () => {
+              void Haptics.selectionAsync();
+              agentCall.callSession(props.sessionId);
+            },
+          },
           renderLeading: () => attachMenu,
           options: pill ? (
             <ComposerPill

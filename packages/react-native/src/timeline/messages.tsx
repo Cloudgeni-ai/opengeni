@@ -22,6 +22,12 @@ export interface NativeTimelineMessages {
   workedFor: string;
   stillWaiting: string;
   longerThanUsual: string;
+  /**
+   * The loading copy that rotates beside the orb while a reply starts. Empty
+   * keeps the built-in phrases; a host's own voice replaces them, as the web
+   * timeline's loading `phrases` option does.
+   */
+  loadingPhrases: readonly string[];
   command: string;
   output: string;
   startupDetail: string;
@@ -73,6 +79,10 @@ export interface NativeTimelineMessages {
   recordingSaved: string;
   discard: string;
   followUpPlaceholder: string;
+  /** The composer's call button: start a voice call with the agent. */
+  startCall: string;
+  /** The composer's call button while this conversation is already on a call. */
+  returnToCall: string;
 }
 
 export const defaultNativeTimelineMessages: NativeTimelineMessages = {
@@ -96,6 +106,7 @@ export const defaultNativeTimelineMessages: NativeTimelineMessages = {
   workedFor: "Worked for",
   stillWaiting: "Still waiting for a response…",
   longerThanUsual: "A little longer than usual…",
+  loadingPhrases: [],
   command: "Command",
   output: "Output",
   startupDetail:
@@ -148,6 +159,8 @@ export const defaultNativeTimelineMessages: NativeTimelineMessages = {
   recordingSaved: "Your recording is saved.",
   discard: "Discard",
   followUpPlaceholder: "Send a follow-up...",
+  startCall: "Start a call",
+  returnToCall: "Return to call",
 };
 
 const MessagesContext = createContext<NativeTimelineMessages>(defaultNativeTimelineMessages);
