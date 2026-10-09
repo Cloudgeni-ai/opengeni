@@ -18,6 +18,7 @@ import {
   CreateSocialPostRequest,
   CreateDocumentBaseRequest,
   CreateCheckoutRequest,
+  BillingInvoicesResponse,
   CreateScheduledTaskRequest,
   CreateSessionRequest,
   DocumentSearchRequest,
@@ -1548,6 +1549,27 @@ describe("contracts", () => {
     expect(CreateCheckoutRequest.parse({ amountUsd: 19.99 }).amountUsd).toBe(19.99);
     expect(() => CreateCheckoutRequest.parse({ amountUsd: 4.99 })).toThrow();
     expect(() => CreateCheckoutRequest.parse({ amountUsd: 5.001 })).toThrow();
+  });
+
+  test("accepts paginated billing invoices with downloadable Stripe documents", () => {
+    const response = BillingInvoicesResponse.parse({
+      invoices: [
+        {
+          id: "in_test",
+          number: "OG-0042",
+          status: "paid",
+          createdAt: "2025-08-21T13:20:00.000Z",
+          totalMicros: 25_500_000,
+          amountPaidMicros: 25_500_000,
+          currency: "usd",
+          invoicePdfUrl: "https://pay.stripe.com/invoice/in_test/pdf",
+          hostedInvoiceUrl: "https://invoice.stripe.com/i/in_test",
+        },
+      ],
+      hasMore: false,
+      nextCursor: null,
+    });
+    expect(response.invoices[0]?.invoicePdfUrl).toContain("stripe.com");
   });
 
   test("accepts structured scheduled task definitions", () => {

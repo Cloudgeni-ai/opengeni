@@ -4899,6 +4899,7 @@ describe("shouldDeferNonEagerToolPreparation", () => {
     lazyToolTransport: "codex_native" as const,
     progressiveDisclosureEnabled: true,
     artifactRuntimeAvailable: false,
+    editableArtifactToolsSelected: false,
     triggerKind: "next" as const,
     triggerType: "user.message" as const,
   };
@@ -4919,6 +4920,12 @@ describe("shouldDeferNonEagerToolPreparation", () => {
     );
     expect(
       shouldDeferNonEagerToolPreparation({ ...eligible, artifactRuntimeAvailable: true }),
+    ).toBe(false);
+    expect(
+      shouldDeferNonEagerToolPreparation({
+        ...eligible,
+        editableArtifactToolsSelected: true,
+      }),
     ).toBe(false);
     expect(
       shouldDeferNonEagerToolPreparation({

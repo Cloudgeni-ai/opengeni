@@ -1,7 +1,9 @@
 import {
+  BillingInvoicesResponse,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
   type AccessContext,
+  type BillingInvoice,
   type Permission,
 } from "@opengeni/contracts";
 import { configuredEntitlements } from "@opengeni/config";
@@ -63,6 +65,40 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
       mode: deps.settings.entitlementsMode,
       entitlements: configuredEntitlements(deps.settings),
     });
+  });
+
+  app.get("/v1/billing/invoices", async (c) => {
+    if (deps.settings.billingMode !== "stripe") {
+      throw new HTTPException(404, { message: "stripe billing is not enabled" });
+    }
+    const context = await requireAccessContext(c, deps);
+    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
+    const limit = billingInvoicesLimit(c.req.query("limit"));
+    const startingAfter = billingInvoicesCursor(c.req.query("startingAfter"));
+    const customer = await getBillingCustomer(deps.db, accountId, stripeCustomerProvider(deps));
+    if (!customer) {
+      return c.json(
+        BillingInvoicesResponse.parse({ invoices: [], hasMore: false, nextCursor: null }),
+      );
+    }
+    let page: Stripe.ApiList<Stripe.Invoice>;
+    try {
+      page = await stripeClient(deps).invoices.list({
+        customer: customer.providerCustomerId,
+        limit,
+        ...(startingAfter ? { starting_after: startingAfter } : {}),
+      });
+    } catch {
+      throw new HTTPException(502, { message: "Unable to load Stripe invoices" });
+    }
+    const invoices = page.data.map(billingInvoiceFromStripe);
+    return c.json(
+      BillingInvoicesResponse.parse({
+        invoices,
+        hasMore: page.has_more,
+        nextCursor: page.has_more ? (invoices.at(-1)?.id ?? null) : null,
+      }),
+    );
   });
 
   app.post("/v1/billing/checkout", async (c) => {
@@ -186,6 +222,15 @@ export function stripeCheckoutSessionCreateParams(input: {
     cancel_url: cancelUrl,
     automatic_tax: { enabled: true },
     billing_address_collection: "auto",
+    invoice_creation: {
+      enabled: true,
+      invoice_data: {
+        metadata: {
+          opengeni_account_id: input.accountId,
+          opengeni_credit_idempotency_key: input.idempotencyKey,
+        },
+      },
+    },
     line_items: [
       {
         quantity: 1,
@@ -221,6 +266,58 @@ export function stripeCheckoutSessionCreateParams(input: {
       },
     },
   };
+}
+
+export function billingInvoiceFromStripe(invoice: Stripe.Invoice): BillingInvoice {
+  return {
+    id: invoice.id,
+    number: invoice.number,
+    status: billingInvoiceStatus(invoice.status),
+    createdAt: new Date(invoice.created * 1_000).toISOString(),
+    totalMicros: centsToMicros(invoice.total),
+    amountPaidMicros: centsToMicros(invoice.amount_paid),
+    currency: invoice.currency,
+    invoicePdfUrl: invoice.invoice_pdf ?? null,
+    hostedInvoiceUrl: invoice.hosted_invoice_url ?? null,
+  };
+}
+
+function billingInvoiceStatus(value: Stripe.Invoice.Status | null): BillingInvoice["status"] {
+  switch (value) {
+    case "draft":
+      return "draft";
+    case "open":
+      return "open";
+    case "paid":
+      return "paid";
+    case "uncollectible":
+      return "uncollectible";
+    case "void":
+      return "void";
+    default:
+      return null;
+  }
+}
+
+function billingInvoicesLimit(value: string | undefined): number {
+  if (value === undefined) {
+    return 24;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+    throw new HTTPException(400, { message: "limit must be an integer between 1 and 100" });
+  }
+  return parsed;
+}
+
+function billingInvoicesCursor(value: string | undefined): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!/^in_[A-Za-z0-9]+$/.test(value) || value.length > 255) {
+    throw new HTTPException(400, { message: "startingAfter must be a valid invoice id" });
+  }
+  return value;
 }
 
 function checkoutReturnUrl(

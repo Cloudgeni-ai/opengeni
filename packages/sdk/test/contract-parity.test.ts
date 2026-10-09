@@ -10,6 +10,7 @@ import {
   AttachViewerRequest as ContractAttachViewerRequest,
   AttachViewerResponse as ContractAttachViewerResponse,
   BeginSessionRealtimeRequest as ContractBeginSessionRealtimeRequest,
+  BillingInvoicesResponse as ContractBillingInvoicesResponse,
   CAPABILITY_DESCRIPTORS,
   ClientConfig as ContractClientConfig,
   CodexRealtimeWebrtcRequest as ContractCodexRealtimeWebrtcRequest,
@@ -136,6 +137,7 @@ import type {
   AttachViewerRequest,
   AttachViewerResponse,
   BeginSessionRealtimeRequest,
+  BillingInvoicesResponse,
   CreateKnowledgeMemoryRequest,
   FirstPartyMcpToolName,
   KnowledgeMemory,
@@ -250,6 +252,17 @@ describe("SDK / contracts parity", () => {
   });
   test("pins the default uploaded-file mount root", () => {
     expect(DEFAULT_FILE_RESOURCE_MOUNT_ROOT).toBe(CONTRACT_DEFAULT_FILE_RESOURCE_MOUNT_ROOT);
+  });
+
+  test("billing invoice list shapes match the public contracts", () => {
+    const contractToSdk = (
+      value: z.infer<typeof ContractBillingInvoicesResponse>,
+    ): BillingInvoicesResponse => value;
+    const sdkToContract = (
+      value: BillingInvoicesResponse,
+    ): z.input<typeof ContractBillingInvoicesResponse> => value;
+    expect(typeof contractToSdk).toBe("function");
+    expect(typeof sdkToContract).toBe("function");
   });
 
   test("Slack user-link access continuation shapes match the public contracts", () => {

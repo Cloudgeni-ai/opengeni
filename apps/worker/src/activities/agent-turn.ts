@@ -487,6 +487,7 @@ import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import {
   desktopCapableBackend,
   sandboxRunAs,
+  selectsCanonicalEditableArtifactToolSurface,
   WorkspaceModelPolicyBlockedError,
 } from "@opengeni/runtime";
 import {
@@ -2497,6 +2498,7 @@ export function shouldDeferNonEagerToolPreparation(args: {
   lazyToolTransport: LazyToolTransport | null;
   progressiveDisclosureEnabled: boolean;
   artifactRuntimeAvailable: boolean;
+  editableArtifactToolsSelected: boolean;
   triggerKind: "next" | "approval";
   triggerType: string;
 }): boolean {
@@ -2504,6 +2506,7 @@ export function shouldDeferNonEagerToolPreparation(args: {
     args.lazyToolTransport &&
     args.progressiveDisclosureEnabled &&
     !args.artifactRuntimeAvailable &&
+    !args.editableArtifactToolsSelected &&
     args.triggerKind === "next" &&
     (args.triggerType === "user.message" || args.triggerType === "system.update.delivered"),
   );
@@ -8167,6 +8170,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         lazyToolTransport,
         progressiveDisclosureEnabled,
         artifactRuntimeAvailable: sandboxArtifactRuntime.available,
+        editableArtifactToolsSelected: selectsCanonicalEditableArtifactToolSurface(
+          selectedFirstPartyMcpTools,
+        ),
         triggerKind: input.trigger.kind,
         triggerType,
       });

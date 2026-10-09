@@ -512,13 +512,29 @@ export class SandboxChannelAService {
     const depthArg = Math.max(1, req.depth);
     const maxCommandEntries = req.maxEntries + 1;
     const gnuPrint = `-printf '%y\\t%s\\t%T@\\t%m\\t%p\\0'`;
-    const gnuSelector = pruneNames.length
-      ? `\\( -type d \\( ${pruneNames.map((name) => `-name ${shellQuote(name)}`).join(" -o ")} \\) ${gnuPrint} -prune \\) -o ${gnuPrint}`
+    const gnuPruneExpression = pruneNames.length
+      ? `-type d \\( ${pruneNames.map((name) => `-name ${shellQuote(name)}`).join(" -o ")} \\)`
+      : null;
+    const gnuSelector = gnuPruneExpression
+      ? `\\( ${gnuPruneExpression} ${gnuPrint} -prune \\) -o ${gnuPrint}`
       : gnuPrint;
     const gnuVisibleSelector = req.includeHidden
       ? gnuSelector
       : `\\( -path '*/.*' -prune \\) -o \\( ${gnuSelector} \\)`;
-    const gnuFind = `find ${findRoot} -mindepth 1 -maxdepth ${depthArg} \\( ${gnuVisibleSelector} \\) 2>/dev/null`;
+    // Emit every root child before descending. A depth-first producer can
+    // otherwise exhaust the bounded record/byte budget inside one large early
+    // directory and omit later top-level output files.
+    const gnuDescendantSelector = gnuPruneExpression
+      ? `\\( ${gnuPruneExpression} \\( \\! -path './*/*' -o ${gnuPrint} \\) -prune \\) -o \\( -path './*/*' ${gnuPrint} \\)`
+      : `\\( -path './*/*' ${gnuPrint} \\)`;
+    const gnuVisibleDescendantSelector = req.includeHidden
+      ? gnuDescendantSelector
+      : `\\( -path '*/.*' -prune \\) -o \\( ${gnuDescendantSelector} \\)`;
+    const gnuRootFind = `find ${findRoot} -mindepth 1 -maxdepth 1 \\( ${gnuVisibleSelector} \\) 2>/dev/null`;
+    const gnuFind =
+      depthArg === 1
+        ? gnuRootFind
+        : `{ ${gnuRootFind}; find ${findRoot} -mindepth 1 -maxdepth ${depthArg} \\( ${gnuVisibleDescendantSelector} \\) 2>/dev/null; }`;
     const portableHiddenGuard = req.includeHidden
       ? ""
       : `if [[ "$base" == .* ]]; then continue; fi;`;
@@ -542,14 +558,14 @@ export class SandboxChannelAService {
         ];
     const portableWalk = [
       "shopt -s nullglob dotglob; count=0; stop=0;",
-      'walk() { local dir="$1" level="$2" p base t size mtime mode pruned;',
+      'walk() { local dir="$1" level="$2" p base t size mtime mode pruned; local -a descend=();',
       'for p in "$dir"/*; do [ "$stop" -eq 1 ] && return; base=${p##*/};',
       portableHiddenGuard,
       ...portableTypeAndMetadata,
       `count=$((count + 1)); if [ "$count" -ge ${maxCommandEntries} ]; then stop=1; return; fi;`,
       portablePruneCase,
-      `if [ "$t" = d ] && [ "$pruned" -eq 0 ] && [ "$level" -lt ${depthArg} ]; then walk "$p" $((level + 1)); fi;`,
-      "done; }; walk . 1",
+      `if [ "$t" = d ] && [ "$pruned" -eq 0 ] && [ "$level" -lt ${depthArg} ]; then descend+=("$p"); fi;`,
+      'done; for p in "${descend[@]}"; do [ "$stop" -eq 1 ] && return; walk "$p" $((level + 1)); done; }; walk . 1',
     ].join(" ");
     // Capability selection lives inside the confined command. Even a BSD/macOS
     // box therefore pays exactly one provider round-trip, and an empty GNU

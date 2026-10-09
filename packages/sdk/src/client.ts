@@ -157,6 +157,7 @@ import type {
   SuperGrokConnectPoll,
   SuperGrokConnectStart,
   SuperGrokRotationSettings,
+  BillingInvoicesResponse,
   BillingSummary,
   BillingUsageResponse,
   InsightsRange,
@@ -6313,6 +6314,26 @@ export class OpenGeniClient {
       ...(options.accountId !== undefined ? { accountId: options.accountId } : {}),
       ...(options.workspaceId !== undefined ? { workspaceId: options.workspaceId } : {}),
     });
+  }
+
+  /** List Stripe invoices for an account, newest first. */
+  async getBillingInvoices(
+    options: {
+      accountId?: string;
+      limit?: number;
+      startingAfter?: string;
+    } = {},
+  ): Promise<BillingInvoicesResponse> {
+    return await this.requestJson<BillingInvoicesResponse>(
+      "GET",
+      "/v1/billing/invoices",
+      undefined,
+      {
+        ...(options.accountId !== undefined ? { accountId: options.accountId } : {}),
+        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+        ...(options.startingAfter !== undefined ? { startingAfter: options.startingAfter } : {}),
+      },
+    );
   }
 
   async getWorkspaceInsights(

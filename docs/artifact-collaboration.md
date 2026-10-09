@@ -61,7 +61,9 @@ definitions.
 The bundled artifact skills are admitted only when that frozen catalog contains
 the complete canonical family. They do not depend on a sandbox-local Office
 runtime; that optional runtime exists solely for explicitly standalone file
-work.
+work. When session policy selects the complete family, the worker joins
+otherwise-deferred first-party MCP preparation before constructing the agent so
+the lazy Skill index and the executable frozen catalog cannot disagree.
 
 ## Files are boundaries
 

@@ -261,6 +261,10 @@ User-message file attachments enter the runtime manifest and eager materializati
 
 ## Verification
 
+Before changing any component, page, or styles, read the making-ui-changes skill and follow it - reuse before you create, add/update the story or capture in the same change, check the blast radius on shared components, and prove the change with a visual test.
+
+The skill is at [`.agents/skills/making-ui-changes/SKILL.md`](.agents/skills/making-ui-changes/SKILL.md). Run `bun run test:visual` for the Vitest browser captures; see [`docs/visual-testing.md`](docs/visual-testing.md) for local uploads and review.
+
 Unit tests and typechecks do not require Temporal, NATS, Postgres, a sandbox backend, or live model credentials:
 
 ```bash

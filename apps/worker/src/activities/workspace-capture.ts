@@ -88,6 +88,7 @@ export const KEEP_LATEST_REVISIONS = 10;
 export const RESIDUE_DIRS: readonly string[] = [
   // build/dep residue
   "node_modules",
+  ".bun",
   ".git",
   // Platform credential/helper state. The workspace root can be $HOME, so this
   // directory may sit inside a root repository; it must never enter a revision.

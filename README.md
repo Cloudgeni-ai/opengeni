@@ -201,8 +201,11 @@ selected content from reaching the configured model provider.
 
 Prerequisites:
 
-- Bun
+- Bun at the version in [`.bun-version`](.bun-version) or newer (`bun upgrade`)
 - Docker
+- rustup (startup builds the native artifact kernel and Connected Machines relay)
+- Git, curl, and native build tools (Xcode Command Line Tools on macOS;
+  `build-essential` on Debian/Ubuntu)
 - OpenAI or Azure OpenAI credentials for real model runs
 
 Start the full local stack:

@@ -26,7 +26,11 @@ import {
   temporalOverlapPolicy,
   temporalScheduleSpec,
 } from "../src/index";
-import { stripeCheckoutSessionCreateParams, stripeCustomerProvider } from "../src/routes/billing";
+import {
+  billingInvoiceFromStripe,
+  stripeCheckoutSessionCreateParams,
+  stripeCustomerProvider,
+} from "../src/routes/billing";
 import {
   applyCapabilityEnablement,
   createCatalogItem,
@@ -921,6 +925,15 @@ describe("API helpers", () => {
     expect(params.customer).toBe("cus_test");
     expect(params.customer_update).toEqual({ address: "auto", name: "auto" });
     expect(params.automatic_tax).toEqual({ enabled: true });
+    expect(params.invoice_creation).toEqual({
+      enabled: true,
+      invoice_data: {
+        metadata: {
+          opengeni_account_id: "00000000-0000-4000-8000-000000000001",
+          opengeni_credit_idempotency_key: "checkout:test",
+        },
+      },
+    });
     expect(params.line_items?.[0]?.price_data?.unit_amount).toBe(2550);
     expect(params.line_items?.[0]?.price_data?.product).toBe("prod_opengeni_credits");
     expect(params.metadata?.opengeni_credit_amount_usd).toBe("25.50");
@@ -928,6 +941,32 @@ describe("API helpers", () => {
     expect(params.payment_intent_data?.metadata?.opengeni_account_id).toBe(
       "00000000-0000-4000-8000-000000000001",
     );
+  });
+
+  test("projects Stripe invoices into bounded billing download metadata", () => {
+    expect(
+      billingInvoiceFromStripe({
+        id: "in_test",
+        number: "OG-0042",
+        status: "paid",
+        created: 1_755_777_600,
+        total: 2_550,
+        amount_paid: 2_550,
+        currency: "usd",
+        invoice_pdf: "https://pay.stripe.com/invoice/in_test/pdf",
+        hosted_invoice_url: "https://invoice.stripe.com/i/in_test",
+      } as never),
+    ).toEqual({
+      id: "in_test",
+      number: "OG-0042",
+      status: "paid",
+      createdAt: "2025-08-21T12:00:00.000Z",
+      totalMicros: 25_500_000,
+      amountPaidMicros: 25_500_000,
+      currency: "usd",
+      invoicePdfUrl: "https://pay.stripe.com/invoice/in_test/pdf",
+      hostedInvoiceUrl: "https://invoice.stripe.com/i/in_test",
+    });
   });
 
   test("restricts Stripe Checkout return URLs to the public OpenGeni origin", () => {

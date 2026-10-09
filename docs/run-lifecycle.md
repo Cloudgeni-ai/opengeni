@@ -364,9 +364,13 @@ optional—connect/list concurrently with the first provider request. A plain
 terminal model response does not join that background work. Search disclosure,
 deferred invocation, Codemode activation, catalog persistence, and cleanup join
 the one exact preparation promise, so no partial catalog grants authority.
-Approval/human-interaction resumes and editable-artifact turns retain the fully
-prepared catalog path because their continuation depends on exact prior tool or
-catalog identity.
+Approval/human-interaction resumes retain the fully prepared catalog path
+because their continuation depends on exact prior tool identity. A fresh turn
+whose selected first-party policy contains the complete collaborative
+editable-artifact family also joins preparation before agent construction: the
+bundled artifact Skills are admitted from the verified frozen catalog, never
+from selection alone, so deferred preparation cannot leave `load_skill` with a
+false-negative index.
 
 Retryable provider connectivity and 5xx failures recover the same accepted turn
 after a durable 2 s, 5 s, 15 s, 30 s, then 60 s capped delay, indexed by that

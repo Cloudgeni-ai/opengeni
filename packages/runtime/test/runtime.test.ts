@@ -63,6 +63,7 @@ import {
   CODEMODE_PROGRAMMATIC_DIRECTIVE,
   GENESIS_TITLE_DIRECTIVE,
   hasCanonicalEditableArtifactToolSurface,
+  selectsCanonicalEditableArtifactToolSurface,
   oneShotGenesisTitleInputFilter,
   composeRuntimeSkills,
   effectiveSkillSelectionsForAgent,
@@ -9324,6 +9325,12 @@ describe("runtime Skill activation", () => {
       entries: catalog.entries.slice(1),
     };
     expect(hasCanonicalEditableArtifactToolSurface(incompleteCatalog)).toBe(false);
+  });
+
+  test("artifact tool selection requires the complete authored family before joining preparation", () => {
+    const selected = Object.keys(EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS);
+    expect(selectsCanonicalEditableArtifactToolSurface(selected)).toBe(true);
+    expect(selectsCanonicalEditableArtifactToolSurface(selected.slice(1))).toBe(false);
   });
 
   function indexedSkillNames(agent: unknown, manifest: Manifest): string[] {

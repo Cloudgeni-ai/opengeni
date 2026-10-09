@@ -144,6 +144,7 @@ describe("workspace-capture — guard constants", () => {
     expect(PER_FILE_DIFF_GUARD_BYTES).toBeLessThan(WHOLE_CAPTURE_GUARD_BYTES);
     expect(KEEP_LATEST_REVISIONS).toBe(10);
     expect(RESIDUE_DIRS).toContain("node_modules");
+    expect(RESIDUE_DIRS).toContain(".bun");
     expect(RESIDUE_DIRS).toContain(".git");
     expect(RESIDUE_DIRS).toContain(".opengeni");
   });

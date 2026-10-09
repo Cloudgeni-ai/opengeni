@@ -2017,6 +2017,21 @@ export function hasCanonicalEditableArtifactToolSurface(
   });
 }
 
+/**
+ * True when session policy selected every authored member of the collaborative
+ * editable-artifact family. This is not execution authority; the worker uses it
+ * only to decide that deferred MCP preparation must be joined before agent
+ * construction, where the resulting frozen catalog is verified above.
+ */
+export function selectsCanonicalEditableArtifactToolSurface(
+  selectedTools: readonly string[],
+): boolean {
+  const selected = new Set(selectedTools);
+  return Object.keys(EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS).every((toolName) =>
+    selected.has(toolName),
+  );
+}
+
 export function buildOpenGeniAgent(
   settings: Settings,
   resources: ResourceRef[],

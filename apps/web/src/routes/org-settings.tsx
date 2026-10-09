@@ -1,5 +1,5 @@
 // Organization settings (formerly "Account"): identity, billing balance +
-// usage (from /v1/billing/usage), plan entitlements (from
+// usage (from /v1/billing/usage), Stripe invoices, plan entitlements (from
 // /v1/billing/entitlements), and members. The workspace-scoped API keys section
 // moved to Workspace settings; this surface is the tenant-level console.
 import { useBillingUsage } from "@opengeni/react";
@@ -7,6 +7,8 @@ import { Link } from "@tanstack/react-router";
 import {
   ActivityIcon,
   BuildingIcon,
+  DownloadIcon,
+  FileTextIcon,
   GaugeIcon,
   Loader2Icon,
   LockIcon,
@@ -29,7 +31,13 @@ import {
 } from "@/lib/format";
 import { orgLabel } from "@/lib/org";
 import { hasAccountPermission } from "@/lib/permissions";
-import type { BillingEntitlementsResponse, BillingSummary, UsageEvent } from "@/types";
+import type {
+  BillingEntitlementsResponse,
+  BillingInvoice,
+  BillingInvoicesResponse,
+  BillingSummary,
+  UsageEvent,
+} from "@/types";
 
 export function OrgSettingsRoute({
   workspaceId,
@@ -51,6 +59,9 @@ export function OrgSettingsRoute({
   const [billingLoading, setBillingLoading] = useState(false);
   const [entitlements, setEntitlements] = useState<BillingEntitlementsResponse | null>(null);
   const [entitlementsError, setEntitlementsError] = useState<Error | null>(null);
+  const [invoicePage, setInvoicePage] = useState<BillingInvoicesResponse | null>(null);
+  const [invoiceError, setInvoiceError] = useState<Error | null>(null);
+  const [invoiceLoading, setInvoiceLoading] = useState(false);
   const [topupAmount, setTopupAmount] = useState("25.00");
   const [busy, setBusy] = useState(false);
   const canManageBilling = hasAccountPermission(context.accessContext, accountId, "billing:manage");
@@ -98,6 +109,38 @@ export function OrgSettingsRoute({
     }
   }, [accountId, canReadBilling, client]);
 
+  const refreshInvoices = useCallback(
+    async (startingAfter?: string) => {
+      if (!accountId || !canReadBilling || billing?.mode !== "stripe") {
+        setInvoicePage(null);
+        setInvoiceError(null);
+        return;
+      }
+      setInvoiceLoading(true);
+      if (!startingAfter) {
+        setInvoicePage(null);
+      }
+      try {
+        const next = await client.getBillingInvoices({
+          accountId,
+          limit: 12,
+          ...(startingAfter ? { startingAfter } : {}),
+        });
+        setInvoicePage((current) =>
+          startingAfter && current
+            ? { ...next, invoices: [...current.invoices, ...next.invoices] }
+            : next,
+        );
+        setInvoiceError(null);
+      } catch (error) {
+        setInvoiceError(error instanceof Error ? error : new Error(String(error)));
+      } finally {
+        setInvoiceLoading(false);
+      }
+    },
+    [accountId, billing?.mode, canReadBilling, client],
+  );
+
   const refresh = useCallback(async () => {
     await Promise.all([refreshBilling(), refreshEntitlements()]);
   }, [refreshBilling, refreshEntitlements]);
@@ -108,6 +151,13 @@ export function OrgSettingsRoute({
     }
     void refresh();
   }, [workspaceId, refresh]);
+
+  useEffect(() => {
+    if (!workspaceId || billing?.mode !== "stripe") {
+      return;
+    }
+    void refreshInvoices();
+  }, [billing?.mode, refreshInvoices, workspaceId]);
 
   // Confirm the Stripe checkout outcome the /billing return redirect forwarded
   // here. Credits post via the asynchronous webhook, so success is phrased as
@@ -264,6 +314,17 @@ export function OrgSettingsRoute({
           )}
         </section>
 
+        {billing?.mode === "stripe" ? (
+          <InvoicesSection
+            enabled={canReadBilling && Boolean(accountId)}
+            page={invoicePage}
+            loading={invoiceLoading}
+            error={invoiceError}
+            onRefresh={() => void refreshInvoices()}
+            onLoadMore={(cursor) => void refreshInvoices(cursor)}
+          />
+        ) : null}
+
         <EntitlementsSection
           enabled={canReadBilling && Boolean(accountId)}
           entitlements={entitlements}
@@ -291,6 +352,129 @@ export function OrgSettingsRoute({
         />
       </section>
     </ContentPage>
+  );
+}
+
+export function InvoicesSection(props: {
+  enabled: boolean;
+  page: BillingInvoicesResponse | null;
+  loading: boolean;
+  error: Error | null;
+  onRefresh: () => void;
+  onLoadMore: (cursor: string) => void;
+}) {
+  const nextCursor = props.page?.nextCursor ?? null;
+  return (
+    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2 className="flex items-center gap-1.5 text-sm font-medium">
+            <FileTextIcon className="size-3.5 text-brand" />
+            Invoices
+          </h2>
+          <p className="mt-1 text-xs text-fg-muted">Stripe invoices for this organization.</p>
+        </div>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={!props.enabled || props.loading}
+          onClick={props.onRefresh}
+        >
+          <RefreshCwIcon className={props.loading ? "size-3.5 animate-spin" : "size-3.5"} />
+          Refresh
+        </Button>
+      </div>
+
+      {!props.enabled ? (
+        <p className="text-xs text-fg-subtle">You don't have permission to view invoices.</p>
+      ) : props.error && !props.page ? (
+        <LoadErrorState
+          title="Couldn't load invoices"
+          error={props.error}
+          onRetry={props.onRefresh}
+        />
+      ) : props.loading && !props.page ? (
+        <div className="flex items-center gap-2 text-xs text-fg-muted">
+          <Loader2Icon className="size-3.5 animate-spin" />
+          Loading invoices
+        </div>
+      ) : !props.page || props.page.invoices.length === 0 ? (
+        <p className="text-xs text-fg-subtle">
+          No Stripe invoices yet. New credit purchases appear after payment is finalized.
+        </p>
+      ) : (
+        <>
+          {props.error ? (
+            <LoadErrorState
+              title="Couldn't refresh invoices"
+              error={props.error}
+              onRetry={props.onRefresh}
+            />
+          ) : null}
+          <div className="overflow-x-auto">
+            <table className="min-w-full border-collapse text-left text-xs">
+              <thead className="border-b border-border text-fg">
+                <tr>
+                  <th className="whitespace-nowrap px-2 py-1.5 font-medium">Invoice</th>
+                  <th className="whitespace-nowrap px-2 py-1.5 font-medium">Date</th>
+                  <th className="whitespace-nowrap px-2 py-1.5 font-medium">Status</th>
+                  <th className="whitespace-nowrap px-2 py-1.5 font-medium">Total</th>
+                  <th className="px-2 py-1.5 text-right font-medium">Document</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border/70">
+                {props.page.invoices.map((invoice) => (
+                  <InvoiceRow key={invoice.id} invoice={invoice} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {props.page.hasMore && nextCursor ? (
+            <div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={props.loading}
+                onClick={() => props.onLoadMore(nextCursor)}
+              >
+                {props.loading ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
+                Load more
+              </Button>
+            </div>
+          ) : null}
+        </>
+      )}
+    </section>
+  );
+}
+
+function InvoiceRow({ invoice }: { invoice: BillingInvoice }) {
+  const documentUrl = invoice.invoicePdfUrl ?? invoice.hostedInvoiceUrl;
+  return (
+    <tr>
+      <td className="whitespace-nowrap px-2 py-1.5 font-medium">{invoice.number ?? invoice.id}</td>
+      <td className="whitespace-nowrap px-2 py-1.5 text-fg-muted">
+        {formatTimestamp(invoice.createdAt)}
+      </td>
+      <td className="whitespace-nowrap px-2 py-1.5 text-fg-muted">{invoice.status ?? "pending"}</td>
+      <td className="whitespace-nowrap px-2 py-1.5 font-mono text-fg-muted">
+        {formatMoneyMicros(invoice.totalMicros, invoice.currency)}
+      </td>
+      <td className="whitespace-nowrap px-2 py-1.5 text-right">
+        {documentUrl ? (
+          <Button asChild type="button" variant="ghost" size="sm">
+            <a href={documentUrl} target="_blank" rel="noopener noreferrer">
+              <DownloadIcon className="size-3.5" />
+              {invoice.invoicePdfUrl ? "Download PDF" : "View invoice"}
+            </a>
+          </Button>
+        ) : (
+          <span className="text-fg-subtle">Not ready</span>
+        )}
+      </td>
+    </tr>
   );
 }
 

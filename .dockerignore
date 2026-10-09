@@ -6,6 +6,9 @@
 .env.*
 !.env.example
 node_modules
+# Workspace installs (including local node_modules symlinks) must be rebuilt
+# inside the image, just like the root install.
+**/node_modules
 var
 # The Rust cargo build output (agent/target/) is large + irrelevant to the API/web
 # images. The signed PER-SHA agent binaries the API serves are staged into

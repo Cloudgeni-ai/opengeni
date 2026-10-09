@@ -13,6 +13,8 @@ htmlcov/
 node_modules/
 .turbo/
 .vite/
+uiverify-archive/
+/apps/web/test/visual/__screenshots__/
 coverage/
 tmp/
 *.tsbuildinfo

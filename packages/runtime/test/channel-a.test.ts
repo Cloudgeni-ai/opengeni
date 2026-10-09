@@ -616,6 +616,37 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     expect(durationMs).toBeLessThan(5_000);
   });
 
+  test("fsListPruned retains top-level files when an earlier directory exhausts the budget", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    const made = await svc.terminalExec({
+      command: [
+        "mkdir -p aaa-cache",
+        'for f in $(seq 1 50); do : > "aaa-cache/f$f"; done',
+        ": > zzz-result.xlsx",
+      ].join(" && "),
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
+    expect(made.exitCode).toBe(0);
+
+    const list = await svc.fsListPruned(
+      { path: "", depth: 20, maxEntries: 10, includeHidden: true },
+      ["node_modules"],
+    );
+    const paths: string[] = [];
+    const walk = (node: typeof list.root): void => {
+      paths.push(node.path);
+      node.children?.forEach(walk);
+    };
+    walk(list.root);
+
+    expect(list.truncated).toBe(true);
+    expect(paths).toContain("aaa-cache");
+    expect(paths).toContain("zzz-result.xlsx");
+  });
+
   test("fsListPruned rejects non-literal prune patterns before executing the box", async () => {
     let executed = false;
     const svc = new SandboxChannelAService({

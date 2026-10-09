@@ -6,6 +6,8 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+bun scripts/check-development-prerequisites.ts
+
 if [ ! -f .env ]; then
   cp .env.example .env
   echo "Created .env from .env.example. Configure model and sandbox credentials before running agent sessions."
