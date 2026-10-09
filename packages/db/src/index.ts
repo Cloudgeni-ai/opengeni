@@ -272,13 +272,26 @@ import {
   mergeCodexPlanEntitlementExclusion,
   readCodexPlanEntitlementExclusion,
   serializeCodexPlanEntitlementExclusion,
-  type CodexPlanEntitlementExclusion,
 } from "./codex-plan-entitlement";
 export * from "./codex-plan-entitlement";
 export * from "./legacy-subscription-world";
 export * from "./subscription-core-codex";
 export * from "./subscription-core-codex-apps";
 export * from "./subscription-core-codex-compat";
+import type {
+  CodexAccountStatus,
+  CodexRotationSettings,
+  EffectiveCodexSubscriptionSource,
+  WorkspaceCodexSubscriptionMode,
+  WorkspaceCodexSubscriptionSource,
+} from "./codex-account-types";
+export type {
+  CodexAccountStatus,
+  CodexRotationSettings,
+  EffectiveCodexSubscriptionSource,
+  WorkspaceCodexSubscriptionMode,
+  WorkspaceCodexSubscriptionSource,
+} from "./codex-account-types";
 import {
   projectSubscriptionCoreCodexWorkspace,
   type SubscriptionCoreCodexWake,
@@ -24008,23 +24021,6 @@ export type WorkspaceEnvironmentForRun = VariableSetForRun;
 // `getCodexCredentialStatus` returns metadata only (never the secret column).
 // ---------------------------------------------------------------------------
 
-export type WorkspaceCodexSubscriptionMode =
-  | "automatic"
-  | "workspace"
-  | "organization"
-  | "disabled";
-export type EffectiveCodexSubscriptionSource = "workspace" | "organization" | "disabled";
-
-export type WorkspaceCodexSubscriptionSource = {
-  accountId: string;
-  workspaceId: string;
-  workspaceKind: "personal" | "shared";
-  mode: WorkspaceCodexSubscriptionMode;
-  effectiveSource: EffectiveCodexSubscriptionSource;
-  workspaceAvailable: boolean;
-  organizationAvailable: boolean;
-};
-
 const workspaceCodexOrganizationInheritanceAvailable = new Map<string, boolean>();
 
 function rememberWorkspaceCodexOrganizationInheritance(
@@ -25958,48 +25954,6 @@ export async function isCodexBilledTurn(input: {
 // ---------------------------------------------------------------------------
 // Multi-account (P1) metadata accessors. All metadata-only — NEVER decrypt.
 // ---------------------------------------------------------------------------
-
-export type CodexAccountStatus = {
-  allowedModelIds?: string[] | null;
-  id: string;
-  source: Exclude<EffectiveCodexSubscriptionSource, "disabled">;
-  chatgptAccountId: string | null;
-  label: string | null;
-  accountEmail: string | null;
-  planType: string | null;
-  /** Last provider plan observation; absent on pre-plan-tracking fixtures. */
-  planCheckedAt?: Date | null;
-  /** Plan before the most recent observed plan change, and when it was seen. */
-  planPreviousType?: string | null;
-  planChangedAt?: Date | null;
-  /** Models the current plan was proven not to include (see codex-plan-entitlement). */
-  planEntitlementExclusion?: CodexPlanEntitlementExclusion | null;
-  status: string; // active | needs_relogin | error
-  /** New automatic allocations only; health/refresh and existing turns remain independent. */
-  allocatorEnabled: boolean;
-  allocatorVersion: number;
-  allocatorUpdatedBySubjectId: string | null;
-  allocatorUpdatedAt: Date | null;
-  resetCreditAvailableCount: number | null;
-  resetCreditsCheckedAt: Date | null;
-  connectedBySubjectId: string | null;
-  isActive: boolean;
-  expiresAt: Date | null;
-  lastRefreshAt: Date | null;
-  lastError: string | null;
-  // P2 cached usage (plaintext metadata; rides along on this metadata-only read
-  // with ZERO provider calls and ZERO decrypts). null until the first refresh.
-  primaryUsedPercent: number | null;
-  primaryResetAt: Date | null;
-  secondaryUsedPercent: number | null;
-  secondaryResetAt: Date | null;
-  usageCheckedAt: Date | null;
-  // P3 rotation cooldown: when set and in the future, this account is cooling-down
-  // (rotated-off after a usage cap) and the engine skips it. null ⇒ not cooling.
-  exhaustedUntil: Date | null;
-  /** Typed provider-refusal provenance; null for legacy/cleared cooldowns. */
-  exhaustedKind: CodexCredentialCooldownKind | null;
-};
 
 /**
  * A metadata-only scheduling candidate observed while the workspace's rotation
@@ -32639,13 +32593,6 @@ async function mutateCodexAccountUsage(
   );
 }
 
-export type CodexRotationSettings = {
-  activeCredentialId: string | null;
-  /** False keeps new allocations on the active account; true permits pool failover. */
-  rotationEnabled: boolean;
-  rotationStrategy: string; // P1: 'most_remaining' (unused)
-};
-
 /**
  * Per-workspace model/provider availability policy. NULL fields = unrestricted
  * (identical to no row — the default for every workspace). Non-null
@@ -33683,9 +33630,12 @@ export async function pinSubscriptionCoreSessionCodexAccount(
       await tx.execute(
         sql`select set_config('opengeni.initiating_human_subject_id', ${input.subjectId}, true)`,
       );
+      // The legacy pin's lock contract: a preference change admits no
+      // inference (waiter reconciliation rechecks Pause), so the canonical
+      // session-events lock is taken without the workspace control prefix.
       const locks = await lockSessionEventWriteRows(tx, {
         workspaceId: input.workspaceId,
-        controlLock: "share",
+        controlLock: "none",
         sessionIds: [input.sessionId],
         sessionLock: "no_key_update",
       });

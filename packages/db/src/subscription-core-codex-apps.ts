@@ -199,13 +199,34 @@ export async function designateSubscriptionCoreCodexApps(
       connectionId: input.connectionId,
     });
     if (!connectionId) return { kind: "not_found" };
-    const [connection] = await rawRows<{ status: string; kind: string; ownership: string }>(
+    // Only a target the Apps resolver can serve: a shared Codex subscription
+    // connection that is organization-scoped or assigned to exactly this
+    // workspace. A personal, people-scoped or elsewhere-assigned connection
+    // would be an inert designation, so it is refused as not found.
+    const [connection] = await rawRows<{
+      status: string;
+      kind: string;
+      ownership: string;
+      in_scope: boolean;
+    }>(
       tx,
-      sql`select status, kind, ownership from subscription_connections
-        where account_id = ${input.accountId}::uuid and provider = 'codex'
-          and id = ${connectionId}::uuid`,
+      sql`select connection.status, connection.kind, connection.ownership,
+          (connection.scope_kind = 'organization'
+            or (connection.scope_kind = 'workspaces' and exists (
+              select 1 from subscription_connection_workspaces assignment
+              where assignment.account_id = connection.account_id
+                and assignment.connection_id = connection.id
+                and assignment.workspace_id = ${input.workspaceId}::uuid))) as in_scope
+        from subscription_connections connection
+        where connection.account_id = ${input.accountId}::uuid and connection.provider = 'codex'
+          and connection.id = ${connectionId}::uuid`,
     );
-    if (!connection || connection.kind !== "subscription" || connection.ownership !== "shared")
+    if (
+      !connection ||
+      connection.kind !== "subscription" ||
+      connection.ownership !== "shared" ||
+      connection.in_scope !== true
+    )
       return { kind: "not_found" };
     if (connection.status !== "active") return { kind: "unavailable" };
     let written: { version: number | string; updated_at: Date | string } | undefined;

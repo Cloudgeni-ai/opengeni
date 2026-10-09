@@ -636,6 +636,55 @@ function authorizationCases(harness: "template" | "owner-migrated") {
     ).catch((error: unknown) => error);
     expect(String((direct as { cause?: unknown })?.cause ?? direct)).toContain("permission denied");
   });
+
+  test(`${harness}: designate refuses a target the Apps resolver could never serve`, async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const scope = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };
+    const admin = { ...scope, subjectId: org.ownerSubjectId };
+    const [other] = await shared!.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${org.accountId}::uuid, 'Core Codex Apps elsewhere') returning id::text as id`;
+    const [peopleScoped] = await shared!.admin<{ id: string }[]>`
+      insert into subscription_connections (
+        account_id, provider, kind, credential_encrypted, ownership, scope_kind, provider_account_id
+      ) values (
+        ${org.accountId}::uuid, 'codex', 'subscription', ${encryptedTokens("designate-people")},
+        'shared', 'people', 'chatgpt-designate-people'
+      ) returning id::text as id`;
+    await shared!.admin`
+      insert into subscription_connection_people (account_id, connection_id, organization_membership_id)
+      values (${org.accountId}::uuid, ${peopleScoped!.id}::uuid, ${org.ownerMembershipId}::uuid)`;
+    const elsewhere = await sharedConnection(org, "designate-elsewhere", {
+      scope: "workspaces",
+      workspaces: [other!.id],
+      managedBy: other!.id,
+    });
+    const personal = await personalConnection(org, "designate-personal");
+    for (const connectionId of [peopleScoped!.id, elsewhere, personal]) {
+      expect(
+        await designateSubscriptionCoreCodexApps(client!.db, {
+          ...admin,
+          connectionId,
+          expectedVersion: 0,
+        }),
+      ).toEqual({ kind: "not_found" });
+    }
+    // Settings never show an inert designation.
+    expect(await getSubscriptionCoreCodexAppsSettings(client!.db, scope)).toEqual({
+      credentialId: null,
+      version: 0,
+      designatedAt: null,
+    });
+    const organizationScoped = await sharedConnection(org, "designate-organization");
+    expect(
+      await designateSubscriptionCoreCodexApps(client!.db, {
+        ...admin,
+        connectionId: organizationScoped,
+        expectedVersion: 0,
+      }),
+    ).toMatchObject({ kind: "updated", credentialId: organizationScoped });
+  });
 }
 
 describe.skipIf(!realDb)("Codex Apps routine authorization (shared template)", () => {

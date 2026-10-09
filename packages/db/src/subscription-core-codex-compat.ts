@@ -27,7 +27,7 @@ import type {
   EffectiveCodexSubscriptionSource,
   WorkspaceCodexSubscriptionMode,
   WorkspaceCodexSubscriptionSource,
-} from "./index";
+} from "./codex-account-types";
 
 /**
  * `legacy`: no cutover row, the legacy Codex path is unchanged. `core`: the

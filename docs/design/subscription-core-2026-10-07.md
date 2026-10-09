@@ -1179,9 +1179,11 @@ nothing unless the account's Codex cutover is enabled.
   the stored version + 1), so it is greater than every earlier designation
   of that workspace (designate and clear serialize on the settings lock) and
   a stale clear always conflicts instead of removing a newer designation; no
-  tombstone or schema change is needed. Personal connections cannot be
-  designated (the M2 policy is shared-only), and the catalog still requires
-  an active connection. The in-process Apps refresh flight is keyed by
+  tombstone or schema change is needed. Designate refuses (as not found,
+  404) every target the resolver could never serve: a personal connection,
+  a people-scoped shared one, or a workspace-scoped one not assigned to this
+  workspace, so settings never show an inert designation; the catalog still
+  requires an active connection. The in-process Apps refresh flight is keyed by
   workspace, connection and refresh generation, because one
   organization-scoped connection can be designated by several workspaces
   and one workspace's `unavailable` must never reach another's request.
@@ -1253,7 +1255,10 @@ nothing unless the account's Codex cutover is enabled.
   the connection so an unhealthy connection does not block "auto"), through
   the binding guard: the connection must be active and eligible for that
   session, and a personal connection only in its owner's own session. It
-  emits the legacy `codex.account.selection.changed` receipt. The pin locks
+  emits the legacy `codex.account.selection.changed` receipt under the
+  legacy pin's session-events lock contract (the canonical session lock
+  without the workspace control prefix, since a preference change admits no
+  inference and waiter reconciliation rechecks Pause). The pin locks
   the binding row (`FOR UPDATE`) before its version compare-and-swap, so a
   running turn's concurrent binding write makes it wait, not report the
   choice as not found. Management
