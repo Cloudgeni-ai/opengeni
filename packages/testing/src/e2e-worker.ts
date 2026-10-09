@@ -10,6 +10,7 @@ import {
 } from "@opengeni/worker-bundle";
 import type { Model, ModelRequest, ModelResponse, StreamEvent } from "@openai/agents";
 import {
+  assistantMessage,
   functionCall,
   latestExecCommandState,
   ScriptedModel,
@@ -393,6 +394,8 @@ class HeldWaitPersonTurnModel implements Model {
       if (!body.includes("opengeni__wait_for_input"))
         return {
           output: [
+            // A person's turn must say something visible before it waits.
+            assistantMessage("HELD_WAIT_STARTED: a child is counting; I'll wait for it."),
             functionCall(name("wait_for_input"), {
               reason: "Waiting for the child's count",
               timeoutSeconds: 600,
@@ -455,6 +458,8 @@ class HeldWaitConsumedByPersonTurnModel implements Model {
         }
         return {
           output: [
+            // A person's turn must say something visible before it waits.
+            assistantMessage("CONSUMED_WAIT_STARTED: a child is counting; I'll wait for it."),
             functionCall(name("wait_for_input"), {
               reason: "Waiting for the child's count",
               timeoutSeconds: 45,

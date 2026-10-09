@@ -162,6 +162,8 @@ export type EventingState = {
   settle: TurnSettleFn | null;
   turnStartedPublished: boolean;
   stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
+  /** Set by the stream attempt: refuses a wait that would leave a person unanswered. */
+  inputWaitReplyGuard: (() => Promise<string | null>) | null;
   modelRunSettings: Settings;
   firstModelRequestPreparationStartedAt: number | null;
   firstModelRequestPreparationRecorded: boolean;
@@ -331,6 +333,7 @@ export function createTurnContext(input: {
       settle: null,
       turnStartedPublished: false,
       stream: undefined,
+      inputWaitReplyGuard: null,
       modelRunSettings: input.settings,
       firstModelRequestPreparationStartedAt: null,
       firstModelRequestPreparationRecorded: false,

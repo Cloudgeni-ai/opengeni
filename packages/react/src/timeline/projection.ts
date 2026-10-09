@@ -1924,11 +1924,35 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
   const messages = new Map<string, AgentMessageItem[]>();
   const inputs = new Map<string, Extract<TimelineItem, { kind: "machine-input-batch" }>>();
   const itemOrder = new Map(items.map((item, index) => [item.id, index]));
+  // Turns that answer a person's message: the first turn after it, and a live
+  // turn it steered. Their replies are never folded as mere progress.
+  const answersPerson = new Set<string>();
+  let personAwaitingTurn = false;
+  // A live turn a person's message may have steered. If it keeps working after
+  // the message, the steer was absorbed and no later turn inherits it; if it is
+  // superseded instead, the next turn answers the person.
+  let steeredTurn: string | undefined;
   let legacyTurn = "start";
   let currentTurn = legacyTurn;
   for (const item of items) {
-    if (item.kind === "user-message") legacyTurn = item.id;
+    if (item.kind === "user-message") {
+      legacyTurn = item.id;
+      personAwaitingTurn = true;
+      steeredTurn = undefined;
+      if (seenTurns.has(currentTurn) && !settlements.has(currentTurn)) {
+        answersPerson.add(currentTurn);
+        steeredTurn = currentTurn;
+      }
+    }
     const key = ("turnId" in item && item.turnId) || legacyTurn;
+    if (
+      steeredTurn !== undefined &&
+      key === steeredTurn &&
+      (isActivityItem(item) || (item.kind === "agent-message" && item.text.trim()))
+    ) {
+      personAwaitingTurn = false;
+      steeredTurn = undefined;
+    }
     // Legacy work still establishes a boundary using its prompt key.
     // A human message alone does not: it may be steering the existing turn.
     if (
@@ -1943,6 +1967,9 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         }
         if (previous?.work && !previous.work.endedAt) previous.work.endedAt = item.occurredAt;
         currentTurn = key;
+        if (personAwaitingTurn) answersPerson.add(key);
+        personAwaitingTurn = false;
+        steeredTurn = undefined;
       }
       seenTurns.add(key);
     }
@@ -2162,12 +2189,26 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         ? (responseCandidates.at(-1) ??
           prose.filter((message) => message.phase === "final_answer").at(-1))
         : undefined);
+    const responses = new Set<AgentMessageItem>(response ? [response] : []);
+    // A turn that answers a person but ends with only commentary (typically by
+    // yielding to a wait) has no single authoritative reply. Its first message
+    // is the immediate answer and its last is the latest word; only the
+    // progress narration between them folds.
+    const firstCandidate = responseCandidates[0];
+    if (
+      settledAt &&
+      firstCandidate &&
+      answersPerson.has(key) &&
+      responseCandidates.every((message) => message.phase === "commentary")
+    ) {
+      responses.add(firstCandidate);
+    }
     if (settledAt) {
       for (const message of responseCandidates) {
         // Markdown image syntax also carries retained video/audio previews.
         // Keep potential primary media visible rather than guessing whether a
         // partial/reference-style embed can safely disappear into history.
-        if (message === response || message.text.includes("![")) continue;
+        if (responses.has(message) || message.text.includes("![")) continue;
         foldedProse.add(message);
         group.work!.details.push({ kind: "item", item: message });
       }
@@ -2198,11 +2239,12 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         settledAt && Date.parse(responseAt) > Date.parse(settledAt) ? settledAt : responseAt;
       // A late completion may belong to an older turn. Keep its work at its
       // original boundary rather than moving it across a newer turn's input.
-      if (
-        settledAt &&
-        (positions.get(response) ?? groups.length) < (nextBoundary.get(group) ?? groups.length)
-      ) {
-        beforeRows.set(groups[positions.get(response)!]!, group);
+      // The work row leads the first visible reply of the turn.
+      const anchor = Math.min(
+        ...[...responses].map((message) => positions.get(message) ?? groups.length),
+      );
+      if (settledAt && anchor < (nextBoundary.get(group) ?? groups.length)) {
+        beforeRows.set(groups[anchor]!, group);
         movedRows.add(group);
       }
     }
@@ -2632,7 +2674,26 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
       ? null
       : extractLatestCompletedCommentary(collected, turnEnd);
   const visibleMessage = finalMessage ?? fallbackMessage;
-  const body = visibleMessage ? collected.filter((group) => group !== visibleMessage) : collected;
+  const visibleMessages = visibleMessage ? [visibleMessage] : [];
+  // A turn that answers a person but declares no final answer (typically one
+  // that yields to a wait) keeps its first message visible beside the latest:
+  // that is the immediate answer, not progress narration.
+  if (
+    visibleMessage &&
+    !hasOrdinaryFinalAgentMessage(collected, turnEnd) &&
+    turnAnswersPerson(groups, startIndex)
+  ) {
+    const first = collected.find(
+      (group): group is Extract<TimelineGroup, { kind: "item" }> =>
+        group.kind === "item" &&
+        group.item.kind === "agent-message" &&
+        !group.item.streaming &&
+        group.item.text.trim().length > 0 &&
+        belongsToTurn(group.item, turnEnd.turnId),
+    );
+    if (first && first !== visibleMessage) visibleMessages.unshift(first);
+  }
+  const body = collected.filter((group) => !visibleMessages.includes(group as never));
   if (body.length === 0) {
     return;
   }
@@ -2658,11 +2719,25 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
     turnGroup.failureText = turnEnd.failureText;
   }
 
-  groups.splice(
-    startIndex,
-    collectedLength,
-    ...(visibleMessage ? [turnGroup, visibleMessage] : [turnGroup]),
-  );
+  groups.splice(startIndex, collectedLength, turnGroup, ...visibleMessages);
+}
+
+/** Whether the input boundary before a turn includes a person's message. */
+function turnAnswersPerson(groups: TimelineGroup[], startIndex: number): boolean {
+  for (let index = startIndex - 1; index >= 0; index -= 1) {
+    const group = groups[index];
+    if (group?.kind !== "item") return false;
+    if (group.item.kind === "user-message") return true;
+    if (
+      group.item.kind !== "machine-input-batch" &&
+      group.item.kind !== "session-status" &&
+      group.item.kind !== "context-compaction" &&
+      !(group.item.kind === "notice" && group.item.tone === "input")
+    ) {
+      return false;
+    }
+  }
+  return false;
 }
 
 function isTurnBoundary(group: TimelineGroup | undefined): boolean {

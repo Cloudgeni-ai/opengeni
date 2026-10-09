@@ -385,7 +385,7 @@ import {
   managedCodemodeClientDirectory,
 } from "./sandbox/codemode-client";
 import { InputWaitYield, type InputWaitYieldStream } from "./input-wait-yield";
-export { InputWaitYield } from "./input-wait-yield";
+export { InputWaitYield, modelResponseHasVisibleText } from "./input-wait-yield";
 import {
   createTurnToolCancellationController,
   TurnSandboxCommandCancelledError,
@@ -4360,6 +4360,12 @@ export type ToolPreparationPhaseMeasurement = {
 };
 
 export type PrepareToolsOptions = {
+  /**
+   * Consulted before `wait_for_input` registers a wait. A returned message is
+   * given to the model as a tool error instead of waiting, for example when the
+   * wait would end a person's turn without any visible reply.
+   */
+  inputWaitReplyGuard?: () => Promise<string | null>;
   /** Frozen, explicitly selected account labels keyed by execution route, not provider. */
   mcpAccountLabels?: ReadonlyMap<string, string>;
   /** Opt-in exact-attempt persistence; absence preserves ordinary MCP execution. */
@@ -4733,7 +4739,7 @@ export async function prepareAgentTools(
   tools: ToolRef[],
   options: PrepareToolsOptions = {},
 ): Promise<PreparedAgentTools> {
-  const inputWaitYield = new InputWaitYield();
+  const inputWaitYield = new InputWaitYield(options.inputWaitReplyGuard);
   // One live Set per prepared tool environment, shared with the codex_apps
   // sanitizing fetch and the current turn's tool_search description.
   const codexConnectorNamespaces = options.deferredCodexConnectorNamespaces ?? new Set<string>();
@@ -8292,6 +8298,17 @@ export class PrefixedMcpServer implements MCPServer {
     };
     const operationId =
       meta && typeof meta.opengeniOperationId === "string" ? meta.opengeniOperationId : undefined;
+    // A wait that would end a person's turn without a visible reply is refused
+    // before admission, so the model answers first and nothing remote changes.
+    if (unprefixed === "wait_for_input") {
+      const refusal = await this.inputWaitYield?.replyRefusal();
+      if (refusal) {
+        return boundedMcpToolResult({
+          isError: true,
+          content: [{ type: "text", text: refusal }],
+        });
+      }
+    }
     // Admission must precede the physical remote call, not merely observe its
     // result: model dispatch and terminal settlement drain this reservation.
     const completeWait =

@@ -509,3 +509,177 @@ describe("answers stay visible across readable turns", () => {
     expect(visibleMessages(groups)).toEqual([ANSWER_A]);
   });
 });
+
+describe("a person's question answered before a wait", () => {
+  const ANSWER = "**Yes, 28 versus 128 costs the same** if the actual node count stays the same.";
+  const CORRECTION = "Please disregard the citation links above; the conclusion stands.";
+
+  function commentary(text: string, id: string, turnId: string): SessionEvent[] {
+    return [
+      event("agent.message.delta", { text, phase: "commentary", messageId: id }, turnId),
+      event("agent.message.completed", { text, phase: "commentary", messageId: id }, turnId),
+    ];
+  }
+
+  function waitThenSettle(turnId: string): SessionEvent[] {
+    return [
+      event(
+        "agent.toolCall.created",
+        { id: `${turnId}-wait`, name: "opengeni__wait_for_input", arguments: {} },
+        turnId,
+      ),
+      event(
+        "session.wait.started",
+        { actor: "agent", reason: "Waiting for the reviews.", waitTurnId: turnId },
+        turnId,
+      ),
+      event(
+        "agent.toolCall.output",
+        { id: `${turnId}-wait`, output: { status: "waiting_for_input" } },
+        turnId,
+      ),
+      event("turn.completed", { output: "", reply: CORRECTION }, turnId),
+    ];
+  }
+
+  /** The recorded shape: answer as commentary, more tools, a short note, then a wait. */
+  function answeredThenWaited(opener: SessionEvent): SessionEvent[] {
+    return [
+      opener,
+      event("turn.started", {}, "turn-q"),
+      ...tool("search", "web_search_call", "turn-q"),
+      ...commentary(ANSWER, "answer", "turn-q"),
+      ...tool("search-2", "web_search_call", "turn-q"),
+      ...tool("clock", "exec_command", "turn-q"),
+      ...commentary(CORRECTION, "correction", "turn-q"),
+      ...tool("clock-2", "exec_command", "turn-q"),
+      ...waitThenSettle("turn-q"),
+    ];
+  }
+
+  test("the answer stays visible after the work row instead of folding into it", () => {
+    sequence = 0;
+    const events = answeredThenWaited(
+      event("user.message", { text: "Does the scaler maximum change what we pay?" }, null),
+    );
+    const groups = groupTimeline(buildTimeline(events), { readableTurns: true });
+    expect(visibleMessages(groups)).toEqual([ANSWER, CORRECTION]);
+    const kinds = topLevelKinds(groups);
+    expect(kinds.slice(0, 4)).toEqual([
+      "user-message",
+      "activity",
+      "agent-message",
+      "agent-message",
+    ]);
+    const work = groups[1];
+    expect(work?.kind === "activity" && visibleMessages(work.work!.details)).toEqual([]);
+  });
+
+  test("progress between the immediate answer and the latest word still folds", () => {
+    sequence = 0;
+    const events = [
+      event("user.message", { text: "Roll out the new bounds" }, null),
+      event("turn.started", {}, "turn-q"),
+      ...commentary("I'll use 2 to 28 in production.", "first", "turn-q"),
+      ...tool("read", "exec_command", "turn-q"),
+      ...commentary("Checking the rollout gates.", "middle", "turn-q"),
+      ...tool("check", "exec_command", "turn-q"),
+      ...commentary(CORRECTION, "last", "turn-q"),
+      ...waitThenSettle("turn-q"),
+    ];
+    const groups = groupTimeline(buildTimeline(events), { readableTurns: true });
+    expect(visibleMessages(groups)).toEqual(["I'll use 2 to 28 in production.", CORRECTION]);
+    const work = groups.find((group) => group.kind === "activity");
+    expect(work?.kind === "activity" && visibleMessages(work.work!.details)).toEqual([
+      "Checking the rollout gates.",
+    ]);
+  });
+
+  test("a machine-started turn that ends waiting keeps only its latest note visible", () => {
+    sequence = 0;
+    const events = [
+      event("user.message", { text: "Build the regional report" }, null),
+      event("turn.started", {}, "turn-1"),
+      ...answer(ANSWER_A, "turn-1"),
+      machineInput("child_progress", "turn-q"),
+      event("turn.started", {}, "turn-q"),
+      ...commentary("Checking the worker result.", "first", "turn-q"),
+      ...tool("check", "exec_command", "turn-q"),
+      ...commentary(CORRECTION, "last", "turn-q"),
+      ...waitThenSettle("turn-q"),
+    ];
+    const groups = groupTimeline(buildTimeline(events), { readableTurns: true });
+    expect(visibleMessages(groups)).toEqual([ANSWER_A, CORRECTION]);
+  });
+
+  for (const readableTurns of [true, false]) {
+    test(`an absorbed steer does not make the next machine turn answer a person (readable=${readableTurns})`, () => {
+      sequence = 0;
+      const events = [
+        event("user.message", { text: "Build the report" }, null),
+        event("turn.started", {}, "turn-1"),
+        ...tool("t1", "exec_command", "turn-1"),
+        event("user.message", { text: "Also include the EU", delivery: "steer" }, "turn-1"),
+        ...tool("t2", "exec_command", "turn-1"),
+        ...answer(ANSWER_A, "turn-1"),
+        machineInput("child_progress", "turn-m"),
+        event("turn.started", {}, "turn-m"),
+        ...commentary("Checking the worker result.", "first", "turn-m"),
+        ...tool("t3", "exec_command", "turn-m"),
+        ...commentary(CORRECTION, "last", "turn-m"),
+        ...waitThenSettle("turn-m"),
+      ];
+      const groups = groupTimeline(buildTimeline(events), { readableTurns });
+      expect(visibleMessages(groups)).toEqual([ANSWER_A, CORRECTION]);
+    });
+
+    test(`a person's turn that compacts before answering keeps the answer (readable=${readableTurns})`, () => {
+      sequence = 0;
+      const events = [
+        event("user.message", { text: "Status?" }, null),
+        event("turn.started", {}, "turn-q"),
+        event("session.context.compacted", { trigger: "auto" }, "turn-q"),
+        ...commentary(ANSWER, "first", "turn-q"),
+        ...tool("t3", "exec_command", "turn-q"),
+        ...commentary(CORRECTION, "last", "turn-q"),
+        ...waitThenSettle("turn-q"),
+      ];
+      const groups = groupTimeline(buildTimeline(events), { readableTurns });
+      expect(visibleMessages(groups)).toEqual([ANSWER, CORRECTION]);
+    });
+  }
+
+  test("a person's message that supersedes a live turn is answered by the next turn", () => {
+    sequence = 0;
+    const events = [
+      event("user.message", { text: "Lower the floor to two" }, null),
+      event("turn.started", {}, "turn-1"),
+      ...tool("t1", "exec_command", "turn-1"),
+      event("user.message", { text: "Does the scaler maximum change what we pay?" }, null),
+      event("turn.superseded", { reason: "steer" }, "turn-1"),
+      event("turn.started", {}, "turn-q"),
+      ...tool("search", "web_search_call", "turn-q"),
+      ...commentary(ANSWER, "answer", "turn-q"),
+      ...tool("clock", "exec_command", "turn-q"),
+      ...commentary(CORRECTION, "correction", "turn-q"),
+      ...waitThenSettle("turn-q"),
+    ];
+    const groups = groupTimeline(buildTimeline(events), { readableTurns: true });
+    expect(visibleMessages(groups)).toEqual([ANSWER, CORRECTION]);
+  });
+
+  test("the classic grouping also keeps the answer outside the folded turn", () => {
+    sequence = 0;
+    const events = answeredThenWaited(
+      event("user.message", { text: "Does the scaler maximum change what we pay?" }, null),
+    );
+    const groups = groupTimeline(buildTimeline(events));
+    expect(visibleMessages(groups)).toEqual([ANSWER, CORRECTION]);
+    expect(topLevelKinds(groups).slice(0, 4)).toEqual([
+      "user-message",
+      "turn",
+      "agent-message",
+      "agent-message",
+    ]);
+  });
+});
