@@ -92,15 +92,17 @@ async function fetchCoreUsageJoined(
     }
     const chunks: Uint8Array[] = [];
     let size = 0;
-    while (reader) {
-      const next = await reader.read();
-      controller.signal.throwIfAborted();
-      remainingCoreUsageBudget(options.deadline);
-      if (next.done) break;
-      size += next.value.byteLength;
-      if (size > CORE_USAGE_MAX_BYTES)
-        throw new Error("Codex usage response exceeded its byte limit");
-      if (response.ok || response.status === 404) chunks.push(next.value);
+    if (reader) {
+      while (true) {
+        const next = await reader.read();
+        controller.signal.throwIfAborted();
+        remainingCoreUsageBudget(options.deadline);
+        if (next.done) break;
+        size += next.value.byteLength;
+        if (size > CORE_USAGE_MAX_BYTES)
+          throw new Error("Codex usage response exceeded its byte limit");
+        if (response.ok || response.status === 404) chunks.push(next.value);
+      }
     }
     let payload: unknown = null;
     if (response.ok || response.status === 404) {
