@@ -572,6 +572,72 @@ describe("createSessionProxyHandler", () => {
     });
   });
 
+  test("voice-first creation is explicit, preserves retry identity and never fabricates a prompt", async () => {
+    const inputs: unknown[] = [];
+    const admissions: SessionProxyMessageInput[] = [];
+    const { upstream, browser } = setup({
+      realtimeVoice: true,
+      createSession: (input) => {
+        inputs.push(input);
+        return { initialMessage: input.initialMessage, tools: [] };
+      },
+      beforeForwardMessage: (input) => {
+        admissions.push(input);
+      },
+    });
+    await browser.createSession(WORKSPACE_ID, {
+      startMode: "realtime",
+      idempotencyKey: "voice-create",
+    });
+    expect(inputs).toEqual([
+      { initialMessage: "", startMode: "realtime", idempotencyKey: "voice-create" },
+    ]);
+    expect(admissions).toEqual([{ delivery: "create", startMode: "realtime" }]);
+    expect(upstream.requests[0]!.body).toMatchObject({
+      startMode: "realtime",
+      idempotencyKey: "voice-create",
+    });
+    expect(upstream.requests[0]!.body).not.toHaveProperty("initialMessage");
+
+    const disabled = setup({ realtimeVoice: false, createSession: () => ({ tools: [] }) });
+    expect(
+      (await rejection(disabled.browser.createSession(WORKSPACE_ID, { startMode: "realtime" })))
+        .code,
+    ).toBe("route_not_allowed");
+    expect(disabled.upstream.requests).toEqual([]);
+    for (const fields of [
+      { initialMessage: "Do not silently send this" },
+      { resources: [{ kind: "file", fileId: "file-1" }] },
+    ]) {
+      expect(
+        (
+          await rejection(
+            browser.createSession(WORKSPACE_ID, { startMode: "realtime", ...fields } as never),
+          )
+        ).status,
+      ).toBe(400);
+    }
+    expect(upstream.requests).toHaveLength(1);
+  });
+
+  test("a simple create hook retains the browser retry key unless the server supplies its own", async () => {
+    for (const serverKey of [undefined, "server-key"]) {
+      const { upstream, browser } = setup({
+        createSession: ({ initialMessage }) => ({
+          initialMessage,
+          ...(serverKey ? { idempotencyKey: serverKey } : {}),
+        }),
+      });
+      await browser.createSession(WORKSPACE_ID, {
+        initialMessage: "Hello",
+        idempotencyKey: "browser-key",
+      });
+      expect(upstream.requests[0]!.body).toMatchObject({
+        idempotencyKey: serverKey ?? "browser-key",
+      });
+    }
+  });
+
   test("first-message files and model choices reach the hook and the created session", async () => {
     const inputs: unknown[] = [];
     const { upstream, browser } = setup({

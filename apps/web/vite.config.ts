@@ -82,7 +82,7 @@ export default defineConfig({
               // Left floating, these presentation modules merge into the
               // shared chunks every workspace and direct session loads.
               name: "embedded-chat",
-              test: /(?:apps[\\/]web[\\/]src[\\/](?:components[\\/]playground[\\/][\w-]+\.(?:tsx?|css)|routes[\\/]playground\.tsx)|packages[\\/]react[\\/]src[\\/](?:lib[\\/]host-theme\.ts|components[\\/](?:open-geni-chat|session-conversation|session-list|session-proxy-scope)\.tsx))$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:components[\\/]playground[\\/][\w-]+\.(?:tsx?|css)|routes[\\/]playground\.tsx)|packages[\\/]react[\\/]src[\\/](?:lib[\\/]host-theme\.ts|components[\\/](?:open-geni-chat|new-conversation|session-conversation|session-list|session-proxy-scope)\.tsx))$/,
               includeDependenciesRecursively: false,
               priority: 21,
             },

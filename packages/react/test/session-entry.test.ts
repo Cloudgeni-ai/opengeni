@@ -60,6 +60,8 @@ describe("session-only entry", () => {
       "@opengeni/sdk/allowance-refusal",
       "@opengeni/sdk/model-display",
       "@opengeni/sdk/model-picker-order",
+      // The new-conversation controller imports only the voice model type.
+      "@opengeni/sdk/realtime",
       "react",
     ]);
     expect(visited.size).toBeGreaterThan(5);
@@ -107,6 +109,7 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/older-history.ts"))).toBe(true);
     expect(reactSources.some((id) => id.includes("/src/components/"))).toBe(false);
     expect(reactSources.some((id) => id.includes("/src/commands/"))).toBe(false);
+    expect(reactSources.some((id) => id.includes("/src/realtime/"))).toBe(false);
     // Keep the session-only closure explicit: adding a source requires reviewing
     // whether it belongs to this provider-neutral public subpath.
     expect(reactSources.some((id) => id.endsWith("/src/conversation-timeline.ts"))).toBe(true);
@@ -121,7 +124,8 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/hooks/use-session-conversation.ts"))).toBe(
       true,
     );
-    expect(reactSources.length).toBe(29);
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/use-new-conversation.ts"))).toBe(true);
+    expect(reactSources.length).toBe(31);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

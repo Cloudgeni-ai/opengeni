@@ -1,31 +1,20 @@
-import {
-  OpenGeniApiError,
-  type FileResourceRef,
-  type LatencyMode,
-  type OpenGeniClient,
-  type ReasoningEffort,
-} from "@opengeni/sdk";
 import { MenuIcon, XIcon } from "lucide-react";
-import { useCallback, useRef, useState, type CSSProperties, type FormEvent } from "react";
-import { useWorkspaceModelCatalog } from "../hooks/use-available-models";
-import { FILE_ONLY_MESSAGE_TEXT, type ComposerState } from "../hooks/use-composer";
-import { useFileAttachments } from "../hooks/use-file-attachments";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import type {
+  CreatedConversation,
+  NewConversationCreateOptions,
+} from "../hooks/use-new-conversation";
 import { cn } from "../lib/cn";
-import { useErrorMessage } from "../lib/error-message";
+import { notifyObserver } from "../lib/notify-observer";
 import {
   useHostTheme,
   type HostSurfacePreference,
   type HostThemePreference,
 } from "../lib/host-theme";
 import { useOpenGeni, type ClientOverride } from "../session-context";
-import { ChatComposer } from "./chat-composer";
-import { ModelPolicyPicker } from "./model-policy-picker";
+import { NewConversation } from "./new-conversation";
 import { useClientConfigFlags } from "../hooks/use-client-config-flags";
-import {
-  SessionConversation,
-  useComposerTranscription,
-  type SessionConversationProps,
-} from "./session-conversation";
+import { SessionConversation, type SessionConversationProps } from "./session-conversation";
 import { SessionList, type SessionListLabels, type SessionListProps } from "./session-list";
 import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-scope";
 
@@ -37,6 +26,9 @@ export type OpenGeniChatLabels = SessionListLabels & {
   newChatTitle: string;
   send: string;
   newChatUnavailable: string;
+  newChatRetry?: string | undefined;
+  newChatPending?: string | undefined;
+  newChatFinishingUploads?: string | undefined;
 };
 
 const DEFAULT_LABELS: Omit<OpenGeniChatLabels, keyof SessionListLabels> = {
@@ -49,14 +41,7 @@ const DEFAULT_LABELS: Omit<OpenGeniChatLabels, keyof SessionListLabels> = {
 };
 
 /** What the first message carries besides its text. */
-export type OpenGeniChatCreateOptions = {
-  /** Files attached in the new-chat composer. */
-  resources?: FileResourceRef[] | undefined;
-  /** Present only when the user changed it in the model picker. */
-  model?: string | undefined;
-  reasoningEffort?: ReasoningEffort | undefined;
-  latencyMode?: LatencyMode | undefined;
-};
+export type OpenGeniChatCreateOptions = NewConversationCreateOptions;
 
 export type OpenGeniChatProps = ClientOverride &
   SessionProxyBaseUrl & {
@@ -113,8 +98,6 @@ export type OpenGeniChatProps = ClientOverride &
     surface?: HostSurfacePreference | undefined;
   };
 
-type CreateClient = Partial<Pick<OpenGeniClient, "createSession">>;
-
 /**
  * A complete chat experience: the user's chat list plus the conversation.
  * The list is a sidebar when the component is wide and a drawer when narrow
@@ -161,6 +144,7 @@ function Chat({
   const selected = controlledSessionId !== undefined ? controlledSessionId : uncontrolled;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [listRevision, setListRevision] = useState(0);
+  const [handoff, setHandoff] = useState<CreatedConversation | null>(null);
   const root = useRef<HTMLDivElement>(null);
   const hostTheme = useHostTheme(root, { theme, surface });
   const config = useClientConfigFlags(context.client);
@@ -169,39 +153,22 @@ function Chat({
 
   const select = useCallback(
     (next: string | null) => {
+      setHandoff(null);
       if (controlledSessionId === undefined) setUncontrolled(next);
-      onSessionChange?.(next);
+      notifyObserver(onSessionChange, next);
       setDrawerOpen(false);
     },
     [controlledSessionId, onSessionChange],
   );
 
-  const create = useCallback(
-    async (
-      initialMessage: string,
-      idempotencyKey: string,
-      options: OpenGeniChatCreateOptions,
-    ): Promise<string> => {
-      if (createSession) return await createSession(initialMessage, idempotencyKey, options);
-      const creator = (context.client as unknown as CreateClient).createSession;
-      if (typeof creator !== "function") throw new Error(labels.newChatUnavailable);
-      try {
-        const created = await creator.call(context.client, context.workspaceId, {
-          initialMessage,
-          idempotencyKey,
-          ...options,
-        } as Parameters<NonNullable<CreateClient["createSession"]>>[1]);
-        return created.id;
-      } catch (error) {
-        // A proxy without a createSession hook refuses the route itself.
-        if (error instanceof OpenGeniApiError && error.code === "route_not_allowed") {
-          throw new Error(labels.newChatUnavailable, { cause: error });
-        }
-        throw error;
-      }
-    },
-    [context.client, context.workspaceId, createSession, labels.newChatUnavailable],
-  );
+  useEffect(() => {
+    if (!handoff) return;
+    // The child's native composer captures its seed on mount. Do not seed it
+    // again after later navigation; voice keeps its separate one-shot handoff
+    // until the lazy control reports consumption.
+    if (selected === handoff.sessionId && !handoff.realtimeModel) setHandoff(null);
+    else if (selected !== null && selected !== handoff.sessionId) setHandoff(null);
+  }, [handoff, selected]);
 
   const list = (
     <SessionList
@@ -278,6 +245,24 @@ function Chat({
           {selected ? (
             <SessionConversation
               {...conversationProps}
+              composerOptions={{
+                ...conversationProps?.composerOptions,
+                ...(handoff?.sessionId === selected ? { initialDraft: handoff.draft } : {}),
+              }}
+              realtimeVoiceProps={{
+                ...conversationProps?.realtimeVoiceProps,
+                ...(handoff?.sessionId === selected && handoff.realtimeModel
+                  ? {
+                      realtimeAutostartModel: handoff.realtimeModel,
+                      onRealtimeAutostartConsumed: () => {
+                        setHandoff(null);
+                        notifyObserver(
+                          conversationProps?.realtimeVoiceProps?.onRealtimeAutostartConsumed,
+                        );
+                      },
+                    }
+                  : {}),
+              }}
               // Sub-agent chats open in place, like a chat from the list.
               onOpenSession={conversationProps?.onOpenSession ?? select}
               {...scope}
@@ -285,227 +270,40 @@ function Chat({
               height="100%"
             />
           ) : (
-            <NewChat
-              scope={scope}
-              labels={labels}
-              placeholderOverride={labelOverrides?.newChatPlaceholder}
-              conversationProps={conversationProps}
-              available={canCreate}
-              create={create}
-              onCreated={(id) => {
+            <NewConversation
+              {...scope}
+              attachments={conversationProps?.attachments}
+              modelPicker={conversationProps?.modelPicker}
+              modelPickerProps={conversationProps?.modelPickerProps}
+              composerProps={conversationProps?.composerProps}
+              voiceInput={conversationProps?.voiceInput}
+              realtimeVoice={conversationProps?.realtimeVoice}
+              realtimeVoiceProps={conversationProps?.realtimeVoiceProps}
+              labels={{
+                ...(labels.newChatRetry ? { retry: labels.newChatRetry } : {}),
+                ...(labels.newChatPending ? { pending: labels.newChatPending } : {}),
+                ...(labels.newChatFinishingUploads
+                  ? { finishingUploads: labels.newChatFinishingUploads }
+                  : {}),
+                title: labels.newChatTitle,
+                send: labels.send,
+                unavailable: labels.newChatUnavailable,
+                placeholder:
+                  labelOverrides?.newChatPlaceholder ??
+                  conversationProps?.composerProps?.placeholder ??
+                  labels.newChatPlaceholder,
+              }}
+              enabled={canCreate}
+              createSession={createSession}
+              onCreated={(created) => {
                 setListRevision((revision) => revision + 1);
-                select(id);
+                select(created.sessionId);
+                setHandoff(created);
               }}
             />
           )}
         </div>
       </main>
     </div>
-  );
-}
-
-const NOOP_ASYNC = async () => {};
-
-/**
- * The first message of a new chat, in the same composer as follow-ups: file
- * attachments, the model picker when offered, and the host's `composerProps`
- * (custom controls, voice input, copy).
- */
-function NewChat({
-  scope,
-  labels,
-  placeholderOverride,
-  conversationProps,
-  available,
-  create,
-  onCreated,
-}: {
-  scope: ClientOverride;
-  labels: OpenGeniChatLabels;
-  placeholderOverride: string | undefined;
-  conversationProps: OpenGeniChatProps["conversationProps"];
-  /** False when this product cannot start chats; the composer is disabled and says so. */
-  available: boolean;
-  create: (
-    initialMessage: string,
-    idempotencyKey: string,
-    options: OpenGeniChatCreateOptions,
-  ) => Promise<string>;
-  onCreated: (sessionId: string) => void;
-}) {
-  const context = useOpenGeni(scope);
-  const config = useClientConfigFlags(context.client);
-  const composerProps = conversationProps?.composerProps;
-  const modelPickerProps = conversationProps?.modelPickerProps;
-  const showModelPicker = conversationProps?.modelPicker ?? config.modelSelection;
-  const catalog = useWorkspaceModelCatalog({
-    client: context.client,
-    workspaceId: context.workspaceId,
-    enabled: showModelPicker,
-  });
-  const files = useFileAttachments(scope);
-  const uploadsEnabled = (conversationProps?.attachments ?? true) && config.uploads;
-  const transcription = useComposerTranscription(
-    context.client,
-    context.workspaceId,
-    (conversationProps?.voiceInput ?? true) && available ? config.voiceInput : null,
-  );
-  const [text, setText] = useState("");
-  const [sending, setSending] = useState(false);
-  const [error, setError] = useState<{ cause: unknown } | null>(null);
-  // Only what the user changed is sent; everything else stays server-owned.
-  const [choice, setChoice] = useState<
-    Pick<OpenGeniChatCreateOptions, "model" | "reasoningEffort" | "latencyMode">
-  >({});
-  const formatError = useErrorMessage();
-  // One key per attempted payload, so a retried send returns the same chat
-  // and an edited retry is a new request rather than an idempotency conflict.
-  const attempt = useRef<{ fingerprint: string; key: string } | null>(null);
-  const resources = uploadsEnabled ? files.readyResources : [];
-  const pendingFiles = uploadsEnabled && files.hasUnresolved;
-
-  const submit = async (): Promise<boolean> => {
-    const initialMessage = text.trim() || (resources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
-    if (!initialMessage || sending || pendingFiles || !available) return false;
-    const options: OpenGeniChatCreateOptions = {
-      ...(resources.length > 0 ? { resources } : {}),
-      ...(showModelPicker ? choice : {}),
-    };
-    const fingerprint = JSON.stringify([initialMessage, options]);
-    if (attempt.current?.fingerprint !== fingerprint) {
-      attempt.current = { fingerprint, key: crypto.randomUUID() };
-    }
-    setSending(true);
-    setError(null);
-    try {
-      const id = await create(initialMessage, attempt.current.key, options);
-      attempt.current = null;
-      setText("");
-      files.removeReadyFiles(resources.map((resource) => resource.fileId));
-      onCreated(id);
-      return true;
-    } catch (cause) {
-      setError({ cause });
-      return false;
-    } finally {
-      setSending(false);
-    }
-  };
-
-  const defaultModel = catalog.defaultModel;
-  const policy =
-    showModelPicker && (choice.model ?? defaultModel)
-      ? {
-          model: (choice.model ?? defaultModel)!,
-          reasoningEffort:
-            choice.reasoningEffort ?? config.defaultReasoningEffort ?? ("medium" as const),
-          latencyMode: choice.latencyMode ?? ("standard" as const),
-        }
-      : null;
-
-  const composer: ComposerState = {
-    value: text,
-    setValue: setText,
-    hasDraftContent: () => text.length > 0 || files.attachments.length > 0,
-    send: submit,
-    steer: submit,
-    sending,
-    canSend:
-      available && (text.trim().length > 0 || resources.length > 0) && !sending && !pendingFiles,
-    pause: NOOP_ASYNC,
-    pausing: false,
-    resume: NOOP_ASYNC,
-    resumeScope: NOOP_ASYNC,
-    resuming: false,
-    draft: null,
-    draftRevision: 0,
-    draftLoading: false,
-    draftSaving: false,
-    draftConflict: null,
-    policy,
-    setModel: (model) => setChoice((current) => ({ ...current, model })),
-    setReasoningEffort: (reasoningEffort) =>
-      setChoice((current) => ({ ...current, reasoningEffort })),
-    setLatencyMode: (latencyMode) => setChoice((current) => ({ ...current, latencyMode })),
-    draftPersistence: "disabled",
-    applyDraft: () => {},
-    reloadDraft: NOOP_ASYNC,
-    resolveDraftConflict: NOOP_ASYNC,
-    restoredResources: [],
-    removeRestoredResource: () => {},
-    // Shown below with the product's own copy.
-    error: null,
-    clearError: () => setError(null),
-  };
-
-  return (
-    <form
-      onSubmit={(event: FormEvent) => {
-        event.preventDefault();
-        void submit();
-      }}
-      className="mx-auto box-border flex h-full w-full max-w-3xl flex-col gap-4 p-3"
-      data-og-new-chat-composer=""
-    >
-      {/* Sits a little above center, relative to the panel rather than the page. */}
-      <div aria-hidden className="min-h-0 flex-[2]" />
-      {labels.newChatTitle ? (
-        <p className="text-center text-og-md font-medium text-og-fg">{labels.newChatTitle}</p>
-      ) : null}
-      <ChatComposer
-        {...composerProps}
-        {...(transcription && composerProps?.transcription === undefined ? { transcription } : {})}
-        composer={composer}
-        attachments={uploadsEnabled ? files : undefined}
-        disabled={!available || composerProps?.disabled}
-        runControl="none"
-        running={false}
-        placeholder={placeholderOverride ?? composerProps?.placeholder ?? labels.newChatPlaceholder}
-        inputProps={{
-          "aria-label": placeholderOverride ?? labels.newChatPlaceholder,
-          ...composerProps?.inputProps,
-        }}
-        messages={{ sendMessageAriaLabel: labels.send, ...composerProps?.messages }}
-        controlsStart={
-          composerProps?.controlsStart ??
-          (policy ? (
-            <ModelPolicyPicker
-              groupPresentation={modelPickerProps?.groupPresentation}
-              messages={modelPickerProps?.messages}
-              rows={catalog.rows}
-              model={policy.model}
-              effort={policy.reasoningEffort}
-              latencyMode={policy.latencyMode}
-              loading={catalog.loading}
-              error={catalog.error?.message}
-              disabled={sending}
-              menuSide="bottom"
-              onOpenChange={(open) => {
-                if (open) void catalog.refresh();
-              }}
-              onModelChange={composer.setModel!}
-              onEffortChange={composer.setReasoningEffort!}
-              onLatencyModeChange={composer.setLatencyMode!}
-            />
-          ) : undefined)
-        }
-        responsiveBasis={composerProps?.responsiveBasis ?? "container"}
-      />
-      {!available ? (
-        <p className="text-center text-og-sm text-og-fg-muted" data-og-new-chat-unavailable="">
-          {labels.newChatUnavailable}
-        </p>
-      ) : error ? (
-        <p role="alert" className="text-center text-og-sm text-og-status-failed">
-          {formatError(
-            error.cause,
-            error.cause instanceof Error && error.cause.message === labels.newChatUnavailable
-              ? labels.newChatUnavailable
-              : undefined,
-          )}
-        </p>
-      ) : null}
-      <div aria-hidden className="min-h-0 flex-[3]" />
-    </form>
   );
 }
