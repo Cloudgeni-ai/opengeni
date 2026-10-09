@@ -1,6 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
-import { codexRequestStorage, codexSubscriptionFetch } from "@opengeni/codex";
 import {
   createTurnCredentialLeases,
   type TurnCredentialLeaseDeps,
@@ -8,15 +7,14 @@ import {
 import { recordCompletedModelCallBeforeOwnershipFences } from "../src/activities/agent-turn/model-usage";
 import { assertCodexDispatchAdmission } from "../src/activities/agent-turn/codex-credit-policy";
 
-test.each(["codex", "xai", "claude"] as const)(
+test.each(["xai", "claude"] as const)(
   "%s checkpoint lifecycle coalesces events while preserving scoped renewal and usage truth",
   async (provider) => {
     let now = 0;
     const clock = spyOn(performance, "now").mockImplementation(() => now);
-    const codex = spyOn(db, "heartbeatCodexCredentialLeaseUntil").mockResolvedValue(new Date());
     const xai = spyOn(db, "heartbeatXaiCredentialLeaseUntil").mockResolvedValue(new Date());
     const claude = spyOn(db, "heartbeatClaudeCredentialLeaseUntil").mockResolvedValue(new Date());
-    const heartbeats = { codex, xai, claude };
+    const heartbeats = { xai, claude };
     const deps = {
       db: {} as TurnCredentialLeaseDeps["db"],
       observability: {
@@ -51,36 +49,6 @@ test.each(["codex", "xai", "claude"] as const)(
           signals++;
         },
       });
-    let providerCalls = 0;
-    const dispatchCodex = () =>
-      codexRequestStorage.run(
-        {
-          clientVersion: "test",
-          getToken: async () => ({
-            accessToken: "fixture",
-            chatgptAccountId: "fixture",
-            isFedramp: false,
-          }),
-          refresh: async () => ({
-            accessToken: "fixture",
-            chatgptAccountId: "fixture",
-            isFedramp: false,
-          }),
-          resolveModel: (model) => model,
-          beforeProviderDispatch: lease.assertUsable,
-        },
-        () =>
-          codexSubscriptionFetch(async () => {
-            providerCalls++;
-            return new Response(
-              'data: {"type":"response.completed","response":{"id":"fixture-response","status":"completed","output":[]}}\n\n',
-              { status: 200, headers: { "content-type": "text/event-stream" } },
-            );
-          })("https://chatgpt.com/backend-api/responses", {
-            method: "POST",
-            body: JSON.stringify({ model: "gpt-5.6-sol", input: [] }),
-          }),
-      );
     try {
       // Mirror the runtime checkpoint and completed-response consumer seams.
       for (let event = 0; event < 100; event++) {
@@ -89,43 +57,24 @@ test.each(["codex", "xai", "claude"] as const)(
         await completedCall();
         lease.assertUsable();
       }
-      expect(codex).not.toHaveBeenCalled();
       expect(xai).not.toHaveBeenCalled();
       expect(claude).not.toHaveBeenCalled();
       expect(lease.confirmedUntilMs).toBe(300_000);
-      if (provider === "codex") {
-        expect((await dispatchCodex()).status).toBe(200);
-        expect(providerCalls).toBe(1);
-      }
       now = 60_000;
       await completedCall();
       expect(heartbeats[provider]).toHaveBeenCalledTimes(1);
-      if (provider === "codex") {
-        expect(codex.mock.calls[0]).toEqual([
-          deps.db,
-          deps.accountId,
-          deps.workspaceId,
-          "turn-fixture",
-          "holder-fixture",
-          2,
-          db.CODEX_CREDENTIAL_LEASE_TTL_MS,
-        ]);
-      } else {
-        expect(heartbeats[provider].mock.calls[0]).toEqual([
-          deps.db,
-          {
-            workspaceId: deps.workspaceId,
-            subjectId: "subject-fixture",
-            turnId: "turn-fixture",
-            holderId: "holder-fixture",
-            generation: 2,
-            leaseTtlMs:
-              provider === "xai"
-                ? db.XAI_CREDENTIAL_LEASE_TTL_MS
-                : db.CLAUDE_CREDENTIAL_LEASE_TTL_MS,
-          },
-        ]);
-      }
+      expect(heartbeats[provider].mock.calls[0]).toEqual([
+        deps.db,
+        {
+          workspaceId: deps.workspaceId,
+          subjectId: "subject-fixture",
+          turnId: "turn-fixture",
+          holderId: "holder-fixture",
+          generation: 2,
+          leaseTtlMs:
+            provider === "xai" ? db.XAI_CREDENTIAL_LEASE_TTL_MS : db.CLAUDE_CREDENTIAL_LEASE_TTL_MS,
+        },
+      ]);
       expect(lease.confirmedUntilMs).toBe(360_000);
       await leases.renewServing("runtime_event");
       expect(heartbeats[provider]).toHaveBeenCalledTimes(1);
@@ -140,17 +89,10 @@ test.each(["codex", "xai", "claude"] as const)(
         "credential lease is not usable for provider dispatch",
       );
       expect(lease.confirmedUntilMs).toBe(360_000);
-      if (provider === "codex") {
-        await expect(dispatchCodex()).rejects.toThrow(
-          "Codex credential lease is not usable for provider dispatch",
-        );
-        expect(providerCalls).toBe(1);
-      }
     } finally {
       leases.codex.stopHeartbeat();
       leases.xai.stopHeartbeat();
       leases.claude.stopHeartbeat();
-      codex.mockRestore();
       xai.mockRestore();
       claude.mockRestore();
       clock.mockRestore();
@@ -161,7 +103,6 @@ test.each(["codex", "xai", "claude"] as const)(
 test("core Codex lease heartbeats renew the canonical subscription lease", async () => {
   let now = 0;
   const clock = spyOn(performance, "now").mockImplementation(() => now);
-  const codex = spyOn(db, "heartbeatCodexCredentialLeaseUntil").mockResolvedValue(new Date());
   const renew = spyOn(db, "renewSubscriptionTurnLease").mockResolvedValue(new Date());
   const rls = spyOn(db, "withRlsContext").mockImplementation(
     async (_db, _context, callback) => await callback({} as TurnCredentialLeaseDeps["db"]),
@@ -189,7 +130,6 @@ test("core Codex lease heartbeats renew the canonical subscription lease", async
   try {
     now = 60_000;
     await leases.codex.renew("timer");
-    expect(codex).not.toHaveBeenCalled();
     expect(rls).toHaveBeenCalledWith(
       deps.db,
       { accountId: deps.accountId, workspaceId: deps.workspaceId },
@@ -209,7 +149,6 @@ test("core Codex lease heartbeats renew the canonical subscription lease", async
     expect(leases.codex.confirmedUntilMs).toBe(360_000);
   } finally {
     leases.codex.stopHeartbeat();
-    codex.mockRestore();
     renew.mockRestore();
     rls.mockRestore();
     clock.mockRestore();
@@ -314,7 +253,7 @@ test("rejects a delayed positive core lease check after the local deadline", asy
   }
 });
 
-test("legacy Codex dispatch keeps its existing local lease fence", async () => {
+test("a Codex lease without a core placement refuses provider dispatch", async () => {
   const core = spyOn(db, "assertSubscriptionTurnLeaseCurrent").mockResolvedValue(true);
   const deps = {
     db: {} as TurnCredentialLeaseDeps["db"],
@@ -326,6 +265,7 @@ test("legacy Codex dispatch keeps its existing local lease fence", async () => {
     workspaceId: "workspace-fixture",
     codexWorkspaceKey: "fixture",
     getTurnId: () => "turn-fixture",
+    getSessionId: () => "session-fixture",
   };
   const leases = createTurnCredentialLeases(deps);
   Object.assign(leases.codex, {
@@ -335,25 +275,22 @@ test("legacy Codex dispatch keeps its existing local lease fence", async () => {
     confirmedUntilMs: performance.now() + db.CODEX_CREDENTIAL_LEASE_TTL_MS,
   });
   try {
-    await leases.codex.assertCurrentForDispatch();
-    expect(core).not.toHaveBeenCalled();
-    const pendingConsent = Promise.withResolvers<void>();
     const dispatch = assertCodexDispatchAdmission(
-      () => pendingConsent.promise,
+      async () => undefined,
       () => leases.codex.assertCurrentForDispatch(),
     );
-    const rejected = dispatch.catch((error) => error);
-    leases.codex.confirmedUntilMs = performance.now() - 1;
-    pendingConsent.resolve();
-    expect(((await rejected) as Error).message).toContain("lease is not usable");
+    expect(((await dispatch.catch((error) => error)) as Error).message).toContain(
+      "lease is not usable",
+    );
+    expect(core).not.toHaveBeenCalled();
+    expect(leases.codex.lossReason).toBe("not_found");
   } finally {
     leases.codex.stopHeartbeat();
     core.mockRestore();
   }
 });
 
-test("Codex lease release follows the backend that acquired it", async () => {
-  const legacy = spyOn(db, "releaseCodexCredentialLease").mockResolvedValue(true);
+test("Codex lease release goes through the core lease it acquired", async () => {
   const core = spyOn(db, "releaseSubscriptionTurnLease").mockResolvedValue(true);
   const rls = spyOn(db, "withRlsContext").mockImplementation(
     async (_db, _context, callback) => await callback({} as TurnCredentialLeaseDeps["db"]),
@@ -370,9 +307,15 @@ test("Codex lease release follows the backend that acquired it", async () => {
     getTurnId: () => "turn-fixture",
     getSessionId: () => "session-fixture",
   };
+  const unplaced = createTurnCredentialLeases(deps);
   const leases = createTurnCredentialLeases(deps);
+  Object.assign(unplaced.codex, { holderId: "holder-fixture", generation: 4 });
   Object.assign(leases.codex, { holderId: "holder-fixture", generation: 4 });
   try {
+    // Before placement there is no lease to release.
+    expect(await unplaced.codex.releaseCurrent()).toBe(false);
+    expect(core).not.toHaveBeenCalled();
+
     leases.codex.useSubscriptionCoreLease("connection-fixture");
     expect(await leases.codex.releaseCurrent()).toBe(true);
     expect(core).toHaveBeenCalledWith(expect.anything(), {
@@ -385,21 +328,9 @@ test("Codex lease release follows the backend that acquired it", async () => {
       holderId: "holder-fixture",
       generation: 4,
     });
-    expect(legacy).not.toHaveBeenCalled();
-
-    leases.codex.useLegacyCodexLease();
-    expect(await leases.codex.releaseCurrent()).toBe(true);
-    expect(legacy).toHaveBeenCalledWith(
-      deps.db,
-      deps.accountId,
-      deps.workspaceId,
-      "turn-fixture",
-      "holder-fixture",
-      4,
-    );
   } finally {
+    unplaced.codex.stopHeartbeat();
     leases.codex.stopHeartbeat();
-    legacy.mockRestore();
     core.mockRestore();
     rls.mockRestore();
   }

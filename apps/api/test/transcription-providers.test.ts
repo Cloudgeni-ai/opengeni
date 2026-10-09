@@ -238,16 +238,27 @@ describe("transcription providers", () => {
   });
 
   test("prefers Codex when subscription is attached even if OpenAI is configured", async () => {
-    // No Codex cutover row: the legacy path, after one cutover-row read.
-    const disposition = spyOn(dbModule, "readCodexCutoverDisposition").mockResolvedValue("legacy");
-    const accounts = spyOn(dbModule, "listCodexAccountStatuses").mockResolvedValue([
-      {
-        id: "cred-1",
-        isActive: true,
-        status: "active",
-      },
-    ] as never);
-    const resolver = spyOn(dbModule, "buildCodexTokenResolver").mockReturnValue({
+    // An enabled cutover with a shared connection selects the core path.
+    const disposition = spyOn(dbModule, "readCodexCutoverDisposition").mockResolvedValue("core");
+    const candidates = spyOn(
+      dbModule,
+      "listSubscriptionCoreCodexOperationCandidates",
+    ).mockResolvedValue([{ connectionId: "connection-1" }] as never);
+    const acquired = spyOn(
+      dbModule,
+      "acquireSubscriptionCoreCodexOperationLease",
+    ).mockResolvedValue({ kind: "acquired" } as never);
+    const renewed = spyOn(dbModule, "renewSubscriptionCoreCodexOperationLease").mockResolvedValue(
+      true as never,
+    );
+    const released = spyOn(
+      dbModule,
+      "releaseSubscriptionCoreCodexOperationLease",
+    ).mockResolvedValue(true as never);
+    const resolver = spyOn(
+      dbModule,
+      "buildSubscriptionCoreCodexConnectionTokenResolver",
+    ).mockReturnValue({
       getToken: async () => ({
         accessToken: "access",
         chatgptAccountId: "acct",
@@ -257,6 +268,13 @@ describe("transcription providers", () => {
         chatgptAccountId: "acct",
       }),
     } as never);
+    const operationFetch = spyOn(
+      dbModule,
+      "buildSubscriptionCoreCodexOperationFetch",
+    ).mockImplementation(
+      ((_db: unknown, _scope: unknown, _ref: unknown, _id: unknown, base: unknown) =>
+        base) as never,
+    );
     try {
       let url: string | undefined;
       const service = createTranscriptionService({
@@ -282,9 +300,16 @@ describe("transcription providers", () => {
       expect(result.providerId).toBe("codex-subscription");
       expect(url).toContain("/backend-api/transcribe");
     } finally {
-      disposition.mockRestore();
-      accounts.mockRestore();
-      resolver.mockRestore();
+      for (const spy of [
+        disposition,
+        candidates,
+        acquired,
+        renewed,
+        released,
+        resolver,
+        operationFetch,
+      ])
+        spy.mockRestore();
     }
   });
 
