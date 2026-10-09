@@ -49,6 +49,8 @@ import {
   subscriptionCoreShadowRequest,
 } from "./subscription-core-shadow";
 import { createTurnCredentialLeases } from "./credential-leases";
+import { selectCoreCodexTurnCapacity } from "./codex-core-capacity";
+import { subscriptionCoreCutoverDisabledFailure } from "./codex-core-errors";
 import { deliverFailedChildTurnToParent } from "../parent-wake";
 import { randomUUID } from "node:crypto";
 import { createLogThrottle, type LogThrottle } from "@opengeni/observability";
@@ -196,16 +198,11 @@ export async function selectCodexTurnCapacity(
       }),
   );
   const disposition = codexCutoverDisposition(cutover);
-  if (disposition !== "legacy") {
-    // Once the one-way migration has created a provider row, neither an
-    // explicitly disabled cutover nor an incomplete core implementation may
-    // silently route work back through the legacy Codex tables.
-    throw new Error(
-      disposition === "fail_closed"
-        ? "Codex subscription core cutover is disabled; refusing legacy routing"
-        : "Codex subscription core cutover is enabled but its authoritative selector is unavailable",
-    );
-  }
+  // Once the one-way migration has created a provider row, an explicitly
+  // disabled cutover must never silently route work back through the legacy
+  // Codex tables; an enabled one places the turn on the shared core.
+  if (disposition === "fail_closed") throw subscriptionCoreCutoverDisabledFailure();
+  if (disposition === "core") return await selectCoreCodexTurnCapacity(deps);
   return await selectLegacyCodexTurnCapacity(deps);
 }
 

@@ -42,6 +42,7 @@ import {
   type ResumedTurnSandbox,
 } from "../../sandbox-resume";
 import { createTurnCredentialLeases } from "./credential-leases";
+import { coreCodexModelCallCompletedAt, finalizeCoreCodexUsage } from "./codex-core-settlement";
 import { drainPhysicalSandboxResumes } from "./sandbox-provision";
 import { safeErrorDiagnostic, safeErrorForTelemetry } from "./errors";
 import {
@@ -453,7 +454,25 @@ async function finalizeTurnAttemptSteps(
         );
       }
     }
-    if (providerTurn.effectiveCodexCredentialId) {
+    const coreCodex = providerTurn.codexSubscriptionCore;
+    if (coreCodex) {
+      // Shared-core turn: usage headers become a quota observation on the
+      // leased connection and a completed model call advances the binding's
+      // cache clock. The legacy Codex usage cache never sees a core id.
+      if (attempt.turnId && leases.codex.held) {
+        await waitForTurnFinalizerStep(
+          finalizeCoreCodexUsage({
+            db,
+            core: coreCodex,
+            lease: leases.codex,
+            usage: providerTurn.latestCodexUsage,
+            credentialVersion: providerTurn.effectiveCodexCredentialVersion,
+            modelCallCompletedAt: coreCodexModelCallCompletedAt(providerTurn),
+          }).catch(() => undefined),
+          finalizerSignal,
+        );
+      }
+    } else if (providerTurn.effectiveCodexCredentialId) {
       // Part A: the latest scraped usage-header snapshot → the P2 usage cache. A
       // full duration-identified snapshot (parseCodexUsageHeaders gates on both),
       // so untyped response headers cannot mislabel weekly-only quota.

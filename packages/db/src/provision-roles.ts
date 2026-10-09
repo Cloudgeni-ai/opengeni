@@ -2087,6 +2087,7 @@ BEGIN
       'subscription_codex_refresh_write_allowed(uuid,uuid,uuid)',
       'begin_subscription_codex_refresh(uuid,uuid,uuid,uuid,text,text,uuid,text,bigint)',
       'persist_subscription_codex_refresh(uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)',
+      'fail_subscription_codex_refresh(uuid,uuid,uuid,uuid,uuid,bigint,text)',
       'subscription_organization_admin(uuid)',
       'subscription_people_assignment_visible(uuid,uuid,uuid,text,text)',
       'subscription_person_preference_visible(uuid,uuid,text,text)',

@@ -310,6 +310,10 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     }
 
     if (resolvedModel?.provider.kind === "codex-subscription") {
+      // Codex image operations move to core operation leases in PR 2. Until
+      // then a turn placed by the shared core exposes no image tool rather
+      // than funding one against the legacy Codex credential tables.
+      if (providerTurn.codexSubscriptionCore) return {};
       const imageAuthority = connectedSubscriptionImageGenerationAuthority(
         codexContext,
         providerTurn.effectiveCodexCredentialId,

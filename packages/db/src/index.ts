@@ -270,6 +270,7 @@ import {
 } from "./codex-plan-entitlement";
 export * from "./codex-plan-entitlement";
 export * from "./legacy-subscription-world";
+export * from "./subscription-core-codex";
 export * from "./scheduled-task-access";
 export { buildSlackApiRateLimiter } from "./slack-api-rate-limits";
 export * from "./scheduled-human-wait";
@@ -25432,12 +25433,10 @@ export async function loadCodexCredentialForRun(
         refreshToken: parsed.refresh_token,
         idToken: parsed.id_token,
       };
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `failed to decrypt codex credential for workspace ${workspaceId}: ${reason}`,
-        { cause: error },
-      );
+    } catch {
+      // Fixed text and no cause: a JSON.parse message quotes the plaintext
+      // token it failed on, and runtimes print a cause with the error.
+      throw new Error(`failed to decrypt codex credential for workspace ${workspaceId}`);
     }
     return {
       id: row.id,
@@ -32232,6 +32231,111 @@ export async function recordSessionCodexSelectionForTurnAttempt(
           eq(schema.sessions.id, input.sessionId),
         ),
       );
+    const appended = await appendSessionEventsForTurnAttempt(
+      tx,
+      input.workspaceId,
+      input.sessionId,
+      input.turnId,
+      input.executionGeneration,
+      input.attemptId,
+      events,
+    );
+    if (!appended.accepted) throw new CodexCredentialLeaseAttemptFencedError();
+    return { events: appended.events, diagnostics };
+  });
+}
+
+/**
+ * The core counterpart of `recordSessionCodexSelectionForTurnAttempt`: the
+ * same attempt-fenced, idempotent `codex.credential.selected` (and
+ * `codex.account.switched`) events, but the previous account comes from the
+ * session's core binding and the legacy `sessions.codex_last_credential_id`
+ * pointer is never written with a core connection id.
+ */
+export async function recordSubscriptionCoreCodexSelectionForTurnAttempt(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    credentialId: string;
+    previousCredentialId: string | null;
+    strategy: string;
+    reusedLease: boolean;
+    pinnedCredentialId: string | null;
+    eligibleCount: number;
+    connectedCount: number;
+  },
+): Promise<{ events: SessionEvent[]; diagnostics: ReturnType<typeof codexSelectionDiagnostics> }> {
+  return await withWorkspaceSessionEventActivityRls(db, input.workspaceId, true, async (tx) => {
+    const fence = await lockTurnAttemptWriteFenceTx(tx, {
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      executionGeneration: input.executionGeneration,
+      attemptId: input.attemptId,
+      sessionLock: "no_key_update",
+    });
+    if (!fence.allowed || !fence.session) throw new CodexCredentialLeaseAttemptFencedError();
+    const key = `opengeni:codex-selection:${input.attemptId}`;
+    const prior = await tx
+      .select()
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          inArray(schema.sessionEvents.clientEventId, [key, `${key}:switch`]),
+        ),
+      )
+      .orderBy(asc(schema.sessionEvents.sequence));
+    if (prior.length) {
+      const receipt = prior.find((event) => event.type === "codex.credential.selected");
+      if (!receipt) throw new Error("Codex selection receipt missing");
+      const payload = sessionEventPayloadRecord(receipt.payload, receipt.payloadCodecVersion);
+      if (payload.credentialId !== input.credentialId)
+        throw new Error("An attempt cannot record two different Codex selections");
+      return {
+        events: prior.map(mapEvent),
+        diagnostics: {
+          transition: payload.transition,
+          source: payload.source,
+          reason: payload.reason,
+        } as ReturnType<typeof codexSelectionDiagnostics>,
+      };
+    }
+    const previousCredentialId = input.previousCredentialId;
+    const diagnostics = codexSelectionDiagnostics({
+      ...input,
+      pinSource: input.pinnedCredentialId ? "manual" : null,
+    });
+    const events: AppendEventInput[] = [];
+    if (previousCredentialId !== null && previousCredentialId !== input.credentialId) {
+      events.push({
+        type: "codex.account.switched",
+        clientEventId: `${key}:switch`,
+        payload: {
+          fromAccountId: previousCredentialId,
+          toAccountId: input.credentialId,
+          reason: diagnostics.source === "manual_pin" ? "manual" : "rotation",
+        },
+      });
+    }
+    events.push({
+      type: "codex.credential.selected",
+      clientEventId: key,
+      payload: {
+        credentialId: input.credentialId,
+        strategy: input.strategy,
+        ...diagnostics,
+        previousCredentialId,
+        eligibleCount: input.eligibleCount,
+        connectedCount: input.connectedCount,
+        reused: input.reusedLease,
+      },
+    });
     const appended = await appendSessionEventsForTurnAttempt(
       tx,
       input.workspaceId,
@@ -82119,6 +82223,12 @@ export type RequestSessionTurnRecoveryInput = {
   providerRecoveryCount?: number;
   /** One rejected-token renewal per serving account generation on this turn. */
   claudeAuthRecovery?: { credentialId: string; credentialVersion: number };
+  /**
+   * The consecutive shared-core lease-busy chain this recovery continues: when
+   * it started and the execution generation that recorded it. The worker
+   * bounds the chain; the database only stores it on the turn.
+   */
+  subscriptionLeaseBusy?: { startedAt: string; executionGeneration: number };
   fromStatuses?: SessionTurnStatus[];
   providerArtifactInvalidation?: {
     historyItemIds: string[];
@@ -82159,6 +82269,13 @@ export async function requestSessionTurnRecovery(
       input.claudeAuthRecovery.credentialVersion < 1)
   )
     throw new Error("Invalid Claude authentication recovery identity");
+  if (
+    input.subscriptionLeaseBusy &&
+    (!Number.isFinite(Date.parse(input.subscriptionLeaseBusy.startedAt)) ||
+      !Number.isSafeInteger(input.subscriptionLeaseBusy.executionGeneration) ||
+      input.subscriptionLeaseBusy.executionGeneration < 1)
+  )
+    throw new Error("Invalid subscription lease-busy recovery chain");
   const fromStatuses = input.fromStatuses ?? ["running", "requires_action"];
   return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
@@ -82407,6 +82524,14 @@ export async function requestSessionTurnRecovery(
           metadata: {
             ...recoveryTurnMetadata(turn.metadata, input.sandboxLifecycleWait),
             ...(input.claudeAuthRecovery ? { claudeAuthRecovery: input.claudeAuthRecovery } : {}),
+            ...(input.subscriptionLeaseBusy
+              ? {
+                  subscriptionLeaseBusy: {
+                    startedAt: input.subscriptionLeaseBusy.startedAt,
+                    executionGeneration: input.subscriptionLeaseBusy.executionGeneration,
+                  },
+                }
+              : {}),
             ...(input.sandboxSetupOutcomeUnknown
               ? {
                   [SANDBOX_SETUP_OUTCOME_UNKNOWN_METADATA_KEY]: {
