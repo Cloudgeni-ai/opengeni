@@ -265,7 +265,11 @@ describe("session hover facts", () => {
         now: NOW,
       }).commands;
     expect(facts({ state: "running", count: 1 })).toBe("1 background command running");
-    expect(facts({ state: "stopping", count: 2 })).toBe("Stopping 2 background commands");
+    // "stopping" means at least one is stopping, so it never relabels them all.
+    expect(facts({ state: "stopping", count: 2 })).toBe("2 background commands · Stop requested");
+    expect(facts({ state: "stopping", count: 2, unavailableCount: 1 })).toBe(
+      "1 background command · Stop requested · 1 command status unavailable",
+    );
     // Unavailable statuses are never counted as running.
     expect(facts({ state: "running", count: 3, unavailableCount: 1 })).toBe(
       "2 background commands running · 1 command status unavailable",

@@ -146,9 +146,10 @@ function commandFacts(session: RailSession): string | null {
         ? "1 command status unavailable"
         : `${unavailable.toLocaleString("en-US")} command statuses unavailable`;
   if (known > 0) {
+    // "stopping" is aggregate: at least one command is stopping, not all.
     const main =
       activity.state === "stopping"
-        ? `Stopping ${plural(known, "background command")}`
+        ? `${plural(known, "background command")} · Stop requested`
         : `${plural(known, "background command")} running`;
     return unknown ? `${main} · ${unknown}` : main;
   }
