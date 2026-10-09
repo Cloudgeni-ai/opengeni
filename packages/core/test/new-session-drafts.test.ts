@@ -108,6 +108,123 @@ function draftCreateDeps(): ApiRouteDeps {
 }
 
 describe("core new-session draft hydration", () => {
+  test.each(["organization", "user"] as const)(
+    "preserves a visible %s rig selection from another same-organization workspace",
+    async (scope) => {
+      if (!available) return;
+      const { grant, subjectId } = await fixture();
+      const workspaceId = grant.workspaceId;
+      const [origin] = await shared!.admin<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${grant.accountId}, 'scoped rig origin') returning id`;
+      await shared!.admin`
+        insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
+        values (${grant.accountId}, ${subjectId}, 'active', ${workspaceId})`;
+      await shared!.admin`
+        insert into workspace_memberships (account_id, workspace_id, subject_id)
+        values (${grant.accountId}, ${origin!.id}, ${subjectId})`;
+      const rig = await createRig(db, {
+        accountId: grant.accountId,
+        workspaceId: origin!.id,
+        subjectId,
+        scope,
+        allowOrganization: scope === "organization",
+        name: `${scope} draft selection`,
+      });
+      await withWorkspaceSubjectRls(db, workspaceId, subjectId, (scoped) =>
+        saveNewSessionDraftInTransaction(scoped, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId,
+          expectedRevision: 0,
+          text: "Use the selected environment",
+          resources: [],
+          tools: [],
+          toolsProvided: true,
+          model: settings.openaiModel,
+          modelProvided: true,
+          reasoningEffort: settings.openaiReasoningEffort,
+          latencyMode: "standard",
+          selectedProjectChannelId: null,
+          options: { rigId: rig.id },
+        }),
+      );
+      const hydrated = await getActorNewSessionDraft({ db, settings }, grant, workspaceId);
+      expect(hydrated.options.rigId).toBe(rig.id);
+    },
+    180_000,
+  );
+
+  test("drops cross-organization, another user's, revoked, and versionless rig selections", async () => {
+    if (!available) return;
+    const { grant, subjectId } = await fixture();
+    const foreign = await fixture();
+    const crossOrganization = await createRig(db, {
+      accountId: foreign.grant.accountId,
+      workspaceId: foreign.grant.workspaceId,
+      subjectId: foreign.subjectId,
+      scope: "organization",
+      allowOrganization: true,
+      name: "foreign draft environment",
+    });
+    const otherSubject = `user:${crypto.randomUUID()}`;
+    const [personal] = await shared!.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${grant.accountId}, 'other personal workspace') returning id`;
+    await shared!.admin`
+      insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
+      values (${grant.accountId}, ${otherSubject}, 'active', ${personal!.id})`;
+    await shared!.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id)
+      values (${grant.accountId}, ${grant.workspaceId}, ${otherSubject})`;
+    const otherUser = await createRig(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: otherSubject,
+      scope: "user",
+      name: "another user's draft environment",
+    });
+    const revoked = await createRig(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: "revoked draft environment",
+    });
+    const versionless = await createRig(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: "versionless draft environment",
+    });
+    await shared!.admin`
+      update rigs set status = 'revoked', revoked_at = now() where id = ${revoked.id}`;
+    await shared!.admin`
+      update rig_versions set active = false where rig_id = ${versionless.id}`;
+
+    let revision = 0;
+    for (const rig of [crossOrganization, otherUser, revoked, versionless]) {
+      await withWorkspaceSubjectRls(db, grant.workspaceId, subjectId, (scoped) =>
+        saveNewSessionDraftInTransaction(scoped, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          subjectId,
+          expectedRevision: revision,
+          text: "Stale environment selection",
+          resources: [],
+          tools: [],
+          toolsProvided: true,
+          model: settings.openaiModel,
+          modelProvided: true,
+          reasoningEffort: settings.openaiReasoningEffort,
+          latencyMode: "standard",
+          selectedProjectChannelId: null,
+          options: { rigId: rig.id },
+        }),
+      );
+      revision += 1;
+      const hydrated = await getActorNewSessionDraft({ db, settings }, grant, grant.workspaceId);
+      expect(hydrated.options).not.toHaveProperty("rigId");
+    }
+  }, 180_000);
+
   test("accepts the exact saved visibility when creating the first session turn", async () => {
     if (!available) return;
     const { grant } = await fixture();
