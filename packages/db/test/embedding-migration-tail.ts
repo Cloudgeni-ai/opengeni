@@ -158,4 +158,6 @@ export const embeddingMigrationTail = [
   "0691_subscription_core_codex_disconnect.sql",
   "0695_subscription_model_catalog_observations.sql",
   "0697_codex_retry_after_unknown_outcome.sql",
+  // Patches ownerless access and lease guards created by withheld 0667 and 0671.
+  "0698_codex_ownerless_person_turns.sql",
 ];

@@ -259,13 +259,14 @@ export async function assertSubscriptionCoreAcceptedTurn(
 ): Promise<boolean> {
   const [authorization] = await rawRows<{ authorized: boolean }>(
     tx,
+    // An ownerless session is shared-only whoever started the turn: a person's
+    // turn there (for example a scheduled run that opens a new session) gets
+    // the same shared-scope access as a service turn and no personal access.
     !request.sessionOwnerSubjectId
-      ? request.initiatingHumanSubjectId !== null
-        ? sql`select false as authorized`
-        : sql`select opengeni_private.authorize_subscription_ownerless_session_access(
-            ${request.accountId}::uuid, ${request.workspaceId}::uuid,
-            ${request.sessionId}::uuid, ${request.turnId}::uuid
-          ) as authorized`
+      ? sql`select opengeni_private.authorize_subscription_ownerless_session_access(
+          ${request.accountId}::uuid, ${request.workspaceId}::uuid,
+          ${request.sessionId}::uuid, ${request.turnId}::uuid
+        ) as authorized`
       : request.initiatingHumanSubjectId
         ? sql`select opengeni_private.authorize_subscription_session_access(
             ${request.accountId}::uuid, ${request.workspaceId}::uuid,

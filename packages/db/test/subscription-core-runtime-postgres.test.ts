@@ -563,7 +563,9 @@ describe("provider-neutral subscription runtime persistence", () => {
         wrongAccount: false,
         wrongWorkspace: false,
         wrongTurn: false,
-        humanTurn: false,
+        // An ownerless session stays shared-only when a person starts the
+        // turn; the grant records no person and carries no personal access.
+        humanTurn: true,
         ownedSession: false,
       });
 
