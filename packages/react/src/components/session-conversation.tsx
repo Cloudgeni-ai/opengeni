@@ -271,7 +271,13 @@ function Conversation(props: SessionConversationProps & { onRetry: () => void })
 
 /** Stock view for a controller mounted in a stable host. No second event feed or draft. */
 export function SessionConversationView(props: SessionConversationViewProps) {
-  return <ConversationView {...props} onRetry={() => void props.conversation.retry()} />;
+  return (
+    <ConversationView
+      key={`${props.conversation.workspaceId}:${props.conversation.sessionId}`}
+      {...props}
+      onRetry={() => void props.conversation.retry()}
+    />
+  );
 }
 
 function ConversationView({

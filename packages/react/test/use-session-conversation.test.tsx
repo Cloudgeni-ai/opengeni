@@ -10,6 +10,52 @@ import { actRun, flush, registerDom, renderComponent, renderHook } from "./rende
 
 registerDom();
 
+test("a session change retires ready files and late upload settlements from the previous draft", async () => {
+  const f = fixture();
+  const getConfig = f.client.getClientConfig;
+  f.client.getClientConfig = async () =>
+    ({ ...(await getConfig()), fileUploads: { enabled: true, maxSizeBytes: 1000 } }) as never;
+  let finishUpload!: (asset: never) => void;
+  f.client.uploadFile = () =>
+    new Promise((resolve) => {
+      finishUpload = resolve;
+    });
+  const asset = {
+    id: crypto.randomUUID(),
+    workspaceId: WORKSPACE_ID,
+    status: "ready",
+    filename: "old.txt",
+    contentType: "text/plain",
+    sizeBytes: 1,
+  };
+  const hook = await renderHook(
+    ({ sessionId }) =>
+      useSessionConversation(sessionId, {
+        client: f.client,
+        workspaceId: WORKSPACE_ID,
+      }),
+    { sessionId: f.sessionId },
+  );
+  try {
+    await flush(30);
+    await actRun(() => {
+      hook.result.current.files.restoreReadyFiles([asset as never]);
+      hook.result.current.files.addFiles([new File(["test"], "pending.txt")]);
+    });
+    expect(hook.result.current.files.attachments).toHaveLength(2);
+    await hook.rerender({ sessionId: crypto.randomUUID() });
+    await flush(30);
+    expect(hook.result.current.files.attachments).toEqual([]);
+    await actRun(() => finishUpload({ ...asset, id: crypto.randomUUID() } as never));
+    expect(hook.result.current.files.attachments).toEqual([]);
+    expect(hook.result.current.composer.canSend).toBe(false);
+    expect(await actRun(() => hook.result.current.composer.send())).toBe(false);
+    expect(f.sent).toEqual([]);
+  } finally {
+    await hook.unmount();
+  }
+});
+
 function fixture() {
   const sessionId = crypto.randomUUID();
   const sent: SendMessageInput[] = [];

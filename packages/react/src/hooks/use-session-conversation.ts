@@ -1,5 +1,5 @@
 import type { SendMessageInput } from "@opengeni/sdk";
-import { useMemo } from "react";
+import { useLayoutEffect, useMemo, useRef } from "react";
 import { projectPendingApprovals } from "../approvals";
 import { conversationTimeline } from "../conversation-timeline";
 import { useOpenGeni, type ClientOverride } from "../session-context";
@@ -57,6 +57,16 @@ export function useSessionConversation(
   const control = useSessionControl(sessionId, scope);
   const approvals = useMemo(() => projectPendingApprovals(feed.events), [feed.events]);
   const files = useFileAttachments(scope);
+  const clearFiles = files.clear;
+  const attachmentSession = useRef(sessionId);
+  useLayoutEffect(() => {
+    if (attachmentSession.current === sessionId) return;
+    attachmentSession.current = sessionId;
+    // Upload transport is workspace-scoped; these unsent cards belong to one
+    // conversation. Retiring them also makes late settlements no-ops because
+    // their local attachment identities no longer exist in the queue.
+    clearFiles();
+  }, [clearFiles, sessionId]);
   const uploadsEnabled = (options.attachments ?? true) && config.uploads;
   const status = feed.sessionStatus ?? detail.session?.status;
   const terminal = status === "cancelled";
