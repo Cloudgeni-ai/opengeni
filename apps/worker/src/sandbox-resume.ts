@@ -787,9 +787,10 @@ export type WarmWorkspaceSnapshotPromise = Promise<boolean> & {
 };
 
 /** Who owns a warm checkpoint: the exact turn attempt holding the box, or
- * (`idleCheckpoint`) the reaper checkpointing a box that no turn holds and only
- * running background commands keep warm. The idle owner is fenced by its
- * exact capture claim alone and is limited to point-in-time Modal captures. */
+ * (`idleCheckpoint`) the reaper checkpointing a box that no turn holds and
+ * viewers, interactions or running background commands keep warm. The idle
+ * owner is fenced by its exact capture claim alone and is limited to
+ * point-in-time Modal captures. */
 export type WarmWorkspaceSnapshotOwner = {
   accountId: string;
   workspaceId: string;

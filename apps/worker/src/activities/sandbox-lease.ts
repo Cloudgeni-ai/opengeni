@@ -36,6 +36,7 @@ import {
   leaseMayHaveUntrackedWriters,
   releaseWorkspaceArchiveCapture,
   listIdleCheckpointCandidates,
+  recordIdleCheckpointAttempt,
   claimSandboxCheckpointArtifactsForGc,
   claimTerminalRetainedProcesses,
   countActiveRetainedProcessesByOwnerState,
@@ -163,6 +164,7 @@ import {
   type SandboxDrainActivityInput,
   type SandboxLeaseSweepMaintenanceInput,
   sandboxDrainTimeoutClass,
+  sandboxIdleCheckpointWorkflowId,
   type SandboxIdleCheckpointActivityInput,
   type SandboxIdleCheckpointPlan,
 } from "../sandbox-reaper-contract";
@@ -501,9 +503,14 @@ export type SandboxIdleCheckpointActivityResult = {
   reason?: string;
 };
 
-/** Children per sweep; the next sweep continues where this one stopped
- * (oldest capture attempt first). */
-const SANDBOX_IDLE_CHECKPOINT_BATCH = 32;
+/** Children per sweep; the next sweep continues with the least recently tried
+ * boxes (each box is tried at most once per snapshot interval). Half the
+ * lifecycle worker's activity slots, so a burst of captures never queues the
+ * drains that stop idle boxes behind it. */
+const SANDBOX_IDLE_CHECKPOINT_BATCH = Math.max(
+  1,
+  Math.floor(CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES / 2),
+);
 
 export type SandboxLeaseSweepMaintenanceResult = {
   metered: number;
@@ -608,6 +615,8 @@ export function createSandboxLeaseActivities(
   const probeDrainableProvider = options.probeDrainableProvider ?? probeDrainableProviderReadiness;
   const resumeIdleCheckpointSession =
     options.resumeIdleCheckpointSession ?? resumeIdleCheckpointSessionAtProvider;
+  /** Embedded idle checkpoints still running, by exact lease epoch. */
+  const embeddedIdleCheckpoints = new Set<string>();
   async function prepareSandboxLeaseSweep(): Promise<SandboxLeaseSweepPlan> {
     const stopHeartbeat = startSandboxReaperHeartbeat({ phase: "prepare" });
     try {
@@ -702,9 +711,9 @@ export function createSandboxLeaseActivities(
 
   /** Inventory for the idle checkpoint sweep. DB only: warm boxes no turn
    * holds, kept warm by viewers, interactions or running background commands,
-   * with writes no capture may cover yet and no capture attempt within the
-   * snapshot interval.
-   * Oldest attempt first; the next sweep continues past the batch. */
+   * with writes no capture may cover yet and neither a capture attempt nor an
+   * idle checkpoint attempt within the snapshot interval.
+   * Least recently tried first; the next sweep continues past the batch. */
   async function listIdleSandboxCheckpoints(): Promise<SandboxIdleCheckpointPlan> {
     const stopHeartbeat = startSandboxReaperHeartbeat({ phase: "idle_checkpoint_inventory" });
     try {
@@ -766,11 +775,25 @@ export function createSandboxLeaseActivities(
       ) {
         return skipped("lease_fenced");
       }
+      // A turn's own checkpoints cover a box it holds; a box nothing holds
+      // belongs to the idle drain.
+      if (lease.turnHolders > 0) return skipped("turn_held");
+      if (lease.refcount === 0) return skipped("drain_owned");
+      const { accountId } = await rlsContextForWorkspace(db, target.workspaceId);
+      // Counted as tried whatever happens next, so a refused or failing box
+      // waits a full interval instead of taking a batch slot every sweep.
+      const stamped = await recordIdleCheckpointAttempt(db, {
+        accountId,
+        workspaceId: target.workspaceId,
+        sandboxGroupId: target.sandboxGroupId,
+        expectedEpoch: target.leaseEpoch,
+        expectedInstanceId: target.instanceId,
+      });
+      if (!stamped) return skipped("lease_fenced");
       if (!providerWorkspaceCaptureIsPointInTime(lease.backend, lease.resumeState)) {
         return skipped("capture_policy");
       }
       if (lease.archiveComplete && !leaseMayHaveUntrackedWriters(lease)) return skipped("clean");
-      const { accountId } = await rlsContextForWorkspace(db, target.workspaceId);
       if (lease.archiveCapture) {
         const tookOver = await releaseWorkspaceArchiveCapture(db, {
           accountId,
@@ -1103,20 +1126,29 @@ export function createSandboxLeaseActivities(
       ),
     );
     // The embedded path has no idle checkpoint sweep workflow; run the same
-    // inventory and per-box activity inline. Failure defers to the next sweep.
-    await listIdleSandboxCheckpoints()
-      .then(({ targets, timeoutClass }) =>
-        Promise.allSettled(
-          targets
-            .slice(0, CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES)
-            .map((target) => checkpointIdleSandboxLease({ target, timeoutClass })),
-        ),
-      )
-      .catch((error: unknown) => {
-        service.observability.warn("sandbox reaper: idle checkpoint inventory failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
+    // inventory and per-box activity. Captures run detached so a provider
+    // snapshot never holds up this sweep's drains; a box whose capture is
+    // still running is not started twice. Failure defers to the next sweep.
+    try {
+      const { targets, timeoutClass } = await listIdleSandboxCheckpoints();
+      for (const target of targets) {
+        const key = sandboxIdleCheckpointWorkflowId(target);
+        if (embeddedIdleCheckpoints.has(key)) continue;
+        embeddedIdleCheckpoints.add(key);
+        void checkpointIdleSandboxLease({ target, timeoutClass })
+          .catch((error: unknown) => {
+            service.observability.warn("sandbox reaper: idle checkpoint failed", {
+              sandboxLeaseKey: sandboxLeaseTelemetryKey(target.workspaceId, target.sandboxGroupId),
+              error: error instanceof Error ? error.message : String(error),
+            });
+          })
+          .finally(() => embeddedIdleCheckpoints.delete(key));
+      }
+    } catch (error) {
+      service.observability.warn("sandbox reaper: idle checkpoint inventory failed", {
+        error: error instanceof Error ? error.message : String(error),
       });
+    }
     const terminated = outcomes.filter(
       (outcome) => outcome.status === "fulfilled" && outcome.value.status === "terminated",
     ).length;

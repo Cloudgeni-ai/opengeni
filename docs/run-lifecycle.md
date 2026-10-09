@@ -3404,15 +3404,28 @@ rolling deploy. Its DB-only inventory
 (`opengeni_private.list_idle_checkpoint_candidates`, migration 0680) lists warm
 Modal boxes with point-in-time capture where:
 
-- no turn holds the box, and every holder is a viewer, an interaction, or the
+- at least one holder keeps the box warm (a zero-holder box belongs to its drain),
+  no turn holds it, and every holder is a viewer, an interaction, or the
   process holder of an active, unsupervised retained process on the exact lease
   epoch and instance (a direct request or any other process holder blocks);
 - no supervised process is active, no rotation or operator hold is set, and no
   unobservable command drain is open;
 - the workspace is dirty: `archive_generation` is null or behind
-  `workspace_generation`, or a viewer or interaction is attached;
-- no capture was attempted within `sandboxSnapshotIntervalMs`, the same interval
-  that paces turn heartbeats.
+  `workspace_generation`, or `untracked_writer_since` is set;
+- no capture and no idle checkpoint attempt (`idle_checkpoint_attempted_at`)
+  happened within `sandboxSnapshotIntervalMs`, the same interval that paces turn
+  heartbeats. The child stamps its attempt before it does anything else, so a
+  box whose claim is refused (an open request, a fenced lease) waits one interval
+  instead of being relisted on every tick; the least recently tried boxes are
+  listed first.
+
+`untracked_writer_since` records the first time a viewer or interaction holder
+was attached since the last successful capture. Lease recompute sets it whenever
+such a holder is present and keeps the oldest value; only a capture that did not
+run around writers (or a new lease epoch) clears it. A tab opened and closed
+between two captures therefore still marks the box dirty, where checking only the
+currently attached holders missed it, and the warm-snapshot short circuit
+(`leaseMayHaveUntrackedWriters`) honours the same stamp.
 
 So the rule is one invariant for every warm box: a workspace with changes since
 its last capture is captured at most one snapshot interval after the change,
@@ -3422,8 +3435,10 @@ the idle grace. Each listed box gets one child per exact lease epoch
 (`sandbox-idle-checkpoint:<workspace>:<group>:<epoch>`), so a sweep that finds
 the previous child still running coalesces into it. The child resumes the exact
 box by id, never restoring or replacing it, and runs the ordinary warm checkpoint
-with an idle owner. `claimWorkspaceArchiveCapture` with `idleCheckpoint: true`
-expects zero turn holders, runs around the same holders and parent admissions as
+with an idle owner. In the embedded (single-process) worker the reaper starts
+the same children in the background, keyed by the same id, so a slow capture
+never blocks the reaper tick. `claimWorkspaceArchiveCapture` with
+`idleCheckpoint: true` expects zero turn holders and at least one holder, runs around the same holders and parent admissions as
 a warm turn capture, and refuses if any other holder or open request exists.
 Publication lands one generation behind the workspace whenever a writer was
 attached, as above. A clean box, a box no longer warm on that epoch and

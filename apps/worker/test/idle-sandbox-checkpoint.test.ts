@@ -14,6 +14,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import type { Settings } from "@opengeni/config";
 import {
+  acquireLease,
   advanceWorkspaceGeneration,
   claimSessionWorkForAttempt,
   claimWorkspaceArchiveCapture,
@@ -418,6 +419,8 @@ async function idleFor(fixture: Fixture, minutes: number) {
   await admin`update sandbox_leases set holders_changed_at = now() - ${ago}::interval,
     archive_capture_last_attempt_at = case when archive_capture_last_attempt_at is null then null
       else archive_capture_last_attempt_at - ${ago}::interval end,
+    idle_checkpoint_attempted_at = case when idle_checkpoint_attempted_at is null then null
+      else idle_checkpoint_attempted_at - ${ago}::interval end,
     resume_state = case
       when resume_state #>> '{sessionState,workspaceArchiveAt}' is null then resume_state
       else jsonb_set(resume_state, '{sessionState,workspaceArchiveAt}', to_jsonb(
@@ -617,8 +620,19 @@ describe("checkpoints of held boxes between turns", () => {
         and not exists (select 1 from sandbox_retained_processes process
           where process.parent_admission_id = admission.id)`;
     expect(open!.count).toBeGreaterThan(0);
+    const listed = async () =>
+      (await listIdleCheckpointCandidates(db, { limit: 100, intervalMs: INTERVAL_MS })).map(
+        (row) => row.sandboxGroupId,
+      );
+    // The inventory cannot see the request; the claim refuses it.
+    expect(await listed()).toContain(fixture.sandboxGroupId);
     expect((await checkpointNow(fixture, provider)).status).toBe("skipped");
     expect(provider.snapshots()).toBe(0);
+    // The refused attempt still counts: the box yields its batch slot to
+    // others until the interval passes, instead of heading every sweep.
+    expect(await listed()).not.toContain(fixture.sandboxGroupId);
+    await idleFor(fixture, 16);
+    expect(await listed()).toContain(fixture.sandboxGroupId);
   }, 120_000);
 
   test("a capture claim orphaned by a dead worker is taken over after its deadline", async () => {
@@ -648,6 +662,7 @@ describe("checkpoints of held boxes between turns", () => {
     await admin`update sandbox_leases set
       archive_capture_started_at = now() - interval '20 minutes',
       archive_capture_last_attempt_at = now() - interval '20 minutes',
+      idle_checkpoint_attempted_at = now() - interval '20 minutes',
       archive_capture_deadline_at = now() - interval '1 minute'
       where id = ${fixture.leaseId}`;
     const tick = await reaperTick(provider, fixture);
@@ -693,32 +708,79 @@ describe("checkpoints of held boxes between turns", () => {
     }
   }, 120_000);
 
-  test("a viewer attached after a complete checkpoint keeps the box dirty; nothing attached is clean", async () => {
-    const fixture = await heldBoxFixture({ heldBy: "viewer" });
+  test("a viewer that detached before the next capture still leaves the box dirty", async () => {
+    const fixture = await heldBoxFixture({ heldBy: "viewer", keepTurn: true });
     const provider = modalProvider();
-    await idleFor(fixture, 45);
-    // The tab closes and a capture with nothing attached completes the archive.
-    // (In production the box would drain; keep it warm to probe the claim.)
-    const [viewer] = await admin<{ holder_id: string }[]>`
-      select holder_id from sandbox_lease_holders where lease_id = ${fixture.leaseId}`;
-    await removeHolder(fixture, viewer!.holder_id);
-    expect((await checkpointNow(fixture, provider)).status).toBe("checkpointed");
-    const complete = await readLease(db, fixture.workspaceId, fixture.sandboxGroupId);
-    expect(complete!.archiveComplete).toBe(true);
-    expect(provider.snapshots()).toBe(1);
-
-    // Complete with no writer attached: nothing can have changed, so neither
-    // the inventory nor the claim captures it again.
-    await idleFor(fixture, 16);
-    expect(
-      (await listIdleCheckpointCandidates(db, { limit: 100, intervalMs: INTERVAL_MS })).map(
-        (row) => row.sandboxGroupId,
-      ),
-    ).not.toContain(fixture.sandboxGroupId);
-    const claim = await claimWorkspaceArchiveCapture(db, {
+    const ids = {
       accountId: fixture.accountId,
       workspaceId: fixture.workspaceId,
       sandboxGroupId: fixture.sandboxGroupId,
+    };
+    const turnCheckpoint = async () => {
+      const capture = maybePersistWarmWorkspaceSnapshot(
+        {
+          db,
+          settings: SETTINGS,
+          objectStorage: null,
+          observability: createObservability(SETTINGS, { component: "worker-test" }),
+        },
+        {
+          ...ids,
+          sessionId: fixture.attempt.sessionId,
+          turnId: fixture.attempt.turnId,
+          attemptId: fixture.attempt.attemptId,
+        },
+        provider.session,
+        EPOCH,
+      );
+      const captured = await capture;
+      await capture.settled;
+      return captured;
+    };
+    // The first tab closes; the turn's next checkpoint, with nothing else
+    // attached, completes the archive.
+    const [tab] = await admin<{ holder_id: string }[]>`
+      select holder_id from sandbox_lease_holders where lease_id = ${fixture.leaseId}
+        and kind = 'viewer'`;
+    await removeHolder(fixture, tab!.holder_id);
+    expect(await turnCheckpoint()).toBe(true);
+    const complete = await readLease(db, fixture.workspaceId, fixture.sandboxGroupId);
+    expect(complete).toMatchObject({ archiveComplete: true, untrackedWriterSince: null });
+
+    // A terminal tab opens mid-turn, types into /workspace (no generation
+    // admission) and closes before the next checkpoint.
+    const viewerId = `viewer-${crypto.randomUUID()}`;
+    const attached = await acquireLease(db, {
+      ...ids,
+      kind: "viewer",
+      holderId: viewerId,
+      backend: "modal",
+      leaseTtlMs: 90_000,
+    });
+    expect(attached.role).toBe("attached");
+    expect(attached.lease.untrackedWriterSince).not.toBeNull();
+    await releaseLeaseHolder(db, {
+      ...ids,
+      kind: "viewer",
+      holderId: viewerId,
+      idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+    });
+    const detached = await readLease(db, fixture.workspaceId, fixture.sandboxGroupId);
+    // The generation never moved, so the archive still looks complete...
+    expect(detached).toMatchObject({ archiveComplete: true, viewerHolders: 0 });
+    // ...but the box is not clean. Before, the turn's checkpoint stopped at
+    // the complete archive and the tab's writes waited for the next drain.
+    expect(detached!.untrackedWriterSince).not.toBeNull();
+    await idleFor(fixture, 16);
+    expect(await turnCheckpoint()).toBe(true);
+    expect(provider.snapshots()).toBe(2);
+    const covered = await readLease(db, fixture.workspaceId, fixture.sandboxGroupId);
+    expect(covered).toMatchObject({ archiveComplete: true, untrackedWriterSince: null });
+
+    // A complete archive with nothing attached since is clean: the claim
+    // refuses before any provider call.
+    const claim = await claimWorkspaceArchiveCapture(db, {
+      ...ids,
       captureId: crypto.randomUUID(),
       expectedEpoch: EPOCH,
       expectedInstanceId: fixture.instanceId,
@@ -728,19 +790,27 @@ describe("checkpoints of held boxes between turns", () => {
       providerReplaySafe: true,
       takeoverSafe: true,
       pointInTimeCapture: true,
-      idleCheckpoint: true,
+      warmAttempt: {
+        sessionId: fixture.attempt.sessionId,
+        turnId: fixture.attempt.turnId,
+        attemptId: fixture.attempt.attemptId,
+        holderId: fixture.attempt.holderId,
+      },
     });
     expect(claim.status).toBe("clean");
 
-    // A terminal tab opens again. It can write without moving the generation,
-    // so the complete archive no longer proves the box clean.
-    await addHolder(holderScope(fixture), "viewer");
-    expect(
-      (await reaperTick(provider, fixture)).checkpoints.map((row) => row.sandboxGroupId),
-    ).toContain(fixture.sandboxGroupId);
-    expect(provider.snapshots()).toBe(2);
-    const after = await readLease(db, fixture.workspaceId, fixture.sandboxGroupId);
-    expect(after!.archiveGeneration).toBe(after!.workspaceGeneration - 1);
+    // A new lease epoch is a new box restored from the archive.
+    await acquireLease(db, {
+      ...ids,
+      kind: "viewer",
+      holderId: viewerId,
+      backend: "modal",
+      leaseTtlMs: 90_000,
+    });
+    const [rolled] = await admin<{ untracked_writer_since: Date | null }[]>`
+      update sandbox_leases set lease_epoch = lease_epoch + 1 where id = ${fixture.leaseId}
+      returning untracked_writer_since`;
+    expect(rolled!.untracked_writer_since).toBeNull();
   }, 60_000);
 
   test("a turn's heartbeat checkpoint runs around an open viewer instead of skipping", async () => {

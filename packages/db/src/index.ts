@@ -48619,6 +48619,7 @@ type LeaseRow = {
   archive_capture_remaining_ms?: number | string | null;
   archive_capture_published_at: Date | string | null;
   archive_capture_concurrent_capture_id?: string | null;
+  untracked_writer_since?: Date | string | null;
   deadline_forced_admission_ids?: string[] | null;
   reaper_hold_id: string | null;
   reaper_hold_until: Date | string | null;
@@ -48689,6 +48690,10 @@ export interface LeaseSnapshot {
   /** True only when the current verified archive represents the exact current
    * workspace generation. This is numeric/boolean truth, never archive content. */
   archiveComplete: boolean;
+  /** Earliest attach of a viewer or interaction (writers that bypass
+   * generation admissions) that no capture taken with none attached has
+   * covered yet. Null when every such write is in the archive. */
+  untrackedWriterSince: Date | null;
   /** Exact provider capture currently holding the lease-local admission gate. */
   archiveCapture: {
     id: string;
@@ -49380,14 +49385,21 @@ export class SandboxRigConflictError extends Error {
   }
 }
 
-/** True when a holder that can write `/workspace` without a generation
- * admission may be attached: a viewer, or a holder that is neither a turn nor
- * a viewer (an interaction controller among them). Such a box is not proven
- * clean by a complete archive; the capture claim decides exactly. */
+/** True when `/workspace` may hold writes that bypassed generation
+ * admissions and no capture covers yet: a viewer or interaction attached since
+ * the last capture taken with none attached (`untrackedWriterSince`), or a
+ * viewer, or a holder that is neither a turn nor a viewer (an interaction
+ * controller among them), attached now. Such a box is not proven clean by a
+ * complete archive; the capture claim decides exactly. */
 export function leaseMayHaveUntrackedWriters(
-  lease: Pick<LeaseSnapshot, "refcount" | "turnHolders" | "viewerHolders">,
+  lease: Pick<LeaseSnapshot, "refcount" | "turnHolders" | "viewerHolders"> &
+    Partial<Pick<LeaseSnapshot, "untrackedWriterSince">>,
 ): boolean {
-  return lease.viewerHolders > 0 || lease.refcount > lease.turnHolders + lease.viewerHolders;
+  return (
+    (lease.untrackedWriterSince ?? null) !== null ||
+    lease.viewerHolders > 0 ||
+    lease.refcount > lease.turnHolders + lease.viewerHolders
+  );
 }
 
 function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
@@ -49419,6 +49431,12 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
       recovery.archive.status === "available" &&
       archiveGeneration !== null &&
       archiveGeneration === workspaceGeneration,
+    untrackedWriterSince:
+      row.untracked_writer_since === null || row.untracked_writer_since === undefined
+        ? null
+        : row.untracked_writer_since instanceof Date
+          ? row.untracked_writer_since
+          : new Date(row.untracked_writer_since),
     archiveCapture:
       row.archive_capture_id === null ||
       row.archive_capture_operation_id === null ||
@@ -50146,10 +50164,12 @@ async function recomputeAndStampLease(
     total: number;
     turns: number;
     viewers: number;
+    untracked_writers: number;
   }>(sql`
     select count(*)::int as total,
            count(*) filter (where kind = 'turn')::int   as turns,
-           count(*) filter (where kind = 'viewer')::int as viewers
+           count(*) filter (where kind = 'viewer')::int as viewers,
+           count(*) filter (where kind in ('viewer', 'interaction'))::int as untracked_writers
     from sandbox_lease_holders where lease_id = ${leaseId}
   `);
   const c = counts[0]!;
@@ -50158,6 +50178,15 @@ async function recomputeAndStampLease(
       refcount       = ${c.total},
       turn_holders   = ${c.turns},
       viewer_holders = ${c.viewers},
+      -- A viewer or interaction can write /workspace without a generation
+      -- admission. Remember the earliest such attach until a capture taken
+      -- with none attached covers it, so a writer that detached before the
+      -- next capture still leaves the box dirty.
+      ${
+        c.untracked_writers > 0
+          ? sql`untracked_writer_since = coalesce(untracked_writer_since, now()),`
+          : sql``
+      }
       expires_at     = now() + (${String(leaseTtlMs)} || ' milliseconds')::interval,
       ${setLiveness ? sql`liveness = ${setLiveness},` : sql``}
       updated_at     = now()
@@ -57775,12 +57804,13 @@ export type IdleCheckpointCandidate = {
   instanceId: string;
 };
 
-/** Global inventory of warm Modal boxes that no turn holds, that only running
- * unsupervised background commands keep warm, whose workspace has writes the
- * newest archive does not cover, and whose last capture attempt is at least
- * `intervalMs` old. Discovery only: the exact warm capture claim
- * (`claimWorkspaceArchiveCapture` with `idleCheckpoint`) re-checks every fact
- * under the lease lock before any provider capture. */
+/** Global inventory of warm Modal boxes that no turn holds and that viewers,
+ * browser/computer interactions or running unsupervised background commands
+ * keep warm, whose workspace has writes the newest archive may not cover, and
+ * whose last capture attempt and last idle checkpoint attempt are both at least
+ * `intervalMs` old (least recently tried first). Discovery only: the exact
+ * warm capture claim (`claimWorkspaceArchiveCapture` with `idleCheckpoint`)
+ * re-checks every fact under the lease lock before any provider capture. */
 export async function listIdleCheckpointCandidates(
   db: Database,
   input: { limit: number; intervalMs: number },
@@ -57809,6 +57839,39 @@ export async function listIdleCheckpointCandidates(
     leaseEpoch: Number(row.lease_epoch),
     instanceId: row.instance_id,
   }));
+}
+
+/** Stamp an idle checkpoint attempt on the exact warm box before the sweep
+ * tries it, whatever the outcome. The inventory lists a box again only after
+ * the snapshot interval, so a box whose claim is refused or whose provider
+ * fails cannot hold a batch slot on every sweep and starve the others. */
+export async function recordIdleCheckpointAttempt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ id: string }>(sql`
+        update sandbox_leases set idle_checkpoint_attempted_at = now()
+        where account_id = ${input.accountId}
+          and workspace_id = ${input.workspaceId}
+          and sandbox_group_id = ${input.sandboxGroupId}
+          and liveness = 'warm'
+          and lease_epoch = ${input.expectedEpoch}
+          and instance_id = ${input.expectedInstanceId}
+        returning id
+      `);
+      return rows.length === 1;
+    },
+  );
 }
 
 // §4.6 (global) — the cross-workspace reaper sweep (OD-3). Calls the
@@ -62307,11 +62370,13 @@ export async function claimWorkspaceArchiveCapture(
      * exact box are recorded in deadline_forced_admission_ids, captured
      * around, and settled with the box after termination. */
     deadlineMandatoryCaptureLeadMs?: number;
-    /** Warm point-in-time checkpoint of a box no turn holds, kept warm only by
-     * active unsupervised background commands (e.g. while the session waits
-     * for one). Requires `pointInTimeCapture` and no `warmAttempt`: with no
-     * turn attempt to fence, no holder other than those commands' process
-     * holders may be on the box, and every other open request still blocks. */
+    /** Warm point-in-time checkpoint of a box no turn holds, kept warm by
+     * viewers, browser/computer interactions or active unsupervised background
+     * commands (e.g. while the session waits for one or for input). Requires
+     * `pointInTimeCapture` and no `warmAttempt`: with no turn attempt to fence,
+     * no other holder may be on the box, at least one of those must be (a box
+     * no holder keeps warm belongs to the idle drain), and every other open
+     * request still blocks. */
     idleCheckpoint?: boolean;
   },
 ): Promise<ClaimWorkspaceArchiveCaptureResult> {
@@ -62463,6 +62528,11 @@ export async function claimWorkspaceArchiveCapture(
       }
       if (input.liveness === "draining" && row.reaper_hold_active) {
         return { status: "reaper_held" as const };
+      }
+      // A box no holder keeps warm belongs to the idle drain, which captures
+      // it before teardown; an idle checkpoint would duplicate that capture.
+      if (idleCheckpoint && Number(row.refcount) === 0) {
+        return { status: "lease_fenced" as const };
       }
       const [supervision] = await scopedDb.execute<{ safe: boolean }>(sql`
         select ${noActiveSupervisedProcesses(sql`${row.id}::uuid`)} as safe
@@ -62644,10 +62714,17 @@ export async function claimWorkspaceArchiveCapture(
         recoveryStateFromLeaseRow(row).archive.status === "available";
       // Every admitted write advances the generation, and a capture taken
       // while an untracked writer was attached is published one generation
-      // behind, so a complete archive with no such writer attached now has
-      // nothing new to save. A viewer that attached after the last capture
-      // keeps the box dirty even though the generation did not move.
-      if (aroundCommands && archiveComplete && concurrentCommands?.present !== true) {
+      // behind, so a complete archive with no such writer attached now, and
+      // none attached since the last capture taken with none attached, has
+      // nothing new to save. A viewer that attached after that capture keeps
+      // the box dirty even after it detached, though the generation did not
+      // move.
+      if (
+        aroundCommands &&
+        archiveComplete &&
+        concurrentCommands?.present !== true &&
+        (row.untracked_writer_since ?? null) === null
+      ) {
         return { status: "clean" as const };
       }
       if (
@@ -64323,6 +64400,14 @@ async function foldWorkspaceArchiveOntoLease(
                   then lease.workspace_generation + 1
                 else lease.workspace_generation
               end,
+              -- A capture claimed with no viewer or interaction attached (none
+              -- can attach while the claim is held) covers every write they
+              -- made before it.
+              untracked_writer_since = case
+                when ${captureRanAroundCommands(sql`lease`)}
+                  then lease.untracked_writer_since
+                else null
+              end,
               archive_capture_concurrent_capture_id = null,
               archive_capture_id = null,
               archive_capture_operation_id = null,
@@ -64336,7 +64421,9 @@ async function foldWorkspaceArchiveOntoLease(
               archive_capture_published_at = null,
             `
           : input.livenessGuard === "draining"
-            ? sql`archive_capture_published_at = now(),`
+            ? // A drain claims with no holder at all, so it covers every
+              // earlier viewer or interaction write.
+              sql`archive_capture_published_at = now(), untracked_writer_since = null,`
             : sql``
       }
       updated_at = now()

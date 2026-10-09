@@ -7,12 +7,39 @@
 -- drain and idle containment leave a held box alone, so before this its only
 -- save was the mandatory pre-deadline save, up to a day later.
 -- Dirty means a write the newest archive may not cover: a generation it does
--- not include, or a viewer/interaction attached (those can write without a
--- generation admission). Inventory only: the exact warm capture claim re-checks
+-- not include, or a viewer/interaction attached now or since the last capture
+-- claimed with none attached (those can write without a generation
+-- admission). Inventory only: the exact warm capture claim re-checks
 -- every holder, open request, cleanliness and throttle fact under the lease
 -- lock before any provider capture. Additive: older workers never call it.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
+
+-- Idle sweep cadence per box, stamped before each attempt whatever its
+-- outcome, so a refused or failing box cannot hold a batch slot every sweep.
+ALTER TABLE sandbox_leases ADD COLUMN IF NOT EXISTS idle_checkpoint_attempted_at timestamptz;
+-- A viewer or interaction can write /workspace without a generation
+-- admission. The earliest such attach not yet covered by a capture claimed
+-- with none attached, so a writer that detached before the next capture still
+-- leaves the box dirty. Nullable expansion; older writers leave it null and
+-- keep the presence-only behavior until they are replaced.
+ALTER TABLE sandbox_leases ADD COLUMN IF NOT EXISTS untracked_writer_since timestamptz;
+
+-- A new lease epoch is a new box restored from the archive: nothing it holds
+-- is uncaptured yet.
+CREATE OR REPLACE FUNCTION opengeni_private.clear_untracked_writer_since()
+RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+  NEW.untracked_writer_since := NULL;
+  RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION opengeni_private.clear_untracked_writer_since() FROM PUBLIC;
+DROP TRIGGER IF EXISTS sandbox_untracked_writer_epoch_clear ON sandbox_leases;
+CREATE TRIGGER sandbox_untracked_writer_epoch_clear
+  BEFORE UPDATE OF lease_epoch ON sandbox_leases FOR EACH ROW
+  WHEN (NEW.lease_epoch IS DISTINCT FROM OLD.lease_epoch
+    AND NEW.untracked_writer_since IS NOT NULL)
+  EXECUTE FUNCTION opengeni_private.clear_untracked_writer_since();
 
 DO $install$
 DECLARE target_schema text := current_schema(); role_name text;
@@ -22,7 +49,7 @@ BEGIN
       p_limit integer, p_interval_ms bigint)
     RETURNS TABLE(account_id uuid, workspace_id uuid, sandbox_group_id uuid,
       lease_epoch integer, instance_id text)
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, %1$I, pg_temp
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
     AS $body$
     DECLARE inventory_id uuid; due_before timestamptz;
     BEGIN
@@ -38,17 +65,25 @@ BEGIN
       WHERE lease.backend = 'modal' AND lease.liveness = 'warm'
         AND lease.instance_id IS NOT NULL
         AND lease.turn_holders = 0
+        -- Something other than a turn keeps it warm; a box no holder keeps
+        -- warm belongs to the idle drain, which captures before teardown.
+        AND lease.refcount > 0
         AND lease.unobservable_command_drain_ids IS NULL
         AND lease.rotation_requested_at IS NULL
         AND (lease.reaper_hold_until IS NULL OR lease.reaper_hold_until <= now())
         AND (lease.archive_generation IS NULL
           OR lease.archive_generation < lease.workspace_generation
+          OR lease.untracked_writer_since IS NOT NULL
           OR EXISTS (
             SELECT 1 FROM %1$I.sandbox_lease_holders writer
             WHERE writer.lease_id = lease.id AND writer.kind IN ('viewer', 'interaction')))
         -- Coalesced with every other warm capture of the box on one clock.
         AND (lease.archive_capture_last_attempt_at IS NULL
           OR lease.archive_capture_last_attempt_at <= due_before)
+        -- And never more than once per interval from this sweep, whatever the
+        -- previous attempt's outcome.
+        AND (lease.idle_checkpoint_attempted_at IS NULL
+          OR lease.idle_checkpoint_attempted_at <= due_before)
         -- No capture in progress, or one whose owner died: past its deadline,
         -- takeover-safe and never published.
         AND (lease.archive_capture_id IS NULL OR (
@@ -87,7 +122,9 @@ BEGIN
                 AND process.state = 'active'
                 AND NOT (coalesce(process.provider_command, '{}'::jsonb) ? 'supervision')))
         )
-      ORDER BY lease.archive_capture_last_attempt_at NULLS FIRST, lease.id
+      -- Least recently tried first; greatest() ignores a null clock.
+      ORDER BY greatest(lease.archive_capture_last_attempt_at,
+        lease.idle_checkpoint_attempted_at) NULLS FIRST, lease.id
       LIMIT p_limit;
       PERFORM opengeni_private.close_session_tenancy_fence_inventory(inventory_id);
     EXCEPTION WHEN OTHERS THEN
