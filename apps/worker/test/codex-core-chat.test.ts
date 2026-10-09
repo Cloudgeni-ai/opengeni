@@ -400,15 +400,43 @@ describe("Codex cutover gate dispositions", () => {
     expect(error.payload).toMatchObject({ code: "subscription_core_cutover_disabled" });
   });
 
-  test("a compaction turn fails closed instead of reaching a legacy consumer", async () => {
+  test("a compaction turn places on the core like a chat turn and never reads the legacy selector", async () => {
     gate("enabled");
-    const place = spy(db, "placeSubscriptionCoreCodexTurn");
     const legacy = spy(db, "acquireCodexCredentialLease");
-    const error = await selectCodexTurnCapacity(capacityDeps({ source: "compaction" })).catch(
-      (caught) => caught,
-    );
-    expect(error.payload).toMatchObject({ code: "subscription_core_unsupported" });
-    expect(place).not.toHaveBeenCalled();
+    const { armed } = coreWaitMocks(new Date(Date.now() + 60_000));
+    const settled: unknown[] = [];
+    const deps = capacityDeps({ source: "compaction" });
+    deps.eventing.settle = async (input: unknown) => {
+      settled.push(input);
+      return true;
+    };
+    const outcome = await selectCodexTurnCapacity(deps);
+    // A core wait defers maintenance with its request preserved (legacy
+    // compaction parity) instead of parking on a capacity waiter.
+    expect(outcome).toEqual({
+      exit: { status: "idle", deferredUntilWake: true, turnId: "turn-1" },
+    });
+    expect(settled).toEqual([
+      {
+        events: [
+          {
+            type: "turn.cancelled",
+            payload: {
+              maintenance: "context_compaction",
+              reason: "subscription_capacity_unavailable",
+              waitReason: "pinned_account_unavailable",
+              requestPreserved: true,
+            },
+          },
+          { type: "session.status.changed", payload: { status: "idle" } },
+        ],
+        turnStatus: "cancelled",
+        sessionStatus: "idle",
+        activeTurnId: null,
+      },
+    ]);
+    expect(db.placeSubscriptionCoreCodexTurn).toHaveBeenCalledTimes(1);
+    expect(armed).not.toHaveBeenCalled();
     expect(legacy).not.toHaveBeenCalled();
   });
 });

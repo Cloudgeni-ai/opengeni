@@ -292,6 +292,7 @@ export type {
   WorkspaceCodexSubscriptionMode,
   WorkspaceCodexSubscriptionSource,
 } from "./codex-account-types";
+export * from "./subscription-core-codex-operations";
 import {
   projectSubscriptionCoreCodexWorkspace,
   type SubscriptionCoreCodexWake,
@@ -5692,6 +5693,11 @@ export async function recordModelCallFact(
     reasoningTokens?: number | null;
     totalTokens?: number | null;
     occurredAt?: Date;
+    /**
+     * The shared-core subscription connection that served the call (core
+     * Codex turns). Legacy and non-subscription calls leave it NULL.
+     */
+    connectionId?: string | null;
   },
 ): Promise<ModelCallFact> {
   if (input.pricedCostMicros < 0 || !Number.isSafeInteger(input.pricedCostMicros)) {
@@ -5801,6 +5807,7 @@ export async function recordModelCallFact(
           listOutputCostMicros: classes?.output ?? null,
           listCostIsApprox: classes == null ? null : (input.listByClassApprox ?? false),
           contextContributions,
+          connectionId: input.connectionId ?? null,
           occurredAt,
         })
         .onConflictDoUpdate({
@@ -5824,6 +5831,7 @@ export async function recordModelCallFact(
             listOutputCostMicros: sql`coalesce(${schema.modelCallFacts.listOutputCostMicros}, excluded.list_output_cost_micros)`,
             listCostIsApprox: sql`coalesce(${schema.modelCallFacts.listCostIsApprox}, excluded.list_cost_is_approx)`,
             contextContributions: sql`coalesce(${schema.modelCallFacts.contextContributions}, excluded.context_contributions)`,
+            connectionId: sql`coalesce(${schema.modelCallFacts.connectionId}, excluded.connection_id)`,
           },
         })
         .returning();
@@ -31737,6 +31745,42 @@ export async function listCodexResetRedemptionRecoveries(
   );
 }
 
+/**
+ * Who may redeem a credential's reset credits, read (and share-locked
+ * against disconnect or credential replacement) inside the ledger
+ * transaction. `null` is an unknown credential in this workspace. The legacy
+ * rule is the human who connected it; the shared core supplies its own
+ * section 6.3 authority (M3 PR 2c).
+ */
+export type CodexResetRedemptionCredentialAuthority = (
+  tx: Database,
+  input: { accountId: string; workspaceId: string; credentialId: string; subjectId: string },
+) => Promise<{ status: string; owned: boolean } | null>;
+
+export async function legacyCodexResetRedemptionAuthority(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; credentialId: string; subjectId: string },
+): Promise<{ status: string; owned: boolean } | null> {
+  const [credential] = await tx
+    .select({
+      connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
+      status: schema.codexSubscriptionCredentials.status,
+    })
+    .from(schema.codexSubscriptionCredentials)
+    .where(
+      and(
+        eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
+        eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
+        eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+      ),
+    )
+    .for("share")
+    .limit(1);
+  return credential
+    ? { status: credential.status, owned: credential.connectedBySubjectId === input.subjectId }
+    : null;
+}
+
 export type AdoptCodexResetRedemptionResult =
   | { kind: "current" | "adopted"; attempt: CodexResetRedemptionAttempt }
   | { kind: "in_progress" }
@@ -31756,27 +31800,16 @@ export async function adoptCodexResetRedemptionAttempt(
     subjectId: string;
     browserSessionHash: string;
   },
+  authority: CodexResetRedemptionCredentialAuthority = legacyCodexResetRedemptionAuthority,
 ): Promise<AdoptCodexResetRedemptionResult> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        const [credential] = await tx
-          .select({
-            connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
-          })
-          .from(schema.codexSubscriptionCredentials)
-          .where(
-            and(
-              eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-              eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
-            ),
-          )
-          .for("share")
-          .limit(1);
+        const credential = await authority(tx as unknown as Database, input);
         if (!credential) return { kind: "not_found" } as const;
-        if (credential.connectedBySubjectId !== input.subjectId) {
+        if (!credential.owned) {
           return { kind: "forbidden" } as const;
         }
         const [attempt] = await tx
@@ -31862,6 +31895,7 @@ export async function claimCodexResetRedemption(
     claimHolderId: string;
     claimTtlMs?: number;
   },
+  authority: CodexResetRedemptionCredentialAuthority = legacyCodexResetRedemptionAuthority,
 ): Promise<ClaimCodexResetRedemptionResult> {
   const claimTtlMs = input.claimTtlMs ?? 60_000;
   if (!Number.isFinite(claimTtlMs) || claimTtlMs <= 0) {
@@ -31887,21 +31921,7 @@ export async function claimCodexResetRedemption(
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`codex-reset-credit:${input.workspaceId}:${input.credentialId}:${input.creditId}`}, 0))`,
         );
-        const [credential] = await tx
-          .select({
-            connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
-            status: schema.codexSubscriptionCredentials.status,
-          })
-          .from(schema.codexSubscriptionCredentials)
-          .where(
-            and(
-              eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
-              eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
-              eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-            ),
-          )
-          .for("share")
-          .limit(1);
+        const credential = await authority(tx as unknown as Database, input);
         if (!credential) return { kind: "not_found" } as const;
         const [existing] = await tx
           .select()
@@ -31925,7 +31945,7 @@ export async function claimCodexResetRedemption(
           ) {
             return { kind: "conflict" } as const;
           }
-          if (credential.connectedBySubjectId !== input.subjectId) {
+          if (!credential.owned) {
             return { kind: "forbidden" } as const;
           }
           const mapped = mapCodexResetRedemptionAttempt(existing);
@@ -31967,7 +31987,7 @@ export async function claimCodexResetRedemption(
 
         // Authorize before looking up credit-attempt state so a non-owner cannot
         // distinguish an unused provider credit from one with an existing attempt.
-        if (credential.status !== "active" || credential.connectedBySubjectId !== input.subjectId) {
+        if (credential.status !== "active" || !credential.owned) {
           return { kind: "forbidden" } as const;
         }
 
@@ -32068,6 +32088,7 @@ export async function fenceCodexResetRedemptionSend(
     browserSessionHash: string;
     sendLeaseMs?: number;
   },
+  authority: CodexResetRedemptionCredentialAuthority = legacyCodexResetRedemptionAuthority,
 ): Promise<FenceCodexResetRedemptionSendResult> {
   const sendLeaseMs = input.sendLeaseMs ?? 30_000;
   if (!Number.isFinite(sendLeaseMs) || sendLeaseMs <= 10_000) {
@@ -32078,21 +32099,7 @@ export async function fenceCodexResetRedemptionSend(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        const [credential] = await tx
-          .select({
-            connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
-            status: schema.codexSubscriptionCredentials.status,
-          })
-          .from(schema.codexSubscriptionCredentials)
-          .where(
-            and(
-              eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
-              eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
-              eq(schema.codexSubscriptionCredentials.id, input.credentialId),
-            ),
-          )
-          .for("share")
-          .limit(1);
+        const credential = await authority(tx as unknown as Database, input);
         const [attempt] = await tx
           .select()
           .from(schema.codexResetRedemptionAttempts)
@@ -32129,11 +32136,7 @@ export async function fenceCodexResetRedemptionSend(
         let reason: CodexResetRedemptionSendNotReadyReason;
         if (!liveness?.claim_live) reason = "claim_expired";
         else if (!liveness.confirmation_live) reason = "confirmation_expired";
-        else if (
-          !credential ||
-          credential.status !== "active" ||
-          credential.connectedBySubjectId !== input.subjectId
-        ) {
+        else if (!credential || credential.status !== "active" || !credential.owned) {
           reason = "credential_unavailable";
         } else {
           const [ready] = await tx
@@ -32351,6 +32354,208 @@ export async function completeCodexResetRedemption(
         changed: restoresCapacity,
       };
     },
+  );
+}
+
+/**
+ * Section 6.3 reset-credit authority on the shared core (M3 PR 2c): the
+ * database decides, inside the ledger transaction, whether the RLS subject is
+ * an organization administrator or an administrator of the workspace that
+ * manages this shared Codex connection, and share-locks the connection
+ * against disconnect or credential replacement. Nothing without an enabled
+ * Codex cutover.
+ */
+export const subscriptionCoreCodexResetAuthority: CodexResetRedemptionCredentialAuthority = async (
+  tx,
+  input,
+) => {
+  const [row] = await rawRows<{ status: string; authorized: boolean }>(
+    tx,
+    sql`select status, authorized from opengeni_private.subscription_codex_reset_authority(
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.credentialId}::uuid,
+      ${input.subjectId}
+    )`,
+  );
+  return row ? { status: row.status, owned: row.authorized === true } : null;
+};
+
+/**
+ * Persist the exact provider outcome of a core redemption with its audit
+ * record. A credit that restores capacity clears the connection's stored
+ * exhaustion only when it was observed with the connection's current
+ * refresh generation (an observation of an older credential is left for the
+ * generation fence to discard), and returns a core wake for the caller to
+ * deliver after commit. The legacy credential columns and outbox are never
+ * touched.
+ */
+export async function completeSubscriptionCoreCodexResetRedemption(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    attemptId: string;
+    claimHolderId: string;
+    outcome: CodexResetRedemptionOutcome;
+  },
+): Promise<{
+  attempt: CodexResetRedemptionAttempt | null;
+  wake: SubscriptionCoreCodexWake | null;
+}> {
+  if (!CODEX_RESET_REDEMPTION_OUTCOMES.includes(input.outcome)) {
+    throw new Error("Unknown Codex redemption outcome");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`codex-reset-attempt:${input.attemptId}`}, 0))`,
+        );
+        const [current] = await tx
+          .select()
+          .from(schema.codexResetRedemptionAttempts)
+          .where(
+            and(
+              eq(schema.codexResetRedemptionAttempts.accountId, input.accountId),
+              eq(schema.codexResetRedemptionAttempts.workspaceId, input.workspaceId),
+              eq(schema.codexResetRedemptionAttempts.id, input.attemptId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!current) return { attempt: null, wake: null };
+        if (current.status === "completed") {
+          return { attempt: mapCodexResetRedemptionAttempt(current), wake: null };
+        }
+        if (
+          current.status !== "provider_started" ||
+          current.claimHolderId !== input.claimHolderId
+        ) {
+          return { attempt: null, wake: null };
+        }
+        const completedAt = new Date();
+        const [completed] = await tx
+          .update(schema.codexResetRedemptionAttempts)
+          .set({
+            status: "completed",
+            outcome: input.outcome,
+            completedAt,
+            claimHolderId: null,
+            claimExpiresAt: null,
+            lastFailureKind: null,
+            updatedAt: completedAt,
+          })
+          .where(
+            and(
+              eq(schema.codexResetRedemptionAttempts.accountId, input.accountId),
+              eq(schema.codexResetRedemptionAttempts.workspaceId, input.workspaceId),
+              eq(schema.codexResetRedemptionAttempts.id, input.attemptId),
+            ),
+          )
+          .returning();
+        if (!completed) throw new Error("Codex redemption completion returned no row");
+        const restoresCapacity = input.outcome === "reset" || input.outcome === "alreadyRedeemed";
+        if (restoresCapacity) {
+          await tx.execute(sql`
+            update subscription_connection_quota quota
+            set quota = quota.quota || '{"exhaustedUntil": null, "exhaustedKind": null}'::jsonb,
+                revision = quota.revision + 1,
+                updated_at = clock_timestamp()
+            from subscription_connections connection
+            where quota.account_id = ${input.accountId}::uuid
+              and quota.connection_id = ${current.credentialId}::uuid
+              and connection.account_id = quota.account_id
+              and connection.id = quota.connection_id
+              and connection.provider = 'codex'
+              and quota.observed_refresh_generation = connection.refresh_generation
+              and quota.quota->>'exhaustedUntil' is not null`);
+        }
+        await tx.insert(schema.auditEvents).values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: current.subjectId,
+              action: "codex.reset_credit.redemption.completed",
+              targetType: "codex_reset_redemption_attempt",
+              targetId: input.attemptId,
+              metadata: { outcome: input.outcome },
+            },
+            "metadata",
+            "metadataCodecVersion",
+          ),
+        );
+        return {
+          attempt: mapCodexResetRedemptionAttempt(completed),
+          // A successful or already-applied reset can make waiters eligible
+          // even when no exhaustion was stored.
+          wake: restoresCapacity
+            ? { accountId: input.accountId, reason: "codex_reset_credit_redeemed" }
+            : null,
+        };
+      }),
+  );
+}
+
+/**
+ * The owner's durable ambiguous/completed core redemptions in this
+ * workspace, limited to connections the same person may still redeem on
+ * (the section 6.3 authority, read in the same transaction).
+ */
+export async function listSubscriptionCoreCodexResetRedemptionRecoveries(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<CodexResetRedemptionRecovery[]> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .select()
+        .from(schema.codexResetRedemptionAttempts)
+        .where(
+          and(
+            eq(schema.codexResetRedemptionAttempts.workspaceId, input.workspaceId),
+            eq(schema.codexResetRedemptionAttempts.subjectId, input.subjectId),
+            inArray(schema.codexResetRedemptionAttempts.status, ["provider_started", "completed"]),
+          ),
+        )
+        .orderBy(desc(schema.codexResetRedemptionAttempts.createdAt));
+      const allowed = new Map<string, boolean>();
+      for (const credentialId of new Set(rows.map((row) => row.credentialId))) {
+        const authority = await subscriptionCoreCodexResetAuthority(scopedDb, {
+          ...input,
+          credentialId,
+        });
+        allowed.set(credentialId, authority?.owned === true);
+      }
+      return rows
+        .filter((row) => allowed.get(row.credentialId) === true)
+        .map((row) => ({
+          attemptId: row.id,
+          credentialId: row.credentialId,
+          creditId: row.creditId,
+          status: row.status as "provider_started" | "completed",
+          outcome: row.outcome as CodexResetRedemptionOutcome | null,
+          providerStartedAt: codexMetadataDate(row.providerStartedAt),
+          completedAt: codexMetadataDate(row.completedAt),
+          createdAt: codexMetadataDate(row.createdAt)!,
+          updatedAt: codexMetadataDate(row.updatedAt)!,
+        }));
+    },
+  );
+}
+
+/** Per-connection redemption authority for the caller, read outside the ledger. */
+export async function readSubscriptionCoreCodexResetAuthority(
+  db: Database,
+  input: { accountId: string; workspaceId: string; credentialId: string; subjectId: string },
+): Promise<{ status: string; owned: boolean } | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => await subscriptionCoreCodexResetAuthority(tx, input),
   );
 }
 
@@ -76350,6 +76555,11 @@ export async function claimSessionWorkForAttempt(
                     claudeProviderAccountAuthoritySnapshot:
                       latestStarted?.claudeProviderAccountAuthoritySnapshot ??
                       sharedCompactionPool!.claude,
+                    // The immutable v2 accepted authority of the turn this
+                    // compacts after (NULL without a Codex cutover, so the
+                    // legacy path is unchanged). A session with no started
+                    // turn has none: shared capacity only.
+                    subscriptionAuthority: latestStarted?.subscriptionAuthority ?? null,
                     startedAt: now,
                     createdAt: now,
                     updatedAt: now,

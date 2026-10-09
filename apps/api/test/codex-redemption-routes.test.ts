@@ -1880,3 +1880,179 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
   }, 60_000);
 });
+
+describe("Codex reset credits and overview on the shared core (M3 PR 2c)", () => {
+  test("a browser organization administrator redeems a workspace-managed core connection through its alias; agents, bearers and strangers are refused", async () => {
+    if (!available) return;
+    const api = app();
+    const access = await api.request("/v1/access/me", { headers: { cookie: OWNER_COOKIE } });
+    const accountId = ((await access.json()) as AccessContext).defaultAccountId!;
+    const workspaceId = crypto.randomUUID();
+    await admin`
+      insert into workspaces (id, account_id, name)
+      values (${workspaceId}, ${accountId}, ${`core-reset-${workspaceId}`})`;
+    await admin`
+      insert into workspace_memberships (
+        account_id, workspace_id, subject_id, subject_label, role, permissions
+      ) values (
+        ${accountId}, ${workspaceId}, ${`user:${OWNER_USER_ID}`}, 'Core owner', 'member',
+        ${admin.json(["workspace:read", "connections:write"])}
+      )`;
+    const [connection] = await admin<{ id: string }[]>`
+      insert into subscription_connections (
+        account_id, provider, kind, credential_encrypted, ownership, scope_kind,
+        provider_account_id, plan_type, provider_state, expires_at, managed_by_workspace_id, label
+      ) values (
+        ${accountId}::uuid, 'codex', 'subscription', ${encryptedCodexTokens("core-token", "core-refresh")},
+        'shared', 'workspaces', ${`core-${crypto.randomUUID()}`}, 'pro', '{}'::jsonb,
+        ${new Date(Date.now() + 60 * 60_000).toISOString()}::timestamptz, ${workspaceId}::uuid, 'Core'
+      ) returning id::text as id`;
+    const connectionId = connection!.id;
+    await admin`
+      insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
+      values (${accountId}::uuid, ${connectionId}::uuid, ${workspaceId}::uuid)`;
+    await admin`
+      insert into subscription_connection_assignment_policies (
+        account_id, connection_id, workspace_id, inference_pool
+      ) values (${accountId}::uuid, ${connectionId}::uuid, ${workspaceId}::uuid, 'workspace')`;
+    await admin`
+      insert into subscription_settings (
+        account_id, rotation, providers, cross_provider_failover, fallback_order,
+        personal_connections_allowed, personal_fallback_allowed
+      )
+      select ${accountId}::uuid, ${admin.json({ codex: { mode: "spread" } })}::jsonb,
+        '{}'::jsonb, false, '{}'::jsonb, false, false
+      where not exists (
+        select 1 from subscription_settings
+        where account_id = ${accountId}::uuid and workspace_id is null
+      )`;
+    const alias = crypto.randomUUID();
+    await admin`
+      insert into subscription_connection_aliases (account_id, provider, alias_connection_id, connection_id)
+      values (${accountId}::uuid, 'codex', ${alias}::uuid, ${connectionId}::uuid)`;
+    await admin`
+      insert into subscription_provider_cutovers (account_id, provider, enabled)
+      values (${accountId}::uuid, 'codex', true)
+      on conflict (account_id, provider) do update set enabled = true`;
+    try {
+      const consumedBefore = provider.consumeBodies.length;
+      // Through the legacy alias: prepare, then redeem, then replay.
+      const prepared = await prepare(api, workspaceId, alias, "credit-reset");
+      expect(prepared.response.status).toBe(200);
+      const redeem = (attemptId: string, confirmationToken: string, headers = browserHeaders()) =>
+        api.request(`/v1/workspaces/${workspaceId}/codex/accounts/${alias}/reset-credits/redeem`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            attemptId,
+            creditId: "credit-reset",
+            confirmationToken,
+            confirmation: "REDEEM_USAGE_LIMIT_RESET",
+          }),
+        });
+      const redeemed = await redeem(prepared.attemptId, prepared.body.confirmationToken);
+      expect(redeemed.status).toBe(200);
+      expect((await redeemed.json()) as any).toMatchObject({
+        status: "completed",
+        outcome: "reset",
+      });
+      expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+      const [attempt] = await admin<{ credential_id: string; upstream: string }[]>`
+        select credential_id::text as credential_id, upstream_idempotency_key::text as upstream
+        from codex_reset_redemption_attempts where id = ${prepared.attemptId}::uuid`;
+      // The ledger holds the canonical core id; the provider saw its one key.
+      expect(attempt!.credential_id).toBe(connectionId);
+      expect(provider.consumeBodies.at(-1)!.redeem_request_id).toBe(attempt!.upstream);
+      // Single use: a lost response replays the durable outcome, no second consume.
+      const replay = await redeem(prepared.attemptId, prepared.body.confirmationToken);
+      expect((await replay.json()) as any).toMatchObject({ status: "completed", outcome: "reset" });
+      expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+      // The canonical id reaches the same connection.
+      expect(
+        (await prepare(api, workspaceId, connectionId, "credit-ambiguous")).response.status,
+      ).toBe(200);
+
+      // A bearer, another organization's administrator and an agent acting as
+      // the person are refused before any provider call.
+      const bearer = await api.request(
+        `/v1/workspaces/${workspaceId}/codex/accounts/${alias}/reset-credits/prepare`,
+        {
+          method: "POST",
+          headers: { ...browserHeaders(), authorization: "Bearer not-a-person" },
+          body: JSON.stringify({ attemptId: crypto.randomUUID(), creditId: "credit-reset" }),
+        },
+      );
+      expect(bearer.status).toBe(403);
+      const stranger = await prepare(
+        api,
+        workspaceId,
+        alias,
+        "credit-reset",
+        undefined,
+        browserHeaders(OTHER_COOKIE),
+      );
+      expect(stranger.response.status).toBeGreaterThanOrEqual(403);
+      const agentPayload = JSON.stringify({
+        attemptId: crypto.randomUUID(),
+        creditId: "credit-reset",
+      });
+      const agentRequest = new Request(
+        `${PUBLIC_ORIGIN}/v1/workspaces/${workspaceId}/codex/accounts/${alias}/reset-credits/prepare`,
+        {
+          method: "POST",
+          headers: {
+            accept: "application/json",
+            "content-type": "application/json",
+            "content-length": String(Buffer.byteLength(agentPayload)),
+          },
+          body: agentPayload,
+        },
+      );
+      stampDelegatedHumanAuthorization(agentRequest, {
+        organizationId: accountId,
+        subjectId: `user:${OWNER_USER_ID}`,
+        permissions: ["connections:write", "workspace:read"] as never,
+        workspaceScope: { kind: "all" },
+      });
+      // The same stamped request is accepted by the legacy route (see the
+      // organization MCP test above); on the core it is refused (design 6.3).
+      const agentResponse = await api.fetch(agentRequest);
+      expect(agentResponse.status).toBe(403);
+      expect(((await agentResponse.json()) as any).error?.message ?? "").toContain(
+        "managed browser session",
+      );
+      expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+
+      // The overview serves the core pool with redemption authority for the browser human.
+      const overview = await api.request(`/v1/workspaces/${workspaceId}/codex/overview`, {
+        headers: browserHeaders(),
+      });
+      expect(overview.status).toBe(200);
+      const body = (await overview.json()) as any;
+      expect(Object.keys(body.accounts)).toEqual([connectionId]);
+      expect(body.accounts[connectionId]).toMatchObject({
+        canRedeem: true,
+        canResumeRedemption: true,
+        redemptionAccess: { ownership: "current_human" },
+        usage: { source: "provider" },
+        resetCredits: { source: "provider", detailState: "detailed" },
+      });
+      expect(body.accounts[connectionId].redemptions).toEqual([
+        expect.objectContaining({
+          attemptId: prepared.attemptId,
+          status: "completed",
+          outcome: "reset",
+        }),
+      ]);
+      expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+
+      // A disabled cutover row fails closed with the typed 503.
+      await admin`update subscription_provider_cutovers set enabled = false
+        where account_id = ${accountId}::uuid and provider = 'codex'`;
+      expect((await prepare(api, workspaceId, alias, "credit-reset")).response.status).toBe(503);
+    } finally {
+      await admin`delete from subscription_provider_cutovers
+        where account_id = ${accountId}::uuid and provider = 'codex'`;
+    }
+  });
+});

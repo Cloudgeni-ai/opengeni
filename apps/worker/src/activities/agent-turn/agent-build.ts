@@ -47,7 +47,10 @@ import { summarizeCompanyBrainContributions } from "../../model-context-contribu
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { executeGatewayImageGeneration } from "../gateway-image-generation";
-import { executeCodexImageGeneration } from "../codex-image-generation";
+import {
+  executeCodexImageGeneration,
+  executeCoreCodexImageGeneration,
+} from "../codex-image-generation";
 import {
   ImageGenerationReferenceError,
   resolveImageGenerationReferencesForTool,
@@ -310,10 +313,43 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     }
 
     if (resolvedModel?.provider.kind === "codex-subscription") {
-      // Codex image operations move to core operation leases in PR 2. Until
-      // then a turn placed by the shared core exposes no image tool rather
-      // than funding one against the legacy Codex credential tables.
-      if (providerTurn.codexSubscriptionCore) return {};
+      // A turn placed by the shared core funds its image operations through
+      // core operation leases on its own connection, never the legacy tables.
+      const core = providerTurn.codexSubscriptionCore;
+      if (core) {
+        const executionGeneration = leases.codex.generation;
+        if (!codexContext || executionGeneration === null) return {};
+        return {
+          imageGeneration: {
+            kind: "provider_adapter",
+            execute: async ({ prompt, references }, { toolCallId }) => {
+              const referenceResolution = await resolveImageReferences(references);
+              if (referenceResolution.status === "rejected") return referenceResolution.result;
+              const receipt = await executeCoreCodexImageGeneration({
+                db,
+                settings: capabilitySettings,
+                objectStorage,
+                core,
+                executionGeneration,
+                clientVersion: codexContext.clientVersion,
+                assertChatLease: () => leases.codex.assertCurrentForDispatch(),
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                attemptId: input.attemptId,
+                toolCallId,
+                prompt,
+                references: referenceResolution.references,
+                ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
+              });
+              media.rememberGeneratedImageCreatedThisTurn(receipt);
+              await media.materializeGeneratedImage(receipt);
+              return receipt;
+            },
+          },
+        };
+      }
       const imageAuthority = connectedSubscriptionImageGenerationAuthority(
         codexContext,
         providerTurn.effectiveCodexCredentialId,

@@ -830,7 +830,7 @@ async function writeBinding(
  * turn's frozen v2 Codex entry. A no-op without that entry, for service and
  * ownerless turns, and before the Codex cutover is enabled.
  */
-async function authorizeFrozenPersonalCodex(
+export async function authorizeSubscriptionCoreFrozenPersonalCodex(
   tx: Database,
   identity: SubscriptionCoreTurnIdentity,
 ): Promise<boolean> {
@@ -879,7 +879,7 @@ async function withLeasedCodexConnection<T>(
       generation: lease.generation,
     });
     if (!current) return { status: "lease_lost" } as const;
-    await authorizeFrozenPersonalCodex(tx, identity);
+    await authorizeSubscriptionCoreFrozenPersonalCodex(tx, identity);
     return { status: "ok", value: await operation(tx) } as const;
   });
   return access.status === "not_visible" ? access : access.value;

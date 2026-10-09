@@ -124,6 +124,8 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "claude_subscription_pool_protocol_v1_active()",
   // M3 PR 2b: run only by the Codex Apps routines as their owner.
   "subscription_codex_apps_designation_target(uuid, uuid)",
+  // M3 PR 2c: run only by the Codex connection-seam routines as their owner.
+  "subscription_codex_connection_target(uuid, uuid, uuid, uuid, uuid, text, bigint)",
   "read_sender_connection(uuid, uuid, uuid, text)",
   // Lifecycle fact writers (migrations 0532 and 0565): owner-run trigger
   // functions and the migration-owner backfill. Runtime roles may still hold
@@ -693,12 +695,20 @@ export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   "begin_subscription_codex_apps_refresh(uuid, uuid, uuid)",
   "persist_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
   "fail_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text)",
+  // M3 PR 2c: the connection-level Codex credential seam for operations.
+  "read_subscription_codex_connection_credential(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "begin_subscription_codex_connection_refresh(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "persist_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text)",
+  "subscription_codex_reset_authority(uuid, uuid, uuid, text)",
 ] as const;
 
 /** Owner-only private helpers the runtime role must never be able to execute. */
 export const SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES = [
   // M3 PR 2b: returns a full connection row to the Apps routines that run as its owner.
   "subscription_codex_apps_designation_target(uuid, uuid)",
+  // M3 PR 2c: returns a full connection row to the connection-seam routines.
+  "subscription_codex_connection_target(uuid, uuid, uuid, uuid, uuid, text, bigint)",
 ] as const;
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [

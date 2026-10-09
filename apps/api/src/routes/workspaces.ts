@@ -90,6 +90,8 @@ import {
   upsertWorkspaceMemberAsWorkspaceManager,
   upsertWorkspaceModelPolicy,
   workspaceCodexSubscriptionActive,
+  readCodexCutoverDisposition,
+  listSubscriptionCoreCodexOperationCandidates,
   workspaceControlRequestLockTimeoutMs,
   workspaceXaiSubscriptionActive,
   workspaceVercelAiGatewayConnectionActive,
@@ -274,6 +276,30 @@ export function externalWorkspaceAccountId(
       omittedIssueCount: 0,
     },
   });
+}
+
+/**
+ * Codex Live readiness: the legacy active subscription without a cutover
+ * row; on the shared core, any shared connection that could serve a
+ * realtime operation here; never ready during maintenance.
+ */
+async function workspaceCodexRealtimeReady(
+  routeDeps: ApiRouteDeps,
+  grant: { accountId: string; subjectId: string },
+  workspaceId: string,
+): Promise<boolean> {
+  const disposition = await readCodexCutoverDisposition(routeDeps.db, grant.accountId, workspaceId);
+  if (disposition === "legacy") {
+    return await workspaceCodexSubscriptionActive(routeDeps.db, routeDeps.settings, workspaceId);
+  }
+  if (disposition === "maintenance" || !routeDeps.settings.codexSubscriptionEnabled) return false;
+  const candidates = await listSubscriptionCoreCodexOperationCandidates(routeDeps.db, {
+    kind: "workspace",
+    accountId: grant.accountId,
+    workspaceId,
+    subjectId: grant.subjectId,
+  });
+  return candidates.length > 0;
 }
 
 export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -1116,7 +1142,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const [codexConnected, supergrokConnected, workspaceGatewayConnected] = await Promise.all([
-      workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
+      workspaceCodexRealtimeReady(deps, grant, workspaceId),
       workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
       workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
     ]);

@@ -1659,11 +1659,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ).catch(() => undefined);
         return refused;
       }
-      const broker = (
+      const broker =
         claim.mode.model === AZURE_LIVE_MODEL_ID
-          ? buildSessionAzureLiveBroker
-          : buildSessionCodexRealtimeBroker
-      )(db, settings, workspaceId, sessionId, deps.codexFetch);
+          ? buildSessionAzureLiveBroker(db, settings, workspaceId, sessionId, deps.codexFetch)
+          : buildSessionCodexRealtimeBroker(
+              db,
+              settings,
+              { accountId: grant.accountId, workspaceId, sessionId },
+              deps.codexFetch,
+            );
       try {
         const answer = await broker({
           request: providerRequest,

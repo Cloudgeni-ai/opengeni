@@ -129,6 +129,8 @@ function cutover(disposition: "core" | "maintenance") {
     "updateCodexAllocatorEligibility",
     "getSessionCodexAccounts",
     "switchSessionCodexAccount",
+    "fetchCodexUsageForAccount",
+    "buildCodexTokenResolver",
   ] as const) {
     mock(legacy, async () => {
       throw new Error(`legacy Codex accessor ${legacy} must not run`);
@@ -305,13 +307,9 @@ describe("Codex routes with an enabled cutover", () => {
     expect(wakes).toHaveLength(2);
   });
 
-  test("operations the core does not serve yet answer a typed 409", async () => {
+  test("connect and disconnect (left to PR 3) still answer a typed 409", async () => {
     cutover("core");
     const requests: Array<[string, string]> = [
-      ["POST", "/codex/usage/refresh"],
-      ["GET", "/codex/usage"],
-      ["GET", `/codex/accounts/${CONNECTION}/usage`],
-      ["GET", "/codex/overview"],
       ["POST", "/codex/connect/start"],
       ["DELETE", `/codex/accounts/${CONNECTION}`],
       ["DELETE", "/codex"],
@@ -330,6 +328,133 @@ describe("Codex routes with an enabled cutover", () => {
         },
       });
     }
+  });
+
+  test("live usage, per-account usage and refresh read through the core seam", async () => {
+    cutover("core");
+    mock("getSubscriptionCoreCodexWorkspaceProjection", async () => projection);
+    mock("resolveSubscriptionCoreCodexConnectionId", async (_db: never, input: never) =>
+      (input as { connectionId: string }).connectionId === CONNECTION ? CONNECTION : null,
+    );
+    const usage = {
+      status: "ok" as const,
+      planType: "pro",
+      fiveHour: null,
+      weekly: null,
+      limitReached: false,
+      fetchedAt: new Date(0).toISOString(),
+      rateLimitResetCredits: null,
+    };
+    const reads = mock("fetchSubscriptionCoreCodexUsage", async () => ({ usage, recovered: true }));
+    const headers = { authorization: await bearer(["workspace:read"]) };
+
+    const live = await app().request(`/v1/workspaces/${WS}/codex/usage`, { headers });
+    expect(live.status).toBe(200);
+    expect(await live.json()).toEqual({ status: "ok", usage });
+    const one = await app().request(`/v1/workspaces/${WS}/codex/accounts/${CONNECTION}/usage`, {
+      headers,
+    });
+    expect(one.status).toBe(200);
+    const missing = await app().request(
+      `/v1/workspaces/${WS}/codex/accounts/22222222-0000-4000-8000-000000000002/usage`,
+      { headers },
+    );
+    expect(missing.status).toBe(404);
+    const refresh = await app().request(`/v1/workspaces/${WS}/codex/usage/refresh`, {
+      method: "POST",
+      headers,
+    });
+    expect(refresh.status).toBe(200);
+    expect(await refresh.json()).toEqual({ usage: { [CONNECTION]: { status: "ok", usage } } });
+    // Every read carried the explicit organization/workspace/caller context.
+    expect(reads.mock.calls).toHaveLength(3);
+    for (const call of reads.mock.calls) {
+      expect(call[2]).toEqual({
+        kind: "workspace",
+        accountId: ACCOUNT,
+        workspaceId: WS,
+        subjectId: "tester",
+      });
+      expect(call[3]).toBe(CONNECTION);
+    }
+    // An ended exhaustion wakes the account's core waiters.
+    expect(wakes).toEqual([
+      { accountId: ACCOUNT, reason: "usage_recovered" },
+      { accountId: ACCOUNT, reason: "usage_recovered" },
+      { accountId: ACCOUNT, reason: "usage_recovered" },
+    ]);
+  });
+
+  test("a failed wake hint never turns a committed usage read into an error", async () => {
+    cutover("core");
+    mock("getSubscriptionCoreCodexWorkspaceProjection", async () => projection);
+    mock("deliverSubscriptionCoreCodexWake", async () => {
+      throw new Error("wake delivery failed");
+    });
+    const usage = {
+      status: "ok" as const,
+      planType: "pro",
+      fiveHour: null,
+      weekly: null,
+      limitReached: false,
+      fetchedAt: new Date(0).toISOString(),
+      rateLimitResetCredits: null,
+    };
+    mock("fetchSubscriptionCoreCodexUsage", async () => ({ usage, recovered: true }));
+    const headers = { authorization: await bearer(["workspace:read"]) };
+    const live = await app().request(`/v1/workspaces/${WS}/codex/usage`, { headers });
+    expect(live.status).toBe(200);
+    const refresh = await app().request(`/v1/workspaces/${WS}/codex/usage/refresh`, {
+      method: "POST",
+      headers,
+    });
+    expect(await refresh.json()).toEqual({ usage: { [CONNECTION]: { status: "ok", usage } } });
+  });
+
+  test("the overview settles usage and reset details per account through the core seam", async () => {
+    cutover("core");
+    mock("getSubscriptionCoreCodexWorkspaceProjection", async () => projection);
+    mock("listCodexResetRedemptionRecoveries", async () => {
+      throw new Error("legacy redemption recoveries must not run");
+    });
+    const usage = {
+      status: "ok" as const,
+      planType: "pro",
+      fiveHour: null,
+      weekly: null,
+      limitReached: false,
+      fetchedAt: new Date(0).toISOString(),
+      rateLimitResetCredits: null,
+    };
+    mock("fetchSubscriptionCoreCodexUsage", async () => ({ usage, recovered: false }));
+    const tokens = mock("buildSubscriptionCoreCodexConnectionTokenResolver", () => ({
+      getToken: async () => {
+        throw new Error("reset details unavailable in this fixture");
+      },
+      refresh: async () => {
+        throw new Error("reset details unavailable in this fixture");
+      },
+    }));
+    const response = await app().request(`/v1/workspaces/${WS}/codex/overview`, {
+      headers: { authorization: await bearer(["workspace:read"]) },
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { accounts: Record<string, Record<string, unknown>> };
+    expect(Object.keys(body.accounts)).toEqual([CONNECTION]);
+    expect(body.accounts[CONNECTION]).toMatchObject({
+      accountId: CONNECTION,
+      usage: { source: "provider", value: usage },
+      resetCredits: { error: "network_error" },
+      // A bearer caller is never a redemption principal on the core.
+      canRedeem: false,
+      redemptionAccess: { ownership: "managed_human_unavailable" },
+    });
+    expect(tokens.mock.calls[0]![2]).toEqual({
+      kind: "workspace",
+      accountId: ACCOUNT,
+      workspaceId: WS,
+      subjectId: "tester",
+    });
   });
 
   test("the session account view and pin use the core binding", async () => {

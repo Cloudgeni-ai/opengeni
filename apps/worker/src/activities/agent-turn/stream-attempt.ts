@@ -432,6 +432,7 @@ export async function runTurnStreamAttempt(
         countsTowardTokenCap: billingState.countsTowardTokenCap,
         servingCredentialId: providerTurn.effectiveCodexCredentialId,
         priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
+        subscriptionConnectionId: providerTurn.codexSubscriptionCore?.connectionId ?? null,
         emittedSourceKeys: emittedModelUsageSourceKeys,
         renewLease: () => leases.renewServing("model_usage"),
         leaseLost: leases.servingLost,
@@ -1154,6 +1155,7 @@ export async function runTurnStreamAttempt(
           countsTowardTokenCap: billingState.countsTowardTokenCap,
           servingCredentialId: providerTurn.effectiveCodexCredentialId,
           priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
+          subscriptionConnectionId: providerTurn.codexSubscriptionCore?.connectionId ?? null,
           emittedSourceKeys: emittedModelUsageSourceKeys,
           renewLease: () => leases.renewServing("model_usage"),
           leaseLost: leases.servingLost,
@@ -1722,6 +1724,7 @@ export async function runTurnStreamAttempt(
                 providerApi: aggregateProviderApi,
                 model: turn.model,
                 billing,
+                subscriptionConnectionId: providerTurn.codexSubscriptionCore?.connectionId ?? null,
                 contextContributions: eventing.companyBrainContextContributions,
               });
               recordAuthoritativeModelUsageMetrics({
