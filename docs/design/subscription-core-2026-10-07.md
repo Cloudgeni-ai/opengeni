@@ -1519,11 +1519,28 @@ Left to PR 3:
 
 ##### PR 3b: the remaining Codex writers (dormant)
 
-Migration 0679 (rolling) and the matching code complete every Codex writer on
+Migration 0680 (rolling, after 0679 extra-credit consent) and the matching code complete every Codex writer on
 the core before the drained cutover, so the cutover moves data and flips no
 route to a 409. Like PR 1/2 everything is dormant: no cutover row keeps the
 legacy path unchanged, a disabled row fails closed (typed 503), and every
 database routine below rechecks the enabled row itself.
+
+The four owner-only writer implementations live in `opengeni_subscription_internal`,
+not the previous binary's `opengeni_private` runtime capability inventory. The app
+has neither schema USAGE/CREATE nor function EXECUTE there. Callers use the existing
+restricted public seam. This preserves previous-binary readiness during rolling
+0680 without granting capability mint/drop functions to runtime roles; current
+readiness separately verifies the owner-only schema functions. The drained cutover
+is still a later maintenance release, not activated by these writers.
+
+Reconnect requires a verified upstream account **and person**. Distinct people
+within a Team account remain separate, including personal connections. Missing
+or `legacy:<id>` identities refuse `identity_unverified` rather than matching NULL,
+guessing, or creating an ambiguous duplicate. Owner-only `resolve` is read-only:
+failed in-use disconnects cannot mutate primary choice or settings versions.
+The exported enqueue helper freezes acceptance v2 (service work gets empty authority),
+so otherwise identical frozen-authority system updates can batch without weakening
+the equality key.
 
 - **Connect and disconnect (SUB-OWN-01/04/08).** The device-code start
   touches no account state; workspace device state binds the starting actor

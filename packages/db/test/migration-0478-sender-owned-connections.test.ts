@@ -45,7 +45,7 @@ const withheldMigrations = [
   ...inboxTriggerTailMigrations,
   // The Codex writers read columns the withheld 0661 adds, so they run with
   // the withheld tail, in ledger order.
-  "0680_subscription_core_codex_writers.sql",
+  "0682_subscription_core_codex_writers.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

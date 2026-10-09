@@ -113,7 +113,7 @@ export async function codexSubscriptionAuthorityV2OrEmptyInTransaction(
 /**
  * A scheduled task's frozen v2 value at creation (M3 PR 3b, EP-T15), from
  * `subscription_codex_task_authority_v2`: the acceptance rule for the exact
- * accepting human. `null` without an enabled cutover (or before 0679).
+ * accepting human. `null` without an enabled cutover (or before 0680).
  */
 export async function codexSubscriptionAuthorityV2ForScheduledTaskInTransaction(
   tx: Database,
