@@ -160,7 +160,7 @@ describe.skipIf(process.platform !== "linux")("host archive spool ownership", ()
     expect((await stat(leaked).catch(() => null)) === null).toBe(true);
   });
 
-  test("a process killed mid-download leaves its download spool only until the next sweep", async () => {
+  test("a process killed mid-download leaves its download spool only until the next download", async () => {
     const { temporary } = await fixture();
     const child = await downloadInChild(temporary);
     const [name] = await entries(temporary);
@@ -171,10 +171,13 @@ describe.skipIf(process.platform !== "linux")("host archive spool ownership", ()
     child.kill("SIGKILL");
     await exited(child);
     expect(await entries(temporary)).toEqual([name]);
-    expect(await sweepOrphanedHostArchiveTemporaryDirectories([temporary])).toEqual([
-      join(temporary, name!),
-    ]);
-    expect(await entries(temporary)).toEqual([]);
+
+    // The next process to download reclaims the dead owner's spool by itself.
+    await downloadInChild(temporary);
+    const remaining = await entries(temporary);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]).not.toBe(name);
+    expect(remaining[0]).toMatch(/^opengeni-workspace-archive-o\d+\.\d+\.\d+-[A-Za-z0-9]{6}$/);
   });
 
   test("only provably dead owners in this PID namespace are swept", async () => {

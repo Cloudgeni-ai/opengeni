@@ -194,7 +194,7 @@ esac`;
       "rm -f abc123",
     ]);
     expect(clean.stdout).toContain("removed 1 sandbox workspace");
-    expect(await Bun.file(join(owned, "go", "pkg", "mod", "go.mod")).exists()).toBe(false);
+    expect(await stat(owned).catch(() => null)).toBeNull();
     expect(await Bun.file(join(outside, "keep.txt")).text()).toBe("outside");
     expect((await stat(unrelated)).isDirectory()).toBe(true);
   });

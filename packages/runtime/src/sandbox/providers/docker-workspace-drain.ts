@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { isAbsolute, join, resolve } from "node:path";
-import { chmod, lstat, readdir, realpath, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import { chmod, lstat, open, readdir, realpath, rm } from "node:fs/promises";
 import { promisify } from "node:util";
 import { DockerSandboxSession, type DockerSandboxClient } from "@openai/agents/sandbox/local";
 import type { SandboxArchiveLimits } from "@openai/agents/sandbox";
@@ -285,9 +286,37 @@ async function makeDescendantsRemovable(root: string): Promise<void> {
       const path = join(directory, entry.name);
       const stats = await lstat(path);
       if (!stats.isDirectory()) continue;
-      if ((stats.mode & 0o700) !== 0o700) await chmod(path, (stats.mode & 0o7777) | 0o700);
+      if ((stats.mode & 0o700) !== 0o700) await grantOwnerAccess(path, stats);
       pending.push(path);
     }
+  }
+}
+
+/** chmod through a no-follow directory handle pinned to the inode just
+ * lstat'ed, so a path swapped for a symlink or another directory in between
+ * is left alone. A directory without read permission cannot be opened; it
+ * falls back to a path chmod of the same lstat'ed directory. */
+async function grantOwnerAccess(
+  path: string,
+  stats: { dev: number; ino: number; mode: number },
+): Promise<void> {
+  const mode = (stats.mode & 0o7777) | 0o700;
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (errorCode(error) !== "EACCES") throw error;
+    await chmod(path, mode);
+    return;
+  }
+  try {
+    const pinned = await handle.stat();
+    if (pinned.dev !== stats.dev || pinned.ino !== stats.ino) {
+      throw new Error(`workspace directory changed during release: ${path}`);
+    }
+    await handle.chmod(mode);
+  } finally {
+    await handle.close();
   }
 }
 
