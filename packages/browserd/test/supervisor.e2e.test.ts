@@ -50,7 +50,42 @@ recoveryE2e(
         ),
     });
     const open = () =>
-      BrowserSupervisor.open({ rootDirectory: join(directory, "state"), socketRootDirectory });
+      BrowserSupervisor.open({
+        rootDirectory: join(directory, "state"),
+        socketRootDirectory,
+        createDriver: async (context) => {
+          // Keep the actual executable in ownership receipts while applying
+          // the same container launch flags as the other Chromium CI fixtures.
+          const runner = await AgentBrowserJsonRunner.create({
+            namespace: "og",
+            sessionName: `r${randomUUID().replaceAll("-", "").slice(0, 16)}`,
+            socketDirectory: context.socketDirectory,
+            profileDirectory: context.profileDirectory,
+            downloadDirectory: context.downloadDirectory,
+            screenshotDirectory: context.screenshotDirectory,
+            headed: context.headed,
+            ...(context.browserExecutablePath
+              ? { browserExecutablePath: context.browserExecutablePath }
+              : {}),
+            launchArguments: ["--no-sandbox", "--disable-gpu"],
+            ...(context.recoverOwnedProcess
+              ? {
+                  recoverOwnedProcess: context.recoverOwnedProcess,
+                  allowOwnedProcessLaunch: context.allowOwnedProcessLaunch,
+                }
+              : {}),
+          });
+          return new AgentBrowserDriver({
+            browserSessionId: context.browserSessionId,
+            controllerGeneration: context.controllerGeneration,
+            runner,
+            focusEmulation: true,
+            downloadDirectory: context.downloadDirectory,
+            ...(context.downloadEvents ? { downloadEvents: context.downloadEvents } : {}),
+            resolveWorkspaceFiles: context.resolveWorkspaceFiles,
+          });
+        },
+      });
     const options = {
       ...reference(),
       headed: false,
