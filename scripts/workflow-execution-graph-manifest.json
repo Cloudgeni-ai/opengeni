@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
-      "sha256": "a739913b5470819b147f4d94633cdbbb7edbe89decfa98888aefa7d24ef3a9e7"
+      "sha256": "0a8801588a4774fd36557ac61ece90b8e8714f2e3e0817cf21290713f474f154"
     },
     {
       "path": ".github/workflows/local-startup.yml",
@@ -111,6 +111,10 @@
     {
       "path": ".github/workflows/staging-canary-dispatch.yml",
       "sha256": "459cd722dec2939e2496c21a03daaf78b489db37f18552decff8fd65df566a0f"
+    },
+    {
+      "path": ".github/workflows/terminal-readiness.yml",
+      "sha256": "841beb92b55c60639b40c3c90750cf2f7bc03f906a308c7807dbaa0079817212"
     },
     {
       "path": ".github/workflows/verify-public-container-packages.yml",

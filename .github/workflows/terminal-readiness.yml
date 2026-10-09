@@ -1,0 +1,52 @@
+name: Terminal readiness image conformance
+
+# Ordinary PR CI does not bake workload images. This narrowly triggered,
+# build-only lane proves the headless cross-compiled addon against the actual
+# final runtime Bash on BOTH image architectures before source merge.
+# The desktop image's existing e2e workflow supplies its native-amd64 proof.
+on:
+  pull_request:
+    branches: [main, production]
+    paths:
+      - "agent/native/terminal-ready/**"
+      - "docker/sandbox.Dockerfile"
+      - "docker/desktop/opengeni-terminal-ready.sh"
+      - "docker/desktop/opengeni-terminal-up.sh"
+      - ".github/workflows/terminal-readiness.yml"
+
+concurrency:
+  group: terminal-readiness-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  headless-image:
+    if: ${{ !(github.head_ref == 'main' && github.base_ref == 'production') }}
+    name: Headless terminal ABI (amd64 + arm64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      # Like the existing desktop e2e build, the unrelated editable-artifact
+      # runtime may be unavailable in this test image. The canonical Dockerfile
+      # still executes the installed-profile PTY tests in its final runtime.
+      - name: Build canonical headless image and exercise installed PTYs
+        timeout-minutes: 40
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: docker/sandbox.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+          build-args: OPENGENI_SOURCE_SHA=${{ github.event.pull_request.head.sha }}
+          cache-from: type=gha,scope=opengeni-ci-sandbox

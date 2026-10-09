@@ -9,6 +9,7 @@ name: Desktop image e2e
 on:
   pull_request:
     paths:
+      - "agent/native/terminal-ready/**"
       - "docker/desktop.Dockerfile"
       - "docker/desktop/**"
       - "apps/worker/test/desktop-image.e2e.ts"

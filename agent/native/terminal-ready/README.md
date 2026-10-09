@@ -70,6 +70,9 @@ verify octal-encoded execution markers (echo cannot pass). They cover profile
 state preservation, silent prompts, startup and PS1 stdin flushes, startup reads,
 subshell ownership, disabled Readline, unload, and fresh per-PTY identities.
 Both stock images also run the suite with `--installed` against the real system
-profile integration. Browser/hook regressions live in `packages/react/test/`;
+profile integration. PRs run the canonical headless Dockerfile on amd64 and
+arm64 in the build-only `terminal-readiness.yml` lane (no push/deploy), alongside
+the existing native-amd64 desktop image e2e lane. Neither test image requires
+the unrelated editable-artifact runtime bundle. Browser/hook regressions live in `packages/react/test/`;
 the actual-component demo is `terminal.html?view=readiness` with
 `mode=ready|silent|manual|legacy`.
