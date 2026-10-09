@@ -3442,6 +3442,14 @@ export async function verifyEnrollmentBearer(
 // bearer (verifyEnrollmentBearer's `oge_` prefix check rejects it) and vice-versa
 // (verifyEnrollToken's `oget_` prefix + typ check rejects an `oge_` bearer). The
 // secret value is NEVER logged.
+/**
+ * The OpenGeni Browser Chrome extension (Chrome Web Store). It bridges Chrome to
+ * an installed Connected Machine agent through native messaging, so the machine
+ * must be connected before the extension can link up.
+ */
+export const OPENGENI_BROWSER_EXTENSION_URL =
+  "https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch";
+
 export const EnrollTokenPayload = z.object({
   // Domain-separation claim — fixed "enroll" so an `oge_`/`ogd_`/`ogs_` payload (no
   // typ, or a different typ) can never satisfy verifyEnrollToken even past the prefix.
@@ -3453,6 +3461,13 @@ export const EnrollTokenPayload = z.object({
   allowScreenControl: z.boolean(),
   iat: z.number().int().nonnegative(),
   exp: z.number().int().positive(),
+  // Unique token id. The exchange records it so one token connects one machine;
+  // the same machine (same public key) may retry. Optional only for tokens minted
+  // before single-use redemption shipped; those still expire after one hour.
+  jti: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{16,128}$/)
+    .optional(),
 });
 export type EnrollTokenPayload = z.infer<typeof EnrollTokenPayload>;
 

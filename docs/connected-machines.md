@@ -808,6 +808,40 @@ in that workspace until a workspace administrator removes/revokes it. This is
 intentional: possessing the machine credential does not grant workspace-admin
 authority.
 
+### Connect from a chat
+
+Agents connect machines the way they request integrations. When the agent can
+already run commands on the target machine, it installs the agent itself with
+`connected_machine_enroll_token` (below). When the person has to connect their
+own computer, the agent posts the **Connected Machine card**: either
+`capability_catalog_search` (for example "my Mac" or "Chrome") followed by
+`capability_authorization_request` with `api:connected-machine`, or
+`sandbox_provision` with `kind: "selfhosted"`. Both append the ordinary
+`tool.auth_needed` event with that capability id; the event carries no token.
+
+The card (`apps/web/src/components/capabilities/session-machine-card.tsx`):
+
+- lists the workspace's enrolled machines with **Use in this chat**, which swaps
+  the session onto that machine and sends `Use the machine “<name>” for this
+  chat.` (the name quoted, on one line, at most 60 characters) so the agent
+  continues there. A chat that cannot take a Send is not moved; a chat waiting
+  on a question is moved and keeps the question;
+- mints a single-use token in the person's browser on **Connect a machine**
+  (screen control is chosen before copying because it is baked into the token),
+  shows the matching Mac/Linux or PowerShell command, and polls until a new
+  machine, or a known one that was offline, comes online, then puts **Use in
+  this chat** first; Cancel stops the watch;
+- once a machine with a screen is reachable (the chat's own machine first),
+  offers the
+  [OpenGeni Browser extension](https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch)
+  for that machine and shows **Connected** when a Chrome profile on that same
+  enrollment links up. It checks once, polls only after **Add to Chrome**, and
+  stops after ten minutes or when the inventory is not readable.
+
+Reading the list needs `enrollments:read`; connecting needs `enrollments:manage`;
+moving the chat needs `sessions:control`. The card says who can act otherwise.
+Like GitHub, the card is posted even when machines are already connected.
+
 ### Zero-click token (fleet / headless)
 
 Agents with the existing `enrollments:manage` permission can call the first-party
@@ -820,14 +854,23 @@ path, then verify readiness with `sandboxes_list`. A token cannot execute the
 installer on a machine for which no access path exists.
 
 The token is returned to the agent in the tool result; never publish it in source
-code or unrelated logs. Missing `enrollments:manage`, an explicit tool selection
-that excludes it, or disabled Connected Machines means the tool is unavailable.
-This addition does not grant the permission to existing sessions. For interactive
-enrollment without this permission, `sandbox_provision` still returns human
-device-flow instructions.
+code, chat, or unrelated logs. Missing `enrollments:manage`, an explicit tool
+selection that excludes it, or disabled Connected Machines means the tool is
+unavailable. This addition does not grant the permission to existing sessions.
+
+Enroll tokens are **single-use**. Each token carries a random `jti`; the exchange
+records it in `enrollment_token_redemptions` (0696) in the same transaction that
+creates the enrollment, so one token connects one machine. The same machine
+(same public key) may repeat the exchange after a lost response or a re-run
+install command, while its enrollment is still active. Any other machine, or a
+machine removed since, receives `401` with "this connect command was already
+used to connect another machine". Mint one token per machine for a
+fleet. Tokens minted before 0696 carry no `jti` and stay multi-use until they
+expire an hour later. Expired redemptions are pruned per workspace during later
+exchanges.
 
 Mint a short-TTL enroll token and hand it to the machine's installer. The token
-is **secret** — surface it once with a copy-now warning; it cannot be re-read.
+is **secret**: anyone holding it can connect one machine until it expires.
 
 ```ts
 const { token, expiresAt, expiresInSeconds } = await client.mintEnrollToken(

@@ -66,16 +66,28 @@ to request human setup are separate.
 ## Connected Machine enrollment
 
 Use `sandboxes_list` to check existing machine readiness before enrolling again.
-For authorized headless setup, `connected_machine_enroll_token` returns a
-short-lived token, expiry, and Unix/PowerShell installation commands bound to the
-current deployment and workspace. It requires the existing `enrollments:manage`
-permission and session tool selection; it adds no separate approval prompt.
-Screen control defaults off. Run the returned command through an existing
-authorized path to the intended machine, then verify it appears ready in
-`sandboxes_list`. Do not publish the token in code or unrelated logs. If the tool
-is unavailable, distinguish missing permission/selection from an offline target;
-`sandbox_provision` supplies the interactive human enrollment instructions.
 An already enrolled machine normally needs connection diagnosis, not a new token.
+
+When you can already run commands on the target machine (`run_on`, SSH, a VM you
+control), install it yourself: `connected_machine_enroll_token` returns a
+single-use token (one machine, one hour), its expiry, and Unix/PowerShell
+commands bound to this deployment and workspace. It requires `enrollments:manage`
+and session tool selection; it adds no approval prompt. Screen control defaults
+off. Run the matching command on that machine, then confirm it is ready in
+`sandboxes_list`. Mint a new token for each additional machine. Do not publish a
+token in code, chat, or unrelated logs.
+
+When the person must connect their own computer, post the Connected Machine card
+with `capability_authorization_request` and `api:connected-machine` (or
+`sandbox_provision` with `kind: "selfhosted"`). The card mints the command in
+their browser, shows when the machine comes online, and offers "Use in this
+chat". Do not paste an enroll token into the chat.
+
+To let agents use the person's own Chrome, the machine must be connected first;
+then they install the OpenGeni Browser extension from the Chrome Web Store:
+https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch.
+Chrome requires the person to click "Add to Chrome"; an agent cannot install it.
+`interaction_discover` with `scope: "attached_browsers"` shows when it is linked.
 
 ## Cost questions
 
