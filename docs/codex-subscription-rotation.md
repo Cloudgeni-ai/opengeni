@@ -10,7 +10,7 @@ PR 4. Its historical text remains in git history.
 | Requirements | [Subscription accounts contract](subscription-accounts.md) |
 | Placement, leases, refresh, waits, Apps and operations | [Subscription core design](design/subscription-core-2026-10-07.md) |
 | Legacy migration and mapping | [Design, PR 3](design/subscription-core-2026-10-07.md#pr-3-the-drained-codex-cutover) |
-| Deployment and fix-forward | [Deployment](deployment.md#codex-on-the-shared-subscription-core-0681) |
+| Deployment and fix-forward | [Deployment](deployment.md#codex-on-the-shared-subscription-core-0683) |
 | Entry-point inventory | [Inventory](subscription-accounts-inventory.md) |
 
 Legacy account ids remain aliases of their canonical connections; routes, SDK
@@ -83,7 +83,7 @@ For a stalled waiter check `next_check_at`, `wake_revision`,
 
 Databases older than 0683 still upgrade through 0403, 0422 and 0492. Each needs
 drained processes and `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` listing
-every old and new runtime login. Include retiring and replacement roles during
+every old and new runtime login. Include both the retiring and replacement roles during
 rotation; embedded callers pass the same list through
 `MigrationRuntimeOptions.applicationDatabaseRoles`. Missing/malformed lists or
 live listed sessions fail with SQLSTATE `55000` before changes.
