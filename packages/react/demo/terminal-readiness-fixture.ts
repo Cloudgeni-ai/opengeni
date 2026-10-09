@@ -19,7 +19,6 @@ export function installTerminalReadinessFixture(mode: "ready" | "silent" | "manu
     onclose: (() => void) | null = null;
     onerror: (() => void) | null = null;
     constructor() {
-      socket = this;
       queueMicrotask(() => {
         this.readyState = 1;
         this.onopen?.();
@@ -61,8 +60,10 @@ export function installTerminalReadinessFixture(mode: "ready" | "silent" | "manu
       if (
         String(args[0]).startsWith("https://terminal.example") ||
         String(args[0]).startsWith("wss://terminal.example")
-      )
-        return new FixtureSocket();
+      ) {
+        socket = new FixtureSocket();
+        return socket;
+      }
       return Reflect.construct(target, args);
     },
   });
