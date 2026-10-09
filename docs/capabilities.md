@@ -741,7 +741,14 @@ Ordinary new sessions include two first-party Opengeni tools:
   Capabilities page. It returns bounded, secret-free descriptors and a live
   setup state; it never returns credential instructions, tokens, or raw catalog
   metadata. Search is deterministic, excludes untrusted registry rows, and
-  prefers exact, enabled, verified, and built-in matches. Agents should search
+  prefers exact, enabled, verified, and built-in matches. It tolerates near
+  spellings with a bounded edit-distance tier on names, provider domains, and
+  tags (ranked below exact, prefix, and substring hits and flagged
+  `approximate`), and matches workspace or operator entries without a provider
+  domain by their endpoint's registrable domain. A miss never returns a bare
+  empty result while the catalog has entries: `suggestions` lists the closest
+  names so the agent checks them before saying an integration does not exist.
+  Agents should search
   by the outcome they need (for example, `GitHub repositories`, `product
   analytics`, or `Slack notifications`) rather than guessing an MCP endpoint.
 - `capability_authorization_request` posts one `tool.auth_needed`-style card to

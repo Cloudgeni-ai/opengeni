@@ -203,6 +203,7 @@ import {
   SessionAuthorizationUnavailableError,
   dispatchWithSessionAuthorizationReadReuse,
   searchCapabilityCatalogItems,
+  suggestCapabilityCatalogItems,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
 import {
@@ -6265,7 +6266,7 @@ function registerCapabilityDiscoveryTools(
     "capability_catalog_search",
     {
       description:
-        "Find integrations in Opengeni's reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. This reads metadata only and does not connect or authorize anything.",
+        "Find integrations in Opengeni's reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome; names are matched with typo tolerance, and a match with approximate: true matched only by a near spelling. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. When matches is empty, suggestions lists the closest catalog names: check whether one is what the user meant (or ask) before saying an integration does not exist. This reads metadata only and does not connect or authorize anything.",
       inputSchema: {
         query: z4.string().min(1).max(500),
         limit: z4.number().int().min(1).max(20).optional(),
@@ -6274,13 +6275,10 @@ function registerCapabilityDiscoveryTools(
     async ({ query, limit }) => {
       await authorize();
       const current = await catalog();
-      const ranked = searchCapabilityCatalogItems(
-        [...current.items, ...nativeConnectionCapabilityRecommendations()],
-        query,
-        limit ?? 8,
-      );
+      const candidates = [...current.items, ...nativeConnectionCapabilityRecommendations()];
+      const ranked = searchCapabilityCatalogItems(candidates, query, limit ?? 8);
       const setups = await setupProjections(ranked.map(({ item }) => item));
-      const matches = ranked.map(({ item, matchedOn }, index) => ({
+      const matches = ranked.map(({ item, matchedOn, approximate }, index) => ({
         capabilityId: item.id,
         name: item.name,
         description: item.description,
@@ -6292,6 +6290,7 @@ function registerCapabilityDiscoveryTools(
         authKind: item.authKind,
         tier: item.tier,
         matchedOn,
+        approximate,
         setup: {
           ...setups[index]!,
           requiredVariables: capabilityRequiredVariables(item),
@@ -6301,7 +6300,30 @@ function registerCapabilityDiscoveryTools(
               : null,
         },
       }));
-      return json({ query, matches });
+      // A miss must not read as "this integration does not exist" while the
+      // workspace catalog has entries: return the closest names, clearly
+      // labelled as suggestions rather than matches.
+      const suggestions =
+        matches.length === 0
+          ? suggestCapabilityCatalogItems(candidates, query, 5).map(({ item, similarity }) => ({
+              capabilityId: item.id,
+              name: item.name,
+              kind: item.kind,
+              source: item.source,
+              providerDomain: item.providerDomain,
+              similarity,
+            }))
+          : [];
+      return json({
+        query,
+        matches,
+        suggestions,
+        ...(suggestions.length > 0
+          ? {
+              note: "No catalog entry matched this query. suggestions are the closest names in this workspace catalog, not matches; check whether one is what the user meant before concluding the integration does not exist.",
+            }
+          : {}),
+      });
     },
   );
 

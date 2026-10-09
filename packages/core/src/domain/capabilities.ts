@@ -2019,13 +2019,42 @@ export type CapabilityCatalogSearchMatch = {
   item: CapabilityCatalogItem;
   score: number;
   matchedOn: Array<"name" | "provider" | "tag" | "category" | "description" | "id">;
+  /**
+   * True when the item matched only through the typo-tolerant tier (an edit
+   * distance hit), never through an exact, prefix, or substring hit.
+   */
+  approximate: boolean;
 };
+
+export type CapabilityCatalogSuggestion = {
+  item: CapabilityCatalogItem;
+  /** Name similarity to the query in [0, 1]; 1 means identical once normalized. */
+  similarity: number;
+};
+
+// Typo tolerance stays deterministic and bounded: tokens shorter than four
+// characters never fuzz, compared strings are capped, and only identity fields
+// (name, provider domain, tags) participate in the fuzzy tier.
+const FUZZY_MIN_TOKEN_LENGTH = 4;
+const FUZZY_PREFIX_MIN_TOKEN_LENGTH = 5;
+const FUZZY_MAX_COMPARED_LENGTH = 48;
+const FUZZY_MAX_TOKENS = 8;
+const FUZZY_FIELDS = new Set<CapabilityCatalogSearchMatch["matchedOn"][number]>([
+  "name",
+  "provider",
+  "tag",
+]);
 
 /**
  * Deterministically rank the already-merged workspace catalog for an agent.
  * The caller still owns live authorization checks (GitHub binding, OAuth row,
  * and so on); this function searches metadata only and never probes a provider
  * or exposes credential/setup prose to the model.
+ *
+ * Exact word, prefix, and substring hits rank first. A typo-tolerant tier
+ * (bounded Damerau-Levenshtein on name, provider-domain, and tag words, plus
+ * the space-stripped name against the space-stripped query) contributes a
+ * smaller score so a one-letter spelling difference still finds the entry.
  */
 export function searchCapabilityCatalogItems(
   items: readonly CapabilityCatalogItem[],
@@ -2035,11 +2064,13 @@ export function searchCapabilityCatalogItems(
   const phrase = normalizeCapabilitySearchText(query);
   const tokens = [...new Set(phrase.split(" ").filter(Boolean))].slice(0, 24);
   if (tokens.length === 0) return [];
+  const compactPhrase = phrase.replaceAll(" ", "");
+  const fuzzyTokens = tokens.slice(0, FUZZY_MAX_TOKENS);
   const boundedLimit = Math.min(20, Math.max(1, Math.trunc(limit)));
   const weightedFields = (item: CapabilityCatalogItem) =>
     [
       ["name", item.name, 100],
-      ["provider", item.providerDomain ?? "", 80],
+      ["provider", capabilityCatalogSearchProviderDomain(item) ?? "", 80],
       ["tag", item.tags.join(" "), 50],
       ["category", item.category, 30],
       ["id", item.id, 25],
@@ -2050,25 +2081,54 @@ export function searchCapabilityCatalogItems(
     .filter((item) => capabilityCatalogItemIsTrustedForExposure(item))
     .flatMap((item): CapabilityCatalogSearchMatch[] => {
       let score = 0;
+      let approximate = true;
       const matchedOn = new Set<CapabilityCatalogSearchMatch["matchedOn"][number]>();
+      const hit = (
+        field: CapabilityCatalogSearchMatch["matchedOn"][number],
+        points: number,
+        fuzzy = false,
+      ) => {
+        score += points;
+        matchedOn.add(field);
+        if (!fuzzy) approximate = false;
+      };
       for (const [field, raw, weight] of weightedFields(item)) {
         const value = normalizeCapabilitySearchText(raw);
         if (!value) continue;
         const words = value.split(" ");
+        const fuzzyField = FUZZY_FIELDS.has(field);
         if (value.includes(phrase)) {
-          score += Math.round(weight * 1.5);
-          matchedOn.add(field);
+          hit(field, Math.round(weight * 1.5));
+        } else if (fuzzyField && compactPhrase.length >= FUZZY_MIN_TOKEN_LENGTH) {
+          // Compare with separators removed so "wispr flow" meets "WisprFlow"
+          // and "wisprflow" meets "Wispr Flow"; a near miss is typo-tolerant.
+          const compactValue = value.replaceAll(" ", "");
+          const budget = fuzzyEditBudget(compactPhrase.length);
+          if (compactValue.includes(compactPhrase)) {
+            hit(field, weight);
+          } else {
+            const distance = boundedEditDistance(compactPhrase, compactValue, budget);
+            if (distance.whole <= budget) {
+              hit(field, Math.round(weight * 0.5), true);
+            } else if (
+              compactPhrase.length >= FUZZY_PREFIX_MIN_TOKEN_LENGTH &&
+              distance.prefix <= budget
+            ) {
+              hit(field, Math.round(weight * 0.3), true);
+            }
+          }
         }
         for (const token of tokens) {
           if (words.includes(token)) {
-            score += weight;
-            matchedOn.add(field);
+            hit(field, weight);
           } else if (words.some((word) => word.startsWith(token) || token.startsWith(word))) {
-            score += Math.round(weight * 0.7);
-            matchedOn.add(field);
+            hit(field, Math.round(weight * 0.7));
           } else if (value.includes(token)) {
-            score += Math.round(weight * 0.4);
-            matchedOn.add(field);
+            hit(field, Math.round(weight * 0.4));
+          } else if (fuzzyField && fuzzyTokens.includes(token)) {
+            const fuzzy = fuzzyWordMatch(token, words);
+            if (fuzzy === "word") hit(field, Math.round(weight * 0.3), true);
+            else if (fuzzy === "prefix") hit(field, Math.round(weight * 0.2), true);
           }
         }
       }
@@ -2076,7 +2136,7 @@ export function searchCapabilityCatalogItems(
       if (item.enabled) score += 12;
       if (item.tier === "verified") score += 8;
       if (item.source === "built_in") score += 6;
-      return [{ item, score, matchedOn: [...matchedOn] }];
+      return [{ item, score, matchedOn: [...matchedOn], approximate }];
     })
     .sort(
       (left, right) =>
@@ -2086,6 +2146,167 @@ export function searchCapabilityCatalogItems(
         left.item.id.localeCompare(right.item.id),
     )
     .slice(0, boundedLimit);
+}
+
+/**
+ * Closest catalog names for a query that matched nothing. A miss must never
+ * read as "this integration does not exist" while the workspace has entries,
+ * so callers surface these as explicitly labelled suggestions. An empty
+ * (all-punctuation) query returns the first entries by name for browsing.
+ */
+export function suggestCapabilityCatalogItems(
+  items: readonly CapabilityCatalogItem[],
+  query: string,
+  limit = 5,
+): CapabilityCatalogSuggestion[] {
+  const boundedLimit = Math.min(20, Math.max(1, Math.trunc(limit)));
+  const compactPhrase = normalizeCapabilitySearchText(query)
+    .replaceAll(" ", "")
+    .slice(0, FUZZY_MAX_COMPARED_LENGTH);
+  return items
+    .filter((item) => capabilityCatalogItemIsTrustedForExposure(item))
+    .map((item): CapabilityCatalogSuggestion => {
+      if (!compactPhrase) return { item, similarity: 0 };
+      let best = 0;
+      for (const raw of [item.name, capabilityCatalogSearchProviderDomain(item) ?? ""]) {
+        const candidate = normalizeCapabilitySearchText(raw)
+          .replaceAll(" ", "")
+          .slice(0, FUZZY_MAX_COMPARED_LENGTH);
+        if (!candidate) continue;
+        const distance = boundedEditDistance(compactPhrase, candidate, FUZZY_MAX_COMPARED_LENGTH);
+        best = Math.max(
+          best,
+          1 - distance.whole / Math.max(compactPhrase.length, candidate.length),
+          // A query that resembles the start of a longer name ("wspr" for
+          // "Whisprflow") is as informative as a whole-name resemblance.
+          1 - distance.prefix / compactPhrase.length,
+        );
+      }
+      return { item, similarity: Math.round(Math.max(0, best) * 100) / 100 };
+    })
+    .sort(
+      (left, right) =>
+        right.similarity - left.similarity ||
+        Number(right.item.enabled) - Number(left.item.enabled) ||
+        left.item.name.localeCompare(right.item.name) ||
+        left.item.id.localeCompare(right.item.id),
+    )
+    .slice(0, boundedLimit);
+}
+
+/**
+ * The vendor domain search may match. A stored providerDomain wins. Workspace
+ * and operator entries (manual, configured, built-in) without one fall back to
+ * the registrable domain of their endpoint (api.wisprflow.ai -> wisprflow.ai).
+ * Registry rows do not: their endpoints may sit on a third-party host. This is
+ * a search-only projection and never changes the stored item or any
+ * connection/authority matching.
+ */
+export function capabilityCatalogSearchProviderDomain(item: CapabilityCatalogItem): string | null {
+  const stored = item.providerDomain?.trim();
+  if (stored) return stored;
+  if (item.source === "registry" || item.source === "public_registry") return null;
+  for (const candidate of [item.endpointUrl, item.mcpUrl, item.homepageUrl]) {
+    if (!candidate) continue;
+    const domain = registrableDomain(candidate);
+    if (domain) return domain;
+  }
+  return null;
+}
+
+// Common two-label public suffixes. Without a full public-suffix list this
+// keeps hosts such as api.example.co.uk on example.co.uk rather than co.uk.
+const TWO_LABEL_PUBLIC_SUFFIXES = new Set([
+  "ac.uk",
+  "co.uk",
+  "gov.uk",
+  "org.uk",
+  "com.au",
+  "net.au",
+  "org.au",
+  "co.nz",
+  "co.jp",
+  "co.kr",
+  "co.in",
+  "co.za",
+  "com.br",
+  "com.cn",
+  "com.mx",
+  "com.sg",
+  "com.tr",
+]);
+
+function registrableDomain(url: string): string | null {
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+  } catch {
+    return null;
+  }
+  if (!hostname || hostname.includes(":") || /^\d+(\.\d+){3}$/.test(hostname)) return null;
+  const labels = hostname.split(".").filter(Boolean);
+  if (labels.length <= 2) return labels.join(".") || null;
+  const lastTwo = labels.slice(-2).join(".");
+  return TWO_LABEL_PUBLIC_SUFFIXES.has(lastTwo) ? labels.slice(-3).join(".") : lastTwo;
+}
+
+function fuzzyEditBudget(length: number): number {
+  if (length < FUZZY_MIN_TOKEN_LENGTH) return 0;
+  return length >= 8 ? 2 : 1;
+}
+
+function fuzzyWordMatch(token: string, words: readonly string[]): "word" | "prefix" | null {
+  const budget = fuzzyEditBudget(token.length);
+  if (budget === 0 || token.length > FUZZY_MAX_COMPARED_LENGTH) return null;
+  let prefixHit = false;
+  for (const word of words) {
+    const lengthGap = Math.abs(word.length - token.length);
+    const prefixCandidate =
+      token.length >= FUZZY_PREFIX_MIN_TOKEN_LENGTH && word.length > token.length;
+    if (lengthGap > budget && !prefixCandidate) continue;
+    const distance = boundedEditDistance(token, word, budget);
+    if (lengthGap <= budget && distance.whole <= budget) return "word";
+    if (prefixCandidate && distance.prefix <= budget) prefixHit = true;
+  }
+  return prefixHit ? "prefix" : null;
+}
+
+/**
+ * Optimal-string-alignment (restricted Damerau-Levenshtein) distance from
+ * `source` to all of `target` (`whole`) and to its closest prefix (`prefix`).
+ * Both inputs are capped at FUZZY_MAX_COMPARED_LENGTH, and the computation
+ * stops early once every cell of a row exceeds `budget`, returning budget + 1.
+ */
+function boundedEditDistance(
+  source: string,
+  target: string,
+  budget: number,
+): { whole: number; prefix: number } {
+  const a = source.slice(0, FUZZY_MAX_COMPARED_LENGTH);
+  const b = target.slice(0, FUZZY_MAX_COMPARED_LENGTH);
+  const over = budget + 1;
+  const width = b.length + 1;
+  let previousPrevious = new Array<number>(width).fill(0);
+  let previous = Array.from({ length: width }, (_, index) => index);
+  let current = new Array<number>(width).fill(0);
+  for (let i = 1; i <= a.length; i += 1) {
+    current[0] = i;
+    let rowMinimum = current[0];
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let value = Math.min(previous[j]! + 1, current[j - 1]! + 1, previous[j - 1]! + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        value = Math.min(value, previousPrevious[j - 2]! + 1);
+      }
+      current[j] = value;
+      if (value < rowMinimum) rowMinimum = value;
+    }
+    if (rowMinimum > budget) return { whole: over, prefix: over };
+    [previousPrevious, previous, current] = [previous, current, previousPrevious];
+  }
+  let prefix = previous[0]!;
+  for (let j = 1; j <= b.length; j += 1) prefix = Math.min(prefix, previous[j]!);
+  return { whole: Math.min(previous[b.length]!, over), prefix: Math.min(prefix, over) };
 }
 
 function normalizeCapabilitySearchText(value: string): string {
