@@ -10,6 +10,23 @@ import {
   type SubscriptionCoreCodexLeaseRef,
 } from "@opengeni/db";
 
+/**
+ * Prefix for this activity execution's physical model request IDs.
+ *
+ * Request reservations are unique per account, so an ID must not repeat across
+ * turns or executions. A Temporal activity ID is unique only within its own
+ * workflow (every turn's first activity is typically "1"), and a retried
+ * activity keeps its ID, so the prefix also names the turn attempt and the
+ * activity attempt.
+ */
+export function providerRequestIdPrefix(input: {
+  turnAttemptId: string;
+  activityId: string;
+  activityAttempt: number;
+}): string {
+  return `${input.turnAttemptId}:${input.activityId}:${input.activityAttempt}`;
+}
+
 /** The usage probe is a finite read, authorized by this attempt's chat lease. */
 export function buildCoreCodexUsageReader(
   db: Database,
