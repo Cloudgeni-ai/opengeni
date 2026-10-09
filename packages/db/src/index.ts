@@ -68472,6 +68472,20 @@ async function finalizeEnrollmentInScope(
 // end state as approveDeviceEnrollmentRequest — an enrollments row + a selfhosted
 // sandbox row — but WITHOUT a pending device-flow request (a stateless `oget_`
 // token carries the grant). Idempotent via the shared finalize core's upsert.
+//
+// A token with an id (`jti`) is single-use: its redemption is recorded in the
+// same transaction as the enrollment, so it connects exactly one machine. The
+// same machine (same public key) may repeat the exchange while its enrollment is
+// still active; any other machine, or a machine removed since, gets
+// EnrollTokenAlreadyRedeemedError and nothing is written. Legacy tokens without
+// an id keep their old multi-use behavior until they expire.
+export class EnrollTokenAlreadyRedeemedError extends Error {
+  constructor() {
+    super("enroll token was already used to connect another machine");
+    this.name = "EnrollTokenAlreadyRedeemedError";
+  }
+}
+
 export async function finalizeEnrollmentByToken(
   db: Database,
   input: {
@@ -68483,15 +68497,59 @@ export async function finalizeEnrollmentByToken(
     os: EnrollmentOs;
     arch: string;
     sandboxName: string;
+    /** The token's `jti`; when present the token is single-use. */
+    tokenId?: string | null;
+    /** The token's expiry; required with tokenId (bounds redemption retention). */
+    tokenExpiresAt?: Date | null;
     now?: Date;
   },
 ): Promise<{ enrollment: EnrollmentRecord; sandbox: SandboxRecord }> {
   const now = input.now ?? new Date();
+  const tokenId = input.tokenId ?? null;
+  if (tokenId !== null && !input.tokenExpiresAt) {
+    throw new Error("a single-use enroll token requires its expiry");
+  }
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      return await finalizeEnrollmentInScope(scopedDb, {
+      if (tokenId !== null) {
+        // Expired redemptions can never match a live token; drop them so the
+        // ledger stays bounded per workspace.
+        await scopedDb.execute(sql`
+          delete from enrollment_token_redemptions
+          where workspace_id = ${input.workspaceId}::uuid
+            and expires_at < ${new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString()}::timestamptz`);
+        // Claim the token first. A concurrent claim by another machine blocks on
+        // the primary key, then sees this row and is refused.
+        const claimed = await rawRows<{ tokenId: string }>(
+          scopedDb,
+          sql`insert into enrollment_token_redemptions
+                (token_id, account_id, workspace_id, pubkey, expires_at, redeemed_at)
+              values (${tokenId}, ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+                ${input.pubkey}, ${input.tokenExpiresAt!.toISOString()}::timestamptz,
+                ${now.toISOString()}::timestamptz)
+              on conflict (token_id) do nothing
+              returning token_id as "tokenId"`,
+        );
+        if (claimed.length === 0) {
+          // A repeat by the same machine is a retry only while the machine it
+          // connected is still enrolled; a removed machine needs a new token.
+          const [existing] = await rawRows<{ pubkey: string; enrollmentActive: boolean }>(
+            scopedDb,
+            sql`select r.pubkey,
+                       coalesce(e.status = 'active', false) as "enrollmentActive"
+                from enrollment_token_redemptions r
+                left join enrollments e on e.id = r.enrollment_id
+                where r.token_id = ${tokenId}
+                  and r.workspace_id = ${input.workspaceId}::uuid`,
+          );
+          if (!existing || existing.pubkey !== input.pubkey || !existing.enrollmentActive) {
+            throw new EnrollTokenAlreadyRedeemedError();
+          }
+        }
+      }
+      const finalized = await finalizeEnrollmentInScope(scopedDb, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         pubkey: input.pubkey,
@@ -68502,6 +68560,14 @@ export async function finalizeEnrollmentByToken(
         sandboxName: input.sandboxName,
         now,
       });
+      if (tokenId !== null) {
+        await scopedDb.execute(sql`
+          update enrollment_token_redemptions
+          set enrollment_id = ${finalized.enrollment.id}::uuid
+          where token_id = ${tokenId}
+            and workspace_id = ${input.workspaceId}::uuid`);
+      }
+      return finalized;
     },
   );
 }

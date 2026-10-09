@@ -1038,6 +1038,56 @@ describe("design-11 A2 headless: mint enroll token -> exchange -> identical cred
     expect(list.enrollments[0]!.allowScreenControl).toBe(true);
   }, 120_000);
 
+  test("a minted token connects one machine: the same machine may retry, another is refused", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const app = appFor();
+    const manageBearer = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage", "enrollments:read"])}`;
+    const mintRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments/token`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: manageBearer },
+      body: JSON.stringify({ allowScreenControl: false }),
+    });
+    expect(mintRes.status).toBe(201);
+    const { token } = (await mintRes.json()) as { token: string };
+    const exchange = (publicKey: string, machineName: string) =>
+      app.request("/v1/enrollments/token/exchange", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          token,
+          publicKey,
+          os: "linux",
+          arch: "x86_64",
+          machineName,
+          canOfferDisplay: true,
+          requestsScreenControl: false,
+        }),
+      });
+
+    const first = await exchange("ed25519:LAPTOP", "laptop");
+    expect(first.status).toBe(201);
+    const firstAgent = ((await first.json()) as { credentials: { agentId: string } }).credentials
+      .agentId;
+    // A lost response or a re-run install command on the same machine still works.
+    const retry = await exchange("ed25519:LAPTOP", "laptop");
+    expect(retry.status).toBe(201);
+    expect(((await retry.json()) as { credentials: { agentId: string } }).credentials.agentId).toBe(
+      firstAgent,
+    );
+    // A copied command cannot connect a second machine.
+    const other = await exchange("ed25519:OTHER", "someone-else");
+    expect(other.status).toBe(401);
+    expect(await other.text()).toContain("already used to connect another machine");
+
+    const list = (await (
+      await app.request(`/v1/workspaces/${workspaceId}/enrollments`, {
+        headers: { authorization: manageBearer },
+      })
+    ).json()) as { enrollments: { id: string }[] };
+    expect(list.enrollments.map((enrollment) => enrollment.id)).toEqual([firstAgent]);
+  }, 120_000);
+
   test("exchange with an invalid token → 401; an oge_ bearer is NOT accepted as an enroll token", async () => {
     if (!available) return;
     const app = appFor();

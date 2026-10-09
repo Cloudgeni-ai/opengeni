@@ -120,4 +120,15 @@ describe("EnrollTokenPayload sign/verify", () => {
     const token = await signEnrollToken(SECRET, payload());
     expect(await verifyEnrollmentBearer(SECRET, token)).toBeNull();
   });
+
+  test("a single-use token id round-trips; legacy tokens without one still verify", async () => {
+    const single = payload({ jti: "AbCdEfGhIjKlMnOpQrStUvWx" });
+    expect(await verifyEnrollToken(SECRET, await signEnrollToken(SECRET, single))).toEqual(single);
+    const legacy = payload();
+    expect(legacy.jti).toBeUndefined();
+    expect(await verifyEnrollToken(SECRET, await signEnrollToken(SECRET, legacy))).toEqual(legacy);
+    // Ids are bounded and URL-safe so the redemption ledger key stays predictable.
+    expect(() => payload({ jti: "short" })).toThrow();
+    expect(() => payload({ jti: "has spaces and is long enough" })).toThrow();
+  });
 });
