@@ -26,30 +26,55 @@ test.skipIf(process.platform !== "linux" || process.env.OPENGENI_CUA_E2E !== "1"
           const seat = await allocator.allocate(context);
           const state = join(context.sessionDirectory, "fixture.json");
           states.set(context.computerSessionId, state);
-          const fixture = Bun.spawn(
-            [
-              "python3",
-              join(import.meta.dir, "fixtures/cua/Fixture.py"),
-              state,
-              context.computerSessionId,
-            ],
-            {
-              env: seat.environment,
-              stdout: "ignore",
-              stderr: "inherit",
-            },
-          );
-          children.push(fixture);
-          for (let i = 0; i < 100 && !(await Bun.file(state).exists()); i++) await Bun.sleep(100);
-          if (!(await Bun.file(state).exists())) throw new Error("GTK fixture did not open");
-          return {
-            ...seat,
-            async close() {
-              fixture.kill();
-              await fixture.exited;
+          let fixture: ReturnType<typeof Bun.spawn> | undefined;
+          try {
+            fixture = Bun.spawn(
+              [
+                "python3",
+                join(import.meta.dir, "fixtures/cua/Fixture.py"),
+                state,
+                context.computerSessionId,
+              ],
+              {
+                env: seat.environment,
+                stdout: "ignore",
+                stderr: "inherit",
+              },
+            );
+            children.push(fixture);
+            // Wait only for cold fixture startup; never retry native input.
+            const readyDeadline = Date.now() + 30_000;
+            while (!(await Bun.file(state).exists()) && Date.now() < readyDeadline) {
+              if (fixture.exitCode !== null) break;
+              await Bun.sleep(100);
+            }
+            if (!(await Bun.file(state).exists()))
+              throw new Error(`GTK fixture did not open (exit ${fixture.exitCode ?? "running"})`);
+            const readyFixture = fixture;
+            return {
+              ...seat,
+              async close() {
+                try {
+                  if (readyFixture.exitCode === null) readyFixture.kill();
+                  await readyFixture.exited;
+                } finally {
+                  await seat.close();
+                }
+              },
+            };
+          } catch (error) {
+            // Allocation has not returned its lease yet, so the supervisor
+            // cannot release this seat when startup fails.
+            try {
+              if (fixture) {
+                if (fixture.exitCode === null) fixture.kill("SIGKILL");
+                await fixture.exited;
+              }
+            } finally {
               await seat.close();
-            },
-          };
+            }
+            throw error;
+          }
         },
       },
     });
