@@ -36,6 +36,7 @@ function lease(overrides: Partial<LeaseSnapshot> = {}): LeaseSnapshot {
     workspaceGeneration: 4,
     archiveGeneration: 3,
     archiveComplete: false,
+    untrackedWriterSince: null,
     archiveCapture: null,
     reaperHold: null,
     resumeBackendId: "modal",
