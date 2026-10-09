@@ -54,6 +54,10 @@ import {
   MandatoryHistoryPersistenceError,
   type MandatoryHistoryPersistenceStage,
 } from "./quiescence";
+import {
+  PROVIDER_OUTPUT_PROTOCOL_VIOLATION_CODE,
+  ProviderOutputProtocolViolationError,
+} from "./output-conformance";
 
 // Retryable provider connectivity/5xx failures start quickly and back off to
 // this ceiling. Explicit rate limits retain the minute-granular fallback.
@@ -109,6 +113,7 @@ export function providerRecoveryResult(input: {
           input.failureCode === "sandbox_command_start_unavailable" ||
           input.failureCode === "mcp_transport_timeout" ||
           input.failureCode === "mcp_transport_unavailable" ||
+          input.failureCode === PROVIDER_OUTPUT_PROTOCOL_VIOLATION_CODE ||
           input.failureCode === POST_COMPACTION_CONTINUATION_EMPTY_CODE
         ? Math.max(
             providerDelay ?? 0,
@@ -880,6 +885,15 @@ export function agentRunFailurePayload(
         "Context compaction completed, but the continuation ended before a new model response. The same turn will retry from the compacted checkpoint.",
       code: POST_COMPACTION_CONTINUATION_EMPTY_CODE,
       retryable: true,
+    };
+  }
+  if (error instanceof ProviderOutputProtocolViolationError) {
+    return {
+      error: error.structuredToolActivityObserved
+        ? "The model provider returned malformed agent protocol text after structured tool activity. The output was rejected; automatic replay is disabled because tool side effects may have occurred."
+        : "The model provider returned malformed agent protocol text. The output was rejected and the same turn will retry from durable history.",
+      code: error.code,
+      retryable: !error.structuredToolActivityObserved,
     };
   }
   if (isModalTaskExecStartDnsResolutionError(error)) {

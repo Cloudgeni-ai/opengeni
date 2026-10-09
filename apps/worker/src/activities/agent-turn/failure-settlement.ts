@@ -84,6 +84,7 @@ import type {
   ProviderTurnState,
   TurnControlState,
 } from "./turn-context";
+import { ProviderOutputProtocolViolationError } from "./output-conformance";
 
 export type TurnFailureDeps = {
   error: unknown;
@@ -1350,7 +1351,13 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     try {
       if (recoveryResult.status === "recovering") {
         await flushRuntimeBatcher();
-        await historySink.reconcileConversationTruth({ requireDurable: true });
+        // Transcript-shaped provider output is text masquerading as agent
+        // protocol, not conversation truth. Its safe prefix may already be a
+        // live event, but the SDK message must not enter model history before
+        // the same logical turn is retried.
+        if (!(error instanceof ProviderOutputProtocolViolationError)) {
+          await historySink.reconcileConversationTruth({ requireDurable: true });
+        }
         const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
           sessionId: input.sessionId,
           turnId: attempt.turnId,
@@ -1452,10 +1459,13 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // A partial/malformed stream may have emitted assistant/tool items (and
   // external side effects) before its terminal error. Persist every item the
   // SDK state observed before marking the turn failed so a later user revive
-  // never replays work from an incomplete history. This does not retry or
-  // rotate the ambiguous request.
+  // never replays work from an incomplete history. The typed protocol leak is
+  // the one exception: its SDK message is known-invalid text, not conversation
+  // truth, and must stay quarantined even when automatic replay is unsafe.
   await flushRuntimeBatcher();
-  await historySink.reconcileConversationTruth();
+  if (!(error instanceof ProviderOutputProtocolViolationError)) {
+    await historySink.reconcileConversationTruth();
+  }
   if (
     !(await eventing.settle!({
       events: [

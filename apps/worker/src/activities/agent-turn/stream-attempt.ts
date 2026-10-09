@@ -123,6 +123,12 @@ import {
 } from "./quiescence";
 import { waitForTurnOperation } from "./sandbox-provision";
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
+import {
+  AssistantOutputConformanceGuard,
+  detectLeakedAgentTranscript,
+  ProviderOutputProtocolViolationError,
+  type LeakedTranscriptViolation,
+} from "./output-conformance";
 
 import type { CompactionSummarizer } from "../context-compaction";
 import type { TurnExecutionPolicyV1 } from "@opengeni/contracts";
@@ -495,6 +501,21 @@ export async function runTurnStreamAttempt(
     // schema or compatibility state.
     let currentToolBatchCallIds = new Set<string>();
     let currentToolBatchCompletedCallIds = new Set<string>();
+    let currentResponseSawStructuredToolActivity = false;
+    const outputConformanceGuard = new AssistantOutputConformanceGuard();
+    const throwOutputProtocolViolation = (violation: LeakedTranscriptViolation): never => {
+      observability.warn("model provider output failed protocol conformance", {
+        provider: resolvedModel?.provider.id ?? settings.openaiProvider ?? "openai",
+        providerApi: resolvedModel?.provider.api ?? "responses",
+        model: turn.model,
+        markerKinds: violation.markers.join(","),
+        structuredToolActivityObserved: currentResponseSawStructuredToolActivity,
+      });
+      throw new ProviderOutputProtocolViolationError(
+        violation,
+        currentResponseSawStructuredToolActivity,
+      );
+    };
     let streamSawPerResponseUsage = false;
     // Actual input tokens of the most recent model response this turn; the
     // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
@@ -929,6 +950,17 @@ export async function runTurnStreamAttempt(
           ...(resolvedModel?.provider.id ? { providerId: resolvedModel.provider.id } : {}),
         });
         if (responseResult.status === "processed") {
+          const guardedRemainder = outputConformanceGuard.finish();
+          if (guardedRemainder.violation) {
+            throwOutputProtocolViolation(guardedRemainder.violation);
+          }
+          if (guardedRemainder.text.length > 0) {
+            streamTiming.onEvent("agent.message.delta");
+            await eventing.batcher.push({
+              type: "agent.message.delta",
+              payload: { text: guardedRemainder.text },
+            });
+          }
           if (
             !providerPublishesNativeRequestEvents &&
             fallbackProviderRequestLifecycleStartedAt !== null
@@ -967,6 +999,7 @@ export async function runTurnStreamAttempt(
           streamSawPerResponseUsage ||= responseResult.usageReported;
           currentToolBatchCallIds = new Set<string>();
           currentToolBatchCompletedCallIds = new Set<string>();
+          currentResponseSawStructuredToolActivity = false;
           await historySink.reconcileConversationTruth();
           turnLifecycleMetricsFor(observability).progress(attempt.turnId!);
           modelCheckpointMemoryCollector.schedule(observability);
@@ -1004,6 +1037,7 @@ export async function runTurnStreamAttempt(
           : next.value;
         const pendingToolCall = pendingToolCallFromSdkEvent(durableSdkEvent);
         if (pendingToolCall) {
+          currentResponseSawStructuredToolActivity = true;
           const registered = await registerPendingSessionToolCall(db, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -1029,6 +1063,7 @@ export async function runTurnStreamAttempt(
         }
         const completedToolCall = completedToolCallFromSdkEvent(durableSdkEvent);
         if (completedToolCall) {
+          currentResponseSawStructuredToolActivity = true;
           retainedScreenshotMetadata =
             media.retainedScreenshotReceiptsByCallId.get(completedToolCall.callId) ?? null;
           const typedScreenshot = retainedScreenshotMetadata
@@ -1205,6 +1240,33 @@ export async function runTurnStreamAttempt(
               : {},
           );
         for (const event of normalized) {
+          if (event.type === "agent.message.delta") {
+            const text = (event.payload as { text?: unknown }).text;
+            if (typeof text !== "string") continue;
+            const guarded = outputConformanceGuard.push(text);
+            if (guarded.violation) {
+              throwOutputProtocolViolation(guarded.violation);
+            }
+            if (guarded.text.length === 0) continue;
+            event.payload = { text: guarded.text };
+          } else if (event.type === "agent.message.completed") {
+            const text = (event.payload as { text?: unknown }).text;
+            if (typeof text === "string") {
+              const violation = detectLeakedAgentTranscript(text);
+              if (violation) throwOutputProtocolViolation(violation);
+              const guardedRemainder = outputConformanceGuard.finish();
+              if (guardedRemainder.violation) {
+                throwOutputProtocolViolation(guardedRemainder.violation);
+              }
+              if (guardedRemainder.text.length > 0) {
+                streamTiming.onEvent("agent.message.delta");
+                await eventing.batcher.push({
+                  type: "agent.message.delta",
+                  payload: { text: guardedRemainder.text },
+                });
+              }
+            }
+          }
           streamTiming.onEvent(event.type);
           await eventing.batcher.push(event);
         }
@@ -1560,6 +1622,10 @@ export async function runTurnStreamAttempt(
     }
 
     const finalOutput = String(requireAgentStreamFinalOutput(eventing.stream.finalOutput));
+    const finalOutputViolation = detectLeakedAgentTranscript(finalOutput);
+    if (finalOutputViolation) {
+      throwOutputProtocolViolation(finalOutputViolation);
+    }
     await historySink.reconcileConversationTruth({ requireDurable: true });
     // Op-stream durability fence: the tool outputs are now durably in the
     // history store (a redispatch would NOT re-execute them), so this
