@@ -268,7 +268,10 @@ test.skipIf(!promtool)(
                         exp_labels: {
                           ...identity(scope),
                           node: scope.node,
-                          severity: "critical",
+                          severity:
+                            alertname === "OpenGeniNodeContainerRuntimeErrors"
+                              ? "warning"
+                              : "critical",
                           ...(alertname === "OpenGeniNodeContainerRuntimeErrors"
                             ? { operation_type: "create_container" }
                             : {}),
