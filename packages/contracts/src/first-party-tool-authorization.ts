@@ -3,6 +3,11 @@ import type { Permission } from "./permissions";
 
 export type FirstPartyToolAuthorization = {
   sessionRequired?: true;
+  /**
+   * Registered only while the session has admin access (live, per request),
+   * whatever its tool selection; the tool then acts as the person who gave it.
+   */
+  adminAccessRequired?: true;
   allOf?: readonly Permission[];
   anyOf?: readonly Permission[];
 };
@@ -290,6 +295,9 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   project_reorder: { allOf: ["sessions:create"] },
   project_delete: { allOf: ["sessions:create"] },
   session_set_project: { allOf: ["sessions:control"] },
+  admin_actions_search: { sessionRequired: true, adminAccessRequired: true },
+  admin_action_describe: { sessionRequired: true, adminAccessRequired: true },
+  admin_action_call: { sessionRequired: true, adminAccessRequired: true },
 } satisfies Record<FirstPartyMcpToolName, FirstPartyToolAuthorization>;
 
 /**

@@ -82,6 +82,12 @@ export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reaso
     reason:
       "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user",
   },
+  {
+    pattern:
+      /^(PATCH \/v1\/organizations\/:organizationId\/agent-admin-access|PUT \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/admin-access)$/,
+    reason:
+      "giving an agent admin access, or allowing it for the organization, is done by an owner or admin in person in the Opengeni app",
+  },
 ];
 
 export function actionCatalogBrowserOnlyReason(method: string, path: string): string | undefined {

@@ -5,6 +5,7 @@ import {
   DelegatedAccessTokenPayload,
   FIRST_PARTY_MCP_TOOL_NAMES,
   RETIRED_AGENT_LEARNING_TOOL_NAMES,
+  SESSION_ADMIN_ACCESS_TOOL_NAMES,
 } from "../src";
 
 const EXPLICIT_ONLY_CONNECTOR_TOOLS = [
@@ -87,9 +88,17 @@ describe("first-party MCP tool-name contract", () => {
       FIRST_PARTY_MCP_TOOL_NAMES.filter(
         (name) =>
           !DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(name) &&
-          !(RETIRED_AGENT_LEARNING_TOOL_NAMES as readonly string[]).includes(name),
+          !(RETIRED_AGENT_LEARNING_TOOL_NAMES as readonly string[]).includes(name) &&
+          !(SESSION_ADMIN_ACCESS_TOOL_NAMES as readonly string[]).includes(name),
       ),
     ).toEqual([...EXPLICIT_ONLY_CONNECTOR_TOOLS]);
+  });
+
+  test("keeps session admin access tools outside every default selection", () => {
+    for (const name of SESSION_ADMIN_ACCESS_TOOL_NAMES) {
+      expect(FIRST_PARTY_MCP_TOOL_NAMES).toContain(name);
+      expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain(name);
+    }
   });
 
   test("selects structured Knowledge tools and excludes retired learning tools by default", () => {

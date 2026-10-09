@@ -39,8 +39,9 @@ import type { OrganizationPrivateSessionSettings, OrganizationRetentionPolicy } 
 import { useOrganizationDirectory } from "./organization-directory";
 
 /* ----------------------------------------------------------------------------
-   Organization settings > Security & data: Only me chats, how long a removed
-   person's data is kept, and recovery (owners, managed sign-in only).
+   Organization settings > Security & data: Only me chats, admin access for
+   agent sessions, how long a removed person's data is kept, and recovery
+   (owners, managed sign-in only).
    -------------------------------------------------------------------------- */
 
 export function OrganizationSecurityPage() {
@@ -54,6 +55,11 @@ export function OrganizationSecurityPage() {
       {managedPeople && administrator ? (
         <Section title="Chats">
           <PrivateChatsRow client={client} identity={directory.identity} />
+        </Section>
+      ) : null}
+      {administrator ? (
+        <Section title="Agents">
+          <AgentAdminAccessRow client={client} identity={directory.identity} />
         </Section>
       ) : null}
       {administrator ? (
@@ -243,6 +249,111 @@ export function PrivateChatsRow({
             }}
           />
         }
+      />
+    </SettingRowGroup>
+  );
+}
+
+/* ------------------------------------------------- Admin access for agents */
+
+export function AgentAdminAccessRow({
+  client,
+  identity,
+}: {
+  client: OpenGeniBrowserClient;
+  identity: OrganizationAdminIdentity;
+}) {
+  const { claim, owns } = useOwnedOperations(identity, "agent-admin-access");
+  const [allowed, setAllowed] = useState<boolean | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+  const [pending, setPending] = useState<boolean | null>(null);
+  const [confirmOff, setConfirmOff] = useState(false);
+
+  const load = useCallback(async () => {
+    const operation = claim("read");
+    setError(null);
+    try {
+      const value = await client.getOrganizationAgentAdminAccess(identity.organizationId);
+      if (owns(operation)) setAllowed(value.sessionAdminAccessAllowed);
+    } catch (loadError) {
+      if (owns(operation))
+        setError(loadError instanceof Error ? loadError : new Error(String(loadError)));
+    }
+  }, [claim, client, identity.organizationId, owns]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = useCallback(
+    async (next: boolean) => {
+      const operation = claim("mutation");
+      setPending(next);
+      try {
+        const value = await client.updateOrganizationAgentAdminAccess(identity.organizationId, {
+          sessionAdminAccessAllowed: next,
+        });
+        if (!owns(operation)) return;
+        setAllowed(value.sessionAdminAccessAllowed);
+        toast.success(
+          next
+            ? "Owners and admins can give their sessions admin access"
+            : "Admin access is off for every session",
+        );
+      } catch (saveError) {
+        if (!owns(operation)) return;
+        toast.error("Couldn't change admin access for agents", {
+          description: userErrorText(saveError),
+        });
+      } finally {
+        if (owns(operation)) setPending(null);
+      }
+    },
+    [claim, client, identity.organizationId, owns],
+  );
+
+  if (error && allowed === null) {
+    return (
+      <RowLoadFailure
+        title="Couldn't load the admin access setting."
+        error={error}
+        onRetry={() => void load()}
+      />
+    );
+  }
+  if (allowed === null) return <SettingRowSkeleton />;
+
+  return (
+    <SettingRowGroup>
+      <SettingRow
+        label="Admin access for agent sessions"
+        description="Lets owners and admins give one of their own sessions admin access. Its agent can then manage what they can across the organization: every workspace's sessions, settings and connections."
+        control={
+          <Switch
+            aria-label="Admin access for agent sessions"
+            checked={pending ?? allowed}
+            pending={pending !== null}
+            onCheckedChange={(next) => {
+              if (next) void save(true);
+              else setConfirmOff(true);
+            }}
+          />
+        }
+      />
+      <FormDialog
+        open={confirmOff}
+        onOpenChange={setConfirmOff}
+        size="sm"
+        title="Turn off admin access for agents?"
+        description="Every session that has admin access loses it right away. Turning this on again doesn't give it back."
+        submitLabel="Turn off"
+        pendingLabel="Turning off…"
+        tone="destructive"
+        initialFocus="cancel"
+        onSubmit={async () => {
+          await save(false);
+        }}
+        onSubmitted={() => setConfirmOff(false)}
       />
     </SettingRowGroup>
   );

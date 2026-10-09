@@ -92914,6 +92914,7 @@ export * from "./governed-learning-activation";
 export * from "./automations";
 export * from "./organization-model-providers";
 export * from "./organization-model-defaults";
+export * from "./session-admin-access";
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-tokens";
 
