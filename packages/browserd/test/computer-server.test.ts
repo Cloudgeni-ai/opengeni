@@ -33,6 +33,58 @@ const rotatedControlToken = `control.${"d".repeat(48)}`;
 const rotatedViewToken = `view.${"w".repeat(48)}`;
 
 describe("Computer routes on the placement interaction server", () => {
+  test("keeps a large queued frame stream open while the socket drains", async () => {
+    await withServer(async ({ server, reference, getDriver }) => {
+      const created = await request(server, "/v1/computer-sessions", {
+        method: "POST",
+        token: adminToken,
+        body: createBody(reference),
+      });
+      expect(created.status).toBe(201);
+      const driver = getDriver();
+      const source = await driver.capture();
+      const image = new Uint8Array(2 * 1024 * 1024);
+      image.set(source.data);
+      driver.subscribeFrames = async () => {
+        const subscription = new LatestComputerFrameSubscription(async () => undefined);
+        queueMicrotask(() => subscription.push({ ...source, sequence: 1, data: image }));
+        setTimeout(() => subscription.push({ ...source, sequence: 2, data: image }), 80);
+        return subscription;
+      };
+
+      const websocket = new WebSocket(
+        `${server.url.replace("http:", "ws:")}/v1/computer-sessions/${reference.computerSessionId}/targets/window-1/frames`,
+        [
+          COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
+          `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${viewToken}`,
+        ],
+      );
+      websocket.binaryType = "arraybuffer";
+      try {
+        const sequences = await new Promise<number[]>((resolve, reject) => {
+          const values: number[] = [];
+          const timer = setTimeout(() => reject(new Error("large frame stream stalled")), 3_000);
+          websocket.addEventListener("message", (event) => {
+            values.push(
+              decodeComputerFrameMessage(new Uint8Array(event.data as ArrayBuffer)).sequence,
+            );
+            if (values.length === 2) {
+              clearTimeout(timer);
+              resolve(values);
+            }
+          });
+          websocket.addEventListener("close", (event) => {
+            clearTimeout(timer);
+            reject(new Error(`large frame stream closed: ${event.code}`));
+          });
+        });
+        expect(sequences).toEqual([1, 2]);
+      } finally {
+        websocket.close();
+      }
+    });
+  });
+
   test("native calls require control tokens, bind the URL resource, and replay through the shared journal", async () => {
     await withServer(async ({ server, reference, getDriver }) => {
       expect(
