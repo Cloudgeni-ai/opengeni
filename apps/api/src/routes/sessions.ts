@@ -5352,9 +5352,6 @@ export function sessionAuthorizationOperationForHttp(
   }
   if (suffix === "/pin" && verb === "PUT") return "session.pin.write";
   if (suffix === "/attention" && verb === "PUT") return "session.attention.write";
-  // This changes only the authenticated person's inbox preference, not the
-  // session. Both operations require visibility; the handler enforces person-only access.
-  if (suffix === "/inbox-mute" && (verb === "GET" || verb === "PUT")) return "session.read";
   if (suffix === "/archive" && verb === "PUT") return "session.archive.write";
   if (suffix === "/retention" && verb === "PUT") return "session.retention.write";
   if (suffix === "/visibility" && verb === "PUT") return "session.visibility.write";

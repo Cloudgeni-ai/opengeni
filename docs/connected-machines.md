@@ -564,6 +564,13 @@ ambiguous and is not replayed. `run_on` uses the deployment's separate
 `OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS` settings (30 seconds and no exec
 deadline by default), while preserving the active sandbox pointer and epoch.
 
+Large `write` operations use the existing bounded transactional file transfer
+when the live target advertises `transactional_fs_write`. Each transfer request
+rechecks authority, capability, and the pinned connection; it never falls back
+to a whole-file write after an uncertain result. Older agents keep their legacy
+small-write behavior and report oversized requests without marking the machine
+offline. See [Transactional file edits](#transactional-file-edits).
+
 ### Streaming exec (op-stream)
 
 Connected Machine exec requires a runner that advertises the `op_stream`

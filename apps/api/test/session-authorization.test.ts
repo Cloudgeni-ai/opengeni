@@ -18,8 +18,6 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["DELETE", "", "session.delete"],
   ["PUT", "/pin", "session.pin.write"],
   ["PUT", "/attention", "session.attention.write"],
-  ["GET", "/inbox-mute", "session.read"],
-  ["PUT", "/inbox-mute", "session.read"],
   ["PUT", "/archive", "session.archive.write"],
   ["PUT", "/visibility", "session.visibility.write"],
   ["POST", "/forks", "session.fork.create"],
@@ -142,10 +140,5 @@ describe("session HTTP authorization classification", () => {
       null,
     );
     expect(sessionAuthorizationOperationForHttp("DELETE", `${root}/events`, sessionId)).toBe(null);
-    for (const method of ["POST", "PATCH", "DELETE"]) {
-      expect(sessionAuthorizationOperationForHttp(method, `${root}/inbox-mute`, sessionId)).toBe(
-        null,
-      );
-    }
   });
 });

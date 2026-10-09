@@ -120,6 +120,39 @@ describe("inbox access on a local install", () => {
     expect(settings.status).toBe(200);
   });
 
+  test("the local human mutes one session's replies through the session seam", async () => {
+    if (!client || !local) return;
+    const session = await createSession(client.db, {
+      ...local,
+      initialMessage: "Mute me",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: "dev", label: "Local dev" },
+      createdByContext: { label: "Local dev" },
+    });
+    const app = inboxApp("local");
+    const url = `http://x/v1/workspaces/${local.workspaceId}/sessions/${session.id}/inbox-mute`;
+    const muted = await app.request(url, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repliesMuted: true }),
+    });
+    expect(muted.status).toBe(200);
+    expect(await muted.json()).toEqual({ repliesMuted: true });
+    const read = await app.request(url);
+    expect(read.status).toBe(200);
+    expect(await read.json()).toEqual({ repliesMuted: true });
+
+    const missing = await app.request(
+      `http://x/v1/workspaces/${local.workspaceId}/sessions/${crypto.randomUUID()}/inbox-mute`,
+    );
+    expect(missing.status).toBe(404);
+  });
+
   test("a delegated bearer naming `dev` is not the local human", async () => {
     if (!client || !local) return;
     const app = inboxApp("local");
@@ -174,7 +207,7 @@ describe("inbox access on a local install", () => {
     expect(muted.status).toBe(200);
     expect(await muted.json()).toEqual({ repliesMuted: true });
     expect(await (await app.request(path)).json()).toEqual({ repliesMuted: true });
-    expect(operations).toEqual(["session.read", "session.read", "session.read"]);
+    expect(operations).toEqual(["session.read", "session.attention.write", "session.read"]);
 
     const delegatedUser = `user:${crypto.randomUUID()}`;
     await bootstrapWorkspace(client.db, {
