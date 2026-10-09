@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
+#include <sys/ioctl.h>
 #include <sys/random.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
@@ -20,18 +21,24 @@
 #include <sys/syscall.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
 #define PROTOCOL "native-subreaper-v1"
+#define PTY_PROTOCOL "native-subreaper-pty-v1"
 #define FRAME_SIZE 1024
 #define CANCEL_GRACE_MS 200
 
 struct options {
     const char *invocation, *nonce, *path, *action, *receipt;
     char **command;
-    bool launch;
+    bool launch, pty;
 };
+
+static const char *protocol(const struct options *o) {
+    return o->pty ? PTY_PROTOCOL : PROTOCOL;
+}
 
 static void fail(const char *message) {
     /* Never include argv, nonce, command text or socket request in diagnostics. */
@@ -64,6 +71,11 @@ static struct options parse(int argc, char **argv) {
     o.launch = !strcmp(argv[1], "launch");
     if (!o.launch && strcmp(argv[1], "control")) fail("invalid subcommand");
     for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--pty")) {
+            if (o.pty) fail("duplicate PTY option");
+            o.pty = true;
+            continue;
+        }
         if (!strcmp(argv[i], "--") && o.launch) {
             if (i + 1 == argc) fail("missing command");
             o.command = &argv[i + 1];
@@ -222,7 +234,7 @@ static int control(const struct options *o) {
     struct sockaddr_un address = socket_address(o->path);
     if (connect(fd, (struct sockaddr *)&address, sizeof(address))) fail("control unavailable");
     char frame[FRAME_SIZE];
-    snprintf(frame, sizeof(frame), "%s\t%s\t%s\t%s\t%s", PROTOCOL, o->invocation,
+    snprintf(frame, sizeof(frame), "%s\t%s\t%s\t%s\t%s", protocol(o), o->invocation,
         o->nonce, o->action, o->receipt ? o->receipt : "-");
     if (send(fd, frame, strlen(frame), MSG_NOSIGNAL) != (ssize_t)strlen(frame)) fail("control send failed");
     if (!ready(fd, POLLIN, 2000) || receive_frame(fd, frame) < 0) fail("control response unavailable");
@@ -251,8 +263,141 @@ static void initialize(void) {
     fclose(children);
 }
 
+/* Use the provider's existing controlling terminal. Never steal it with
+ * setsid/TIOCSCTTY, and never turn off the command's real shell job control.
+ * A background or redirected wrapper cannot offer this PTY capability. */
+static int inherited_terminal(void) {
+    int terminal = open("/dev/tty", O_RDWR | O_NOCTTY | O_CLOEXEC);
+    if (terminal < 0) fail("controlling terminal unavailable");
+    unsigned int owned, stream;
+    if (ioctl(terminal, TIOCGDEV, &owned)) fail("terminal identity unavailable");
+    for (int fd = 0; fd <= 2; fd++) {
+        if (!isatty(fd) || ioctl(fd, TIOCGDEV, &stream) || stream != owned)
+            fail("stdio must share controlling terminal");
+    }
+    if (tcgetsid(terminal) != getsid(0) || tcgetpgrp(terminal) != getpgrp())
+        fail("controlling terminal must be foreground");
+    struct termios attributes;
+    /* Exercise handoff/restoration ioctls without changing foreground or mode,
+     * so capability preflight fails on denied primitives before any launch. */
+    if (tcgetattr(terminal, &attributes) || tcsetpgrp(terminal, getpgrp()) ||
+        tcsetattr(terminal, TCSANOW, &attributes)) fail("terminal control unavailable");
+    return terminal;
+}
+
+static void terminal_signals(void (*handler)(int)) {
+    const int signals[] = {SIGHUP, SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU, SIGPIPE};
+    struct sigaction action = {.sa_handler = handler};
+    sigemptyset(&action.sa_mask);
+    for (size_t i = 0; i < sizeof(signals) / sizeof(signals[0]); i++) {
+        if (sigaction(signals[i], &action, NULL)) fail("terminal signal reset failed");
+    }
+}
+
+static void child_signals(void) {
+    terminal_signals(SIG_DFL);
+    struct sigaction action = {.sa_handler = SIG_DFL};
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGTERM, &action, NULL) || sigaction(SIGCHLD, &action, NULL))
+        _exit(125);
+    sigset_t mask;
+    sigemptyset(&mask);
+    if (sigprocmask(SIG_SETMASK, &mask, NULL)) _exit(125);
+}
+
+static void barrier_write(int fd) {
+    ssize_t n;
+    do { n = write(fd, "+", 1); } while (n < 0 && errno == EINTR);
+    if (n != 1) fail("terminal launch barrier failed");
+}
+
+static void barrier_read(int fd) {
+    char byte;
+    ssize_t n;
+    do { n = read(fd, &byte, 1); } while (n < 0 && errno == EINTR);
+    if (n != 1 || byte != '+') fail("terminal launch barrier failed");
+}
+
+struct launch_barrier {
+    int prepared, release;
+};
+
+static void close_barrier(struct launch_barrier *barrier) {
+    if (barrier->prepared >= 0) close(barrier->prepared);
+    if (barrier->release >= 0) close(barrier->release);
+    barrier->prepared = barrier->release = -1;
+}
+
+/* Readiness must never block the authenticated control loop. A stopped,
+ * failed or externally signaled child remains owned and cancellable even
+ * before exec. Closing release forbids user code on every handoff failure. */
+static bool advance_barrier(struct launch_barrier *barrier, pid_t leader, int terminal) {
+    if (barrier->prepared < 0) return true;
+    char byte;
+    ssize_t n;
+    do { n = read(barrier->prepared, &byte, 1); } while (n < 0 && errno == EINTR);
+    if (n < 0 && errno == EAGAIN) return true;
+    bool prepared = n == 1 && byte == '+';
+    if (prepared && getpgid(leader) == leader && !tcsetpgrp(terminal, leader) &&
+        tcgetpgrp(terminal) == leader) {
+        do { n = write(barrier->release, "+", 1); } while (n < 0 && errno == EINTR);
+        prepared = n == 1;
+    } else prepared = false;
+    close_barrier(barrier);
+    return prepared;
+}
+
+static pid_t start_command(const struct options *o, int listener, int client, int terminal,
+                          struct launch_barrier *barrier) {
+    int prepared[2] = {-1, -1}, release[2] = {-1, -1};
+    if (o->pty && (pipe2(prepared, O_CLOEXEC) || pipe2(release, O_CLOEXEC)))
+        fail("terminal launch barrier unavailable");
+    if (o->pty && (fcntl(prepared[0], F_SETFL, O_NONBLOCK) ||
+                  fcntl(release[1], F_SETFL, O_NONBLOCK)))
+        fail("terminal readiness unavailable");
+    pid_t leader = fork();
+    if (leader < 0) fail("leader fork failed");
+    if (!leader) {
+        close(client);
+        close(listener);
+        if (o->pty) {
+            close(terminal);
+            close(prepared[0]);
+            close(release[1]);
+            /* Defaults are restored before handoff so Ctrl-C/Ctrl-Z cannot
+             * disappear into inherited ignored dispositions at the barrier. */
+            if (setpgid(0, 0)) _exit(125);
+            child_signals();
+            barrier_write(prepared[1]);
+            close(prepared[1]);
+            barrier_read(release[0]);
+            close(release[0]);
+        }
+        execvp(o->command[0], o->command);
+        _exit(127);
+    }
+    int handle = pidfd_open_child(leader);
+    if (o->pty) {
+        close(prepared[1]);
+        close(release[0]);
+        barrier->prepared = prepared[0];
+        barrier->release = release[1];
+    }
+    close(handle);
+    return leader;
+}
+
 static int launch(const struct options *o) {
     initialize(); /* All required primitives checked before any user code. */
+    int terminal = o->pty ? inherited_terminal() : -1;
+    pid_t foreground = o->pty ? getpgrp() : 0;
+    struct termios attributes;
+    if (o->pty) {
+        if (tcgetattr(terminal, &attributes)) fail("terminal attributes unavailable");
+        /* The supervisor must remain alive when a foreground job stops or
+         * receives terminal signals. User children restore native defaults. */
+        terminal_signals(SIG_IGN);
+    }
     validate_directory(o->path, true);
     int listener = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (listener < 0) fail("control socket unavailable");
@@ -264,19 +409,30 @@ static int launch(const struct options *o) {
     if (bound || listen(listener, 16)) fail("control bind failed");
     bool started = false, cancelled = false, quiescent = false, leader_seen = false;
     pid_t leader = 0;
+    struct launch_barrier barrier = {.prepared = -1, .release = -1};
     int leader_exit = 125; /* Cancelled before release: no leader was launched. */
     long long cancel_at = 0;
     char receipt_id[37], response[FRAME_SIZE];
     make_receipt_id(receipt_id);
     for (;;) {
         if (!quiescent && (started || cancelled)) {
+            if (barrier.prepared >= 0) {
+                if (cancelled) close_barrier(&barrier);
+                else if (!advance_barrier(&barrier, leader, terminal)) {
+                    cancelled = true;
+                    cancel_at = milliseconds();
+                }
+            }
             if (cancelled) signal_children(milliseconds() - cancel_at < CANCEL_GRACE_MS ? SIGTERM : SIGKILL);
             if (reap(leader, &leader_exit, &leader_seen)) {
                 if (started && !leader_seen) fail("leader status missing");
+                if (o->pty && (tcsetpgrp(terminal, foreground) ||
+                    tcsetattr(terminal, TCSANOW, &attributes)))
+                    fail("terminal restoration failed");
                 quiescent = true;
                 snprintf(response, sizeof(response),
                     "{\"state\":\"quiescent\",\"receipt\":{\"protocol\":\"%s\",\"invocationId\":\"%s\","
-                    "\"receiptId\":\"%s\",\"leaderExitCode\":%d}}", PROTOCOL, o->invocation, receipt_id, leader_exit);
+                    "\"receiptId\":\"%s\",\"leaderExitCode\":%d}}", protocol(o), o->invocation, receipt_id, leader_exit);
             }
         }
         if (!ready(listener, POLLIN, 10)) continue;
@@ -297,7 +453,7 @@ static int launch(const struct options *o) {
             fields[i] = strsep(&position, "\t");
             if (!fields[i]) valid = false;
         }
-        valid = valid && !position && !strcmp(fields[0], PROTOCOL) &&
+        valid = valid && !position && !strcmp(fields[0], protocol(o)) &&
             !strcmp(fields[1], o->invocation) && !strcmp(fields[2], o->nonce);
         if (!valid) {
             send_frame(client, "{\"error\":\"unauthenticated\"}");
@@ -313,19 +469,8 @@ static int launch(const struct options *o) {
                 cancel_at = milliseconds();
             }
             if (!strcmp(fields[3], "release") && !started && !cancelled && !quiescent) {
-                leader = fork();
-                if (leader < 0) fail("leader fork failed");
-                if (!leader) {
-                    close(client);
-                    close(listener);
-                    /* No supervisor-owned pidfds exist across fork. CLOEXEC on
-                     * all private descriptors is defense in depth, not proof. */
-                    execvp(o->command[0], o->command);
-                    _exit(127);
-                }
+                leader = start_command(o, listener, client, terminal, &barrier);
                 started = true;
-                int fd = pidfd_open_child(leader);
-                close(fd);
             }
             send_frame(client, quiescent ? response :
                 (started || cancelled ? "{\"state\":\"running\"}" : "{\"state\":\"idle\"}"));
@@ -333,6 +478,7 @@ static int launch(const struct options *o) {
         close(client);
         if (ack) {
             close(listener);
+            if (terminal >= 0) close(terminal);
             /* Control housekeeping only; never mutate /workspace after proof. */
             if (unlink(o->path)) fail("control cleanup failed");
             return 0;
@@ -400,9 +546,11 @@ int main(int argc, char **argv) {
     }
     /* Bounded capability check: exercise the same kernel prerequisites as
      * launch, but create no socket, child or persistent supervisor. */
-    if (argc == 2 && !strcmp(argv[1], "capabilities")) {
+    if ((argc == 2 || (argc == 3 && !strcmp(argv[2], "--pty"))) &&
+        !strcmp(argv[1], "capabilities")) {
         initialize();
-        printf("%s", PROTOCOL);
+        if (argc == 3) close(inherited_terminal());
+        printf("%s", argc == 3 ? PTY_PROTOCOL : PROTOCOL);
         return 0;
     }
     struct options o = parse(argc, argv);

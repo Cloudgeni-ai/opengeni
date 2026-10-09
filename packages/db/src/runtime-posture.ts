@@ -1,6 +1,11 @@
 import { sql } from "drizzle-orm";
 import type { Database, RlsStrategy } from "./database";
 import {
+  evaluateNativeCommandQualificationTriggers,
+  inspectNativeCommandQualificationTriggers,
+  type NativeCommandQualificationTrigger,
+} from "./native-command-readiness";
+import {
   classifyRoleRelationships,
   roleRelationshipsCatalogQuery,
   type RoleRelationshipCatalogRow,
@@ -121,6 +126,8 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
   "scheduled_task_runs",
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  "native_command_qualification_guard()",
+  "native_command_receipt_immutable()",
   "claude_subscription_pool_protocol_v1_active()",
   // M3 PR 2b: run only by the Codex Apps routines as their owner.
   "subscription_codex_apps_designation_target(uuid, uuid)",
@@ -750,7 +757,18 @@ const UNIFIED_KNOWLEDGE_AUTHORITY_TABLES = [
   "files",
   "documents",
 ] as const;
+export const NATIVE_COMMAND_QUALIFICATION_PRIVATE_TABLES = [
+  "native_command_qualifications",
+  "native_command_group_births",
+  "native_command_provider_enrollments",
+  "native_command_provider_bindings",
+] as const;
+export const NATIVE_COMMAND_QUALIFICATION_RUNTIME_ROUTINES = [
+  "native_command_birth_qualification(uuid, uuid, uuid)",
+  "native_command_provider_qualification(uuid, uuid, uuid, text, bigint)",
+] as const;
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  ...NATIVE_COMMAND_QUALIFICATION_RUNTIME_ROUTINES,
   "lock_live_native_original_origin_v2(jsonb)",
   "modal_native_origin_member_read_active(uuid, text)",
   ...CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES,
@@ -822,6 +840,8 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  "freeze_native_command_group_birth()",
+  "freeze_native_command_provider_enrollment()",
   "enable_organization_private_sessions_from_activation(uuid, text[])",
   "usage_allowance_members(uuid, uuid)",
   "usage_allowance_effective_period(uuid, jsonb, timestamp with time zone)",
@@ -1909,6 +1929,7 @@ export type RuntimeDatabasePosture = {
   privateTables: RuntimePrivateTablePosture[];
   targetRoutines: RuntimeTargetRoutinePosture[];
   privateRoutines: RuntimeRoutinePosture[];
+  nativeCommandQualificationTriggers: NativeCommandQualificationTrigger[];
   sessionVariableSetAttachmentsCutoverPresent: boolean;
   claudeSubscriptionPoolActivationPresent: boolean;
 };
@@ -2064,6 +2085,7 @@ export async function inspectRuntimeDatabasePosture(
           privateTables: [],
           targetRoutines: [],
           privateRoutines: [],
+          nativeCommandQualificationTriggers: [],
           sessionVariableSetAttachmentsCutoverPresent,
           claudeSubscriptionPoolActivationPresent,
         };
@@ -2212,22 +2234,27 @@ export async function inspectRuntimeDatabasePosture(
             -- table must remain EXECUTE-only even after column ACL drift.
             (has_table_privilege(current_user, c.oid, 'SELECT') or
               ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb)) or
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify(NATIVE_COMMAND_QUALIFICATION_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
             (has_table_privilege(current_user, c.oid, 'INSERT') or
               ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb)) or
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify(NATIVE_COMMAND_QUALIFICATION_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
             (has_table_privilege(current_user, c.oid, 'UPDATE') or
               ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb)) or
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify(NATIVE_COMMAND_QUALIFICATION_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
             has_table_privilege(current_user, c.oid, 'TRUNCATE') as can_truncate,
             (has_table_privilege(current_user, c.oid, 'REFERENCES') or
               has_any_column_privilege(current_user, c.oid, 'REFERENCES')) as can_references,
             has_table_privilege(current_user, c.oid, 'TRIGGER') as can_trigger,
-            CASE WHEN c.relname = ${ARTIFACT_PINS_TABLE} THEN ARRAY(
+            CASE WHEN c.relname = ${ARTIFACT_PINS_TABLE} OR c.relname in (
+              select jsonb_array_elements_text(${JSON.stringify(NATIVE_COMMAND_QUALIFICATION_PRIVATE_TABLES)}::jsonb)
+            ) THEN ARRAY(
               SELECT DISTINCT acl.privilege_type FROM aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) acl
               WHERE acl.privilege_type NOT IN ('SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER')
                 AND CASE WHEN acl.grantee = 0 THEN true ELSE pg_has_role(current_user, acl.grantee, 'USAGE') END
@@ -2266,6 +2293,8 @@ export async function inspectRuntimeDatabasePosture(
               'session_file_read_capabilities',
               'session_import_batches',
               'modal_inventory_read_capabilities',
+              'native_command_qualifications', 'native_command_group_births',
+              'native_command_provider_enrollments', 'native_command_provider_bindings',
               'modal_native_origin_read_capabilities',
               ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE},
               ${VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE},
@@ -2296,6 +2325,7 @@ export async function inspectRuntimeDatabasePosture(
         can_execute: boolean;
         public_execute: boolean;
         security_definer: boolean;
+        configuration: string[] | null;
       }>(
         await tx.execute(sql`
           select
@@ -2307,7 +2337,8 @@ export async function inspectRuntimeDatabasePosture(
               from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
               where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
             ) as public_execute,
-            p.prosecdef as security_definer
+            p.prosecdef as security_definer,
+            p.proconfig as configuration
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
           where n.nspname = ${targetSchema}
@@ -2331,6 +2362,7 @@ export async function inspectRuntimeDatabasePosture(
           execute: row.can_execute,
           publicExecute: row.public_execute,
           securityDefiner: row.security_definer,
+          configuration: row.configuration,
         }))
         .sort((left, right) => left.name.localeCompare(right.name));
 
@@ -2379,6 +2411,10 @@ export async function inspectRuntimeDatabasePosture(
         privateTables,
         targetRoutines,
         privateRoutines,
+        nativeCommandQualificationTriggers: await inspectNativeCommandQualificationTriggers(
+          tx as unknown as Database,
+          targetSchema,
+        ),
         sessionVariableSetAttachmentsCutoverPresent,
         claudeSubscriptionPoolActivationPresent,
       };
@@ -2433,6 +2469,12 @@ export function evaluateRuntimeDatabasePosture(
 
   const expectedRole = options.expectedRole?.trim() || "opengeni_app";
   const targetSchema = options.targetSchema?.trim() || "public";
+  violations.push(
+    ...evaluateNativeCommandQualificationTriggers(
+      posture.nativeCommandQualificationTriggers,
+      targetSchema,
+    ),
+  );
   const protectedTables = new Set(options.protectedTables ?? FORCE_RLS_TABLES);
   const tablePrivileges = options.tablePrivileges ?? RUNTIME_TABLE_PRIVILEGES;
   const directRuntimeTables = new Set(Object.keys(tablePrivileges));
@@ -3227,6 +3269,14 @@ export function evaluateRuntimeDatabasePosture(
           );
         }
       }
+    } else if (
+      (NATIVE_COMMAND_QUALIFICATION_RUNTIME_ROUTINES as readonly string[]).includes(routine.name)
+    ) {
+      if (
+        routine.owner !== privateSchemaOwner ||
+        !routine.configuration?.includes("search_path=pg_catalog")
+      )
+        violations.push(`Native command qualification capability ${routine.name} owner is unsafe`);
     } else if (targetSchemaOwner && routine.owner !== targetSchemaOwner) {
       violations.push(
         `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match schema owner ${targetSchemaOwner}`,
@@ -3870,6 +3920,52 @@ export function evaluateRuntimeDatabasePosture(
 
   if (posture.privateRoutines.length === 0) {
     violations.push("opengeni_private has no helper routines");
+  }
+
+  const nativeQualificationTables = posture.privateTables.filter((table) =>
+    (NATIVE_COMMAND_QUALIFICATION_PRIVATE_TABLES as readonly string[]).includes(table.name),
+  );
+  if (
+    nativeQualificationTables.length ||
+    posture.targetRoutines.some((routine) =>
+      (NATIVE_COMMAND_QUALIFICATION_RUNTIME_ROUTINES as readonly string[]).includes(routine.name),
+    )
+  ) {
+    for (const name of NATIVE_COMMAND_QUALIFICATION_PRIVATE_TABLES) {
+      const table = nativeQualificationTables.find((candidate) => candidate.name === name);
+      if (
+        !table ||
+        table.owner === expectedRole ||
+        table.owner !== privateSchemaOwner ||
+        table.select ||
+        table.insert ||
+        table.update ||
+        table.delete ||
+        table.truncate ||
+        table.references ||
+        table.trigger ||
+        table.extraPrivileges?.length
+      ) {
+        violations.push(
+          `Native command qualification ledger ${name} is missing or has runtime authority`,
+        );
+      }
+    }
+    for (const name of [
+      "native_command_qualification_guard()",
+      "native_command_receipt_immutable()",
+    ]) {
+      const routine = posture.privateRoutines.find((candidate) => candidate.name === name);
+      if (
+        !routine ||
+        routine.execute ||
+        routine.publicExecute ||
+        routine.owner !== privateSchemaOwner
+      )
+        violations.push(
+          `Native command qualification owner-only guard ${name} is missing or executable`,
+        );
+    }
   }
 
   // The trial-credit kill switch is operator state. Runtime roles may read it

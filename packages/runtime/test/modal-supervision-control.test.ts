@@ -78,7 +78,7 @@ function fixture() {
   };
 }
 
-test("only readiness-gated nonPTY commands without runAs get an idle supervisor", async () => {
+test("admitted protocol must match native command shape; unsupported calls remain unclaimed", async () => {
   const f = fixture();
   const legacy = await f.control.start({ cmd: "original" });
   expect(legacy.supervision).toBeUndefined();
@@ -100,17 +100,68 @@ test("only readiness-gated nonPTY commands without runAs get an idle supervisor"
     "-c",
     "original",
   ]);
-  expect(
-    (await withCommandSupervisionReady(true, () => f.control.start({ cmd: "original", tty: true })))
-      .supervision,
-  ).toBeUndefined();
-  expect(
-    (
-      await withCommandSupervisionReady(true, () =>
-        f.control.start({ cmd: "original", runAs: "root" }),
-      )
-    ).supervision,
-  ).toBeUndefined();
+  await expect(
+    withCommandSupervisionReady(true, () => f.control.start({ cmd: "original", tty: true })),
+  ).rejects.toThrow("shape");
+  await expect(
+    withCommandSupervisionReady(true, () => f.control.start({ cmd: "original", runAs: "root" })),
+  ).rejects.toThrow("shape");
+  expect(f.starts).toHaveLength(2);
+});
+
+test("qualified PTY launch and control use distinct protocol and preserve provider PTY", async () => {
+  const f = fixture();
+  const command = await withSupervisedLaunchReservation({ reserve: async () => {} }, () =>
+    withReady(true, () => f.control.start({ cmd: "bash", tty: true }), "native-subreaper-pty-v1"),
+  );
+  expect(command.pty).toBe(true);
+  expect(command.supervision?.protocol).toBe("native-subreaper-pty-v1");
+  expect(f.starts[0]!.commandArgs.slice(0, 3)).toEqual([
+    "/usr/local/bin/opengeni-command-supervisor",
+    "launch",
+    "--pty",
+  ]);
+  expect(f.starts[0]!.ptyInfo).toMatchObject({ enabled: true, noTerminateOnIdleStdin: true });
+  const receipt = {
+    protocol: "native-subreaper-pty-v1",
+    invocationId: command.supervision!.invocationId,
+    receiptId: randomUUID(),
+    leaderExitCode: 137,
+  };
+  f.response(JSON.stringify({ state: "quiescent", receipt }));
+  expect((await f.control.supervisionControl(command, "cancel")).receipt).toEqual(receipt);
+  expect(f.starts[1]!.commandArgs.slice(0, 3)).toEqual([
+    "/usr/local/bin/opengeni-command-supervisor",
+    "control",
+    "--pty",
+  ]);
+  expect(f.starts[1]!.ptyInfo).toBeUndefined();
+  f.response(
+    JSON.stringify({
+      state: "quiescent",
+      receipt: { ...receipt, protocol: "native-subreaper-v1" },
+    }),
+  );
+  await expect(f.control.supervisionControl(command, "status")).rejects.toThrow("mismatch");
+});
+
+test("PTY capability is probed through real provider PTY shape and cannot accept old v1", async () => {
+  const f = fixture();
+  f.response("native-subreaper-v1");
+  await expect(f.control.verifySupervisionCapability("native-subreaper-pty-v1")).rejects.toThrow(
+    "lacks compatible",
+  );
+  expect(f.starts[0]!.commandArgs).toEqual([
+    "/usr/local/bin/opengeni-command-supervisor",
+    "capabilities",
+    "--pty",
+  ]);
+  expect(f.starts[0]!.ptyInfo?.enabled).toBe(true);
+  f.response("native-subreaper-pty-v1");
+  expect(await f.control.verifySupervisionCapability("native-subreaper-pty-v1")).toEqual({
+    sandboxId: "sandbox-original",
+    taskId: "task-original",
+  });
 });
 
 test("capability read retries preserve one helper UUID and zero offsets", async () => {

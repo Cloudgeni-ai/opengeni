@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
+import { ModalImageSelector } from "@openai/agents-extensions/sandbox/modal";
+import {
+  prepareCanonicalModalCreateImage,
+  readCanonicalModalRegistryPreparation,
+} from "../src/sandbox/providers/modal-registry-image";
 import {
   __resetModalRegistryImageCacheForTest,
   ensureModalRegistryImage,
@@ -14,7 +19,11 @@ const SECRET_NAME = "acr-credentials-gecko";
 
 /** A fake modal module capturing the fromRegistry(tag, secret) call shape. */
 function fakeModal() {
-  const builtImage = { imageId: "im-built", objectId: "im-built" };
+  const builtImage = {
+    imageId: "im-built",
+    objectId: "im-built",
+    build: async (_app: unknown): Promise<typeof builtImage> => builtImage,
+  };
   const build = mock(async (_app: unknown) => builtImage);
   const dockerfileCommands = mock((_commands: string[], _params?: unknown) => fakeImage);
   const fakeImage = { imageId: "", objectId: "", build, dockerfileCommands };
@@ -55,6 +64,57 @@ function fakeModal() {
 
 afterEach(() => {
   __resetModalRegistryImageCacheForTest();
+});
+
+test("canonical preparation records actual public/private import results, never copied image metadata or explicit IDs", async () => {
+  const settings = testSettings({
+    sandboxBackend: "modal",
+    modalImageRef: IMAGE_REF,
+    modalImageRegistrySecret: SECRET_NAME,
+  });
+  const fixture = fakeModal();
+  await ensureModalRegistryImage(settings, fixture.loadModal);
+  const native = {
+    images: {
+      fromRegistry: fixture.fromRegistry,
+      fromId: async (_id: string) => fixture.builtImage,
+    },
+  };
+  const prepared = await prepareCanonicalModalCreateImage(
+    native as never,
+    fixture.app as never,
+    resolveModalImageSelector(settings)!,
+  );
+  expect(prepared.preparation).toEqual({
+    kind: "registry-import",
+    imageRef: IMAGE_REF,
+    imageId: "im-built",
+  });
+  expect(readCanonicalModalRegistryPreparation({ ...fixture.builtImage })).toBeUndefined();
+  const copied = await prepareCanonicalModalCreateImage(
+    native as never,
+    fixture.app as never,
+    ModalImageSelector.fromImage({ ...fixture.builtImage } as never),
+  );
+  expect(copied.preparation).toEqual({ kind: "unqualified-image", imageId: "im-built" });
+  const custom = await prepareCanonicalModalCreateImage(
+    native as never,
+    fixture.app as never,
+    ModalImageSelector.fromId("im-old-custom"),
+  );
+  expect(custom.preparation).toEqual({ kind: "provider-image-id", imageId: "im-built" });
+  const publicImport = await prepareCanonicalModalCreateImage(
+    native as never,
+    fixture.app as never,
+    ModalImageSelector.fromTag(IMAGE_REF),
+  );
+  expect(fixture.fromRegistry).toHaveBeenLastCalledWith(IMAGE_REF);
+  expect(fixture.build).toHaveBeenLastCalledWith(fixture.app);
+  expect(publicImport.preparation).toEqual({
+    kind: "registry-import",
+    imageRef: IMAGE_REF,
+    imageId: "im-built",
+  });
 });
 
 describe("resolveModalImageSelector", () => {

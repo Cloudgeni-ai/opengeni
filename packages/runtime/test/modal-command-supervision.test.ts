@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import type { CommandSupervisionReceipt, ModalRouterProviderCommand } from "@opengeni/contracts";
+import type {
+  CommandSupervisionReceipt,
+  CommandSupervisionProtocol,
+  ModalRouterProviderCommand,
+} from "@opengeni/contracts";
 import type { ChannelASession } from "../src/sandbox/channel-a";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../src/sandbox/exec-banner";
 import {
@@ -8,6 +12,9 @@ import {
   type ProviderCommandSession,
   withProviderCommandHandle,
   admittedCommandSupervisionReady,
+  withRequiredCommandSupervision,
+  withTurnCommandSupervision,
+  withPendingCommandSupervision,
   reserveSupervisedLaunch,
   ProviderCommandStartRejectedError,
 } from "../src/sandbox/provider-command-session";
@@ -17,18 +24,22 @@ import { isModalTaskExecStartPreDispatchUnavailableError } from "../src/sandbox/
 import {
   RoutingSandboxSession,
   RoutingBackendRecoveryRequiredError,
+  RoutingMutationOutputRejectedError,
+  RoutingMutationOutcomeUnknownError,
+  withRoutingMutationOutputRejectionFence,
 } from "../src/sandbox/routing/routing-session";
 import { isProviderSandboxGoneDuringRoutedOperation } from "../src/sandbox/provider-errors";
 
-function fixture() {
+function fixture(protocol: CommandSupervisionProtocol = "native-subreaper-v1") {
   const invocationId = randomUUID();
   const command: ModalRouterProviderCommand = {
     kind: "modal-router-v1",
     sandboxId: "sb-original",
     taskId: "ta-original",
     execId: randomUUID(),
+    ...(protocol === "native-subreaper-pty-v1" ? { pty: true } : {}),
     supervision: {
-      protocol: "native-subreaper-v1",
+      protocol,
       invocationId,
       nonce: "a".repeat(64),
       controlPath: `/tmp/opengeni-supervision/${invocationId}.sock`,
@@ -39,7 +50,7 @@ function fixture() {
     },
   };
   const receipt: CommandSupervisionReceipt = {
-    protocol: "native-subreaper-v1",
+    protocol,
     invocationId,
     receiptId: randomUUID(),
     leaderExitCode: 7,
@@ -209,6 +220,292 @@ test("idle launch never releases user code before initial retention commits", as
   f.retain();
   await f.session.releaseSupervisedCommand!(41);
   expect(f.actions).toEqual(["launch-idle", "release"]);
+});
+
+test("mandatory turn-owned PTY qualifies and reserves before Start while global adoption stays off", async () => {
+  const f = fixture("native-subreaper-pty-v1");
+  const order: string[] = [];
+  f.session.verifyCommandSupervisionCapability = async (protocol) => {
+    expect(protocol).toBe("native-subreaper-pty-v1");
+    order.push("capability");
+    return { sandboxId: f.command.sandboxId, taskId: f.command.taskId };
+  };
+  const backend = { session: f.session, sandboxId: null, kind: "modal", activeEpoch: 0 } as const;
+  const routed = new RoutingSandboxSession({
+    defaultResolved: backend,
+    readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+    resolveActiveBackend: async () => backend,
+    providerSupervisionReady: async () => false,
+    requiredProviderSupervisionReady: async (protocol) => {
+      expect(protocol).toBe("native-subreaper-pty-v1");
+      order.push("database-ready");
+      return true;
+    },
+    providerCommandHandle: () => 41,
+    providerCommandPersistence: () => f.persistence,
+    beforeMutation: async () => {
+      order.push("admission");
+      return "admitted";
+    },
+    afterMutation: async () => {
+      order.push("reservation");
+      f.retain();
+    },
+    captureProcessOutput: async () => {},
+  });
+  await withRequiredCommandSupervision("native-subreaper-pty-v1", () =>
+    routed.execCommand({ cmd: "bash", tty: true }),
+  );
+  expect(order).toEqual(["database-ready", "capability", "admission", "reservation"]);
+  expect(f.actions).toEqual(["launch-idle", "release"]);
+  expect(await routed.cancelSupervisedCommand(41, "explicit_stop")).toBe(true);
+  expect(
+    parseExecBannerExitCode(await routed.writeStdinForProcessControl({ sessionId: 41, chars: "" })),
+  ).toBe(7);
+  expect(f.actions.indexOf("persist-proof")).toBeLessThan(f.actions.indexOf("ack"));
+});
+
+test.each(["native-subreaper-v1", "native-subreaper-pty-v1"] as const)(
+  "qualified cohort owns a new ordinary turn command and preserves durable adoption (%s)",
+  async (protocol) => {
+    const f = fixture(protocol);
+    let adoptions = 0;
+    let qualified = 0;
+    const backend = { session: f.session, sandboxId: null, kind: "modal", activeEpoch: 0 } as const;
+    const routed = new RoutingSandboxSession({
+      defaultResolved: backend,
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => backend,
+      providerSupervisionReady: async () => false,
+      requiredProviderSupervisionReady: async () => true,
+      qualifiedProviderSupervision: async (actual, requested) => {
+        expect(actual).toEqual(backend);
+        expect(requested).toBe(protocol);
+        qualified++;
+        return { status: "enrolled" };
+      },
+      providerCommandHandle: () => 41,
+      providerCommandPersistence: () => f.persistence,
+      beforeMutation: async () => "admitted",
+      afterMutation: async () => {
+        f.retain();
+      },
+      captureProcessOutput: async () => {},
+      adoptProcessAsBackgroundCommand: async () => {
+        adoptions++;
+      },
+    });
+    await withTurnCommandSupervision(protocol, () =>
+      routed.execCommand({ cmd: "preview-server", tty: protocol === "native-subreaper-pty-v1" }),
+    );
+    expect(qualified).toBe(1);
+    expect(f.actions).toEqual(["launch-idle", "release"]);
+    await routed.adoptRetainedProcessAsBackgroundCommand(41, "preview-server");
+    expect(adoptions).toBe(1);
+    expect(await routed.cancelSupervisedCommand(41, "explicit_stop")).toBe(true);
+    expect(
+      parseExecBannerExitCode(
+        await routed.writeStdinForProcessControl({ sessionId: 41, chars: "" }),
+      ),
+    ).toBe(7);
+  },
+);
+
+test("born-qualified binding mismatch rejects before admission and cannot fall back", async () => {
+  const f = fixture("native-subreaper-pty-v1");
+  let admitted = false;
+  const backend = { session: f.session, sandboxId: null, kind: "modal", activeEpoch: 0 } as const;
+  const routed = new RoutingSandboxSession({
+    defaultResolved: backend,
+    readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+    resolveActiveBackend: async () => backend,
+    providerSupervisionReady: async () => false,
+    requiredProviderSupervisionReady: async () => true,
+    qualifiedProviderSupervision: async () => ({
+      status: "blocked",
+      reason: "physical_binding_mismatch",
+    }),
+    beforeMutation: async () => {
+      admitted = true;
+    },
+  });
+  await expect(
+    withTurnCommandSupervision("native-subreaper-pty-v1", () =>
+      withRequiredCommandSupervision("native-subreaper-pty-v1", () =>
+        routed.execCommand({ cmd: "bash", tty: true }),
+      ),
+    ),
+  ).rejects.toThrow("physical_binding_mismatch");
+  expect(admitted).toBe(false);
+  expect(f.actions).toEqual([]);
+});
+
+test.each([false, true])(
+  "native missing-handle preparation settles its exact unused admission (settlement failure: %s)",
+  async (failSettlement) => {
+    const f = fixture("native-subreaper-pty-v1");
+    const backend = { session: f.session, sandboxId: null, kind: "modal", activeEpoch: 0 } as const;
+    const admission = { id: randomUUID(), workspaceGeneration: 41 };
+    const settlements: unknown[] = [];
+    let admissionOpen = false;
+    const settlementError = new Error("exact admission settlement unavailable");
+    const pending: { managed: boolean; notDispatched?: boolean; preparing?: boolean } = {
+      managed: false,
+    };
+    const routed = new RoutingSandboxSession({
+      defaultResolved: backend,
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => backend,
+      requiredProviderSupervisionReady: async () => true,
+      providerCommandPersistence: () => f.persistence,
+      beforeMutation: async () => {
+        admissionOpen = true;
+        return admission;
+      },
+      afterMutation: async (input) => {
+        settlements.push(input);
+        if (failSettlement) throw settlementError;
+        admissionOpen = false;
+      },
+    });
+    const operation = withPendingCommandSupervision(pending, () =>
+      withRequiredCommandSupervision("native-subreaper-pty-v1", () =>
+        routed.execCommand({ cmd: "bash", tty: true }),
+      ),
+    );
+    if (failSettlement) {
+      const error = await operation.catch((cause: unknown) => cause);
+      expect(error).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+      expect((error as RoutingMutationOutcomeUnknownError).retainedProcess).toBeNull();
+      expect((error as Error).cause).toBe(settlementError);
+      expect((error as Error).message).toContain("never-dispatched admission");
+    } else {
+      await expect(operation).rejects.toThrow("admitted retained handle");
+    }
+    expect(settlements).toEqual([{ op: "execCommand", backend, admission, outcome: "rejected" }]);
+    expect((settlements[0] as { admission: unknown }).admission).toBe(admission);
+    expect(admissionOpen).toBe(failSettlement);
+    expect(pending.notDispatched).toBe(true);
+    expect(pending.preparing).toBe(false);
+    expect(f.actions).toEqual([]);
+  },
+);
+
+test("generic post-dispatch provider errors never become original non-dispatch proof", async () => {
+  const pending: { managed: boolean; notDispatched?: boolean } = { managed: false };
+  const backend = {
+    sandboxId: null,
+    kind: "modal",
+    activeEpoch: 0,
+    session: {
+      execCommand: async () => {
+        throw new Error("unknown provider transport outcome");
+      },
+    },
+  };
+  const routed = new RoutingSandboxSession({
+    defaultResolved: backend,
+    readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+    resolveActiveBackend: async () => backend,
+    beforeMutation: async () => "admitted",
+    afterMutation: async () => {},
+  });
+  await expect(
+    withPendingCommandSupervision(pending, () =>
+      routed.execCommand({ cmd: "issued once", tty: false }),
+    ),
+  ).rejects.toThrow("unknown provider transport outcome");
+  expect(pending.notDispatched).toBeUndefined();
+});
+
+test("a caught earlier mutation rejection settles the original command preparation without dispatch", async () => {
+  let settlements = 0,
+    dispatches = 0;
+  const pending: {
+    managed: boolean;
+    preparing?: boolean;
+    notDispatched?: boolean;
+    settlePreparation: () => void;
+  } = {
+    managed: false,
+    settlePreparation: () => {
+      settlements++;
+    },
+  };
+  const backend = {
+    sandboxId: null,
+    kind: "modal",
+    activeEpoch: 0,
+    session: {
+      execCommand: async () => {
+        dispatches++;
+        return "unused";
+      },
+    },
+  };
+  const routed = new RoutingSandboxSession({
+    defaultResolved: backend,
+    readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+    resolveActiveBackend: async () => backend,
+  });
+  await expect(
+    withPendingCommandSupervision(pending, () =>
+      withRoutingMutationOutputRejectionFence(async () => {
+        const earlier = new RoutingMutationOutputRejectedError("other command", "stale authority");
+        await expect(routed.execCommand({ cmd: "never dispatched" })).rejects.toBe(earlier);
+      }),
+    ),
+  ).rejects.toThrow("stale authority");
+  expect(pending.notDispatched).toBe(true);
+  expect(pending.preparing).toBe(false);
+  expect(settlements).toBe(1);
+  expect(dispatches).toBe(0);
+});
+
+test.each(["database", "native", "shape"] as const)(
+  "mandatory PTY rejects before admission without PGID fallback when %s is unsupported",
+  async (failure) => {
+    const f = fixture("native-subreaper-pty-v1");
+    let admitted = false;
+    f.session.verifyCommandSupervisionCapability = async () => {
+      throw new Error("native unsupported");
+    };
+    const backend = { session: f.session, sandboxId: null, kind: "modal", activeEpoch: 0 } as const;
+    const routed = new RoutingSandboxSession({
+      defaultResolved: backend,
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => backend,
+      providerSupervisionReady: async () => false,
+      requiredProviderSupervisionReady: async () => failure !== "database",
+      providerCommandHandle: () => 41,
+      providerCommandPersistence: () => f.persistence,
+      beforeMutation: async () => {
+        admitted = true;
+      },
+      afterMutation: async () => {},
+    });
+    await expect(
+      withRequiredCommandSupervision("native-subreaper-pty-v1", () =>
+        routed.execCommand({
+          cmd: "bash",
+          tty: true,
+          ...(failure === "shape" ? { runAs: "root" } : {}),
+        }),
+      ),
+    ).rejects.toThrow();
+    expect(admitted).toBe(false);
+    expect(f.actions).toEqual([]);
+  },
+);
+
+test("PTY supervisor crash never exposes terminal without an authenticated receipt", async () => {
+  const f = fixture("native-subreaper-pty-v1");
+  await f.start();
+  f.retain();
+  f.crash();
+  expect(parseExecBannerExitCode(await f.read())).toBeNull();
+  expect(f.actions).not.toContain("persist-proof");
+  expect(f.actions).not.toContain("ack");
 });
 
 test("natural quiescence persists receipt before ACK and terminal output", async () => {

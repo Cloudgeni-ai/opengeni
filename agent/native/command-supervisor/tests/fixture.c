@@ -90,13 +90,30 @@ int main(int argc, char **argv) {
     if (!strncmp(mode, "deny-", 5)) {
         int nr = !strcmp(mode, "deny-pidfd") ? SYS_pidfd_open :
             !strcmp(mode, "deny-send") ? SYS_pidfd_send_signal :
-            !strcmp(mode, "deny-wait") ? SYS_waitid : SYS_prctl;
+            !strcmp(mode, "deny-wait") ? SYS_waitid :
+            !strcmp(mode, "deny-tty") ? SYS_ioctl :
+            !strcmp(mode, "deny-setpgid") ? SYS_setpgid : SYS_prctl;
         deny_syscall(nr);
         execvp(argv[2], &argv[2]);
         return 84;
     }
     if (argc != 3) return 85;
     marker = argv[2];
+    if (!strcmp(mode, "tty-signal-check")) {
+        const int signals[] = {SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGTSTP,
+                               SIGTTIN, SIGTTOU, SIGPIPE, SIGCHLD};
+        sigset_t mask;
+        if (sigprocmask(SIG_SETMASK, NULL, &mask)) return 86;
+        for (size_t i = 0; i < sizeof(signals) / sizeof(signals[0]); i++) {
+            struct sigaction action;
+            if (sigaction(signals[i], NULL, &action) || action.sa_handler != SIG_DFL ||
+                sigismember(&mask, signals[i])) return 87;
+        }
+        if (getpgrp() != getpid() || tcgetpgrp(STDIN_FILENO) != getpgrp() ||
+            getsid(0) == getpid()) return 89;
+        tick();
+        return 20;
+    }
     if (!strcmp(mode, "signal-check")) {
         struct sigaction action;
         sigset_t mask;

@@ -15,8 +15,13 @@ import {
   type Entry,
 } from "@openai/agents/sandbox";
 import { materializeEnvironment, readOptionalString } from "@openai/agents-core/sandbox/internal";
-import { ModalClient, Sandbox, type Image, type CloudBucketMount } from "modal";
-import { createModalProviderCreateBoundary, type ModalCreateIntent } from "./modal-create-boundary";
+import { ModalClient, Sandbox, type CloudBucketMount } from "modal";
+import {
+  createModalProviderCreateBoundary,
+  type ModalCreateIntent,
+  type ModalCreateImagePreparation,
+} from "./modal-create-boundary";
+import { prepareCanonicalModalCreateImage } from "./modal-registry-image";
 import { modalCommandStartCleanupIsSafe } from "./modal-command-start-errors";
 
 export type ModalCreateLifecycle = {
@@ -165,6 +170,7 @@ export async function createModalSessionWithLifecycle(
   let cloudBucketMounts: Record<string, CloudBucketMount> | undefined;
   let state: Omit<ModalSandboxSessionState, "sandboxId">;
   let app: Awaited<ReturnType<ModalClient["apps"]["fromName"]>>;
+  let imagePreparation: ModalCreateImagePreparation | undefined;
   const modal = new ModalClient(
     defined({
       tokenId: options.tokenId,
@@ -174,6 +180,7 @@ export async function createModalSessionWithLifecycle(
       grpcMiddleware: [
         createModalProviderCreateBoundary({
           operationId: crypto.randomUUID(),
+          imagePreparation: () => imagePreparation,
           beforeDispatch: async (intent) => {
             if (timedOut) throw new Error("Modal create expired before provider dispatch");
             await lifecycle.beforeDispatch(intent, { modal });
@@ -257,15 +264,9 @@ export async function createModalSessionWithLifecycle(
     const environment = await materializeEnvironment(manifest, options.env);
     const selector =
       options.image ?? ModalImageSelector.fromTag(options.imageTag ?? "debian:bookworm-slim");
-    let image: Image;
-    if (selector.kind === "image") image = selector.value as Image;
-    else if (typeof selector.value !== "string" || !selector.value.trim())
-      throw new Error("Modal image identity must be non-empty");
-    else if (selector.kind === "id") image = await modal.images.fromId(selector.value);
-    else if (selector.kind === "tag") image = modal.images.fromRegistry(selector.value);
-    else throw new Error("Unsupported Modal image selector");
-    if (typeof image?.build !== "function")
-      throw new Error("Modal image selector requires a native Image");
+    const prepared = await prepareCanonicalModalCreateImage(modal, app, selector);
+    const image = prepared.image;
+    imagePreparation = prepared.preparation;
     cloudBucketMounts = await resolveMounts(manifest);
     state = {
       manifest,

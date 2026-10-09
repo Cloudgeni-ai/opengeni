@@ -4,6 +4,7 @@ import {
   SandboxProviderCommand,
   ModalRouterProviderCommand,
   CommandSupervisionReceipt,
+  type CommandSupervisionProtocol,
   type SessionEvent,
 } from "@opengeni/contracts";
 import { withRlsContext, withSessionActivityRlsContext, type Database } from "./database";
@@ -349,9 +350,17 @@ function supervisionDescriptor(command: SandboxProviderCommand) {
 }
 
 /** Fail before provider start, not after discovering an unprotected DB at retention. */
-export async function supervisedCommandProtocolReady(db: Database): Promise<boolean> {
+export async function supervisedCommandProtocolReady(
+  db: Database,
+  protocol: CommandSupervisionProtocol = "native-subreaper-v1",
+): Promise<boolean> {
   const [row] = await db.execute<{ ready: boolean }>(sql`
-    select count(*) = 5 as ready from pg_catalog.pg_trigger
+    select count(*) = 5 and (
+      ${protocol} = 'native-subreaper-v1' or
+      pg_catalog.obj_description(
+        pg_catalog.to_regprocedure('opengeni_private.supervised_command_guard()'), 'pg_proc'
+      ) = 'native-subreaper-pty-v1'
+    ) as ready from pg_catalog.pg_trigger
     where (tgrelid, tgname) in (
       ('sandbox_retained_processes'::regclass, 'supervised_command_guard'),
       ('sandbox_retained_processes'::regclass, 'supervised_provider_loss_commit_guard'),

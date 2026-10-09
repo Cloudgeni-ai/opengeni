@@ -7,11 +7,12 @@ import {
   SandboxProviderCommand,
   CommandSupervisionReceipt,
   ModalRouterProviderCommand,
+  type CommandSupervisionProtocol,
 } from "@opengeni/contracts";
 import type { ChannelAExecArgs } from "../channel-a";
 import type { ProviderCommandOutput } from "../provider-command-session";
 import {
-  admittedCommandSupervisionReady,
+  admittedCommandSupervisionProtocol,
   markPendingCommandSupervised,
   reserveSupervisedLaunch,
   ProviderCommandStartOutcomeUnknownError,
@@ -46,6 +47,14 @@ type RouterEntry = {
 type RouterLookup = { controller: AbortController; waiters: number; settled: boolean };
 /** A post-EOF exit re-poll may finish this long after the read deadline. */
 const REPOLL_GRACE_MS = 250;
+const commandPtyInfo = () => ({
+  enabled: true,
+  winszRows: 24,
+  winszCols: 80,
+  envTerm: "xterm",
+  ptyType: 1,
+  noTerminateOnIdleStdin: true,
+});
 type ControlObservation = { command: ModalRouterProviderCommand; output: string };
 type SupervisionControlResult = {
   state: "idle" | "running" | "quiescent";
@@ -233,7 +242,13 @@ export class ModalCommandControl {
 
   async start(args: ChannelAExecArgs, signal?: AbortSignal): Promise<ModalRouterProviderCommand> {
     signal?.throwIfAborted();
-    const supervised = admittedCommandSupervisionReady() && !args.tty && !args.runAs;
+    const protocol = admittedCommandSupervisionProtocol();
+    const supervised =
+      Boolean(protocol) &&
+      !args.runAs &&
+      (protocol === "native-subreaper-pty-v1" ? args.tty === true : !args.tty);
+    if (protocol && !supervised)
+      throw new Error("Command shape does not match admitted native supervision protocol");
     if (supervised) markPendingCommandSupervised();
     const sandboxId = this.sandboxId;
     const workdir = posix.resolve(this.root, args.workdir ?? this.root);
@@ -248,12 +263,12 @@ export class ModalCommandControl {
     if (this.sandboxId !== sandboxId)
       throw new Error("Modal sandbox changed during command preparation");
     const execId = randomUUID();
-    // PTY and runAs retain their existing explicit unsupported supervision
-    // semantics. Never attach a fabricated descriptor to either path.
+    // Protocol and PTY shape were qualified on this exact instance before
+    // admission. runAs remains unsupported and never receives a descriptor.
     const invocationId = randomUUID();
     const supervision = supervised
       ? {
-          protocol: "native-subreaper-v1" as const,
+          protocol: protocol!,
           invocationId,
           nonce: randomBytes(32).toString("hex"),
           controlPath: `/tmp/opengeni-supervision/${invocationId}.sock`,
@@ -265,6 +280,7 @@ export class ModalCommandControl {
       commandArgs = [
         "/usr/local/bin/opengeni-command-supervisor",
         "launch",
+        ...(supervision.protocol === "native-subreaper-pty-v1" ? ["--pty"] : []),
         "--invocation",
         supervision.invocationId,
         "--nonce",
@@ -300,14 +316,7 @@ export class ModalCommandControl {
             env,
             ...(args.tty
               ? {
-                  ptyInfo: {
-                    enabled: true,
-                    winszRows: 24,
-                    winszCols: 80,
-                    envTerm: "xterm",
-                    ptyType: 1,
-                    noTerminateOnIdleStdin: true,
-                  },
+                  ptyInfo: commandPtyInfo(),
                 }
               : {}),
           },
@@ -333,7 +342,9 @@ export class ModalCommandControl {
   /** Read-only, authenticated control execution on this exact instance. Never
    * inferred from a fleet image selector or user command stdout. No cache: warm
    * instances and route/task replacement must each pass before admission. */
-  async verifySupervisionCapability(): Promise<{ sandboxId: string; taskId: string }> {
+  async verifySupervisionCapability(
+    protocol: CommandSupervisionProtocol = "native-subreaper-v1",
+  ): Promise<{ sandboxId: string; taskId: string }> {
     const sandboxId = this.sandboxId;
     const signal = AbortSignal.timeout(5_000);
     const task = await ModalCommandStartPreDispatchUnavailableError.beforeDispatch(
@@ -360,9 +371,14 @@ export class ModalCommandControl {
         await router.start(
           {
             ...identity,
-            commandArgs: ["/usr/local/bin/opengeni-command-supervisor", "capabilities"],
+            commandArgs: [
+              "/usr/local/bin/opengeni-command-supervisor",
+              "capabilities",
+              ...(protocol === "native-subreaper-pty-v1" ? ["--pty"] : []),
+            ],
             workdir: "/tmp",
             env: {},
+            ...(protocol === "native-subreaper-pty-v1" ? { ptyInfo: commandPtyInfo() } : {}),
           },
           signal,
         );
@@ -392,7 +408,7 @@ export class ModalCommandControl {
       }
       signal.throwIfAborted();
       const { output, exit } = result;
-      if (exit !== 0 || output !== "native-subreaper-v1")
+      if (exit !== 0 || output !== protocol)
         throw new Error(
           "Exact Modal instance lacks compatible native supervision; command not admitted",
         );
@@ -528,6 +544,7 @@ export class ModalCommandControl {
                 commandArgs: [
                   "/usr/local/bin/opengeni-command-supervisor",
                   "control",
+                  ...(descriptor.protocol === "native-subreaper-pty-v1" ? ["--pty"] : []),
                   "--invocation",
                   descriptor.invocationId,
                   "--nonce",
@@ -588,7 +605,10 @@ export class ModalCommandControl {
         throw new Error("Invalid supervisor control response");
       if (result.receipt !== undefined) {
         result.receipt = CommandSupervisionReceipt.parse(result.receipt);
-        if (result.receipt.invocationId !== descriptor.invocationId)
+        if (
+          result.receipt.invocationId !== descriptor.invocationId ||
+          result.receipt.protocol !== descriptor.protocol
+        )
           throw new Error("Supervisor receipt invocation mismatch");
       }
       if ((result.state === "quiescent") !== Boolean(result.receipt))

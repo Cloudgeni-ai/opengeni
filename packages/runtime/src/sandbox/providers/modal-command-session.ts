@@ -78,10 +78,10 @@ export function installModalCommandSession(
       }
     };
   }
-  session.verifyCommandSupervisionCapability = async () => {
+  session.verifyCommandSupervisionCapability = async (protocol) => {
     if (!control.verifySupervisionCapability)
       throw new Error("Modal instance lacks supervised command capability verification");
-    return await control.verifySupervisionCapability();
+    return await control.verifySupervisionCapability(protocol);
   };
   session.verifyMaterializedPath = (path, workdir) =>
     verifyModalMaterializedPath(control, path, workdir, pendingStarts);

@@ -163,6 +163,30 @@ describe("release schema contract", () => {
     expect(new Set(contractMigrationPaths).size).toBe(contractMigrationPaths.length);
   });
 
+  test("registers native PTY command supervision as a maintenance forward migration", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0689_native_pty_command_supervision.sql",
+      ),
+    ).toMatchObject({
+      path: "0689_native_pty_command_supervision.sql",
+      deploymentMode: "maintenance",
+    });
+  });
+
+  test("registers native command qualification as a maintenance forward migration", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0690_native_command_qualification.sql",
+      ),
+    ).toMatchObject({
+      path: "0690_native_command_qualification.sql",
+      deploymentMode: "maintenance",
+    });
+  });
+
   test("installs the workspace activity initializer before its conflict-safe backfill", async () => {
     const migration = await readFile(
       join(import.meta.dir, "../packages/db/drizzle/0214_session_activity_commit_gate.sql"),
@@ -2591,6 +2615,8 @@ describe("release schema contract", () => {
       "0680_sandbox_idle_checkpoint.sql",
       "0681_sandbox_ended_epoch_blockers.sql",
       "0684_claude_haiku_5_5_default_model.sql",
+      "0689_native_pty_command_supervision.sql",
+      "0690_native_command_qualification.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

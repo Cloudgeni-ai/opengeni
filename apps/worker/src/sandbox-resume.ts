@@ -30,6 +30,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { randomUUID } from "node:crypto";
+import { readImmutableServerSourceSha } from "@opengeni/config/server-source-identity";
 import { retainsHolderForWarmCapture } from "./warm-capture-holder";
 import {
   acquireLease,
@@ -79,6 +80,7 @@ import {
   renewSandboxProviderExpiration,
   modalSessionMatchesCheckpointProviderBinding,
   resolveModalCheckpointProviderBindingForSession,
+  readModalCreateImagePreparation,
   serializeReplacementSandboxEnvelope,
   tagModalSandbox,
   terminateUnpublishedSandboxSession,
@@ -1790,6 +1792,8 @@ async function resumeBoxForTurnOnce(
             providerContext,
           );
           const operationId = intent.operationId;
+          const nativeSourceSha = await readImmutableServerSourceSha();
+          const nativeImagePreparation = readModalCreateImagePreparation(intent);
           await beginModalProviderCreate(db, {
             accountId: ids.accountId,
             workspaceId: ids.workspaceId,
@@ -1804,6 +1808,8 @@ async function resumeBoxForTurnOnce(
             appId: intent.appId,
             providerName: intent.name,
             requestSha256: intent.requestSha256,
+            ...(nativeSourceSha ? { nativeSourceSha } : {}),
+            ...(nativeImagePreparation ? { nativeImagePreparation } : {}),
           });
           providerCreateOperationId = operationId;
           providerCreateBindingKey = binding.key;

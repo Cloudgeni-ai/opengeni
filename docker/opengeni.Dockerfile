@@ -72,6 +72,15 @@ COPY --chown=bun:bun . .
 
 ENV NODE_ENV=production
 USER root
+ARG OPENGENI_SOURCE_SHA=development
+RUN case "$OPENGENI_SOURCE_SHA" in \
+      development) ;; \
+      *[!0-9a-f]*|'') echo 'invalid immutable server source SHA' >&2; exit 1 ;; \
+      *) test "${#OPENGENI_SOURCE_SHA}" = 40 ;; \
+    esac \
+  && install -d -o root -g root -m 0555 /opt/opengeni \
+  && printf '%s' "$OPENGENI_SOURCE_SHA" > /opt/opengeni/source-sha \
+  && chmod 0444 /opt/opengeni/source-sha
 RUN install -d -o bun -g bun -m 0755 /workspace
 USER bun
 

@@ -2080,6 +2080,50 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
+    -- Native qualifications are operator-authored. Only the two schema-local
+    -- read RPCs are runtime capabilities; repair table and column ACLs after
+    -- the blanket private-function grant without granting enrollment writers.
+    FOREACH routine_signature IN ARRAY ARRAY[
+      'freeze_native_command_group_birth()', 'freeze_native_command_provider_enrollment()'
+    ] LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC', ${literal(schema)}, routine_signature);
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM %I', ${literal(schema)}, routine_signature, ${literal(role)});
+      END IF;
+    END LOOP;
+    FOREACH runtime_table IN ARRAY ARRAY[
+      'native_command_qualifications', 'native_command_group_births',
+      'native_command_provider_enrollments', 'native_command_provider_bindings'
+    ] LOOP
+      IF to_regclass(format('opengeni_private.%I', runtime_table)) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON TABLE opengeni_private.%I FROM %I', runtime_table, ${literal(role)});
+        EXECUTE format('REVOKE ALL ON TABLE opengeni_private.%I FROM PUBLIC', runtime_table);
+        EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.%I FROM %I',
+          (SELECT string_agg(quote_ident(attname), ',' ORDER BY attnum) FROM pg_attribute
+            WHERE attrelid=format('opengeni_private.%I',runtime_table)::regclass AND attnum>0 AND NOT attisdropped),
+          runtime_table, ${literal(role)});
+        EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.%I FROM PUBLIC',
+          (SELECT string_agg(quote_ident(attname), ',' ORDER BY attnum) FROM pg_attribute
+            WHERE attrelid=format('opengeni_private.%I',runtime_table)::regclass AND attnum>0 AND NOT attisdropped), runtime_table);
+      END IF;
+    END LOOP;
+    FOREACH routine_signature IN ARRAY ARRAY[
+      'native_command_birth_qualification(uuid,uuid,uuid)',
+      'native_command_provider_qualification(uuid,uuid,uuid,text,bigint)'
+    ] LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC', ${literal(schema)}, routine_signature);
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%s TO %I', ${literal(schema)}, routine_signature, ${literal(role)});
+      END IF;
+    END LOOP;
+    FOREACH routine_signature IN ARRAY ARRAY[
+      'native_command_qualification_guard()', 'native_command_receipt_immutable()'
+    ] LOOP
+      IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.%s FROM PUBLIC', routine_signature);
+        EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.%s FROM %I', routine_signature, ${literal(role)});
+      END IF;
+    END LOOP;
     FOREACH routine_signature IN ARRAY ARRAY[
       'subscription_connection_visible(uuid,uuid,uuid,text,text,uuid,text,text)',
       'authorize_subscription_ownerless_session_access(uuid,uuid,uuid,uuid)',

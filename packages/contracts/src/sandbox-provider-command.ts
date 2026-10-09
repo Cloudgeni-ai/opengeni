@@ -40,9 +40,15 @@ const ModalByteCursor = z
     message: "A terminal output cursor must have reached EOF",
   });
 
+export const CommandSupervisionProtocol = z.enum([
+  "native-subreaper-v1",
+  "native-subreaper-pty-v1",
+]);
+export type CommandSupervisionProtocol = z.infer<typeof CommandSupervisionProtocol>;
+
 export const CommandSupervisionDescriptor = z
   .object({
-    protocol: z.literal("native-subreaper-v1"),
+    protocol: CommandSupervisionProtocol,
     invocationId: z.string().uuid(),
     nonce: z.string().regex(/^[a-f0-9]{64}$/u),
     controlPath: z.string().regex(/^\/tmp\/opengeni-supervision\/[a-f0-9-]{36}\.sock$/u),
@@ -52,7 +58,7 @@ export type CommandSupervisionDescriptor = z.infer<typeof CommandSupervisionDesc
 
 export const CommandSupervisionReceipt = z
   .object({
-    protocol: z.literal("native-subreaper-v1"),
+    protocol: CommandSupervisionProtocol,
     invocationId: z.string().uuid(),
     receiptId: z.string().uuid(),
     leaderExitCode: z.number().int(),

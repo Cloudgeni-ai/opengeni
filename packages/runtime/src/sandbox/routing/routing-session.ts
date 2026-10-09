@@ -41,6 +41,12 @@ import {
   admittedProviderCommandHandle,
   withoutProviderCommandHandle,
   withCommandSupervisionReady,
+  requiredCommandSupervisionProtocol,
+  turnCommandSupervisionProtocol,
+  beginPendingCommandPreparation,
+  preparePendingCommandStart,
+  completePendingCommandPreparation,
+  markPendingCommandNotDispatched,
   withSupervisedLaunchReservation,
   ProviderCommandStartRejectedError,
   ProviderCommandStartOutcomeUnknownError,
@@ -50,7 +56,7 @@ import {
   type ProviderCommandSession,
   type ProviderCommandOutput,
 } from "../provider-command-session";
-import type { SandboxProviderCommand } from "@opengeni/contracts";
+import type { SandboxProviderCommand, CommandSupervisionProtocol } from "@opengeni/contracts";
 import { hasTypedExecHandleLoss, parseExecResponseBanner } from "../exec-banner";
 import {
   SandboxMaterializationVerificationError,
@@ -224,6 +230,14 @@ export type RoutingCommandDispatchOptions = {
 export interface RoutingSandboxSessionDeps {
   providerCommandHandle?: (admission: unknown) => number | undefined;
   providerSupervisionReady?: () => Promise<boolean>;
+  /** Mandatory turn-owned launches do not activate adopted background launches. */
+  requiredProviderSupervisionReady?: (protocol: CommandSupervisionProtocol) => Promise<boolean>;
+  qualifiedProviderSupervision?: (
+    backend: ResolvedActiveBackend,
+    protocol: CommandSupervisionProtocol,
+  ) => Promise<
+    { status: "legacy" } | { status: "enrolled" } | { status: "blocked"; reason: string }
+  >;
   providerCommandPersistence?: (process: RoutingRetainedProcess) => ProviderCommandPersistence;
   /**
    * The DEFAULT backend resolved at construction time (the same shape `resolve()`
@@ -362,10 +376,13 @@ export interface RoutingSandboxSessionDeps {
 }
 
 function eligibleForSupervision(args: unknown): boolean {
+  const required = requiredCommandSupervisionProtocol() ?? turnCommandSupervisionProtocol();
   return Boolean(
     args &&
     typeof args === "object" &&
-    !(args as { tty?: boolean }).tty &&
+    (required === "native-subreaper-pty-v1"
+      ? (args as { tty?: boolean }).tty === true
+      : !(args as { tty?: boolean }).tty) &&
     !(args as { runAs?: string }).runAs,
   );
 }
@@ -1881,14 +1898,19 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   ): Promise<T> {
     let attempt = 0;
     let lastError: unknown;
+    const commandStart = op === "exec" || op === "execCommand";
+    if (commandStart) beginPendingCommandPreparation();
     while (attempt <= this.maxFenceRetries) {
-      assertNoCaughtMutationOutputRejection();
       const resolutionStartedAt = performance.now();
       let resolutionOutcome: RoutingSandboxPhaseOutcome = "failed";
       let backend: ResolvedActiveBackend;
       try {
+        assertNoCaughtMutationOutputRejection();
         backend = pinnedBackend ?? (await this.resolve());
         resolutionOutcome = "completed";
+      } catch (error) {
+        if (commandStart) markPendingCommandNotDispatched();
+        throw error;
       } finally {
         recordFirstOperationPhase(
           firstOperationTiming,
@@ -1900,74 +1922,145 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       // Admission failures are NOT provider fence errors and must never enter
       // the retry/rebind loop. If this exact route cannot advance its durable
       // mutation generation, fail before the provider sees the operation.
-      const supervisionReady =
-        supervisionEligible &&
-        backend.kind === "modal" &&
-        ((await this.deps.providerSupervisionReady?.()) ?? false);
-      let verifiedSupervision: { sandboxId: string; taskId: string } | undefined;
-      if (supervisionReady) {
-        if (
-          !backend.session.verifyCommandSupervisionCapability ||
-          !this.deps.afterMutation ||
-          !this.deps.providerCommandPersistence
-        )
+      const prepare = async () => {
+        const turnProtocol =
+          backend.kind === "modal" ? turnCommandSupervisionProtocol() : undefined;
+        const qualification = turnProtocol
+          ? ((await this.deps.qualifiedProviderSupervision?.(backend, turnProtocol)) ?? {
+              status: "legacy" as const,
+            })
+          : { status: "legacy" as const };
+        if (qualification.status === "blocked")
+          throw new Error(`Qualified Modal command launch blocked: ${qualification.reason}`);
+        const requiredProtocol =
+          backend.kind === "modal"
+            ? qualification.status === "enrolled"
+              ? turnProtocol
+              : requiredCommandSupervisionProtocol()
+            : undefined;
+        if (requiredProtocol && !supervisionEligible)
+          throw new Error("Turn-owned Modal command requires a supported native supervision shape");
+        const supervisionReady =
+          backend.kind === "modal" &&
+          supervisionEligible &&
+          (requiredProtocol
+            ? ((await this.deps.requiredProviderSupervisionReady?.(requiredProtocol)) ?? false)
+            : turnProtocol !== "native-subreaper-pty-v1" &&
+              ((await this.deps.providerSupervisionReady?.()) ?? false));
+        if (requiredProtocol && !supervisionReady)
           throw new Error(
-            "Supervised command requires exact-instance verification and durable reservation wiring",
+            "Turn-owned Modal command requires canonical native supervision fences before admission",
           );
-        try {
-          verifiedSupervision = await backend.session.verifyCommandSupervisionCapability();
-        } catch (error) {
-          // A missing helper is merely an incompatible instance. Only the
-          // existing sandbox-scoped classifier may retire a missing provider.
-          return await this.throwProviderError(op, backend, error);
+        const supervisionProtocol = requiredProtocol ?? "native-subreaper-v1";
+        let verifiedSupervision: { sandboxId: string; taskId: string } | undefined;
+        if (supervisionReady) {
+          if (
+            !backend.session.verifyCommandSupervisionCapability ||
+            !this.deps.afterMutation ||
+            !this.deps.providerCommandPersistence
+          )
+            throw new Error(
+              "Supervised command requires exact-instance verification and durable reservation wiring",
+            );
+          try {
+            verifiedSupervision =
+              await backend.session.verifyCommandSupervisionCapability(supervisionProtocol);
+          } catch (error) {
+            // A missing helper is merely an incompatible instance. Only the
+            // existing sandbox-scoped classifier may retire a missing provider.
+            return await this.throwProviderError(op, backend, error);
+          }
+          if (
+            backend.providerInstanceId &&
+            verifiedSupervision.sandboxId !== backend.providerInstanceId
+          )
+            throw new Error("Supervision capability does not match the admitted provider instance");
         }
-        if (
-          backend.providerInstanceId &&
-          verifiedSupervision.sandboxId !== backend.providerInstanceId
-        )
-          throw new Error("Supervision capability does not match the admitted provider instance");
-      }
-      let admission: unknown;
-      let reservedProcess: RoutingRetainedProcess | undefined;
-      if (mutatesWorkspace && this.deps.beforeMutation) {
-        const admissionStartedAt = performance.now();
-        let admissionWaitMs = 0;
-        let admissionOutcome: RoutingSandboxPhaseOutcome = "failed";
-        try {
-          admission = await this.deps.beforeMutation({
-            op,
-            backend,
-            onCaptureWait: (observation: RoutingSandboxWaitObservation) => {
-              admissionWaitMs += Math.max(0, observation.durationMs);
+        let admission: unknown;
+        let admissionAccepted = false;
+        if (mutatesWorkspace && this.deps.beforeMutation) {
+          const admissionStartedAt = performance.now();
+          let admissionWaitMs = 0;
+          let admissionOutcome: RoutingSandboxPhaseOutcome = "failed";
+          try {
+            admission = await this.deps.beforeMutation({
+              op,
+              backend,
+              onCaptureWait: (observation: RoutingSandboxWaitObservation) => {
+                admissionWaitMs += Math.max(0, observation.durationMs);
+                recordFirstOperationPhase(
+                  firstOperationTiming,
+                  "snapshotWait",
+                  observation.durationMs,
+                  observation.outcome,
+                );
+                this.observeCaptureWait(op, backend, "admission", observation);
+              },
+            });
+            admissionAccepted = true;
+            admissionOutcome = "completed";
+          } catch (error) {
+            // Only this boundary knows that the command never reached provider
+            // dispatch. Keep proof local to this call and preserve the original
+            // error's identity/type for every existing admission-fence consumer.
+            try {
+              onMutationAdmissionRefused?.(error);
+            } catch {
+              // A caller's proof observer cannot change admission or its error.
+            }
+            throw error;
+          } finally {
+            recordFirstOperationPhase(
+              firstOperationTiming,
+              "mutationAdmission",
+              Math.max(0, performance.now() - admissionStartedAt - admissionWaitMs),
+              admissionOutcome,
+            );
+          }
+        }
+        if (supervisionReady && !this.deps.providerCommandHandle?.(admission)) {
+          const error = new Error(
+            "Native command requires an admitted retained handle before provider dispatch",
+          );
+          if (admissionAccepted) {
+            // This exact admission succeeded, but user-code dispatch has not
+            // begun. Close the unused admission without inventing a provider
+            // result or a process identity. Failed settlement retains its fence.
+            const settlementStartedAt = performance.now();
+            let settlementOutcome: RoutingSandboxPhaseOutcome = "failed";
+            try {
+              await this.deps.afterMutation!({
+                op,
+                backend,
+                admission,
+                outcome: "rejected",
+                ...(retainedProcessPurpose ? { retainedProcessPurpose } : {}),
+              });
+              settlementOutcome = "completed";
+            } catch (cause) {
+              this.invalidate(backend);
+              throw new RoutingMutationOutcomeUnknownError(
+                op,
+                "Native preparation left its exact never-dispatched admission unsettled; the workspace fence remains unresolved",
+                { cause },
+              );
+            } finally {
               recordFirstOperationPhase(
                 firstOperationTiming,
-                "snapshotWait",
-                observation.durationMs,
-                observation.outcome,
+                "mutationSettlement",
+                performance.now() - settlementStartedAt,
+                settlementOutcome,
               );
-              this.observeCaptureWait(op, backend, "admission", observation);
-            },
-          });
-          admissionOutcome = "completed";
-        } catch (error) {
-          // Only this boundary knows that the command never reached provider
-          // dispatch. Keep proof local to this call and preserve the original
-          // error's identity/type for every existing admission-fence consumer.
-          try {
-            onMutationAdmissionRefused?.(error);
-          } catch {
-            // A caller's proof observer cannot change admission or its error.
+            }
           }
           throw error;
-        } finally {
-          recordFirstOperationPhase(
-            firstOperationTiming,
-            "mutationAdmission",
-            Math.max(0, performance.now() - admissionStartedAt - admissionWaitMs),
-            admissionOutcome,
-          );
         }
-      }
+        return { supervisionReady, supervisionProtocol, verifiedSupervision, admission };
+      };
+      const { supervisionReady, supervisionProtocol, verifiedSupervision, admission } =
+        await (commandStart ? preparePendingCommandStart(prepare) : prepare());
+      if (commandStart) completePendingCommandPreparation(supervisionReady);
+      let reservedProcess: RoutingRetainedProcess | undefined;
       let result: T;
       try {
         const providerStartedAt = performance.now();
@@ -1979,56 +2072,68 @@ export class RoutingSandboxSession implements RoutableBackendSession {
             backend,
             () =>
               withProviderCommandHandle(this.deps.providerCommandHandle?.(admission), () =>
-                withCommandSupervisionReady(supervisionReady, () =>
-                  withSupervisedLaunchReservation(
-                    {
-                      reserve: async (command) => {
-                        const handle = this.deps.providerCommandHandle?.(admission);
-                        if (!supervisionReady || !handle || reservedProcess || !command.supervision)
-                          throw new Error("Invalid supervised launch reservation");
-                        if (
-                          command.sandboxId !== verifiedSupervision?.sandboxId ||
-                          command.taskId !== verifiedSupervision.taskId
-                        )
-                          throw new Error(
-                            "Modal task changed after supervision capability verification",
-                          );
-                        const process = {
-                          id: crypto.randomUUID(),
-                          providerSessionId: handle,
-                          providerCommand: command,
-                        };
-                        reservedProcess = process;
-                        const reservationResult = await this.deps.afterMutation!({
-                          op,
-                          backend,
-                          admission,
-                          outcome: "resolved",
-                          retainedProcess: process,
-                          ...(retainedProcessPurpose ? { retainedProcessPurpose } : {}),
-                        });
-                        // Even a durable-but-authority-rejected reservation must
-                        // never dispatch user work. Its exact row remains recoverable.
-                        if (reservationResult)
-                          throw new RoutingMutationOutcomeUnknownError(
+                withCommandSupervisionReady(
+                  supervisionReady,
+                  () =>
+                    withSupervisedLaunchReservation(
+                      {
+                        reserve: async (command) => {
+                          const handle = this.deps.providerCommandHandle?.(admission);
+                          if (
+                            !supervisionReady ||
+                            !handle ||
+                            reservedProcess ||
+                            !command.supervision
+                          )
+                            throw new Error("Invalid supervised launch reservation");
+                          if (command.supervision.protocol !== supervisionProtocol)
+                            throw new Error(
+                              "Reserved native protocol differs from exact-instance qualification",
+                            );
+                          if (
+                            command.sandboxId !== verifiedSupervision?.sandboxId ||
+                            command.taskId !== verifiedSupervision.taskId
+                          )
+                            throw new Error(
+                              "Modal task changed after supervision capability verification",
+                            );
+                          const process = {
+                            id: crypto.randomUUID(),
+                            providerSessionId: handle,
+                            providerCommand: command,
+                          };
+                          reservedProcess = process;
+                          const reservationResult = await this.deps.afterMutation!({
                             op,
-                            "Supervised launch reservation lost authority before dispatch",
-                            { retainedProcess: process },
-                          );
-                        const persisted =
-                          await this.deps.providerCommandPersistence!(process).load();
-                        if (!persisted || !isDeepStrictEqual(persisted, command))
-                          throw new Error(
-                            "Supervised launch reservation did not retain the exact invocation",
-                          );
-                        const record = this.registerRetainedProcess(process, backend);
-                        if (retainedProcessPurpose)
-                          record.retainedProcessPurpose = retainedProcessPurpose;
-                        record.durable = true;
+                            backend,
+                            admission,
+                            outcome: "resolved",
+                            retainedProcess: process,
+                            ...(retainedProcessPurpose ? { retainedProcessPurpose } : {}),
+                          });
+                          // Even a durable-but-authority-rejected reservation must
+                          // never dispatch user work. Its exact row remains recoverable.
+                          if (reservationResult)
+                            throw new RoutingMutationOutcomeUnknownError(
+                              op,
+                              "Supervised launch reservation lost authority before dispatch",
+                              { retainedProcess: process },
+                            );
+                          const persisted =
+                            await this.deps.providerCommandPersistence!(process).load();
+                          if (!persisted || !isDeepStrictEqual(persisted, command))
+                            throw new Error(
+                              "Supervised launch reservation did not retain the exact invocation",
+                            );
+                          const record = this.registerRetainedProcess(process, backend);
+                          if (retainedProcessPurpose)
+                            record.retainedProcessPurpose = retainedProcessPurpose;
+                          record.durable = true;
+                        },
                       },
-                    },
-                    () => fn(backend.session, backend),
-                  ),
+                      () => fn(backend.session, backend),
+                    ),
+                  supervisionProtocol,
                 ),
               ),
             (observation) => {

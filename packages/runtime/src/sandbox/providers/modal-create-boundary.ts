@@ -16,6 +16,19 @@ export type ModalCreateIntent = {
   requestSha256: string;
 };
 
+export type ModalCreateImagePreparation =
+  | { kind: "registry-import"; imageRef: string; imageId: string }
+  | { kind: "provider-image-id" | "unqualified-image"; imageId: string };
+const imagePreparations = new WeakMap<ModalCreateIntent, Readonly<ModalCreateImagePreparation>>();
+
+/** Actual boundary object only. A copied intent or caller metadata has no
+ * preparation authority; the canonical selector/build owns the proof. */
+export function readModalCreateImagePreparation(
+  intent: ModalCreateIntent,
+): Readonly<ModalCreateImagePreparation> | undefined {
+  return imagePreparations.get(intent);
+}
+
 export function modalCreateOperationName(operationId: string): string {
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u.test(operationId)) {
     throw new Error("Modal create requires a UUID operation identity");
@@ -39,6 +52,7 @@ export function createModalProviderCreateBoundary(input: {
   operationId: string;
   beforeDispatch: (intent: ModalCreateIntent) => Promise<void>;
   onReceipt: (receipt: ModalCreateIntent & { instanceId: string }) => Promise<void>;
+  imagePreparation?: () => ModalCreateImagePreparation | undefined;
 }): ModalMiddleware {
   const name = modalCreateOperationName(input.operationId);
   let attempted = false;
@@ -82,6 +96,12 @@ export function createModalProviderCreateBoundary(input: {
       imageId: request.definition.imageId,
       requestSha256: createHash("sha256").update(JSON.stringify(wireRequest)).digest("hex"),
     };
+    const preparation = input.imagePreparation?.();
+    if (preparation) {
+      if (preparation.imageId !== intent.imageId)
+        throw new Error("Modal create image disagrees with its actual native preparation");
+      imagePreparations.set(intent, Object.freeze({ ...preparation }));
+    }
     attempted = true;
     await input.beforeDispatch(intent);
     // Middleware is generic over every Modal RPC. The exact method/path and
