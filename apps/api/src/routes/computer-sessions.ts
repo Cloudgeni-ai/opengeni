@@ -1112,6 +1112,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         workspaceId: sourceSession.workspaceId,
         session: sourceSession,
         subjectId: grant.subjectId,
+        grant,
         waitSignal,
         operation,
         retryControllerTransport: operation === "computer.read" || operation === "computer.action",

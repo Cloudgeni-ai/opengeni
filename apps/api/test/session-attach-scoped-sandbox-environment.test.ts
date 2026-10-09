@@ -5,7 +5,7 @@
 // while agent turns (which resolve through the scoped authority) kept working.
 // Visibility and organization boundaries are unchanged: an environment the
 // attaching subject cannot use, or one from another organization, is refused.
-import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission, type Session } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
@@ -30,6 +30,7 @@ import {
 } from "@opengeni/testing";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import * as sandboxRuntime from "@opengeni/runtime/sandbox";
 import { createApp } from "../src/app";
 
 const SECRET = "session-attach-scoped-sandbox-environment-secret";
@@ -181,7 +182,12 @@ async function storedSession(grant: Grant, session: Session): Promise<Session> {
 }
 
 const AGENT_SUBJECT = "worker:first-party-mcp";
-const AGENT_PERMISSIONS: Permission[] = ["sessions:read", "files:read", "terminal:attach"];
+const AGENT_PERMISSIONS: Permission[] = [
+  "sessions:read",
+  "sessions:control",
+  "files:read",
+  "terminal:attach",
+];
 
 /** Claim a live attempt on the session's first turn the way the worker does,
  *  and return the agent-attempt grant claims that attempt carries. */
@@ -430,4 +436,57 @@ describe("session attach with a Sandbox Environment homed in another workspace",
       expect(await runtimeStatus(stored, subjectId)).toEqual({ status: 403 });
     }
   });
+
+  test.each(["browser", "computer"] as const)(
+    "the owner's agent reaches the %s controller through a personal environment",
+    async (surface) => {
+      if (!available) return;
+      const { home, team } = await organization();
+      const rig = await createRig(client.db, {
+        ...home,
+        scope: "user",
+        name: `owner personal environment for ${surface}`,
+        createdBy: home.subjectId,
+      });
+      // As in the agent Files case, claim first and then bind the environment:
+      // this fixture isolates attach authority from turn-time grant capture.
+      const session = await createSession(team);
+      const agent = await liveAgentAttempt(team, session.id);
+      await shared!.admin`
+        update sessions set rig_id = ${rig.id}, rig_version_id = ${rig.activeVersion!.id}
+        where id = ${session.id}`;
+
+      // Keep the composed route, live attempt, scoped Rig lookup, local sandbox
+      // placement and interaction holder real. Stop only when the controller
+      // would be provisioned, so this needs no live browser/desktop provider.
+      const message = "synthetic controller boundary reached";
+      const provision = spyOn(sandboxRuntime, "provisionBrowserControlClient").mockRejectedValue(
+        new sandboxRuntime.BrowserControlRequestError(422, {
+          code: "unsupported",
+          message,
+          retryable: false,
+        }),
+      );
+      try {
+        const response = await app().request(
+          `/v1/workspaces/${team.workspaceId}/${surface}-sessions`,
+          {
+            method: "POST",
+            headers: {
+              authorization: agent.authorization,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({ operationId: crypto.randomUUID(), sessionId: session.id }),
+          },
+        );
+        expect(response.status).toBe(200);
+        expect(provision).toHaveBeenCalledTimes(1);
+        expect(await response.json()).toMatchObject({
+          operation: { state: "failed", error: { message } },
+        });
+      } finally {
+        provision.mockRestore();
+      }
+    },
+  );
 });
