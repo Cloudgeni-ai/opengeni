@@ -124,6 +124,8 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "claude_subscription_pool_protocol_v1_active()",
   // M3 PR 2b: run only by the Codex Apps routines as their owner.
   "subscription_codex_apps_designation_target(uuid, uuid)",
+  // M3 PR 2c: run only by the Codex connection-seam routines as their owner.
+  "subscription_codex_connection_target(uuid, uuid, uuid, uuid, uuid, text, bigint)",
   "read_sender_connection(uuid, uuid, uuid, text)",
   // Lifecycle fact writers (migrations 0532 and 0565): owner-run trigger
   // functions and the migration-owner backfill. Runtime roles may still hold
@@ -705,6 +707,8 @@ export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
 export const SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES = [
   // M3 PR 2b: returns a full connection row to the Apps routines that run as its owner.
   "subscription_codex_apps_designation_target(uuid, uuid)",
+  // M3 PR 2c: returns a full connection row to the connection-seam routines.
+  "subscription_codex_connection_target(uuid, uuid, uuid, uuid, uuid, text, bigint)",
 ] as const;
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [

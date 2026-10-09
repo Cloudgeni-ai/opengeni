@@ -75,6 +75,39 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
+/**
+ * Fixture only: make an accepted turn's attempt live for a turn-bound
+ * (image) operation lease, which since M3 PR 2c must belong to the turn's
+ * running attempt and execution generation with a live chat-turn lease on
+ * the same connection.
+ */
+async function liveTurnAttempt(input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  connectionId: string;
+  attemptId: string;
+  generation: number;
+}): Promise<void> {
+  await shared!.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`update session_turns set status = 'running', active_attempt_id = ${input.attemptId}::uuid,
+        execution_generation = ${input.generation}
+      where account_id = ${input.accountId}::uuid and id = ${input.turnId}::uuid`;
+    await tx`delete from subscription_leases
+      where account_id = ${input.accountId}::uuid and turn_id = ${input.turnId}::uuid`;
+    await tx`insert into subscription_leases (
+        account_id, workspace_id, session_id, turn_id, provider, connection_id,
+        holder_id, generation, leased_until
+      ) values (
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid,
+        ${input.turnId}::uuid, 'codex', ${input.connectionId}::uuid,
+        ${`chat-${input.attemptId}`}, ${input.generation}, clock_timestamp() + interval '5 minutes'
+      )`;
+  });
+}
+
 async function fixture(connectionKind: "subscription" | "api_key" = "subscription") {
   const userId = `subscription-runtime-${crypto.randomUUID()}`;
   const access = await ensureManagedAccessForUser(client!.db, {
@@ -405,6 +438,16 @@ describe("provider-neutral subscription runtime persistence", () => {
         owner_subject_id: "",
         turn_human_subject_id: "",
       });
+      const ownerlessAttempt = crypto.randomUUID();
+      await liveTurnAttempt({
+        accountId: state.accountId,
+        workspaceId: state.workspaceId,
+        sessionId: ownerless.sessionId,
+        turnId: ownerless.turnId,
+        connectionId: workspaceConnection!.id,
+        attemptId: ownerlessAttempt,
+        generation: 1,
+      });
       const operationLease = await withSessionRlsActorContext(actor, () =>
         withRlsContext(
           client!.db,
@@ -414,7 +457,7 @@ describe("provider-neutral subscription runtime persistence", () => {
               accountId: state.accountId,
               workspaceId: state.workspaceId,
               operationId: crypto.randomUUID(),
-              attemptId: crypto.randomUUID(),
+              attemptId: ownerlessAttempt,
               operationKind: "image",
               sessionId: ownerless.sessionId,
               turnId: ownerless.turnId,
@@ -1458,11 +1501,21 @@ describe("provider-neutral subscription runtime persistence", () => {
         subjectId: "service:subscription-test",
         initiatingHumanSubjectId: state.subjectId,
       };
+      const liveAttempt = crypto.randomUUID();
+      await liveTurnAttempt({
+        accountId: state.accountId,
+        workspaceId: state.workspaceId,
+        sessionId: state.sessionId,
+        turnId: state.turnId,
+        connectionId: state.connectionId,
+        attemptId: liveAttempt,
+        generation: 1,
+      });
       const leaseInput = (operationId: string) => ({
         accountId: state.accountId,
         workspaceId: state.workspaceId,
         operationId,
-        attemptId: crypto.randomUUID(),
+        attemptId: liveAttempt,
         operationKind: "image" as const,
         sessionId: state.sessionId,
         turnId: state.turnId,
@@ -1516,6 +1569,16 @@ describe("provider-neutral subscription runtime persistence", () => {
         holderId: `reclaimer-${crypto.randomUUID()}`,
         generation: 2,
       };
+      // The turn's next attempt and execution generation take over.
+      await liveTurnAttempt({
+        accountId: state.accountId,
+        workspaceId: state.workspaceId,
+        sessionId: state.sessionId,
+        turnId: state.turnId,
+        connectionId: state.connectionId,
+        attemptId: reclaimer.attemptId,
+        generation: 2,
+      });
       const reclaimed = await withSessionRlsActorContext(actor, () =>
         withRlsContext(
           client!.db,

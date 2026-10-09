@@ -1665,10 +1665,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           : buildSessionCodexRealtimeBroker(
               db,
               settings,
-              workspaceId,
-              sessionId,
+              { accountId: grant.accountId, workspaceId, sessionId },
               deps.codexFetch,
-              grant.accountId,
             );
       try {
         const answer = await broker({

@@ -221,6 +221,16 @@ export async function renewSubscriptionCoreCodexOperationLease(
 ): Promise<Date | null> {
   const access = await withOperationScope(db, scope, async (tx) => {
     if (!(await codexCutoverEnabled(tx, scopeTenant(scope).accountId))) return null;
+    // Renewal touches only the expiry, so the lease guard does not rerun:
+    // re-check the full operation authority (live turn attempt and chat
+    // lease, scope, personal authority and settings) before extending it.
+    const [current] = await rawRows<{ status: string }>(
+      tx,
+      sql`select status from opengeni_private.read_subscription_codex_connection_credential(
+          ${routineArgs(scope, ref.connectionId, ref)}
+        )`,
+    );
+    if (!current || current.status !== "active") return null;
     return await renewSubscriptionOperationLease(tx, { ...leaseIdentity(scope, ref), ttlMs });
   });
   return access?.value ?? null;
@@ -795,6 +805,12 @@ export async function fetchSubscriptionCoreCodexUsage(
   try {
     token = await resolver.getToken();
   } catch (error) {
+    if (error instanceof SubscriptionCoreCodexOperationUnavailableError) {
+      // Not readable in this workspace context (for example a personal or
+      // people-scoped connection, which only its owner's turns may read):
+      // "no data here", not an error.
+      return { usage: { ...errorUsagePayload(), status: "no-data" }, recovered: false };
+    }
     return {
       usage: errorUsagePayload(error instanceof CodexReloginRequired ? "needs_relogin" : undefined),
       recovered: false,

@@ -6,18 +6,25 @@
 -- cutover is enabled, and the capability kind added below is minted only by
 -- these routines. Claude and xAI are untouched. No data moves.
 --
--- 1. subscription_codex_connection_target (internal; not granted here,
---    though role provisioning grants every opengeni_private routine, so it
---    exposes no more than read_subscription_codex_connection_credential)
---    returns one Codex subscription connection for one workspace context:
+-- 1. subscription_codex_connection_target (internal; revoked from the
+--    application role here and after role provisioning's schema-wide grant,
+--    and asserted by the runtime posture check) returns one Codex
+--    subscription connection for one workspace context. Every check is
+--    explicit, so the result does not depend on whether the routine owner is
+--    subject to row-level security:
 --    * with an operation id, only while the caller's exact live
 --      subscription_operation_leases row (operation, attempt, holder,
---      generation, connection) exists. A turn-bound operation (image) sees
---      the connection through the caller's row-level visibility for that
---      exact accepted turn, including a personal connection only under the
---      turn's frozen authority; a session-bound (realtime) or sessionless
---      (transcription) operation is limited to shared organization- or
---      workspace-scoped connections in the workspace's scope.
+--      generation, connection) exists and its session is visible. A
+--      turn-bound operation (image) additionally requires the turn to be
+--      running on exactly that attempt and execution generation with a live
+--      chat-turn lease on the same connection, and the connection to pass
+--      subscription_connection_visible for this transaction: a personal
+--      connection only with the in-transaction personal_access capability
+--      (the turn's frozen authority) and personal connections allowed now,
+--      and an ownerless turn only shared organization- or workspace-scoped
+--      capacity. A session-bound (realtime) or sessionless (transcription)
+--      operation is limited to shared organization- or workspace-scoped
+--      connections in the workspace's scope.
 --    * without an operation id (usage refresh, reset credits), only a shared
 --      organization- or workspace-scoped connection in the workspace's scope.
 -- 2. read_subscription_codex_connection_credential returns its credential
@@ -40,7 +47,9 @@
 -- 5. guard_subscription_operation_lease_reference also admits a realtime
 --    operation for an ownerless session (no turn, no initiating human), which
 --    the existing shared-only check limits to organization- or
---    workspace-scoped shared connections. Every other branch is unchanged.
+--    workspace-scoped shared connections, and requires a turn-bound
+--    operation to belong to the turn's running attempt and execution
+--    generation with a live chat-turn lease on the same connection.
 
 SET LOCAL lock_timeout = '5s';
 
@@ -99,6 +108,7 @@ BEGIN
       operation_lease subscription_operation_leases%%ROWTYPE;
       target subscription_connections%%ROWTYPE;
       turn_bound boolean := false;
+      session_owner text;
     BEGIN
       IF p_account_id IS NULL OR p_workspace_id IS NULL OR p_connection_id IS NULL
         OR p_account_id IS DISTINCT FROM nullif(current_setting('opengeni.account_id', true), '')::uuid
@@ -123,7 +133,32 @@ BEGIN
           AND lease.provider = 'codex' AND lease.connection_id = p_connection_id
           AND lease.leased_until > pg_catalog.clock_timestamp();
         IF NOT FOUND THEN RETURN; END IF;
+        IF operation_lease.session_id IS NOT NULL AND NOT session_reference_visible(
+          p_account_id, p_workspace_id, operation_lease.session_id
+        ) THEN RETURN; END IF;
         turn_bound := operation_lease.turn_id IS NOT NULL;
+        IF turn_bound THEN
+          -- The operation belongs to the turn's live attempt: the turn runs on
+          -- exactly this attempt and execution generation and still holds its
+          -- chat-turn lease on this connection.
+          SELECT session.owner_subject_id INTO session_owner
+          FROM sessions session
+          JOIN session_turns turn ON turn.account_id = session.account_id
+            AND turn.workspace_id = session.workspace_id AND turn.session_id = session.id
+          WHERE session.account_id = p_account_id AND session.workspace_id = p_workspace_id
+            AND session.id = operation_lease.session_id AND turn.id = operation_lease.turn_id
+            AND turn.status = 'running'
+            AND turn.active_attempt_id = operation_lease.attempt_id
+            AND turn.execution_generation = operation_lease.generation;
+          IF NOT FOUND OR NOT EXISTS (
+            SELECT 1 FROM subscription_leases chat
+            WHERE chat.account_id = p_account_id AND chat.workspace_id = p_workspace_id
+              AND chat.session_id = operation_lease.session_id
+              AND chat.turn_id = operation_lease.turn_id
+              AND chat.provider = 'codex' AND chat.connection_id = p_connection_id
+              AND chat.leased_until > pg_catalog.clock_timestamp()
+          ) THEN RETURN; END IF;
+        END IF;
       ELSIF p_attempt_id IS NOT NULL OR p_holder_id IS NOT NULL OR p_generation IS NOT NULL THEN
         RETURN;
       END IF;
@@ -133,6 +168,32 @@ BEGIN
       WHERE connection.account_id = p_account_id AND connection.id = p_connection_id
         AND connection.provider = 'codex' AND connection.kind = 'subscription';
       IF NOT FOUND THEN RETURN; END IF;
+      IF turn_bound THEN
+        -- Explicit visibility for this transaction's exact accepted turn,
+        -- never the routine owner's row-level security posture.
+        IF NOT opengeni_private.subscription_connection_visible(
+          p_account_id, p_workspace_id, target.id, target.ownership, target.scope_kind,
+          target.owner_organization_membership_id, target.owner_subject_id, target.provider
+        ) THEN RETURN; END IF;
+        IF session_owner IS NULL AND (target.ownership IS DISTINCT FROM 'shared'
+          OR target.scope_kind NOT IN ('organization', 'workspaces'))
+        THEN RETURN; END IF;
+        IF target.ownership = 'personal' AND NOT (
+          EXISTS (
+            SELECT 1 FROM opengeni_private.subscription_runtime_capabilities capability
+            WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+              AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+              AND capability.capability_kind = 'personal_access'
+              AND capability.account_id = p_account_id
+              AND capability.connection_id = target.id
+              AND capability.session_id = operation_lease.session_id
+              AND capability.turn_id = operation_lease.turn_id
+          )
+          AND coalesce((subscription_effective_settings(
+            p_account_id, p_workspace_id
+          ) #>> '{values,personalConnectionsAllowed}')::boolean, false)
+        ) THEN RETURN; END IF;
+      END IF;
       -- Outside an exact accepted turn only shared organization- or
       -- workspace-scoped capacity in this workspace's scope is usable: no
       -- caller, creator or viewer authority reaches a personal or
@@ -386,6 +447,9 @@ BEGIN
       session_owner text;
       session_owner_membership uuid;
       turn_human text;
+      turn_status text;
+      turn_attempt uuid;
+      turn_generation bigint;
       personal_authorized boolean := false;
       ownerless_session boolean := false;
     BEGIN
@@ -421,12 +485,31 @@ BEGIN
         ownerless_session := session_owner IS NULL;
 
         IF NEW.turn_id IS NOT NULL THEN
-          SELECT turn.initiating_human_subject_id INTO turn_human
+          SELECT turn.initiating_human_subject_id, turn.status, turn.active_attempt_id,
+              turn.execution_generation
+            INTO turn_human, turn_status, turn_attempt, turn_generation
           FROM session_turns turn
           WHERE turn.account_id = NEW.account_id AND turn.workspace_id = NEW.workspace_id
             AND turn.session_id = NEW.session_id AND turn.id = NEW.turn_id;
           IF NOT FOUND THEN
             RAISE EXCEPTION 'subscription operation turn is not in the referenced session'
+              USING ERRCODE = '42501';
+          END IF;
+          -- A turn-bound operation belongs to the turn's live attempt: running
+          -- on exactly this attempt and execution generation, with its live
+          -- chat-turn lease on the same connection.
+          IF turn_status IS DISTINCT FROM 'running'
+            OR turn_attempt IS DISTINCT FROM NEW.attempt_id
+            OR turn_generation IS DISTINCT FROM NEW.generation
+            OR NOT EXISTS (
+              SELECT 1 FROM subscription_leases chat
+              WHERE chat.account_id = NEW.account_id AND chat.workspace_id = NEW.workspace_id
+                AND chat.session_id = NEW.session_id AND chat.turn_id = NEW.turn_id
+                AND chat.provider = NEW.provider AND chat.connection_id = NEW.connection_id
+                AND chat.leased_until > pg_catalog.clock_timestamp()
+            )
+          THEN
+            RAISE EXCEPTION 'subscription operation turn is not the live attempt holding this connection'
               USING ERRCODE = '42501';
           END IF;
           IF ownerless_session THEN
@@ -585,8 +668,9 @@ REVOKE ALL ON FUNCTION opengeni_private.subscription_codex_reset_authority(
   uuid, uuid, uuid, text
 ) FROM PUBLIC;
 
--- The internal target helper is not granted here; the routines above call it
--- as its owner.
+-- The internal target helper is never executable by the application role;
+-- the routines above call it as its owner. Revoke explicitly so default
+-- privileges or an earlier schema-wide grant cannot expose it.
 DO $grant_codex_connection$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
@@ -605,6 +689,9 @@ BEGIN
     GRANT EXECUTE ON FUNCTION opengeni_private.subscription_codex_reset_authority(
       uuid, uuid, uuid, text
     ) TO opengeni_app;
+    REVOKE EXECUTE ON FUNCTION opengeni_private.subscription_codex_connection_target(
+      uuid, uuid, uuid, uuid, uuid, text, bigint
+    ) FROM opengeni_app;
   END IF;
 END
 $grant_codex_connection$;

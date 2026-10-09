@@ -49,6 +49,7 @@ import {
   readSubscriptionCoreCodexResetAuthority,
   resolveSubscriptionCoreCodexConnectionId,
   subscriptionCoreCodexResetAuthority,
+  SubscriptionCoreCodexOperationUnavailableError,
   withSessionRlsActorContext,
   claimCodexResetRedemption,
   completeCodexResetRedemption,
@@ -2859,6 +2860,11 @@ async function coreCodexOverview(
           null,
         ).getToken();
       } catch (error) {
+        // Not readable in this workspace context: reset details are not
+        // available here (reported as unsupported, not as a failure).
+        if (error instanceof SubscriptionCoreCodexOperationUnavailableError) {
+          return { ok: false as const, status: 404, reason: "http_error" as const };
+        }
         return {
           ok: false as const,
           status: 0,

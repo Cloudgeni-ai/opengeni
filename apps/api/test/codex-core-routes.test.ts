@@ -385,6 +385,32 @@ describe("Codex routes with an enabled cutover", () => {
     ]);
   });
 
+  test("a failed wake hint never turns a committed usage read into an error", async () => {
+    cutover("core");
+    mock("getSubscriptionCoreCodexWorkspaceProjection", async () => projection);
+    mock("deliverSubscriptionCoreCodexWake", async () => {
+      throw new Error("wake delivery failed");
+    });
+    const usage = {
+      status: "ok" as const,
+      planType: "pro",
+      fiveHour: null,
+      weekly: null,
+      limitReached: false,
+      fetchedAt: new Date(0).toISOString(),
+      rateLimitResetCredits: null,
+    };
+    mock("fetchSubscriptionCoreCodexUsage", async () => ({ usage, recovered: true }));
+    const headers = { authorization: await bearer(["workspace:read"]) };
+    const live = await app().request(`/v1/workspaces/${WS}/codex/usage`, { headers });
+    expect(live.status).toBe(200);
+    const refresh = await app().request(`/v1/workspaces/${WS}/codex/usage/refresh`, {
+      method: "POST",
+      headers,
+    });
+    expect(await refresh.json()).toEqual({ usage: { [CONNECTION]: { status: "ok", usage } } });
+  });
+
   test("the overview settles usage and reset details per account through the core seam", async () => {
     cutover("core");
     mock("getSubscriptionCoreCodexWorkspaceProjection", async () => projection);

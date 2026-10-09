@@ -409,10 +409,12 @@ async function liveCoreCodexUsage(
     (deps.codexFetch ?? fetch) as CodexFetch,
   );
   if (recovered) {
+    // The quota observation already committed; a failed wake hint must never
+    // turn the read into an error (every core waiter has its own recheck).
     await deliverSubscriptionCoreCodexWake(deps.db, {
       accountId: grant.accountId,
       reason: "usage_recovered",
-    });
+    }).catch(() => undefined);
   }
   return usage;
 }

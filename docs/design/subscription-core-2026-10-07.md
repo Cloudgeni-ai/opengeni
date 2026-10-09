@@ -1449,6 +1449,50 @@ enabled, and one added branch in the operation-lease guard.
   human only; any other caller sees `managed_human_unavailable` and no
   redemption actions.
 
+Review fixes (round 1):
+
+- **Image operations are tied to the live turn attempt.** Both layers check
+  it. The worker calls the chat lease's dispatch fence
+  (`assertCurrentForDispatch`) before taking the image lease and again before
+  the provider call. In SQL, the operation-lease guard (at creation) and the
+  connection target (on every read, refresh and renewal) require the turn to
+  be `running` on exactly the lease's attempt and execution generation, with
+  a live chat-turn lease on the same connection. A cancelled turn, a
+  superseded generation or an attempt that was never active can neither
+  lease, read nor renew.
+- **No reliance on the routine owner's row-level security.** The target
+  routine's turn-bound branch checks visibility explicitly through
+  `subscription_connection_visible`. A personal connection additionally
+  needs the in-transaction `personal_access` capability for this exact turn
+  and personal connections allowed now, and an ownerless turn is limited to
+  shared organization- or workspace-scoped capacity. Leased sessions must be
+  visible. Renewal re-runs the full target check before extending a lease,
+  because a renewal touches only the expiry and the guard does not rerun.
+  The reset-authority routine and the refresh persist/fail routines already
+  decide explicitly. The suite runs the personal and revocation cases under
+  both the shared superuser-owned template and a `NOBYPASSRLS` migration
+  owner.
+- **Owner-only target helper.** `subscription_codex_connection_target` is
+  revoked from the application role in 0671 and again after role
+  provisioning's schema-wide grant, and the runtime posture check rejects an
+  executable helper.
+- **Image pre-dispatch failures.** Any failure before dispatch (a thrown or
+  refused lease acquisition, a lost chat lease, a failed renewal) is a
+  verified pre-dispatch rejection: the ledger row returns to `prepared` and
+  is never marked outcome-unknown. The holder id is a fixed-length hash of
+  the attempt and tool-call id.
+- **Attribution survives a deleted connection.** A foreign-key violation on
+  `connection_id` (the connection deleted mid-turn) retries the fact without
+  the attribution instead of dropping it.
+- **Realtime requires its account.** The broker takes the account
+  explicitly, so a disabled cutover always fails closed.
+- **Wake hints never fail a committed read.** Usage routes catch a failed
+  core wake delivery, as the overview does.
+- **Unreadable connections report no data.** A connection the caller's
+  workspace context may not read (personal or people-scoped) yields usage
+  `status: "no-data"` and reset details reported as unsupported, not an
+  error, keeping the response shape.
+
 Left to PR 3:
 
 - **Connect start/poll and disconnect (one or all).** Their core writers must
@@ -1456,6 +1500,13 @@ Left to PR 3:
   credential replacement, take the `subscription-refresh:<id>` key.
 - **Organization-level reset redemption** for organization-managed
   connections (see the decision above).
+- **One ledger across the legacy and core paths for reset redemption.** The
+  advisory locks and the per-credit lookup key on the credential id. While a
+  legacy id and its canonical core id differ (an alias), a legacy attempt and
+  a core attempt for the same credit do not see each other. The drained
+  migration must resolve ledger rows through aliases, or key the fence on
+  the provider account, so a credit can never be redeemed twice across the
+  cutover.
 - **Facts repair.** The Insights repair that recreates a missing model-call
   fact from its usage event does not know the connection; a repaired fact
   has a NULL `connection_id`.

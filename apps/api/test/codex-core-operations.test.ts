@@ -168,12 +168,10 @@ describe("Codex realtime on the shared core", () => {
     const broker = buildSessionCodexRealtimeBroker(
       db,
       settings,
-      WS,
-      SESSION,
+      { accountId: ACCOUNT, workspaceId: WS, sessionId: SESSION },
       (async () => {
         throw new Error("provider must not be called");
       }) as never,
-      ACCOUNT,
     );
     const failure = await broker({ request: { sdp: "v=0", version: "v3" } as never }).catch(
       (error: unknown) => error,
@@ -196,7 +194,12 @@ describe("Codex realtime on the shared core", () => {
 
   test("a disabled cutover row fails closed without legacy reads", async () => {
     cutover("maintenance");
-    const broker = buildSessionCodexRealtimeBroker(db, settings, WS, SESSION, fetch, ACCOUNT);
+    const broker = buildSessionCodexRealtimeBroker(
+      db,
+      settings,
+      { accountId: ACCOUNT, workspaceId: WS, sessionId: SESSION },
+      fetch,
+    );
     const failure = await broker({ request: { sdp: "v=0", version: "v3" } as never }).catch(
       (error: unknown) => error,
     );

@@ -2122,6 +2122,13 @@ BEGIN
     END LOOP;
     -- The Codex Apps designation target helper returns a full connection row;
     -- only its owner-run callers may execute it, never the runtime role.
+    -- The Codex connection target helper (M3 PR 2c) is owner-only for the same reason.
+    IF to_regprocedure('opengeni_private.subscription_codex_connection_target(uuid,uuid,uuid,uuid,uuid,text,bigint)') IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.subscription_codex_connection_target(uuid,uuid,uuid,uuid,uuid,text,bigint) FROM %I',
+        ${literal(role)}
+      );
+    END IF;
     IF to_regprocedure('opengeni_private.subscription_codex_apps_designation_target(uuid,uuid)') IS NOT NULL THEN
       EXECUTE format(
         'REVOKE EXECUTE ON FUNCTION opengeni_private.subscription_codex_apps_designation_target(uuid,uuid) FROM %I',

@@ -332,6 +332,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
                 core,
                 executionGeneration,
                 clientVersion: codexContext.clientVersion,
+                assertChatLease: () => leases.codex.assertCurrentForDispatch(),
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,

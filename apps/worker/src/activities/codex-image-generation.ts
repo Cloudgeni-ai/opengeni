@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   CODEX_PROVIDER_ID,
   CODEX_IMAGE_MODEL,
@@ -48,6 +49,8 @@ export async function executeCodexImageGeneration(
     abortSignal?: AbortSignal;
     /** Core turns only: the per-operation lease held around the provider call. */
     operationLease?: { acquire(): Promise<void>; release(): Promise<void> };
+    /** Test seam for the provider request; production uses the Codex image client. */
+    generateImage?: typeof generateCodexSubscriptionImage;
   },
   ports?: ImageGenerationOperationPorts,
 ): Promise<GeneratedImageReceipt> {
@@ -78,7 +81,7 @@ export async function executeCodexImageGeneration(
         await input.operationLease?.acquire();
         let generated: Awaited<ReturnType<typeof generateCodexSubscriptionImage>>;
         try {
-          generated = await generateCodexSubscriptionImage({
+          generated = await (input.generateImage ?? generateCodexSubscriptionImage)({
             prompt: input.prompt,
             ...(input.references ? { references: input.references } : {}),
             turnId: input.turnId,
@@ -118,12 +121,20 @@ export async function executeCoreCodexImageGeneration(
     core: { identity: SubscriptionCoreTurnIdentity; connectionId: string };
     executionGeneration: number;
     clientVersion: string;
+    /**
+     * The turn's chat-lease dispatch fence (`leases.codex.assertCurrentForDispatch`):
+     * an image operation runs only while its turn's live attempt still holds
+     * the chat lease, checked before the operation lease is taken and before
+     * the provider call.
+     */
+    assertChatLease: () => Promise<void>;
     deps?: {
       acquire?: typeof acquireSubscriptionCoreCodexOperationLease;
       renew?: typeof renewSubscriptionCoreCodexOperationLease;
       release?: typeof releaseSubscriptionCoreCodexOperationLease;
       resolver?: typeof buildSubscriptionCoreCodexConnectionTokenResolver;
       ports?: ImageGenerationOperationPorts;
+      generateImage?: typeof generateCodexSubscriptionImage;
     };
   },
 ): Promise<GeneratedImageReceipt> {
@@ -151,10 +162,21 @@ export async function executeCoreCodexImageGeneration(
     attemptId: input.attemptId,
     operationKind: "image",
     connectionId: input.core.connectionId,
-    holderId: `image:${input.attemptId}:${input.toolCallId}`,
+    // Bounded (the column allows 256 characters): tool-call ids are provider-supplied.
+    holderId: `image:${createHash("sha256").update(`${input.attemptId}\0${input.toolCallId}`).digest("hex")}`,
     generation: input.executionGeneration,
   };
   const resolver = buildResolver(input.db, input.settings, scope, input.core.connectionId, ref);
+  // Nothing has reached the provider yet: any failure here, including a
+  // transient database error, is a verified pre-dispatch rejection.
+  const preDispatch = async (step: () => Promise<void>): Promise<void> => {
+    try {
+      await step();
+    } catch (error) {
+      if (error instanceof CodexCredentialLeaseLostError) throw error;
+      throw new CodexCredentialLeaseLostError("not_found");
+    }
+  };
   const unavailable = (error: unknown): never => {
     // The operation lost its lease, scope or enabled cutover before dispatch.
     if (error instanceof SubscriptionCoreCodexOperationUnavailableError) {
@@ -162,24 +184,38 @@ export async function executeCoreCodexImageGeneration(
     }
     throw error;
   };
-  const { deps: _deps, settings: _settings, core: _core, ...operationInput } = input;
+  const {
+    deps: _deps,
+    settings: _settings,
+    core: _core,
+    assertChatLease: _assertChatLease,
+    ...operationInput
+  } = input;
   return await executeCodexImageGeneration(
     {
       ...operationInput,
       credentialId: input.core.connectionId,
+      ...(input.deps?.generateImage ? { generateImage: input.deps.generateImage } : {}),
       codexContext: {
         clientVersion: input.clientVersion,
         getToken: () => resolver.getToken().catch(unavailable),
         refresh: () => resolver.refresh().catch(unavailable),
         beforeProviderDispatch: async () => {
-          if (!(await renew(input.db, scope, ref)))
-            throw new CodexCredentialLeaseLostError("not_found");
+          await preDispatch(async () => {
+            await input.assertChatLease();
+            if (!(await renew(input.db, scope, ref))) {
+              throw new CodexCredentialLeaseLostError("not_found");
+            }
+          });
         },
       },
       operationLease: {
         acquire: async () => {
-          const lease = await acquire(input.db, scope, ref);
-          if (lease.kind !== "acquired") throw new CodexCredentialLeaseLostError("not_found");
+          await preDispatch(async () => {
+            await input.assertChatLease();
+            const lease = await acquire(input.db, scope, ref);
+            if (lease.kind !== "acquired") throw new CodexCredentialLeaseLostError("not_found");
+          });
         },
         release: async () => {
           await release(input.db, scope, ref);

@@ -10,8 +10,10 @@ import {
   createDb,
   createSession,
   enqueueSessionTurn,
+  fetchSubscriptionCoreCodexUsage,
   ensureManagedAccessForUser,
   listSubscriptionCoreCodexOperationCandidates,
+  placeSubscriptionCoreCodexTurn,
   loadSubscriptionCoreCodexConnectionCredential,
   readCodexCutoverDisposition,
   readSubscriptionCoreTurnIdentity,
@@ -30,6 +32,9 @@ import {
 } from "../src";
 import { rawRows } from "../src/database";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
+import { migrate } from "../src/migrate";
+import { provisionRoles } from "../src/provision-roles";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
 
 setDefaultTimeout(180_000);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -162,6 +167,12 @@ async function sharedConnection(
 }
 
 async function personalConnection(org: Org, label: string): Promise<string> {
+  // Placement needs the owner's personal-fallback opt-in.
+  await shared!.admin`
+    insert into subscription_person_preferences (
+      account_id, organization_membership_id, personal_fallback_opt_in
+    ) values (${org.accountId}::uuid, ${org.ownerMembershipId}::uuid, true)
+    on conflict do nothing`;
   const connectionId = crypto.randomUUID();
   const authorityId = crypto.randomUUID();
   await shared!.admin`
@@ -258,14 +269,19 @@ async function runningTurn(
   if (claimed.action !== "claimed") throw new Error(`claim failed: ${claimed.reason}`);
   expect(claimed.turn.id).toBe(turn.id);
   if (input.personalAuthority) {
-    await shared!.admin`
-      update session_turns set subscription_authority = ${shared!.admin.json({
+    // Fixture only: the immutable-authority trigger admits only the table
+    // owner, which is not this superuser in an owner-migrated database.
+    await shared!.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`
+      update session_turns set subscription_authority = ${tx.json({
         version: 2,
         personal: [
           { provider: "codex", ownerMembershipId: org.ownerMembershipId, authorityGeneration: 1 },
         ],
       })}::jsonb
       where account_id = ${org.accountId}::uuid and id = ${turn.id}::uuid`;
+    });
   }
   const identity = await readSubscriptionCoreTurnIdentity(client!.db, {
     accountId: org.accountId,
@@ -295,6 +311,30 @@ function ref(
     generation: 1,
     ...overrides,
   };
+}
+
+/** Place the turn's chat lease on the core (image operations require it). */
+async function placeChat(turn: TurnFixture, connectionId: string): Promise<void> {
+  const placed = await placeSubscriptionCoreCodexTurn(client!.db, {
+    identity: turn.identity,
+    attemptId: turn.attemptId,
+    executionGeneration: turn.executionGeneration,
+    holderId: turn.holderId,
+    productModelId: MODEL,
+    reasoningLevel: "medium",
+    leaseTtlMs: 120_000,
+  });
+  expect(placed).toMatchObject({ kind: "run", connectionId });
+}
+
+async function chatState(turn: TurnFixture) {
+  const rows = await shared!.admin<{ lease: string | null; binding: string | null }[]>`
+    select (select string_agg(connection_id::text || ':' || holder_id || ':' || generation::text
+              || ':' || leased_until::text, ',')
+            from subscription_leases where turn_id = ${turn.identity.turnId}::uuid) as lease,
+      (select string_agg(connection_id::text || ':' || version::text, ',')
+       from subscription_session_bindings where session_id = ${turn.identity.sessionId}::uuid) as binding`;
+  return rows[0]!;
 }
 
 function turnScope(turn: TurnFixture): SubscriptionCoreCodexOperationScope {
@@ -396,6 +436,9 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
     await setCutover(org.accountId, true);
     const connectionId = await sharedConnection(org, "ops-image");
     const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    await placeChat(turn, connectionId);
+    const chatBefore = await chatState(turn);
+    expect(chatBefore.lease).not.toBeNull();
     const scope = turnScope(turn);
     const first = ref(connectionId, {
       attemptId: turn.attemptId,
@@ -436,11 +479,8 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
         turn_id: turn.identity.turnId,
       },
     ]);
-    // The chat-turn lease table and the session binding are untouched.
-    const [chat] = await shared!.admin<{ leases: number; bindings: number }[]>`
-      select (select count(*)::int from subscription_leases where turn_id = ${turn.identity.turnId}::uuid) as leases,
-        (select count(*)::int from subscription_session_bindings where session_id = ${turn.identity.sessionId}::uuid) as bindings`;
-    expect(chat).toEqual({ leases: 0, bindings: 0 });
+    // The chat-turn lease and the session binding are untouched.
+    expect(await chatState(turn)).toEqual(chatBefore);
 
     const loaded = await loadSubscriptionCoreCodexConnectionCredential(
       client!.db,
@@ -547,6 +587,7 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
       visibility: "user_private",
       personalAuthority: true,
     });
+    await placeChat(authorized, personal);
     const lease = ref(personal, {
       attemptId: authorized.attemptId,
       generation: authorized.executionGeneration,
@@ -933,7 +974,194 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
       select connection_id::text as connection_id from model_call_facts where id = ${fact.id}::uuid`;
     expect(row).toEqual({ connection_id: connectionId });
   });
+  test("an image operation needs its turn's running attempt, generation and live chat lease", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const connectionId = await sharedConnection(org, "ops-liveness");
+    const operation = async (
+      turn: TurnFixture,
+      overrides: Partial<SubscriptionCoreCodexOperationLeaseRef> = {},
+    ) => {
+      const lease = ref(connectionId, {
+        attemptId: turn.attemptId,
+        generation: turn.executionGeneration,
+        ...overrides,
+      });
+      return {
+        lease,
+        acquired: (
+          await acquireSubscriptionCoreCodexOperationLease(client!.db, turnScope(turn), lease)
+        ).kind,
+      };
+    };
+    const readable = async (turn: TurnFixture, lease: SubscriptionCoreCodexOperationLeaseRef) =>
+      (
+        await loadSubscriptionCoreCodexConnectionCredential(
+          client!.db,
+          settings,
+          turnScope(turn),
+          connectionId,
+          lease,
+        )
+      ).kind;
+
+    // No chat lease yet: refused.
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect((await operation(turn)).acquired).toBe("refused");
+    await placeChat(turn, connectionId);
+    // A random attempt that was never active, or another generation, is refused.
+    expect((await operation(turn, { attemptId: crypto.randomUUID() })).acquired).toBe("refused");
+    expect((await operation(turn, { generation: 99 })).acquired).toBe("refused");
+    const live = await operation(turn);
+    expect(live.acquired).toBe("acquired");
+    expect(await readable(turn, live.lease)).toBe("loaded");
+
+    // A superseded execution generation stops reads and renewals of the old lease.
+    await shared!.admin`update session_turns set execution_generation = execution_generation + 5
+      where id = ${turn.identity.turnId}::uuid`;
+    expect(await readable(turn, live.lease)).toBe("not_visible");
+    expect(
+      await renewSubscriptionCoreCodexOperationLease(client!.db, turnScope(turn), live.lease),
+    ).toBeNull();
+    await shared!.admin`update session_turns set execution_generation = execution_generation - 5
+      where id = ${turn.identity.turnId}::uuid`;
+    expect(await readable(turn, live.lease)).toBe("loaded");
+
+    // A settled (cancelled) turn's stale attempt can neither acquire nor read.
+    const [trigger] = await shared!.admin<{ id: string }[]>`
+      select trigger_event_id::text as id from session_turns where id = ${turn.identity.turnId}::uuid`;
+    const settled = await applySessionTurnSettlement(client!.db, org.sharedWorkspaceId, {
+      sessionId: turn.identity.sessionId,
+      turnId: turn.identity.turnId,
+      triggerEventId: trigger!.id,
+      attemptId: turn.attemptId,
+      turnStatus: "cancelled",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.cancelled", payload: { reason: "test" } }],
+    });
+    expect(settled.action).toBe("settled");
+    expect(await readable(turn, live.lease)).toBe("not_visible");
+    expect(
+      await renewSubscriptionCoreCodexOperationLease(client!.db, turnScope(turn), live.lease),
+    ).toBeNull();
+    expect((await operation(turn)).acquired).not.toBe("acquired");
+  });
+
+  test("a connection not readable in this workspace reports no data, not an error", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const people = await peopleConnection(org, "ops-usage-people");
+    const personal = await personalConnection(org, "ops-usage-personal");
+    for (const connectionId of [people, personal]) {
+      const read = await fetchSubscriptionCoreCodexUsage(
+        client!.db,
+        settings,
+        workspaceScope(org, org.personalWorkspaceId),
+        connectionId,
+        (async () => {
+          throw new Error("no provider call for an unreadable connection");
+        }) as never,
+      );
+      expect(read.usage.status).toBe("no-data");
+      expect(read.recovered).toBe(false);
+    }
+  });
+
+  test("the connection target helper is owner-only", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const connectionId = await sharedConnection(org, "ops-helper");
+    const direct = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+      rawRows(
+        client!.db,
+        sql`select id from opengeni_private.subscription_codex_connection_target(
+          ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${connectionId}::uuid,
+          null, null, null, null)`,
+      ),
+    ).catch((error: unknown) => error);
+    expect(String((direct as { cause?: unknown })?.cause ?? direct)).toContain("permission denied");
+  });
+
+  test("personal reads and renewals recheck current settings and authority explicitly", async () => {
+    await personalRevocationCase();
+  });
+
+  test("personal reads and renewals recheck explicitly under a NOBYPASSRLS migration owner", async () => {
+    const owned = await acquireOwnerMigratedTestDatabase(
+      "subscription-core-codex-operations-owner",
+    );
+    if (!owned) throw new Error("Real PostgreSQL is required");
+    const previous = { shared, client };
+    let ownerClient: DbClient | null = null;
+    try {
+      await migrate(owned.ownerUrl);
+      await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword });
+      const appUrl = new URL(owned.ownerUrl);
+      appUrl.username = "opengeni_app";
+      appUrl.password = owned.appPassword;
+      ownerClient = createDb(appUrl.toString(), { max: 4 });
+      shared = { ...previous.shared!, admin: owned.admin } as SharedTestDatabase;
+      client = ownerClient;
+      // Role provisioning grants every opengeni_private routine; the target
+      // helper is revoked again after that blanket grant.
+      const [executable] = await owned.admin<{ executable: boolean }[]>`
+        select has_function_privilege('opengeni_app',
+          'opengeni_private.subscription_codex_connection_target(uuid,uuid,uuid,uuid,uuid,text,bigint)',
+          'EXECUTE') as executable`;
+      expect(executable).toEqual({ executable: false });
+      await personalRevocationCase();
+    } finally {
+      shared = previous.shared;
+      client = previous.client;
+      await ownerClient?.close();
+      await owned.release();
+    }
+  }, 900_000);
 });
+
+async function personalRevocationCase(): Promise<void> {
+  const org = await organization();
+  await setCutover(org.accountId, true);
+  const personal = await personalConnection(org, "ops-revocation");
+  const turn = await runningTurn(org, {
+    workspaceId: org.personalWorkspaceId,
+    visibility: "user_private",
+    personalAuthority: true,
+  });
+  await placeChat(turn, personal);
+  const lease = ref(personal, { attemptId: turn.attemptId, generation: turn.executionGeneration });
+  const scope = turnScope(turn);
+  expect((await acquireSubscriptionCoreCodexOperationLease(client!.db, scope, lease)).kind).toBe(
+    "acquired",
+  );
+  const readable = async () =>
+    (
+      await loadSubscriptionCoreCodexConnectionCredential(
+        client!.db,
+        settings,
+        scope,
+        personal,
+        lease,
+      )
+    ).kind;
+  expect(await readable()).toBe("loaded");
+
+  // Personal connections switched off: no read, no renewal.
+  await shared!.admin`update subscription_settings set personal_connections_allowed = false
+    where account_id = ${org.accountId}::uuid and workspace_id is null`;
+  expect(await readable()).toBe("not_visible");
+  expect(await renewSubscriptionCoreCodexOperationLease(client!.db, scope, lease)).toBeNull();
+  await shared!.admin`update subscription_settings set personal_connections_allowed = true
+    where account_id = ${org.accountId}::uuid and workspace_id is null`;
+  expect(await readable()).toBe("loaded");
+
+  // The owner's resource authority revoked: no read, no renewal.
+  await shared!.admin`update organization_user_resource_authorities
+    set status = 'revoked', revoked_at = now() where resource_id = ${personal}::uuid`;
+  expect(await readable()).toBe("not_visible");
+  expect(await renewSubscriptionCoreCodexOperationLease(client!.db, scope, lease)).toBeNull();
+}
 
 async function connectionRefreshGeneration(connectionId: string): Promise<number> {
   const [row] = await shared!.admin<{ generation: string }[]>`
