@@ -19,7 +19,13 @@ import { parseExecResponseBanner } from "./exec-banner";
 type Invoke = FunctionTool["invoke"];
 type NestedTool = { name: string; description: string; parameters: unknown; invoke: Invoke };
 
-const DEFAULT_MAX_OUTPUT_CHARS = 40_000;
+/** Result budget for one `exec` call, in approximate tokens (4 chars each). Sized
+ * like the larger direct `exec_command` outputs, so moving work into a script
+ * never grows the context faster than the direct tools would. */
+const DEFAULT_EXEC_RESULT_TOKENS = 6_000;
+/** Budget for one drained nested shell command when the call sets none. */
+const DEFAULT_NESTED_OUTPUT_TOKENS = 10_000;
+const CHARS_PER_TOKEN = 4;
 const CPU_INTERRUPT_MS = 60_000;
 
 let quickjs: ReturnType<typeof newQuickJSWASMModule> | null = null;
@@ -53,7 +59,8 @@ function describe(nested: NestedTool[]): string {
     "- All nested tools are available on the global `tools` object, for example `await tools.exec_command({cmd: \"ls\"})`.",
     "- Nested tool methods take either an object (the tool's JSON arguments) or a string.",
     "- Nested tools return the tool's output (usually a string).",
-    "- Nested `exec_command` and `write_stdin` wait until the command exits, however long it runs, and return its complete output and exit code; you never need to poll. Pass `background: true` to get the running session handle back after `yield_time_ms` instead (for servers or watchers you will interact with).",
+    "- Nested `exec_command` and `write_stdin` wait until the command exits and return its output and exit code; you never need to poll. Their stdin is closed (reads see EOF) unless you pass `tty: true`, so a command that would read input finishes instead of waiting. If a command prints nothing for 5 minutes, the call returns its running session ID instead of blocking; continue with `tools.write_stdin({session_id, chars: \"\"})`. Pass `background: true` to get the running session handle back after `yield_time_ms` (for servers or watchers you will interact with).",
+    `- Nested shell output is cleaned of terminal control codes and progress redraws, and long output keeps its beginning and end within \`max_output_tokens\` (default ${DEFAULT_NESTED_OUTPUT_TOKENS}). The whole \`exec\` result keeps its beginning and end within about ${DEFAULT_EXEC_RESULT_TOKENS} tokens, so filter large output in the script and \`text(...)\` only what you need.`,
     "- Runs raw JavaScript -- no Node, no file system, no network access, no console. Use nested tools for side effects.",
     "- Run independent calls concurrently with `await Promise.allSettled([...])`; chain dependent steps in one script instead of separate exec calls when the next step does not need your judgment.",
     "- Only output you pass to `text(...)` is returned to you; return just what you need to see.",
@@ -71,6 +78,84 @@ function describe(nested: NestedTool[]): string {
 
 const WAIT_SLICE_MS = 30_000;
 const WAIT_CEILING_MS = 60 * 60 * 1000;
+const SILENCE_RETURN_MS = 5 * 60 * 1000;
+
+// CSI/OSC/two-byte escape sequences emitted by progress bars and colored logs.
+const ANSI_ESCAPE = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[@-Z\\-_])/gu;
+
+/** Remove terminal control codes and collapse carriage-return redraws to the
+ * final state of each line, the text a person would see in the terminal. */
+export function cleanTerminalOutput(text: string): string {
+  return text
+    .replace(ANSI_ESCAPE, "")
+    .split("\n")
+    .map((line) => {
+      const body = line.endsWith("\r") ? line.slice(0, -1) : line;
+      if (!body.includes("\r")) return line;
+      const frames = body.split("\r").filter((frame) => frame.length > 0);
+      return frames.at(-1) ?? "";
+    })
+    .join("\n");
+}
+
+/** Keeps the first and last halves of a stream within a character budget, so
+ * draining a long command never holds or returns more than the budget. */
+export class HeadTailBuffer {
+  private head = "";
+  private tail = "";
+  private totalChars = 0;
+  private newlines = 0;
+  private endsWithNewline = false;
+  constructor(private readonly budgetChars: number) {}
+
+  push(chunk: string): void {
+    if (!chunk) return;
+    this.totalChars += chunk.length;
+    for (const ch of chunk) if (ch === "\n") this.newlines += 1;
+    this.endsWithNewline = chunk.endsWith("\n");
+    const headRoom = Math.floor(this.budgetChars / 2) - this.head.length;
+    if (headRoom > 0) {
+      this.head += chunk.slice(0, headRoom);
+      chunk = chunk.slice(headRoom);
+    }
+    if (chunk) this.tail = (this.tail + chunk).slice(-(this.budgetChars - Math.floor(this.budgetChars / 2)));
+  }
+
+  get size(): number {
+    return this.totalChars;
+  }
+
+  text(): string {
+    const kept = this.head.length + this.tail.length;
+    if (kept >= this.totalChars) return this.head + this.tail;
+    const omittedTokens = Math.ceil((this.totalChars - kept) / CHARS_PER_TOKEN);
+    const lines = this.newlines + (this.endsWithNewline ? 0 : 1);
+    return `Total output lines: ${lines}\n\n${this.head}...${omittedTokens} tokens truncated...${this.tail}`;
+  }
+}
+
+function argObject(arg: unknown): Record<string, unknown> | null {
+  return typeof arg === "object" && arg !== null && !Array.isArray(arg) ? (arg as Record<string, unknown>) : null;
+}
+
+const POSIX_SHELL = /(?:^|\/)(?:sh|bash|dash|zsh|ksh|ash)$/u;
+
+/** Run-to-completion has nobody to answer a prompt, so a non-tty command gets
+ * EOF on stdin (as Codex runs non-tty commands) instead of waiting forever:
+ * `rg pattern` with no path otherwise blocks reading stdin until the ceiling. */
+function withClosedStdin(arg: Record<string, unknown>): Record<string, unknown> {
+  const cmd = arg.cmd;
+  const shell = arg.shell;
+  if (typeof cmd !== "string" || arg.tty === true) return arg;
+  if (typeof shell === "string" && !POSIX_SHELL.test(shell)) return arg;
+  return { ...arg, cmd: `exec </dev/null\n${cmd}` };
+}
+
+function splitExecResponse(raw: string): { header: string; body: string } {
+  const match = /\r?\nOutput:\r?\n/u.exec(raw);
+  if (!match) return { header: "", body: raw };
+  return { header: raw.slice(0, match.index), body: raw.slice(match.index + match[0].length) };
+}
 
 /** Nested shell calls run to completion: a script is the place to wait, so a
  * yielded command is drained here instead of costing the model a poll request. */
@@ -81,29 +166,50 @@ async function invokeToCompletion(
   arg: unknown,
   details: unknown,
 ): Promise<unknown> {
-  const background =
-    typeof arg === "object" && arg !== null && (arg as Record<string, unknown>).background === true;
-  const cleaned =
-    typeof arg === "object" && arg !== null
-      ? Object.fromEntries(Object.entries(arg as Record<string, unknown>).filter(([k]) => k !== "background"))
-      : arg;
+  const shellCall = tool.name === "exec_command" || tool.name === "write_stdin";
+  const object = argObject(typeof arg === "string" && tool.name === "exec_command" ? { cmd: arg } : arg);
+  const background = object?.background === true;
+  let cleaned: unknown = object
+    ? Object.fromEntries(Object.entries(object).filter(([k]) => k !== "background"))
+    : arg;
+  if (!shellCall || background) return await tool.invoke(runContext as never, toInputString(tool, cleaned), details as never);
+
+  const maxTokens =
+    typeof object?.max_output_tokens === "number" && object.max_output_tokens > 0
+      ? Math.trunc(object.max_output_tokens)
+      : DEFAULT_NESTED_OUTPUT_TOKENS;
+  if (tool.name === "exec_command" && object) cleaned = withClosedStdin(cleaned as Record<string, unknown>);
   let result = await tool.invoke(runContext as never, toInputString(tool, cleaned), details as never);
   const poller = tools.get("write_stdin");
-  if (background || !poller || (tool.name !== "exec_command" && tool.name !== "write_stdin")) return result;
-  const bodies: string[] = [];
+  const output = new HeadTailBuffer(maxTokens * CHARS_PER_TOKEN);
   const deadline = Date.now() + WAIT_CEILING_MS;
+  let lastOutputAt = Date.now();
   for (;;) {
     if (typeof result !== "string") return result;
     const banner = parseExecResponseBanner(result);
-    const split = result.split(/\r?\nOutput:\r?\n/u);
-    if (banner.kind !== "running" || Date.now() > deadline) {
-      if (bodies.length === 0) return result;
-      return `${split[0]}\nOutput:\n${[...bodies, split.slice(1).join("\nOutput:\n")].join("")}`;
+    const { header, body } = splitExecResponse(result);
+    const fresh = cleanTerminalOutput(body);
+    if (fresh.trim()) lastOutputAt = Date.now();
+    output.push(fresh);
+    if (banner.kind !== "running" || !poller) {
+      return header ? `${header}\nOutput:\n${output.text()}` : output.text();
     }
-    bodies.push(split.slice(1).join("\nOutput:\n"));
+    const now = Date.now();
+    if (now > deadline || now - lastOutputAt >= SILENCE_RETURN_MS) {
+      const why =
+        now > deadline
+          ? "still running after the wait ceiling"
+          : `no output for ${Math.round((now - lastOutputAt) / 1000)}s`;
+      return `${header}\nOutput:\n${output.text()}\n[exec: ${why}; returned the running session ${banner.sessionId}. Continue waiting with tools.write_stdin({session_id: ${banner.sessionId}, chars: ""}) or send it input.]`;
+    }
     result = await poller.invoke(
       runContext as never,
-      JSON.stringify({ session_id: banner.sessionId, chars: "", yield_time_ms: WAIT_SLICE_MS }),
+      JSON.stringify({
+        session_id: banner.sessionId,
+        chars: "",
+        yield_time_ms: WAIT_SLICE_MS,
+        max_output_tokens: maxTokens,
+      }),
       details as never,
     );
   }
@@ -189,21 +295,11 @@ export class CodeExecRegistry {
     let cpuStartedAt = Date.now();
     runtime.setInterruptHandler(() => Date.now() - cpuStartedAt > CPU_INTERRUPT_MS);
     const vm = runtime.newContext();
-    const out: string[] = [];
-    let outChars = 0;
-    let truncated = false;
+    const out = new HeadTailBuffer(DEFAULT_EXEC_RESULT_TOKENS * CHARS_PER_TOKEN);
     let exited = false;
     const pending = new Set<Promise<void>>();
     const append = (value: string) => {
-      if (outChars >= DEFAULT_MAX_OUTPUT_CHARS) {
-        truncated = true;
-        return;
-      }
-      const room = DEFAULT_MAX_OUTPUT_CHARS - outChars;
-      const piece = value.length > room ? value.slice(0, room) : value;
-      if (piece.length < value.length) truncated = true;
-      out.push(piece);
-      outChars += piece.length;
+      out.push(out.size > 0 ? `\n${value}` : value);
     };
     try {
       const fn = (name: string, impl: (...args: QuickJSHandle[]) => QuickJSHandle | void) => {
@@ -300,9 +396,7 @@ export class CodeExecRegistry {
     }
 
     function finish(error: string | null): string {
-      const body = out.join("\n");
-      const parts = [body];
-      if (truncated) parts.push(`[exec output truncated at ${DEFAULT_MAX_OUTPUT_CHARS} characters]`);
+      const parts = [out.text()];
       if (error) parts.push(error);
       const text = parts.filter((p) => p.length > 0).join("\n");
       return text.length > 0 ? text : "(exec completed with no text output)";
