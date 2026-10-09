@@ -938,7 +938,12 @@ function focusBelongsElsewhere(textarea: HTMLTextAreaElement): boolean {
   if (!active || active === textarea) return false;
   if (active.closest(EDITING_FOCUS_SELECTOR)) return true;
   const popup = active.closest(POPUP_FOCUS_SELECTOR);
-  return popup !== null && !popup.contains(textarea);
+  if (popup) return !popup.contains(textarea);
+  // A dismissed popup can restore a button or link while draft hydration is
+  // still pending. Its focus remains intentional after the popup disappears.
+  return (
+    active !== textarea.ownerDocument.body && active !== textarea.ownerDocument.documentElement
+  );
 }
 
 export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(function ComposerInput(

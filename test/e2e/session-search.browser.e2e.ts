@@ -210,6 +210,68 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
   }, 60_000);
 
   for (const collapsed of [false, true]) {
+    test(`dismissed ${collapsed ? "collapsed" : "expanded"} search restores keyboard focus while a delayed draft hydrates`, async () => {
+      const context = await configuredContext(browser, {
+        viewport: { width: 1280, height: 800 },
+        extraHTTPHeaders: ownerHeaders,
+      });
+      const page = await context.newPage();
+      let releaseDraft!: () => void;
+      const hydrationGate = new Promise<void>((resolve) => {
+        releaseDraft = resolve;
+      });
+      // Keep the real API response; only delay delivery to reproduce a draft
+      // becoming interactive after the person dismissed a different surface.
+      await page.route("**/new-session-draft", async (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        const response = await route.fetch();
+        await hydrationGate;
+        await route.fulfill({ response });
+      });
+      try {
+        await page.goto(webBaseUrl);
+        await workspaceFromPage(page);
+        if (collapsed) {
+          await page.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
+        }
+        const search = page.getByRole("button", { name: "Search sessions", exact: true });
+        const composer = page.getByRole("textbox", { name: "Message the agent", exact: true });
+        const dialog = await openSearchDialog(page);
+        await page.keyboard.press("Escape");
+        await dialog.waitFor({ state: "hidden" });
+        await page.waitForFunction(
+          () =>
+            document.querySelector('[aria-label="Search sessions"]') === document.activeElement &&
+            !document.querySelector('[aria-describedby="session-search-description"]'),
+        );
+        expect(await composer.isDisabled()).toBe(true);
+        releaseDraft();
+        await page.waitForFunction(() => !!document.querySelector("textarea:not(:disabled)"));
+        // Cross the component's scheduled autofocus frame before asserting the
+        // restored target still owns focus. Locator.press would hide this bug.
+        await page.evaluate(
+          () =>
+            new Promise<void>((resolve) =>
+              requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+            ),
+        );
+        expect(await search.evaluate((element) => element === document.activeElement)).toBe(true);
+        await page.keyboard.press("Space");
+        const input = dialog.getByRole("searchbox", {
+          name: "Search session titles and messages",
+          exact: true,
+        });
+        await input.waitFor();
+        expect(await input.evaluate((element) => element === document.activeElement)).toBe(true);
+      } finally {
+        releaseDraft();
+        await page.unrouteAll({ behavior: "wait" });
+        await context.close();
+      }
+    }, 90_000);
+  }
+
+  for (const collapsed of [false, true]) {
     for (const key of ["Enter", "Space"]) {
       test(`closing ${collapsed ? "collapsed" : "expanded"} search restores its trigger and ${key} reopens it from real keyboard focus`, async () => {
         const context = await configuredContext(browser, {

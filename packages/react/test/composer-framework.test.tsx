@@ -642,6 +642,41 @@ describe("compound composer framework", () => {
     expect(search.value).toBe("Needle");
   });
 
+  test("hydration autofocus preserves restored button and link focus", async () => {
+    for (const kind of ["button", "link"] as const) {
+      let setDisabled: ((value: boolean) => void) | null = null;
+      function Harness() {
+        const [disabled, set] = useState(true);
+        setDisabled = set;
+        return (
+          <>
+            {kind === "button" ? (
+              <button type="button" data-return-focus>
+                Search sessions
+              </button>
+            ) : (
+              <a href="#sessions" data-return-focus>
+                Sessions
+              </a>
+            )}
+            <ChatComposer composer={fullComposer()} disabled={disabled} autoFocus />
+          </>
+        );
+      }
+      mounted = await renderComponent(<Harness />);
+      const opener = mounted.container.querySelector<HTMLElement>("[data-return-focus]")!;
+      opener.focus();
+      await act(async () => {
+        setDisabled?.(false);
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      });
+      expect(mounted.container.querySelector("textarea")?.disabled).toBe(false);
+      expect(document.activeElement).toBe(opener);
+      await mounted.unmount();
+      mounted = null;
+    }
+  });
+
   test("autoFocus on an interactive mount focuses the composer", async () => {
     mounted = await renderComponent(<ChatComposer composer={fullComposer()} autoFocus />);
     const textarea = mounted.container.querySelector("textarea")!;
