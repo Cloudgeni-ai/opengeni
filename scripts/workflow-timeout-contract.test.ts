@@ -24,21 +24,6 @@ type Job = Readonly<{
 type Workflow = Readonly<{ jobs?: Readonly<Record<string, Job>> }>;
 
 const EXPECTED_CAPS = [
-  ["terminal-readiness.yml", "native-terminal-ready", "Install Bash loadable headers", 3, "run"],
-  [
-    "terminal-readiness.yml",
-    "native-terminal-ready",
-    "Exercise real login-shell PTYs and unsupported manual-input cases",
-    2,
-    "run",
-  ],
-  [
-    "terminal-readiness.yml",
-    "headless-image",
-    "Build canonical headless image and exercise installed PTYs",
-    40,
-    "action",
-  ],
   [
     "agent-ci.yml",
     "native-command-supervisor",
@@ -207,8 +192,6 @@ const EXPECTED_CAPS = [
 ] as const;
 
 const EXPECTED_JOB_BUDGETS = {
-  "terminal-readiness.yml:native-terminal-ready": { stepCaps: 5, needed: 6, jobCap: 6 },
-  "terminal-readiness.yml:headless-image": { stepCaps: 40, needed: 41, jobCap: 45 },
   "agent-ci.yml:native-command-supervisor": { stepCaps: 5, needed: 6, jobCap: 6 },
   "local-startup.yml:docker": { stepCaps: 88, needed: 89, jobCap: 90 },
   "local-startup.yml:platform-preflight": { stepCaps: 2, needed: 3, jobCap: 5 },
@@ -242,22 +225,8 @@ function numericCap(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
-function approvedStepKind(file: string, job: string, step: Step): "run" | "action" | null {
-  if (step.run) return "run";
-  if (step.uses === PLAYWRIGHT_ACTION) return "action";
-  if (
-    file === "terminal-readiness.yml" &&
-    job === "headless-image" &&
-    step.name === "Build canonical headless image and exercise installed PTYs" &&
-    step.uses === "docker/build-push-action@v7.3.0" &&
-    step.with?.push === false
-  )
-    return "action";
-  return null;
-}
-
 describe("workflow timeout contract", () => {
-  test("all jobs and the exact 48 run plus 6 action steps use static native caps", async () => {
+  test("all jobs and the exact 46 run plus 5 action steps use static native caps", async () => {
     const workflows = await loadWorkflows();
     const capped: Array<readonly [string, string, string, number, "run" | "action"]> = [];
     const budgets: Record<string, { stepCaps: number; needed: number; jobCap: number }> = {};
@@ -279,7 +248,7 @@ describe("workflow timeout contract", () => {
           }
           if (cap === null) continue;
           stepCaps += cap;
-          const kind = approvedStepKind(file, jobName, step);
+          const kind = step.run ? "run" : step.uses === PLAYWRIGHT_ACTION ? "action" : null;
           if (!kind || !step.name) {
             violations.push(`${file}:${jobName} has a capped step outside the approved corpus`);
           } else {
@@ -297,32 +266,10 @@ describe("workflow timeout contract", () => {
       right: readonly [string, string, string, number, "run" | "action"],
     ) => left.slice(0, 3).join("\0").localeCompare(right.slice(0, 3).join("\0"));
     expect(capped.toSorted(byIdentity)).toEqual(EXPECTED_CAPS.toSorted(byIdentity));
-    expect(capped.filter((row) => row[4] === "run")).toHaveLength(48);
-    expect(capped.filter((row) => row[4] === "action")).toHaveLength(6);
+    expect(capped.filter((row) => row[4] === "run")).toHaveLength(46);
+    expect(capped.filter((row) => row[4] === "action")).toHaveLength(5);
     for (const [job, expected] of Object.entries(EXPECTED_JOB_BUDGETS)) {
       expect(budgets[job], job).toEqual(expected);
-    }
-  });
-
-  test("the image action exception is exact and build-only", () => {
-    const step: Step = {
-      name: "Build canonical headless image and exercise installed PTYs",
-      uses: "docker/build-push-action@v7.3.0",
-      with: { push: false },
-    };
-    expect(approvedStepKind("terminal-readiness.yml", "headless-image", step)).toBe("action");
-    expect(approvedStepKind("other.yml", "headless-image", step)).toBeNull();
-    expect(approvedStepKind("terminal-readiness.yml", "other", step)).toBeNull();
-    for (const change of [
-      { name: "Other build" },
-      { uses: "docker/build-push-action@v8" },
-      { uses: "other/action@v7.3.0" },
-      { with: { push: true } },
-      { with: {} },
-    ]) {
-      expect(
-        approvedStepKind("terminal-readiness.yml", "headless-image", { ...step, ...change }),
-      ).toBeNull();
     }
   });
 
