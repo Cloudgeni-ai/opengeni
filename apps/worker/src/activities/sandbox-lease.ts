@@ -153,6 +153,7 @@ import {
   terminateManagedSandboxSession,
   terminateModalSandboxById,
   verifySandboxExecReadiness,
+  type DockerHostWorkspaceRelease,
   type ModalOrphanSweepTermination,
   type ModalCheckpointProviderBinding,
   type ProviderWorkspaceCapturePolicy,
@@ -196,6 +197,7 @@ import {
   recordSandboxOrphansTerminated,
   recordSandboxCommandContainment,
   recordSandboxProviderMissingBeforeCapture,
+  recordSandboxDockerWorkspaceRelease,
   recordSandboxRecoveryObservationGauges,
   recordSandboxRotationBacklogGauges,
   recordSandboxCheckpointStalenessGauges,
@@ -742,7 +744,7 @@ export function createSandboxLeaseActivities(
 
   /** Checkpoint one warm box between turns. Reuses the turn's warm checkpoint
    * path with an idle owner: the exact capture claim requires that only
-   * viewers, interactions and active unsupervised background commands hold the
+   * viewers, interactions and active background commands hold the
    * box and that no other request is open, then the native Modal snapshot runs
    * around them and is published one generation behind the workspace. */
   async function checkpointIdleSandboxLease(
@@ -4274,6 +4276,23 @@ export async function verifyDockerDrainCaptureFence(
   };
 }
 
+function observeDockerWorkspaceRelease(
+  observability: ActivityServices["observability"],
+  session: unknown,
+  logIdentity: ReturnType<typeof providerDrainLogIdentity>,
+): void {
+  const release = (session as { hostWorkspaceRelease?: DockerHostWorkspaceRelease | null })
+    .hostWorkspaceRelease;
+  if (!release) return;
+  recordSandboxDockerWorkspaceRelease(observability, release.status);
+  if (release.status === "retained") {
+    observability.warn(
+      "sandbox reaper: Docker drain kept its host workspace directory after teardown",
+      { ...logIdentity, reason: release.reason },
+    );
+  }
+}
+
 export async function terminateProviderBox(
   settings: ActivityServices["settings"],
   lease: NonNullable<Awaited<ReturnType<typeof readLease>>>,
@@ -4653,6 +4672,7 @@ export async function terminateProviderBox(
     prepareProviderForTeardownAfterCapture(backend, session);
     await beforeProviderStop?.();
     await terminateManagedSandboxSession(client, sessionState, session);
+    if (backend === "docker") observeDockerWorkspaceRelease(observability, session, logIdentity);
     return { terminated: true, providerMissingBeforeCapture: false };
   } catch (error) {
     if (isProviderSandboxNotFoundError(client.backendId, error)) {

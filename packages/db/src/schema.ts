@@ -4365,7 +4365,9 @@ export const toolGatewayApprovalCapabilities = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     subjectId: text("subject_id").notNull(),
     operationId: uuid("operation_id").notNull(),
-    catalogDigest: text("catalog_digest").notNull(),
+    bindingVersion: integer("binding_version").notNull().default(1),
+    catalogDigest: text("catalog_digest"),
+    targetBindingDigest: text("target_binding_digest"),
     serverId: text("server_id").notNull(),
     toolName: text("tool_name").notNull(),
     argumentsDigest: text("arguments_digest").notNull(),
@@ -4399,6 +4401,11 @@ export const toolGatewayApprovalCapabilities = pgTable(
     catalogDigestValid: check(
       "tool_gateway_approval_capabilities_catalog_digest_chk",
       sql`${table.catalogDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    bindingValid: check(
+      "tool_gateway_approval_capabilities_binding_chk",
+      sql`(${table.bindingVersion} = 1 and ${table.catalogDigest} is not null and ${table.targetBindingDigest} is null)
+        or (${table.bindingVersion} = 2 and ${table.catalogDigest} is null and ${table.targetBindingDigest} is not null and ${table.targetBindingDigest} ~ '^[0-9a-f]{64}$')`,
     ),
     argumentsDigestValid: check(
       "tool_gateway_approval_capabilities_arguments_digest_chk",
@@ -4488,6 +4495,29 @@ export const workspaceModelPolicies = pgTable(
     workspace: uniqueIndex("workspace_model_policies_workspace_idx").on(table.workspaceId),
   }),
 );
+
+// Model defaults every workspace in the organization follows until it sets its
+// own: the default model for new work, the model allowlist for workspaces with
+// no policy row, and compaction triggers by exact model id. One row per
+// organization; absent reads as no defaults.
+export const organizationModelDefaults = pgTable("organization_model_defaults", {
+  accountId: uuid("account_id")
+    .primaryKey()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  sessionDefaults: jsonb("session_defaults").$type<{
+    model: string;
+    reasoningEffort: string;
+  } | null>(),
+  allowedProviders: text("allowed_providers").array(),
+  allowedModels: text("allowed_models").array(),
+  modelCompactionThresholds: jsonb("model_compaction_thresholds")
+    .$type<Record<string, number>>()
+    .notNull()
+    .default({}),
+  updatedBySubjectId: text("updated_by_subject_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 // One workspace-local short-lived holder per running Codex turn. Selection and
 // insertion happen atomically while codex_rotation_settings is locked FOR
@@ -8708,6 +8738,11 @@ export const sessionSystemUpdates = pgTable(
       .$type<ClaudeProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
+    // M3 v2 slot (0688): the Codex entry frozen with the update; copied, never
+    // recomputed, by the turn that delivers it. NULL before the cutover.
+    subscriptionAuthority: jsonb(
+      "subscription_authority",
+    ).$type<SubscriptionPersonalAuthorityV2 | null>(),
     // Private scheduled-occurrence authority linkage. Public update/event
     // projections intentionally omit this producer identifier.
     scheduledTaskRunId: uuid("scheduled_task_run_id"),
@@ -8815,6 +8850,10 @@ export const sessionSystemUpdateOutbox = pgTable(
       .$type<ClaudeProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
+    // M3 v2 slot (0688), copied onto the update the outbox row delivers.
+    subscriptionAuthority: jsonb(
+      "subscription_authority",
+    ).$type<SubscriptionPersonalAuthorityV2 | null>(),
     status: text("status").notNull().default("pending"),
     attempts: integer("attempts").notNull().default(0),
     updateId: uuid("update_id"),
@@ -11732,6 +11771,11 @@ export const scheduledTasks = pgTable(
       .$type<ClaudeProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
+    // M3 v2 slot (0688): frozen at task creation; a firing copies it (or its
+    // current revision authority's value), never recomputes it.
+    subscriptionAuthority: jsonb(
+      "subscription_authority",
+    ).$type<SubscriptionPersonalAuthorityV2 | null>(),
     authorityRevision: bigint("authority_revision", { mode: "number" }).notNull().default(1),
     // The migration-owned BEFORE INSERT/UPDATE trigger replaces this client
     // placeholder with the canonical whole-row execution digest.

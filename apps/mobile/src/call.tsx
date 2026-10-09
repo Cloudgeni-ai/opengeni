@@ -20,6 +20,7 @@ import {
   unpinCallSession,
 } from "@/call-preferences";
 import { AppThemeProvider } from "@/theme";
+import { resolveOutsideCallTarget } from "./call-routing";
 
 export function useAgentCall(): NativeAgentCallContextValue {
   return useNativeAgentCall();
@@ -30,30 +31,20 @@ const webrtc = createReactNativeWebRtcAdapter();
 /**
  * Where a call from outside the app goes (Phone recents, Siri, the Control
  * Center control, the home-screen action, the opengeni://call link): the
- * session the user pinned, else the one last opened, else the newest
- * conversation, else a new session; or always a new session.
+ * a fresh session by default. Explicit saved latest/pinned preferences remain
+ * in force, and explicit session entry always wins.
  */
 async function resolveOutsideCall(context: NativeOutsideCallContext): Promise<string> {
-  const { requested, workspaceId, sessionExists, latestOrNew, client } = context;
-  if (requested) return requested;
-  const preference = getOutsideCallTarget();
-  const pinned = getPinnedCallSession();
-  if (preference === "pinned" && pinned?.workspaceId === workspaceId) {
-    if (await sessionExists(pinned.sessionId)) return pinned.sessionId;
-    // The chosen session is gone: forget it and start fresh rather than fail the call.
-    unpinCallSession();
-  }
-  if (preference === "latest") {
-    // The session you last had open, like calling back whoever you were talking to.
-    const opened = getLastOpenedSessionId(workspaceId);
-    if (opened) {
-      if (await sessionExists(opened)) return opened;
-      forgetOpenedSession({ workspaceId, sessionId: opened });
-    }
-    return latestOrNew();
-  }
-  const created = await client.createSession(workspaceId, { startMode: "realtime" });
-  return created.id;
+  const opened = getLastOpenedSessionId(context.workspaceId);
+  return resolveOutsideCallTarget(context, {
+    target: getOutsideCallTarget(),
+    pinned: getPinnedCallSession(),
+    opened,
+    unpin: unpinCallSession,
+    forgetOpened: () => {
+      if (opened) forgetOpenedSession({ workspaceId: context.workspaceId, sessionId: opened });
+    },
+  });
 }
 
 /**

@@ -92,7 +92,7 @@ for it until the matching requirement below is implemented:
   Verification: pending (personal-connections).
 - **SUB-OWN-04** An organization administrator can delegate management of a
   connection to a workspace administrator; ownership stays with the
-  organization. Verification: pending (data-model).
+  organization. Verification: `packages/db/test/subscription-core-codex-writers-postgres.test.ts`, `packages/db/test/subscription-core-m2-postgres.test.ts`.
 - **SUB-OWN-05** An organization administrator can disable personal
   connections for the whole organization. Disabling stops new selection of
   personal connections; work already running on one moves at its next safe
@@ -363,7 +363,9 @@ for it until the matching requirement below is implemented:
 
 - **SUB-COMPAT-01** Migration preserves existing credentials, scopes, pins,
   settings, accepted authority, live waits and workflow histories.
-  Verification: pending (data-model).
+  Verification: `packages/db/test/migration-0689-subscription-core-codex-cutover.test.ts`,
+  `test/integration/subscription-core-codex-cutover.integration.ts` (Codex,
+  migration 0689; Claude and SuperGrok move at M4).
 - **SUB-COMPAT-02** Existing per-provider API and SDK shapes keep working as
   aliases that delegate to the core until they are versioned out.
   Verification: pending (rollout).

@@ -797,9 +797,14 @@ test.each(["organization", "user"] as const)(
     expect(frozen.xai.scope).toBe(scope);
 
     const commandId = crypto.randomUUID();
+    const [codex] = await shared.admin<{ authority: unknown }[]>`
+      select subscription_authority as authority from session_turns where id = ${accepted.turn.id}`;
+    const { SubscriptionPersonalAuthorityV2 } = await import("@opengeni/contracts");
+    const subscriptionAuthority = SubscriptionPersonalAuthorityV2.parse(codex!.authority);
     const updates = [
       {
         kind: "child_terminal_result" as const,
+        subscriptionAuthority,
         sourceId: crypto.randomUUID(),
         dedupeKey: `sub-access-child:${crypto.randomUUID()}`,
         lineage: {
@@ -824,6 +829,7 @@ test.each(["organization", "user"] as const)(
       },
       {
         kind: "background_command_result" as const,
+        subscriptionAuthority,
         sourceId: commandId,
         dedupeKey: `sub-access-command:${commandId}`,
         lineage: {

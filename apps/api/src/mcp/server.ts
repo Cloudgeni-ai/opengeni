@@ -1,4 +1,7 @@
 import {
+  getSessionSystemUpdateById,
+  getSessionMessageOutcomeEvent,
+  setSessionTargetContext,
   getAttemptToolCatalog,
   createChannel,
   listChannels,
@@ -19,6 +22,8 @@ import {
   workspaceArtifactDownloads,
 } from "../site-uploads";
 import {
+  sessionTargetContext,
+  SetSessionTargetRequest,
   CreateScheduledTaskRequest,
   ScheduledTaskAgentConfigInput,
   ResourceRef,
@@ -657,7 +662,7 @@ const sessionCreateToolInput = staticToolInput(() => {
     .strict()
     .optional()
     .describe(
-      "Optional agent configuration for the child. Omit to inherit this session's. capabilities 'all' means everything this session has; 'none' keeps only essentials; an object starts from one and switches capabilities off (or back on within this session's own set). A child may only narrow: enabling a capability this session lacks is rejected.",
+      "Optional agent configuration for the child. Omit to inherit this session's. capabilities 'all' means everything this session has; 'none' keeps only essentials; an object starts from one and switches capabilities off (or back on within this session's own set). A child may only narrow: enabling a capability this session lacks is rejected. For a worker that must not start, message, or follow other sessions, use agent: { capabilities: { from: 'all', subagents: false } } and omit firstPartyMcpTools. This keeps the parent's other capabilities and tool selections; the worker's final answer still reaches its parent automatically.",
     );
   const sessionCreateInput = z4
     .object({
@@ -731,7 +736,7 @@ const sessionCreateToolInput = staticToolInput(() => {
         .array(z4.enum(FIRST_PARTY_MCP_TOOL_NAMES))
         .optional()
         .describe(
-          "Exact model-visible first-party tool selection for the child. Omit to inherit this session's effective selection. An explicit selection may only narrow that selection: every listed tool must already be available to this session, and a wider list is rejected. To create a non-delegating leaf, provide a selection that omits session_create. This does not grant permissions.",
+          "Exact model-visible first-party tool selection for the child. Usually omit to inherit this session's effective selection. An explicit array replaces the entire inherited selection, including browser, computer, and scheduling tools; it is not an additions list. Do not construct a partial list merely because a worker has a specialist role or bounded task. For a worker that must not coordinate other sessions, prefer agent.capabilities with from: 'all' and subagents: false. Use an explicit array only for deliberate per-tool restrictions. Every listed tool must already be available to this session; a wider list is rejected and [] selects no tools from this server. This does not grant permissions.",
         ),
       // The child's agent-access scope and end-user label are never model
       // choices: it inherits this session's exactly. Only the Memory
@@ -4641,6 +4646,132 @@ function registerWorkspaceOrchestrationTools(
         )
       : await listOutstandingSessionSystemUpdates(deps.db, grant.workspaceId, ownSessionId);
   };
+  if (callerSessionId && can("sessions:read")) {
+    server.registerTool(
+      "session_target_get",
+      {
+        description:
+          "Read this conversation's optional selected session. Selection is context, not permission to send, steer, resume or transfer a call. Access is checked live; clear an unavailable target with session_target_set(sessionId=null).",
+        inputSchema: {},
+      },
+      async () => {
+        await authorizeFirstPartySession(deps, grant, callerSessionId, "session.read");
+        const own = await getSession(deps.db, grant.workspaceId, callerSessionId);
+        if (!own) throw new Error("Calling session is unavailable");
+        const target = sessionTargetContext(own.metadata);
+        if (target.sessionId) {
+          try {
+            await authorizeFirstPartySession(deps, grant, target.sessionId, "session.read");
+          } catch (error) {
+            if (!(error instanceof SessionAuthorizationDeniedError)) throw error;
+            return json({
+              version: target.version,
+              sessionId: null,
+              unavailable: true,
+              selectionOnly: true,
+            });
+          }
+          const selected = await getSession(deps.db, grant.workspaceId, target.sessionId);
+          if (!selected) throw new Error("Selected session is unavailable");
+          return json({ ...target, title: selected.title, selectionOnly: true });
+        }
+        return json({ ...target, title: null, selectionOnly: true });
+      },
+    );
+    server.registerTool(
+      "session_message_status",
+      {
+        description:
+          "Follow the exact update ID returned by session_send_message or session_steer. Returns delivery state, consuming turn and an exact outcome read when present; acceptance or another turn finishing is not completion. Never resends. Use session_wait for changes, then read again. A paused pending target requires an explicitly authorized resume; do not silently steer it.",
+        inputSchema: { sessionId: z4.string().uuid(), updateId: z4.string().uuid() },
+      },
+      async ({ sessionId, updateId }) => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.events.read");
+        const update = await getSessionSystemUpdateById(
+          deps.db,
+          grant.workspaceId,
+          sessionId,
+          updateId,
+        );
+        if (
+          !update ||
+          update.sourceId !== callerSessionId ||
+          !["agent_message", "agent_steer_instruction"].includes(update.kind)
+        )
+          throw new Error("Message receipt not found for this caller and target");
+        const turn = update.deliveredTurnId
+          ? await getSessionTurn(deps.db, grant.workspaceId, update.deliveredTurnId)
+          : null;
+        if (turn && turn.sessionId !== sessionId) throw new Error("Message receipt turn mismatch");
+        const outcome = turn
+          ? await getSessionMessageOutcomeEvent(
+              deps.db,
+              grant.workspaceId,
+              sessionId,
+              turn.id,
+              turn.executionGeneration,
+            )
+          : null;
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.events.read");
+        return json({
+          sessionId,
+          updateId,
+          delivery: update.state,
+          turnId: turn?.id ?? null,
+          turnStatus: turn?.status ?? null,
+          outcome: outcome ? { type: outcome.type, sequence: outcome.sequence } : null,
+          nextAction: outcome
+            ? {
+                tool: "session_events",
+                arguments: {
+                  sessionId,
+                  ...(outcome.type === "turn.cancelled" || outcome.type === "turn.superseded"
+                    ? {
+                        view: "debug",
+                        includeTypes: [outcome.type],
+                        payloadMode: "full",
+                      }
+                    : { view: "results" }),
+                  after: outcome.sequence - 1,
+                  before: outcome.sequence + 1,
+                  limit: 1,
+                },
+              }
+            : { tool: "session_get", arguments: { sessionId } },
+        });
+      },
+    );
+    if (can("sessions:control"))
+      server.registerTool(
+        "session_target_set",
+        {
+          description:
+            "Select an accessible session as conversational context, or clear with sessionId=null. Read session_target_get first and pass its version. Does not dispatch work, change authority or transfer/restart voice. Keep the same operationId for an exact retry.",
+          inputSchema: SetSessionTargetRequest.shape,
+        },
+        async (request) => {
+          await authorizeFirstPartySession(
+            deps,
+            grant,
+            callerSessionId,
+            "session.first_party_mcp.call",
+          );
+          const claims = exactAgentAttemptClaims(grant);
+          if (!claims || claims.sessionId !== callerSessionId)
+            throw new Error("Exact caller attempt required");
+          return json(
+            await setSessionTargetContext(deps.db, {
+              workspaceId: grant.workspaceId,
+              actor: { type: "agent_attempt", ...claims },
+              request,
+              authorizeTarget: async (db, sessionId) => {
+                await authorizeFirstPartySession({ ...deps, db }, grant, sessionId, "session.read");
+              },
+            }),
+          );
+        },
+      );
+  }
   if (can("sessions:read")) {
     server.registerTool(
       "sessions_list",
@@ -5328,7 +5459,7 @@ function registerWorkspaceOrchestrationTools(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and send a related follow-up to a worker you already spawned with session_send_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, Opengeni derives one from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Sandbox Environment, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and send a related follow-up to a worker you already spawned with session_send_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, Opengeni derives one from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Sandbox Environment, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. Normally omit tools, mcpServers, and firstPartyMcpTools so the worker inherits this session's exact selections; specialize its task through initialMessage rather than a hand-written partial tool list. To create a worker that cannot start, message, or follow other sessions, use agent: { capabilities: { from: 'all', subagents: false } } and keep tool lists omitted; its final answer still reaches you automatically. Explicit tool arrays replace the inherited selection and are only for deliberate restrictions. Do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
         inputSchema: sessionCreateToolInput(),
       },
       async (args) => {

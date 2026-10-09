@@ -188,6 +188,54 @@ export type ToolGatewayCallResponse = {
   result: ToolGatewayResult;
 };
 
+export type ToolGatewayTarget = { identity: ToolGatewayIdentity } | { path: string[] };
+export type ToolGatewayResolvedTool = {
+  version: 1;
+  definitionDigest: string;
+  entry: ToolGatewayCatalogEntry;
+};
+export type ToolGatewayResolveRequest = {
+  target: ToolGatewayTarget;
+  siteArtifactId?: string;
+  siteVersionId?: string;
+};
+export type ToolGatewayInvokeRequest = ToolGatewayResolveRequest & {
+  operationId: string;
+  arguments: Record<string, unknown>;
+  expectedDefinitionDigest?: string;
+  approvalToken?: string;
+};
+export type ToolGatewayInvokeResponse = {
+  operationId: string;
+  tool: ToolGatewayResolvedTool;
+  result: ToolGatewayResult;
+};
+export type ToolGatewayTargetApprovalRequest = {
+  identity: ToolGatewayIdentity;
+  operationId: string;
+  arguments: Record<string, unknown>;
+  expectedDefinitionDigest: string;
+  siteArtifactId?: string;
+  siteVersionId?: string;
+};
+export type ToolGatewayTargetApprovalResponse = {
+  bindingVersion: 2;
+  operationId: string;
+  tool: ToolGatewayResolvedTool;
+  approvalToken: string;
+  expiresAt: string;
+};
+export type ToolGatewayManifestRequest = {
+  identities: ToolGatewayIdentity[];
+  siteArtifactId?: string;
+  siteVersionId?: string;
+};
+export type ToolGatewayManifestResponse = {
+  version: 1;
+  digest: string;
+  tools: ToolGatewayResolvedTool[];
+};
+
 export type ToolGatewayDeclarationsResponse = {
   catalogDigest: string;
   moduleSpecifier: string;
@@ -3483,6 +3531,9 @@ export type FirstPartyMcpToolName =
   | "command_wait"
   | "session_create"
   | "session_send_message"
+  | "session_message_status"
+  | "session_target_get"
+  | "session_target_set"
   | "session_pause"
   | "session_resume"
   | "session_steer"
@@ -3743,7 +3794,10 @@ export type WorkspaceModelCatalogModel = ClientModel & {
   compactionPolicy?:
     | {
         defaultTokens: number;
+        /** This workspace's own limit; null follows the organization's or the model's default. */
         overrideTokens: number | null;
+        /** The organization's limit this workspace follows while it sets none. */
+        organizationTokens?: number | null | undefined;
         effectiveTokens: number;
         minimumTokens: number;
         maximumTokens: number;
@@ -3757,7 +3811,12 @@ export type WorkspaceModelCatalogModel = ClientModel & {
 };
 
 /** Why a new chat or scheduled task without an explicit model gets its default. */
-export type DefaultModelSelectionSource = "workspace" | "subscription" | "credits" | "deployment";
+export type DefaultModelSelectionSource =
+  | "workspace"
+  | "organization"
+  | "subscription"
+  | "credits"
+  | "deployment";
 
 export type DefaultModelSelection = {
   model: string;
@@ -3907,6 +3966,35 @@ export type DeleteOrganizationProviderCustomModelRequest = DeleteWorkspaceGatewa
 export type WorkspaceModelAccessPolicy = {
   allowedProviders: string[] | null;
   allowedModels: string[] | null;
+  /**
+   * Where the policy comes from: the workspace's own, the organization's
+   * default it follows, or no restriction. Absent from older servers.
+   */
+  source?: "workspace" | "organization" | "none" | undefined;
+  /** The organization default the workspace follows without its own policy. */
+  organization?: { allowedProviders: string[] | null; allowedModels: string[] | null } | null;
+};
+
+/**
+ * Model defaults every workspace in an organization follows until it sets its
+ * own (`GET/PATCH /v1/organizations/:id/model-defaults`, owners and admins).
+ */
+export type OrganizationModelDefaults = {
+  sessionDefaults: { model: string; reasoningEffort: ReasoningEffort } | null;
+  allowedProviders: string[] | null;
+  allowedModels: string[] | null;
+  modelCompactionThresholds: Record<string, number>;
+  updatedAt: string | null;
+};
+
+/** Field-by-field update; compaction merges by model id and null resets one model. */
+export type UpdateOrganizationModelDefaultsRequest = {
+  sessionDefaults?: { model: string; reasoningEffort: ReasoningEffort } | null | undefined;
+  modelPolicy?:
+    | { allowedProviders?: string[] | null | undefined; allowedModels?: string[] | null }
+    | null
+    | undefined;
+  modelCompactionThresholds?: Record<string, number | null> | undefined;
 };
 
 /** Full replacement body for `PUT /v1/workspaces/:id/model-policy`. */
@@ -5202,7 +5290,8 @@ export type UpdateWorkspaceSettingsRequest = {
   modelCompactionThresholds?: Record<string, number | null>;
   memoryEnabled?: boolean | undefined;
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
-  sessionDefaults?: WorkspaceSessionDefaults | undefined;
+  /** null removes the workspace's own default so it follows its organization's. */
+  sessionDefaults?: WorkspaceSessionDefaults | null | undefined;
   sessionToolDefaults?:
     | {
         mcpServerIds?: string[] | null;

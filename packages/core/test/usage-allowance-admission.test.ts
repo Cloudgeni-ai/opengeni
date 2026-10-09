@@ -104,6 +104,33 @@ describe("core usage allowance admission", () => {
     });
   });
 
+  test("accepted Codex funding passes the exact turn and needs no deployment credit balance", async () => {
+    codex.mockResolvedValue(true);
+    const acceptedTurn = { sessionId: crypto.randomUUID(), turnId: crypto.randomUUID() };
+    const spendable = spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
+      balanceMicros: 0,
+    } as never);
+    try {
+      expect(
+        await checkLimit(
+          {
+            ...deps,
+            settings: testSettings({
+              billingMode: "stripe",
+              usageLimitsMode: "managed",
+              codexSubscriptionEnabled: true,
+            }),
+          },
+          { ...input, model: "codex/gpt-5.5", acceptedTurn },
+        ),
+      ).toEqual({ allowed: true });
+      expect(codex.mock.calls.at(-1)?.[0].acceptedTurn).toEqual(acceptedTurn);
+      expect(spendable).not.toHaveBeenCalled();
+    } finally {
+      spendable.mockRestore();
+    }
+  });
+
   test.each([HUMAN, null])(
     "retry uses the original frozen human %s rather than the retrying administrator",
     async (originalHuman) => {

@@ -21,6 +21,8 @@ import {
   currentAgentLearningToolSelection,
   resolveWorkspaceSessionToolDefaults,
   workspaceModelCompactionThreshold,
+  organizationModelCompactionThreshold,
+  type OrganizationModelDefaults,
   type ModelCompactionPolicy,
   Entitlements,
   EntitlementsMode,
@@ -1575,6 +1577,8 @@ const SettingsSchema = z.object({
   // email verification, and invitation-bound account setup keep working. Read
   // at startup; the 0585 runtime switch pauses sign-ups without a restart.
   managedAuthNewSignupsEnabled: EnvBoolean.default(true),
+  // Unset retains environment-based verification (required outside local).
+  managedAuthRequireEmailVerification: EnvBoolean.optional(),
   // Query transport is an explicit second-stage rollout. A pre-compatibility
   // web image understands only fragment bearers, so API replicas must keep
   // generating fragment links until the compatible web fleet has converged.
@@ -4856,6 +4860,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     apnsPrivateKey: optional("OPENGENI_APNS_PRIVATE_KEY"),
     fcmServiceAccountJson: optional("OPENGENI_FCM_SERVICE_ACCOUNT_JSON"),
     managedAuthNewSignupsEnabled: optional("OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED"),
+    managedAuthRequireEmailVerification: optional(
+      "OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION",
+    ),
     organizationUserSetupEmailTokenTransport: optional(
       "OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT",
     ),
@@ -5037,10 +5044,21 @@ export function resolveSessionFirstPartyMcpTools(
   session: Pick<Session, "firstPartyMcpTools" | "toolPolicy"> & Partial<Pick<Session, "agent">>,
   workspaceSettings: unknown,
 ): FirstPartyMcpToolNameType[] {
-  const selected =
-    session.toolPolicy.firstPartyMode === "workspace_default"
-      ? resolveWorkspaceSessionToolDefaults(workspaceSettings)?.firstPartyMcpTools
-      : session.firstPartyMcpTools;
+  let selected: readonly FirstPartyMcpToolNameType[] | null | undefined =
+    session.firstPartyMcpTools;
+  if (session.toolPolicy.firstPartyMode === "workspace_default") {
+    // Follow today's defaults, plus any tools the creator guaranteed on top.
+    const defaults = resolveWorkspaceSessionToolDefaults(workspaceSettings)?.firstPartyMcpTools;
+    const additions = session.toolPolicy.firstPartyAdditions ?? [];
+    selected = additions.length
+      ? [
+          ...new Set([
+            ...(defaults ?? resolveFirstPartyMcpToolPolicy(settings).default),
+            ...additions,
+          ]),
+        ]
+      : defaults;
+  }
   const allowed = allowedFirstPartyMcpToolsForSession(settings, selected);
   return session.agent ? agentConfigFirstPartyMcpTools(session.agent, allowed) : allowed;
 }
@@ -5102,10 +5120,10 @@ export function effectiveSandboxLifecycle(
 /**
  * One shared upper bound for the durable provider-capture claim and for command
  * admission waiting behind it. The SDK request itself is bounded by
- * sandboxSnapshotTimeoutMs; the extra window lets a non-cancellable provider
- * response settle and release its exact claim without turning a normal
- * checkpoint into a visible command failure. Database validation caps both
- * consumers at one hour.
+ * sandboxSnapshotTimeoutMs (a warm host-backed spool capture is stopped there);
+ * the extra window lets a non-cancellable provider response settle and release
+ * its exact claim without turning a normal checkpoint into a visible command
+ * failure. Database validation caps both consumers at one hour.
  */
 export function sandboxArchiveCaptureTimeoutMs(
   settings: Pick<Settings, "sandboxSnapshotTimeoutMs">,
@@ -6585,10 +6603,19 @@ function canonicalJson(value: unknown): string {
 function definitionVersionFor(
   model: Omit<ConfiguredModel, "definitionVersion">,
   provider: ResolvedModelProvider,
-  options: { includeWireProfile?: boolean } = {},
+  options: { includeWireProfile?: boolean; includeAutoCompactTokenLimit?: boolean } = {},
 ): string {
   const requestMetadata = staticRequestMetadataForDigest(provider);
   const includeWireProfile = options.includeWireProfile ?? true;
+  // The automatic-compaction trigger is a context-management default, not
+  // executable identity: workspace and organization compaction preferences
+  // already replace it live on every attempt of an accepted turn. Freezing
+  // it made a changed default strand every in-flight turn of that model.
+  // Only the pre-exclusion compatibility digests below still include it.
+  const { autoCompactTokenLimit, ...executableLimits } = model.executionLimits;
+  const executionLimits = options.includeAutoCompactTokenLimit
+    ? { ...executableLimits, autoCompactTokenLimit }
+    : executableLimits;
   const digestInput = canonicalJson({
     schemaVersion: model.schemaVersion,
     id: model.id,
@@ -6605,7 +6632,7 @@ function definitionVersionFor(
     },
     credentialSource: model.credentialSource,
     billing: model.billing,
-    executionLimits: model.executionLimits,
+    executionLimits,
     capabilities: model.capabilities,
     // Workspace-facing free/credits classification is a separate live
     // deployment policy. Operators must drain/fence accepted turns before
@@ -6620,6 +6647,22 @@ function definitionVersionFor(
     .digest("hex")}`;
 }
 
+/**
+ * The digest a turn accepted before the compaction trigger left the
+ * definition carries. It reproduces only the current trigger value, so an
+ * accepted turn stays runnable across the release that drops the field, and
+ * every other executable field must still match exactly.
+ */
+function legacyFrozenAutoCompactDefinitionVersionFor(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+): string {
+  const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
+  return definitionVersionFor(modelWithoutVersion, provider, {
+    includeAutoCompactTokenLimit: true,
+  });
+}
+
 function legacyImplicitOpenAiDefinitionVersionFor(
   model: ConfiguredModel,
   provider: ResolvedModelProvider,
@@ -6628,6 +6671,7 @@ function legacyImplicitOpenAiDefinitionVersionFor(
   const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
   return definitionVersionFor(modelWithoutVersion, provider, {
     includeWireProfile: false,
+    includeAutoCompactTokenLimit: true,
   });
 }
 
@@ -6655,7 +6699,9 @@ function legacyCodexAstraImplicitCachingDefinitionVersionFor(
   // Recompute, rather than allowlisting an incident hash: all other current
   // fields must still reproduce the accepted digest. Do not compose this with
   // the older wire-profile compatibility or rewrite the accepted policy.
-  return definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider);
+  return definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider, {
+    includeAutoCompactTokenLimit: true,
+  });
 }
 
 function matchesAdditiveCapabilityDefinitionVersion(
@@ -6690,14 +6736,35 @@ function matchesAdditiveCapabilityDefinitionVersion(
         inputModalities: retainedInputs,
       };
       if (
-        policy.definitionVersion ===
-        definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider)
+        matchesCurrentOrPreCompactionExclusionDigest(
+          policy,
+          { ...modelWithoutVersion, capabilities },
+          provider,
+        )
       ) {
         return true;
       }
     }
   }
   return false;
+}
+
+/**
+ * Operator-change compatibility (an added capability or enabled web search)
+ * also applies to a turn accepted before the compaction trigger left the
+ * digest. This is the same single historical declaration in either digest
+ * form, never an additional tolerated change.
+ */
+function matchesCurrentOrPreCompactionExclusionDigest(
+  policy: TurnExecutionPolicyV1,
+  model: Omit<ConfiguredModel, "definitionVersion">,
+  provider: ResolvedModelProvider,
+): boolean {
+  return (
+    policy.definitionVersion === definitionVersionFor(model, provider) ||
+    policy.definitionVersion ===
+      definitionVersionFor(model, provider, { includeAutoCompactTokenLimit: true })
+  );
 }
 
 /** The one pre-enablement hosted web-search declaration an operator may upgrade from. */
@@ -6724,9 +6791,10 @@ function matchesWebSearchEnablementDefinitionVersion(
     ...model.capabilities,
     hostedTools: { ...model.capabilities.hostedTools, webSearch: webSearchPreEnablementState() },
   };
-  return (
-    policy.definitionVersion ===
-    definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider)
+  return matchesCurrentOrPreCompactionExclusionDigest(
+    policy,
+    { ...modelWithoutVersion, capabilities },
+    provider,
   );
 }
 
@@ -7589,6 +7657,7 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
           billing: parsed.billing,
         },
         resolved.provider,
+        { includeAutoCompactTokenLimit: true },
       );
   // wireProfile was added to the definition digest after policies already
   // existed in durable in-flight turns. An omitted profile meant exactly
@@ -7600,6 +7669,8 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   );
   const definitionVersionMatches =
     parsed.definitionVersion === resolved.model.definitionVersion ||
+    parsed.definitionVersion ===
+      legacyFrozenAutoCompactDefinitionVersionFor(resolved.model, resolved.provider) ||
     parsed.definitionVersion === legacyImplicitOpenAiDefinitionVersion ||
     parsed.definitionVersion ===
       legacyCodexAstraImplicitCachingDefinitionVersionFor(resolved.model, resolved.provider) ||
@@ -7884,6 +7955,7 @@ export function settingsWithResolvedModelContext(
     | "toolOutputTruncationTokens"
   > & { id?: string },
   workspaceSettings?: unknown,
+  organizationDefaults?: Pick<OrganizationModelDefaults, "modelCompactionThresholds"> | null,
 ): Settings {
   const contextWindowTokens = model.contextWindowTokens ?? settings.contextWindowTokens;
   const resolved = {
@@ -7911,11 +7983,16 @@ export function settingsWithResolvedModelContext(
       settings,
       { ...model, id: model.id },
       workspaceSettings,
+      organizationDefaults,
     ).effectiveTokens,
   };
 }
 
-/** One policy projection for settings UI and all model-facing worker paths. */
+/**
+ * One policy projection for settings UI and all model-facing worker paths.
+ * The workspace's own preference wins, then the organization's default for
+ * the model, then the model's own default.
+ */
 export function workspaceModelCompactionPolicy(
   settings: Settings,
   model: Pick<
@@ -7923,6 +8000,7 @@ export function workspaceModelCompactionPolicy(
     "id" | "contextWindowTokens" | "effectiveContextWindowTokens" | "autoCompactTokenLimit"
   >,
   workspaceSettings: unknown,
+  organizationDefaults?: Pick<OrganizationModelDefaults, "modelCompactionThresholds"> | null,
 ): ModelCompactionPolicy {
   const resolved = settingsWithResolvedModelContext(settings, model);
   const maximumTokens = Math.max(
@@ -7939,10 +8017,12 @@ export function workspaceModelCompactionPolicy(
         Math.max(0.3, Math.min(0.9, resolved.contextCompactionThresholdRatio)),
   );
   const overrideTokens = workspaceModelCompactionThreshold(workspaceSettings, model.id);
+  const organizationTokens = organizationModelCompactionThreshold(organizationDefaults, model.id);
   return {
     defaultTokens,
     overrideTokens,
-    effectiveTokens: clamp(overrideTokens ?? defaultTokens),
+    organizationTokens,
+    effectiveTokens: clamp(overrideTokens ?? organizationTokens ?? defaultTokens),
     minimumTokens,
     maximumTokens,
   };

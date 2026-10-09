@@ -234,7 +234,15 @@ export async function listSubscriptionConnectionsForPlacement(
       entitledModelIds: row.entitled_model_ids,
       excludedModelIds: row.excluded_models,
       allowedModelIds: row.allowed_model_ids,
-      ...(ownership.kind === "shared" ? { assignmentPolicies: assignmentPolicy ?? [] } : {}),
+      // A shared connection with no assignment-policy row for this workspace
+      // (an organization-scope connection in a workspace without a local
+      // copy, including one connected on the core after the cutover) keeps
+      // the management classification: organization pool unless this
+      // workspace manages it. Explicit rows decide everywhere else, exactly
+      // as the compatibility projection and operation candidates read them.
+      ...(ownership.kind === "shared" && assignmentPolicy && assignmentPolicy.length > 0
+        ? { assignmentPolicies: assignmentPolicy }
+        : {}),
       refreshGeneration: Number(row.refresh_generation),
       quota: decodeSubscriptionQuota(row),
     };

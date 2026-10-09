@@ -10,12 +10,15 @@
  * management authority: an organization administrator, or a workspace
  * administrator for a connection or setting that workspace manages. Nothing
  * here reads or writes a legacy Codex table, and nothing returns credential
- * material. Personal connections are never listed (they are visible only
- * inside their owner's exact accepted turn).
+ * material. Personal connections are listed only to their owner, through the
+ * owner-only reader (`subscription_codex_personal_connections`, M3 PR 3b):
+ * in the owner's Personal-workspace list and their sessions' "Running on".
  */
 import { sql } from "drizzle-orm";
 import { auditEvents } from "./schema";
 import { withLosslessContentWriteVersion } from "./lossless-json";
+import { codexPlanKey } from "@opengeni/codex";
+import { CODEX_PLAN_ENTITLEMENT_EXCLUSION_TTL_MS } from "./codex-plan-entitlement";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
 import {
   decodeSubscriptionQuota,
@@ -134,10 +137,15 @@ function projectAccount(
     label: row.label,
     accountEmail: row.account_email,
     planType: row.plan_type,
-    planCheckedAt: null,
-    planPreviousType: null,
-    planChangedAt: null,
-    planEntitlementExclusion: null,
+    // Plan history the M3 cutover carried over (and later plan changes the
+    // connection trigger records) is adapter-owned provider state.
+    planCheckedAt: stateDate(row.provider_state?.planCheckedAt),
+    planPreviousType:
+      typeof row.provider_state?.planPreviousType === "string"
+        ? row.provider_state.planPreviousType
+        : null,
+    planChangedAt: stateDate(row.provider_state?.planChangedAt),
+    planEntitlementExclusion: planCooldownExclusion(row.plan_type, quota),
     status: row.status,
     extraCreditsEnabled: row.extra_credits_enabled,
     extraCreditsVersion: Number(row.extra_credits_version),
@@ -163,6 +171,26 @@ function projectAccount(
     exhaustedKind: quota?.exhaustedKind ?? null,
     allowedModelIds: row.allowed_model_ids,
   };
+}
+
+/**
+ * The legacy plan-entitlement projection of the core's per-model cooldowns: a
+ * proven plan refusal is a 24-hour model cooldown on the connection (design
+ * PR 2a), so each live cooldown is reported under the connection's current
+ * plan with the time it was proven.
+ */
+function planCooldownExclusion(
+  planType: string | null,
+  quota: ReturnType<typeof decodeSubscriptionQuota>,
+): NonNullable<CodexAccountStatus["planEntitlementExclusion"]> | null {
+  const models = Object.entries(quota?.modelCooldowns ?? {})
+    .filter(([, until]) => Number.isFinite(until))
+    .map(([modelId, until]) => ({
+      modelId,
+      excludedAt: new Date(until - CODEX_PLAN_ENTITLEMENT_EXCLUSION_TTL_MS),
+    }))
+    .sort((left, right) => left.modelId.localeCompare(right.modelId));
+  return models.length === 0 ? null : { planType: codexPlanKey(planType), models };
 }
 
 type EffectiveCodexSettings = {
@@ -207,6 +235,8 @@ export type SubscriptionCoreCodexWorkspaceProjection = {
   accounts: CodexAccountStatus[];
   rotation: CodexRotationSettings;
   source: WorkspaceCodexSubscriptionSource;
+  /** The viewer's own personal connections among `accounts` (Personal workspace only). */
+  personalAccountIds?: string[];
 };
 
 /**
@@ -340,12 +370,78 @@ export async function projectSubscriptionCoreCodexWorkspace(
 
 export async function getSubscriptionCoreCodexWorkspaceProjection(
   db: Database,
-  input: { accountId: string; workspaceId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    /**
+     * The viewing person. In their own Personal workspace their personal
+     * Codex connections are listed with the workspace pool (M3 PR 3b).
+     */
+    viewerSubjectId?: string | null;
+  },
 ): Promise<SubscriptionCoreCodexWorkspaceProjection> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (tx) => await projectSubscriptionCoreCodexWorkspace(tx, input),
+    async (tx) => {
+      const projection = await projectSubscriptionCoreCodexWorkspace(tx, input);
+      if (!input.viewerSubjectId || projection.source.workspaceKind !== "personal") {
+        return projection;
+      }
+      const personal = await listSubscriptionCoreCodexPersonalAccountsInTransaction(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.viewerSubjectId,
+      });
+      return personal.length === 0
+        ? projection
+        : {
+            ...projection,
+            accounts: [
+              ...projection.accounts,
+              ...personal.map((account) => ({
+                ...account,
+                isActive: account.id === projection.rotation.activeCredentialId,
+              })),
+            ],
+            personalAccountIds: personal.map((account) => account.id),
+          };
+    },
+  );
+}
+
+/**
+ * The viewing person's own personal Codex connections in the legacy account
+ * shape (no credential material), through the owner-only reader. Requires the
+ * workspace RLS context on `tx`; sets the subject. Empty for anyone else, for
+ * a workspace the person may not use, or without an enabled cutover.
+ */
+export async function listSubscriptionCoreCodexPersonalAccountsInTransaction(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<CodexAccountStatus[]> {
+  if (!input.subjectId.startsWith("user:")) return [];
+  await setSubjectRlsContext(tx, input.subjectId);
+  const rows = await rawRows<ConnectionRow>(
+    tx,
+    sql`select personal.id::text as id, personal.label, personal.account_email,
+        personal.plan_type, personal.provider_account_id, personal.status, personal.last_error,
+        personal.allocator_enabled, personal.allocator_version, personal.allowed_model_ids,
+        personal.connected_by_subject_id, personal.expires_at, personal.last_refresh_at,
+        null::text as managed_by_workspace_id, personal.provider_state, personal.updated_at,
+        personal.quota, personal.quota_revision, personal.quota_observed_refresh_generation,
+        personal.quota_updated_at, personal.extra_credits_enabled,
+        personal.extra_credits_version, personal.extra_credits_updated_at
+      from opengeni_private.subscription_codex_personal_connections(
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}
+      ) personal`,
+  );
+  return rows.map((row) =>
+    projectAccount(row, {
+      source: "workspace",
+      primaryConnectionId: null,
+      poolAllocatorEnabled: true,
+    }),
   );
 }
 
@@ -421,6 +517,30 @@ function isRlsRefusal(error: unknown): boolean {
 }
 
 type Administration = { accountId: string; workspaceId: string | null; subjectId: string };
+
+async function managePersonalConnection(
+  tx: Database,
+  input: Administration & { connectionId: string },
+  action: "rename" | "allocator" | "primary",
+  label: string | null = null,
+  enabled: boolean | null = null,
+  expectedVersion: number | null = null,
+): Promise<
+  ({ id: string } & Exclude<SubscriptionCoreCodexAllocatorResult, { kind: "not_found" }>) | null
+> {
+  if (!input.workspaceId) return null;
+  const [row] = await rawRows<{
+    result:
+      | ({ id: string } & Exclude<SubscriptionCoreCodexAllocatorResult, { kind: "not_found" }>)
+      | null;
+  }>(
+    tx,
+    sql`select opengeni_private.manage_subscription_codex_personal(
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}, ${input.connectionId}::uuid,
+      ${action}, ${label}, ${enabled}::boolean, ${expectedVersion}::integer) as result`,
+  );
+  return row?.result ?? null;
+}
 
 async function withCodexAdministration<T>(
   db: Database,
@@ -502,6 +622,19 @@ export async function setSubscriptionCoreCodexAllocator(
   wake: SubscriptionCoreCodexWake | null;
 }> {
   return await withCodexAdministration(db, input, async (tx) => {
+    const personal = await managePersonalConnection(
+      tx,
+      input,
+      "allocator",
+      null,
+      input.enabled,
+      input.expectedVersion,
+    );
+    if (personal)
+      return {
+        result: { ...personal, allocatorUpdatedAt: date(personal.allocatorUpdatedAt) },
+        wake: personal.kind === "updated" ? wakeFor(input, "core_codex_allocator_changed") : null,
+      };
     const current = await visibleSharedConnection(tx, input, input.connectionId);
     if (!current) return { result: { kind: "not_found" }, wake: null };
     const projection = (
@@ -603,6 +736,54 @@ export async function setSubscriptionCoreCodexExtraCredits(
   wake: SubscriptionCoreCodexWake | null;
 }> {
   return await withCodexAdministration(db, input, async (tx) => {
+    if (input.workspaceId) {
+      const [personal] = await rawRows<{
+        result:
+          | ({ id: string } & Exclude<
+              SubscriptionCoreCodexExtraCreditsResult,
+              { kind: "not_found" }
+            >)
+          | null;
+      }>(
+        tx,
+        sql`select opengeni_private.manage_subscription_codex_personal(
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}, ${input.connectionId}::uuid,
+        'extra_credits', null, ${input.enabled}, ${input.expectedVersion}::integer) as result`,
+      );
+      if (personal?.result) {
+        const result = {
+          ...personal.result,
+          extraCreditsUpdatedAt: date(personal.result.extraCreditsUpdatedAt),
+        };
+        if (result.kind === "updated") {
+          await tx.insert(auditEvents).values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                subjectId: input.subjectId,
+                action: "codex.extra_credits.updated",
+                targetType: "subscription_connection",
+                targetId: result.id,
+                metadata: {
+                  extraCreditsEnabled: result.extraCreditsEnabled,
+                  extraCreditsVersion: result.extraCreditsVersion,
+                },
+              },
+              "metadata",
+              "metadataCodecVersion",
+            ),
+          );
+        }
+        return {
+          result,
+          wake:
+            result.kind === "updated"
+              ? { accountId: input.accountId, reason: "core_codex_extra_credits_changed" }
+              : null,
+        };
+      }
+    }
     const visible = await visibleSharedConnection(tx, input, input.connectionId);
     if (!visible) return { result: { kind: "not_found" }, wake: null };
     const [row] = await rawRows<{ enabled: boolean; version: number }>(
@@ -721,6 +902,8 @@ export async function renameSubscriptionCoreCodexConnection(
   input: Administration & { connectionId: string; label: string | null },
 ): Promise<string | null> {
   return await withCodexAdministration(db, input, async (tx) => {
+    const personal = await managePersonalConnection(tx, input, "rename", input.label);
+    if (personal) return personal.id;
     const current = await visibleSharedConnection(tx, input, input.connectionId);
     if (!current) return null;
     const label = input.label === null ? null : input.label.trim().slice(0, 200) || null;
@@ -864,6 +1047,9 @@ export async function setSubscriptionCoreCodexPrimary(
   input: Administration & { connectionId: string },
 ): Promise<{ activated: string | null; wake: SubscriptionCoreCodexWake | null }> {
   return await withCodexAdministration(db, input, async (tx) => {
+    const personal = await managePersonalConnection(tx, input, "primary");
+    if (personal)
+      return { activated: personal.id, wake: wakeFor(input, "core_codex_primary_changed") };
     const current = await visibleSharedConnection(tx, input, input.connectionId);
     if (!current) return { activated: null, wake: null };
     const written = await writeSettingsRow(tx, input, {

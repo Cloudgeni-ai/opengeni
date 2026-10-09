@@ -8,7 +8,15 @@ import type {
   ToolGatewayDeclarationsResponse,
   ToolGatewayIdentity,
   ToolGatewayResult,
+  ToolGatewayTarget,
+  ToolGatewayResolvedTool,
+  ToolGatewayInvokeRequest,
+  ToolGatewayInvokeResponse,
+  ToolGatewayTargetApprovalResponse,
+  ToolGatewayManifestRequest,
+  ToolGatewayManifestResponse,
 } from "./types";
+import { createKnownWorkspaceTools } from "./known-tools";
 import { OpenGeniApiError } from "./errors";
 import { createSharedCatalogLoader } from "./shared-catalog-loader";
 
@@ -18,6 +26,10 @@ export type OpenGeniToolCallOptions = {
   refreshCatalog?: boolean;
   /** Server-issued, single-use capability returned by `$approve`. */
   approvalToken?: string;
+  /** A schema-first precondition; absence on a cold call means current definition. */
+  expectedDefinitionDigest?: string;
+  /** External v1 approval capabilities must explicitly use the legacy adapter. */
+  approvalBinding?: "catalog" | "target";
 };
 
 export type OpenGeniToolFunction<
@@ -41,6 +53,29 @@ export type OpenGeniWorkspaceTools<
   > = ToolGatewayCatalog,
 > = OpenGeniGeneratedTools &
   OpenGeniDynamicToolNamespace & {
+    readonly $targetProtocol?: 1;
+    readonly $resolve: (
+      target: ToolGatewayTarget,
+      options?: {
+        refresh?: boolean;
+        signal?: AbortSignal;
+        siteArtifactId?: string;
+        siteVersionId?: string;
+      },
+    ) => Promise<ToolGatewayResolvedTool>;
+    readonly $invoke: (
+      request: ToolGatewayInvokeRequest,
+      options?: { signal?: AbortSignal },
+    ) => Promise<ToolGatewayInvokeResponse>;
+    readonly $manifest: (
+      request: ToolGatewayManifestRequest,
+      options?: { signal?: AbortSignal },
+    ) => Promise<ToolGatewayManifestResponse>;
+    readonly $approveTarget: (
+      identity: ToolGatewayIdentity,
+      argumentsValue?: Record<string, unknown>,
+      options?: OpenGeniToolCallOptions,
+    ) => Promise<ToolGatewayTargetApprovalResponse>;
     readonly $catalog: (options?: { refresh?: boolean; signal?: AbortSignal }) => Promise<TCatalog>;
     readonly $call: (
       identity: ToolGatewayIdentity,
@@ -61,6 +96,8 @@ export type OpenGeniWorkspaceTools<
   };
 
 export interface OpenGeniToolTransport {
+  /** Explicit v1 compatibility. Never selected as a retry after an uncertain invoke. */
+  readonly toolGatewayMode?: "catalog" | "target";
   requestJson<T>(
     method: string,
     path: string,
@@ -125,6 +162,14 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
 
   forWorkspace(workspaceId: string): OpenGeniWorkspaceTools {
     const normalizedWorkspaceId = requiredId(workspaceId, "workspaceId");
+    if (this.transport.toolGatewayMode !== "catalog") {
+      return createKnownWorkspaceTools(this.transport, normalizedWorkspaceId, () =>
+        new OpenGeniToolsClient({
+          toolGatewayMode: "catalog",
+          requestJson: this.transport.requestJson.bind(this.transport),
+        }).forWorkspace(normalizedWorkspaceId),
+      );
+    }
     const catalogPath = `/v1/workspaces/${encodeURIComponent(normalizedWorkspaceId)}/tools/catalog`;
     const catalogLoader = createSharedCatalogLoader<ToolGatewayCatalog>(
       async (_refresh, signal) =>
@@ -382,6 +427,13 @@ function requireCatalogPath(
 function isCatalogStaleApiError(
   error: unknown,
 ): error is OpenGeniApiError | { code: "catalog_stale" } {
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    ("outcomeUnknown" in error && error.outcomeUnknown === true) ||
+    ("retryable" in error && error.retryable === false)
+  )
+    return false;
   return (
     (error instanceof OpenGeniApiError &&
       error.status === 409 &&

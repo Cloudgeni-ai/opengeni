@@ -213,13 +213,18 @@ type TreeIndex = {
 
 const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
-async function inventory(root: FileHandle, excludedPaths: readonly string[]): Promise<TreeIndex> {
+async function inventory(
+  root: FileHandle,
+  excludedPaths: readonly string[],
+  signal?: AbortSignal,
+): Promise<TreeIndex> {
   const tree: TreeIndex = { directories: new Map(), files: new Map() };
   const walk = async (handle: FileHandle, logical: string) => {
     const before = await handle.stat({ bigint: true });
     tree.directories.set(logical, before);
     const names = await readdir(fdPath(handle));
     for (const name of names) {
+      signal?.throwIfAborted();
       const path = logical ? `${logical}/${name}` : name;
       if (
         excludedPaths.some(
@@ -288,6 +293,7 @@ async function readTreeFile(
   tree: TreeIndex,
   path: string,
   consume: (bytes: Buffer) => void | Promise<void>,
+  signal?: AbortSignal,
 ) {
   const [parent, name] = parentAndName(path);
   const directory = await openDirectory(root, parent, tree);
@@ -301,6 +307,7 @@ async function readTreeFile(
       const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
       let offset = 0;
       while (offset < size) {
+        signal?.throwIfAborted();
         const { bytesRead } = await handle.read(
           buffer,
           0,
@@ -380,7 +387,7 @@ async function verifyInventory(rootPath: string, root: FileHandle, tree: TreeInd
   }
 }
 
-async function hashTree(rootPath: string, root: FileHandle, tree: TreeIndex) {
+async function hashTree(rootPath: string, root: FileHandle, tree: TreeIndex, signal?: AbortSignal) {
   const directories = [...tree.directories.keys()].filter(Boolean);
   const hash = projection(directories);
   let total = 0;
@@ -388,9 +395,16 @@ async function hashTree(rootPath: string, root: FileHandle, tree: TreeIndex) {
     const size = Number(tree.files.get(path)!.size);
     frame(hash, "file", path);
     frame(hash, "bytes", String(size));
-    await readTreeFile(root, tree, path, (bytes) => {
-      hash.update(bytes);
-    });
+    signal?.throwIfAborted();
+    await readTreeFile(
+      root,
+      tree,
+      path,
+      (bytes) => {
+        hash.update(bytes);
+      },
+      signal,
+    );
     total += size;
   }
   await verifyInventory(rootPath, root, tree);
@@ -520,17 +534,28 @@ function ownedSpool(
   };
 }
 
+/**
+ * An aborted `signal` stops the capture at the next file chunk, removes its
+ * temporary spool and rejects with the signal's reason. Every read is local
+ * and owned here, so the rejection is the physical end of the capture: callers
+ * may treat it as settled.
+ */
 export async function captureHostWorkspaceArchive(
   root: string,
   excludedPaths: readonly string[],
   expectedRoot?: HostWorkspaceRootIdentity,
-): Promise<{ spool: WorkspaceArchiveSpool; workspace: WorkspaceTreeFingerprint }> {
+  signal?: AbortSignal,
+): Promise<{
+  spool: WorkspaceArchiveSpool;
+  workspace: WorkspaceTreeFingerprint;
+}> {
+  signal?.throwIfAborted();
   const handle = await openRoot(root, false, expectedRoot);
   let temporary: string | undefined;
   let handleClosed = false;
   try {
-    const tree = await inventory(handle, excludedPaths);
-    const before = await hashTree(root, handle, tree);
+    const tree = await inventory(handle, excludedPaths, signal);
+    const before = await hashTree(root, handle, tree, signal);
     temporary = await privateTemporaryDirectory(root);
     const path = join(temporary, "archive.json");
     const file = await open(path, CREATE, 0o600);
@@ -552,10 +577,16 @@ export async function captureHostWorkspaceArchive(
         await writer.write(`${first ? "" : ","}{"path":${JSON.stringify(logical)},"data":"`);
         first = false;
         const encoder = new Base64Encoder(writer);
-        await readTreeFile(handle, tree, logical, async (bytes) => {
-          hash.update(bytes);
-          await encoder.write(bytes);
-        });
+        await readTreeFile(
+          handle,
+          tree,
+          logical,
+          async (bytes) => {
+            hash.update(bytes);
+            await encoder.write(bytes);
+          },
+          signal,
+        );
         await encoder.finish();
         await writer.write('"}');
         total += size;
@@ -577,7 +608,10 @@ export async function captureHostWorkspaceArchive(
         0o600,
       );
       try {
-        decoded = await fingerprintArchiveIndex(await indexArchive(encoded, payload, {}), payload);
+        signal?.throwIfAborted();
+        const index = await indexArchive(encoded, payload, {});
+        signal?.throwIfAborted();
+        decoded = await fingerprintArchiveIndex(index, payload, signal);
       } finally {
         await payload.close();
       }
@@ -585,8 +619,14 @@ export async function captureHostWorkspaceArchive(
       await encoded.close();
     }
     await unlink(payloadPath);
+    signal?.throwIfAborted();
     await verifyInventory(root, handle, tree);
-    const after = await hashTree(root, handle, await inventory(handle, excludedPaths));
+    const after = await hashTree(
+      root,
+      handle,
+      await inventory(handle, excludedPaths, signal),
+      signal,
+    );
     if (
       before.sha256 !== archived.sha256 ||
       after.sha256 !== archived.sha256 ||
@@ -867,11 +907,16 @@ class Base64Decoder {
 type FileSpan = { path: string; offset: number; byteSize: number };
 type ArchiveIndex = { directories: string[]; files: FileSpan[] };
 
-async function fingerprintArchiveIndex(index: ArchiveIndex, payload: FileHandle) {
+async function fingerprintArchiveIndex(
+  index: ArchiveIndex,
+  payload: FileHandle,
+  signal?: AbortSignal,
+) {
   const hash = projection(index.directories);
   let total = 0;
   const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
   for (const file of [...index.files].sort((a, b) => compare(a.path, b.path))) {
+    signal?.throwIfAborted();
     frame(hash, "file", file.path);
     frame(hash, "bytes", String(file.byteSize));
     let copied = 0;

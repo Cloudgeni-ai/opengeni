@@ -97,6 +97,13 @@ selectors are rejected to prevent secret-value probing. Browser image blocks
 are bounded below the Code Mode journal limit; for an oversized screenshot,
 capture the viewport or lower JPEG quality.
 
+`CodemodeCallOptions.expectedDefinitionDigest` optionally pins one complete
+public entry. The client checks it before submission and again after the one
+permitted pre-execution stale-catalog refresh. Local Site previews always pass
+this pin, so a retry cannot execute a changed definition while reporting old
+metadata. The pin grants no authority and does not alter durable operation
+reconciliation or frozen approval decisions.
+
 Both surfaces return the same durable tool receipts. Human approval, catalog
 generation, operation idempotency, and outcome-unknown behavior remain enforced
 by the shared attempt executor. Catalog, approval, authorization, input

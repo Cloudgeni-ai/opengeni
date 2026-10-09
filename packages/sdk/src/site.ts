@@ -23,6 +23,10 @@ import type {
   ToolGatewayCallResponse,
   ToolGatewayCatalog,
   ToolGatewayDeclarationsResponse,
+  ToolGatewayResolveRequest,
+  ToolGatewayResolvedTool,
+  ToolGatewayInvokeRequest,
+  ToolGatewayInvokeResponse,
 } from "./types";
 
 export const OPENGENI_SITE_BRIDGE_VERSION = 2 as const;
@@ -42,6 +46,7 @@ export type OpenGeniSiteBridgeConnectMessage = {
 export type OpenGeniSiteBridgeReadyMessage = {
   type: typeof OPENGENI_SITE_BRIDGE_READY;
   version: typeof OPENGENI_SITE_BRIDGE_VERSION;
+  targetTools?: 1;
 };
 
 /** Site-originated calls cannot carry host-only approval tokens or Site-version authority. */
@@ -63,6 +68,8 @@ export type OpenGeniSiteBridgeRequestMessage = {
   | { method: "catalog" }
   | { method: "call"; payload: OpenGeniSiteToolCallRequest }
   | { method: "declarations" }
+  | { method: "resolve"; payload: ToolGatewayResolveRequest }
+  | { method: "invoke"; payload: ToolGatewayInvokeRequest }
 );
 
 export type OpenGeniSiteBridgeCancelMessage = {
@@ -78,7 +85,12 @@ export type OpenGeniSiteBridgeResponseMessage = {
 } & (
   | {
       ok: true;
-      value: OpenGeniSiteToolCatalog | ToolGatewayCallResponse | ToolGatewayDeclarationsResponse;
+      value:
+        | OpenGeniSiteToolCatalog
+        | ToolGatewayCallResponse
+        | ToolGatewayDeclarationsResponse
+        | ToolGatewayResolvedTool
+        | ToolGatewayInvokeResponse;
     }
   | {
       ok: false;
@@ -102,6 +114,8 @@ export type OpenGeniSiteClient = {
 };
 
 export type OpenGeniSiteClientOptions = {
+  /** Explicit compatibility with hosts predating targeted tool calls; never an automatic fallback. */
+  toolGatewayMode?: "catalog" | "target";
   /** Advanced embedding seam; ordinary Sites accept bootstrap only from their exact parent. */
   parentWindow?: MessageEventSource;
   /** Advanced embedding seam for listening to the host's document-bound bootstrap message. */
@@ -143,6 +157,7 @@ export function createOpenGeniSiteClient(
   return {
     client: new OpenGeniClient({
       baseUrl: "https://site.opengeni.invalid",
+      toolGatewayMode: options.toolGatewayMode ?? "target",
       fetch: (input, init) => transport.fetch(input, init),
     }),
     workspaceId: SITE_WORKSPACE,
@@ -152,10 +167,12 @@ export function createOpenGeniSiteClient(
 }
 
 class OpenGeniSiteLocalCodemodeTransport implements OpenGeniToolTransport {
+  readonly toolGatewayMode: "catalog" | "target";
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly basePath: string;
 
   constructor(options: OpenGeniSiteClientOptions) {
+    this.toolGatewayMode = options.toolGatewayMode ?? "target";
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
     const configured = options.localCodemodePath;
     this.basePath = (
@@ -221,6 +238,8 @@ function localCodemodeSuffix(method: string, path: string): string {
   if (method === "GET" && path.endsWith("/tools/catalog")) return "/catalog";
   if (method === "GET" && path.endsWith("/tools/declarations")) return "/declarations";
   if (method === "POST" && path.endsWith("/tools/calls")) return "/calls";
+  if (method === "POST" && path.endsWith("/tools/resolve")) return "/resolve";
+  if (method === "POST" && path.endsWith("/tools/invoke")) return "/invoke";
   throw new OpenGeniSiteBridgeError("unsupported_request", "Unsupported Site tool request");
 }
 
@@ -247,7 +266,7 @@ export function isOpenGeniSiteBridgeRequestMessage(
     return false;
   }
   if (value.method === "catalog" || value.method === "declarations") return true;
-  return value.method === "call" && isRecord(value.payload);
+  return ["call", "resolve", "invoke"].includes(String(value.method)) && isRecord(value.payload);
 }
 
 export function isOpenGeniSiteBridgeCancelMessage(
@@ -274,7 +293,22 @@ export function sanitizeOpenGeniSiteToolCallRequest(
   };
 }
 
+export function sanitizeOpenGeniSiteToolInvokeRequest(
+  value: ToolGatewayInvokeRequest,
+): ToolGatewayInvokeRequest {
+  return {
+    target: value.target,
+    operationId: value.operationId,
+    arguments: value.arguments,
+    ...(value.expectedDefinitionDigest === undefined
+      ? {}
+      : { expectedDefinitionDigest: value.expectedDefinitionDigest }),
+  };
+}
+
 class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
+  readonly toolGatewayMode: "catalog" | "target";
+  private targetTools = false;
   private readonly options: OpenGeniSiteClientOptions;
   private readonly bootstrap: SiteBridgeBootstrap;
   private port: MessagePort | null = null;
@@ -282,6 +316,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
   private closed = false;
 
   constructor(options: OpenGeniSiteClientOptions) {
+    this.toolGatewayMode = options.toolGatewayMode ?? "target";
     this.options = options;
     this.bootstrap = createSiteBridgeBootstrap(options);
   }
@@ -297,6 +332,22 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
     _query?: Record<string, string>,
     requestOptions: { signal?: AbortSignal; timeoutMs?: number } = {},
   ): Promise<T> {
+    if (method === "POST" && (path.endsWith("/tools/resolve") || path.endsWith("/tools/invoke"))) {
+      await this.connect();
+      if (!this.targetTools)
+        throw new OpenGeniSiteBridgeError(
+          "target_tools_unsupported",
+          "Upgrade the Site host to use targeted tools",
+        );
+      if (!isRecord(body)) throw new TypeError("Site target payload is required");
+      const request = body as ToolGatewayInvokeRequest;
+      return (await this.request(
+        path.endsWith("/tools/resolve")
+          ? { method: "resolve", payload: { target: request.target } }
+          : { method: "invoke", payload: sanitizeOpenGeniSiteToolInvokeRequest(request) },
+        requestOptions,
+      )) as T;
+    }
     if (method === "GET" && path.endsWith("/tools/catalog")) {
       return (await this.request({ method: "catalog" }, requestOptions)) as T;
     }
@@ -326,6 +377,14 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
 
   private async request(
     request:
+      | Omit<
+          Extract<OpenGeniSiteBridgeRequestMessage, { method: "resolve" }>,
+          "type" | "version" | "requestId"
+        >
+      | Omit<
+          Extract<OpenGeniSiteBridgeRequestMessage, { method: "invoke" }>,
+          "type" | "version" | "requestId"
+        >
       | { method: "catalog" }
       | { method: "call"; payload: OpenGeniSiteToolCallRequest }
       | { method: "declarations" },
@@ -342,7 +401,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
         cleanup();
         cancel(port, requestId);
         reject(
-          request.method === "call"
+          request.method === "call" || request.method === "invoke"
             ? new OpenGeniSiteBridgeError(
                 "timeout",
                 "Site tool request timed out after execution may have started",
@@ -426,6 +485,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
           return;
         }
         cleanup();
+        this.targetTools = message.targetTools === 1;
         this.port = channel.port1;
         resolve(channel.port1);
       };

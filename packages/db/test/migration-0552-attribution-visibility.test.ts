@@ -67,6 +67,13 @@ test("0552 attribution lifecycle does not rewrite source visibility or read priv
   expect(source).toContain("receipt.idempotency_key='knowledge.query_cost:'||NEW.source_id");
 });
 
+const v2CarrierTables = [
+  "scheduled_tasks",
+  "scheduled_task_revision_authorities",
+  "session_system_updates",
+  "session_system_update_outbox",
+] as const;
+
 test("real non-bypass owner preserves source policy bytes through receipt repair and exact visibility through later planning", async () => {
   const owned = await acquireOwnerMigratedTestDatabase("0552-attribution-visibility");
   if (!owned) {
@@ -113,6 +120,9 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     // The current turn adapter also projects the later M3 authority snapshot;
     // keep this historical fixture's staged schema compatible while seeding.
     await owner`ALTER TABLE session_turns ADD COLUMN subscription_authority jsonb`;
+    // ...and the M3 PR 3b slots on the other accepted-work carriers.
+    for (const table of v2CarrierTables)
+      await owner.unsafe(`ALTER TABLE ${table} ADD COLUMN subscription_authority jsonb`);
     // Renumbering the independent nullable agent-config column after this
     // repair must not break current session writers used to seed legacy rows.
     // Apply those adapter prerequisites early; allowance/collaborator repairs
@@ -312,6 +322,8 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     await owner`ALTER TABLE sessions DROP COLUMN execution_context_turn_id`;
     await owner`ALTER TABLE session_turns DROP COLUMN execution_context_turn_id`;
     await owner`ALTER TABLE session_turns DROP COLUMN subscription_authority`;
+    for (const table of v2CarrierTables)
+      await owner.unsafe(`ALTER TABLE ${table} DROP COLUMN subscription_authority`);
     for (const name of planningSuffix)
       await owner`delete from schema_migrations where name=${name}`;
     await migrate(owned.ownerUrl);

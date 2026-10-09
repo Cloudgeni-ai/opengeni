@@ -18,11 +18,26 @@ provider archive protocols retain their existing compatibility paths; this is
 not a bounded-memory guarantee for those paths. Existing archive limits and
 capture/publication ownership fences remain authoritative and unchanged.
 
+A warm (periodic or turn-end) host spool capture is stopped at
+`OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`. Its reads are local, so the abort ends
+them at the next chunk, removes the private spool and only then releases the
+exact capture claim; it is settlement, not a timeout-based release. Without it
+a slow host (swap, a very large workspace) held the workspace write fence for
+the whole read, so writers failed with `SandboxWorkspaceMutationFencedError` and
+turn finalization stalled behind the capture. A capture still waiting for the
+in-process provider operation gate is abandoned the same way. Provider-native
+captures and object-storage publication are not interrupted; the lease drain
+capture keeps its own budget.
+
 Host spool directories (`opengeni-host-archive-o<pid-namespace>.<pid>.<start-time>-*`,
 `packages/runtime/src/sandbox/host-archive-temporary.ts`) record their owner
-process. Callers dispose them on every in-process path and a normal process exit
+process. Object-storage restore download spools use the same rule with the
+`opengeni-workspace-archive-o...` prefix: `@opengeni/storage` cannot depend on
+runtime, so the API and worker pass runtime's
+`workspaceArchiveDownloadTemporaryDirectory` to `downloadWorkspaceArchiveSpool`
+(other callers keep the plain unmarked default). Callers dispose them on every in-process path and a normal process exit
 removes the live ones. A worker that stops mid-capture, upload or restore cannot
-do either, so each worker start and the first spool of a process sweep
+do either, so each worker start and the first spool or download of a process sweep
 directories whose owner is provably gone: same uid and PID namespace, and that
 PID no longer exists or has a different start time. Live owners, including peer
 workers sharing one TMPDIR, are never touched; unmarked legacy names are never
@@ -36,7 +51,8 @@ directory before inventory or file reads, preserving descriptor-relative
 no-symlink access. A missing/stopped legacy container without sufficient custody,
 changed root ownership, unknown observation or failed capture stays unresolved.
 The drain attachment cannot execute commands or replace a container. Exact
-post-publication container teardown leaves the host workspace intact.
+post-publication container teardown then releases the fenced host workspace
+directory (see [run lifecycle](run-lifecycle.md)).
 
 The logical revision stays unchanged; physical locators append a random upload
 UUID before `.tar`. Application-owned unique keys isolate simultaneous attempts

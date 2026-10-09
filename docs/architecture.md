@@ -372,6 +372,12 @@ never pads a grant or signs an empty token; external-host, host-local,
 connection-backed and already-authorized native paths keep their own authority.
 See [automation defaults](automations.md#empty-first-party-authority).
 
+Managed password sign-ups require email verification outside local development
+unless the operator explicitly disables `OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION`.
+That opt-out attests new password users before provisioning; it requires an
+independent trusted-user boundary. Social-provider proof remains required outside
+local development. See [verification configuration](deployment.md#password-sign-up-email-verification).
+
 Organization settings owns the cross-workspace roster and roles. A managed
 browser administrator is the ordinary authority. Single-user local deployments
 also admit only the access resolver's canonical `opengeni:local/default` + `dev`
@@ -578,7 +584,8 @@ they never call ordinary SDK resume or create a replacement execution wrapper.
 The protected SDK ownership receipt and current lease/capture fence precede
 descriptor-bound content reads. Missing legacy custody or failed capture retains
 data and unresolved lease truth; post-publication exact-container teardown
-preserves the host workspace. Canonical leaf:
+then releases the fenced host workspace directory, because the cold commit is
+archive-only and nothing references it afterwards. Canonical leaf:
 packages/runtime/src/sandbox/providers/docker-workspace-drain.ts.
 
 Pending cancellation accepts non-dispatch only from call-scoped routing preparation
@@ -668,8 +675,10 @@ changes. Drain budgets cover dispatch/capture/retry within the lifecycle ceiling
 Warm-capture reclamation/heartbeat cleanup retain holders through the original
 deadline after turn closure: no takeover or authority extension.
 
-Supervision-key presence—even malformed—blocks legacy containment enrollment,
-capture, publication and teardown. Observation failure never proves exit.
+Supervision-key presence (even malformed) blocks legacy containment enrollment,
+drain capture, publication and teardown. Only a warm point-in-time checkpoint
+that runs around the command, published one generation behind, may capture
+the box meanwhile (migration 0685). Observation failure never proves exit.
 
 Acquisition/mutation waits extend once through the first durable capture deadline
 plus handoff grace (one-hour cap). Expired/replacement claims never replenish
@@ -1511,7 +1520,18 @@ never a retry of an existing or ambiguous operation. Submission conflicts never
 reconcile to an existing row; ambiguous failures adopt one only after exact
 scope, catalog, identity and argument comparison. Recovery never replays the
 tool ([run lifecycle](run-lifecycle.md#codemode-recovery)). The current-human
-gateway rebuilds live authority per request. HTTP calls may rebuild only the
+gateway rebuilds live authority per request. Known-tool HTTP requests use the
+additive `tools/resolve` and `tools/invoke` adapters in
+`apps/api/src/workspace-tool-target.ts`: select one authorized registry/account
+route before provider construction, then use the shared gateway's schema,
+preflight, policy and execution pipeline. Cold calls use the current definition;
+optional full-entry definition pins reject drift before approval consumption.
+The pin is not authority and requires no shared cache or previous discovery.
+Version-2 approvals bind executable effect and Site context, not the public
+approval display field, and share the permanent operation tombstone namespace
+with v1. Physical targeted dispatch rechecks the caller, exact pinned Site and
+selected live action policy after awaited native credential authorization.
+Legacy HTTP calls may rebuild only the
 target identity's connector when their complete catalog digest has a
 content-free per-process attestation for the same caller scope and the live
 entry is identical; otherwise they prepare the complete catalog
@@ -1527,6 +1547,12 @@ parent intersects them with the viewer's live gateway, the API revalidates every
 call, and live approval still applies. Agent-authored versions may retain any
 identity in their exact attempt catalog. Ports are revoked on document
 navigation or replacement.
+
+Modern Site clients negotiate targeted calls with the host. Old bundled Site
+clients receive a bounded requested-identity manifest, whose retained entry
+pins translate their legacy calls without whole-workspace provider discovery.
+Local preview remains frozen-attempt Codemode, not current-human authority.
+Explicit catalog/declarations discovery and OAuth remain separate paths.
 
 HTML-only Sites and inline chat previews share the SDK bridge and renderer.
 See [embedding authority internals](embedding-authority-internals.md#inline-html-and-chat-previews)
@@ -1940,9 +1966,12 @@ Post-start recovery preserves IDs/cursors, budgets and writer fences.
 Cancellation stays waiter-local; mixed faults never retry. Cleanup retains its
 helper UUID/cursors.
 
-Legacy retained Modal commands, whatever their health, use the existing drain once
-the group is unused for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS` with no input
-wait or pending request; they settle lost with a notice. A recovering turn under
+Legacy retained Modal commands use the existing drain once the group is unused
+for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS` and no active command printed
+output in that window; they settle lost with a notice. A held input wait or a
+pending approval or human-input request is not use: the box is saved, stopped and
+resumed on demand, and the stop notice waits for a later turn instead of
+waking the session. A recovering turn under
 an effective pause does not retain the machine once physical writers have
 quiesced and the idle window has elapsed; workspace capture precedes stop,
 while turn history and pause state survive. Command backoff never
@@ -2132,6 +2161,7 @@ Topics: [`README.md`](README.md).
 | Child sessions or depth policy | `packages/core/src/domain/sessions.ts`, `packages/core/src/session-authorization.ts` | [`nested-agent-depth.md`](nested-agent-depth.md) |
 | Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/api/src/mcp/server.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Realtime browser conversation | `packages/sdk/src/realtime.ts`, `packages/react/src/realtime/`, `apps/api/src/session-realtime-context.ts` | [`run-lifecycle.md`](run-lifecycle.md), package READMEs |
+| Conversation target context / cross-session receipt reads | `packages/contracts/src/session-target.ts`, `packages/db/src/session-target.ts`, `apps/api/src/mcp/server.ts` | [`session-monitoring-mcp.md`](session-monitoring-mcp.md); non-authoritative context, existing Send/Steer delivery |
 
 ### Contracts, access, and persistence
 
@@ -2201,6 +2231,14 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Advanced in-process embedding | `packages/core/`, `apps/api/`, `apps/worker/` | [`embedding.md`](embedding.md) |
 
 ### Operations
+
+The standalone database backup runner (`scripts/backup.ts`, `scripts/backup/`)
+uses PostgreSQL clients, Age and rclone without depending on the API or worker.
+Deployment-owned scheduling and a dedicated credential boundary keep recovery
+available during application failure. Its optional Helm CronJobs share a
+persistent checkpoint/lock volume; the independent operator image is published
+separately from runtime images. See [database backups](backups.md) for retention,
+validation, isolated restoration and coverage limits.
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |

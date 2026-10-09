@@ -1,6 +1,7 @@
 import { ClaudeProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
 import { resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./claude-subscription-accounts";
 import {
+  receiverCodexSubscriptionAuthorityV2InTransaction,
   receiverSubscriptionAuthorityInTransaction,
   sharedPoolSubscriptionAuthoritySnapshotsInTransaction,
 } from "./accepted-subscription-authority";
@@ -2155,20 +2156,29 @@ export async function submitHumanPromptInTransaction(
       (await resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction(db, {
         workspaceId: input.workspaceId,
       })));
-  // Codex v2 accepted authority (M3 PR 2a): an edit keeps its source turn's
-  // frozen value; a human prompt, whether sent or steered, resolves that
-  // human's own owner-caused authority; every other actor (service, operator,
-  // API key, and an agent's message or Steer) freezes none. NULL until the
+  // Codex v2 accepted authority (M3 PR 2a, 3b): an edit keeps its source
+  // turn's frozen value; a human prompt, whether sent or steered, resolves
+  // that human's own owner-caused authority; agent-submitted work copies the
+  // receiving session's value exactly as its v1 pools do (EP-T14); every
+  // other actor (service, operator, API key) freezes none. NULL until the
   // account's Codex cutover is enabled. Reads the cutover row on every
   // non-edit prompt (one indexed lookup).
   const subscriptionAuthority = editedSourceTurn
     ? (editedSourceTurn.subscriptionAuthority ?? null)
-    : await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        acceptingSubjectId: input.actor.type === "human" ? acceptedInitiatingHumanSubjectId : null,
-      });
+    : input.actor.type === "agent_attempt"
+      ? await receiverCodexSubscriptionAuthorityV2InTransaction(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          causalHumanSubjectId: acceptedInitiatingHumanSubjectId,
+        })
+      : await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          acceptingSubjectId:
+            input.actor.type === "human" ? acceptedInitiatingHumanSubjectId : null,
+        });
   await input.beforeFreshPromptCommit?.(db, { claudeProviderAccountAuthoritySnapshot });
   const acceptedEventId = crypto.randomUUID();
   const turnId = crypto.randomUUID();
@@ -2770,6 +2780,13 @@ export async function sendAgentMessageInTransaction(
     sessionId: input.targetSessionId,
     causalHumanSubjectId: subscriptionCausalHuman,
   });
+  // Codex v2 (M3 PR 3b): the same receiving source, copied (EP-T14).
+  const receiverCodexAuthority = await receiverCodexSubscriptionAuthorityV2InTransaction(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.targetSessionId,
+    causalHumanSubjectId: subscriptionCausalHuman,
+  });
   const effective = await evaluateSessionControl(db, input.workspaceId, input.targetSessionId, {
     workspaceControl,
   });
@@ -2823,6 +2840,7 @@ export async function sendAgentMessageInTransaction(
             mcpAccountBindings: inheritedConnectionAuthority.mcpAccountBindings,
             xaiProviderAccountAuthoritySnapshot: receiverAuthority.xai.snapshot,
             claudeProviderAccountAuthoritySnapshot: receiverAuthority.claude.snapshot,
+            subscriptionAuthority: receiverCodexAuthority,
             state: "pending",
           },
           "summary",
@@ -3061,6 +3079,13 @@ export async function steerAgentSessionInTransaction(
     sessionId: input.targetSessionId,
     causalHumanSubjectId: subscriptionCausalHuman,
   });
+  // Codex v2 (M3 PR 3b): the same receiving source, copied (EP-T14).
+  const receiverCodexAuthority = await receiverCodexSubscriptionAuthorityV2InTransaction(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.targetSessionId,
+    causalHumanSubjectId: subscriptionCausalHuman,
+  });
   const now = new Date();
   const updateId = crypto.randomUUID();
   // An Agent Steer is external input for the target's goal. A goal paused only
@@ -3142,6 +3167,7 @@ export async function steerAgentSessionInTransaction(
             mcpAccountBindings: inheritedConnectionAuthority.mcpAccountBindings,
             xaiProviderAccountAuthoritySnapshot: receiverAuthority.xai.snapshot,
             claudeProviderAccountAuthoritySnapshot: receiverAuthority.claude.snapshot,
+            subscriptionAuthority: receiverCodexAuthority,
             state: "pending",
           },
           "summary",

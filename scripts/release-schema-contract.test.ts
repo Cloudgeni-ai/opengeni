@@ -70,6 +70,30 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers the dormant Codex core writers as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0688_subscription_core_codex_writers.sql",
+      ),
+    ).toMatchObject({
+      path: "0688_subscription_core_codex_writers.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers the drained Codex subscription-core cutover as maintenance-only", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0689_subscription_core_codex_cutover.sql",
+      ),
+    ).toMatchObject({
+      path: "0689_subscription_core_codex_cutover.sql",
+      deploymentMode: "maintenance",
+    });
+  });
+
   test("registers the subscription people-assignment read policy fix as rolling", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -323,6 +347,18 @@ describe("release schema contract", () => {
     );
     if (subscriptionCoreCodexOperations) {
       expect(subscriptionCoreCodexOperations.deploymentMode).toBe("rolling");
+    }
+    const subscriptionCoreCodexWriters = sourceContract.migrations.find(
+      (migration) => migration.path === "0688_subscription_core_codex_writers.sql",
+    );
+    if (subscriptionCoreCodexWriters) {
+      expect(subscriptionCoreCodexWriters.deploymentMode).toBe("rolling");
+    }
+    const subscriptionCoreCodexCutover = sourceContract.migrations.find(
+      (migration) => migration.path === "0689_subscription_core_codex_cutover.sql",
+    );
+    if (subscriptionCoreCodexCutover) {
+      expect(subscriptionCoreCodexCutover.deploymentMode).toBe("maintenance");
     }
     // Keep the published-history assertions below scoped to their existing
     // migration range; the new forward migration is checked explicitly above.
@@ -2232,7 +2268,10 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0686_target_tool_approval_bindings.sql",
+      "0689_subscription_core_codex_cutover.sql",
       "0671_subscription_core_codex_operations.sql",
+      "0688_subscription_core_codex_writers.sql",
       "0670_subscription_core_codex_apps.sql",
       "0669_subscription_core_codex_waits.sql",
       "0668_subscription_core_codex_chat_authority.sql",
@@ -2615,6 +2654,8 @@ describe("release schema contract", () => {
       "0680_sandbox_idle_checkpoint.sql",
       "0681_sandbox_ended_epoch_blockers.sql",
       "0684_claude_haiku_5_5_default_model.sql",
+      "0685_sandbox_capture_around_supervised_commands.sql",
+      "0687_human_wait_command_containment.sql",
       "0691_native_pty_command_supervision.sql",
       "0692_native_command_qualification.sql",
     ].filter((path) =>

@@ -124,6 +124,48 @@ export async function getModelConnectionAccess(
   });
 }
 
+/**
+ * A shared Codex connection's access policy on the shared subscription core
+ * (M3 PR 3), in the legacy shape, for an organization whose Codex cutover is
+ * enabled. The organization route reads an organization-managed connection
+ * (as the legacy organization-authority row), the workspace route one that
+ * workspace manages. `allowedWorkspaces` is the enumerated workspace scope
+ * (null for organization scope). Read-only: the core has no access-policy
+ * writer yet (the scope editor is M5), so callers refuse writes.
+ */
+export async function getSubscriptionCoreCodexModelConnectionAccess(
+  db: Database,
+  target: ModelConnectionTarget,
+): Promise<ModelConnectionAccess | null> {
+  if (target.kind !== "codex") throw new Error("Only Codex connections are read from the core");
+  return await scoped(db, target, async (tx) => {
+    const [row] = await rawRows<ModelConnectionAccess>(
+      tx,
+      sql`select connection.allowed_model_ids as "allowedModels",
+          case when connection.scope_kind = 'organization' then null
+            else array(select assignment.workspace_id::text
+              from subscription_connection_workspaces assignment
+              where assignment.account_id = connection.account_id
+                and assignment.connection_id = connection.id
+              order by assignment.workspace_id) end as "allowedWorkspaces",
+          connection.allow_personal_workspaces as "allowPersonalWorkspaces",
+          connection.version
+        from subscription_connections connection
+        where connection.account_id = ${target.accountId}::uuid
+          and connection.id = ${target.connectionId}::uuid
+          and connection.provider = 'codex' and connection.kind = 'subscription'
+          and connection.ownership = 'shared'
+          and ${
+            target.workspaceId === null
+              ? sql`connection.managed_by_workspace_id is null`
+              : sql`connection.managed_by_workspace_id = ${target.workspaceId}::uuid`
+          }
+        limit 1`,
+    );
+    return row ?? null;
+  });
+}
+
 export async function updateModelConnectionAccess(
   db: Database,
   target: ModelConnectionTarget,

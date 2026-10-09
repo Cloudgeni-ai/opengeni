@@ -18,8 +18,7 @@ const dependencies = [
   "connectionRestrictionsAndXaiReadiness",
   "loadWorkspaceClaudeSubscriptionReadiness",
   "getWorkspaceModelPolicy",
-  "workspaceCodexSubscriptionActive",
-  "loadWorkspaceCodexModelAvailability",
+  "loadWorkspaceCodexCatalogReadiness",
   "listConnectionsMetadata",
   "listWorkspaceProviderCustomModelsByKind",
   "getOrganizationModelProviderCatalogForWorkspace",
@@ -71,8 +70,8 @@ function fixture(
     restrictions: { restrictions: { "supergrok/": ["allowed"] }, xaiSubscriptionActive: true },
     claude: { workspace: true, organization: false },
     policy: { allowedProviders: ["anthropic"], allowedModels: null },
-    codex: true,
-    observations: { marker: "availability" },
+    // Codex readiness and live availability come from one cutover-aware read.
+    codex: { active: true, observations: {} },
     // Workspace API-key readiness is derived from one metadata read; the
     // fixture keys it by provider so the derivation port stays trivial.
     connections: {
@@ -105,8 +104,7 @@ function fixture(
     connectionRestrictionsAndXaiReadiness: (...args: unknown[]) => read("restrictions", args),
     loadWorkspaceClaudeSubscriptionReadiness: (...args: unknown[]) => read("claude", args),
     getWorkspaceModelPolicy: (...args: unknown[]) => read("policy", args),
-    workspaceCodexSubscriptionActive: (...args: unknown[]) => read("codex", args),
-    loadWorkspaceCodexModelAvailability: (...args: unknown[]) => read("observations", args),
+    loadWorkspaceCodexCatalogReadiness: (...args: unknown[]) => read("codex", args),
     listConnectionsMetadata: (...args: unknown[]) => read("connections", args),
     listWorkspaceProviderCustomModelsByKind: (...args: unknown[]) => read("workspace-models", args),
     getOrganizationModelProviderCatalogForWorkspace: (...args: unknown[]) =>
@@ -259,7 +257,15 @@ test("disabled subscription skips only its catalog; every read keeps its exact s
         else if (name === "restrictions" || name === "claude")
           expect(args.slice(1)).toEqual([f.settings, f.context]);
         else if (name === "codex")
-          expect(args.slice(1)).toEqual([f.settings, f.context.workspaceId]);
+          expect(args.slice(1)).toEqual([
+            f.settings,
+            {
+              accountId: f.context.accountId,
+              workspaceId: f.context.workspaceId,
+              subjectId: f.context.subjectId,
+            },
+            { observeAvailability: false },
+          ]);
         else expect(args.slice(1)).toEqual([f.context.workspaceId]);
       }
       f.release(Object.keys(f.values));
@@ -276,15 +282,29 @@ test("disabled subscription skips only its catalog; every read keeps its exact s
   }
 });
 
-test("opt-in live availability is still invoked exactly once, never added to stable create admission", async () => {
+test("opt-in live availability is still requested exactly once, never for stable create admission", async () => {
   const f = fixture({ observe: true });
   try {
     await flush();
-    expect(f.calls.filter((call) => call.name === "observations")).toEqual([
-      { name: "observations", args: [f.db, f.settings, f.context.workspaceId] },
+    expect(f.calls.filter((call) => call.name === "codex")).toEqual([
+      {
+        name: "codex",
+        args: [
+          f.db,
+          f.settings,
+          {
+            accountId: f.context.accountId,
+            workspaceId: f.context.workspaceId,
+            subjectId: f.context.subjectId,
+          },
+          { observeAvailability: true },
+        ],
+      },
     ]);
-    f.release(Object.keys(f.values));
-    expect((await f.running).observations).toBe(f.values.observations);
+    const observations = { marker: "availability" };
+    f.holds.codex!.resolve({ active: true, observations });
+    f.release(Object.keys(f.values).filter((name) => name !== "codex"));
+    expect((await f.running).observations).toBe(observations);
   } finally {
     await f.cleanup();
   }
@@ -294,9 +314,13 @@ test("the loader's existing omitted-options default still observes live availabi
   const f = fixture({ observe: "default" });
   try {
     await flush();
-    expect(f.names().filter((name) => name === "observations")).toHaveLength(1);
-    f.release(Object.keys(f.values));
-    expect((await f.running).observations).toBe(f.values.observations);
+    const codexCalls = f.calls.filter((call) => call.name === "codex");
+    expect(codexCalls).toHaveLength(1);
+    expect(codexCalls[0]!.args[3]).toEqual({ observeAvailability: true });
+    const observations = { marker: "availability" };
+    f.holds.codex!.resolve({ active: true, observations });
+    f.release(Object.keys(f.values).filter((name) => name !== "codex"));
+    expect((await f.running).observations).toBe(observations);
   } finally {
     await f.cleanup();
   }

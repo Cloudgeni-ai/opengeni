@@ -355,6 +355,20 @@ For sandbox configuration work, read `references/sandbox-configuration.md`. Use 
 
 ## Tools And MCP Discovery
 
+For known current-human tool calls, inspect `apps/api/src/workspace-tool-target.ts`
+and the targeted contracts in `packages/contracts/src/tool-catalog.ts`. Resolve
+only the selected authorized registry/account route before constructing providers;
+do not add full-workspace discovery as a fallback. Definition pins are full-entry
+preconditions, never authority. Version-2 approvals bind the existing executable
+effect digest and Site tuple, separately from private authority, and retain the
+v1 operation tombstone namespace.
+For raw/local targets lacking adapter private authority, use the runtime's
+existing executable-authority digest and exact selected configuration, never
+the public-catalog fallback; preserve v1/frozen semantics. Targeted physical callbacks
+recheck caller/Site authority and the selected live action policy; do not change
+frozen worker/Codemode policy semantics. SDK/Site adoption and explicit legacy mode are documented in
+`packages/sdk/README.md`; local previews retain frozen Codemode authority.
+
 For unified Skills work, start with `docs/design/skills-system.md`. Server-side
 file primitives and packaged guidance live in `packages/runtime/src/skill-files.ts`,
 `skill-library.ts`, and `runtime-skills.ts`; worker gateway adapters live under
@@ -378,6 +392,11 @@ For tools and MCP work, distinguish:
 - First-party MCP servers exposed by the API.
 - Built-in SDK sandbox capabilities for shell/files, and Opengeni's separate Skill catalog and reader.
 - Tools available inside the sandbox image, such as CLIs.
+
+Conversation target context is non-authoritative: inspect
+`packages/db/src/session-target.ts` and `docs/session-monitoring-mcp.md` for
+`session_target_get/set` and exact Send/Steer receipt tracking. Selection must
+never transfer voice, dispatch work, or replace live session authorization.
 
 Configured agents receive capability-gated prompt modules under
 `packages/runtime/src/agent-instructions/`; media guidance belongs to the media

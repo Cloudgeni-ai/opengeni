@@ -30,6 +30,8 @@ const subscriptionCoreMigrations = [
   "0671_subscription_core_codex_operations.sql",
   // Extends the shared connection table created by withheld 0642.
   "0679_codex_extra_credit_consent.sql",
+  "0688_subscription_core_codex_writers.sql",
+  "0689_subscription_core_codex_cutover.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {

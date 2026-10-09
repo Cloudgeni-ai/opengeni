@@ -15,6 +15,7 @@ import {
 } from "@opengeni/core";
 import {
   getModelConnectionAccess,
+  getSubscriptionCoreCodexModelConnectionAccess,
   updateModelConnectionAccess,
   getOrganizationAdministrationOverview,
   getXaiSubscriptionAccountAuthoritySnapshot,
@@ -31,6 +32,7 @@ import {
   requireOrganizationCodexHuman,
   requireSameOriginBrowserMutation,
 } from "./codex";
+import { codexRouteDisposition, coreCodexRouteUnsupported } from "./codex-core";
 import { requireScopeMutation } from "./supergrok";
 import {
   requirePrivateSubscriptionHuman,
@@ -54,6 +56,19 @@ function modelPrefix(target: ModelConnectionTarget) {
     );
   if (target.kind === "codex" || target.kind === "supergrok") return `${target.kind}/`;
   return `${target.workspaceId === null ? "organization" : "workspace"}-${target.kind === "vercel_gateway" ? "gateway" : target.kind === "opper" ? "opper" : "openrouter"}/`;
+}
+
+/**
+ * Codex access policies follow the organization's Codex cutover row (M3 PR
+ * 3): the legacy credential row without one; the shared core connection with
+ * an enabled one (the legacy rows are frozen after 0680); a disabled row is
+ * maintenance (typed 503 from `codexRouteDisposition`).
+ */
+async function codexAccessDisposition(
+  deps: ApiRouteDeps,
+  target: ModelConnectionTarget,
+): Promise<"legacy" | "core"> {
+  return target.kind === "codex" ? await codexRouteDisposition(deps, target.accountId) : "legacy";
 }
 
 export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDeps) {
@@ -133,7 +148,10 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
     app.get(path, async (c) => {
       c.header("cache-control", "private, no-store");
       const connection = await target(c, false);
-      const policy = await getModelConnectionAccess(deps.db, connection);
+      const policy =
+        (await codexAccessDisposition(deps, connection)) === "core"
+          ? await getSubscriptionCoreCodexModelConnectionAccess(deps.db, connection)
+          : await getModelConnectionAccess(deps.db, connection);
       if (!policy) throw new HTTPException(404, { message: "Connection not found" });
       let settings =
         connection.workspaceId === null
@@ -198,6 +216,9 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
     });
     app.put(path, async (c) => {
       const connection = await target(c, true);
+      // The core has no Codex access-policy writer yet (scope and per-workspace
+      // allowlists are the M5 editor); never write the frozen legacy row.
+      if ((await codexAccessDisposition(deps, connection)) === "core") coreCodexRouteUnsupported();
       const parsed = ModelConnectionAccessPolicy.safeParse(await c.req.json().catch(() => null));
       if (!parsed.success)
         throw new HTTPException(422, { message: "Invalid connection access policy" });

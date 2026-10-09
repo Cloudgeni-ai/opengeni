@@ -1012,6 +1012,13 @@ provider metadata. It changes when routing, wire API, wire profile, execution li
 capabilities, pricing, credential class, billing attribution, base URL, or an
 explicitly public request-metadata value changes.
 
+The automatic-compaction trigger (`autoCompactTokenLimit`) is the one execution
+limit outside the digest. It is a context-management default that workspace and
+organization compaction preferences already replace on every attempt, so
+changing a model's default compaction threshold leaves accepted turns runnable.
+A turn accepted before the trigger left the digest still verifies, as long as
+the trigger and every other executable field are unchanged.
+
 It does not include aliases, display labels, health, entitlement state, concrete
 credential IDs, keys, tokens, or secret header/query values. Rotating a secret
 within the same credential class therefore does not invalidate an accepted
@@ -1355,9 +1362,20 @@ It uses the existing model-policy routes through the typed SDK methods
 `getWorkspaceModelAccessPolicy` and `updateWorkspaceModelAccessPolicy`:
 
 ```text
-GET /v1/workspaces/:workspaceId/model-policy
-PUT /v1/workspaces/:workspaceId/model-policy
+GET    /v1/workspaces/:workspaceId/model-policy
+PUT    /v1/workspaces/:workspaceId/model-policy
+DELETE /v1/workspaces/:workspaceId/model-policy
 ```
+
+Organization owners and admins also set an allowlist once for every workspace
+(**Organization settings → Models → Defaults for every workspace**, or
+`modelPolicy` on `PATCH /v1/organizations/:organizationId/model-defaults`). A
+workspace without a policy row follows it; a workspace row, including one that
+allows every model, is that workspace's own choice and wins. The GET response
+reports `source` (`workspace`, `organization` or `none`) and the `organization`
+policy the workspace would follow; DELETE removes the workspace's own policy so
+it follows the organization again (`deleteWorkspaceModelAccessPolicy`). In the
+form, **Use <organization>'s allowed models** switches between the two.
 
 Provider allowlists remain part of the API contract for advanced/operator use.
 The authenticated catalog exposes only a per-model `policyAllowed` verdict, not
@@ -1418,6 +1436,11 @@ first match wins:
 1. `workspace`: the saved workspace default (`settings.sessionDefaults`), while
    it is selectable in the workspace. Its saved reasoning is clamped to the
    highest effort the model supports today at or below it.
+   1b. `organization`: the organization's default
+   (`PATCH /v1/organizations/:organizationId/model-defaults` with
+   `sessionDefaults`), the same way, for a workspace without its own (or whose
+   own can't run there). Saving `sessionDefaults: null` on a workspace removes
+   its own default so it follows the organization again.
 2. `subscription`: the first selectable connected-subscription model in
    operator catalog order (ChatGPT/Codex, then SuperGrok) with its own default
    reasoning. A deployment default that is itself a selectable subscription

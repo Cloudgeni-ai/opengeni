@@ -1,10 +1,12 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mock } from "bun:test";
+import { mock, spyOn } from "bun:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { AccessGrant, ConnectionMetadata, ToolGatewayCatalog } from "@opengeni/contracts";
 import type {
   ApiIntegrationRuntime,
   Database,
   ResolveConnectionCredentialInput,
+  ConnectorActionPolicySnapshotEntry,
 } from "@opengeni/db";
 import type { AccessGrantAuthorization, ApiRouteDeps } from "@opengeni/core";
 import { startTestMcpServer, testSettings, type TestMcpServer } from "@opengeni/testing";
@@ -23,11 +25,18 @@ const real = {
   availableMcpAccountBindings: core.availableMcpAccountBindings,
   buildConnectionTokenResolver: dbModule.buildConnectionTokenResolver,
   listConnectorToolPermissionPolicies: dbModule.listConnectorToolPermissionPolicies,
+  getWorkspaceSiteSessionOrigin: dbModule.getWorkspaceSiteSessionOrigin,
+  bootstrapWorkspace: dbModule.bootstrapWorkspace,
 };
 type Fixture = {
   connections: ConnectionMetadata[];
   integrations: ApiIntegrationRuntime[];
   resolved: ResolveConnectionCredentialInput[];
+  policies?: ConnectorActionPolicySnapshotEntry[];
+  onCredential?: (input: ResolveConnectionCredentialInput) => Promise<void>;
+  onPhysical?: () => Promise<void>;
+  revokedCaller?: boolean;
+  callerReads?: number;
 };
 const fixtures = new Map<Database, Fixture>();
 mock.module("@opengeni/core", () => ({
@@ -59,15 +68,33 @@ mock.module("@opengeni/core", () => ({
 }));
 mock.module("@opengeni/db", () => ({
   ...dbModule,
+  bootstrapWorkspace: (...args: Parameters<typeof real.bootstrapWorkspace>) => {
+    const f = fixtures.get(args[0]);
+    if (!f) return real.bootstrapWorkspace(...args);
+    f.callerReads = (f.callerReads ?? 0) + 1;
+    return Promise.resolve({
+      mode: "local",
+      subjectId: "dev",
+      accountGrants: [{ accountId, subjectId: "dev", permissions: [] }],
+      workspaceGrants: [
+        { ...grantFor("dev"), permissions: f.revokedCaller ? [] : ["workspace:read"] },
+      ],
+    });
+  },
+  getWorkspaceSiteSessionOrigin: (...args: Parameters<typeof real.getWorkspaceSiteSessionOrigin>) =>
+    fixtures.has(args[0]) ? Promise.resolve(null) : real.getWorkspaceSiteSessionOrigin(...args),
   listConnectorToolPermissionPolicies: (
     ...args: Parameters<typeof real.listConnectorToolPermissionPolicies>
   ) =>
-    fixtures.has(args[0]) ? Promise.resolve([]) : real.listConnectorToolPermissionPolicies(...args),
+    fixtures.has(args[0])
+      ? Promise.resolve(fixtures.get(args[0])!.policies ?? [])
+      : real.listConnectorToolPermissionPolicies(...args),
   buildConnectionTokenResolver: (...args: Parameters<typeof real.buildConnectionTokenResolver>) => {
     const fixture = fixtures.get(args[0]);
     if (!fixture) return real.buildConnectionTokenResolver(...args);
     return async (input: ResolveConnectionCredentialInput) => {
       fixture.resolved.push(input);
+      await fixture.onCredential?.(input);
       const connection = fixture.connections.find(
         (candidate) =>
           candidate.id === input.connectionRef.connectionId &&
@@ -84,7 +111,10 @@ mock.module("@opengeni/db", () => ({
         status: "ok" as const,
         connectionId: connection.id,
         headers: { authorization: `Bearer ${connection.id}` },
-        authorizeProviderRequest: async () => connection.status === "active",
+        authorizeProviderRequest: async () => {
+          await fixture.onPhysical?.();
+          return connection.status === "active";
+        },
       };
     };
   },
@@ -112,13 +142,44 @@ const {
   callWorkspaceToolGatewayForCaller,
   prepareAttestedWorkspaceToolGateway,
   prepareWorkspaceToolGatewayForGrant,
+  prepareWorkspaceToolGateway,
   workspaceToolGatewayAttestationScope,
   workspaceToolGatewayServerTiming,
 } = await import("../src/workspace-tool-gateway");
 const { createWorkspaceToolGatewayCatalogAttestations } =
   await import("../src/workspace-tool-gateway-attestations");
+const {
+  invokeWorkspaceToolTarget,
+  resolveWorkspaceToolTarget,
+  resolveWorkspaceToolManifest,
+  approveWorkspaceToolTarget,
+} = await import("../src/workspace-tool-target");
+import type { TargetGatewayOptions } from "../src/workspace-tool-target";
 
 afterAll(() => mock.restore());
+
+function targetAuthorization(subject = subjectId) {
+  const grant = grantFor(subject);
+  const authorization = core.accessGrantAuthorizationFromContext(
+    {
+      subjectId: subject,
+      accountGrants: [{ accountId, subjectId: subject, permissions: [] }],
+      workspaceGrants: [grant],
+    } as unknown as Parameters<typeof core.accessGrantAuthorizationFromContext>[0],
+    grant,
+  );
+  // Trusted route fixture: the production route obtains this bit from canonical login.
+  authorization.canonicalManagedHumanSession = true;
+  return authorization;
+}
+function targetOptions(extra: TargetGatewayOptions = {}): TargetGatewayOptions {
+  return {
+    prepare: async (deps, authorization, options = {}) =>
+      await prepareWorkspaceToolGateway(deps, authorization, options),
+    begin: async () => true,
+    ...extra,
+  };
+}
 
 const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -197,12 +258,17 @@ type DelayedProvider = TestMcpServer & { extraTools: string[] };
 /** A remote MCP provider whose every HTTP request takes `delayMs`. */
 function delayedProvider(
   delayMs: number,
-  options: { requireBearer?: boolean; baseTools?: string[] } = {},
+  options: {
+    requireBearer?: boolean;
+    baseTools?: string[];
+    onRequest?: (method: string | null) => Promise<void>;
+  } = {},
 ) {
   const extraTools: string[] = [];
   const provider = startTestMcpServer({
     toolsForAuthorization: () => [...(options.baseTools ?? []), ...extraTools],
     validateAuthorization: async (value) => {
+      await options.onRequest?.(provider.requests.at(-1)?.jsonRpcMethod ?? null);
       if (delayMs > 0) await Bun.sleep(delayMs);
       return options.requireBearer ? value?.startsWith("Bearer ") === true : true;
     },
@@ -211,12 +277,18 @@ function delayedProvider(
 }
 
 function createFixture(
-  input: { delayMs?: number; unrelatedConnectors?: number; firstParty?: boolean } = {},
+  input: {
+    delayMs?: number;
+    unrelatedConnectors?: number;
+    firstParty?: boolean;
+    onRequest?: (method: string | null) => Promise<void>;
+  } = {},
 ) {
   const delayMs = input.delayMs ?? 0;
   const grafana = delayedProvider(delayMs, {
     requireBearer: true,
     baseTools: ["query_prometheus"],
+    ...(input.onRequest ? { onRequest: input.onRequest } : {}),
   });
   const unrelated = Array.from({ length: input.unrelatedConnectors ?? 3 }, () =>
     delayedProvider(delayMs),
@@ -337,6 +409,470 @@ async function expectHttpStatus(promise: Promise<unknown>, status: number, code?
   expect(error?.status).toBe(status);
   if (code) expect(error?.details?.code).toBe(code);
 }
+
+describe("portable known-tool calls", () => {
+  test("cold invocation and fresh-replica preconditions need no complete catalog or sibling account", async () => {
+    const f = createFixture();
+    try {
+      const identity = f.identity(f.shared);
+      const request = { target: { identity }, operationId: crypto.randomUUID(), arguments: {} };
+      const first = await invokeWorkspaceToolTarget(
+        f.deps,
+        targetAuthorization(),
+        request,
+        targetOptions(),
+      );
+      expect(first.tool.entry.identity).toEqual(identity);
+      expect(f.unrelatedSetupRequests()).toBe(0);
+      expect(
+        f.state.resolved.every((item) => item.connectionRef.connectionId === f.shared.id),
+      ).toBe(true);
+      f.resetRequests();
+      const second = await invokeWorkspaceToolTarget(
+        f.deps,
+        targetAuthorization(),
+        {
+          ...request,
+          operationId: crypto.randomUUID(),
+          expectedDefinitionDigest: first.tool.definitionDigest,
+        },
+        targetOptions(),
+      );
+      expect(second.tool.definitionDigest).toBe(first.tool.definitionDigest);
+      expect(f.unrelatedSetupRequests()).toBe(0);
+      expect(f.grafana.calls).toHaveLength(2);
+    } finally {
+      f.close();
+    }
+  });
+  test("full-entry stale fails before approval admission and never falls back", async () => {
+    const f = createFixture();
+    let began = 0;
+    try {
+      await expectHttpStatus(
+        invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          {
+            target: { identity: f.identity(f.shared) },
+            operationId: crypto.randomUUID(),
+            arguments: {},
+            expectedDefinitionDigest: "0".repeat(64),
+          },
+          targetOptions({
+            begin: async () => {
+              began++;
+              return true;
+            },
+          }),
+        ),
+        409,
+        "tool_definition_stale",
+      );
+      expect(began).toBe(0);
+      expect(f.grafana.calls).toHaveLength(0);
+      expect(f.unrelatedSetupRequests()).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+  test("canonical, foreign, nonexistent and forged caller identities never prepare another account", async () => {
+    const f = createFixture();
+    try {
+      for (const identity of [
+        { serverId: "grafana", toolName: "query_prometheus" },
+        f.identity(f.foreign),
+        { serverId: "missing", toolName: "missing" },
+      ]) {
+        await expectHttpStatus(
+          resolveWorkspaceToolTarget(
+            f.deps,
+            targetAuthorization(),
+            { target: { identity } },
+            targetOptions(),
+          ),
+          404,
+        );
+      }
+      await expectHttpStatus(
+        resolveWorkspaceToolTarget(
+          f.deps,
+          authorizationFor(subjectId),
+          { target: { identity: f.identity(f.shared) } },
+          targetOptions(),
+        ),
+        403,
+      );
+      expect(f.grafana.requests).toHaveLength(0);
+      expect(f.unrelatedSetupRequests()).toBe(0);
+      expect(f.state.resolved).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  });
+  test("symbolic projection resolves only its exact connector and preserves first-party caller settings", async () => {
+    const f = createFixture({ firstParty: true });
+    try {
+      const identity = f.identity(f.shared);
+      const resolved = await resolveWorkspaceToolTarget(
+        f.deps,
+        targetAuthorization(),
+        { target: { identity } },
+        targetOptions(),
+      );
+      await invokeWorkspaceToolTarget(
+        f.deps,
+        targetAuthorization(),
+        {
+          target: { path: resolved.entry.codemodePath },
+          operationId: crypto.randomUUID(),
+          arguments: {},
+        },
+        targetOptions(),
+      );
+      expect(f.unrelatedSetupRequests()).toBe(0);
+      const response = await invokeWorkspaceToolTarget(
+        f.deps,
+        targetAuthorization(),
+        {
+          target: { path: ["opengeni", "sessions_list"] },
+          operationId: crypto.randomUUID(),
+          arguments: {},
+        },
+        targetOptions(),
+      );
+      expect(JSON.stringify(response.result)).toContain("unrelated_0");
+      expect(f.unrelatedSetupRequests()).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+  test("Site denial and pre-aborted requests cause zero provider preparation", async () => {
+    const f = createFixture();
+    try {
+      const request = {
+        target: { identity: f.identity(f.shared) },
+        operationId: crypto.randomUUID(),
+        arguments: {},
+        siteArtifactId: artifactId,
+        siteVersionId: versionId,
+      };
+      await expectHttpStatus(
+        invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          request,
+          targetOptions({
+            authorizeSite: async () => {
+              throw Object.assign(new Error("denied"), { status: 403 });
+            },
+          }),
+        ),
+        403,
+      );
+      const controller = new AbortController();
+      controller.abort();
+      await expect(
+        invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          request,
+          targetOptions({ signal: controller.signal }),
+        ),
+      ).rejects.toThrow();
+      expect(f.grafana.requests).toHaveLength(0);
+      expect(f.unrelatedSetupRequests()).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+  test("a bounded manifest groups duplicate target identities without unrelated connectors", async () => {
+    const f = createFixture();
+    try {
+      const identity = f.identity(f.shared);
+      const manifest = await resolveWorkspaceToolManifest(
+        f.deps,
+        targetAuthorization(),
+        { identities: [identity, identity] },
+        targetOptions(),
+      );
+      expect(manifest.tools).toHaveLength(1);
+      expect(manifest.digest).toMatch(/^[a-f0-9]{64}$/);
+      expect(f.unrelatedSetupRequests()).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+  test("installed physical credential callbacks fence Site revocation during awaited native authorization, including manifests", async () => {
+    for (const manifest of [false, true]) {
+      const f = createFixture();
+      let admitted = manifest;
+      let revoked = false;
+      let physical = 0;
+      let closes = 0;
+      f.state.onPhysical = async () => {
+        if (!admitted) return;
+        await Promise.resolve();
+        physical++;
+        revoked = true;
+      };
+      const options = targetOptions({
+        authorizeSite: async (_db, _grant, context) => {
+          expect(context).toEqual({
+            siteArtifactId: artifactId,
+            siteVersionId: versionId,
+            identity: f.identity(f.shared),
+          });
+          if (revoked) throw Object.assign(new Error("site revoked"), { status: 403 });
+        },
+        begin: async () => {
+          admitted = true;
+          return true;
+        },
+        prepare: async (...args) => {
+          const prepared = await prepareWorkspaceToolGateway(...args);
+          return {
+            ...prepared,
+            close: async () => {
+              closes++;
+              await prepared.close();
+            },
+          };
+        },
+      });
+      try {
+        const host = { siteArtifactId: artifactId, siteVersionId: versionId };
+        const outcome = await (
+          manifest
+            ? resolveWorkspaceToolManifest(
+                f.deps,
+                targetAuthorization(),
+                { ...host, identities: [f.identity(f.shared)] },
+                options,
+              )
+            : invokeWorkspaceToolTarget(
+                f.deps,
+                targetAuthorization(),
+                {
+                  ...host,
+                  target: { identity: f.identity(f.shared) },
+                  operationId: crypto.randomUUID(),
+                  arguments: {},
+                },
+                options,
+              )
+        ).then(
+          (value) => value,
+          () => null,
+        );
+        if (outcome) expect(outcome).toMatchObject({ result: { isError: true } });
+        expect(physical).toBeGreaterThan(0);
+        expect(f.grafana.calls).toHaveLength(0);
+        expect(
+          f.grafana.requests.filter((request) => request.jsonRpcMethod === "tools/call"),
+        ).toHaveLength(0);
+        if (!manifest) expect(closes).toBe(1);
+        expect(f.unrelatedSetupRequests()).toBe(0);
+      } finally {
+        f.close();
+      }
+    }
+  });
+  test("selected live policy Allow to Ask or Block during physical credential acquisition prevents dispatch", async () => {
+    for (const decision of ["ask", "block"] as const) {
+      const f = createFixture();
+      let admitted = false;
+      let changed = false;
+      f.state.onCredential = async () => {
+        if (!admitted) return;
+        await Promise.resolve();
+        changed = true;
+        f.state.policies = [
+          {
+            id: crypto.randomUUID(),
+            connectionId: f.shared.id,
+            serverId: "grafana",
+            toolName: "query_prometheus",
+            actionName: "*",
+            policy: decision,
+            version: 1,
+          },
+        ];
+      };
+      try {
+        const outcome = await invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          {
+            target: { identity: f.identity(f.shared) },
+            operationId: crypto.randomUUID(),
+            arguments: {},
+          },
+          targetOptions({
+            begin: async () => {
+              admitted = true;
+              return true;
+            },
+          }),
+        ).then(
+          (value) => value,
+          () => null,
+        );
+        if (outcome) expect(outcome.result.isError).toBe(true);
+        expect(changed).toBe(true);
+        expect(f.grafana.calls).toHaveLength(0);
+        expect(
+          f.grafana.requests.filter((request) => request.jsonRpcMethod === "tools/call"),
+        ).toHaveLength(0);
+        expect(f.unrelatedSetupRequests()).toBe(0);
+      } finally {
+        f.close();
+      }
+    }
+  });
+  test("authenticated HTTP route re-resolves its caller after in-flight credentials, through the production preparation wrapper", async () => {
+    const f = createFixture();
+    const { createApp } = await import("../src/app");
+    const app = createApp({
+      settings: f.settings,
+      db: f.deps.db,
+      bus: {} as never,
+      workflowClient: {} as never,
+    });
+    f.state.onCredential = async () => {
+      await Promise.resolve();
+      f.state.revokedCaller = true;
+    };
+    try {
+      const response = await app.request(
+        `http://localhost/v1/workspaces/${workspaceId}/tools/invoke`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            target: { identity: f.identity(f.shared) },
+            operationId: crypto.randomUUID(),
+            arguments: {},
+          }),
+        },
+      );
+      expect(response.status).toBe(403);
+      expect(f.state.resolved.length).toBeGreaterThan(0);
+      expect(f.state.callerReads).toBeGreaterThan(1);
+      expect(f.grafana.calls).toHaveLength(0);
+      expect(f.unrelatedSetupRequests()).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+  test("cancellation during connect, list, native preflight and call closes preparation without replay", async () => {
+    for (const phase of ["initialize", "tools/list", "preflight", "tools/call"] as const) {
+      const controller = new AbortController();
+      let reached = false;
+      const f = createFixture({
+        onRequest: async (method) => {
+          if (method !== phase) return;
+          await Promise.resolve();
+          reached = true;
+          controller.abort();
+        },
+      });
+      const close = spyOn(Client.prototype, "close");
+      let admitted = false;
+      if (phase === "preflight")
+        f.state.onPhysical = async () => {
+          if (!admitted) return;
+          await Promise.resolve();
+          reached = true;
+          controller.abort();
+        };
+      try {
+        await expect(
+          invokeWorkspaceToolTarget(
+            f.deps,
+            targetAuthorization(),
+            {
+              target: { identity: f.identity(f.shared) },
+              operationId: crypto.randomUUID(),
+              arguments: {},
+            },
+            targetOptions({
+              signal: controller.signal,
+              begin: async () => {
+                admitted = true;
+                return true;
+              },
+            }),
+          ),
+        ).rejects.toThrow();
+        expect(reached).toBe(true);
+        expect(close).toHaveBeenCalled();
+        expect(
+          f.grafana.requests.filter((request) => request.jsonRpcMethod === "tools/call").length,
+        ).toBe(phase === "tools/call" ? 1 : 0);
+        expect(f.grafana.calls.length).toBeLessThanOrEqual(phase === "tools/call" ? 1 : 0);
+        expect(f.unrelatedSetupRequests()).toBe(0);
+      } finally {
+        close.mockRestore();
+        f.close();
+      }
+    }
+  });
+  test("authorization revocation after resolution fails closed at dispatch", async () => {
+    const f = createFixture();
+    try {
+      const identity = f.identity(f.shared);
+      await resolveWorkspaceToolTarget(
+        f.deps,
+        targetAuthorization(),
+        { target: { identity } },
+        targetOptions(),
+      );
+      f.shared.status = "revoked" as typeof f.shared.status;
+      await expectHttpStatus(
+        invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          { target: { identity }, operationId: crypto.randomUUID(), arguments: {} },
+          targetOptions(),
+        ),
+        404,
+      );
+      expect(f.grafana.calls).toHaveLength(0);
+      expect(f.unrelatedSetupRequests()).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+  test("scales through 1/10/100+ connectors with no unrelated provider I/O, even when unrelated endpoints fail", async () => {
+    for (const count of [1, 10, 101]) {
+      const f = createFixture({ unrelatedConnectors: count - 1 });
+      try {
+        for (const provider of f.unrelated) provider.close();
+        const start = performance.now();
+        await invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          {
+            target: { identity: f.identity(f.shared) },
+            operationId: crypto.randomUUID(),
+            arguments: {},
+          },
+          targetOptions(),
+        );
+        console.log(
+          `[known-tool benchmark] ${JSON.stringify({ configuredConnectors: count, wallMs: Math.round(performance.now() - start), selectedProviderRequests: f.grafana.requests.length, unrelatedProviderRequests: f.unrelatedSetupRequests(), credentialResolutions: f.state.resolved.length, metadata: "fixture inventory; not a database latency benchmark" })}`,
+        );
+        expect(f.unrelatedSetupRequests()).toBe(0);
+        expect(
+          f.state.resolved.every((item) => item.connectionRef.connectionId === f.shared.id),
+        ).toBe(true);
+      } finally {
+        f.close();
+      }
+    }
+  }, 120_000);
+});
 
 describe("target-only workspace tool calls", () => {
   test("a warm attested call connects only its target connector and echoes the caller digest", async () => {

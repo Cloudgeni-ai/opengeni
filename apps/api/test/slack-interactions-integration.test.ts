@@ -25,9 +25,6 @@ import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createConnection,
-  ensureCodexRotationSettings,
-  updateCodexRotationSettings,
-  upsertCodexSubscriptionCredential,
   createDb,
   createRig,
   setWorkspaceDefaultRig,
@@ -711,19 +708,17 @@ function encryptedBotCredential(settings: Settings): string {
 }
 
 async function connectModelPreferenceCodex(grant: AccessGrant) {
-  await upsertCodexSubscriptionCredential(client.db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    credentialEncrypted: "metadata-only-model-preference-fixture",
-    chatgptAccountId: `fixture-${grant.workspaceId}`,
-    scopes: null,
-    planType: "pro",
-    isFedramp: false,
-    expiresAt: null,
-    lastRefreshAt: null,
-  });
-  await ensureCodexRotationSettings(client.db, grant.accountId, grant.workspaceId);
-  await updateCodexRotationSettings(client.db, grant.workspaceId, { rotationEnabled: true });
+  // Connected Codex after the drained cutover (0680 seeds every organization
+  // enabled): a shared core connection; the legacy tables are frozen.
+  await shared!.admin`
+    insert into subscription_connections (
+      account_id, provider, kind, credential_encrypted, ownership, scope_kind,
+      provider_account_id, plan_type
+    ) values (
+      ${grant.accountId}::uuid, 'codex', 'subscription',
+      'metadata-only-model-preference-fixture', 'shared', 'organization',
+      ${`fixture-${grant.workspaceId}`}, 'pro'
+    )`;
 }
 
 async function fixture(
@@ -1748,7 +1743,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
           resources: Array<Record<string, unknown>>;
           variable_set_ids: string[];
           tools: Array<{ kind: string; id: string }>;
-          tool_policy: { mode: string };
+          tool_policy: { mode: string; firstPartyMode?: string; firstPartyAdditions?: string[] };
           first_party_mcp_tools: string[];
           first_party_mcp_permissions: string[] | null;
           initial_message: string;
@@ -1794,6 +1789,16 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
       );
       expect(new Set(session!.first_party_mcp_tools).size).toBe(
         session!.first_party_mcp_tools.length,
+      );
+      // Built-ins follow the workspace defaults (so later built-ins arrive);
+      // the Slack read tools are guaranteed on top rather than frozen in.
+      expect(session!.tool_policy.firstPartyMode).toBe("workspace_default");
+      expect(session!.tool_policy.firstPartyAdditions).toEqual(
+        trigger === "reaction"
+          ? undefined
+          : SLACK_READ_ONLY_CONTEXT_TOOLS.filter(
+              (tool) => !DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(tool),
+            ),
       );
       // An explicitly chosen model narrows nothing and still carries over.
       expect(session!.reasoning_effort).toBe("high");

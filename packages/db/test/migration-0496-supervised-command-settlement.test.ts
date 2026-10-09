@@ -308,6 +308,71 @@ test("capture winning before initial descriptor attachment fences the supervised
   ).rejects.toThrow("Supervised launch cannot join checkpoint containment");
 });
 
+test("a supervised command admits only a warm concurrent capture claim and its one-behind fold", async () => {
+  const f = await fixture();
+  const lease = f.leaseId;
+  await shared.admin`update sandbox_leases set liveness='warm', refcount=1,
+    workspace_generation=5 where id=${lease}`;
+  const claim = (fields: { concurrent: boolean; liveness?: string }) => {
+    const captureId = crypto.randomUUID();
+    return shared.admin`update sandbox_leases set archive_capture_id=${captureId},
+      archive_capture_operation_id=${crypto.randomUUID()},
+      archive_capture_provider_request_id=${crypto.randomUUID()},archive_capture_attempt=1,
+      archive_capture_generation=workspace_generation,archive_capture_started_at=now(),
+      archive_capture_deadline_at=now()+interval '1 minute',
+      archive_capture_concurrent_capture_id=${fields.concurrent ? captureId : null},
+      liveness=${fields.liveness ?? "warm"} where id=${lease}`;
+  };
+  const blocked = "Supervised command blocks legacy containment and checkpoint publication";
+  // A claim that does not record the running command, or a drain's claim,
+  // could publish as complete or lead to termination without a receipt.
+  await rejects(claim({ concurrent: false }), blocked);
+  await rejects(claim({ concurrent: true, liveness: "draining" }), blocked);
+  await rejects(
+    shared.admin`update sandbox_leases set unobservable_command_drain_ids=array[${f.scope.processId}]::uuid[]
+      where id=${lease}`,
+    blocked,
+  );
+  await rejects(
+    shared.admin`update sandbox_leases set archive_generation=5 where id=${lease}`,
+    blocked,
+  );
+  // The warm claim that runs around the command is admitted.
+  await claim({ concurrent: true });
+  await rejects(
+    shared.admin`update sandbox_leases set archive_capture_published_at=now() where id=${lease}`,
+    blocked,
+  );
+  const fold = (bump: number) => shared.admin`update sandbox_leases set
+    archive_generation=archive_capture_generation, workspace_generation=workspace_generation+${bump},
+    resume_state=jsonb_build_object('sessionState', jsonb_build_object('workspaceArchive', 'snap')),
+    archive_capture_id=null, archive_capture_operation_id=null,
+    archive_capture_provider_request_id=null, archive_capture_attempt=null,
+    archive_capture_generation=null, archive_capture_started_at=null,
+    archive_capture_deadline_at=null, archive_capture_concurrent_capture_id=null
+    where id=${lease}`;
+  // Publishing it as current would claim the command's later writes.
+  await rejects(fold(0), blocked);
+  await fold(1);
+  const [published] = await shared.admin<
+    { archive_generation: number; workspace_generation: number; archive_capture_id: null }[]
+  >`select archive_generation, workspace_generation, archive_capture_id
+    from sandbox_leases where id=${lease}`;
+  expect(published).toEqual({
+    archive_generation: 5,
+    workspace_generation: 6,
+    archive_capture_id: null,
+  });
+  // A released claim may always be cleared.
+  await claim({ concurrent: true });
+  await shared.admin`update sandbox_leases set archive_capture_id=null,
+    archive_capture_operation_id=null, archive_capture_provider_request_id=null,
+    archive_capture_attempt=null, archive_capture_generation=null,
+    archive_capture_started_at=null, archive_capture_deadline_at=null,
+    archive_capture_concurrent_capture_id=null where id=${lease}`;
+  expect(await getRetainedProcess(client.db, f.scope)).toMatchObject({ state: "active" });
+});
+
 test("old SQL writers cannot erase identity, proof, parent admission or holder", async () => {
   const f = await fixture();
   const statements = [

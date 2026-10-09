@@ -73,6 +73,7 @@ export const embeddingMigrationTail = [
   // from withheld 0345; replay after it.
   "0547_idle_command_containment.sql",
   "0599_paused_recovery_command_containment.sql",
+  "0687_human_wait_command_containment.sql",
   // Allowance receipts compile against the withheld Knowledge/embedding and
   // scheduled-refusal lifecycle. Replay them after those prerequisites.
   ...allowanceMigrationTail,
@@ -147,4 +148,6 @@ export const embeddingMigrationTail = [
   "0678_inbox_mute_session_replies.sql",
   // Extends the shared connection table created by withheld 0642.
   "0679_codex_extra_credit_consent.sql",
+  "0688_subscription_core_codex_writers.sql",
+  "0689_subscription_core_codex_cutover.sql",
 ];

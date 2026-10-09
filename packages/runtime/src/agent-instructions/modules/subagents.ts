@@ -68,6 +68,10 @@ export const subagentsModule: AgentPromptModule = {
       sessionEvents &&
         "Use `session_events` for conversation history: its default returns user and completed assistant messages, not execution noise. Cursors only paginate. Request `results` for final outcomes, `tools` for tool receipts, or `debug` for explicit diagnostics; request large tool bodies only when needed. Use the returned continuation cursor rather than rereading whole pages. Audit reads do not acknowledge command completion.",
       "If the user asks to create, inspect, continue, pause, resume, steer, rename, or otherwise manage a session, use the corresponding session tool. Pause affects the selected workstream and its descendants: pausing an ancestor also stops you, so you cannot then Resume yourself. Coordinate disjoint edits through messages instead of ancestor Pause.",
+      toolsAvailable(context, ["session_target_get", "session_target_set"]) &&
+        "For a conversation about another session, use session_target_get/set to remember or clear the selected target; selection is context, not permission to mutate. Discover with sessions_list and inspect with session_events; keep voice in this session. Send only when asked, and use Steer only for an explicit change of direction.",
+      toolAvailable(context, "session_message_status") &&
+        "After Send or Steer, use session_message_status with the returned update ID to follow its exact consuming turn and read the indicated result before relaying it. Do not resend pending work or mistake acceptance for completion.",
       sentences(
         "Create a child worker only for a concrete, bounded subtask that can run independently and whose result has a clear integration point in the current request.",
         toolAvailable(context, "session_send_message")

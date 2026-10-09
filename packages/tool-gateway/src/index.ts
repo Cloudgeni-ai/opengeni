@@ -9,6 +9,7 @@ import Ajv, {
 } from "ajv";
 import Ajv2019 from "ajv/dist/2019.js";
 import Ajv2020 from "ajv/dist/2020.js";
+import { schemaPatternEngine } from "./schema-pattern";
 import {
   TOOL_GATEWAY_CATALOG_VERSION,
   ToolGatewayCallRequest,
@@ -547,6 +548,8 @@ function createSchemaValidators(mode: SchemaValidatorMode): SchemaValidators {
     strict: false,
     useDefaults: false,
     validateFormats: false,
+    // Remote schemas: a pattern invalid in Unicode mode must not fail the catalog.
+    code: { regExp: schemaPatternEngine },
   } as const;
   const validators = {
     draft7: new Ajv(options),
@@ -665,21 +668,23 @@ function compileCatalogSchema(
 }
 
 function allocateToolPaths(definitions: readonly ToolGatewayDefinition[]): string[][] {
-  const requested = definitions.map((definition) =>
-    definition.codemodePath?.length
-      ? [...definition.codemodePath]
-      : [definition.identity.serverId, definition.identity.toolName],
-  );
-  const bases = requested.map((path) => path.map(safeNamespaceSegment));
-  const allocated = bases.map((base, index) => {
-    const path = requested[index]!;
-    if (path.every((segment, segmentIndex) => segment === base[segmentIndex])) return base;
-    const suffix = `_${shortIdentityDigest(definitions[index]!.identity)}`;
-    const last = base.at(-1)!;
-    return [...base.slice(0, -1), `${last.slice(0, 128 - suffix.length)}${suffix}`];
-  });
+  const allocated = definitions.map(projectToolGatewayPath);
   assertNoToolPathCollisions(allocated);
   return allocated;
+}
+
+/** Shared forward projection; never reverse-parse a namespace as authority. */
+export function projectToolGatewayPath(
+  definition: Pick<ToolGatewayDefinition, "identity" | "codemodePath">,
+): string[] {
+  const path = definition.codemodePath?.length
+    ? [...definition.codemodePath]
+    : [definition.identity.serverId, definition.identity.toolName];
+  const base = path.map(safeNamespaceSegment);
+  if (path.every((segment, segmentIndex) => segment === base[segmentIndex])) return base;
+  const suffix = `_${shortIdentityDigest(definition.identity)}`;
+  const last = base.at(-1)!;
+  return [...base.slice(0, -1), `${last.slice(0, 128 - suffix.length)}${suffix}`];
 }
 
 type ToolPathNode = {
@@ -719,7 +724,7 @@ function compareToolPaths(left: readonly string[], right: readonly string[]): nu
   return left.length - right.length;
 }
 
-function safeNamespaceSegment(value: string): string {
+export function safeNamespaceSegment(value: string): string {
   let normalized = value.replace(/[^A-Za-z0-9_$]/gu, "_");
   if (!/^[A-Za-z_$]/u.test(normalized)) normalized = `_${normalized}`;
   if (["__proto__", "prototype", "constructor"].includes(normalized)) {

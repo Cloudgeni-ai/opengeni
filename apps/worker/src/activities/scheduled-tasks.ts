@@ -67,6 +67,7 @@ import {
   getScheduledTaskRunPersonalResourceAuthority,
   getScheduledTaskPersonalResourceAuthoritySubject,
   getScheduledTaskRevisionAuthority,
+  getScheduledTaskSubscriptionAuthority,
   getScheduledTaskXaiProviderAccountAuthoritySnapshot,
   getEnrollment,
   getSandbox,
@@ -959,6 +960,15 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         await getScheduledTaskXaiProviderAccountAuthoritySnapshot(db, task.workspaceId, task.id);
       const taskClaudeProviderAccountAuthoritySnapshot =
         await getScheduledTaskClaudeProviderAccountAuthoritySnapshot(db, task.workspaceId, task.id);
+      // Codex v2 (M3 PR 3b, EP-T15): the task's value frozen at creation,
+      // copied by every firing; empty when another person authorized the
+      // current revision. Never recomputed from current membership.
+      const taskSubscriptionAuthority = await getScheduledTaskSubscriptionAuthority(db, {
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        revisionAuthorizerSubjectId: taskRevisionAuthority?.subjectId ?? null,
+        taskAuthorityRevision: task.authorityRevision,
+      });
       // A scheduled bot selection was authorized when the task was written,
       // but connection status and tenant/role binding are mutable. Revalidate
       // before any session/model cost and never fall back to a personal Slack
@@ -1548,6 +1558,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 workspaceId: task.workspaceId,
                 sessionId: session.id,
                 reasoningEffortFallback: reasoningEffort,
+                initialSubscriptionAuthority: taskSubscriptionAuthority,
                 createdEventPayload: {
                   scheduledTaskId:
                     typeof session.metadata.scheduledTaskId === "string"
@@ -1611,6 +1622,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 workspaceId: task.workspaceId,
                 sessionId: session.id,
                 reasoningEffortFallback: reasoningEffort,
+                initialSubscriptionAuthority: taskSubscriptionAuthority,
                 createdEventPayload: {
                   scheduledTaskId:
                     typeof session.metadata.scheduledTaskId === "string"
@@ -1728,6 +1740,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 mcpAccountBindings: taskMcpAccountBindings,
                 xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
                 claudeProviderAccountAuthoritySnapshot: taskClaudeProviderAccountAuthoritySnapshot,
+                subscriptionAuthority: taskSubscriptionAuthority,
                 scheduledTaskRunId: run.id,
               },
               async (tx, wakeEventId, _updateId, rejectionReason) => {
@@ -1860,6 +1873,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 mcpAccountBindings: taskMcpAccountBindings,
                 xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
                 claudeProviderAccountAuthoritySnapshot: taskClaudeProviderAccountAuthoritySnapshot,
+                subscriptionAuthority: taskSubscriptionAuthority,
                 scheduledTaskRunId: run.id,
               },
               async (tx, wakeEventId, _updateId, rejectionReason) => {
@@ -2757,6 +2771,15 @@ async function recoverBoundScheduledTaskDispatch(input: {
         input.acceptedExecution.xaiProviderAccountAuthoritySnapshot,
       claudeProviderAccountAuthoritySnapshot:
         input.acceptedExecution.claudeProviderAccountAuthoritySnapshot,
+      // Codex v2 (M3 PR 3b): the task's value frozen at creation, narrowed to
+      // empty when the accepted revision's authorizer is not the owner.
+      subscriptionAuthority: await getScheduledTaskSubscriptionAuthority(input.db, {
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        revisionAuthorizerSubjectId:
+          input.acceptedExecution.causalHumanAuthority?.subjectId ?? null,
+        taskAuthorityRevision: task.authorityRevision,
+      }),
       scheduledTaskRunId: input.run.id,
     },
     async (tx, wakeEventId, _updateId, rejectionReason) => {

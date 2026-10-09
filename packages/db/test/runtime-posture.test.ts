@@ -420,6 +420,7 @@ function safePosture(): RuntimeDatabasePosture {
         configuration: ["search_path=pg_catalog"],
       }),
     ),
+    subscriptionCodexCutoverActivationPresent: true,
     tables: [
       {
         name: "tenant_rows",
@@ -763,6 +764,14 @@ describe("runtime database posture evaluator", () => {
     posture.claudeSubscriptionPoolActivationPresent = false;
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "database is missing the Claude subscription account activation receipt",
+    );
+  });
+
+  test("requires the drained Codex subscription-core cutover before starting a runtime", () => {
+    const posture = safePosture();
+    posture.subscriptionCodexCutoverActivationPresent = false;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "database is missing the 0689 Codex subscription-core cutover receipt; run the drained migration first",
     );
   });
 

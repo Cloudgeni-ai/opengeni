@@ -31,7 +31,11 @@ export {
 import type { Settings } from "@opengeni/config";
 import { collectSandboxEnvironment, parseExposedPorts } from "@opengeni/config";
 export type { WorkspaceArchiveSpool, VerifiedHostWorkspaceArchive } from "./archive-spool";
-export { sweepOrphanedHostArchiveTemporaryDirectoriesOnce } from "./host-archive-temporary";
+export {
+  sweepOrphanedHostArchiveTemporaryDirectoriesOnce,
+  workspaceArchiveDownloadTemporaryDirectory,
+} from "./host-archive-temporary";
+export type { DockerHostWorkspaceRelease } from "./providers/docker-workspace-drain";
 export { reduceModalRawOutputPage } from "./providers/modal-command-raw-page";
 export type {
   ModalRawOutputPage,

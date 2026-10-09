@@ -971,6 +971,29 @@ export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(functio
     return () => window.cancelAnimationFrame(frame);
   }, [autoFocus, controller.disabled, controller.textareaRef]);
 
+  // Text rewraps when the box gets narrower or wider (panel resize, viewport
+  // change), so refit the height on width changes, not only on edits.
+  useEffect(() => {
+    const textarea = controller.textareaRef.current;
+    if (!textarea || typeof ResizeObserver === "undefined") return;
+    let width = textarea.clientWidth;
+    let frame: number | null = null;
+    const observer = new ResizeObserver(() => {
+      if (textarea.clientWidth === width) return;
+      width = textarea.clientWidth;
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        applyComposerTextareaHeight(textarea, 220);
+      });
+    });
+    observer.observe(textarea);
+    return () => {
+      observer.disconnect();
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
+  }, [controller.textareaRef]);
+
   return (
     <textarea
       {...props}

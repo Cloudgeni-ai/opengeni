@@ -8,6 +8,13 @@ import { registerInboxRoutes } from "./routes/inbox";
 import { registerWorkspaceIntegrationRoutes } from "./routes/workspace-integrations";
 import { registerOrganizationIntegrationRoutes } from "./routes/organization-integrations";
 import {
+  resolveWorkspaceToolTarget,
+  invokeWorkspaceToolTarget,
+  approveWorkspaceToolTarget,
+  resolveWorkspaceToolManifest,
+} from "./workspace-tool-target";
+import { recordWorkspaceToolTargetOperation } from "./workspace-tool-gateway-observability";
+import {
   CLIENT_ERRORS_PATH,
   isClientErrorReportRequest,
   registerClientErrorRoutes,
@@ -59,6 +66,10 @@ import {
   TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
   ToolGatewayApprovalRequest,
   ToolGatewayCallRequest,
+  ToolGatewayResolveRequest,
+  ToolGatewayInvokeRequest,
+  ToolGatewayTargetApprovalRequest,
+  ToolGatewayManifestRequest,
   type AccessGrant,
   type ClientAgentConfig,
   type ErrorCode,
@@ -144,6 +155,7 @@ import {
   hasPermission,
   requireAccessGrant,
   requireAccessGrantAuthorization,
+  requireFreshAccessGrant,
   accountScopedApiKeyWorkspaceAuthority,
   requireAccessContext,
   requirePermission,
@@ -248,6 +260,7 @@ import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
 import { registerOrganizationModelProviderRoutes } from "./routes/organization-model-providers";
+import { registerOrganizationModelDefaultsRoutes } from "./routes/organization-model-defaults";
 import { registerOrganizationIntegrationPolicyRoutes } from "./routes/organization-integration-policy";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
@@ -1746,8 +1759,89 @@ export function createAppComposition(deps: AppDependencies): {
     );
   });
 
-  // Content-free, per-process catalog attestations: they let a call prepare
-  // only its target connector while preserving the stale-catalog contract.
+  // Known calls need no preceding full-catalog discovery or replica-local attestation.
+  for (const operation of ["resolve", "invoke", "target-approvals", "manifest"] as const) {
+    app.post(`/v1/workspaces/:workspaceId/tools/${operation}`, async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const authorization = await requireAccessGrantAuthorization(
+        c,
+        routeDeps,
+        workspaceId,
+        "workspace:read",
+      );
+      const options = {
+        signal: c.req.raw.signal,
+        reauthorize: async () => {
+          const live = await requireFreshAccessGrant(c, routeDeps, workspaceId, "workspace:read");
+          const original = authorization.grant;
+          if (
+            live.accountId !== original.accountId ||
+            live.subjectId !== original.subjectId ||
+            live.principalKind !== original.principalKind ||
+            original.permissions.some((permission) => !hasPermission(live.permissions, permission))
+          )
+            throw new HTTPException(403, { message: "tool_access_changed" });
+        },
+      };
+      const body: unknown = await c.req.json().catch(() => null);
+      const schema =
+        operation === "resolve"
+          ? ToolGatewayResolveRequest
+          : operation === "invoke"
+            ? ToolGatewayInvokeRequest
+            : operation === "manifest"
+              ? ToolGatewayManifestRequest
+              : ToolGatewayTargetApprovalRequest;
+      if (!schema.safeParse(body).success)
+        throw new HTTPException(400, { message: "Invalid targeted tool request" });
+      c.header("cache-control", "no-store");
+      const started = performance.now();
+      let outcome: "ok" | "failed" = "failed";
+      try {
+        const response =
+          operation === "resolve"
+            ? await resolveWorkspaceToolTarget(
+                routeDeps,
+                authorization,
+                ToolGatewayResolveRequest.parse(body),
+                options,
+              )
+            : operation === "invoke"
+              ? await invokeWorkspaceToolTarget(
+                  routeDeps,
+                  authorization,
+                  ToolGatewayInvokeRequest.parse(body),
+                  options,
+                )
+              : operation === "manifest"
+                ? await resolveWorkspaceToolManifest(
+                    routeDeps,
+                    authorization,
+                    ToolGatewayManifestRequest.parse(body),
+                    options,
+                  )
+                : await approveWorkspaceToolTarget(
+                    routeDeps,
+                    authorization,
+                    ToolGatewayTargetApprovalRequest.parse(body),
+                    options,
+                  );
+        c.header(
+          "server-timing",
+          `gw-target;dur=${(performance.now() - started).toFixed(1)};desc="${operation}"`,
+        );
+        outcome = "ok";
+        return c.json(response, operation === "target-approvals" ? 201 : 200);
+      } finally {
+        recordWorkspaceToolTargetOperation(routeDeps.observability, {
+          operation,
+          outcome,
+          durationSeconds: (performance.now() - started) / 1000,
+        });
+      }
+    });
+  }
+  // Legacy calls retain their content-free, per-process catalog attestations.
   const toolGatewayCatalogAttestations = createWorkspaceToolGatewayCatalogAttestations();
   app.get("/v1/workspaces/:workspaceId/tools/catalog", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -2002,6 +2096,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
+  registerOrganizationModelDefaultsRoutes(app, routeDeps);
   registerWorkspaceModelProviderRoutes(app, routeDeps);
   registerClaudeSubscriptionOAuthRoutes(app, routeDeps);
   registerOrganizationIntegrationPolicyRoutes(app, routeDeps);
@@ -2830,6 +2925,10 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/tools\/catalog$/,
     label: "/v1/workspaces/:workspaceId/tools/catalog",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/tools\/(resolve|invoke|target-approvals|manifest)$/,
+    label: (match) => `/v1/workspaces/:workspaceId/tools/${match[1]}`,
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/tools\/calls$/,

@@ -114,7 +114,78 @@ capability may be replaced when catalog or provider authority changes, but a
 consumed capability leaves a durable hash-only operation tombstone: the same
 operation id cannot be approved again after execution may have started.
 
-Workspace HTTP/SDK/Site calls avoid re-preparing every connector per request.
+Known workspace HTTP/SDK calls use additive `POST tools/resolve` and
+`POST tools/invoke`. An exact identity or canonical symbolic path selects one
+authorized registry/account route before provider construction. Missing,
+unauthorized, or ambiguous targets return the same non-enumerating
+`tool_unavailable`; malformed contracts fail before preparation. There is no
+whole-catalog fallback. Cold calls use the current definition; optional
+`expectedDefinitionDigest` binds the complete public entry, account and workspace
+under a versioned hash domain. A mismatch returns `tool_definition_stale` before
+approval admission or execution. A selected MCP server may still need its own
+paginated `tools/list`; no provider revision atomicity is promised between that
+listing and its physical call.
+
+`POST tools/target-approvals` issues a version-2 binding over the existing
+executable effect digest and Site tuple. Exact caller, identity, arguments and
+private authority are checked separately. The full public definition digest is
+only an optional invocation precondition, not approval provenance: changing
+Ask to Allow changes its public approval field without changing the approved
+effect. Missing executable effect digests fail closed.
+For targeted raw/local providers without an adapter-owned private revision, the
+private binding uses the existing runtime executable-authority digest and exact
+selected server configuration, scoped to account, workspace and identity. It
+does not use public catalog presentation; endpoint or private-header changes
+still require reapproval. Existing adapter authority and legacy/frozen fallback
+semantics remain unchanged. The shared operation namespace and consumed
+tombstones survive policy Ask-to-Allow and protocol changes. Supplied tokens
+cannot be silently ignored.
+Allow-only calls without approval provenance are not generally idempotent.
+Unknown dispatch outcomes never replay automatically.
+
+Only the selected provider is constructed, credentialed, connected or listed.
+Registry/account/integration inventory remains O(N) metadata; target execution
+does not imply constant-time database work. External targets skip unrelated
+model-catalog loading, while first-party handlers retain complete caller settings.
+Live caller, exact pinned Site, metadata and native credential checks run again
+at the installed physical-request boundary, including after awaited native
+preflight. Targeted current-human calls also re-read the selected action policy:
+Allow becoming Ask or Block before physical dispatch prevents the request.
+This does not change frozen worker/Codemode approval decisions. No
+credential cache, sticky session or cross-replica warm-up is required.
+`opengeni_tool_target_operations_total`,
+`opengeni_tool_target_duration_seconds` and `Server-Timing: gw-target`
+measure the bounded operation labels without identities or arguments. Compare
+cold replicas at increasing connector counts separately from selected-provider
+latency and metadata assembly cost.
+
+Saved legacy Site bundles use `POST tools/manifest` (at most 256 requested
+identities) through an upgraded host, which translates retained manifest pins
+into targeted calls. Modern clients negotiate direct targeted calls; older hosts
+require explicit SDK catalog mode. Local preview keeps frozen attempt/Codemode
+authority, fencing the entry again after any pre-submission catalog refresh.
+The host's legacy call projection separates executed provider errors from retry
+control: an error result named `catalog_stale` or `tool_definition_stale` becomes
+`site_tool_execution_failed`, with the original error intact under
+`structuredContent.error.providerError`. Other result fields, ordinary provider
+errors, and success outputs are unchanged. Stale-named transport errors without
+known preexecution proof become `site_tool_call_failed`, retaining the original
+code in the diagnostic message. Saved bundle bytes are not rewritten; only
+genuine known preexecution stale signals authorize refresh.
+OAuth and explicit catalog/declarations discovery are unchanged.
+For a mixed-version fleet, apply rolling migration
+`0686_target_tool_approval_bindings.sql` first. Bring up a fully upgraded API pool
+and route all four new endpoints (`resolve`, `invoke`, `target-approvals`, and
+`manifest`) exclusively to that pool before sending new-protocol traffic.
+Existing v1 endpoints may still reach older replicas during the rollout. If
+endpoint-specific routing is unavailable, finish upgrading the entire API pool
+before releasing clients. Neither route relies on sticky sessions or a warm-up
+catalog request. Release the matching SDK/React host and generated Site runtime
+only after this API routing gate; old clients remain v1. Do not fall back to v1
+after a failed targeted invocation. Cleanup failures preserve the original
+success/error/unknown outcome and produce only a content-free warning.
+
+Legacy workspace HTTP/SDK/Site calls avoid re-preparing every connector on a warm replica.
 Each complete catalog preparation (`tools/catalog`, `tools/declarations`, or a
 complete call fallback) leaves a bounded, per-process, content-free attestation:
 the complete digest plus only the canonical digest of each entry, keyed by the
@@ -341,8 +412,10 @@ the operator without deleting durable evidence; see
 
 `CreateSessionRequest.firstPartyMcpTools` is an exact allowlist over the exported
 `FIRST_PARTY_MCP_TOOL_NAMES` catalog. Omission selects the safe default catalog,
-which excludes connector-wide `social_*`, `slack_bot_*` and `fiken_*` tools; those require
-explicit selection plus their normal connection permission. Historical native
+which excludes connector-wide `social_*` and `fiken_*` tools and most `slack_bot_*`
+tools. `slack_bot_list_channels`, `slack_bot_prepare_message`, and
+`slack_bot_send_prepared_message` are default-selected; other Slack bot tools
+require explicit selection plus their normal connection permission. Historical native
 `atlassian_*` names remain parseable but are excluded from execution; Atlassian
 agent access uses its hosted MCP connector. Explicit `[]` means
 no tools from the broad server. Unknown names fail validation. This field does
@@ -370,6 +443,16 @@ Repository discovery and browser connect status remain model-visible, but token
 minting and credential-file renewal stay host-side in the worker/runtime. No
 first-party MCP, Codemode, API, SDK, event, or audit projection returns a live
 installation token to the model or sandbox command surface.
+
+For a child, an explicit array replaces the entire inherited selection rather
+than adding to it, so omitted browser, computer, or scheduling names become
+unavailable even when needed by the task. Keep the selection omitted for an
+ordinary specialist.
+For a worker that must not start, message, or follow other sessions, use the
+existing `agent: { capabilities: { from: "all", subagents: false } }` and omit
+tool lists. Other parent-selected tools remain inherited, and the final answer
+still reaches the parent automatically. This guidance changes no inheritance,
+permission, or explicit-empty semantics and adds no tool-enablement UI.
 
 File and document resources are independent from this broad-server selection.
 Attaching a resource still materializes it for the session when

@@ -17,6 +17,10 @@
       "sha256": "12db03d6711e4cc9f33dd6be5b70738bcf19843f451cbd889fbc17b623bcbd65"
     },
     {
+      "path": ".github/workflows/backup-image.yml",
+      "sha256": "474f26fa2e86ea63beae0c1a2604401e61f74b350d390b5cebad116bfeb6459e"
+    },
+    {
       "path": ".github/workflows/ci.yml",
       "sha256": "4738e9fe9554dc8718c5de4d886b2dd086aca5e41b397f26e910cd9823fed29e"
     },

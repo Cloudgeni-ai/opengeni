@@ -96,13 +96,19 @@ export async function withSubscriptionCorePlacementWorld<T>(
                 session.visibility,
                 session.codex_compaction_mode,
                 get_workspace_kind(workspace.account_id, workspace.id) as workspace_kind,
-                policy.allowed_providers, policy.allowed_models
+                -- The workspace's own policy, else its organization's default.
+                case when policy.workspace_id is not null then policy.allowed_providers
+                  else organization_defaults.allowed_providers end as allowed_providers,
+                case when policy.workspace_id is not null then policy.allowed_models
+                  else organization_defaults.allowed_models end as allowed_models
               from sessions session
               join session_turns turn on turn.account_id = session.account_id
                 and turn.workspace_id = session.workspace_id and turn.session_id = session.id
               join workspaces workspace on workspace.account_id = session.account_id
                 and workspace.id = session.workspace_id
               left join workspace_model_policies policy on policy.workspace_id = workspace.id
+              left join organization_model_defaults organization_defaults
+                on organization_defaults.account_id = workspace.account_id
               where session.account_id = ${request.accountId}::uuid
                 and session.workspace_id = ${request.workspaceId}::uuid
                 and session.id = ${request.sessionId}::uuid

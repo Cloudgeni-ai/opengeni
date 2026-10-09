@@ -49,6 +49,10 @@ export {
   downloadWorkspaceArchiveSpool,
   WorkspaceArchiveStorageError,
 } from "./workspace-archive-spool";
+export type {
+  DownloadWorkspaceArchiveSpoolOptions,
+  WorkspaceArchiveTemporaryDirectory,
+} from "./workspace-archive-spool";
 
 export type ObjectStorage = {
   bucket: string;

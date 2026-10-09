@@ -16,6 +16,7 @@ import { IntegrationInvocationError } from "@opengeni/capabilities";
 import type { Settings } from "@opengeni/config";
 import {
   FIRST_PARTY_MCP_TOOL_NAMES,
+  EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
   ToolGatewayCallRequest,
   ToolGatewayCallResponse,
   ToolGatewayApprovalRequest,
@@ -26,6 +27,7 @@ import {
   type ToolGatewayCatalog,
   type ToolGatewayIdentity,
   type ToolRef,
+  type ToolGatewayTarget,
 } from "@opengeni/contracts";
 import {
   availableMcpAccountBindings,
@@ -77,6 +79,8 @@ import {
   ToolGatewayToolNotFoundError,
   digestCanonicalJson,
   generateToolGatewayDeclarations,
+  safeNamespaceSegment,
+  projectToolGatewayPath,
   type PreparedToolGatewayCall,
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
@@ -205,21 +209,32 @@ export async function prepareWorkspaceToolGateway(
           });
         }
       : undefined;
-  await reauthorize?.();
+  const reauthorizeCaller = async () => {
+    options.signal?.throwIfAborted();
+    await options.reauthorize?.();
+    await reauthorize?.();
+  };
+  await reauthorizeCaller();
   const prepared = await prepareWorkspaceToolGatewayForGrantInternal(
     routeDeps,
     grant,
     options.allowedIdentities,
-    reauthorize,
-    options.firstPartySettings ? { firstPartySettings: options.firstPartySettings } : {},
+    reauthorizeCaller,
+    options,
   );
   try {
-    await reauthorize?.();
+    await reauthorizeCaller();
   } catch (error) {
-    await prepared.close();
+    await prepared.close().catch(() => undefined);
     throw error;
   }
-  return { ...prepared, ...(reauthorize ? { reauthorize } : {}) };
+  return {
+    ...prepared,
+    reauthorize: async () => {
+      await reauthorizeCaller();
+      await prepared.reauthorize?.();
+    },
+  };
 }
 
 /**
@@ -450,6 +465,10 @@ export async function prepareWorkspaceToolGatewayForGrant(
 }
 
 export type WorkspaceToolGatewayPreparationOptions = {
+  target?: ToolGatewayTarget;
+  signal?: AbortSignal;
+  /** Trusted transport callback, never a request-body field. */
+  reauthorize?: () => Promise<void>;
   /**
    * Settings visible to first-party (opengeni/files/docs) tool handlers.
    * `prepared` (default, MCP OAuth): the identity-narrowed server set.
@@ -475,7 +494,11 @@ export function withWorkspaceConnectionAuthorization(
       authorizeProviderRequest: async () => {
         try {
           await reauthorize();
-          return result.authorizeProviderRequest ? await result.authorizeProviderRequest() : true;
+          const allowed = result.authorizeProviderRequest
+            ? await result.authorizeProviderRequest()
+            : true;
+          await reauthorize();
+          return allowed;
         } catch {
           return false;
         }
@@ -492,14 +515,19 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   options: WorkspaceToolGatewayPreparationOptions = {},
 ): Promise<PreparedWorkspaceToolGateway> {
   const catalogSourceSettings = routeDeps.catalogSourceSettings ?? routeDeps.settings;
-  const resolvedCatalog = await resolveWorkspaceCatalogSettings(
-    routeDeps.db,
-    catalogSourceSettings,
-    {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-    },
-  );
+  // Remote tools do not consume the model catalog. First-party handlers keep
+  // the complete caller model/settings context (not a narrowed provider view).
+  const targetNamespace =
+    options.target &&
+    ("identity" in options.target ? options.target.identity.serverId : options.target.path[0]);
+  const needsModelContext =
+    !targetNamespace || ["opengeni", "docs", "files", "artifacts"].includes(targetNamespace);
+  const resolvedCatalog = needsModelContext
+    ? await resolveWorkspaceCatalogSettings(routeDeps.db, catalogSourceSettings, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+      })
+    : { settings: catalogSourceSettings };
   let integrations: readonly ApiIntegrationRuntime[] = [];
   // One designation read serves the catalog overlay and the Apps request
   // authentication below (every Apps request is rechecked by the database).
@@ -542,22 +570,117 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     tools: allGatewayToolRefs(settings),
     bindings: accountBindings,
   });
+  const callerSettings = workspaceToolGatewaySettingsForGrant(accountRoutes.settings, grant);
+  const targetServerId = options.target
+    ? workspaceToolGatewayTargetServer(callerSettings, options.target)
+    : undefined;
+  if (options.target && "identity" in options.target) allowedIdentities = [options.target.identity];
   // OAuth/Site identities are account-qualified. Intersect only after expansion;
   // canonical connector IDs are never aliases for an account's execution route.
   const gatewaySettings = workspaceToolGatewaySettingsForGrant(
-    accountRoutes.settings,
+    targetServerId
+      ? {
+          ...accountRoutes.settings,
+          mcpServers: accountRoutes.settings.mcpServers.filter(
+            (server) => server.id === targetServerId,
+          ),
+        }
+      : accountRoutes.settings,
     grant,
     allowedIdentities,
   );
   const gatewayServerIds = new Set(gatewaySettings.mcpServers.map((server) => server.id));
+  // Only targeted current-human requests use live policy fencing. Frozen
+  // attempt/Codemode decisions retain their existing lifecycle semantics.
+  let reauthorizeActionPolicy: (() => Promise<void>) | undefined;
+  // Metadata only. Never construct/list another provider to recheck a target.
+  const authorizeTargetMetadata = options.target
+    ? async () => {
+        await reauthorize?.();
+        let currentIntegrations: readonly ApiIntegrationRuntime[] = [];
+        const currentSettings = await settingsWithEnabledCapabilityMcpServers(
+          routeDeps.db,
+          grant.workspaceId,
+          resolvedCatalog.settings,
+          {
+            subjectId: grant.subjectId,
+            onResolvedApiIntegrations: (items) => {
+              currentIntegrations = items;
+            },
+          },
+        );
+        const currentBindings = await availableMcpAccountBindings({
+          db: routeDeps.db,
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          settings: currentSettings,
+          tools: allGatewayToolRefs(currentSettings),
+          source:
+            grant.principalKind === "service" || grant.principalKind === "api_key"
+              ? { kind: "none" }
+              : { kind: "subject", accountId: grant.accountId, subjectId: grant.subjectId },
+        });
+        const currentRoutes = expandMcpAccountRoutes({
+          settings: currentSettings,
+          tools: allGatewayToolRefs(currentSettings),
+          bindings: currentBindings,
+        });
+        const current = workspaceToolGatewaySettingsForGrant(
+          currentRoutes.settings,
+          grant,
+        ).mcpServers.filter((server) => gatewayServerIds.has(server.id));
+        const integrationSnapshot = (
+          items: readonly ApiIntegrationRuntime[],
+          bindings: typeof accountBindings,
+        ) =>
+          expandApiIntegrationAccountRoutes({
+            integrations: items,
+            bindings,
+            tools: allGatewayToolRefs(gatewaySettings),
+          });
+        if (
+          digestCanonicalJson(current) !== digestCanonicalJson(gatewaySettings.mcpServers) ||
+          digestCanonicalJson(integrationSnapshot(currentIntegrations, currentBindings)) !==
+            digestCanonicalJson(integrationSnapshot(integrations, accountBindings))
+        )
+          throw new HTTPException(403, { message: "tool_access_changed" });
+        await reauthorizeActionPolicy?.();
+        options.signal?.throwIfAborted();
+      }
+    : undefined;
   const firstPartySettings =
-    options.firstPartySettings === "caller" && allowedIdentities
-      ? workspaceToolGatewaySettingsForGrant(accountRoutes.settings, grant)
+    options.firstPartySettings === "caller" && (allowedIdentities || options.target)
+      ? callerSettings
       : gatewaySettings;
   const deps = { ...routeDeps, catalogSourceSettings, settings: firstPartySettings };
+  const nativeResolveConnection = buildConnectionTokenResolver(routeDeps.db, gatewaySettings);
   const resolveConnection = withWorkspaceConnectionAuthorization(
-    buildConnectionTokenResolver(routeDeps.db, gatewaySettings),
-    reauthorize,
+    options.target
+      ? async (input) => {
+          const result = await nativeResolveConnection(input);
+          if (result.status !== "ok") return result;
+          return {
+            ...result,
+            authorizeProviderRequest: async () => {
+              await reauthorize?.();
+              if (result.authorizeProviderRequest && !(await result.authorizeProviderRequest()))
+                return false;
+              const live = await nativeResolveConnection({
+                ...input,
+                forceRefresh: false,
+                credentialResolutionMode: "preflight",
+              });
+              return (
+                live.status === "ok" &&
+                live.connectionId === result.connectionId &&
+                live.connectionVersion === result.connectionVersion &&
+                (!live.authorizeProviderRequest || (await live.authorizeProviderRequest()))
+              );
+            },
+          };
+        }
+      : nativeResolveConnection,
+    authorizeTargetMetadata ?? reauthorize,
   );
   const resolveCredential = async (
     input: ResolveConnectionCredentialInput,
@@ -661,6 +784,10 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       subjectId: grant.subjectId,
+      ...(options.signal ? { requestSignal: options.signal } : {}),
+      ...((authorizeTargetMetadata ?? reauthorize)
+        ? { authorizeProviderRequest: authorizeTargetMetadata ?? reauthorize! }
+        : {}),
       credentialSubjectId: grant.subjectId,
       mcpAccountLabels: accountRoutes.accountLabels,
       resolveCredential,
@@ -669,6 +796,30 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       ...(codexAppsAuth ? { codexAppsAuth } : {}),
       workspaceToolGateway: {
         mapDefinition: (definition) => {
+          // Raw/local providers have no native credential revision. The legacy
+          // gateway fallback binds the whole public catalog, including Ask/Allow
+          // presentation. Targeted approvals instead use the runtime's existing
+          // executable authority plus the exact selected configuration already
+          // fenced by authorizeTargetMetadata. Never replace adapter authority.
+          if (options.target && definition.approvalAuthorityDigest === undefined) {
+            const config = gatewaySettings.mcpServers.find(
+              (server) => server.id === definition.identity.serverId,
+            );
+            if (!config || !definition.effectAuthorityDigest)
+              throw new Error("target approval authority unavailable");
+            definition = {
+              ...definition,
+              approvalAuthorityDigest: digestCanonicalJson({
+                domain: "opengeni.target-tool-config-authority",
+                version: 1,
+                accountId: grant.accountId,
+                workspaceId: grant.workspaceId,
+                identity: definition.identity,
+                effectAuthorityDigest: definition.effectAuthorityDigest,
+                configuration: config,
+              }),
+            };
+          }
           const recommendation = definition.approval === "human" ? "ask" : "allow";
           recommendations.set(workspaceToolGatewayIdentityKey(definition.identity), recommendation);
           const target = policyTargets.get(definition.identity.serverId);
@@ -691,27 +842,49 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
             (entry.approval === "human" ? "ask" : "allow");
           const target = policyTargets.get(entry.identity.serverId);
           if (!target) return defaultDecision;
-          const policies = await listConnectorToolPermissionPolicies(routeDeps.db, {
-            ...grant,
-            connectionId: target.connectionId,
-          });
-          const resolved = resolveConnectorActionPolicy(policies, {
-            ...target,
-            toolName: entry.identity.toolName,
-            defaultDecision,
-            actionName: toolPolicyActionName(
-              entry.identity.toolName,
-              entry.inputSchema,
-              call.arguments,
-            ),
-          });
+          const resolveSelectedPolicy = async () =>
+            resolveConnectorActionPolicy(
+              await listConnectorToolPermissionPolicies(routeDeps.db, {
+                ...grant,
+                connectionId: target.connectionId,
+              }),
+              {
+                ...target,
+                toolName: entry.identity.toolName,
+                defaultDecision,
+                actionName: toolPolicyActionName(
+                  entry.identity.toolName,
+                  entry.inputSchema,
+                  call.arguments,
+                ),
+              },
+            );
+          const resolved = await resolveSelectedPolicy();
           const decision = !resolved.managed
             ? defaultDecision
             : connectorActionPolicyDecision(resolved);
           recordToolApproval(decision, resolved.managed ? resolved.source : "default");
+          if (options.target)
+            reauthorizeActionPolicy = async () => {
+              const live = await resolveSelectedPolicy();
+              const current = live.managed ? connectorActionPolicyDecision(live) : defaultDecision;
+              if (current === "block") throw new ToolGatewayBlockedError();
+              if (current === "ask" && decision !== "ask")
+                throw new ToolGatewayApprovalRequiredError();
+            };
           return decision;
         },
-        filterDefinition: workspaceToolGatewayDefinitionFilter(gatewaySettings, allowedIdentities),
+        filterDefinition: (definition) => {
+          if (!workspaceToolGatewayDefinitionFilter(gatewaySettings, allowedIdentities)(definition))
+            return false;
+          const target = options.target;
+          if (!target || "identity" in target) return true;
+          const path = projectToolGatewayPath(definition);
+          return (
+            path.length === target.path.length &&
+            path.every((part, index) => part === target.path[index])
+          );
+        },
       },
     },
   );
@@ -719,11 +892,44 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     await prepared.close().catch(() => undefined);
     throw new Error("workspace tool gateway preparation did not produce a gateway");
   }
+  if (options.signal?.aborted) {
+    await prepared.close().catch(() => undefined);
+    options.signal.throwIfAborted();
+  }
   return {
     toolGateway: prepared.toolGateway,
     toolGatewayCatalog: prepared.toolGatewayCatalog,
     close: prepared.close,
+    ...(authorizeTargetMetadata ? { reauthorize: authorizeTargetMetadata } : {}),
   };
+}
+
+/** Select one authorized connector without constructing any provider. */
+export function workspaceToolGatewayTargetServer(
+  settings: Pick<Settings, "mcpServers">,
+  target: ToolGatewayTarget,
+): string {
+  if ("identity" in target) {
+    if (settings.mcpServers.some((server) => server.id === target.identity.serverId))
+      return target.identity.serverId;
+  } else {
+    const candidates = new Set(
+      settings.mcpServers
+        .filter((server) => safeNamespaceSegment(server.id) === target.path[0])
+        .map((server) => server.id),
+    );
+    if (
+      Object.values(EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS).some(
+        (path) =>
+          path.length === target.path.length &&
+          path.every((part, index) => part === target.path[index]),
+      ) &&
+      settings.mcpServers.some((server) => server.id === "opengeni")
+    )
+      candidates.add("opengeni");
+    if (candidates.size === 1) return [...candidates][0]!;
+  }
+  throw new HTTPException(404, { message: "tool_unavailable" });
 }
 
 export function workspaceToolGatewayDefinitionFilter(
@@ -1033,7 +1239,7 @@ function catalogStaleHttpError(): ApiHttpError {
   });
 }
 
-function throwWorkspaceToolGatewayHttpError(error: unknown): never {
+export function throwWorkspaceToolGatewayHttpError(error: unknown): never {
   if (error instanceof ToolGatewayCatalogStaleError) {
     throw catalogStaleHttpError();
   }

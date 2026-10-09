@@ -142,6 +142,13 @@ async function fixture(withConnector = false) {
     subjectId,
   });
   const grant = access.workspaceGrants[0]!;
+  // The route lifecycle here runs on a legacy Codex credential fixture, which
+  // M3 PR 4 deletes with the legacy path. Migration 0680 starts every
+  // organization on the shared core, so this organization alone returns to
+  // the pre-cutover world (core realtime is covered by the PR 2c suites).
+  await shared.admin`
+    delete from subscription_provider_cutovers
+    where account_id = ${grant.accountId}::uuid and provider = 'codex'`;
   const credential = await upsertCodexSubscriptionCredential(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId!,

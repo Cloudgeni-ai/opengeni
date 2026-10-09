@@ -5404,6 +5404,13 @@ describe("worker activities integration", () => {
       rotationEnabled?: boolean;
     }) {
       const grant = await testGrant(dbClient.db);
+      // These exercise the legacy Codex selector, which M3 PR 4 deletes.
+      // Migration 0680 seeds every organization on the shared core; restore the
+      // pre-cutover world (no Codex row) for this fixture organization only.
+      await dbClient.db.execute(
+        dbSql`delete from subscription_provider_cutovers
+          where account_id = ${grant.accountId}::uuid and provider = 'codex'`,
+      );
       const credentialIds = new Map<string, string>();
       for (const account of input.accounts) {
         credentialIds.set(

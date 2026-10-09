@@ -486,6 +486,7 @@ describe("embedded worker lifecycle contract", () => {
       ],
       [{ present: true }],
       [{ present: true }],
+      [{ present: true }],
       [],
       [
         { name: "opengeni_private", owner: "opengeni_migrator", usage: true, create: false },
@@ -762,6 +763,15 @@ describe("embedded worker lifecycle contract", () => {
           "persist_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
           "fail_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text)",
           "subscription_codex_reset_authority(uuid, uuid, uuid, text)",
+          "connect_subscription_codex_personal(uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text)",
+          "disconnect_subscription_codex_connection(uuid, uuid, text, uuid)",
+          "subscription_codex_personal_connections(uuid, uuid, text)",
+          "subscription_codex_reset_credit_fence(uuid, uuid, uuid, text, text, uuid)",
+          "subscription_codex_task_authority_v2(uuid, uuid, uuid, text)",
+          "subscription_codex_revision_authority_v2(uuid, uuid, uuid, bigint)",
+          "manage_subscription_codex_personal(uuid, uuid, text, uuid, text, text, boolean, integer)",
+          "subscription_codex_owner_capability_held(uuid, text[], text, uuid, boolean)",
+          "subscription_codex_owner_membership_held(uuid, uuid)",
         ].map((name) => ({
           name,
           owner: "opengeni_migrator",
@@ -775,6 +785,19 @@ describe("embedded worker lifecycle contract", () => {
           ],
         })),
       ],
+      [
+        "subscription_codex_writer_context(uuid, uuid, text)",
+        "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+        "drop_subscription_codex_owner_capabilities(uuid)",
+        "derive_scheduled_revision_subscription_authority()",
+      ].map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+      })),
     ];
     const db = {
       execute: async () => {
@@ -831,7 +854,7 @@ describe("embedded worker lifecycle contract", () => {
         "session_tenancy_additional_organization_activation_evidence",
       ],
     })();
-    expect((catalogResults[9] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
+    expect((catalogResults[10] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
       ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
       ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
     ]);
@@ -845,7 +868,11 @@ describe("embedded worker lifecycle contract", () => {
   test("embedded readiness enforces runtime receipts without a session-tenancy activation interlock", async () => {
     // Migration 0611 retired the activation startup interlock: the embedded
     // probe no longer queries session-tenancy activation at all.
-    const embeddedDb = (variableSetCutoverPresent = true, claudePoolActivationPresent = true) => {
+    const embeddedDb = (
+      variableSetCutoverPresent = true,
+      claudePoolActivationPresent = true,
+      codexCutoverActivationPresent = true,
+    ) => {
       const results: unknown[] = [
         [
           {
@@ -866,6 +893,7 @@ describe("embedded worker lifecycle contract", () => {
         ],
         [{ present: variableSetCutoverPresent }],
         [{ present: claudePoolActivationPresent }],
+        [{ present: codexCutoverActivationPresent }],
       ];
       let index = 0;
       return {
@@ -890,6 +918,9 @@ describe("embedded worker lifecycle contract", () => {
     );
     await expect(dbReadyCheck(embeddedDb(true, false), options)()).rejects.toThrow(
       /missing the Claude subscription account activation receipt/,
+    );
+    await expect(dbReadyCheck(embeddedDb(true, true, false), options)()).rejects.toThrow(
+      /missing the 0680 Codex subscription-core cutover receipt/,
     );
   });
 

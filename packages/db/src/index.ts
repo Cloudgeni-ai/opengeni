@@ -1,3 +1,4 @@
+export * from "./session-target";
 import { sessionRetentionFromRow } from "./session-archive";
 import { readOrganizationCodexUsage } from "./organization-codex-usage";
 export * from "./organization-slack-bots";
@@ -131,10 +132,8 @@ export {
   type SubscriptionCorePlacementWorldRequest,
   type SubscriptionCorePlacementWorldResult,
 } from "./subscription-core-placement-world";
-import type {
-  GoalAdmissionPausedReason,
-  SubscriptionPersonalAuthorityV2,
-} from "@opengeni/contracts";
+import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
+import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import {
   claudeSubscriptionAccountRepository,
   claudeSubscriptionTables,
@@ -163,6 +162,10 @@ import {
   getAcceptedSubscriptionTurnAuthority,
   getAcceptedSubscriptionParentAuthority,
   sharedPoolSubscriptionAuthoritySnapshotsInTransaction,
+} from "./accepted-subscription-authority";
+export {
+  getScheduledTaskSubscriptionAuthority,
+  receiverCodexSubscriptionAuthorityV2InTransaction,
 } from "./accepted-subscription-authority";
 export { resolveClaudeAccountCredential } from "./claude-subscription-account-tokens";
 export * from "./claude-subscription-accounts";
@@ -296,7 +299,15 @@ export type {
   WorkspaceCodexSubscriptionSource,
 } from "./codex-account-types";
 export * from "./subscription-core-codex-operations";
+export * from "./subscription-core-codex-connections";
+export * from "./subscription-core-codex-catalog";
 import {
+  listSubscriptionCoreCodexServingConnections,
+  readCodexCutoverDispositionForWorkspace,
+  subscriptionCoreCodexConnectionAllowlist,
+} from "./subscription-core-codex-catalog";
+import {
+  listSubscriptionCoreCodexPersonalAccountsInTransaction,
   projectSubscriptionCoreCodexWorkspace,
   type SubscriptionCoreCodexWake,
 } from "./subscription-core-codex-compat";
@@ -335,8 +346,18 @@ import {
   resolveSubscriptionConnectionId as resolveCoreConnectionId,
   writeSubscriptionSessionBinding as writeCoreSessionBinding,
 } from "./subscription-core-repository";
-import { codexSubscriptionAuthorityV2ForAcceptanceInTransaction } from "./subscription-core-acceptance-authority";
-export { codexSubscriptionAuthorityV2ForAcceptanceInTransaction } from "./subscription-core-acceptance-authority";
+import {
+  codexSubscriptionAuthorityV2ForAcceptanceInTransaction,
+  codexSubscriptionAuthorityV2ForScheduledTaskInTransaction,
+  codexSubscriptionAuthorityV2OrEmptyInTransaction,
+} from "./subscription-core-acceptance-authority";
+export {
+  codexSubscriptionAuthorityV2ActiveInTransaction,
+  codexSubscriptionAuthorityV2ForAcceptanceInTransaction,
+  codexSubscriptionAuthorityV2ForScheduledTaskInTransaction,
+  codexSubscriptionAuthorityV2OrEmptyInTransaction,
+  EMPTY_SUBSCRIPTION_AUTHORITY_V2,
+} from "./subscription-core-acceptance-authority";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./scheduled-slack-bot-messages";
@@ -3585,10 +3606,20 @@ export async function updateWorkspaceSettings(
         }),
     );
   }
+  // A null default model removes the workspace's own choice, so it follows
+  // its organization's default (or the automatic default) again.
+  const clearSessionDefaults = ordinaryPatch.sessionDefaults === null;
+  const plainPatch = { ...ordinaryPatch };
+  if (clearSessionDefaults) delete plainPatch.sessionDefaults;
   const [row] = await db
     .update(schema.workspaces)
     .set({
-      settings: settingsPatch(schema.workspaces.settings, ordinaryPatch),
+      settings: settingsPatch(
+        clearSessionDefaults
+          ? sql`(${schema.workspaces.settings} - 'sessionDefaults')`
+          : schema.workspaces.settings,
+        plainPatch,
+      ),
       updatedAt: new Date(),
     })
     .where(eq(schema.workspaces.id, workspaceId))
@@ -17974,6 +18005,60 @@ export async function createScheduledTask(
         input.claudeProviderAccountAuthoritySnapshot === undefined
           ? await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(scopedDb, input.workspaceId)
           : null;
+      // Codex v2 (M3 PR 3b, EP-T15): frozen once, at creation, for the exact
+      // accepting human under the acceptance rule; firings copy it and never
+      // recompute it. Non-human creators freeze the empty value; nothing
+      // before the cutover.
+      const taskOwnerSubjectId =
+        (input.action?.kind ?? "agent_turn") === "agent_turn"
+          ? (frozenCreator.initiatingHumanSubjectId ??
+            (frozenCreator.initiator.kind === "subject" ? frozenCreator.initiator.subjectId : null))
+          : null;
+      const creatorTurn = input.createdByActor
+        ? (
+            await scopedDb
+              .select({ authority: schema.sessionTurns.subscriptionAuthority })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.accountId, input.accountId),
+                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                  eq(schema.sessionTurns.sessionId, input.createdByActor.sessionId),
+                  eq(schema.sessionTurns.id, input.createdByActor.turnId),
+                ),
+              )
+              .limit(1)
+          )[0]
+        : null;
+      const [taskDestination] =
+        input.createdByActor && taskOwnerSubjectId
+          ? await rawRows<{ eligible: boolean }>(
+              scopedDb,
+              sql`select
+            case when ${input.targetSessionId ?? null}::uuid is null then
+              get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid) = 'personal'
+            else exists (select 1 from sessions destination
+              where destination.account_id = ${input.accountId}::uuid
+                and destination.workspace_id = ${input.workspaceId}::uuid
+                and destination.id = ${input.targetSessionId ?? null}::uuid
+                and destination.owner_subject_id = ${taskOwnerSubjectId}
+                and (destination.visibility = 'user_private' or
+                  get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid) = 'personal'))
+            end as eligible`,
+            )
+          : [];
+      const taskSubscriptionAuthority = input.createdByActor
+        ? await codexSubscriptionAuthorityV2OrEmptyInTransaction(
+            scopedDb,
+            input.accountId,
+            taskDestination?.eligible ? creatorTurn?.authority : null,
+          )
+        : await codexSubscriptionAuthorityV2ForScheduledTaskInTransaction(scopedDb, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            reusableSessionId: input.targetSessionId ?? null,
+            acceptingSubjectId: taskOwnerSubjectId,
+          });
       const [row] = await scopedDb
         .insert(schema.scheduledTasks)
         .values({
@@ -18000,6 +18085,7 @@ export async function createScheduledTask(
             input.xaiProviderAccountAuthoritySnapshot ?? sharedTaskPool!.xai,
           claudeProviderAccountAuthoritySnapshot:
             input.claudeProviderAccountAuthoritySnapshot ?? sharedTaskPool!.claude,
+          subscriptionAuthority: taskSubscriptionAuthority,
           creatorFirstPartyMcpTools: input.creatorPolicy?.firstPartyMcpTools ?? null,
           creatorFirstPartyMcpPermissions: input.creatorPolicy?.firstPartyMcpPermissions ?? null,
           creatorSessionPolicy: scheduledTaskCreatorSessionPolicyForInsert(input.creatorPolicy),
@@ -21666,6 +21752,10 @@ export async function updateSessionVariableSets(
                 where codex_waiter.workspace_id = ${input.workspaceId}
                   and codex_waiter.session_id = ${input.sessionId}
                   and codex_waiter.status = 'waiting')
+              or exists (select 1 from subscription_capacity_waiters core_waiter
+                where core_waiter.workspace_id = ${input.workspaceId}::uuid
+                  and core_waiter.session_id = ${input.sessionId}::uuid
+                  and core_waiter.provider = 'codex')
               or exists (select 1 from ${schema.xaiCapacityWaiters} xai_waiter
                 where xai_waiter.workspace_id = ${input.workspaceId}
                   and xai_waiter.session_id = ${input.sessionId}
@@ -24806,6 +24896,19 @@ export async function getOrganizationCodexRotationSettings(
   });
 }
 
+/**
+ * The organization administrator check of the organization Codex routes on
+ * its own: the generic administration overview (42501 not authorized, P0002
+ * unknown organization) with no read of the legacy Codex tables, which 0680
+ * left read-only and blanked. The route reads the cutover row after this.
+ */
+export async function assertOrganizationCodexAdministrator(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string },
+): Promise<void> {
+  await withOrganizationCodexAdministrator(db, input, async () => undefined);
+}
+
 export async function setActiveOrganizationCodexCredential(
   db: Database,
   input: { organizationId: string; actorSubjectId: string; credentialId: string },
@@ -25886,8 +25989,49 @@ export async function getCodexCredentialStatus(
  * This is the SAME condition `settingsWithCodexCredential` (worker) uses to
  * decide whether to inject the synthetic codex-subscription provider, so billing
  * and provider-injection cannot drift. Metadata-only read (never the secret).
+ *
+ * Gated by the organization's Codex cutover row (M3 PR 3): without a row the
+ * legacy pool below decides, unchanged; a disabled row is maintenance (false,
+ * no legacy read); an enabled row asks the shared core whether a connection
+ * can serve new work of `context.subjectId` here (shared capacity only
+ * without a human subject). The legacy tables are frozen after 0680 and are
+ * never read for an organization with a row.
  */
 export async function workspaceCodexSubscriptionActive(
+  db: Database,
+  settings: Pick<Settings, "codexSubscriptionEnabled">,
+  workspaceId: string,
+  acceptedTurnId?: string,
+  context: { accountId?: string | null; subjectId?: string | null } = {},
+): Promise<boolean> {
+  if (!settings.codexSubscriptionEnabled) {
+    return false;
+  }
+  return await withCodexActiveReadRetry(async () => {
+    const { accountId, disposition } = await readCodexCutoverDispositionForWorkspace(
+      db,
+      workspaceId,
+      context.accountId,
+    );
+    if (disposition === "maintenance") return false;
+    if (disposition === "core") {
+      const serving = await listSubscriptionCoreCodexServingConnections(db, {
+        accountId,
+        workspaceId,
+        subjectId: context.subjectId ?? null,
+      });
+      return serving.length > 0;
+    }
+    return await readLegacyWorkspaceCodexSubscriptionActive(db, workspaceId, acceptedTurnId);
+  });
+}
+
+/**
+ * The legacy active-credential read alone, for a caller that has already
+ * established the `legacy` Codex cutover disposition (no row) for this
+ * organization. PR 4 deletes it with the legacy tables' readers.
+ */
+export async function legacyWorkspaceCodexSubscriptionActive(
   db: Database,
   settings: Pick<Settings, "codexSubscriptionEnabled">,
   workspaceId: string,
@@ -25896,6 +26040,49 @@ export async function workspaceCodexSubscriptionActive(
   if (!settings.codexSubscriptionEnabled) {
     return false;
   }
+  return await withCodexActiveReadRetry(
+    async () => await readLegacyWorkspaceCodexSubscriptionActive(db, workspaceId, acceptedTurnId),
+  );
+}
+
+async function readLegacyWorkspaceCodexSubscriptionActive(
+  db: Database,
+  workspaceId: string,
+  acceptedTurnId: string | undefined,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
+    if (acceptedTurnId) {
+      const acceptedSource = await codexSourceForTurn(
+        scopedDb,
+        workspaceId,
+        acceptedTurnId,
+        pool.source.effectiveSource,
+      );
+      pool.source.effectiveSource = acceptedSource;
+      pool.condition =
+        acceptedSource === "disabled"
+          ? null
+          : codexCredentialPoolCondition({
+              accountId: pool.source.accountId,
+              workspaceId,
+              source: acceptedSource,
+            });
+    }
+    if (!pool.condition || pool.source.effectiveSource === "disabled") return false;
+    // Provider admission is pool-aware even when rotation is disabled. The
+    // active pointer governs allocation policy, not whether the connected
+    // subscription provider exists for billing and routing.
+    const [row] = await scopedDb
+      .select({ id: schema.codexSubscriptionCredentials.id })
+      .from(schema.codexSubscriptionCredentials)
+      .where(and(pool.condition, eq(schema.codexSubscriptionCredentials.status, "active")))
+      .limit(1);
+    return Boolean(row);
+  });
+}
+
+async function withCodexActiveReadRetry(read: () => Promise<boolean>): Promise<boolean> {
   // Bounded re-read. A TRANSIENT read failure (a pooled-connection blip or a
   // lost RLS GUC — now thrown loud by withRlsContext's read-back guard rather
   // than silently returning zero rows) must never permanently decide a
@@ -25908,36 +26095,7 @@ export async function workspaceCodexSubscriptionActive(
   let lastError: unknown;
   for (let attempt = 0; attempt < CODEX_ACTIVE_READ_ATTEMPTS; attempt++) {
     try {
-      return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-        const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
-        if (acceptedTurnId) {
-          const acceptedSource = await codexSourceForTurn(
-            scopedDb,
-            workspaceId,
-            acceptedTurnId,
-            pool.source.effectiveSource,
-          );
-          pool.source.effectiveSource = acceptedSource;
-          pool.condition =
-            acceptedSource === "disabled"
-              ? null
-              : codexCredentialPoolCondition({
-                  accountId: pool.source.accountId,
-                  workspaceId,
-                  source: acceptedSource,
-                });
-        }
-        if (!pool.condition || pool.source.effectiveSource === "disabled") return false;
-        // Provider admission is pool-aware even when rotation is disabled. The
-        // active pointer governs allocation policy, not whether the connected
-        // subscription provider exists for billing and routing.
-        const [row] = await scopedDb
-          .select({ id: schema.codexSubscriptionCredentials.id })
-          .from(schema.codexSubscriptionCredentials)
-          .where(and(pool.condition, eq(schema.codexSubscriptionCredentials.status, "active")))
-          .limit(1);
-        return Boolean(row);
-      });
+      return await read();
     } catch (error) {
       lastError = error;
       if (attempt < CODEX_ACTIVE_READ_ATTEMPTS - 1) {
@@ -25982,6 +26140,13 @@ export async function isCodexBilledTurn(input: {
   settings: Pick<Settings, "codexSubscriptionEnabled">;
   workspaceId: string;
   model: string | null | undefined;
+  /** The organization, when the caller holds it (saves one lookup). */
+  accountId?: string | null;
+  /**
+   * The accepted work's causal human. On the shared core their own personal
+   * Codex connection in their Personal workspace also funds the turn.
+   */
+  subjectId?: string | null;
   /**
    * Precomputed `workspaceCodexSubscriptionActive` result (P2-b). When the caller
    * already resolved the active flag for provider injection, pass it here so the
@@ -25990,14 +26155,37 @@ export async function isCodexBilledTurn(input: {
    * either wrongly debit Opengeni credits for a ChatGPT-paid turn or the inverse.
    */
   active?: boolean;
+  /** Exact durable work; required for personal funding outside a Personal workspace. */
+  acceptedTurn?: { sessionId: string; turnId: string };
 }): Promise<boolean> {
   if (!isCodexBilledModel(input.model)) {
     return false; // cheap; no db hit on the common path
   }
+  if (!input.settings.codexSubscriptionEnabled) return false;
+  if (input.acceptedTurn) {
+    const accountId =
+      input.accountId ?? (await rlsContextForWorkspace(input.db, input.workspaceId)).accountId;
+    const { readCodexCutoverDisposition } = await import("./subscription-core-codex-compat");
+    const disposition = await readCodexCutoverDisposition(input.db, accountId, input.workspaceId);
+    if (disposition !== "legacy") {
+      if (disposition !== "core") return false;
+      const { subscriptionCoreAcceptedCodexTurnIsFunded } =
+        await import("./subscription-core-codex");
+      return subscriptionCoreAcceptedCodexTurnIsFunded(input.db, {
+        accountId,
+        workspaceId: input.workspaceId,
+        ...input.acceptedTurn,
+        productModelId: input.model!,
+      });
+    }
+  }
   if (input.active !== undefined) {
     return input.active;
   }
-  return workspaceCodexSubscriptionActive(input.db, input.settings, input.workspaceId);
+  return workspaceCodexSubscriptionActive(input.db, input.settings, input.workspaceId, undefined, {
+    accountId: input.accountId ?? null,
+    subjectId: input.subjectId ?? null,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -31395,21 +31583,52 @@ export async function getWorkspaceConnectionModelRestrictions(
   authoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1,
   claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1,
 ) {
-  const [accounts, rotation] = await Promise.all([
-    listCodexAccountStatuses(db, workspaceId),
-    getCodexRotationSettings(db, workspaceId),
-  ]);
-  const selectableAccounts = rotation?.rotationEnabled
-    ? accounts
-    : accounts.filter((account) => account.id === rotation?.activeCredentialId);
   return await resolveWorkspaceConnectionModelRestrictions(
     db,
     workspaceId,
     subjectId,
-    selectableAccounts,
+    await codexAccountsForModelRestrictions(db, workspaceId, subjectId),
     authoritySnapshot,
     claudeAuthoritySnapshot,
   );
+}
+
+/**
+ * The Codex accounts whose model allowlists bound the `codex/` restriction,
+ * by the organization's Codex cutover row (M3 PR 3): the legacy selectable
+ * pool without a row; the core connections that can serve this subject's new
+ * work with an enabled row; none (every Codex model closed) while the
+ * cutover is disabled. No legacy table is read for an organization with a
+ * row.
+ */
+async function codexAccountsForModelRestrictions(
+  db: Database,
+  workspaceId: string,
+  subjectId: string,
+): Promise<
+  Array<{ status: string; allocatorEnabled: boolean; allowedModelIds?: string[] | null }>
+> {
+  const { accountId, disposition } = await readCodexCutoverDispositionForWorkspace(db, workspaceId);
+  if (disposition === "maintenance") return [];
+  if (disposition === "core") {
+    const serving = await listSubscriptionCoreCodexServingConnections(db, {
+      accountId,
+      workspaceId,
+      subjectId,
+    });
+    return serving.map((connection) => ({
+      status: "active",
+      allocatorEnabled: true,
+      allowedModelIds: subscriptionCoreCodexConnectionAllowlist(connection),
+    }));
+  }
+  const [accounts, rotation] = await Promise.all([
+    listCodexAccountStatuses(db, workspaceId),
+    getCodexRotationSettings(db, workspaceId),
+  ]);
+  return rotation?.rotationEnabled
+    ? accounts
+    : accounts.filter((account) => account.id === rotation?.activeCredentialId);
 }
 
 /**
@@ -32133,6 +32352,25 @@ export type CodexResetRedemptionCredentialAuthority = (
   input: { accountId: string; workspaceId: string; credentialId: string; subjectId: string },
 ) => Promise<{ status: string; owned: boolean } | null>;
 
+/**
+ * The cross-workspace fence of one provider credit (M3 PR 3b): `clear` when
+ * no other workspace holds the credit, `refiled` when the caller's own
+ * logical attempt was moved here from another workspace for recovery,
+ * `held_elsewhere` when another workspace holds it, `refused` without
+ * redemption authority. The legacy ledger passes none (per-workspace).
+ */
+export type CodexResetCreditFence = (
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    credentialId: string;
+    subjectId: string;
+    creditId: string;
+    attemptId: string;
+  },
+) => Promise<"clear" | "refiled" | "held_elsewhere" | "refused">;
+
 export async function legacyCodexResetRedemptionAuthority(
   tx: Database,
   input: { accountId: string; workspaceId: string; credentialId: string; subjectId: string },
@@ -32272,6 +32510,7 @@ export async function claimCodexResetRedemption(
     claimTtlMs?: number;
   },
   authority: CodexResetRedemptionCredentialAuthority = legacyCodexResetRedemptionAuthority,
+  creditFence: CodexResetCreditFence | null = null,
 ): Promise<ClaimCodexResetRedemptionResult> {
   const claimTtlMs = input.claimTtlMs ?? 60_000;
   if (!Number.isFinite(claimTtlMs) || claimTtlMs <= 0) {
@@ -32299,6 +32538,21 @@ export async function claimCodexResetRedemption(
         );
         const credential = await authority(tx as unknown as Database, input);
         if (!credential) return { kind: "not_found" } as const;
+        // The core ledger also fences the credit across workspaces: another
+        // workspace's open or consumed attempt for the same credit wins, and
+        // the caller's own attempt filed elsewhere is moved here to recover.
+        if (creditFence) {
+          const fence = await creditFence(tx as unknown as Database, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            credentialId: input.credentialId,
+            subjectId: input.subjectId,
+            creditId: input.creditId,
+            attemptId: input.id,
+          });
+          if (fence === "refused") return { kind: "forbidden" } as const;
+          if (fence === "held_elsewhere") return { kind: "conflict" } as const;
+        }
         const [existing] = await tx
           .select()
           .from(schema.codexResetRedemptionAttempts)
@@ -32755,6 +33009,40 @@ export const subscriptionCoreCodexResetAuthority: CodexResetRedemptionCredential
   return row ? { status: row.status, owned: row.authorized === true } : null;
 };
 
+/** The core ledger's cross-workspace credit fence (`subscription_codex_reset_credit_fence`). */
+export const subscriptionCoreCodexResetCreditFence: CodexResetCreditFence = async (tx, input) => {
+  const [row] = await rawRows<{ outcome: string }>(
+    tx,
+    sql`select outcome from opengeni_private.subscription_codex_reset_credit_fence(
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.credentialId}::uuid,
+      ${input.subjectId}, ${input.creditId}, ${input.attemptId}::uuid
+    )`,
+  );
+  const outcome = row?.outcome;
+  return outcome === "clear" || outcome === "refiled" || outcome === "held_elsewhere"
+    ? outcome
+    : "refused";
+};
+
+/**
+ * Run the cross-workspace credit fence on its own (redemption prepare): a
+ * person recovering their own attempt from another workspace gets it moved
+ * here, so the ordinary adopt and claim continue on the same upstream key.
+ */
+export async function fenceSubscriptionCoreCodexResetCredit(
+  db: Database,
+  input: Parameters<CodexResetCreditFence>[1],
+): Promise<Awaited<ReturnType<CodexResetCreditFence>>> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(
+        async (tx) => await subscriptionCoreCodexResetCreditFence(tx as unknown as Database, input),
+      ),
+  );
+}
+
 /**
  * Persist the exact provider outcome of a core redemption with its audit
  * record. A credit that restores capacity clears the connection's stored
@@ -33175,41 +33463,104 @@ async function mutateCodexAccountUsage(
 }
 
 /**
- * Per-workspace model/provider availability policy. NULL fields = unrestricted
- * (identical to no row — the default for every workspace). Non-null
- * allowedProviders is a strict allowlist over resolved provider identities;
- * non-null allowedModels an additional exact model-id allowlist. Consumers:
- * the API model choke points (fail 422) and the worker's post-resolution gate
- * (a blocked provider never reaches a model call and never silently remaps).
+ * Per-workspace model/provider availability policy. NULL fields = unrestricted.
+ * Non-null allowedProviders is a strict allowlist over resolved provider
+ * identities; non-null allowedModels an additional exact model-id allowlist.
+ * Consumers: the API model choke points (fail 422) and the worker's
+ * post-resolution gate (a blocked provider never reaches a model call and
+ * never silently remaps).
+ *
+ * A workspace row is the workspace's own choice. Without one, the workspace
+ * follows its organization's default allowlist (organization_model_defaults);
+ * with neither, every model is allowed.
  */
 export type WorkspaceModelPolicy = {
   allowedProviders: string[] | null;
   allowedModels: string[] | null;
 };
 
-/** The per-workspace model policy row (null when none exists = unrestricted). */
-export async function getWorkspaceModelPolicy(
+function restrictsAnything(policy: WorkspaceModelPolicy | null | undefined): boolean {
+  return Boolean(policy && (policy.allowedProviders !== null || policy.allowedModels !== null));
+}
+
+/**
+ * The workspace's own policy row and the organization default it would
+ * follow without one. `organization` is null when the organization allows
+ * every model.
+ */
+export async function getWorkspaceModelPolicyLayers(
   db: Database,
   workspaceId: string,
-): Promise<WorkspaceModelPolicy | null> {
+): Promise<{ workspace: WorkspaceModelPolicy | null; organization: WorkspaceModelPolicy | null }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select({
-        allowedProviders: schema.workspaceModelPolicies.allowedProviders,
-        allowedModels: schema.workspaceModelPolicies.allowedModels,
+        workspaceAllowedProviders: schema.workspaceModelPolicies.allowedProviders,
+        workspaceAllowedModels: schema.workspaceModelPolicies.allowedModels,
+        workspacePolicyId: schema.workspaceModelPolicies.id,
+        organizationAllowedProviders: schema.organizationModelDefaults.allowedProviders,
+        organizationAllowedModels: schema.organizationModelDefaults.allowedModels,
       })
-      .from(schema.workspaceModelPolicies)
-      .where(eq(schema.workspaceModelPolicies.workspaceId, workspaceId))
+      .from(schema.workspaces)
+      .leftJoin(
+        schema.workspaceModelPolicies,
+        eq(schema.workspaceModelPolicies.workspaceId, schema.workspaces.id),
+      )
+      .leftJoin(
+        schema.organizationModelDefaults,
+        eq(schema.organizationModelDefaults.accountId, schema.workspaces.accountId),
+      )
+      .where(eq(schema.workspaces.id, workspaceId))
       .limit(1);
-    return row ?? null;
+    if (!row) return { workspace: null, organization: null };
+    const organization = {
+      allowedProviders: row.organizationAllowedProviders ?? null,
+      allowedModels: row.organizationAllowedModels ?? null,
+    };
+    return {
+      workspace: row.workspacePolicyId
+        ? {
+            allowedProviders: row.workspaceAllowedProviders ?? null,
+            allowedModels: row.workspaceAllowedModels ?? null,
+          }
+        : null,
+      organization: restrictsAnything(organization) ? organization : null,
+    };
   });
 }
 
 /**
- * Create or replace the workspace's model policy. Passing null for a field
- * clears that restriction; a policy of {null, null} is kept as an explicit
- * "unrestricted" row (delete is not needed for correctness — it reads the same
- * as no row).
+ * The policy this workspace runs with: its own row, else its organization's
+ * default, else null (unrestricted).
+ */
+export async function getWorkspaceModelPolicy(
+  db: Database,
+  workspaceId: string,
+): Promise<WorkspaceModelPolicy | null> {
+  const layers = await getWorkspaceModelPolicyLayers(db, workspaceId);
+  return layers.workspace ?? layers.organization;
+}
+
+/** Remove the workspace's own policy so it follows its organization's default. */
+export async function deleteWorkspaceModelPolicy(
+  db: Database,
+  input: { accountId: string; workspaceId: string },
+): Promise<void> {
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb
+        .delete(schema.workspaceModelPolicies)
+        .where(eq(schema.workspaceModelPolicies.workspaceId, input.workspaceId));
+    },
+  );
+}
+
+/**
+ * Create or replace the workspace's own model policy. Passing null for a field
+ * clears that restriction; a policy of {null, null} is kept as the workspace's
+ * explicit choice to allow every model even when its organization restricts.
  */
 export async function upsertWorkspaceModelPolicy(
   db: Database,
@@ -34070,10 +34421,19 @@ export async function recordSubscriptionCoreCodexSelectionForTurnAttempt(
  * active turn's core lease and the workspace's core account pool. The
  * "Running on" account of a running turn is its live core lease; a waiting
  * turn shows only an explicit choice. Never reads a legacy Codex table.
+ *
+ * A turn running on a personal connection shows it only to that connection's
+ * owner (`viewerSubjectId`), read through the owner-only reader (M3 PR 3b);
+ * anyone else sees the id with a null account, as before.
  */
 export async function getSubscriptionCoreSessionCodexAccounts(
   db: Database,
-  input: { accountId: string; workspaceId: string; sessionId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    viewerSubjectId?: string | null;
+  },
 ) {
   return await withRlsContext(
     db,
@@ -34123,13 +34483,23 @@ export async function getSubscriptionCoreSessionCodexAccounts(
       const currentSelection = turn
         ? { waiting, credentialId: waiting ? pinnedAccountId : turn.connection_id }
         : null;
+      let currentAccount =
+        projection.accounts.find((account) => account.id === currentSelection?.credentialId) ??
+        null;
+      if (!currentAccount && currentSelection?.credentialId && input.viewerSubjectId) {
+        const personal = await listSubscriptionCoreCodexPersonalAccountsInTransaction(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.viewerSubjectId,
+        });
+        currentAccount =
+          personal.find((account) => account.id === currentSelection.credentialId) ?? null;
+      }
       return {
         accounts: projection.accounts,
         rotation: projection.rotation,
         currentSelection,
-        currentAccount:
-          projection.accounts.find((account) => account.id === currentSelection?.credentialId) ??
-          null,
+        currentAccount,
         pinnedAccountId,
         lastAccountId: codexBinding?.connectionId ?? null,
       };
@@ -34177,6 +34547,72 @@ export async function getSubscriptionCoreCodexSessionPointers(
     });
   }
   return pointers;
+}
+
+/**
+ * The legacy `codexCurrentSelection` of core sessions (M3 PR 3): for an
+ * active Codex turn, the live core lease of a running turn, or the session's
+ * explicit core choice while it waits for capacity; null otherwise. The same
+ * rule as `getSubscriptionCoreSessionCodexAccounts`. Never reads a legacy
+ * Codex table (the legacy lease and pin columns are frozen after 0680).
+ */
+export async function getSubscriptionCoreCodexCurrentSelections(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionIds: readonly string[] },
+): Promise<Map<string, { credentialId: string | null; waiting: boolean }>> {
+  const selections = new Map<string, { credentialId: string | null; waiting: boolean }>();
+  const ids = [...new Set(input.sessionIds)];
+  if (ids.length === 0) return selections;
+  const rows = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) =>
+      await rawRows<{
+        session_id: string;
+        status: string;
+        lease_connection_id: string | null;
+        binding_connection_id: string | null;
+        binding_choice: string | null;
+      }>(
+        tx,
+        sql`select session.id::text as session_id, turn.status,
+            lease.connection_id::text as lease_connection_id,
+            binding.connection_id::text as binding_connection_id,
+            binding.choice as binding_choice
+          from sessions session
+          join session_turns turn on turn.account_id = session.account_id
+            and turn.workspace_id = session.workspace_id and turn.session_id = session.id
+            and turn.id = session.active_turn_id
+          left join subscription_leases lease
+            on lease.account_id = turn.account_id and lease.workspace_id = turn.workspace_id
+              and lease.turn_id = turn.id and lease.provider = 'codex'
+              and lease.leased_until > clock_timestamp()
+          left join subscription_session_bindings binding
+            on binding.account_id = session.account_id
+              and binding.workspace_id = session.workspace_id
+              and binding.session_id = session.id and binding.provider = 'codex'
+          where session.account_id = ${input.accountId}::uuid
+            and session.workspace_id = ${input.workspaceId}::uuid
+            and session.id in (${sql.join(
+              ids.map((id) => sql`${id}::uuid`),
+              sql`, `,
+            )})
+            and turn.status in ('running', 'recovering', 'waiting_capacity', 'requires_action')
+            and turn.model like 'codex/%'`,
+      ),
+  );
+  for (const row of rows) {
+    const waiting = row.status === "waiting_capacity";
+    selections.set(row.session_id, {
+      waiting,
+      credentialId: waiting
+        ? row.binding_choice === "explicit"
+          ? row.binding_connection_id
+          : null
+        : row.lease_connection_id,
+    });
+  }
+  return selections;
 }
 
 /**
@@ -57569,13 +58005,21 @@ export type CommandContainmentEnrollment = ReapDrainable & {
 
 /** Whole-group "unused" from durable facts only. Every session of the group,
  * and every session owning a process on the lease, must have no open turn
- * (queued, running, requires_action, waiting_capacity), no unpaused recovery, no
- * non-closed attempt, no pending quiescence and no held `wait_for_input`; and
- * the newest attempt close, turn finish, holder-set change and admission (or
- * settlement) on this lease epoch must all be older than the window. A held input wait means
- * the agent is deliberately waiting on its background work, so the command is
- * not abandoned: only the provider-deadline backstop may stop it. Process age
- * is deliberately not a fact here. */
+ * (queued, running, waiting_capacity), no unpaused recovery, no non-closed
+ * attempt and no pending quiescence; the newest attempt close, turn finish,
+ * holder-set change and admission (or settlement) on this lease epoch must all
+ * be older than the window; and no active command on the lease may have
+ * printed output inside the window.
+ *
+ * A wait is not use. A held `wait_for_input` or a turn parked in
+ * `requires_action` waits for a person, a child or a timer, none of which needs
+ * the machine; the wait's start is already on the clock as its turn finish or
+ * attempt close, and the box resumes on demand. The only work that keeps the
+ * box is a command that is visibly busy: the retained-process reconciler drains
+ * a running command's output into durable `sandbox.command.output.delta`
+ * events at most five minutes apart, so a command that printed nothing for the
+ * whole window is treated as idle whatever the agent is waiting for. Process
+ * age is deliberately not a fact here. */
 async function sandboxGroupIdleForCommandContainmentTx(
   tx: Database,
   input: {
@@ -57590,7 +58034,6 @@ async function sandboxGroupIdleForCommandContainmentTx(
     idle: boolean;
     session_ids: string[];
     recovering_session_ids: string[];
-    idle_before: Date | string;
   }>(
     tx,
     sql`
@@ -57614,8 +58057,7 @@ async function sandboxGroupIdleForCommandContainmentTx(
             select 1 from session_turns turn
             where turn.workspace_id = ${input.workspaceId}
               and turn.session_id in (select id from member_sessions)
-              and turn.status in ('queued', 'running', 'requires_action',
-                'waiting_capacity'))
+              and turn.status in ('queued', 'running', 'waiting_capacity'))
           and coalesce(greatest(
             (select lease.holders_changed_at from sandbox_leases lease
               where lease.id = ${input.leaseId}),
@@ -57649,13 +58091,28 @@ async function sandboxGroupIdleForCommandContainmentTx(
               join sandbox_leases lease on lease.id = admission.lease_id
               where admission.lease_id = ${input.leaseId}
                 and admission.lease_epoch = lease.lease_epoch)
-          ) < now() - (${input.windowMs}::bigint * interval '1 millisecond'), false) as idle,
+          ) < now() - (${input.windowMs}::bigint * interval '1 millisecond'), false)
+          -- A command that printed inside the window is working, not idle.
+          -- Only each command's newest output row is read (backward over the
+          -- output page index), so the cost does not grow with its history.
+          and not exists (
+            select 1 from sandbox_retained_processes busy
+            where busy.lease_id = ${input.leaseId} and busy.state = 'active'
+              and (
+                select output.created_at from session_events output
+                where output.workspace_id = busy.workspace_id
+                  and output.session_id = busy.session_id
+                  and output.type = 'sandbox.command.output.delta'
+                  and output.payload->>'commandId' = busy.id::text
+                order by output.sequence desc
+                limit 1
+              ) >= now() - (${input.windowMs}::bigint * interval '1 millisecond')
+          ) as idle,
         array(select id from member_sessions order by id) as session_ids,
         array(select distinct turn.session_id from session_turns turn
           where turn.workspace_id = ${input.workspaceId}
             and turn.session_id in (select id from member_sessions)
-            and turn.status = 'recovering') as recovering_session_ids,
-        now() - (${input.windowMs}::bigint * interval '1 millisecond') as idle_before
+            and turn.status = 'recovering') as recovering_session_ids
     `,
   );
   if (!facts?.idle) return false;
@@ -57669,37 +58126,13 @@ async function sandboxGroupIdleForCommandContainmentTx(
     });
     if (control.state !== "paused") return false;
   }
-  const idleBefore = new Date(facts.idle_before).getTime();
-  const sessions = facts.session_ids.length
-    ? await tx
-        .select({
-          id: schema.sessions.id,
-          inputWaitTurnId: schema.sessions.inputWaitTurnId,
-          inputWaitUntil: schema.sessions.inputWaitUntil,
-        })
-        .from(schema.sessions)
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, input.workspaceId),
-            inArray(schema.sessions.id, facts.session_ids),
-          ),
-        )
-        .orderBy(schema.sessions.id)
-    : [];
-  for (const session of sessions) {
-    // A wait that is not superseded puts its deadline on the idle clock: held
-    // until it ends, then the window runs from the deadline, so a timeout
-    // settlement that cannot run (a paused session) never pins the box.
-    const wait = await sessionInputWaitStateTx(tx, input.workspaceId, session.id, session);
+  for (const sessionId of facts.session_ids) {
     if (
-      ((wait.disposition === "held" || wait.disposition === "timeout") &&
-        session.inputWaitUntil !== null &&
-        session.inputWaitUntil.getTime() >= idleBefore) ||
-      (await hasPendingSessionAttemptQuiescenceTx(tx, {
+      await hasPendingSessionAttemptQuiescenceTx(tx, {
         workspaceId: input.workspaceId,
-        sessionId: session.id,
+        sessionId,
         writerMode: input.writerMode,
-      }))
+      })
     )
       return false;
   }
@@ -58054,8 +58487,8 @@ export type IdleCheckpointCandidate = {
 };
 
 /** Global inventory of warm Modal boxes that no turn holds and that viewers,
- * browser/computer interactions or running unsupervised background commands
- * keep warm, whose workspace has writes the newest archive may not cover, and
+ * browser/computer interactions or running background commands (supervised or
+ * not) keep warm, whose workspace has writes the newest archive may not cover, and
  * whose last capture attempt and last idle checkpoint attempt are both at least
  * `intervalMs` old (least recently tried first). Discovery only: the exact
  * warm capture claim (`claimWorkspaceArchiveCapture` with `idleCheckpoint`)
@@ -62156,7 +62589,9 @@ async function settleRetainedProcessWithAuthority(
 
 /** Legacy containment never substitutes for native-supervisor terminal proof.
  * Presence, not successful descriptor parsing, is the fail-closed boundary.
- * Check the whole lease, including stale/already-enrolled process IDs. */
+ * Check the whole lease, including stale/already-enrolled process IDs. A warm
+ * point-in-time capture marked concurrent is the one exception: it never
+ * terminates the box (see `concurrentLeaseProcess`). */
 function noActiveSupervisedProcesses(leaseId: SQL): SQL {
   return sql`not exists (
     select 1 from sandbox_retained_processes supervised_process
@@ -62166,28 +62601,33 @@ function noActiveSupervisedProcesses(leaseId: SQL): SQL {
   )`;
 }
 
-/** The exact active, unsupervised background command on one lease epoch and
- * provider instance. Such a command may keep running across a warm checkpoint:
+/** The exact active background command on one lease epoch and provider
+ * instance. Such a command may keep running across a warm checkpoint:
  * Modal pauses the whole box while it snapshots, so the command is frozen rather
  * than racing the read, but a file it was in the middle of writing can be saved
  * half-written. That is deliberate. A long-running command used to
  * refuse every checkpoint for the box's whole lifetime, so an uncaptured
- * provider death lost everything since the last capture. Supervised commands
- * keep their separate proof gate (`noActiveSupervisedProcesses`); every other
- * holder and every in-flight request still blocks the capture. */
-function activeUnsupervisedLeaseProcess(
+ * provider death lost everything since the last capture. A supervised command
+ * runs through one too: its terminal receipt lives in the supervisor's memory
+ * behind its control socket, never in the snapshot, and a warm concurrent
+ * capture neither terminates the box nor settles the command. Drains,
+ * containment and every other publication still keep the supervised proof
+ * gate (`noActiveSupervisedProcesses`), and the database guard
+ * `supervised_command_capture_guard` admits only the warm concurrent claim
+ * and fold. Every other holder and every in-flight request still blocks the
+ * capture. */
+function concurrentLeaseProcess(
   process: SQL,
   lease: { id: SQL; epoch: SQL; instanceId: SQL },
 ): SQL {
   return sql`${process}.lease_id = ${lease.id}
     and ${process}.lease_epoch = ${lease.epoch}
     and ${process}.provider_instance_id = ${lease.instanceId}
-    and ${process}.state = 'active'
-    and not (coalesce(${process}.provider_command, '{}'::jsonb) ? 'supervision')`;
+    and ${process}.state = 'active'`;
 }
 
 /** A process holder owned by a background command that may run through a warm
- * checkpoint (see `activeUnsupervisedLeaseProcess`). */
+ * checkpoint (see `concurrentLeaseProcess`). */
 function concurrentCommandHolder(
   holder: SQL,
   lease: { id: SQL; epoch: SQL; instanceId: SQL },
@@ -62195,7 +62635,7 @@ function concurrentCommandHolder(
   return sql`(${holder}.kind = 'process' and exists (
     select 1 from sandbox_retained_processes concurrent_process
     where concurrent_process.holder_id = ${holder}.holder_id
-      and ${activeUnsupervisedLeaseProcess(sql`concurrent_process`, lease)}
+      and ${concurrentLeaseProcess(sql`concurrent_process`, lease)}
   ))`;
 }
 
@@ -62220,7 +62660,7 @@ function concurrentCommandAdmission(
   return sql`exists (
     select 1 from sandbox_retained_processes concurrent_process
     where concurrent_process.parent_admission_id = ${admission}.id
-      and ${activeUnsupervisedLeaseProcess(sql`concurrent_process`, lease)}
+      and ${concurrentLeaseProcess(sql`concurrent_process`, lease)}
   )`;
 }
 
@@ -62653,8 +63093,8 @@ export async function claimWorkspaceArchiveCapture(
      * around, and settled with the box after termination. */
     deadlineMandatoryCaptureLeadMs?: number;
     /** Warm point-in-time checkpoint of a box no turn holds, kept warm by
-     * viewers, browser/computer interactions or active unsupervised background
-     * commands (e.g. while the session waits for one or for input). Requires
+     * viewers, browser/computer interactions or active background commands
+     * (supervised or not) (e.g. while the session waits for one or for input). Requires
      * `pointInTimeCapture` and no `warmAttempt`: with no turn attempt to fence,
      * no other holder may be on the box, at least one of those must be (a box
      * no holder keeps warm belongs to the idle drain), and every other open
@@ -62822,8 +63262,26 @@ export async function claimWorkspaceArchiveCapture(
       if (idleCheckpoint && Number(row.refcount) === 0) {
         return { status: "lease_fenced" as const };
       }
+      // Neither a new process nor a new admission can appear while this claim
+      // is held, so "a command was running at claim time" is exactly the
+      // condition under which the snapshot may miss later writes.
+      const aroundCommands =
+        (input.warmAttempt !== undefined || idleCheckpoint) && input.pointInTimeCapture === true;
+      // A supervised command allows only a warm point-in-time capture that
+      // runs around it on its own box: such a claim is always marked
+      // concurrent below (the command is a concurrent process), publishes one
+      // generation behind and never terminates the box. Drains and tar-style
+      // captures keep waiting for its receipt.
       const [supervision] = await scopedDb.execute<{ safe: boolean }>(sql`
-        select ${noActiveSupervisedProcesses(sql`${row.id}::uuid`)} as safe
+        select ${noActiveSupervisedProcesses(sql`${row.id}::uuid`)}
+          or (${aroundCommands && input.liveness === "warm"} and not exists (
+            select 1 from sandbox_retained_processes supervised_process
+            where supervised_process.lease_id = ${row.id}
+              and supervised_process.state = 'active'
+              and coalesce(supervised_process.provider_command, '{}'::jsonb) ? 'supervision'
+              and not (supervised_process.lease_epoch = ${Number(row.lease_epoch)}
+                and supervised_process.provider_instance_id = ${input.expectedInstanceId})
+          )) as safe
       `);
       if (!supervision?.safe) return { status: "mutation_in_progress" as const };
       if (row.archive_capture_id !== null) {
@@ -62837,11 +63295,6 @@ export async function claimWorkspaceArchiveCapture(
         epoch: sql`${Number(row.lease_epoch)}`,
         instanceId: sql`${input.expectedInstanceId}`,
       };
-      // Neither a new process nor a new admission can appear while this claim
-      // is held, so "a command was running at claim time" is exactly the
-      // condition under which the snapshot may miss later writes.
-      const aroundCommands =
-        (input.warmAttempt !== undefined || idleCheckpoint) && input.pointInTimeCapture === true;
       const holderCounts =
         input.liveness === "warm"
           ? await scopedDb.execute<{
@@ -62883,14 +63336,14 @@ export async function claimWorkspaceArchiveCapture(
       // be the sole blocking holder means every other worker/session has
       // relinquished its provider handle before capture can pause the box.
       // A warm point-in-time capture runs around writers that never release on
-      // their own schedule: an active unsupervised background command, and a
+      // their own schedule: an active background command, and a
       // viewer or browser-interaction attach. A viewer is not passive (its
       // noVNC/PTY tunnel can mutate the workspace without a generation
       // admission), so the claim is marked concurrent below and the archive is
       // published one generation behind; the next capture after the writer
       // leaves completes it. Waiting for them instead starved checkpoints for as
       // long as a tab stayed open or a command ran. See
-      // `activeUnsupervisedLeaseProcess` for the torn-file trade-off. An idle
+      // `concurrentLeaseProcess` for the torn-file trade-off. An idle
       // checkpoint has no owner holder of its own. Tar-style and drain captures
       // keep requiring every holder gone.
       const expectedHolderCount = input.warmAttempt ? 1 : 0;
@@ -62974,7 +63427,7 @@ export async function claimWorkspaceArchiveCapture(
         ? await scopedDb.execute<{ present: boolean }>(sql`
             select exists (
               select 1 from sandbox_retained_processes concurrent_process
-              where ${activeUnsupervisedLeaseProcess(sql`concurrent_process`, leaseIdentity)}
+              where ${concurrentLeaseProcess(sql`concurrent_process`, leaseIdentity)}
             ) or exists (
               select 1 from sandbox_lease_holders concurrent_writer
               where concurrent_writer.lease_id = ${row.id}
@@ -64718,7 +65171,11 @@ async function foldWorkspaceArchiveOntoLease(
     where lease.workspace_id = ${input.workspaceId}
       and lease.sandbox_group_id = ${input.sandboxGroupId}
       and ${livenessGuard}
-      and ${noActiveSupervisedProcesses(sql`lease.id`)}
+      and (${noActiveSupervisedProcesses(sql`lease.id`)}${
+        // A warm claim that ran around a supervised command publishes one
+        // generation behind and leaves the box and command running.
+        input.livenessGuard === "warm" ? sql` or ${captureRanAroundCommands(sql`lease`)}` : sql``
+      })
       and lease.lease_epoch = ${currentLeaseEpoch}
       and lease.instance_id is not distinct from ${currentInstanceId}
       and lease.workspace_generation = ${input.expectedWorkspaceGeneration}
@@ -69979,7 +70436,7 @@ export async function getSessionGoalWithContinuation(
           ),
         )
         .limit(1);
-      const [capacityWait] = await tx
+      const [legacyCapacityWait] = await tx
         .select({ nextCheckAt: schema.codexCapacityWaiters.nextCheckAt })
         .from(schema.codexCapacityWaiters)
         .where(
@@ -69992,6 +70449,21 @@ export async function getSessionGoalWithContinuation(
           ),
         )
         .limit(1);
+      // A shared-core Codex waiter for the same goal fence (the only kind
+      // written after 0680; the legacy table is frozen).
+      const coreCapacityWait = legacyCapacityWait
+        ? null
+        : await readSubscriptionCoreCodexWaiterInTransaction(tx as unknown as Database, {
+            workspaceId,
+            sessionId,
+          });
+      const capacityWait =
+        legacyCapacityWait ??
+        (coreCapacityWait &&
+        coreCapacityWait.goalId === goal.id &&
+        coreCapacityWait.goalVersion === goal.version
+          ? { nextCheckAt: coreCapacityWait.nextCheckAt }
+          : undefined);
       const xaiCapacityWait = await getXaiCapacityWaitForSessionInTransaction(
         tx,
         workspaceId,
@@ -72974,6 +73446,13 @@ export async function materializeGoalContinuation(
             ),
           )
           .limit(1);
+        // A shared-core Codex waiter (the only kind written after 0680).
+        const coreCapacityWait = capacityWait
+          ? null
+          : await readSubscriptionCoreCodexWaiterInTransaction(tx as unknown as Database, {
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+            });
         const xaiCapacityWait = await getXaiCapacityWaitForSessionInTransaction(
           tx,
           input.workspaceId,
@@ -72984,7 +73463,7 @@ export async function materializeGoalContinuation(
           input.workspaceId,
           input.sessionId,
         );
-        if (capacityWait || xaiCapacityWait || claudeCapacityWait) {
+        if (capacityWait || coreCapacityWait || xaiCapacityWait || claudeCapacityWait) {
           return { action: "none", events: [] } as const;
         }
 
@@ -73455,6 +73934,12 @@ export type InitializeSessionStartInput = {
   turnExecutionPolicy?: TurnExecutionPolicyV1;
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
+  /**
+   * Codex v2 (M3 PR 3b) frozen by a trusted producer for the first turn: a
+   * scheduled firing passes its task's value, which is copied, never
+   * recomputed. Omitted by every other caller (the acceptance rule applies).
+   */
+  initialSubscriptionAuthority?: SubscriptionPersonalAuthorityV2 | null;
   createdEventPayload: Record<string, unknown>;
   /** Trusted backend-only capture for a newly inserted initial turn. Runs under
    * the canonical activity transaction; failure rolls back events and turn.
@@ -73957,12 +74442,14 @@ export async function initializeSessionStartAtomically(
           );
           let initialTurnInitiatingHumanSubjectId =
             creator.initiator.kind === "subject" ? creator.initiator.subjectId : null;
+          let causalParentSubscriptionAuthority: SubscriptionPersonalAuthorityV2 | null = null;
           if (session.parentSessionId && session.parentTurnId) {
             const [causalParentTurn] = await tx
               .select({
                 initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
                 initiatorKind: schema.sessionTurns.initiatorKind,
                 initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+                subscriptionAuthority: schema.sessionTurns.subscriptionAuthority,
               })
               .from(schema.sessionTurns)
               .where(
@@ -73982,6 +74469,7 @@ export async function initializeSessionStartAtomically(
               (causalParentTurn.initiatorKind === "subject"
                 ? causalParentTurn.initiatorSubjectId
                 : null);
+            causalParentSubscriptionAuthority = causalParentTurn.subscriptionAuthority ?? null;
           }
           if (initialPersonalConnectionDelegations.length > 0) {
             if (!initialTurnInitiatingHumanSubjectId) {
@@ -73998,19 +74486,41 @@ export async function initializeSessionStartAtomically(
           queueTailPosition += 1;
           const acceptedAt = new Date();
           // Codex v2 accepted authority (M3 PR 2a): only the owner's own
-          // initial message freezes personal authority; a child session's
-          // first turn (causal parent human) and other creators freeze none.
-          const initialSubscriptionAuthority = session.parentSessionId
-            ? null
-            : await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
-                tx as unknown as Database,
-                {
-                  accountId: session.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: session.id,
-                  acceptingSubjectId: initialTurnInitiatingHumanSubjectId,
-                },
-              );
+          // initial message freezes personal authority. A scheduled firing
+          // copies its task's frozen value (M3 PR 3b). A child session's first
+          // turn takes its exact causal parent turn's immutable value (M3 PR 3,
+          // design 3.7 EP-T13), never a fresh computation: it gains nothing the
+          // parent did not hold, and the database rechecks owner, session and
+          // generation before any personal lease. A parent with no v2 value
+          // yields the empty value once the cutover is enabled.
+          const initialSubscriptionAuthority =
+            input.initialSubscriptionAuthority !== undefined
+              ? await codexSubscriptionAuthorityV2OrEmptyInTransaction(
+                  tx as unknown as Database,
+                  session.accountId,
+                  input.initialSubscriptionAuthority,
+                )
+              : session.parentSessionId
+                ? causalParentSubscriptionAuthority !== null
+                  ? causalParentSubscriptionAuthority
+                  : await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
+                      tx as unknown as Database,
+                      {
+                        accountId: session.accountId,
+                        workspaceId: input.workspaceId,
+                        sessionId: session.id,
+                        acceptingSubjectId: null,
+                      },
+                    )
+                : await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
+                    tx as unknown as Database,
+                    {
+                      accountId: session.accountId,
+                      workspaceId: input.workspaceId,
+                      sessionId: session.id,
+                      acceptingSubjectId: initialTurnInitiatingHumanSubjectId,
+                    },
+                  );
           [turn] = await tx
             .insert(schema.sessionTurns)
             .values(
@@ -74386,6 +74896,18 @@ export async function enqueueSessionTurn(
                   input.xaiProviderAccountAuthoritySnapshot ?? sharedTurnPool!.xai,
                 claudeProviderAccountAuthoritySnapshot:
                   input.claudeProviderAccountAuthoritySnapshot ?? sharedTurnPool!.claude,
+                // This exported low-level enqueue is also an acceptance boundary.
+                // Freeze the named human (or empty service authority) exactly once,
+                // just like the canonical prompt path; never leave postcutover NULL.
+                subscriptionAuthority: await codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
+                  tx as unknown as Database,
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    acceptingSubjectId: initiatingHumanSubjectId,
+                  },
+                ),
                 createdAt: acceptedAt,
                 updatedAt: acceptedAt,
               },
@@ -74441,6 +74963,7 @@ type BoundedSystemUpdate = Pick<
   | "xaiProviderAccountAuthoritySnapshot"
   | "claudeProviderAccountAuthoritySnapshot"
   | "scheduledTaskRunId"
+  | "subscriptionAuthority"
 >;
 
 export type FrozenXaiExecutionAuthority = {
@@ -74492,6 +75015,9 @@ function systemUpdateExecutionAuthorityKey(update: BoundedSystemUpdate): string 
         ? (update.lineage.connectionAuthoritySubjectId ?? null)
         : null,
     scheduledTaskRunId: update.scheduledTaskRunId,
+    // Codex v2 (M3 PR 3b): updates frozen with different values never share
+    // one internal turn.
+    codexV2: update.subscriptionAuthority ?? null,
   });
 }
 
@@ -74794,6 +75320,11 @@ async function planInboxBatch(
       mcpAccountBindings: context.mcpAccountBindings,
       xaiProviderAccountAuthoritySnapshot: context.xaiProviderAccountAuthoritySnapshot,
       claudeProviderAccountAuthoritySnapshot: context.claudeProviderAccountAuthoritySnapshot,
+      // A Codex v2 value frozen on the update must equal the context's; an
+      // update that froze none follows the v1 rule above and the delivering
+      // turn copies the receiving context's value.
+      subscriptionAuthority:
+        update.subscriptionAuthority == null ? null : context.subscriptionAuthority,
       lineage: {
         connectionAuthoritySubjectId: human,
         xaiAuthoritySubjectId: human,
@@ -76182,8 +76713,11 @@ export async function claimSessionWorkForAttempt(
                   )
                   .orderBy(
                     // Command notices are retained context, not a reason to
-                    // strand later actionable input behind the read limit.
-                    sql`case when ${schema.sessionSystemUpdates.kind} = 'background_command_result' then 1 else 0 end`,
+                    // strand later actionable input behind the read limit. A
+                    // passive idle-containment notice sorts after real command
+                    // results so it can only ride along, never lead a batch
+                    // that the planner then closes on it alone.
+                    sql`case when ${passiveCommandNoticeSql()} then 2 when ${schema.sessionSystemUpdates.kind} = 'background_command_result' then 1 else 0 end`,
                     asc(schema.sessionSystemUpdates.createdAt),
                     asc(schema.sessionSystemUpdates.id),
                   )
@@ -76316,9 +76850,13 @@ export async function claimSessionWorkForAttempt(
             }
             validUpdates.push(update);
           }
+          // Command results alone start a turn only under a held wait, and an
+          // idle-containment notice never does: when every input that opened
+          // the claim was rejected above, the notice waits for the next turn.
           if (
-            options.commandOnlyMayRun === false &&
-            validUpdates.every((update) => update.kind === "background_command_result")
+            validUpdates.every((update) => update.kind === "background_command_result") &&
+            (options.commandOnlyMayRun === false ||
+              (options.commandOnlyMayRun === true && validUpdates.every(isPassiveCommandNotice)))
           ) {
             validUpdates.length = 0;
           }
@@ -77227,6 +77765,13 @@ export async function claimSessionWorkForAttempt(
                   ),
                 )
                 .limit(1);
+              // A shared-core Codex waiter (the only kind written after 0680).
+              const coreWaiter = codexWaiter
+                ? null
+                : await readSubscriptionCoreCodexWaiterInTransaction(tx as unknown as Database, {
+                    workspaceId,
+                    sessionId,
+                  });
               const xaiWaiter = await getXaiCapacityWaitForSessionInTransaction(
                 tx as unknown as Database,
                 workspaceId,
@@ -77237,7 +77782,7 @@ export async function claimSessionWorkForAttempt(
                 workspaceId,
                 sessionId,
               );
-              if (codexWaiter || xaiWaiter || claudeWaiter) {
+              if (codexWaiter || coreWaiter || xaiWaiter || claudeWaiter) {
                 return { action: "unclaimed", reason: "no-work" };
               }
             }
@@ -78200,15 +78745,24 @@ export async function claimSessionWorkForAttempt(
                   continuationCodexPolicy.policy,
                 )
               : baseInternalTurnMetadata;
-          // Codex v2 accepted authority (M3 PR 2a): a pure goal continuation
-          // inherits the exact causal turn's frozen value when that turn's
-          // human is this turn's human; every other internal update (agent
-          // messages, Steer, batched notices, child results, schedules)
-          // freezes none, so it runs on shared capacity only.
+          // Codex v2 accepted authority (M3 PR 2a, 3b): a pure goal
+          // continuation inherits the exact causal turn's frozen value when
+          // that turn's human is this turn's human. Every other delivery
+          // copies, exactly as its v1 pools: the receiving context turn's
+          // value for informational input, otherwise the value frozen on the
+          // delivered update (agent messages and Steer, child results,
+          // background results, scheduled occurrences; a batch only shares a
+          // turn when those values are equal). Nothing is recomputed; once
+          // the cutover is active a missing value is the empty value.
           const goalCausalTurnId = pureGoalUpdate
             ? systemUpdateCausalHumanTurnId(pureGoalUpdate)
             : null;
           let internalSubscriptionAuthority: SubscriptionPersonalAuthorityV2 | null = null;
+          if (!pureGoalUpdate) {
+            internalSubscriptionAuthority = receiverContext
+              ? (receiverContext.subscriptionAuthority ?? null)
+              : (authorityUpdate.subscriptionAuthority ?? null);
+          }
           if (goalCausalTurnId && initiatingHumanSubjectId) {
             const [goalCausalTurn] = await tx
               .select({
@@ -78231,6 +78785,11 @@ export async function claimSessionWorkForAttempt(
               internalSubscriptionAuthority = goalCausalTurn.subscriptionAuthority;
             }
           }
+          internalSubscriptionAuthority = await codexSubscriptionAuthorityV2OrEmptyInTransaction(
+            tx as unknown as Database,
+            session.accountId,
+            internalSubscriptionAuthority,
+          );
           await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
           const [internalTurn] = await tx
             .insert(schema.sessionTurns)
@@ -79897,12 +80456,32 @@ async function queuedSteerHasUnquiescedPredecessor(
   return row !== undefined;
 }
 
+/** A pending background-command result that reports an idle containment
+ * stop. Nothing used the box, so the notice wakes nothing on its own, not even
+ * a held wait: it rides along with the next turn, which a person, another
+ * input or the wait's timeout starts. */
+function passiveCommandNoticeSql() {
+  return sql<boolean>`(${schema.sessionSystemUpdates.kind} = 'background_command_result'
+    and ${schema.sessionSystemUpdates.payload} ->> 'state' = 'lost'
+    and ${schema.sessionSystemUpdates.payload} ->> 'reason' = ${IDLE_COMMAND_CONTAINMENT_REASON})`;
+}
+
+/** The in-memory twin of `passiveCommandNoticeSql`, for updates already read. */
+function isPassiveCommandNotice(update: { kind: string; payload: Record<string, unknown> }) {
+  return (
+    update.kind === "background_command_result" &&
+    update.payload.state === "lost" &&
+    update.payload.reason === IDLE_COMMAND_CONTAINMENT_REASON
+  );
+}
+
 /** Read durable session state without reserving a turn-worker slot or mutating it. */
 /**
  * Which wake classes are represented among a session's pending machine inputs.
  * `immediate` kinds make the session runnable even against a current
  * `wait_for_input` declaration; deferred child notices only do so without one.
- * Command results are separate: only a current explicit wait lets them wake.
+ * Command results are separate: only a current explicit wait lets them wake,
+ * and an idle-containment notice never does (see `passiveCommandNoticeSql`).
  */
 async function pendingSystemUpdateWakeClassesTx(
   db: Database,
@@ -79910,7 +80489,10 @@ async function pendingSystemUpdateWakeClassesTx(
   sessionId: string,
 ): Promise<{ immediate: boolean; deferred: boolean; command: boolean }> {
   const rows = await db
-    .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
+    .selectDistinct({
+      kind: schema.sessionSystemUpdates.kind,
+      passive: passiveCommandNoticeSql(),
+    })
     .from(schema.sessionSystemUpdates)
     .where(
       and(
@@ -79924,7 +80506,7 @@ async function pendingSystemUpdateWakeClassesTx(
   let command = false;
   for (const row of rows) {
     if (row.kind === "background_command_result") {
-      command = true;
+      if (!row.passive) command = true;
       continue;
     }
     const wakeClass =
@@ -80559,6 +81141,7 @@ async function settleSessionInputWaitInActivity(
                   causalAuthority.xaiProviderAccountAuthoritySnapshot,
                 claudeProviderAccountAuthoritySnapshot:
                   causalAuthority.claudeProviderAccountAuthoritySnapshot,
+                subscriptionAuthority: causalAuthority.subscriptionAuthority,
               }
             : {}),
           lineage: causalAuthority?.lineage ?? {},
@@ -81023,6 +81606,13 @@ export async function failSessionWorkBeforeAttemptClaim(
                   ),
                 )
                 .limit(1);
+              // A shared-core Codex waiter (the only kind written after 0680).
+              const coreWaiter = codexWaiter
+                ? null
+                : await readSubscriptionCoreCodexWaiterInTransaction(tx as unknown as Database, {
+                    workspaceId,
+                    sessionId: input.sessionId,
+                  });
               const xaiWaiter = await getXaiCapacityWaitForSessionInTransaction(
                 tx as unknown as Database,
                 workspaceId,
@@ -81033,7 +81623,7 @@ export async function failSessionWorkBeforeAttemptClaim(
                 workspaceId,
                 input.sessionId,
               );
-              if (codexWaiter || xaiWaiter || claudeWaiter) {
+              if (codexWaiter || coreWaiter || xaiWaiter || claudeWaiter) {
                 return { action: "stale", turnId: null, events: [] } as const;
               }
             }
@@ -86318,7 +86908,7 @@ export async function getSessionQueueSnapshot(
         sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then 0 else 1 end`,
         sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then ${schema.sessionSystemUpdates.createdAt} end desc`,
         sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then ${schema.sessionSystemUpdates.id} end desc`,
-        sql`case when ${schema.sessionSystemUpdates.kind} = 'background_command_result' then 1 else 0 end`,
+        sql`case when ${passiveCommandNoticeSql()} then 2 when ${schema.sessionSystemUpdates.kind} = 'background_command_result' then 1 else 0 end`,
         asc(schema.sessionSystemUpdates.createdAt),
         asc(schema.sessionSystemUpdates.id),
       );
@@ -86529,6 +87119,7 @@ async function enqueueChildLifecycleNoticeOutboxTx(
             xaiProviderAccountAuthoritySnapshot: authority.xaiProviderAccountAuthoritySnapshot,
             claudeProviderAccountAuthoritySnapshot:
               authority.claudeProviderAccountAuthoritySnapshot,
+            subscriptionAuthority: authority.subscriptionAuthority,
           },
           "summary",
           "summaryCodecVersion",
@@ -86822,6 +87413,8 @@ export type SessionSystemUpdateOutboxDelivery = {
   mcpAccountBindings: McpConnectionAccountBinding[] | null;
   xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
   claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
+  /** Codex v2 (M3 PR 3b): the exact spawning parent turn's frozen value. */
+  subscriptionAuthority: SubscriptionPersonalAuthorityV2 | null;
 };
 
 /** Narrow an outbox row back to its correlated typed kind/payload input variant. */
@@ -86856,6 +87449,8 @@ function mapSystemUpdateOutboxRow(row: {
   mcp_account_bindings: unknown;
   xai_provider_account_authority_snapshot: unknown;
   claude_provider_account_authority_snapshot: unknown;
+  /** Absent from the claim routine's fixed columns; filled in after the claim. */
+  subscription_authority?: unknown;
 }): SessionSystemUpdateOutboxDelivery {
   const typed = parseChildLifecycleOutboxPayload(
     fromPostgresLosslessJson(row.payload, row.payload_codec_version),
@@ -86886,7 +87481,49 @@ function mapSystemUpdateOutboxRow(row: {
     claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1.parse(
       row.claude_provider_account_authority_snapshot,
     ),
+    subscriptionAuthority: frozenSubscriptionAuthorityV2(row.subscription_authority),
   };
+}
+
+/** A carrier's frozen Codex v2 value (M3 PR 3b), or null when it froze none. */
+function frozenSubscriptionAuthorityV2(value: unknown): SubscriptionPersonalAuthorityV2 | null {
+  return value === null || value === undefined
+    ? null
+    : SubscriptionPersonalAuthorityV2.parse(value);
+}
+
+/**
+ * The Codex v2 value of a child's exact spawning parent turn (M3 PR 3b): a
+ * child-lifecycle notice carries it like the v1 pools, never recomputed.
+ */
+async function childNoticeParentSubscriptionAuthorityTx(
+  tx: Database,
+  workspaceId: string,
+  childSessionId: string,
+): Promise<SubscriptionPersonalAuthorityV2 | null> {
+  const [child] = await tx
+    .select({
+      parentSessionId: schema.sessions.parentSessionId,
+      parentTurnId: schema.sessions.parentTurnId,
+    })
+    .from(schema.sessions)
+    .where(
+      and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, childSessionId)),
+    )
+    .limit(1);
+  if (!child?.parentSessionId || !child.parentTurnId) return null;
+  const [parentTurn] = await tx
+    .select({ subscriptionAuthority: schema.sessionTurns.subscriptionAuthority })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.sessionId, child.parentSessionId),
+        eq(schema.sessionTurns.id, child.parentTurnId),
+      ),
+    )
+    .limit(1);
+  return frozenSubscriptionAuthorityV2(parentTurn?.subscriptionAuthority);
 }
 
 /**
@@ -86942,6 +87579,7 @@ export async function getSessionSystemUpdateOutboxByDedupeKey(
         claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1.parse(
           row.claudeProviderAccountAuthoritySnapshot,
         ),
+        subscriptionAuthority: frozenSubscriptionAuthorityV2(row.subscriptionAuthority),
       };
     },
   );
@@ -87001,6 +87639,40 @@ export async function claimPendingSessionSystemUpdateOutbox(
             );
         },
       );
+    }
+  }
+  // The claim routine's fixed columns predate the Codex v2 slot (M3 PR 3b):
+  // read the frozen values of the claimed rows, one query per workspace.
+  const byWorkspace = new Map<string, SessionSystemUpdateOutboxDelivery[]>();
+  for (const delivery of deliveries) {
+    const group = byWorkspace.get(delivery.workspaceId) ?? [];
+    group.push(delivery);
+    byWorkspace.set(delivery.workspaceId, group);
+  }
+  for (const [workspaceId, group] of byWorkspace) {
+    const values = await withRlsContext(
+      db,
+      { accountId: group[0]!.accountId, workspaceId },
+      async (scopedDb) =>
+        await scopedDb
+          .select({
+            id: schema.sessionSystemUpdateOutbox.id,
+            subscriptionAuthority: schema.sessionSystemUpdateOutbox.subscriptionAuthority,
+          })
+          .from(schema.sessionSystemUpdateOutbox)
+          .where(
+            and(
+              eq(schema.sessionSystemUpdateOutbox.workspaceId, workspaceId),
+              inArray(
+                schema.sessionSystemUpdateOutbox.id,
+                group.map((delivery) => delivery.id),
+              ),
+            ),
+          ),
+    );
+    const frozen = new Map(values.map((value) => [value.id, value.subscriptionAuthority]));
+    for (const delivery of group) {
+      delivery.subscriptionAuthority = frozenSubscriptionAuthorityV2(frozen.get(delivery.id));
     }
   }
   return deliveries;
@@ -87386,7 +88058,10 @@ export async function markSessionWorkflowWakeDelivered(
                 session,
               );
               const pending = await tx
-                .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
+                .selectDistinct({
+                  kind: schema.sessionSystemUpdates.kind,
+                  passive: passiveCommandNoticeSql(),
+                })
                 .from(schema.sessionSystemUpdates)
                 .where(
                   and(
@@ -87407,7 +88082,8 @@ export async function markSessionWorkflowWakeDelivered(
                 .limit(1);
               if (
                 pending.some(
-                  ({ kind }) =>
+                  ({ kind, passive }) =>
+                    !passive &&
                     SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind as SessionSystemUpdateKind] ===
                       "immediate" &&
                     (kind !== "background_command_result" || wait.disposition === "held") &&
@@ -87511,7 +88187,10 @@ export async function markSessionWorkflowWakeFailed(
 
 export async function getOrCreateSessionSystemUpdateOutbox(
   db: Database,
-  input: Omit<SessionSystemUpdateOutboxDelivery, "id" | "status">,
+  input: Omit<SessionSystemUpdateOutboxDelivery, "id" | "status" | "subscriptionAuthority"> & {
+    /** Default: the source child's exact spawning parent turn's value. */
+    subscriptionAuthority?: SubscriptionPersonalAuthorityV2 | null;
+  },
 ): Promise<SessionSystemUpdateOutboxDelivery> {
   const persistence = {
     stage: "session_lifecycle_outbox.get_or_create",
@@ -87577,6 +88256,14 @@ export async function getOrCreateSessionSystemUpdateOutbox(
               mcpAccountBindings: input.mcpAccountBindings,
               xaiProviderAccountAuthoritySnapshot: input.xaiProviderAccountAuthoritySnapshot,
               claudeProviderAccountAuthoritySnapshot: input.claudeProviderAccountAuthoritySnapshot,
+              subscriptionAuthority:
+                input.subscriptionAuthority !== undefined
+                  ? input.subscriptionAuthority
+                  : await childNoticeParentSubscriptionAuthorityTx(
+                      scopedDb as unknown as Database,
+                      input.workspaceId,
+                      input.sourceSessionId,
+                    ),
             },
             "summary",
             "summaryCodecVersion",
@@ -87671,6 +88358,7 @@ export async function getOrCreateSessionSystemUpdateOutbox(
       claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1.parse(
         row.claudeProviderAccountAuthoritySnapshot,
       ),
+      subscriptionAuthority: frozenSubscriptionAuthorityV2(row.subscriptionAuthority),
     };
   });
 }
@@ -87783,6 +88471,12 @@ export type AddSessionSystemUpdateInput = {
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
   claudeProviderAccountAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
   scheduledTaskRunId?: string | null;
+  /**
+   * Codex v2 (M3 PR 3b) frozen by the producer (a child notice's parent turn,
+   * a scheduled task, a causal turn). Absent means none; the delivering turn
+   * then copies its receiving context or takes the empty value.
+   */
+  subscriptionAuthority?: SubscriptionPersonalAuthorityV2 | null;
 } & SessionSystemUpdateInputVariant;
 
 export type AddSessionSystemUpdateResult<RequireIdleSession extends boolean = boolean> =
@@ -87989,6 +88683,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
                     input.xaiProviderAccountAuthoritySnapshot ?? sharedUpdatePool!.xai,
                   claudeProviderAccountAuthoritySnapshot:
                     input.claudeProviderAccountAuthoritySnapshot ?? sharedUpdatePool!.claude,
+                  subscriptionAuthority: input.subscriptionAuthority ?? null,
                   scheduledTaskRunId: input.scheduledTaskRunId ?? null,
                   state: consumedByParentRead ? "superseded" : "pending",
                 },
@@ -88306,6 +89001,8 @@ async function sameSessionCausalAuthorityTx(
     personalConnectionDelegations,
     xaiProviderAccountAuthoritySnapshot,
     claudeProviderAccountAuthoritySnapshot,
+    // Codex v2 (M3 PR 3b): the causal turn's frozen value, copied.
+    subscriptionAuthority: frozenSubscriptionAuthorityV2(turn.subscriptionAuthority),
     lineage: {
       causalTurnId: turn.id,
       ...(human && personalConnectionDelegations.length > 0
@@ -88525,7 +89222,7 @@ function backgroundCommandTerminalMutation(input: {
       const summary = command.failure
         ? `${commandLabel}: output delivery failed (${command.failure.code}); process exit code ${command.exitCode ?? "unknown"} is not a successful command result.`
         : command.state === "lost" && reason === IDLE_COMMAND_CONTAINMENT_REASON
-          ? `\`${commandLabel}\` was stopped because nobody used this session${idleMinutes ? ` for ${idleMinutes} minute${idleMinutes === 1 ? "" : "s"}` : ""} and nothing was waiting on it; the workspace was saved. Restart it if you still need it.`
+          ? `\`${commandLabel}\` was stopped because nobody used this session${idleMinutes ? ` for ${idleMinutes} minute${idleMinutes === 1 ? "" : "s"} and it printed no output in that time` : " and it printed no output"}; the workspace was saved. Restart it if you still need it.`
           : command.state === "lost" && reason === DEADLINE_COMMAND_CONTAINMENT_REASON
             ? `\`${commandLabel}\` was stopped because the sandbox reached its maximum lifetime; the workspace was saved. Restart it if you still need it.`
             : command.state === "lost" && SANDBOX_GONE_COMMAND_REASONS.has(reason)
@@ -88576,6 +89273,7 @@ function backgroundCommandTerminalMutation(input: {
                 claudeProviderAccountAuthoritySnapshot:
                   causalAuthority?.claudeProviderAccountAuthoritySnapshot ??
                   sharedCommandPool!.claude,
+                subscriptionAuthority: causalAuthority?.subscriptionAuthority ?? null,
                 lineage: {
                   commandId: command.id,
                   provider: command.provider,
@@ -88637,7 +89335,12 @@ function backgroundCommandTerminalMutation(input: {
         input.sessionId,
         session,
       );
-      const waitingForInput = commandWait.disposition === "held";
+      // An idle-containment notice never wakes a wait: nothing used the box,
+      // and waking would end a wait for a person, spend a model turn and
+      // invite a restart every window. It is delivered with the next turn.
+      const waitingForInput =
+        commandWait.disposition === "held" &&
+        !(command.state === "lost" && reason === IDLE_COMMAND_CONTAINMENT_REASON);
       const autoResumed = waitingForInput
         ? await autoResumeGoalPausedByCapInTransaction(tx, {
             workspaceId: input.workspaceId,
@@ -92322,6 +93025,7 @@ export * from "./session-tenancy";
 export * from "./governed-learning-activation";
 export * from "./automations";
 export * from "./organization-model-providers";
+export * from "./organization-model-defaults";
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-tokens";
 

@@ -2756,9 +2756,25 @@ no normal execution, viewer, resume, hydration or close surface. Its host reader
 compares the opened directory descriptor to that evidence before inventory.
 Capture/publication/observation errors remain failures; absence is not archive
 completion. Published-capture retries skip recapture only under the existing
-claim/CAS. Exact-container teardown preserves the host workspace and does not
-invoke SDK close's recursive workspace cleanup. Other providers and elected
-normal cold-continuity owners retain their existing rules.
+claim/CAS. Exact-container teardown does not invoke SDK close. Once the
+container is gone it releases the host workspace directory, because the
+draining-to-cold commit is archive-only (no docker continuity) and nothing can
+re-arm or reuse that root afterwards; without this every cold drain leaked a
+whole workspace directory. Immediately before removal it re-proves the same
+published capture, the native daemon, the exact container's absence and the
+receipt's canonical root identity; it grants the owner u+rwx on read-only
+descendant directories (the Go module cache is 0555), never follows symlinks,
+and leaves the root's own mode untouched so the receipt still authenticates a
+retry. Removal is best effort: a drift or failure retains the directory, logs
+and counts `opengeni_sandbox_docker_workspace_release_total{status="retained"}`,
+and the lease still commits cold from its published archive. A published-capture
+retry that finds the root already absent (crash between release and the cold
+commit) completes teardown without recapture, but only when the capture is
+published, the daemon matches and the exact container is gone. Other providers
+and elected normal cold-continuity owners retain their existing rules.
+`bun run dev:clean` likewise removes the SDK workspace directories of the
+sandbox containers it force-removes (its database is deleted with them);
+plain `dev:down` keeps them for continuity.
 
 During idle drain, a resumable cloud box
 is deleted only after a verified workspace capture is durably folded onto the
@@ -3119,10 +3135,11 @@ observation window is never substituted for termination proof.
 **Idle command containment.** A legacy retained command keeps its Modal box
 warm through a non-expiring process holder, so the zero-holder idle drain never
 runs for it and the box would stay up until the provider deadline kills it
-uncaptured. One rule contains such commands, independent of command health:
-running, still draining output, stopping, unobservable, or repeatedly failing
-observation all qualify. The reaper reads a new inventory,
-`list_command_containment_candidates(limit, idle window)` from migrations 0547/0599,
+uncaptured. One rule contains such commands: running, stopping, unobservable,
+or repeatedly failing observation all qualify, as long as the command printed no
+output inside the window. The reaper reads a new inventory,
+`list_command_containment_candidates(limit, idle window)` from migrations
+0547/0599/0687,
 which lists enrolled drains, rotating leases, and warm or draining Modal leases
 whose only holders are process holders of active non-supervised processes, with
 no capture or reaper hold and no open turn, turn finish, attempt close,
@@ -3135,17 +3152,42 @@ workspace control fence and the process -> admission -> lease row locks:
 - no holder other than those process holders, and no unsettled admission other
   than their parent admissions;
 - in every session of the sandbox group and every session owning a process on
-  the lease: no open turn (`queued`, `running`, `requires_action`,
-  `waiting_capacity`, which includes a pending approval or human-input request),
-  no unpaused recovering turn, no non-closed attempt, no pending quiescence
-  (unsettled interruption or undrained attempt writer). A `wait_for_input` that has not been superseded,
-  and unclaimed machine input that will start a turn (pending immediate system
-  updates other than command results; child lifecycle notices only with an
-  active goal), are idle-clock facts: the window runs from the wait's deadline
-  and from the input's creation. A held wait therefore keeps the command
-  running, since the agent registered it for background work it is
-  deliberately waiting on, while input or a timeout settlement that a paused
-  session can never deliver cannot pin the box until the provider deadline;
+  the lease: no open turn (`queued`, `running`, `waiting_capacity`), no
+  unpaused recovering turn, no non-closed attempt, no pending quiescence
+  (unsettled interruption or undrained attempt writer). Unclaimed machine input
+  that will start a turn (pending immediate system updates other than command
+  results; child lifecycle notices only with an active goal) is an idle-clock
+  fact: the window runs from the input's creation, so input a paused session can
+  never deliver cannot pin the box until the provider deadline;
+- a wait is not use (migration 0687). A held `wait_for_input` and a turn parked
+  in `requires_action` (a pending approval or human-input request) wait for a
+  person, a child or a timer, none of which needs the machine. The wait's start
+  is already on the clock as its turn finish or attempt close, so after the
+  ordinary window the box is saved and stopped, the wait and the pending request
+  survive, and the box resumes on demand when the answer, the timeout or other
+  input starts the next turn. The containment notice itself never wakes the
+  session, not even under a held wait, and never starts a turn alone when the
+  input that opened a claim is rejected: it stays pending and is delivered with
+  the next turn whose causal authority it can share, normally the wait's
+  timeout or the person's answer (`passiveCommandNoticeSql`,
+  `isPassiveCommandNotice`). Pending reads sort it after real command results,
+  so it never leads a batch the planner would close on it alone. Waking would end the wait for the
+  person, spend a model turn, and invite the agent to restart the stopped server
+  every window. A pending approval resolved after containment resumes on a
+  restored box without the command, and the notice tells the agent why;
+- no active command on the lease printed output inside the window. The
+  retained-process reconciler drains a running command's output into durable
+  `sandbox.command.output.delta` events (keyed by the process id) at most five
+  minutes apart while observation is healthy, so a command that is visibly
+  working keeps its box whether or not anything waits on it, and one that
+  printed nothing for the whole window is idle. Only each command's newest output
+  row is read. A command whose observation is quarantined, or a window shorter
+  than the reconciler's backoff, can look silent while it still runs. A busy
+  command whose output goes only to a file looks idle and is contained; the
+  agent receives the notice and can restart it. Only exact
+  enrollment reads `session_events` (under the caller's tenant RLS); the
+  inventory stays wider so that this hot table needs no owner read policy, and a
+  busy lease is stamped and rotated behind the other candidates;
 - a recovering turn under an effective session, ancestor or workspace pause
   does not pin the box. The inventory admits it for inspection; exact enrollment
   resolves current pause and resume overrides under the workspace control fence.
@@ -3183,8 +3225,8 @@ never an exit code; a drain enrolled by a pre-0547 worker records none and
 settles as plain `provider_instance_lost`. In the same transaction it appends
 `session.command.finished`, the typed `background_command_result` input and
 `system.update.pending`, exactly as ordinary exit/loss proof does. The notice
-names the command, says nobody used the session for N minutes and nothing was
-waiting on it, says the workspace was saved, and asks the agent to restart it
+names the command, says nobody used the session for N minutes and it printed
+no output in that time, says the workspace was saved, and asks the agent to restart it
 if still needed. A provider that disappeared before capture settles
 `provider_instance_lost` without a saved-workspace claim. A real exit arriving
 during the drain keeps its exit code. Failed checkpoints retain the provider and
@@ -3380,8 +3422,9 @@ checkpoints for that entire interval, leaving later changes without a recovery
 point if the provider instance is lost.
 When the provider capture is a point-in-time image of a paused box (Modal native
 filesystem or directory snapshots), a warm (turn heartbeat or turn-end) capture
-therefore excludes exactly the process holders and parent admissions of active,
-unsupervised retained processes on the same lease epoch and provider instance.
+therefore excludes exactly the process holders and parent admissions of active
+retained processes, supervised or not, on the same lease epoch and provider
+instance.
 Modal pauses the whole box while it snapshots, so such a command is frozen during
 the read, but a file it was in the middle of writing can be saved half-written;
 that trade-off is deliberate, because a possibly torn file beats losing everything
@@ -3392,8 +3435,11 @@ browser or computer controller): their tunnels can write `/workspace` without a
 generation admission and they never release on the capture's schedule, so
 waiting for them starved every checkpoint for as long as a tab stayed open.
 Every other holder (direct request, sibling turn, any other process), every
-in-flight request (including a command's own stdin write), and supervised
-commands still block.
+in-flight request (including a command's own stdin write) still blocks. A
+supervised command allows only this warm concurrent capture: migration 0685
+narrows its lease guard to exactly the claim marked concurrent and the warm
+fold one generation behind, so no drain, enrollment or termination can follow
+without its receipt.
 
 A claim taken while such a command, viewer or interaction was attached records
 itself in `archive_capture_concurrent_capture_id` (migration 0659). No new process
@@ -3428,10 +3474,10 @@ Modal boxes with point-in-time capture where:
 
 - at least one holder keeps the box warm (a zero-holder box belongs to its drain),
   no turn holds it, and every holder is a viewer, an interaction, or the
-  process holder of an active, unsupervised retained process on the exact lease
+  process holder of an active retained process (supervised or not) on the exact lease
   epoch and instance (a direct request or any other process holder blocks);
-- no supervised process is active, no rotation or operator hold is set, and no
-  unobservable command drain is open;
+- no rotation or operator hold is set and no unobservable command drain is open
+  (an active supervised process no longer excludes the box, migration 0685);
 - the workspace is dirty: `archive_generation` is null or behind
   `workspace_generation`, or `untracked_writer_since` is set;
 - no capture and no idle checkpoint attempt (`idle_checkpoint_attempted_at`)

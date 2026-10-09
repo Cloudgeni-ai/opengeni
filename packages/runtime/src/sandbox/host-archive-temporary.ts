@@ -16,10 +16,24 @@ import { join } from "node:path";
  * now belongs to a different process start. Live owners, including concurrent
  * workers sharing one TMPDIR, are never touched. Unmarked legacy names are
  * never swept because their owner cannot be proven gone.
+ *
+ * The same ownership applies to the object-storage download spool
+ * (`@opengeni/storage` `downloadWorkspaceArchiveSpool`), which cannot depend on
+ * runtime and therefore receives `workspaceArchiveDownloadTemporaryDirectory`
+ * from its callers.
  */
 export const HOST_ARCHIVE_TEMPORARY_PREFIX = "opengeni-host-archive-";
+export const WORKSPACE_ARCHIVE_DOWNLOAD_TEMPORARY_PREFIX = "opengeni-workspace-archive-";
+const OWNER_MARKED_PREFIXES = [
+  HOST_ARCHIVE_TEMPORARY_PREFIX,
+  WORKSPACE_ARCHIVE_DOWNLOAD_TEMPORARY_PREFIX,
+] as const;
+type OwnerMarkedPrefix = (typeof OWNER_MARKED_PREFIXES)[number];
 
-const OWNED_NAME = /^opengeni-host-archive-o(\d+)\.(\d+)\.(\d+)-[A-Za-z0-9]{6}$/;
+function ownedName(prefix: OwnerMarkedPrefix): RegExp {
+  return new RegExp("^" + prefix + "o(\\d+)\\.(\\d+)\\.(\\d+)-[A-Za-z0-9]{6}$");
+}
+const OWNED_NAMES = OWNER_MARKED_PREFIXES.map(ownedName);
 
 type ProcessOwner = { namespace: string; pid: number; startTime: string };
 
@@ -67,11 +81,12 @@ function removeLiveDirectoriesOnExit() {
 }
 
 /** Create a private owner-marked spool directory directly under `base`. */
-export async function createHostArchiveTemporaryDirectory(base: string): Promise<string> {
+export async function createHostArchiveTemporaryDirectory(
+  base: string,
+  kind: OwnerMarkedPrefix = HOST_ARCHIVE_TEMPORARY_PREFIX,
+): Promise<string> {
   const owner = await currentOwner();
-  const prefix = owner
-    ? `${HOST_ARCHIVE_TEMPORARY_PREFIX}o${owner.namespace}.${owner.pid}.${owner.startTime}-`
-    : HOST_ARCHIVE_TEMPORARY_PREFIX;
+  const prefix = owner ? `${kind}o${owner.namespace}.${owner.pid}.${owner.startTime}-` : kind;
   const directory = await mkdtemp(join(base, prefix));
   liveDirectories.add(directory);
   if (!exitHookInstalled) {
@@ -117,7 +132,7 @@ export async function sweepOrphanedHostArchiveTemporaryDirectories(
     seen.add(base);
     const names = await readdir(base).catch(() => [] as string[]);
     for (const name of names) {
-      const match = OWNED_NAME.exec(name);
+      const match = OWNED_NAMES.map((pattern) => pattern.exec(name)).find(Boolean);
       if (!match) continue;
       const owner = { namespace: match[1]!, pid: Number(match[2]), startTime: match[3]! };
       try {
@@ -141,7 +156,22 @@ export function hostArchiveTemporaryBases(): string[] {
 }
 
 let processSweep: Promise<string[]> | undefined;
-/** Sweep once per process: at worker start and before the first spool. */
+/** Sweep once per process: at worker start and before the first spool or
+ * download. Covers every owner-marked prefix. */
 export function sweepOrphanedHostArchiveTemporaryDirectoriesOnce(): Promise<string[]> {
   return (processSweep ??= sweepOrphanedHostArchiveTemporaryDirectories());
 }
+
+/** Owner-marked private directories for `downloadWorkspaceArchiveSpool`, so a
+ * process killed mid-download leaves a directory a later process can prove
+ * orphaned and reclaim. */
+export const workspaceArchiveDownloadTemporaryDirectory = Object.freeze({
+  async create(): Promise<string> {
+    await sweepOrphanedHostArchiveTemporaryDirectoriesOnce();
+    return await createHostArchiveTemporaryDirectory(
+      tmpdir(),
+      WORKSPACE_ARCHIVE_DOWNLOAD_TEMPORARY_PREFIX,
+    );
+  },
+  remove: removeHostArchiveTemporaryDirectory,
+});

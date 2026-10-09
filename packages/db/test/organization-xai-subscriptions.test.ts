@@ -339,6 +339,12 @@ realTest(
 realTest("catalog uses the active subscription unless rotation enables the pool", async () => {
   for (const kind of ["codex", "supergrok"] as const) {
     const setup = await fixture();
+    // Migration 0680 seeds every organization enabled on the shared core;
+    // the Codex case covers the legacy pool, so it starts from the
+    // pre-cutover world (no Codex cutover row).
+    if (kind === "codex")
+      await shared.admin`delete from subscription_provider_cutovers
+        where account_id = ${setup.organizationId}::uuid and provider = 'codex'`;
     for (const name of ["first", "second"]) {
       const id =
         kind === "supergrok"

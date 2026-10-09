@@ -348,6 +348,15 @@ typing; the sync indicator remains pending until server acknowledgement. Failed
 independent edits stay visible, and retry cannot overwrite newer overlapping
 edits. The same component is used in the dock and full-page artifact view;
 dimensions and values remain authoritative in the SDK Worker.
+The console supplies an XLSX Download action in both dock and full-page views.
+Custom hosts can supply `download(signal): Promise<Blob>` on the spreadsheet
+surface, or `downloadSpreadsheet(opened, signal): Promise<Blob>` on
+`EditableArtifactView`. Use the authenticated artifact SDK to pin the saved native
+head, materialize XLSX, poll its job, and download its bytes; never return the
+original imported file. Forward the abort signal through every request. The
+control waits for live sync without pending edits, shows progress and retryable
+errors, and cancels on teardown or revoked access. Omit the callback when the host
+does not support export; other modalities do not gain an unsupported download.
 Double-click a sheet tab or focus it and press F2 to rename it. Enter/Save submits
 the canonical `sheet.rename` command; Escape/Cancel discards an unsent name.
 Validation and failed submissions keep the name editor open. Pending cell edits

@@ -48,11 +48,11 @@ function app() {
   } as never);
 }
 
-async function bearer(permissions: Permission[]): Promise<string> {
+async function bearer(permissions: Permission[], subjectId = "tester"): Promise<string> {
   const token = await signDelegatedAccessToken(DELEGATION_SECRET, {
     accountId: ACCOUNT,
     workspaceId: WS,
-    subjectId: "tester",
+    subjectId,
     permissions,
     principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3600,
@@ -107,8 +107,10 @@ const projection = {
 };
 
 const restores: Array<() => void> = [];
+const realFetch = globalThis.fetch;
 afterEach(() => {
   wakes.length = 0;
+  globalThis.fetch = realFetch;
   while (restores.length) restores.pop()!();
 });
 
@@ -116,6 +118,54 @@ function mock<K extends keyof typeof opengeniDb>(name: K, impl: (...args: never[
   const spy = spyOn(opengeniDb, name as never).mockImplementation(impl as never);
   restores.push(() => (spy as { mockRestore(): void }).mockRestore());
   return spy as unknown as { mock: { calls: unknown[][] } };
+}
+
+/** The device-code endpoints the connect routes call. */
+function mockDevice(handlers: {
+  usercode?: () => Response;
+  token?: () => Response;
+  exchange?: () => Response;
+}) {
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url =
+      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes("/deviceauth/usercode") && handlers.usercode) return handlers.usercode();
+    if (url.includes("/deviceauth/token") && handlers.token) return handlers.token();
+    if (url.includes("/oauth/token") && handlers.exchange) return handlers.exchange();
+    throw new Error(`unexpected fetch ${url}`);
+  }) as typeof fetch;
+}
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function jwt(payload: Record<string, unknown>): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "none", typ: "JWT" })}.${encode(payload)}.signature`;
+}
+
+/** Connect and disconnect on the core never reach a legacy writer. */
+function poisonLegacyWriters() {
+  for (const legacy of [
+    "upsertCodexSubscriptionCredential",
+    "upsertOrganizationCodexSubscriptionCredential",
+    "ensureCodexRotationSettings",
+    "ensureOrganizationCodexRotationSettings",
+    "setInitialActiveCodexCredential",
+    "disconnectCodexAccount",
+    "disconnectAllCodexAccounts",
+    "disconnectOrganizationCodexAccount",
+    "withCodexCapacityMutation",
+    "withSessionCodexCapacityMutation",
+  ] as const) {
+    mock(legacy, async () => {
+      throw new Error(`legacy Codex writer ${legacy} must not run`);
+    });
+  }
 }
 
 function cutover(disposition: "core" | "maintenance") {
@@ -347,26 +397,228 @@ describe("Codex routes with an enabled cutover", () => {
     expect(wakes).toHaveLength(2);
   });
 
-  test("connect and disconnect (left to PR 3) still answer a typed 409", async () => {
+  test("connect start and poll write through the core writer (M3 PR 3b)", async () => {
     cutover("core");
-    const requests: Array<[string, string]> = [
+    poisonLegacyWriters();
+    const headers = {
+      authorization: await bearer(["workspace:read", "connections:write"]),
+      "content-type": "application/json",
+    };
+    mockDevice({
+      usercode: () => json({ device_auth_id: "dev_1", user_code: "ABCD-1234", interval: "5" }),
+    });
+    const started = await app().request(`/v1/workspaces/${WS}/codex/connect/start`, {
+      method: "POST",
+      headers,
+    });
+    expect(started.status).toBe(200);
+    const { state } = (await started.json()) as { state: string };
+    const swapped = await app().request(`/v1/workspaces/${WS}/codex/connect/poll`, {
+      method: "POST",
+      headers: { ...headers, authorization: await bearer(["connections:write"], "another-person") },
+      body: JSON.stringify({ state }),
+    });
+    expect(swapped.status).toBe(400);
+    const signIn = () =>
+      mockDevice({
+        token: () => json({ authorization_code: "authorization-code", code_verifier: "verifier" }),
+        exchange: () =>
+          json({
+            id_token: jwt({
+              email: "core@example.test",
+              "https://api.openai.com/auth": {
+                chatgpt_account_id: "chatgpt-core",
+                chatgpt_plan_type: "pro",
+              },
+            }),
+            access_token: jwt({ exp: Math.floor(Date.now() / 1000) + 3600 }),
+            refresh_token: "refresh-token",
+          }),
+      });
+    let result: unknown = {
+      kind: "connected",
+      id: CONNECTION,
+      isNew: true,
+      ownership: "shared",
+      wake: { accountId: ACCOUNT, reason: "core_codex_connected", workspaceIds: [WS] },
+    };
+    const writer = mock("connectSubscriptionCoreCodexConnection", async () => result);
+    mock("deliverSubscriptionCoreCodexWake", async (_db: never, wake: never) => {
+      wakes.push(wake);
+    });
+    mock("getSubscriptionCoreCodexWorkspaceProjection", async () => projection);
+    const poll = async () => {
+      signIn();
+      return await app().request(`/v1/workspaces/${WS}/codex/connect/poll`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ state }),
+      });
+    };
+    const connected = await poll();
+    expect(connected.status).toBe(200);
+    expect(await connected.json()).toEqual({
+      status: "connected",
+      plan: "pro",
+      accountId: CONNECTION,
+      isActive: true,
+    });
+    const call = writer.mock.calls[0]![1] as Record<string, unknown>;
+    // The grant's own subject decides authority in the database.
+    expect(call).toMatchObject({
+      accountId: ACCOUNT,
+      workspaceId: WS,
+      subjectId: "tester",
+      providerAccountId: "chatgpt-core",
+      planType: "pro",
+      accountEmail: "core@example.test",
+      connectedBySubjectId: null,
+    });
+    // Only the encrypted envelope crosses the boundary.
+    expect(String(call.credentialEncrypted)).not.toContain("refresh-token");
+    expect(wakes).toHaveLength(1);
+    for (const [reason, status] of [
+      ["forbidden", 403],
+      ["managed_elsewhere", 409],
+      ["identity_unverified", 409],
+      ["personal_connections_disabled", 409],
+      ["unavailable", 503],
+    ] as const) {
+      result = { kind: "refused", reason };
+      const refused = await poll();
+      expect({ reason, status: refused.status }).toEqual({ reason, status });
+    }
+    // The cutover can change while token exchange is in flight. Re-read it
+    // before deciding which writer may run; no stale legacy write is allowed.
+    let gateReads = 0;
+    mock("readCodexCutoverDisposition", async () => (++gateReads === 1 ? "legacy" : "core"));
+    result = {
+      kind: "connected",
+      id: CONNECTION,
+      isNew: false,
+      ownership: "shared",
+      wake: { accountId: ACCOUNT, reason: "core_codex_connected" },
+    };
+    expect((await poll()).status).toBe(200);
+    expect(gateReads).toBe(2);
+  });
+
+  test("disconnect one and all map every core outcome (M3 PR 3b)", async () => {
+    cutover("core");
+    poisonLegacyWriters();
+    mock("getSubscriptionCoreCodexWorkspaceProjection", async () => projection);
+    mock("deliverSubscriptionCoreCodexWake", async (_db: never, wake: never) => {
+      wakes.push(wake);
+    });
+    const headers = { authorization: await bearer(["workspace:read", "connections:write"]) };
+    let outcome: unknown = "removed";
+    const one = mock(
+      "disconnectSubscriptionCoreCodexConnection",
+      async (_db: never, input: never) => {
+        if (outcome === "organization") {
+          throw new opengeniDb.SubscriptionCoreCodexOrganizationManagedError();
+        }
+        return {
+          outcome,
+          connectionId: (input as { connectionId: string }).connectionId,
+          clearedAppsWorkspaceIds: [],
+          wake:
+            outcome === "removed"
+              ? { accountId: ACCOUNT, reason: "core_codex_disconnected" }
+              : null,
+        };
+      },
+    );
+    const aliased = "22222222-0000-4000-8000-000000000002";
+    for (const id of [CONNECTION, aliased]) {
+      outcome = "removed";
+      const removed = await app().request(`/v1/workspaces/${WS}/codex/accounts/${id}`, {
+        method: "DELETE",
+        headers,
+      });
+      expect(removed.status).toBe(200);
+      expect(await removed.json()).toEqual({ disconnected: true, newActiveId: CONNECTION });
+      // The route id (canonical or a legacy alias) is resolved by the database.
+      expect(one.mock.calls.at(-1)![1]).toEqual({
+        accountId: ACCOUNT,
+        workspaceId: WS,
+        subjectId: "tester",
+        connectionId: id,
+      });
+    }
+    for (const [next, status] of [
+      ["not_found", 200],
+      ["forbidden", 403],
+      ["unresolved_redemption", 409],
+      ["in_use", 409],
+      ["organization", 409],
+    ] as const) {
+      outcome = next;
+      const response = await app().request(`/v1/workspaces/${WS}/codex/accounts/${CONNECTION}`, {
+        method: "DELETE",
+        headers,
+      });
+      expect({ next, status: response.status }).toEqual({ next, status });
+    }
+
+    let all: unknown = {
+      removed: 2,
+      refused: null,
+      clearedAppsWorkspaceIds: [],
+      wake: { accountId: ACCOUNT, reason: "core_codex_disconnected" },
+    };
+    const disconnectAll = mock("disconnectAllSubscriptionCoreCodexConnections", async () => all);
+    const removedAll = await app().request(`/v1/workspaces/${WS}/codex`, {
+      method: "DELETE",
+      headers,
+    });
+    expect(removedAll.status).toBe(200);
+    expect(await removedAll.json()).toEqual({ disconnected: true });
+    expect(disconnectAll.mock.calls[0]![1]).toEqual({
+      accountId: ACCOUNT,
+      workspaceId: WS,
+      subjectId: "tester",
+    });
+    for (const [refusal, status] of [
+      ["unresolved_redemption", 409],
+      ["in_use", 409],
+      ["forbidden", 403],
+    ] as const) {
+      all = {
+        removed: 0,
+        refused: { outcome: refusal, connectionIds: [CONNECTION] },
+        clearedAppsWorkspaceIds: [],
+        wake: null,
+      };
+      const refused = await app().request(`/v1/workspaces/${WS}/codex`, {
+        method: "DELETE",
+        headers,
+      });
+      expect({ refusal, status: refused.status }).toEqual({ refusal, status });
+    }
+  });
+
+  test("a principal without connections:write reaches no writer", async () => {
+    cutover("core");
+    poisonLegacyWriters();
+    for (const name of [
+      "connectSubscriptionCoreCodexConnection",
+      "disconnectSubscriptionCoreCodexConnection",
+      "disconnectAllSubscriptionCoreCodexConnections",
+    ] as const) {
+      mock(name, async () => {
+        throw new Error(`${name} must not run`);
+      });
+    }
+    const headers = { authorization: await bearer(["workspace:read"]) };
+    for (const [method, path] of [
       ["POST", "/codex/connect/start"],
+      ["POST", "/codex/connect/poll"],
       ["DELETE", `/codex/accounts/${CONNECTION}`],
       ["DELETE", "/codex"],
-    ];
-    for (const [method, path] of requests) {
-      const response = await app().request(`/v1/workspaces/${WS}${path}`, {
-        method,
-        headers: { authorization: await bearer(["workspace:read", "connections:write"]) },
-      });
-      expect(response.status).toBe(409);
-      expect(await response.json()).toMatchObject({
-        error: {
-          status: 409,
-          code: "conflict",
-          details: { reason: "subscription_core_route_unsupported" },
-        },
-      });
+    ] as const) {
+      const response = await app().request(`/v1/workspaces/${WS}${path}`, { method, headers });
+      expect({ path, status: response.status }).toEqual({ path, status: 403 });
     }
   });
 
@@ -520,7 +772,13 @@ describe("Codex routes with an enabled cutover", () => {
       { headers: { authorization: await bearer(["workspace:read", "sessions:read"]) } },
     );
     expect(response.status).toBe(200);
-    expect(view.mock.calls[0]![1]).toEqual({ accountId: ACCOUNT, workspaceId: WS, sessionId });
+    expect(view.mock.calls[0]![1]).toEqual({
+      accountId: ACCOUNT,
+      workspaceId: WS,
+      sessionId,
+      // Only the viewer's own personal connection resolves to an account.
+      viewerSubjectId: "tester",
+    });
     expect(await response.json()).toMatchObject({
       activeAccountId: CONNECTION,
       currentSelection: { waiting: false, credentialId: CONNECTION },
@@ -599,9 +857,10 @@ function organizationAdminRequest(path: string, init: RequestInit = {}): Request
 describe("organization Codex routes with a cutover row", () => {
   function organizationCutover(disposition: "core" | "maintenance") {
     cutover(disposition);
-    // The organization administrator check (no Codex state is returned).
-    mock("getOrganizationCodexRotationSettings", async () => null);
+    // The organization administrator check, with no legacy Codex read.
+    mock("assertOrganizationCodexAdministrator", async () => undefined);
     for (const legacy of [
+      "getOrganizationCodexRotationSettings",
       "listOrganizationCodexAccountStatuses",
       "setActiveOrganizationCodexCredential",
       "updateOrganizationCodexRotationSettings",
@@ -618,7 +877,10 @@ describe("organization Codex routes with a cutover row", () => {
   for (const mode of ["legacy", "core"] as const) {
     test(`organization usage keeps administrator authority outside workspace routing (${mode})`, async () => {
       cutover(mode);
-      mock("getOrganizationCodexRotationSettings", async () => null);
+      const administrator = mock("assertOrganizationCodexAdministrator", async () => undefined);
+      mock("getOrganizationCodexRotationSettings", async () => {
+        throw new Error("organization usage must not read legacy Codex rotation settings");
+      });
       const payload = {
         status: "ok" as const,
         planType: "pro",
@@ -638,6 +900,10 @@ describe("organization Codex routes with a cutover row", () => {
       const response = await app().fetch(organizationAdminRequest(path));
       expect(response.status).toBe(200);
       expect(await response.json()).toEqual({ status: "ok", usage: payload });
+      expect(administrator.mock.calls[0]![1]).toEqual({
+        organizationId: ACCOUNT,
+        actorSubjectId: "user:org-admin",
+      });
       expect(usage.mock.calls[0]![2]).toEqual({
         organizationId: ACCOUNT,
         actorSubjectId: "user:org-admin",
@@ -732,6 +998,40 @@ describe("organization Codex routes with a cutover row", () => {
         "subscription_core_cutover_disabled",
       );
     }
+  });
+
+  test("organization disconnect goes to the core writer with no workspace (M3 PR 3b)", async () => {
+    organizationCutover("core");
+    poisonLegacyWriters();
+    mock("getSubscriptionCoreOrganizationCodexProjection", async () => ({
+      accounts: [],
+      rotation: { activeCredentialId: null, rotationEnabled: true, rotationStrategy: "sharded" },
+    }));
+    mock("deliverSubscriptionCoreCodexWake", async () => undefined);
+    let outcome = "removed";
+    const writer = mock("disconnectSubscriptionCoreCodexConnection", async () => ({
+      outcome,
+      connectionId: CONNECTION,
+      clearedAppsWorkspaceIds: [],
+      wake:
+        outcome === "removed" ? { accountId: ACCOUNT, reason: "core_codex_disconnected" } : null,
+    }));
+    const removed = await app().fetch(
+      organizationAdminRequest(`${orgPath}/accounts/${CONNECTION}`, { method: "DELETE" }),
+    );
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toEqual({ disconnected: true, newActiveId: null });
+    expect(writer.mock.calls[0]![1]).toEqual({
+      accountId: ACCOUNT,
+      workspaceId: null,
+      subjectId: "user:org-admin",
+      connectionId: CONNECTION,
+    });
+    outcome = "in_use";
+    const busy = await app().fetch(
+      organizationAdminRequest(`${orgPath}/accounts/${CONNECTION}`, { method: "DELETE" }),
+    );
+    expect(busy.status).toBe(409);
   });
 
   test("accounts, activate, settings and rename go to the core organization row", async () => {

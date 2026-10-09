@@ -358,6 +358,11 @@ beforeAll(async () => {
     return;
   }
   admin = shared.admin;
+  // These exercise the legacy Codex redemption routes, which M3 PR 4 deletes.
+  // Migration 0680 starts every organization on the shared core; this file
+  // reproduces the pre-cutover world in its own dedicated database only.
+  await admin`alter table managed_accounts disable trigger managed_accounts_subscription_codex_cutover_seed`;
+  await admin`delete from subscription_provider_cutovers where provider = 'codex'`;
   client = createDb(shared.appUrl, { max: 16 });
 
   for (const userId of [OWNER_USER_ID, OTHER_USER_ID]) {
@@ -409,6 +414,23 @@ afterAll(async () => {
 });
 
 describe("Codex quota managed-cookie-only reset redemption API", () => {
+  test("managed-cookie device connect start and poll refuse cross-origin browser mutations", async () => {
+    if (!available) return;
+    const api = app();
+    const { workspaceId } = await appsRoutingFixture(api);
+    for (const operation of ["start", "poll"]) {
+      const response = await api.request(
+        `/v1/workspaces/${workspaceId}/codex/connect/${operation}`,
+        {
+          method: "POST",
+          headers: { ...browserHeaders(), origin: "https://other.example.test" },
+          body: JSON.stringify({ state: "untrusted" }),
+        },
+      );
+      expect(response.status).toBe(403);
+      expect(await response.text()).toContain("same-origin");
+    }
+  });
   test("SUB-APPS-01: a workspace Apps designation under organization routing loads its token, persists refreshes, and can be cleared", async () => {
     if (!available) return;
     const api = app();

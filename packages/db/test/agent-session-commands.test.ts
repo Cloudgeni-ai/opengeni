@@ -369,6 +369,14 @@ describe("attempt-fenced Agent session commands", () => {
         }),
       );
       if (index === 0) {
+        // Model the real child-result outbox producer: copy the spawning
+        // parent's frozen v2 value rather than creating a NULL-authority notice.
+        const [causalTurn] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+          db
+            .select({ subscriptionAuthority: schema.sessionTurns.subscriptionAuthority })
+            .from(schema.sessionTurns)
+            .where(eq(schema.sessionTurns.id, parent.turn.id)),
+        );
         await addSessionSystemUpdate(client.db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
@@ -378,6 +386,7 @@ describe("attempt-fenced Agent session commands", () => {
           sourceId: helper.session.id,
           dedupeKey: crypto.randomUUID(),
           summary: "Helper completed",
+          subscriptionAuthority: causalTurn!.subscriptionAuthority,
           lineage: {
             parentSessionId: parent.session.id,
             parentTurnId: parent.turn.id,

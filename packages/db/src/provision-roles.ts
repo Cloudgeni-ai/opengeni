@@ -2146,6 +2146,15 @@ BEGIN
       'persist_subscription_codex_connection_refresh(uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)',
       'fail_subscription_codex_connection_refresh(uuid,uuid,uuid,bigint,text)',
       'subscription_codex_reset_authority(uuid,uuid,uuid,text)',
+      'connect_subscription_codex_personal(uuid,uuid,text,text,text,text,text,jsonb,timestamptz,timestamptz,text,text,text)',
+      'disconnect_subscription_codex_connection(uuid,uuid,text,uuid)',
+      'subscription_codex_personal_connections(uuid,uuid,text)',
+      'subscription_codex_reset_credit_fence(uuid,uuid,uuid,text,text,uuid)',
+      'subscription_codex_owner_capability_held(uuid,text[],text,uuid,boolean)',
+      'subscription_codex_owner_membership_held(uuid,uuid)',
+      'subscription_codex_task_authority_v2(uuid,uuid,uuid,text)',
+      'subscription_codex_revision_authority_v2(uuid,uuid,uuid,bigint)',
+      'manage_subscription_codex_personal(uuid,uuid,text,uuid,text,text,boolean,integer)',
       'subscription_organization_admin(uuid)',
       'subscription_people_assignment_visible(uuid,uuid,uuid,text,text)',
       'subscription_person_preference_visible(uuid,uuid,text,text)',
@@ -2179,6 +2188,41 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    -- M3 PR 3b: the writers' caller check, capability internals and the
+    -- revision-authority trigger function are owner-only. Migration 0680: the
+    -- cutover receipt and its owner-run trigger functions are owner-only.
+    -- Triggers fire without the caller holding EXECUTE.
+    FOREACH routine_signature IN ARRAY ARRAY[
+      'subscription_codex_writer_context(uuid,uuid,text)',
+      'grant_subscription_codex_owner_capability(text,uuid,uuid,text,uuid)',
+      'drop_subscription_codex_owner_capabilities(uuid)',
+      'derive_scheduled_revision_subscription_authority()'
+    ] LOOP
+      IF to_regprocedure('opengeni_subscription_internal.' || routine_signature) IS NOT NULL THEN
+        EXECUTE format(
+          'REVOKE EXECUTE ON FUNCTION opengeni_subscription_internal.%s FROM %I',
+          routine_signature, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
+    -- The drained cutover uses private routines: no previous binary remains.
+    FOREACH routine_signature IN ARRAY ARRAY[
+      'subscription_codex_cutover_v1_active()',
+      'seed_subscription_codex_cutover()',
+      'record_subscription_codex_plan_change()',
+      'keep_subscription_codex_cutover_identity()',
+      'apply_subscription_codex_auto_assignments(uuid,uuid,boolean)',
+      'auto_assign_subscription_codex_workspace()',
+      'auto_assign_subscription_codex_personal_workspace()'
+    ] LOOP
+      IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
+        EXECUTE format(
+          'REVOKE EXECUTE ON FUNCTION opengeni_private.%s FROM %I',
+          routine_signature,
+          ${literal(role)}
+        );
+      END IF;
+    END LOOP;
     -- This exact content-free repair inventory shares the existing global
     -- wake dispatcher's authority. Converge custom-role and migrate-then-
     -- provision installs without opening a generic owner/posture exception.

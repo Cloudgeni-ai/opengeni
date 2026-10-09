@@ -42,6 +42,11 @@ async function organizationFixture() {
     email: `${userId}@example.test`,
     name: "Subscription core fixture",
   });
+  // Migration 0680 seeds every organization's settings row; these contracts
+  // write the organization row themselves.
+  await shared!.admin`
+    delete from subscription_settings
+    where account_id = ${access.workspaceGrants[0]!.accountId}::uuid and workspace_id is null`;
   return {
     accountId: access.workspaceGrants[0]!.accountId,
     workspaceId: access.workspaceGrants[0]!.workspaceId!,
@@ -78,6 +83,10 @@ async function verifySubscriptionLifecycleRlsAsNonBypassOwner(connectionId: stri
       await tx.unsafe(
         `grant execute on function opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid) to ${probeRole}`,
       );
+      // ... and the owner-only Codex writer policy (M3 PR 3b).
+      await tx.unsafe(
+        `grant execute on function opengeni_private.subscription_codex_owner_capability_held(uuid,text[],text,uuid,boolean) to ${probeRole}`,
+      );
       await tx.unsafe(`set local role ${probeRole}`);
       await tx.unsafe("set local search_path = pg_catalog, public, opengeni_private, pg_temp");
       const [attributes] = await tx<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
@@ -106,6 +115,9 @@ async function verifySubscriptionLifecycleRlsAsNonBypassOwner(connectionId: stri
       );
       await tx.unsafe(
         `revoke execute on function opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid) from ${probeRole}`,
+      );
+      await tx.unsafe(
+        `revoke execute on function opengeni_private.subscription_codex_owner_capability_held(uuid,text[],text,uuid,boolean) from ${probeRole}`,
       );
       await tx.unsafe(
         `alter function finalize_organization_retention_deletion(uuid,uuid,uuid,text) owner to ${owners!.function_owner}`,

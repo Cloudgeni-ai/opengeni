@@ -195,6 +195,7 @@ describe("organization membership routes", () => {
           email: "local@example.test",
           "https://api.openai.com/auth": {
             chatgpt_account_id: "local-codex-account",
+            chatgpt_user_id: "local-codex-person",
             chatgpt_plan_type: "team",
           },
         }),
@@ -230,7 +231,9 @@ describe("organization membership routes", () => {
           },
         );
         expect(completed.status).toBe(200);
-        expect(await completed.json()).toMatchObject({ status: "connected", isActive: true });
+        // On the shared core (migration 0680) a rotating organization pool
+        // (`spread`) has no active pointer, so a new account is not "active".
+        expect(await completed.json()).toMatchObject({ status: "connected", isActive: false });
       }
       const connected = await local.request(
         `http://x/v1/organizations/${access.defaultAccountId}/codex/accounts`,
@@ -239,7 +242,7 @@ describe("organization membership routes", () => {
       expect(pool.accounts).toHaveLength(1);
       expect(pool.accounts[0]).toMatchObject({ email: "local@example.test", plan: "team" });
       const [stored] = await shared!
-        .admin`select connected_by_subject_id from codex_subscription_credentials where id = ${pool.accounts[0].id}`;
+        .admin`select connected_by_subject_id from subscription_connections where id = ${pool.accounts[0].id}`;
       expect(stored!.connected_by_subject_id).toBeNull();
 
       const crossOrigin = await local.request(

@@ -112,6 +112,18 @@ sandbox_network="${COMPOSE_PROJECT_NAME}_default"
 sandbox_containers="$(
   docker ps -aq --filter "network=${sandbox_network}" --filter "label=openai-agents-sandbox=true" 2>/dev/null || true
 )"
+# A clean start deletes this project's database, so nothing can resume the
+# host workspaces of these containers afterwards. Record their SDK-owned bind
+# sources now (inspect needs the container) and remove them after the volumes.
+# Plain `down` keeps them: warm leases recover through docker continuity.
+sandbox_workspaces=""
+if [ "$mode" = "clean" ] && [ -n "$sandbox_containers" ]; then
+  # shellcheck disable=SC2086
+  sandbox_workspaces="$(
+    docker inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{println .Source}}{{end}}{{end}}' \
+      $sandbox_containers 2>/dev/null | grep -E '^/.*/openai-agents-docker-sandbox-[A-Za-z0-9_]+$' || true
+  )"
+fi
 if [ -n "$sandbox_containers" ]; then
   # shellcheck disable=SC2086
   docker rm -f $sandbox_containers >/dev/null
@@ -140,6 +152,23 @@ if [ "$mode" = "clean" ]; then
     # shellcheck disable=SC2086
     docker image rm $image_tags >/dev/null 2>&1 || true
     echo "  removed sandbox image tag(s): $(printf '%s ' $image_tags)"
+  fi
+  if [ -n "$sandbox_workspaces" ]; then
+    removed_workspaces=0
+    while IFS= read -r workspace; do
+      [ -d "$workspace" ] && [ ! -L "$workspace" ] || continue
+      # Read-only trees (the Go module cache is 0555) need u+rwx to unlink;
+      # find never follows symlinks out of the workspace.
+      find "$workspace" -type d ! -perm -u=rwx -exec chmod u+rwx {} + 2>/dev/null || true
+      if rm -rf "$workspace" 2>/dev/null; then
+        removed_workspaces=$((removed_workspaces + 1))
+      else
+        echo "  could not fully remove sandbox workspace $workspace" >&2
+      fi
+    done <<EOF_WORKSPACES
+$sandbox_workspaces
+EOF_WORKSPACES
+    echo "  removed ${removed_workspaces} sandbox workspace director(y/ies)"
   fi
   rm -f .env.runtime
   echo "  removed volumes and .env.runtime; the next 'bun run dev' starts from a fresh database."

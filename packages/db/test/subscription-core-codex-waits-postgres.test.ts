@@ -104,6 +104,16 @@ async function organization(): Promise<Org> {
     name: "Core Codex waits fixture",
   });
   const accountId = access.workspaceGrants[0]!.accountId;
+  // Migration 0680 seeds every organization enabled on the shared core. These
+  // dormant-gate fixtures start from the pre-cutover world (no Codex row) and
+  // enable or disable the gate explicitly.
+  await shared!.admin`
+    delete from subscription_provider_cutovers
+    where account_id = ${accountId}::uuid and provider = 'codex'`;
+  // ...and its seeded organization settings row, which the fixture writes itself.
+  await shared!.admin`
+    delete from subscription_settings
+    where account_id = ${accountId}::uuid and workspace_id is null`;
   const ownerSubjectId = `user:${userId}`;
   const [membership] = await shared!.admin<{ id: string; personal_workspace_id: string }[]>`
     select id::text as id, personal_workspace_id::text as personal_workspace_id
@@ -1474,16 +1484,54 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
       },
       prompt: (goal, count) => `continue ${goal.text} (${count})`,
     });
+    const continuationAttemptId = crypto.randomUUID();
     const continuation = await claimSessionWorkForAttempt(client!.db, org.sharedWorkspaceId, {
       sessionId,
       workflowId: `session-${sessionId}`,
       workflowRunId: crypto.randomUUID(),
       dispatchId: crypto.randomUUID(),
-      attemptId: crypto.randomUUID(),
+      attemptId: continuationAttemptId,
       trigger: { kind: "next" },
     });
     if (continuation.action !== "claimed") throw new Error("continuation not claimed");
     expect(continuation.turn.source).toBe("goal");
     expect(await authorityOf(continuation.turn.id)).toEqual(personal);
+
+    // M3 PR 3: a child agent's first turn takes its exact causal parent
+    // turn's frozen value, never a fresh computation for the child.
+    const child = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+      createSession(client!.db, {
+        accountId: org.accountId,
+        workspaceId: org.sharedWorkspaceId,
+        initialMessage: "child of the frozen authority",
+        resources: [],
+        metadata: {},
+        model: MODEL,
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        visibility: "user_private",
+        subjectId: org.ownerSubjectId,
+        parentSessionId: sessionId,
+        createdByActor: {
+          type: "agent_attempt",
+          sessionId,
+          turnId: continuation.turn.id,
+          attemptId: continuationAttemptId,
+          executionGeneration: continuation.turn.executionGeneration,
+        },
+      }),
+    );
+    await initializeSessionStartAtomically(client!.db, {
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      sessionId: child.id,
+      clientEventId: `initial:${child.id}`,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const [childTurn] = await shared!.admin<{ id: string }[]>`
+      select id::text as id from session_turns where session_id = ${child.id}::uuid`;
+    expect(await authorityOf(childTurn!.id)).toEqual(personal);
   });
 });

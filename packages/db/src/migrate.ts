@@ -10,6 +10,12 @@ import {
   migrateClaudeSubscriptionPoolCredentials,
 } from "./claude-subscription-pool-migration";
 import {
+  CODEX_SUBSCRIPTION_CORE_CUTOVER_MARKER,
+  CODEX_SUBSCRIPTION_CORE_CUTOVER_MIGRATION,
+  contentFreeCodexCutoverError,
+  migrateCodexSubscriptionCoreCredentials,
+} from "./codex-subscription-core-cutover";
+import {
   SKILL_METADATA_MIGRATION_MARKER,
   createSkillMetadataMigrationStage,
   stageSkillMetadataMigration,
@@ -43,7 +49,10 @@ export interface ConcurrentIndexMigration {
 }
 
 export type MigrationRuntimeOptions = {
-  /** Existing operator key; used only by the closed Claude maintenance conversion. */
+  /**
+   * Existing operator key; used only by the closed Claude (0598) and Codex
+   * (0680) maintenance conversions.
+   */
   environmentsEncryptionKey?: Uint8Array;
   maxNestedAgentDepth?: number;
   /**
@@ -210,6 +219,33 @@ export async function executeMigrationFile(
       await transaction.unsafe(parts[1]!);
       await transaction`INSERT INTO schema_migrations(name) VALUES(${file}) ON CONFLICT DO NOTHING`;
     });
+    return;
+  }
+  if (sqlText.includes(CODEX_SUBSCRIPTION_CORE_CUTOVER_MARKER)) {
+    if (file !== CODEX_SUBSCRIPTION_CORE_CUTOVER_MIGRATION)
+      throw new Error("Codex subscription cutover is restricted to migration 0680");
+    const parts = sqlText.split(CODEX_SUBSCRIPTION_CORE_CUTOVER_MARKER);
+    if (parts.length !== 2) throw new Error("0680 requires exactly one Codex cutover stage");
+    // Every failure leaves content-free: driver errors carry the statement's
+    // parameters (ciphertext, labels, emails) and server detail text.
+    await sql
+      .begin(async (transaction) => {
+        await transaction`CREATE TEMP TABLE codex_cutover_stage_0672(completed boolean NOT NULL) ON COMMIT DROP`;
+        await transaction`SELECT
+        pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2','1',true),
+        pg_catalog.set_config('opengeni.session_variable_set_attachments_v1','1',true)`;
+        await transaction.unsafe(parts[0]!);
+        await migrateCodexSubscriptionCoreCredentials(
+          transaction,
+          options?.environmentsEncryptionKey,
+        );
+        await transaction`INSERT INTO pg_temp.codex_cutover_stage_0672 VALUES(true)`;
+        await transaction.unsafe(parts[1]!);
+        await transaction`INSERT INTO schema_migrations(name) VALUES(${file}) ON CONFLICT DO NOTHING`;
+      })
+      .catch((error: unknown) => {
+        throw contentFreeCodexCutoverError(error);
+      });
     return;
   }
   if (sqlText.includes(SKILL_METADATA_MIGRATION_MARKER)) {
