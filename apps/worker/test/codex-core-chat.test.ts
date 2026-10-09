@@ -1206,77 +1206,123 @@ describe("core Codex failure settlement", () => {
     },
   );
 
-  test.each([
-    [503, "requests"],
-    [507, "requests"],
-    [503, "titleRequests"],
-    [507, "titleRequests"],
-  ] as const)("HTTP %s with unknown %s custody reports the replay fence", async (status, lane) => {
+  const ownUnknownRequests = async () => {
     const requests = createCoreCodexRequests({
       reserve: async () => ({ operationId: "op" }),
       settle: async () => {},
     });
     await requests.reserve({ requestId: "r", transportAttempt: 1 });
     await requests.observe({ requestId: "r", transportAttempt: 1, outcome: "unknown" });
-    // The provider error has no native outcome error in its cause chain.
-    // The physical request tracker is the evidence that blocks replay.
-    const error = Object.assign(new Error(`${status} upstream unavailable`), {
-      status,
-      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
-    });
-    const { deps, settle } = failureDeps(error, { ...core, [lane]: requests });
-    const checkpoint = mock(async (_options?: unknown) => undefined);
-    deps.historySink.reconcileConversationTruth = checkpoint;
-    const recovery = spy(db, "requestSessionTurnRecovery");
-    const refusal = spy(db, "recordSubscriptionCoreCodexTurnFailure");
-    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
-
-    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
-    expect(checkpoint).toHaveBeenCalledWith({ requireDurable: true });
-    expect(recovery).not.toHaveBeenCalled();
-    expect(refusal).not.toHaveBeenCalled();
-    expect(settle).toHaveBeenCalledWith(
-      expect.objectContaining({
-        events: expect.arrayContaining([
-          {
-            type: "turn.failed",
-            payload: expect.objectContaining({
-              code: "subscription_core_request_outcome_unknown",
-              retryable: false,
-            }),
-          },
-        ]),
-      }),
-    );
-  });
-
-  test.each([
-    ["upstream_failed", "The provider could not finish the response"],
-    ["response_incomplete", "The Codex response was incomplete (max_output_tokens)"],
-    ["invalid_sse_terminal", "The Codex response stream ended without a terminal response"],
-  ])("unknown stream outcome preserves the %s diagnostic without replay", async (code, message) => {
-    const requests = createCoreCodexRequests({
-      reserve: async () => ({ operationId: "op" }),
-      settle: async () => {},
-    });
-    await requests.reserve({ requestId: "r", transportAttempt: 1 });
-    await requests.observe({ requestId: "r", transportAttempt: 1, outcome: "unknown" });
-    const error = new CodexStreamingTerminalError({
+    return requests;
+  };
+  const streamTerminal = (code: string, message: string) =>
+    new CodexStreamingTerminalError({
       status: 502,
       headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
       error: { type: "server_error", code, message },
     });
-    const { deps, settle } = failureDeps(error, { ...core, requests });
-    const checkpoint = mock(async (_options?: unknown) => undefined);
-    deps.historySink.reconcileConversationTruth = checkpoint;
+  const httpTransportError = (status: number) =>
+    Object.assign(new Error(`${status} upstream unavailable`), {
+      status,
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+    });
+
+  test.each([
+    ["HTTP 503", "requests", () => httpTransportError(503)],
+    ["HTTP 507", "requests", () => httpTransportError(507)],
+    ["HTTP 504", "titleRequests", () => httpTransportError(504)],
+    [
+      "dropped stream",
+      "requests",
+      () =>
+        streamTerminal(
+          "invalid_sse_terminal",
+          "The Codex response stream ended without a terminal response",
+        ),
+    ],
+    [
+      "provider stream failure",
+      "requests",
+      () => streamTerminal("upstream_failed", "The provider could not finish the response"),
+    ],
+    [
+      "refused SDK retry after the interruption",
+      "requests",
+      () =>
+        Object.assign(new Error("504 retry wrapper"), {
+          cause: new db.SubscriptionCoreCodexRequestOutcomeUnknownError(),
+        }),
+    ],
+  ] as const)(
+    "%s on this attempt's own %s recovers the same turn from its durable checkpoint",
+    async (_name, lane, error) => {
+      const requests = await ownUnknownRequests();
+      const { deps, settle } = failureDeps(error(), { ...core, [lane]: requests });
+      const checkpoint = mock(async (_options?: unknown) => undefined);
+      deps.historySink.reconcileConversationTruth = checkpoint;
+      const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
+        action: "recovering",
+        events: [],
+      } as never);
+      spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+      expect(checkpoint).toHaveBeenCalledWith({ requireDurable: true });
+      expect(recovery).toHaveBeenCalledTimes(1);
+      const request = recovery.mock.calls[0]![2] as Record<string, unknown>;
+      expect(request).toMatchObject({
+        turnId: "turn-1",
+        attemptId: "attempt-1",
+        providerRecoveryCount: 1,
+        detail: expect.objectContaining({ retryable: true, providerRecoveryCount: 1 }),
+      });
+      expect(settle).not.toHaveBeenCalled();
+    },
+  );
+
+  test("an interrupted request stops recovering once the provider budget is spent", async () => {
+    const requests = await ownUnknownRequests();
+    const { deps, settle } = failureDeps(
+      streamTerminal("invalid_sse_terminal", "The Codex response stream ended"),
+      { ...core, requests },
+    );
+    Object.assign(deps.attempt, { providerRecoveryCount: 5 });
     const recovery = spy(db, "requestSessionTurnRecovery");
-    const refusal = spy(db, "recordSubscriptionCoreCodexTurnFailure");
     spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
 
     expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
-    expect(checkpoint).toHaveBeenCalledWith({ requireDurable: true });
     expect(recovery).not.toHaveBeenCalled();
-    expect(refusal).not.toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledWith(
+      expect.objectContaining({
+        events: expect.arrayContaining([
+          {
+            type: "turn.failed",
+            payload: expect.objectContaining({ retryable: false, recoveryExhausted: true }),
+          },
+        ]),
+      }),
+    );
+  });
+
+  test("an earlier unresolved request refused at admission stays a terminal replay fence", async () => {
+    const requests = createCoreCodexRequests({
+      reserve: async () => {
+        throw new db.SubscriptionCoreCodexRequestOutcomeUnknownError();
+      },
+      settle: async () => {},
+    });
+    await expect(requests.reserve({ requestId: "r", transportAttempt: 1 })).rejects.toBeInstanceOf(
+      db.SubscriptionCoreCodexRequestOutcomeUnknownError,
+    );
+    const { deps, settle } = failureDeps(new db.SubscriptionCoreCodexRequestOutcomeUnknownError(), {
+      ...core,
+      requests,
+    });
+    const recovery = spy(db, "requestSessionTurnRecovery");
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+    expect(recovery).not.toHaveBeenCalled();
     expect(settle).toHaveBeenCalledWith(
       expect.objectContaining({
         events: expect.arrayContaining([
@@ -1285,13 +1331,72 @@ describe("core Codex failure settlement", () => {
             payload: expect.objectContaining({
               code: "subscription_core_request_outcome_unknown",
               retryable: false,
-              detail: message,
             }),
           },
         ]),
       }),
     );
   });
+
+  test("a request still in flight keeps the unknown outcome terminal", async () => {
+    const requests = await ownUnknownRequests();
+    const title = createCoreCodexRequests({
+      reserve: async () => ({ operationId: "title-op" }),
+      settle: async () => {},
+    });
+    await title.reserve({ requestId: "t", transportAttempt: 1 });
+    const { deps } = failureDeps(httpTransportError(503), {
+      ...core,
+      requests,
+      titleRequests: title,
+    });
+    const recovery = spy(db, "requestSessionTurnRecovery");
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+    expect(recovery).not.toHaveBeenCalled();
+  });
+
+  test.each([["response_incomplete", "The Codex response was incomplete (max_output_tokens)"]])(
+    "unknown stream outcome preserves the %s diagnostic without replay",
+    async (code, message) => {
+      const requests = createCoreCodexRequests({
+        reserve: async () => ({ operationId: "op" }),
+        settle: async () => {},
+      });
+      await requests.reserve({ requestId: "r", transportAttempt: 1 });
+      await requests.observe({ requestId: "r", transportAttempt: 1, outcome: "unknown" });
+      const error = new CodexStreamingTerminalError({
+        status: 502,
+        headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+        error: { type: "server_error", code, message },
+      });
+      const { deps, settle } = failureDeps(error, { ...core, requests });
+      const checkpoint = mock(async (_options?: unknown) => undefined);
+      deps.historySink.reconcileConversationTruth = checkpoint;
+      const recovery = spy(db, "requestSessionTurnRecovery");
+      const refusal = spy(db, "recordSubscriptionCoreCodexTurnFailure");
+      spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+      expect(checkpoint).toHaveBeenCalledWith({ requireDurable: true });
+      expect(recovery).not.toHaveBeenCalled();
+      expect(refusal).not.toHaveBeenCalled();
+      expect(settle).toHaveBeenCalledWith(
+        expect.objectContaining({
+          events: expect.arrayContaining([
+            {
+              type: "turn.failed",
+              payload: expect.objectContaining({
+                code: "subscription_core_request_outcome_unknown",
+                retryable: false,
+                detail: message,
+              }),
+            },
+          ]),
+        }),
+      );
+    },
+  );
 
   test("unreadable source diagnostics cannot prevent unknown-outcome settlement", async () => {
     const requests = createCoreCodexRequests({

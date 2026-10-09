@@ -93,6 +93,13 @@ export function createCoreCodexRequests(deps: {
 }) {
   const requests = new Map<string, { operationId: string; responseReceived: boolean }>();
   let uncertain = false;
+  // Which custody produced the uncertainty. "own" means this attempt's own
+  // physical request ended without a definite answer (dropped stream, stall,
+  // gateway timeout). "admission" means the durable fence refused a new
+  // request because an earlier request is still unresolved; only an explicit
+  // reconciliation can clear that.
+  let ownUnknown = false;
+  let admissionRefused = false;
   let reserving = false;
   const key = (request: CodexProviderRequestIdentity) =>
     JSON.stringify([request.requestId, request.transportAttempt]);
@@ -108,7 +115,10 @@ export function createCoreCodexRequests(deps: {
         const reservation = await deps.reserve(request);
         requests.set(key(request), { ...reservation, responseReceived: false });
       } catch (error) {
-        if (error instanceof SubscriptionCoreCodexRequestOutcomeUnknownError) uncertain = true;
+        if (error instanceof SubscriptionCoreCodexRequestOutcomeUnknownError) {
+          uncertain = true;
+          admissionRefused = true;
+        }
         throw error;
       } finally {
         reserving = false;
@@ -122,7 +132,10 @@ export function createCoreCodexRequests(deps: {
         pending.responseReceived = true;
         return;
       }
-      if (request.outcome === "unknown") uncertain = true;
+      if (request.outcome === "unknown") {
+        uncertain = true;
+        ownUnknown = true;
+      }
       await deps.settle({ operationId: pending.operationId, outcome: request.outcome });
       requests.delete(id);
     },
@@ -141,6 +154,19 @@ export function createCoreCodexRequests(deps: {
     /** Preserve an observed unknown outcome even when the SDK throws a plain HTTP error. */
     hasUnknownOutcome(): boolean {
       return uncertain;
+    },
+    /**
+     * True only when every unknown outcome came from this attempt's own
+     * settled request and nothing is still reserved or in flight. The request
+     * row keeps its unknown outcome; closing this attempt as recoverable lets
+     * the next generation be admitted.
+     */
+    unknownIsOwnAndSettled(): boolean {
+      return ownUnknown && !admissionRefused && !reserving && requests.size === 0;
+    },
+    /** The durable fence refused this attempt because of an earlier unresolved request. */
+    admissionRefused(): boolean {
+      return admissionRefused;
     },
   };
 }

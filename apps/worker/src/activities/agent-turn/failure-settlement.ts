@@ -38,6 +38,7 @@ import {
 import { TurnExecutionPolicyDefinitionMismatchError, type Settings } from "@opengeni/config";
 import {
   CodexReloginRequired,
+  CodexStreamingTerminalError,
   classifyCodexEncryptedArtifactRejection,
   classifyCodexEntitlementRejection,
   classifyCodexUsageLimitError,
@@ -96,10 +97,12 @@ import {
 import type {
   AttemptIdentityState,
   BillingState,
+  CodexSubscriptionCoreTurn,
   EventingState,
   ProviderTurnState,
   TurnControlState,
 } from "./turn-context";
+import type { createCoreCodexRequests } from "./codex-core-requests";
 
 import { providerRecoveryCause, recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 
@@ -628,12 +631,31 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // exact core placement and its generation fence.
   const coreCodex = billingState.isCodexTurn ? (providerTurn.codexSubscriptionCore ?? null) : null;
   // The transport may settle an ambiguous request before the SDK throws a plain
-  // HTTP error. That custody evidence must survive classification: advertising
-  // a retryable outage would contradict the replay fence already in force.
+  // HTTP error. That custody evidence must survive classification.
+  //
+  // When the ambiguity is this attempt's own interrupted request (a stream
+  // that dropped or stalled before its terminal event, or a gateway timeout),
+  // the same turn recovers from its durable checkpoint within the bounded
+  // provider-recovery budget. Codex requests are stateless (`store: false`)
+  // and function tools only run after a complete response, so a replay can
+  // at most repeat provider-hosted work and spend more quota. A refusal by
+  // the durable admission fence, an unsettled request, or a deterministic
+  // provider terminal stays a terminal unknown-outcome failure, as does an
+  // interruption combined with a lost lease or a disconnected source.
+  const coreUnknownRecoveryFailure =
+    coreCodex &&
+    !leases.codex.lost &&
+    !hasErrorInCauseChain(error, CodexCredentialLeaseLostError) &&
+    !hasErrorInCauseChain(error, SubscriptionCoreCodexLeaseLostError) &&
+    !hasErrorInCauseChain(error, SubscriptionCoreCodexSourceDisconnectedError) &&
+    !hasErrorInCauseChain(error, SubscriptionCoreCodexAccessLostError)
+      ? ownInterruptedCodexRequestRecovery(error, coreCodex, billingState.isCodexTurn)
+      : null;
   const coreRequestOutcomeUnknown =
-    hasErrorInCauseChain(error, SubscriptionCoreCodexRequestOutcomeUnknownError) ||
-    coreCodex?.requests?.hasUnknownOutcome() ||
-    coreCodex?.titleRequests?.hasUnknownOutcome()
+    !coreUnknownRecoveryFailure &&
+    (hasErrorInCauseChain(error, SubscriptionCoreCodexRequestOutcomeUnknownError) ||
+      coreCodex?.requests?.hasUnknownOutcome() ||
+      coreCodex?.titleRequests?.hasUnknownOutcome())
       ? new SubscriptionCoreCodexRequestOutcomeUnknownError()
       : null;
   const coreCodexLeaseLost =
@@ -1455,17 +1477,20 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         }
       : earlyDefinitionMismatch
         ? { error: error.message, code: error.code, retryable: true }
-        : agentRunFailurePayload(error, {
+        : (coreUnknownRecoveryFailure ??
+          agentRunFailurePayload(error, {
             isCodexTurn: billingState.isCodexTurn,
-          })) as ReturnType<typeof agentRunFailurePayload>,
+          }))) as ReturnType<typeof agentRunFailurePayload>,
     attempt.modelRoutePresentation,
   );
+  const coreLaneRecoverable = (lane: ReturnType<typeof createCoreCodexRequests> | undefined) =>
+    !lane || lane.canRecover() || (!!coreUnknownRecoveryFailure && lane.unknownIsOwnAndSettled());
   if (
     attempt.turnId &&
     !coreRequestOutcomeUnknown &&
     !coreLeaseCheckpointFailed &&
-    (!coreCodex?.requests || coreCodex.requests.canRecover()) &&
-    (!coreCodex?.titleRequests || coreCodex.titleRequests.canRecover()) &&
+    coreLaneRecoverable(coreCodex?.requests) &&
+    coreLaneRecoverable(coreCodex?.titleRequests) &&
     (earlyRecoverableSetup ||
       (failure.retryable && eventing.publish && eventing.turnStartedPublished))
   ) {
@@ -1655,7 +1680,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // never replays work from an incomplete history. This does not retry or
   // rotate the ambiguous request.
   await flushRuntimeBatcher();
-  if (coreRequestOutcomeUnknown) {
+  if (coreRequestOutcomeUnknown || coreUnknownRecoveryFailure) {
     await historySink.reconcileConversationTruth({ requireDurable: true });
   } else {
     await historySink.reconcileConversationTruth();
@@ -1701,4 +1726,68 @@ function hasErrorInCauseChain(
     current = (current as { cause?: unknown }).cause;
   }
   return false;
+}
+
+function findInCauseChain<T extends Error>(
+  error: unknown,
+  type: abstract new (...args: never[]) => T,
+): T | null {
+  let current = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (current instanceof type) return current;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
+const INTERRUPTED_CODEX_RESPONSE_MESSAGE = "The Codex response was interrupted before it finished";
+
+/**
+ * Classify a Codex failure whose only replay obstacle is this attempt's own
+ * interrupted request. Returns the retryable failure the bounded provider
+ * recovery should use, or null when the unknown outcome must stay terminal.
+ */
+export function ownInterruptedCodexRequestRecovery(
+  error: unknown,
+  core: Pick<CodexSubscriptionCoreTurn, "requests" | "titleRequests">,
+  isCodexTurn: boolean,
+): ReturnType<typeof agentRunFailurePayload> | null {
+  const lanes = [core.requests, core.titleRequests].filter(
+    (lane): lane is ReturnType<typeof createCoreCodexRequests> => !!lane,
+  );
+  const uncertain = lanes.filter((lane) => lane.hasUnknownOutcome());
+  if (uncertain.length === 0) return null;
+  if (lanes.some((lane) => lane.admissionRefused())) return null;
+  if (!uncertain.every((lane) => lane.unknownIsOwnAndSettled())) return null;
+  // A complete provider terminal that is incomplete (for example the output
+  // token limit) would end the same way again.
+  if (findInCauseChain(error, CodexStreamingTerminalError)?.code === "response_incomplete") {
+    return null;
+  }
+  // After an interrupted request the tracker refuses the SDK's own retry with
+  // the native unknown-outcome error; the SDK retried, so the cause was
+  // transient.
+  if (hasErrorInCauseChain(error, SubscriptionCoreCodexRequestOutcomeUnknownError)) {
+    return {
+      error: INTERRUPTED_CODEX_RESPONSE_MESSAGE,
+      code: "provider_unavailable",
+      retryable: true,
+    };
+  }
+  let failure: ReturnType<typeof agentRunFailurePayload>;
+  try {
+    failure = agentRunFailurePayload(error, { isCodexTurn });
+  } catch {
+    return null;
+  }
+  // A stream that ended without a terminal event, or stalled after it began,
+  // is a broken connection rather than a provider answer.
+  if (failure.code === "invalid_sse_terminal" || failure.code === "codex_response_timeout") {
+    return {
+      error: INTERRUPTED_CODEX_RESPONSE_MESSAGE,
+      code: "provider_unavailable",
+      retryable: true,
+    };
+  }
+  return failure.retryable === true ? failure : null;
 }
