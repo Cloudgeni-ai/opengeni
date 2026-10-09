@@ -843,6 +843,13 @@ export type SessionCreateRequestOptions = {
    * policy). Omitted derives `slack` from a Slack surface, else the public API.
    */
   agentConfigCreator?: AgentConfigCreator;
+  /**
+   * Built-in tools to guarantee on top of the defaults a new session follows,
+   * for an entry point whose sessions need their own tools (a chat surface's
+   * read tools). Ignored when the request names an explicit built-in list.
+   * Trusted entry points only; not part of the public create request.
+   */
+  firstPartyMcpToolAdditions?: readonly FirstPartyMcpToolName[];
 };
 
 const AGENT_CHILD_AUTOMATIC_TITLE_CONTEXT_KEY = "agentChildAutomaticTitle" as const;
@@ -3303,7 +3310,7 @@ async function createSessionForRequestInFileScope(
   const workspaceFirstPartyDefaults = workspaceSessionToolDefaults?.firstPartyMcpTools?.filter(
     (tool) => deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
   );
-  const creatorFirstPartyMcpTools = resolveFirstPartyMcpToolsForCreate(
+  const resolvedCreatorFirstPartyMcpTools = resolveFirstPartyMcpToolsForCreate(
     payload.firstPartyMcpTools,
     parentSession
       ? resolveSessionFirstPartyMcpTools(settings, parentSession, workspace.settings)
@@ -3316,12 +3323,29 @@ async function createSessionForRequestInFileScope(
       : deploymentFirstPartyMcpToolPolicy,
   );
   // Capabilities only narrow the creator's exact legacy selection; "all" keeps it.
-  if (
+  const followsFirstPartyDefaults =
     payload.firstPartyMcpTools === undefined &&
-    (!parentSession || parentSession.toolPolicy.firstPartyMode === "workspace_default")
-  ) {
-    toolPolicy = { ...toolPolicy, firstPartyMode: "workspace_default" };
+    (!parentSession || parentSession.toolPolicy.firstPartyMode === "workspace_default");
+  // A child following defaults keeps its parent's guaranteed additions; a
+  // top-level session takes them from its trusted entry point.
+  const firstPartyAdditions = followsFirstPartyDefaults
+    ? (parentSession
+        ? (parentSession.toolPolicy.firstPartyAdditions ?? [])
+        : (requestOptions.firstPartyMcpToolAdditions ?? [])
+      ).filter((tool) => deploymentFirstPartyMcpToolPolicy.allowed.includes(tool))
+    : [];
+  if (followsFirstPartyDefaults) {
+    toolPolicy = {
+      ...toolPolicy,
+      firstPartyMode: "workspace_default",
+      ...(firstPartyAdditions.length
+        ? { firstPartyAdditions: [...new Set(firstPartyAdditions)] }
+        : {}),
+    };
   }
+  const creatorFirstPartyMcpTools = firstPartyAdditions.length
+    ? [...new Set([...resolvedCreatorFirstPartyMcpTools, ...firstPartyAdditions])]
+    : resolvedCreatorFirstPartyMcpTools;
   const firstPartyMcpTools = applySessionAgentConfigWriteThrough({
     config: agentConfig,
     firstPartyMcpTools: creatorFirstPartyMcpTools,
@@ -4743,6 +4767,9 @@ function toolPolicyAuditSnapshot(
   return {
     mode: policy.mode,
     ...(policy.firstPartyMode ? { firstPartyMode: policy.firstPartyMode } : {}),
+    ...(policy.firstPartyAdditions?.length
+      ? { firstPartyAdditions: [...policy.firstPartyAdditions] }
+      : {}),
     inheritedFromSessionId: policy.inheritedFromSessionId,
     ...(policy.excludedMcpServerIds?.length
       ? {
@@ -4903,6 +4930,11 @@ export async function updateSessionToolPolicy(
       let nextTools: ToolRef[];
       let nextFirstPartyMcpTools: FirstPartyMcpToolName[];
       let nextPolicy: SessionToolPolicy;
+      // Guaranteed additions belong to the session, not to one tool choice: an
+      // explicit edit stops applying them and a reset to defaults restores them.
+      const sessionFirstPartyAdditions = session.toolPolicy.firstPartyAdditions?.length
+        ? { firstPartyAdditions: [...session.toolPolicy.firstPartyAdditions] }
+        : {};
       if (session.parentSessionId) {
         const parent = await context.getLockedSession(session.parentSessionId);
         if (!parent) {
@@ -4931,7 +4963,12 @@ export async function updateSessionToolPolicy(
             mode: "workspace_default",
             inheritedFromSessionId: parent.id,
             ...(parent.toolPolicy.firstPartyMode === "workspace_default"
-              ? { firstPartyMode: "workspace_default" as const }
+              ? {
+                  firstPartyMode: "workspace_default" as const,
+                  ...(parent.toolPolicy.firstPartyAdditions?.length
+                    ? { firstPartyAdditions: [...parent.toolPolicy.firstPartyAdditions] }
+                    : {}),
+                }
               : {}),
             ...defaultPolicyExclusions([
               ...(parent.toolPolicy.excludedMcpServerIds ?? []),
@@ -4965,11 +5002,19 @@ export async function updateSessionToolPolicy(
           requestedMode === "workspace_default" ? workspaceDefaultTools : explicitRequestedTools!;
         nextFirstPartyMcpTools =
           requestedMode === "workspace_default"
-            ? workspaceDefaultFirstPartyTools
+            ? [
+                ...new Set([
+                  ...workspaceDefaultFirstPartyTools,
+                  ...(session.toolPolicy.firstPartyAdditions ?? []).filter((tool) =>
+                    deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
+                  ),
+                ]),
+              ]
             : explicitRequestedFirstPartyTools!;
         nextPolicy = {
           mode: requestedMode,
           inheritedFromSessionId: null,
+          ...sessionFirstPartyAdditions,
           ...(requestedMode === "workspace_default"
             ? {
                 firstPartyMode: "workspace_default" as const,

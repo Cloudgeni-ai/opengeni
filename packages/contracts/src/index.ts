@@ -6186,6 +6186,12 @@ export const SessionToolPolicy = z.object({
   // Independent of connector selection. Absence preserves an ambiguous legacy
   // snapshot; only an explicit default intent follows future built-in tools.
   firstPartyMode: z.enum(["workspace_default", "explicit"]).optional(),
+  // Built-in tools the session's creator guarantees on top of the defaults it
+  // follows (for example a chat surface's own read tools). Applied only while
+  // firstPartyMode is workspace_default; kept across explicit edits so a later
+  // reset to defaults restores them. Deployment policy and the agent
+  // configuration still bound them.
+  firstPartyAdditions: z.array(FirstPartyMcpToolName).max(64).optional(),
 });
 export type SessionToolPolicy = z.infer<typeof SessionToolPolicy>;
 

@@ -248,9 +248,9 @@ const SLACK_FILE_CONTEXT_GUIDANCE =
 
 /**
  * Slack-originated tasks may retrieve the workspace bot's bounded read surface
- * and explicitly deliver a retained task file to their own thread. Connector
- * tools are explicit-only, so freeze that narrow selection at session creation;
- * ordinary interaction messages remain owned by the durable delivery pump.
+ * and explicitly deliver a retained task file to their own thread. These tools
+ * are guaranteed on top of the defaults a Slack session follows; ordinary
+ * interaction messages remain owned by the durable delivery pump.
  */
 export const SLACK_TASK_FIRST_PARTY_MCP_TOOLS = [
   ...DEFAULT_FIRST_PARTY_MCP_TOOLS,
@@ -264,6 +264,10 @@ export const SLACK_TASK_FIRST_PARTY_MCP_TOOLS = [
   "slack_bot_upload_file",
 ] satisfies readonly FirstPartyMcpToolName[];
 
+/** The Slack task tools that are not already default built-in tools. */
+export const SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS: readonly FirstPartyMcpToolName[] =
+  SLACK_TASK_FIRST_PARTY_MCP_TOOLS.filter((tool) => !DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(tool));
+
 /**
  * The workspace's default first-party selection (or the deployment default)
  * plus the bounded Slack task tools. These are added whatever the base is, then
@@ -276,10 +280,10 @@ export function slackTaskFirstPartyMcpTools(
   const base =
     resolveWorkspaceSessionToolDefaults(workspaceSettings)?.firstPartyMcpTools ??
     resolveFirstPartyMcpToolPolicy(settings).default;
-  const connectorTools = SLACK_TASK_FIRST_PARTY_MCP_TOOLS.filter(
-    (tool) => !DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(tool),
-  );
-  return allowedFirstPartyMcpToolsForSession(settings, [...base, ...connectorTools]);
+  return allowedFirstPartyMcpToolsForSession(settings, [
+    ...base,
+    ...SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
+  ]);
 }
 
 export type NormalizedSlackInteraction = {
@@ -2430,7 +2434,6 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       interaction,
       `slack:${entry.connectionId}:${entry.providerEventId}`,
     );
-    const workspace = await getWorkspace(deps.db, interaction.workspaceId);
     const prepared = slackInvocationPreparedMessage(
       deps,
       preparedEntry,
@@ -2447,19 +2450,25 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
         initialMessage: prepared.entry.text,
         ...(prepared.modelContext ? { modelContext: prepared.modelContext } : {}),
         instructions: SLACK_SESSION_INSTRUCTIONS,
-        // A retried create replays the reserved shell's exact selection;
-        // otherwise the workspace default plus the Slack read tools.
+        // The session follows the workspace's built-in defaults, including
+        // tools added later, with the Slack read tools guaranteed on top. Only
+        // a retried create of a shell that pinned an exact list replays it.
         firstPartyMcpTools:
           defaults.firstPartyMcpTools !== undefined
             ? allowedFirstPartyMcpToolsForSession(deps.settings, defaults.firstPartyMcpTools)
-            : slackTaskFirstPartyMcpTools(deps.settings, workspace?.settings),
+            : undefined,
         resources: [...defaults.resources, ...preparedAttachments.resources],
         ...(!defaults.model && preferredModel ? { model: preferredModel } : {}),
         idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
         clientEventId: `slack:${entry.providerEventId}`,
       },
       undefined,
-      { surface: "slack" },
+      {
+        surface: "slack",
+        ...(defaults.firstPartyMcpTools === undefined
+          ? { firstPartyMcpToolAdditions: SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS }
+          : {}),
+      },
     );
   } catch (error) {
     if (error instanceof HTTPException) {
@@ -3403,7 +3412,11 @@ async function slackNewSessionDefaults(
       : {
           excludedMcpServerIds: pending.toolPolicy.excludedMcpServerIds,
         }),
-    firstPartyMcpTools: pending.firstPartyMcpTools,
+    // A shell that follows the built-in defaults keeps following them; only
+    // an exact selection is replayed as one.
+    ...(pending.toolPolicy.firstPartyMode === "workspace_default"
+      ? {}
+      : { firstPartyMcpTools: pending.firstPartyMcpTools }),
     ...(pending.firstPartyMcpPermissions
       ? { firstPartyMcpPermissions: pending.firstPartyMcpPermissions }
       : {}),

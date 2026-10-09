@@ -5037,10 +5037,21 @@ export function resolveSessionFirstPartyMcpTools(
   session: Pick<Session, "firstPartyMcpTools" | "toolPolicy"> & Partial<Pick<Session, "agent">>,
   workspaceSettings: unknown,
 ): FirstPartyMcpToolNameType[] {
-  const selected =
-    session.toolPolicy.firstPartyMode === "workspace_default"
-      ? resolveWorkspaceSessionToolDefaults(workspaceSettings)?.firstPartyMcpTools
-      : session.firstPartyMcpTools;
+  let selected: readonly FirstPartyMcpToolNameType[] | null | undefined =
+    session.firstPartyMcpTools;
+  if (session.toolPolicy.firstPartyMode === "workspace_default") {
+    // Follow today's defaults, plus any tools the creator guaranteed on top.
+    const defaults = resolveWorkspaceSessionToolDefaults(workspaceSettings)?.firstPartyMcpTools;
+    const additions = session.toolPolicy.firstPartyAdditions ?? [];
+    selected = additions.length
+      ? [
+          ...new Set([
+            ...(defaults ?? resolveFirstPartyMcpToolPolicy(settings).default),
+            ...additions,
+          ]),
+        ]
+      : defaults;
+  }
   const allowed = allowedFirstPartyMcpToolsForSession(settings, selected);
   return session.agent ? agentConfigFirstPartyMcpTools(session.agent, allowed) : allowed;
 }
