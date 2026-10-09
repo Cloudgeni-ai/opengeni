@@ -4,7 +4,7 @@
 // approval), or an open desktop/terminal tab or computer controller after a
 // short turn. Turn heartbeats only run inside a turn (and skipped while a tab
 // was open), the zero-holder drain never sees the box, and idle command
-// containment keeps an awaited command running. Its only save was the
+// containment keeps a command that is still printing output running. Its only save was the
 // mandatory pre-deadline save, so an unplanned box loss before that lost every
 // write since the last turn. Drives the real reaper sweep, the real
 // warm-checkpoint path and the real lease/process ledger against PostgreSQL;
@@ -35,6 +35,7 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { createProviderCommandRetainer } from "@opengeni/db/retained-provider-commands";
+import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import { createObservability } from "@opengeni/observability";
 import {
   acquireSharedTestDatabase,
@@ -314,6 +315,16 @@ async function heldBoxFixture(
   await admin`update sandbox_retained_processes set
     last_reconcile_outcome = 'provider_running', reconcile_attempts = 3
     where id = ${processId}`;
+  // The build is working: the reconciler drained its latest output just now.
+  // A silent command would be contained after the idle window instead.
+  await appendSessionCommandOutput(db, {
+    ...ids,
+    sessionId: attempt.sessionId,
+    commandId: processId,
+    chunkId: crypto.randomUUID(),
+    stream: "stdout",
+    chunk: "compiling release bundle\n",
+  });
   // Turn finalization: writers quiesced, turn holder released, attempt closed,
   // and the session holds wait_for_input for the build.
   await releaseLeaseHolder(db, {

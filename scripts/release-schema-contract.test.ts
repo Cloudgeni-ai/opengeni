@@ -2591,6 +2591,7 @@ describe("release schema contract", () => {
       "0680_sandbox_idle_checkpoint.sql",
       "0681_sandbox_ended_epoch_blockers.sql",
       "0684_claude_haiku_5_5_default_model.sql",
+      "0686_human_wait_command_containment.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
