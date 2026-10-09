@@ -25,10 +25,12 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   try {
     // Stage the actual pre-writer ledger, including on the stacked cutover
     // branch. This is a rolling/gate-off regression, not cutover activation.
-    // The later disconnect migration rewrites the withheld writer function.
+    // The later disconnect migration rewrites the withheld writer function;
+    // the retry migration then patches the withheld disconnect guard.
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     await database.admin`insert into schema_migrations(name) values (${writer}),
-      ('0689_subscription_core_codex_cutover.sql'), ('0691_subscription_core_codex_disconnect.sql')`;
+      ('0689_subscription_core_codex_cutover.sql'), ('0691_subscription_core_codex_disconnect.sql'),
+      ('0697_codex_retry_after_unknown_outcome.sql')`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     const appUrl = new URL(database.ownerUrl);
