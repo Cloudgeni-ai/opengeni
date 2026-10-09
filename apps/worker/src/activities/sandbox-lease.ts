@@ -66,7 +66,9 @@ import {
   registerSandboxCheckpointArtifact,
   recordRetainedProcessReconciliationProof,
   replaceWorkspaceArchiveCaptureAfterProof,
+  listEndedEpochWorkspaceBlockers,
   readLease,
+  settleEndedEpochWorkspaceBlockers,
   readWorkspaceArchiveCapturePreflight,
   reapExpiredSessionListSnapshots,
   reapStaleLeaseHoldersGlobal,
@@ -1031,6 +1033,15 @@ export function createSandboxLeaseActivities(
         service.bus,
       );
 
+      // A request or PTY left on a Modal box whose lease epoch has ended can
+      // never progress once that box is gone; settle it on exact proof.
+      await settleEndedEpochBlockers(
+        db,
+        settings,
+        observability,
+        options.inspectHistoricalModalSandbox ?? inspectModalSandboxLifecycle,
+      );
+
       try {
         modalOrphansTerminated = await sweepModalOrphans(settings, db, observability);
         recordSandboxOrphansTerminated(observability, modalOrphansTerminated);
@@ -1863,6 +1874,75 @@ async function deferConnectedCommandClaim(
       commandId: claim.commandId,
       error: error instanceof Error ? error.message : String(error),
     });
+  }
+}
+
+/**
+ * Settle open requests and PTYs still recorded on a Modal box whose lease
+ * epoch has ended (a legacy loss, or a cold commit that left them). Lease
+ * succession alone proves nothing about the old box, so each exact tuple is
+ * settled only after its historical sandbox is observed terminated. NotFound
+ * is ambiguous here (deletion or a rotated Modal credential workspace) and,
+ * like a running or unreachable box, keeps the rows for a later sweep or an
+ * operator.
+ */
+async function settleEndedEpochBlockers(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  observability: ActivityServices["observability"],
+  inspectHistoricalModalSandbox: HistoricalModalSandboxLifecycleProbeFn,
+): Promise<void> {
+  let tuples: Awaited<ReturnType<typeof listEndedEpochWorkspaceBlockers>>;
+  try {
+    tuples = await listEndedEpochWorkspaceBlockers(db);
+  } catch (error) {
+    observability.warn("sandbox reaper: ended-epoch blocker inventory failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+  // One observation per box: several tuples can name the same instance.
+  const observed = new Map<string, Promise<string>>();
+  for (const tuple of tuples) {
+    const details = {
+      workspaceId: tuple.workspaceId,
+      sandboxGroupId: tuple.sandboxGroupId,
+      lostEpoch: tuple.lostEpoch,
+      instanceId: tuple.lostInstanceId,
+    };
+    try {
+      let status = observed.get(tuple.lostInstanceId);
+      if (!status) {
+        status = withRetainedProcessProbeTimeout(
+          inspectHistoricalModalSandbox(settings, tuple.lostInstanceId, null),
+        ).then((lifecycle) => lifecycle.status);
+        observed.set(tuple.lostInstanceId, status);
+      }
+      if ((await status) !== "terminated") {
+        observability.info("sandbox reaper: ended-epoch blockers kept without terminal proof", {
+          ...details,
+          status: await status,
+        });
+        continue;
+      }
+      const settled = await settleEndedEpochWorkspaceBlockers(db, tuple);
+      if (settled) {
+        observability.info("sandbox reaper: settled blockers of an ended lease epoch", {
+          ...details,
+          ...settled,
+        });
+      }
+    } catch (error) {
+      observability.warn("sandbox reaper: ended-epoch blocker settlement failed", {
+        ...details,
+        error:
+          error === RETAINED_PROCESS_PROBE_TIMEOUT
+            ? "provider_timeout"
+            : error instanceof Error
+              ? error.message
+              : String(error),
+      });
+    }
   }
 }
 

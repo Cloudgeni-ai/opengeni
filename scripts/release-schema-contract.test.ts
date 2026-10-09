@@ -2587,6 +2587,7 @@ describe("release schema contract", () => {
       "0678_inbox_mute_session_replies.sql",
       "0679_codex_extra_credit_consent.sql",
       "0680_sandbox_idle_checkpoint.sql",
+      "0682_sandbox_ended_epoch_blockers.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
