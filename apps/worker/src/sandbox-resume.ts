@@ -84,6 +84,7 @@ import {
   terminateUnpublishedSandboxSession,
   verifySandboxExecReadiness,
   withoutSandboxProviderIdentity,
+  workspaceArchiveDownloadTemporaryDirectory,
   type EstablishedSandboxSession,
   type RuntimeMetricsHooks,
   type WorkspaceCaptureSkipReason,
@@ -1758,10 +1759,12 @@ async function resumeBoxForTurnOnce(
           ? {
               loadHostWorkspaceArchive: async (ref) => {
                 try {
-                  return await downloadWorkspaceArchiveSpool(services.objectStorage!, ref.key, {
-                    bytes: ref.bytes,
-                    sha256: ref.sha256,
-                  });
+                  return await downloadWorkspaceArchiveSpool(
+                    services.objectStorage!,
+                    ref.key,
+                    { bytes: ref.bytes, sha256: ref.sha256 },
+                    { temporaryDirectory: workspaceArchiveDownloadTemporaryDirectory },
+                  );
                 } catch (error) {
                   if (error instanceof WorkspaceArchiveStorageError) {
                     throw new WorkspaceArchiveIntegrityError(error.code, error.message, {

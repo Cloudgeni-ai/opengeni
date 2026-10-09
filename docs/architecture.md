@@ -578,7 +578,8 @@ they never call ordinary SDK resume or create a replacement execution wrapper.
 The protected SDK ownership receipt and current lease/capture fence precede
 descriptor-bound content reads. Missing legacy custody or failed capture retains
 data and unresolved lease truth; post-publication exact-container teardown
-preserves the host workspace. Canonical leaf:
+then releases the fenced host workspace directory, because the cold commit is
+archive-only and nothing references it afterwards. Canonical leaf:
 packages/runtime/src/sandbox/providers/docker-workspace-drain.ts.
 
 Pending cancellation accepts non-dispatch only from call-scoped routing admission

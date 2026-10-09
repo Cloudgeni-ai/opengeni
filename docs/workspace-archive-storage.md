@@ -20,9 +20,13 @@ capture/publication ownership fences remain authoritative and unchanged.
 
 Host spool directories (`opengeni-host-archive-o<pid-namespace>.<pid>.<start-time>-*`,
 `packages/runtime/src/sandbox/host-archive-temporary.ts`) record their owner
-process. Callers dispose them on every in-process path and a normal process exit
+process. Object-storage restore download spools use the same rule with the
+`opengeni-workspace-archive-o...` prefix: `@opengeni/storage` cannot depend on
+runtime, so the API and worker pass runtime's
+`workspaceArchiveDownloadTemporaryDirectory` to `downloadWorkspaceArchiveSpool`
+(other callers keep the plain unmarked default). Callers dispose them on every in-process path and a normal process exit
 removes the live ones. A worker that stops mid-capture, upload or restore cannot
-do either, so each worker start and the first spool of a process sweep
+do either, so each worker start and the first spool or download of a process sweep
 directories whose owner is provably gone: same uid and PID namespace, and that
 PID no longer exists or has a different start time. Live owners, including peer
 workers sharing one TMPDIR, are never touched; unmarked legacy names are never
@@ -36,7 +40,8 @@ directory before inventory or file reads, preserving descriptor-relative
 no-symlink access. A missing/stopped legacy container without sufficient custody,
 changed root ownership, unknown observation or failed capture stays unresolved.
 The drain attachment cannot execute commands or replace a container. Exact
-post-publication container teardown leaves the host workspace intact.
+post-publication container teardown then releases the fenced host workspace
+directory (see [run lifecycle](run-lifecycle.md)).
 
 The logical revision stays unchanged; physical locators append a random upload
 UUID before `.tar`. Application-owned unique keys isolate simultaneous attempts

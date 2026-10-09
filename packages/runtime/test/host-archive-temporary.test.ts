@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { sweepOrphanedHostArchiveTemporaryDirectories } from "../src/sandbox/host-archive-temporary";
 
 const SPOOL_MODULE = join(import.meta.dir, "../src/sandbox/host-archive-spool.ts");
+const TEMPORARY_MODULE = join(import.meta.dir, "../src/sandbox/host-archive-temporary.ts");
+const DOWNLOAD_MODULE = join(import.meta.dir, "../../storage/src/workspace-archive-spool.ts");
 const fixtures: string[] = [];
 const children: Array<ReturnType<typeof spawn>> = [];
 
@@ -55,6 +57,47 @@ function captureInChild(
     });
     child.once("exit", (code) => {
       if (!/SPOOL /.test(output)) reject(new Error(`capture child exited ${code}: ${output}`));
+    });
+  });
+}
+
+/** An API/worker stand-in restoring a workspace: the object-storage download
+ * spool has written its first range when the process is killed. */
+function downloadInChild(temporary: string): Promise<ReturnType<typeof spawn>> {
+  const script = `
+    const { downloadWorkspaceArchiveSpool } = await import(${JSON.stringify(DOWNLOAD_MODULE)});
+    const { workspaceArchiveDownloadTemporaryDirectory } = await import(${JSON.stringify(TEMPORARY_MODULE)});
+    const bytes = new Uint8Array(4 * 1024 * 1024 + 1).fill(9);
+    let ranges = 0;
+    const storage = {
+      headObject: async () => ({ ContentLength: bytes.length, VersionToken: "v1" }),
+      getObjectRange: async (input) => {
+        if (ranges++ > 0) {
+          console.log("DOWNLOADING");
+          await new Promise(() => {});
+        }
+        return { bytes: bytes.slice(input.start, input.endInclusive + 1), versionToken: "v1" };
+      },
+    };
+    const sha256 = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+    await downloadWorkspaceArchiveSpool(storage, "archives/key.tar", { bytes: bytes.length, sha256 }, {
+      temporaryDirectory: workspaceArchiveDownloadTemporaryDirectory,
+    });
+  `;
+  const child = spawn(process.execPath, ["-e", script], {
+    env: { ...process.env, TMPDIR: temporary },
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  children.push(child);
+  return new Promise((resolve, reject) => {
+    let output = "";
+    child.stdout!.on("data", (chunk) => {
+      output += String(chunk);
+      if (output.includes("DOWNLOADING")) resolve(child);
+    });
+    child.once("exit", (code) => {
+      if (!output.includes("DOWNLOADING"))
+        reject(new Error(`download child exited ${code}: ${output}`));
     });
   });
 }
@@ -117,6 +160,23 @@ describe.skipIf(process.platform !== "linux")("host archive spool ownership", ()
     expect((await stat(leaked).catch(() => null)) === null).toBe(true);
   });
 
+  test("a process killed mid-download leaves its download spool only until the next sweep", async () => {
+    const { temporary } = await fixture();
+    const child = await downloadInChild(temporary);
+    const [name] = await entries(temporary);
+    expect(name).toMatch(/^opengeni-workspace-archive-o\d+\.\d+\.\d+-[A-Za-z0-9]{6}$/);
+    expect(await entries(join(temporary, name!))).toEqual(["archive.tar"]);
+    expect(await sweepOrphanedHostArchiveTemporaryDirectories([temporary])).toEqual([]);
+
+    child.kill("SIGKILL");
+    await exited(child);
+    expect(await entries(temporary)).toEqual([name]);
+    expect(await sweepOrphanedHostArchiveTemporaryDirectories([temporary])).toEqual([
+      join(temporary, name!),
+    ]);
+    expect(await entries(temporary)).toEqual([]);
+  });
+
   test("only provably dead owners in this PID namespace are swept", async () => {
     const { temporary } = await fixture();
     const namespace = await pidNamespace();
@@ -128,7 +188,17 @@ describe.skipIf(process.platform !== "linux")("host archive spool ownership", ()
     const otherNamespace = name(String(Number(namespace) + 1), 999_999_999, "1", "bbbbbb");
     const legacy = "opengeni-host-archive-cccccc";
     const unrelated = "something-else";
-    for (const directory of [reused, otherNamespace, legacy, unrelated]) {
+    // The download spool shares the ownership rule; its legacy names stay too.
+    const reusedDownload = `opengeni-workspace-archive-o${namespace}.${process.pid}.1-eeeeee`;
+    const legacyDownload = "opengeni-workspace-archive-ffffff";
+    for (const directory of [
+      reused,
+      otherNamespace,
+      legacy,
+      unrelated,
+      reusedDownload,
+      legacyDownload,
+    ]) {
       await mkdir(join(temporary, directory));
       await writeFile(join(temporary, directory, "archive.json"), "{}");
     }
@@ -139,10 +209,12 @@ describe.skipIf(process.platform !== "linux")("host archive spool ownership", ()
     const linked = name(namespace, 999_999_999, "1", "dddddd");
     await symlink(target, join(temporary, linked));
 
-    expect(await sweepOrphanedHostArchiveTemporaryDirectories([temporary])).toEqual([
-      join(temporary, reused),
-    ]);
-    expect(await entries(temporary)).toEqual([legacy, otherNamespace, linked, unrelated].sort());
+    expect((await sweepOrphanedHostArchiveTemporaryDirectories([temporary])).sort()).toEqual(
+      [join(temporary, reused), join(temporary, reusedDownload)].sort(),
+    );
+    expect(await entries(temporary)).toEqual(
+      [legacy, otherNamespace, linked, unrelated, legacyDownload].sort(),
+    );
     expect(await entries(target)).toEqual(["keep"]);
   });
 });

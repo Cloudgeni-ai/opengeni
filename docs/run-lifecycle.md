@@ -2756,9 +2756,25 @@ no normal execution, viewer, resume, hydration or close surface. Its host reader
 compares the opened directory descriptor to that evidence before inventory.
 Capture/publication/observation errors remain failures; absence is not archive
 completion. Published-capture retries skip recapture only under the existing
-claim/CAS. Exact-container teardown preserves the host workspace and does not
-invoke SDK close's recursive workspace cleanup. Other providers and elected
-normal cold-continuity owners retain their existing rules.
+claim/CAS. Exact-container teardown does not invoke SDK close. Once the
+container is gone it releases the host workspace directory, because the
+draining-to-cold commit is archive-only (no docker continuity) and nothing can
+re-arm or reuse that root afterwards; without this every cold drain leaked a
+whole workspace directory. Immediately before removal it re-proves the same
+published capture, the native daemon, the exact container's absence and the
+receipt's canonical root identity; it grants the owner u+rwx on read-only
+descendant directories (the Go module cache is 0555), never follows symlinks,
+and leaves the root's own mode untouched so the receipt still authenticates a
+retry. Removal is best effort: a drift or failure retains the directory, logs
+and counts `opengeni_sandbox_docker_workspace_release_total{status="retained"}`,
+and the lease still commits cold from its published archive. A published-capture
+retry that finds the root already absent (crash between release and the cold
+commit) completes teardown without recapture, but only when the capture is
+published, the daemon matches and the exact container is gone. Other providers
+and elected normal cold-continuity owners retain their existing rules.
+`bun run dev:clean` likewise removes the SDK workspace directories of the
+sandbox containers it force-removes (its database is deleted with them);
+plain `dev:down` keeps them for continuity.
 
 During idle drain, a resumable cloud box
 is deleted only after a verified workspace capture is durably folded onto the
