@@ -1192,6 +1192,15 @@ its `/v1/config/client` response with `artifactViewerCapability({ client:
 og.asUser(user, { source }), workspaceId, source })` from `@opengeni/sdk`, and
 forwards the same artifact routes under its own authorization.
 
+A page that belongs to the workspace rather than to one chat (for example a
+dashboard several sessions keep current) has no single source session. To show
+it with `SiteList` or `SiteDetail` from `@opengeni/react/sites`, opt in with
+`sites: true`: requests that do not send `x-opengeni-session-id` may then list
+Sites and read Site detail, content, and versioned HTML under Opengeni's own
+read authorization for the resolved user (`artifacts:read`). It is read-only:
+rollback and status changes stay closed, so pass `canPublish={false}` to
+`SiteDetail`. Requests that name a session keep the session-scoped checks above.
+
 When an older API lacks the effective-grant endpoint, the proxy omits artifact
 capability from config but still boots the conversation. Artifact requests fail
 closed; a subsequent config read can discover upgraded API support.
