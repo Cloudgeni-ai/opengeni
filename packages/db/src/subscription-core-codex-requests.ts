@@ -136,6 +136,26 @@ export async function reserveSubscriptionCoreCodexRequest(
   ref: SubscriptionCoreCodexLeaseRef,
   request: TurnRequest,
 ): Promise<{ operationId: string }> {
+  return reserveTurnRequest(db, identity, ref, request, "model");
+}
+
+/** Read-only credential probes retain exact turn authority, not model custody. */
+export async function reserveSubscriptionCoreCodexTurnCredentialRequest(
+  db: Database,
+  identity: SubscriptionCoreTurnIdentity,
+  ref: SubscriptionCoreCodexLeaseRef,
+  request: TurnRequest,
+): Promise<{ operationId: string }> {
+  return reserveTurnRequest(db, identity, ref, request, "credential_request");
+}
+
+async function reserveTurnRequest(
+  db: Database,
+  identity: SubscriptionCoreTurnIdentity,
+  ref: SubscriptionCoreCodexLeaseRef,
+  request: TurnRequest,
+  operationKind: "model" | "credential_request",
+): Promise<{ operationId: string }> {
   const scope = { kind: "turn" as const, identity };
   return inScope(db, scope, async (tx) => {
     // Serialize admission with attempt replacement. A newer worker may neither
@@ -159,7 +179,8 @@ export async function reserveSubscriptionCoreCodexRequest(
           or (request_outcome = 'reserved' and attempt_id <> ${request.attemptId}::uuid))
     ) as unresolved`,
     );
-    if (prior?.unresolved) throw new SubscriptionCoreCodexRequestOutcomeUnknownError();
+    if (operationKind === "model" && prior?.unresolved)
+      throw new SubscriptionCoreCodexRequestOutcomeUnknownError();
     await lockSource(tx, identity.accountId, ref.connectionId);
     const [lease] = await rawRows<{ current: boolean }>(
       tx,
@@ -185,7 +206,7 @@ export async function reserveSubscriptionCoreCodexRequest(
       ...request,
       holderId: ref.holderId,
       generation: request.executionGeneration,
-      operationKind: "model",
+      operationKind,
     });
   });
 }
@@ -278,6 +299,9 @@ export async function settleSubscriptionCoreCodexRequest(
         and request_outcome in ('reserved', 'unknown')`);
   });
 }
+
+/** Same exact holder/attempt settlement, without misclassifying a read as a model call. */
+export const settleSubscriptionCoreCodexTurnCredentialRequest = settleSubscriptionCoreCodexRequest;
 
 export async function settleSubscriptionCoreCodexOperationRequest(
   db: Database,

@@ -18,6 +18,8 @@ import {
   disconnectSubscriptionCoreCodexConnection,
   reserveSubscriptionCoreCodexRequest,
   settleSubscriptionCoreCodexRequest,
+  reserveSubscriptionCoreCodexTurnCredentialRequest,
+  settleSubscriptionCoreCodexTurnCredentialRequest,
   reserveSubscriptionCoreCodexOperationRequest,
   settleSubscriptionCoreCodexOperationRequest,
   SubscriptionCoreCodexSourceDisconnectedError,
@@ -1000,6 +1002,53 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     expect(count!.n).toBe(1);
   });
 
+  test("concurrent reconnect rechecks a disconnected identity under the lifecycle lock", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const first = await connect(org, org.ownerSubjectId, null, "reconnect-drain-race");
+    if (first.kind !== "connected") throw new Error("connect failed");
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const holding = shared!.admin.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtextextended(${"subscription-refresh:" + first.id}, 0))`;
+      entered.resolve();
+      await release.promise;
+    });
+    await entered.promise;
+    const waitForQueued = async (count: number) => {
+      for (let i = 0; i < 200; i++) {
+        const [locks] = await shared!.admin`select count(*)::int as n from pg_locks
+          where locktype = 'advisory' and not granted
+            and database = (select oid from pg_database where datname = current_database())`;
+        if (locks!.n >= count) return;
+        await Bun.sleep(5);
+      }
+      throw new Error("expected lifecycle lock contention");
+    };
+    const removing = disconnect(org, org.ownerSubjectId, null, first.id);
+    let reconnecting: ReturnType<typeof connect> | undefined;
+    try {
+      await waitForQueued(1);
+      reconnecting = connect(org, org.ownerSubjectId, null, "reconnect-drain-race");
+      await waitForQueued(2);
+    } finally {
+      release.resolve();
+      await holding;
+    }
+    expect((await removing).outcome).toBe("removed");
+    const replacement = await reconnecting!;
+    expect(replacement.kind).toBe("connected");
+    if (replacement.kind !== "connected") throw new Error("reconnect failed");
+    expect(replacement.isNew).toBe(true);
+    expect(replacement.id).not.toBe(first.id);
+    const [old] = await shared!.admin`select credential_encrypted from subscription_connections
+      where id = ${first.id}::uuid`;
+    expect(old!.credential_encrypted).toBe("");
+    const [current] = await shared!.admin`select status from subscription_connections
+      where id = ${replacement.id}::uuid`;
+    expect(current!.status).toBe("active");
+  });
+
   test("credential replacement waits behind an in-flight refresh and invalidates its old generation", async () => {
     const org = await organization();
     await setCutover(org.accountId, true);
@@ -1235,6 +1284,24 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
         request,
       ),
     ).rejects.toBeInstanceOf(SubscriptionCoreCodexLeaseLostError);
+    const usage = await reserveSubscriptionCoreCodexTurnCredentialRequest(
+      client!.db,
+      identity,
+      ref,
+      { ...request, requestId: crypto.randomUUID() },
+    );
+    await settleSubscriptionCoreCodexTurnCredentialRequest(client!.db, identity, ref, {
+      ...request,
+      operationId: usage.operationId,
+      outcome: "unknown",
+    });
+    const [usageEvidence] = await shared!.admin`select operation_kind, request_outcome
+      from subscription_operation_leases where operation_id = ${usage.operationId}::uuid`;
+    expect(usageEvidence).toMatchObject({
+      operation_kind: "credential_request",
+      request_outcome: "unknown",
+    });
+    // A read-only usage failure never manufactures an ambiguous model request.
     const reserved = await reserveSubscriptionCoreCodexRequest(client!.db, identity, ref, request);
     await expect(
       reserveSubscriptionCoreCodexRequest(client!.db, identity, ref, request),
@@ -1287,7 +1354,7 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     const [leases] = await shared!.admin`select
       (select count(*) from subscription_leases where connection_id = ${connected.id}::uuid)::int as chat,
       (select count(*) from subscription_operation_leases where connection_id = ${connected.id}::uuid)::int as operation`;
-    expect(leases).toEqual({ chat: 1, operation: 2 });
+    expect(leases).toEqual({ chat: 1, operation: 3 });
     const [unknown] = await shared!.admin`select request_outcome, request_observed_at
       from subscription_operation_leases where operation_id = ${reserved.operationId}::uuid`;
     expect(unknown).toEqual({ request_outcome: "reserved", request_observed_at: null });

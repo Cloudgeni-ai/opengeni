@@ -75,6 +75,23 @@ or reaches its bounded deadline. Disconnect linearizes when it acquires the
 lock and commits, not at HTTP arrival. No new request or refresh admitted after
 that fence can reuse the removed source.
 
+Organization-administrator usage inspection is a narrow read-only exception:
+the native operation identity requires a workspace, which this administrative
+GET does not have. Each finite usage GET instead acquires the same canonical
+source lock under current administrator authority, rechecks source lifecycle
+and bearer generation, and holds the lock through bounded body consumption.
+Redirects are disabled; retries acquire a fresh lock and repeat admission.
+Local deadlines and a database-side orphan-transaction timeout bound this
+critical section. This read has no durable operation-outcome record; timeout
+or process loss is not remote completion. This exception never authorizes
+model requests, tool effects, Apps calls or reset redemption. It neither
+borrows workspace authority nor changes operation keys or RLS.
+
+Turn-bound usage probes retain exact attempt and chat-lease authorization but
+are classified as read-only `credential_request`, not `model` custody. An
+unknown usage read cannot manufacture an ambiguous model execution or poison
+the first model request. Existing model ambiguity remains fail-closed.
+
 ## Limits that must remain explicit
 
 - Local removal does not revoke an upstream OAuth token, erase copies already

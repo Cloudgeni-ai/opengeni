@@ -67,7 +67,8 @@ AS $body$
 BEGIN
   IF NEW.provider <> 'codex' OR NEW.connection_id IS NULL THEN RETURN NEW; END IF;
   IF TG_TABLE_NAME = 'subscription_operation_leases' THEN
-    IF NEW.operation_kind = 'model' AND NEW.request_id IS NOT NULL THEN
+    IF NEW.operation_kind IN ('model', 'credential_request') AND NEW.turn_id IS NOT NULL
+        AND NEW.request_id IS NOT NULL THEN
       PERFORM 1 FROM session_turns turn WHERE turn.account_id = NEW.account_id
         AND turn.workspace_id = NEW.workspace_id AND turn.session_id = NEW.session_id
         AND turn.id = NEW.turn_id AND turn.active_attempt_id = NEW.attempt_id
@@ -76,7 +77,7 @@ BEGIN
       IF NOT FOUND THEN
         RAISE EXCEPTION 'model request no longer owns its exact attempt' USING ERRCODE = '42501';
       END IF;
-      IF EXISTS (SELECT 1 FROM subscription_operation_leases prior
+      IF NEW.operation_kind = 'model' AND EXISTS (SELECT 1 FROM subscription_operation_leases prior
         WHERE prior.account_id = NEW.account_id AND prior.workspace_id = NEW.workspace_id
           AND prior.session_id = NEW.session_id AND prior.turn_id = NEW.turn_id
           AND prior.provider = 'codex' AND prior.operation_kind = 'model'
