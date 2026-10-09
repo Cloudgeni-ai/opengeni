@@ -2344,6 +2344,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             accountId: grant.accountId,
             workspaceId,
             sessionId: c.req.param("sessionId"),
+            // A turn on the viewer's own personal connection shows it to them.
+            viewerSubjectId: grant.subjectId,
           })
         : await getSessionCodexAccounts(db, workspaceId, c.req.param("sessionId"));
     if (!projection) throw new HTTPException(404, { message: "session not found" });

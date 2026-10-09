@@ -1855,7 +1855,9 @@ describe("provider-neutral subscription runtime persistence", () => {
             }),
         ),
       );
-      expect(unassigned[0]?.assignmentPolicies).toEqual([]);
+      // No assignment row in this workspace: the management classification
+      // applies (M3 PR 3b), exactly as the compatibility projection reads it.
+      expect(unassigned[0]?.assignmentPolicies).toBeUndefined();
     },
     180_000,
   );

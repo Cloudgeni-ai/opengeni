@@ -89,15 +89,27 @@ describe("parseIdToken", () => {
     });
     expect(parseIdToken(jwt)).toEqual({
       chatgptAccountId: "acct_1",
+      chatgptUserId: null,
       planType: "pro",
       isFedramp: true,
       email: "jane@example.com",
     });
   });
 
+  test("the signed-in person: chatgpt_user_id, then user_id, then sub", () => {
+    const claims = (auth: Record<string, unknown>, sub?: string) =>
+      parseIdToken(makeJwt({ ...(sub ? { sub } : {}), "https://api.openai.com/auth": auth }))
+        .chatgptUserId;
+    expect(claims({ chatgpt_user_id: "user-a", user_id: "user-b" }, "auth0|c")).toBe("user-a");
+    expect(claims({ user_id: "user-b" }, "auth0|c")).toBe("user-b");
+    expect(claims({}, "auth0|c")).toBe("auth0|c");
+    expect(claims({ chatgpt_user_id: " " })).toBeNull();
+  });
+
   test("missing claim -> nulls and isFedramp false", () => {
     expect(parseIdToken(makeJwt({}))).toEqual({
       chatgptAccountId: null,
+      chatgptUserId: null,
       planType: null,
       isFedramp: false,
       email: null,

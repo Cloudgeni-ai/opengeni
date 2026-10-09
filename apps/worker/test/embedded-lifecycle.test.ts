@@ -762,6 +762,15 @@ describe("embedded worker lifecycle contract", () => {
           "persist_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
           "fail_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text)",
           "subscription_codex_reset_authority(uuid, uuid, uuid, text)",
+          "connect_subscription_codex_personal(uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text)",
+          "disconnect_subscription_codex_connection(uuid, uuid, text, uuid)",
+          "subscription_codex_personal_connections(uuid, uuid, text)",
+          "subscription_codex_reset_credit_fence(uuid, uuid, uuid, text, text, uuid)",
+          "subscription_codex_task_authority_v2(uuid, uuid, uuid, text)",
+          "subscription_codex_revision_authority_v2(uuid, uuid, uuid, bigint)",
+          "manage_subscription_codex_personal(uuid, uuid, text, uuid, text, text, boolean, integer)",
+          "subscription_codex_owner_capability_held(uuid, text[], text, uuid, boolean)",
+          "subscription_codex_owner_membership_held(uuid, uuid)",
         ].map((name) => ({
           name,
           owner: "opengeni_migrator",
@@ -775,6 +784,19 @@ describe("embedded worker lifecycle contract", () => {
           ],
         })),
       ],
+      [
+        "subscription_codex_writer_context(uuid, uuid, text)",
+        "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+        "drop_subscription_codex_owner_capabilities(uuid)",
+        "derive_scheduled_revision_subscription_authority()",
+      ].map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+      })),
     ];
     const db = {
       execute: async () => {

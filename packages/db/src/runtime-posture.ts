@@ -126,6 +126,12 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "subscription_codex_apps_designation_target(uuid, uuid)",
   // M3 PR 2c: run only by the Codex connection-seam routines as their owner.
   "subscription_codex_connection_target(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  // M3 PR 3b: run only by the Codex writers as their owner (the trigger
+  // function fires without the inserting role holding EXECUTE).
+  "subscription_codex_writer_context(uuid, uuid, text)",
+  "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+  "drop_subscription_codex_owner_capabilities(uuid)",
+  "derive_scheduled_revision_subscription_authority()",
   "read_sender_connection(uuid, uuid, uuid, text)",
   // Lifecycle fact writers (migrations 0532 and 0565): owner-run trigger
   // functions and the migration-owner backfill. Runtime roles may still hold
@@ -701,6 +707,18 @@ export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   "persist_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
   "fail_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text)",
   "subscription_codex_reset_authority(uuid, uuid, uuid, text)",
+  // M3 PR 3b: Codex writers, the owner's personal-connection reader, the
+  // cross-workspace reset-credit fence, the scheduled-task v2 writer and the
+  // owner-only policies' capability helpers.
+  "connect_subscription_codex_personal(uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text)",
+  "disconnect_subscription_codex_connection(uuid, uuid, text, uuid)",
+  "subscription_codex_personal_connections(uuid, uuid, text)",
+  "subscription_codex_reset_credit_fence(uuid, uuid, uuid, text, text, uuid)",
+  "subscription_codex_task_authority_v2(uuid, uuid, uuid, text)",
+  "subscription_codex_revision_authority_v2(uuid, uuid, uuid, bigint)",
+  "manage_subscription_codex_personal(uuid, uuid, text, uuid, text, text, boolean, integer)",
+  "subscription_codex_owner_capability_held(uuid, text[], text, uuid, boolean)",
+  "subscription_codex_owner_membership_held(uuid, uuid)",
 ] as const;
 
 /** Owner-only private helpers the runtime role must never be able to execute. */
@@ -709,6 +727,12 @@ export const SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES = [
   "subscription_codex_apps_designation_target(uuid, uuid)",
   // M3 PR 2c: returns a full connection row to the connection-seam routines.
   "subscription_codex_connection_target(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  // M3 PR 3b: the writers' caller check, capability internals and the
+  // revision-authority trigger function.
+  "subscription_codex_writer_context(uuid, uuid, text)",
+  "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+  "drop_subscription_codex_owner_capabilities(uuid)",
+  "derive_scheduled_revision_subscription_authority()",
 ] as const;
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [
@@ -1909,6 +1933,8 @@ export type RuntimeDatabasePosture = {
   privateTables: RuntimePrivateTablePosture[];
   targetRoutines: RuntimeTargetRoutinePosture[];
   privateRoutines: RuntimeRoutinePosture[];
+  /** Separate owner-only schema: not part of the previous binary's runtime API inventory. */
+  subscriptionOwnerRoutines?: RuntimeRoutinePosture[];
   sessionVariableSetAttachmentsCutoverPresent: boolean;
   claudeSubscriptionPoolActivationPresent: boolean;
 };
@@ -2369,6 +2395,20 @@ export async function inspectRuntimeDatabasePosture(
         configuration: row.configuration,
       }));
 
+      const subscriptionOwnerRoutines = resultRows<RuntimeRoutinePosture>(
+        await tx.execute(sql`
+          select (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text as name,
+            pg_get_userbyid(p.proowner)::text as owner,
+            (has_function_privilege(current_user, p.oid, 'EXECUTE')
+              or has_schema_privilege(current_user, n.oid, 'USAGE')
+              or has_schema_privilege(current_user, n.oid, 'CREATE')) as execute,
+            exists (select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+              where acl.grantee = 0 and acl.privilege_type = 'EXECUTE') as "publicExecute",
+            p.prosecdef as "securityDefiner", p.proconfig as configuration
+          from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+          where n.nspname = 'opengeni_subscription_internal' and p.prokind = 'f'
+        `),
+      );
       return {
         identity: mappedIdentity,
         memberships,
@@ -2379,6 +2419,7 @@ export async function inspectRuntimeDatabasePosture(
         privateTables,
         targetRoutines,
         privateRoutines,
+        subscriptionOwnerRoutines,
         sessionVariableSetAttachmentsCutoverPresent,
         claudeSubscriptionPoolActivationPresent,
       };
@@ -2516,9 +2557,38 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
   for (const ownerOnly of SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES) {
-    const routine = posture.privateRoutines.find((candidate) => candidate.name === ownerOnly);
+    const routine = [...posture.privateRoutines, ...(posture.subscriptionOwnerRoutines ?? [])].find(
+      (candidate) => candidate.name === ownerOnly,
+    );
     if (routine && (routine.execute || routine.publicExecute)) {
       violations.push(`subscription M3 owner-only private routine ${ownerOnly} is executable`);
+    }
+  }
+  if (
+    posture.subscriptionOwnerRoutines !== undefined &&
+    posture.privateRoutines.some((routine) =>
+      routine.name.startsWith("connect_subscription_codex_personal("),
+    )
+  ) {
+    const required = SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES.slice(2);
+    for (const signature of required) {
+      const matches = posture.subscriptionOwnerRoutines.filter(
+        (routine) => routine.name === signature,
+      );
+      if (
+        matches.length !== 1 ||
+        matches[0]!.owner !== privateSchemaOwner ||
+        matches[0]!.execute ||
+        matches[0]!.publicExecute ||
+        !matches[0]!.configuration?.some(
+          (value) =>
+            precursorSearchPaths.has(value) ||
+            value === `search_path=pg_catalog, ${targetSchema}, pg_temp` ||
+            value === `search_path=pg_catalog, ${quotedTargetSchema}, pg_temp`,
+        )
+      ) {
+        violations.push(`subscription owner implementation ${signature} is missing or unsafe`);
+      }
     }
   }
   if (tableByName.has("organization_integration_policies")) {

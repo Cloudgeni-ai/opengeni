@@ -409,6 +409,23 @@ afterAll(async () => {
 });
 
 describe("Codex quota managed-cookie-only reset redemption API", () => {
+  test("managed-cookie device connect start and poll refuse cross-origin browser mutations", async () => {
+    if (!available) return;
+    const api = app();
+    const { workspaceId } = await appsRoutingFixture(api);
+    for (const operation of ["start", "poll"]) {
+      const response = await api.request(
+        `/v1/workspaces/${workspaceId}/codex/connect/${operation}`,
+        {
+          method: "POST",
+          headers: { ...browserHeaders(), origin: "https://other.example.test" },
+          body: JSON.stringify({ state: "untrusted" }),
+        },
+      );
+      expect(response.status).toBe(403);
+      expect(await response.text()).toContain("same-origin");
+    }
+  });
   test("SUB-APPS-01: a workspace Apps designation under organization routing loads its token, persists refreshes, and can be cleared", async () => {
     if (!available) return;
     const api = app();
