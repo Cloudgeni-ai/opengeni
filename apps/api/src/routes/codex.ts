@@ -1121,6 +1121,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         credential: {
           credentialEncrypted,
           providerAccountId: id.chatgptAccountId,
+          providerSubjectId: id.chatgptUserId,
           planType: id.planType,
           isFedramp: id.isFedramp,
           expiresAt: accessTokenExpiry(tokens.accessToken),
@@ -1487,6 +1488,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
             }),
           ),
           providerAccountId: id.chatgptAccountId,
+          providerSubjectId: id.chatgptUserId,
           planType: id.planType,
           isFedramp: id.isFedramp,
           expiresAt: accessTokenExpiry(tokens.accessToken),

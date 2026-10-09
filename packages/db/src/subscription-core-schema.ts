@@ -56,6 +56,8 @@ export const subscriptionConnections = pgTable(
     allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(true),
     managedByWorkspaceId: uuid("managed_by_workspace_id"),
     providerState: jsonb("provider_state").notNull().default({}),
+    /** The signed-in person within the upstream account (M3 PR 3b, 0674). */
+    providerSubjectId: text("provider_subject_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -65,6 +67,7 @@ export const subscriptionConnections = pgTable(
         table.accountId,
         table.provider,
         table.providerAccountId,
+        sql`coalesce(${table.providerSubjectId}, '')`,
         sql`coalesce(${table.ownerOrganizationMembershipId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
       )
       .where(sql`${table.providerAccountId} is not null`),

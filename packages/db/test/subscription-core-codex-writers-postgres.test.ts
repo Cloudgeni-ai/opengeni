@@ -153,6 +153,7 @@ function credential(label: string): SubscriptionCoreCodexCredentialInput {
       }),
     ),
     providerAccountId: `chatgpt-${label}`,
+    providerSubjectId: `user-${label}`,
     planType: "pro",
     isFedramp: false,
     expiresAt: new Date(Date.now() + 86_400_000),
@@ -334,6 +335,44 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     // A managed human is recorded as the connecting person.
     expect(replaced!.connected_by_subject_id).toBe(org.ownerSubjectId);
     expect(accessToken(replaced!.credential_encrypted)).toBe("access-rotated");
+  });
+
+  test("two people's logins of one ChatGPT workspace stay distinct shared connections", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    // Both members of one ChatGPT Team workspace: same account id, different person.
+    const login = (person: string): SubscriptionCoreCodexCredentialInput => ({
+      ...credential(`team-${person}`),
+      providerAccountId: "chatgpt-team-workspace",
+      providerSubjectId: `user-${person}`,
+    });
+    const asAdmin = (input: SubscriptionCoreCodexCredentialInput) =>
+      withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+        connectSubscriptionCoreCodexConnection(client!.db, {
+          accountId: org.accountId,
+          workspaceId: null,
+          subjectId: org.ownerSubjectId,
+          ...input,
+        }),
+      );
+    const alice = await asAdmin(login("alice"));
+    const bob = await asAdmin(login("bob"));
+    if (alice.kind !== "connected" || bob.kind !== "connected") throw new Error("connect failed");
+    expect(bob.id).not.toBe(alice.id);
+    expect(bob.isNew).toBe(true);
+    expect(accessToken((await row(alice.id))!.credential_encrypted)).toBe("access-team-alice");
+    expect(accessToken((await row(bob.id))!.credential_encrypted)).toBe("access-team-bob");
+    // Alice signing in again replaces only her own credential.
+    const again = await asAdmin({
+      ...login("alice"),
+      credentialEncrypted: encryptEnvironmentValue(
+        key,
+        JSON.stringify({ access_token: "access-alice-2", refresh_token: "r", id_token: "i" }),
+      ),
+    });
+    expect(again).toMatchObject({ kind: "connected", id: alice.id, isNew: false });
+    expect(accessToken((await row(alice.id))!.credential_encrypted)).toBe("access-alice-2");
+    expect(accessToken((await row(bob.id))!.credential_encrypted)).toBe("access-team-bob");
   });
 
   test("workspace route: SUB-OWN-04 delegated managers reconnect only; administrators create and delete", async () => {

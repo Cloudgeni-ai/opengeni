@@ -32,8 +32,25 @@
 --    administrator for an organization-managed shared connection, and
 --    subscription_codex_reset_credit_fence serializes and fences one provider
 --    credit of one connection across every workspace's ledger.
+-- 7. provider_subject_id: the signed-in person within the upstream account.
+--    Every member of a ChatGPT Team/Business/Enterprise workspace shares the
+--    ChatGPT account id, so one connection per (organization, upstream
+--    account, owner) would merge different people's logins. The shared
+--    connect writer reconnects in place only for the same person; another
+--    person's login is a distinct connection.
 
 SET LOCAL lock_timeout = '5s';
+
+-- 7. The upstream person, part of the connection identity.
+ALTER TABLE subscription_connections ADD COLUMN provider_subject_id text;
+ALTER TABLE subscription_connections ADD CONSTRAINT subscription_connections_provider_subject_chk
+  CHECK (provider_subject_id IS NULL OR length(btrim(provider_subject_id)) BETWEEN 1 AND 512);
+DROP INDEX subscription_connections_provider_owner_account_uq;
+CREATE UNIQUE INDEX subscription_connections_provider_owner_account_uq
+  ON subscription_connections (account_id, provider, provider_account_id,
+    COALESCE(provider_subject_id, ''),
+    COALESCE(owner_organization_membership_id, '00000000-0000-0000-0000-000000000000'::uuid))
+  WHERE provider_account_id IS NOT NULL;
 
 -- 1. v2 accepted-authority slots.
 ALTER TABLE scheduled_tasks ADD COLUMN subscription_authority jsonb;

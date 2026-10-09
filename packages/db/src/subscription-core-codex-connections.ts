@@ -41,6 +41,12 @@ export type SubscriptionCoreCodexCredentialInput = {
   /** v1 envelope of JSON {access_token, refresh_token, id_token}. */
   credentialEncrypted: string;
   providerAccountId: string | null;
+  /**
+   * The signed-in person within the upstream account (the id_token's ChatGPT
+   * user). Two people's logins of one ChatGPT workspace are distinct shared
+   * connections; only the same person's login reconnects in place.
+   */
+  providerSubjectId: string | null;
   planType: string | null;
   isFedramp: boolean;
   expiresAt: Date | null;
@@ -181,7 +187,7 @@ async function connectShared(
   if (cutover?.enabled !== true) return { kind: "refused", reason: "unavailable" };
   if (input.providerAccountId !== null) {
     await tx.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${`subscription-connect:${input.accountId}:codex:shared:${input.providerAccountId}`}, 0))`,
+      sql`select pg_advisory_xact_lock(hashtextextended(${`subscription-connect:${input.accountId}:codex:shared:${input.providerAccountId}:${input.providerSubjectId ?? ""}`}, 0))`,
     );
   }
   const admin = await isOrganizationAdministrator(tx, input.accountId);
@@ -194,7 +200,8 @@ async function connectShared(
             from subscription_connections
             where account_id = ${input.accountId}::uuid and provider = 'codex'
               and kind = 'subscription' and ownership = 'shared'
-              and provider_account_id = ${input.providerAccountId}`,
+              and provider_account_id = ${input.providerAccountId}
+              and provider_subject_id is not distinct from ${input.providerSubjectId}`,
         );
   // Only a managed human is recorded as the connecting person (legacy
   // parity): local administration and service principals own no reset credit.
@@ -258,13 +265,14 @@ async function connectShared(
         account_id, provider, kind, provider_account_id, account_email, label, plan_type,
         credential_encrypted, credential_format, expires_at, last_refresh_at, status,
         ownership, connected_by_subject_id, scope_kind, allow_personal_workspaces,
-        managed_by_workspace_id, provider_state
+        managed_by_workspace_id, provider_state, provider_subject_id
       ) values (
         ${input.accountId}::uuid, 'codex', 'subscription', ${input.providerAccountId},
         ${input.accountEmail}, ${input.label}, ${input.planType}, ${input.credentialEncrypted},
         'v1', ${iso(input.expiresAt)}::timestamptz, ${iso(input.lastRefreshAt)}::timestamptz, 'active', 'shared', ${connectedBySubjectId},
         ${workspaceScoped ? "workspaces" : "organization"}, ${!workspaceScoped},
-        ${input.workspaceId}::uuid, ${JSON.stringify(providerState(input))}::jsonb
+        ${input.workspaceId}::uuid, ${JSON.stringify(providerState(input))}::jsonb,
+        ${input.providerSubjectId}
       ) returning id::text as id`,
   );
   if (!created) throw new Error("Codex connection insert returned no row");
