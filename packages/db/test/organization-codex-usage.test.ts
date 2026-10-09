@@ -58,7 +58,7 @@ function coreFixture() {
       }),
     ),
   };
-  const hooks = { onLock: () => {}, onUnlock: () => {} };
+  const hooks = { onLock: () => {}, onUnlock: () => {}, onCredentialRead: () => {} };
   const dialect = new PgDialect();
   const db = {
     execute: async (statement: SQL) => {
@@ -73,7 +73,9 @@ function coreFixture() {
       if (/set local/.test(query.sql)) return [];
       if (/select id,/.test(query.sql)) {
         expect(query.sql).toContain("disconnected_at is null");
-        return disconnected ? [] : [{ ...row }];
+        const result = disconnected ? [] : [{ ...row }];
+        if (locked) await hooks.onCredentialRead();
+        return result;
       }
       throw new Error("Unexpected fixture query");
     },
@@ -169,6 +171,56 @@ describe("organization core usage bounded request lock", () => {
     expect(fetch).not.toHaveBeenCalled();
     expect(f.canonical).not.toHaveBeenCalled();
     expect(f.queries).toEqual([]);
+  });
+
+  for (const delayedStep of ["source lock", "credential load"] as const) {
+    test(`expiry while awaiting ${delayedStep} cannot restart the budget and dispatch after disconnect`, async () => {
+      const f = coreFixture();
+      let now = 100;
+      const clock = spyOn(performance, "now").mockImplementation(() => now);
+      restores.push(() => clock.mockRestore());
+      let reachedDelayedStep = false;
+      const suspend = () => {
+        reachedDelayedStep = true;
+        // Simulate suspension longer than PostgreSQL's orphan lock timeout;
+        // a credential row already returned by PG still contains the old bearer.
+        now += 11_000;
+        f.disconnect();
+      };
+      if (delayedStep === "source lock") f.hooks.onLock = suspend;
+      else f.hooks.onCredentialRead = suspend;
+      const fetch = joined(mock(async () => new Response("{}")));
+      expect((await f.read(fetch)).status).toBe("error");
+      expect(reachedDelayedStep).toBe(true);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(f.refresh).not.toHaveBeenCalled();
+      expect(f.isLocked()).toBe(false);
+    });
+  }
+
+  test("the GET receives only the admission budget remaining, not a fresh five seconds", async () => {
+    const f = coreFixture();
+    let now = 100;
+    const clock = spyOn(performance, "now").mockImplementation(() => now);
+    restores.push(() => clock.mockRestore());
+    f.hooks.onCredentialRead = () => {
+      now += 4_000;
+    };
+    const schedule = globalThis.setTimeout;
+    const delays: number[] = [];
+    const timer = spyOn(globalThis, "setTimeout").mockImplementation(((
+      callback: (...args: unknown[]) => void,
+      delay?: number,
+    ) => {
+      delays.push(delay ?? 0);
+      return schedule(callback, delay);
+    }) as typeof setTimeout);
+    restores.push(() => timer.mockRestore());
+    const fetch = joined(mock(async () => new Response("{}")));
+    expect((await f.read(fetch)).status).toBe("no-data");
+    expect(delays).toContain(1_000);
+    expect(delays).not.toContain(5_000);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   test("admitted GET retains the lock through full body consumption with redirects disabled", async () => {

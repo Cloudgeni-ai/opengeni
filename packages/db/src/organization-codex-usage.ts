@@ -24,6 +24,12 @@ const nativeUsageFetch: CodexFetch = fetch;
 const CORE_USAGE_TIMEOUT_MS = 5_000;
 const CORE_USAGE_MAX_BYTES = 1024 * 1024;
 
+function remainingCoreUsageBudget(deadline: number): number {
+  const remaining = deadline - performance.now();
+  if (remaining <= 0) throw new Error("Codex usage request deadline exceeded");
+  return remaining;
+}
+
 /**
  * An injected core transport must cancel and join its local work for this exact
  * signal, including any deferred dispatch, before this promise resolves. Native
@@ -47,7 +53,7 @@ function joinedTransport(fetchImpl: CodexFetch) {
 async function fetchCoreUsageJoined(
   auth: CodexAuthHeaders,
   fetchImpl: CodexFetch,
-  options: { signal?: AbortSignal; timeoutMs?: number },
+  options: { signal?: AbortSignal; deadline: number },
 ): Promise<{ status: number; payload: unknown }> {
   const abortAndJoin = joinedTransport(fetchImpl);
   const controller = new AbortController();
@@ -65,14 +71,13 @@ async function fetchCoreUsageJoined(
   controller.signal.addEventListener("abort", onAbort, { once: true });
   options.signal?.throwIfAborted();
   options.signal?.addEventListener("abort", abort, { once: true });
-  const timeoutMs = Math.min(
-    CORE_USAGE_TIMEOUT_MS,
-    Math.max(1, options.timeoutMs ?? CORE_USAGE_TIMEOUT_MS),
-  );
-  const timer = setTimeout(abort, timeoutMs);
+  let timer: ReturnType<typeof setTimeout> | undefined;
   let complete = false;
   try {
+    timer = setTimeout(abort, remainingCoreUsageBudget(options.deadline));
     controller.signal.throwIfAborted();
+    // No await between this final expiry check and the physical invocation.
+    remainingCoreUsageBudget(options.deadline);
     const response = await fetchImpl(`${CODEX_WHAM_BASE}/wham/usage`, {
       method: "GET",
       headers: codexSubscriptionHeaders(auth),
@@ -81,6 +86,7 @@ async function fetchCoreUsageJoined(
     });
     reader = response.body?.getReader();
     controller.signal.throwIfAborted();
+    remainingCoreUsageBudget(options.deadline);
     if (Number(response.headers.get("content-length")) > CORE_USAGE_MAX_BYTES) {
       throw new Error("Codex usage response exceeded its byte limit");
     }
@@ -89,6 +95,7 @@ async function fetchCoreUsageJoined(
     while (reader) {
       const next = await reader.read();
       controller.signal.throwIfAborted();
+      remainingCoreUsageBudget(options.deadline);
       if (next.done) break;
       size += next.value.byteLength;
       if (size > CORE_USAGE_MAX_BYTES)
@@ -103,10 +110,11 @@ async function fetchCoreUsageJoined(
         // Preserve the existing usage normalization for invalid JSON, not body failures.
       }
     }
+    remainingCoreUsageBudget(options.deadline);
     complete = true;
     return { status: response.status, payload };
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
     options.signal?.removeEventListener("abort", abort);
     if (!complete) abort();
     // A fetch that returns late after abort still has a body to cancel locally.
@@ -129,7 +137,7 @@ export async function readOrganizationCodexUsage(
     credentialId: string;
     mode: "legacy" | "core";
     signal?: AbortSignal;
-    /** May shorten, never extend, the core physical request budget. */
+    /** May shorten, never extend, the core admission-plus-request budget. */
     requestTimeoutMs?: number;
   },
   withAdministrator: AdministratorScope,
@@ -276,16 +284,28 @@ export async function readOrganizationCodexUsage(
       deps,
     );
     if (core) {
-      const probe = (expectedGeneration: number) =>
-        scoped(db, async (tx) => {
+      const probe = (expectedGeneration: number) => {
+        // Anchor before administrator/source-lock admission, not after its last
+        // awaited credential read. A suspended worker may outlive PostgreSQL's
+        // orphan-transaction backstop; resuming it must not restart this budget.
+        const timeoutMs = Number.isFinite(input.requestTimeoutMs)
+          ? Math.min(CORE_USAGE_TIMEOUT_MS, Math.max(1, input.requestTimeoutMs!))
+          : CORE_USAGE_TIMEOUT_MS;
+        const deadline = performance.now() + timeoutMs;
+        return scoped(db, async (tx) => {
+          remainingCoreUsageBudget(deadline);
           // The read-only exception holds the source lock through the finite GET.
           // A dead worker cannot leave an idle transaction retaining this lock.
           await tx.execute(sql`set local idle_in_transaction_session_timeout = '10s'`);
+          remainingCoreUsageBudget(deadline);
           await tx.execute(sql`set local statement_timeout = '10s'`);
+          remainingCoreUsageBudget(deadline);
           await tx.execute(sql`set local lock_timeout = '5s'`);
+          remainingCoreUsageBudget(deadline);
           await tx.execute(
             sql`select pg_advisory_xact_lock(hashtextextended(${`subscription-refresh:${credentialId}`}, 0))`,
           );
+          remainingCoreUsageBudget(deadline);
           // Re-enter native administration/cutover checks AFTER the source lock.
           // Never send the resolver's previously cached bearer or return this one.
           const current = await deps.loadCredential(
@@ -294,6 +314,7 @@ export async function readOrganizationCodexUsage(
             input.organizationId,
             credentialId,
           );
+          remainingCoreUsageBudget(deadline);
           if (!current) throw new CodexReloginRequired("Sign in to ChatGPT again");
           if (current.version !== expectedGeneration) return null;
           return await fetchCoreUsageJoined(
@@ -305,13 +326,12 @@ export async function readOrganizationCodexUsage(
             },
             fetchImpl,
             {
+              deadline,
               ...(input.signal ? { signal: input.signal } : {}),
-              ...(input.requestTimeoutMs !== undefined
-                ? { timeoutMs: input.requestTimeoutMs }
-                : {}),
             },
           );
         });
+      };
       let generation = (await resolver.getToken()).credentialVersion;
       for (let attempt = 0; attempt < 2; attempt += 1) {
         let result = await probe(generation);
