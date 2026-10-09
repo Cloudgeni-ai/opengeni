@@ -1937,9 +1937,12 @@ Post-start recovery preserves IDs/cursors, budgets and writer fences.
 Cancellation stays waiter-local; mixed faults never retry. Cleanup retains its
 helper UUID/cursors.
 
-Legacy retained Modal commands, whatever their health, use the existing drain once
-the group is unused for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS` with no input
-wait or pending request; they settle lost with a notice. A recovering turn under
+Legacy retained Modal commands use the existing drain once the group is unused
+for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS` and no active command printed
+output in that window; they settle lost with a notice. A held input wait or a
+pending approval or human-input request is not use: the box is saved, stopped and
+resumed on demand, and the stop notice waits for a later turn instead of
+waking the session. A recovering turn under
 an effective pause does not retain the machine once physical writers have
 quiesced and the idle window has elapsed; workspace capture precedes stop,
 while turn history and pause state survive. Command backoff never

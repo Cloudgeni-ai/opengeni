@@ -3135,10 +3135,11 @@ observation window is never substituted for termination proof.
 **Idle command containment.** A legacy retained command keeps its Modal box
 warm through a non-expiring process holder, so the zero-holder idle drain never
 runs for it and the box would stay up until the provider deadline kills it
-uncaptured. One rule contains such commands, independent of command health:
-running, still draining output, stopping, unobservable, or repeatedly failing
-observation all qualify. The reaper reads a new inventory,
-`list_command_containment_candidates(limit, idle window)` from migrations 0547/0599,
+uncaptured. One rule contains such commands: running, stopping, unobservable,
+or repeatedly failing observation all qualify, as long as the command printed no
+output inside the window. The reaper reads a new inventory,
+`list_command_containment_candidates(limit, idle window)` from migrations
+0547/0599/0687,
 which lists enrolled drains, rotating leases, and warm or draining Modal leases
 whose only holders are process holders of active non-supervised processes, with
 no capture or reaper hold and no open turn, turn finish, attempt close,
@@ -3151,17 +3152,42 @@ workspace control fence and the process -> admission -> lease row locks:
 - no holder other than those process holders, and no unsettled admission other
   than their parent admissions;
 - in every session of the sandbox group and every session owning a process on
-  the lease: no open turn (`queued`, `running`, `requires_action`,
-  `waiting_capacity`, which includes a pending approval or human-input request),
-  no unpaused recovering turn, no non-closed attempt, no pending quiescence
-  (unsettled interruption or undrained attempt writer). A `wait_for_input` that has not been superseded,
-  and unclaimed machine input that will start a turn (pending immediate system
-  updates other than command results; child lifecycle notices only with an
-  active goal), are idle-clock facts: the window runs from the wait's deadline
-  and from the input's creation. A held wait therefore keeps the command
-  running, since the agent registered it for background work it is
-  deliberately waiting on, while input or a timeout settlement that a paused
-  session can never deliver cannot pin the box until the provider deadline;
+  the lease: no open turn (`queued`, `running`, `waiting_capacity`), no
+  unpaused recovering turn, no non-closed attempt, no pending quiescence
+  (unsettled interruption or undrained attempt writer). Unclaimed machine input
+  that will start a turn (pending immediate system updates other than command
+  results; child lifecycle notices only with an active goal) is an idle-clock
+  fact: the window runs from the input's creation, so input a paused session can
+  never deliver cannot pin the box until the provider deadline;
+- a wait is not use (migration 0687). A held `wait_for_input` and a turn parked
+  in `requires_action` (a pending approval or human-input request) wait for a
+  person, a child or a timer, none of which needs the machine. The wait's start
+  is already on the clock as its turn finish or attempt close, so after the
+  ordinary window the box is saved and stopped, the wait and the pending request
+  survive, and the box resumes on demand when the answer, the timeout or other
+  input starts the next turn. The containment notice itself never wakes the
+  session, not even under a held wait, and never starts a turn alone when the
+  input that opened a claim is rejected: it stays pending and is delivered with
+  the next turn whose causal authority it can share, normally the wait's
+  timeout or the person's answer (`passiveCommandNoticeSql`,
+  `isPassiveCommandNotice`). Pending reads sort it after real command results,
+  so it never leads a batch the planner would close on it alone. Waking would end the wait for the
+  person, spend a model turn, and invite the agent to restart the stopped server
+  every window. A pending approval resolved after containment resumes on a
+  restored box without the command, and the notice tells the agent why;
+- no active command on the lease printed output inside the window. The
+  retained-process reconciler drains a running command's output into durable
+  `sandbox.command.output.delta` events (keyed by the process id) at most five
+  minutes apart while observation is healthy, so a command that is visibly
+  working keeps its box whether or not anything waits on it, and one that
+  printed nothing for the whole window is idle. Only each command's newest output
+  row is read. A command whose observation is quarantined, or a window shorter
+  than the reconciler's backoff, can look silent while it still runs. A busy
+  command whose output goes only to a file looks idle and is contained; the
+  agent receives the notice and can restart it. Only exact
+  enrollment reads `session_events` (under the caller's tenant RLS); the
+  inventory stays wider so that this hot table needs no owner read policy, and a
+  busy lease is stamped and rotated behind the other candidates;
 - a recovering turn under an effective session, ancestor or workspace pause
   does not pin the box. The inventory admits it for inspection; exact enrollment
   resolves current pause and resume overrides under the workspace control fence.
@@ -3199,8 +3225,8 @@ never an exit code; a drain enrolled by a pre-0547 worker records none and
 settles as plain `provider_instance_lost`. In the same transaction it appends
 `session.command.finished`, the typed `background_command_result` input and
 `system.update.pending`, exactly as ordinary exit/loss proof does. The notice
-names the command, says nobody used the session for N minutes and nothing was
-waiting on it, says the workspace was saved, and asks the agent to restart it
+names the command, says nobody used the session for N minutes and it printed
+no output in that time, says the workspace was saved, and asks the agent to restart it
 if still needed. A provider that disappeared before capture settles
 `provider_instance_lost` without a saved-workspace claim. A real exit arriving
 during the drain keeps its exit code. Failed checkpoints retain the provider and
