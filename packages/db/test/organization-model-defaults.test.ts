@@ -61,7 +61,7 @@ async function organization(label: string) {
 describe("organization model defaults", () => {
   test("ships as a rolling FORCE RLS table the runtime may change", async () => {
     const migration = await readFile(
-      new URL("../drizzle/0689_organization_model_defaults.sql", import.meta.url),
+      new URL("../drizzle/0690_organization_model_defaults.sql", import.meta.url),
       "utf8",
     );
     expect(migration.split("\n")[0]).toBe("-- deployment-mode: rolling");
