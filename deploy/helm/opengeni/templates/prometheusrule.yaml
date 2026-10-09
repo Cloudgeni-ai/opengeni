@@ -632,23 +632,32 @@ spec:
         - alert: OpenGeniMcpToolLatencyHigh
           # `tool` is bounded: a first-party Opengeni tool name, or `external` for
           # every connector, API-integration, and custom MCP tool.
+          # Command polling permits up to 50 seconds of requested waiting. Its
+          # total-duration budget includes that wait plus 15 seconds overhead.
           expr: |
-            histogram_quantile(
-              0.95,
-              sum by (le, tool) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))
-            ) > 15
+            (
+              histogram_quantile(
+                0.95,
+                sum by (le, tool) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},tool!~"command_read|command_wait"}[10m]))
+              ) > 15
+              or
+              histogram_quantile(
+                0.95,
+                sum by (le, tool) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},tool=~"command_read|command_wait"}[10m]))
+              ) > 65
+            )
             and on(tool)
             sum by (tool) (increase(opengeni_mcp_tool_call_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
           for: 10m
           labels:
             severity: warning
           annotations:
-            summary: 'Calls to the {{ "{{ $labels.tool }}" }} tool take more than 15 seconds at p95. "external" means a connector or custom tool rather than an Opengeni tool.'
+            summary: 'Calls to the {{ "{{ $labels.tool }}" }} tool exceed their p95 latency budget: 65 seconds for command polling, 15 seconds for other tools. "external" means a connector or custom tool rather than an Opengeni tool.'
             headline: 'Slow tool calls: {{ "{{ $labels.tool }}" }}'
             value: 'p95 {{ "{{ $value | humanizeDuration }}" }}'
             user_impact: 'Agent tasks take noticeably longer while waiting on this tool.'
             next_step: 'For an Opengeni tool, check the Opengeni API and database for that tool. For "external", find the slow connector in Grafana; it is usually the outside service.'
-            description: Tool latency is materially delaying turns. The tool label names the first-party Opengeni tool, or "external" for every connector and custom tool. Split by structural outcome and compare MCP connect time before attributing this to model inference.
+            description: Tool duration exceeds its budget. command_read and command_wait permit up to 50 seconds of requested waiting, so their total-duration budget is 65 seconds; it does not measure actual service overhead. Other tools retain a 15-second budget. The tool label names the first-party Opengeni tool, or "external" for every connector and custom tool. Split by structural outcome and compare MCP connect time before attributing this to model inference.
         - alert: OpenGeniHttp5xxRatioHigh
           expr: |
             (

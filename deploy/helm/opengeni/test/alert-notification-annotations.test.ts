@@ -106,7 +106,7 @@ describe("alert notification annotations", () => {
       "Slow tool calls: session_create",
     );
     expect(expandAlertTemplate(annotations.summary!, firstParty)).toStartWith(
-      "Calls to the session_create tool take more than 15 seconds at p95.",
+      "Calls to the session_create tool exceed their p95 latency budget:",
     );
     const external = { value: 21, labels: { tool: "external" } };
     expect(expandAlertTemplate(annotations.headline!, external)).toBe("Slow tool calls: external");
