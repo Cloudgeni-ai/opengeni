@@ -3139,7 +3139,7 @@ uncaptured. One rule contains such commands: running, stopping, unobservable,
 or repeatedly failing observation all qualify, as long as the command printed no
 output inside the window. The reaper reads a new inventory,
 `list_command_containment_candidates(limit, idle window)` from migrations
-0547/0599/0686,
+0547/0599/0687,
 which lists enrolled drains, rotating leases, and warm or draining Modal leases
 whose only holders are process holders of active non-supervised processes, with
 no capture or reaper hold and no open turn, turn finish, attempt close,
@@ -3159,7 +3159,7 @@ workspace control fence and the process -> admission -> lease row locks:
   results; child lifecycle notices only with an active goal) is an idle-clock
   fact: the window runs from the input's creation, so input a paused session can
   never deliver cannot pin the box until the provider deadline;
-- a wait is not use (migration 0686). A held `wait_for_input` and a turn parked
+- a wait is not use (migration 0687). A held `wait_for_input` and a turn parked
   in `requires_action` (a pending approval or human-input request) wait for a
   person, a child or a timer, none of which needs the machine. The wait's start
   is already on the clock as its turn finish or attempt close, so after the

@@ -253,7 +253,7 @@ describe("0547 idle command containment", () => {
     await admin`update session_turns set status = 'waiting_capacity'
       where session_id = ${fixture.sessionId}`;
     expect(await candidateGroups()).not.toContain(fixture.sandboxGroupId);
-    // A turn parked for a person's answer is not use (0686).
+    // A turn parked for a person's answer is not use (0687).
     await admin`update session_turns set status = 'requires_action'
       where session_id = ${fixture.sessionId}`;
     expect(await candidateGroups()).toContain(fixture.sandboxGroupId);
