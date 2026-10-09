@@ -135,4 +135,7 @@ export const embeddingMigrationTail = [
   "0669_subscription_core_codex_waits.sql",
   "0670_subscription_core_codex_apps.sql",
   "0671_subscription_core_codex_operations.sql",
+  // session_hands_back_v1 compiles against sessions.input_wait_turn_id from
+  // withheld 0402; replay after it.
+  "0674_inbox_reply_hands_back.sql",
 ];
