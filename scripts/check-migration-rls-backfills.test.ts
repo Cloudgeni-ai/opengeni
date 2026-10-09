@@ -73,6 +73,50 @@ describe("writesTable", () => {
 });
 
 describe("analyzeMigrationRlsBackfills", () => {
+  test("0697 catalog definition classification requires exact statement bytes", () => {
+    const patch = readFileSync(
+      new URL("../packages/db/drizzle/0697_codex_retry_after_unknown_outcome.sql", import.meta.url),
+      "utf8",
+    );
+    const analyze = (sql: string) =>
+      analyzeMigrationRlsBackfills(
+        fixture({
+          "0001_base.sql": FORCED_TABLE.replaceAll("widgets", "session_turn_attempts"),
+          "0002_patch.sql": sql,
+        }),
+      );
+    expect(analyze(patch)).toEqual([]);
+    // Even comment-only drift loses the exact source classification.
+    expect(analyze(patch.replace("-- An explicit Retry", "-- A changed Retry"))).toMatchObject([
+      { kind: "vacuous-guard", tables: ["session_turn_attempts"] },
+    ]);
+    expect(
+      analyze(
+        patch.replace(
+          "END\n$retry_after_unknown$",
+          "DELETE FROM session_turn_attempts; END\n$retry_after_unknown$",
+        ),
+      ),
+    ).toMatchObject([{ kind: "write", tables: ["session_turn_attempts"] }]);
+    expect(analyze(`${patch}\nDELETE FROM session_turn_attempts;`)).toMatchObject([
+      { kind: "write", statement: 2, tables: ["session_turn_attempts"] },
+    ]);
+    expect(
+      analyze(
+        `${patch}\nDO $guard$ BEGIN IF EXISTS (SELECT 1 FROM session_turn_attempts) THEN RAISE EXCEPTION 'actual guard'; END IF; END $guard$;`,
+      ),
+    ).toMatchObject([{ kind: "vacuous-guard", statement: 2, tables: ["session_turn_attempts"] }]);
+    const changedDynamicSql = patch
+      .replace(/anchor := \$old\$[\s\S]*?\$old\$;/, "anchor := $old$OR REPLACE FUNCTION$old$;")
+      .replace(
+        /\$new\$[\s\S]*?\$new\$/,
+        "$new$TABLE scratch (id int); DELETE FROM session_turn_attempts; CREATE OR REPLACE FUNCTION$new$",
+      );
+    expect(analyze(changedDynamicSql)).toMatchObject([
+      { kind: "write", tables: ["session_turn_attempts"] },
+    ]);
+  });
+
   test("0494 resolver patch is runtime source while real snapshot preflights remain guarded", () => {
     const migration = readFileSync(
       new URL("../packages/db/drizzle/0494_mcp_account_bindings.sql", import.meta.url),
