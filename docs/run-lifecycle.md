@@ -1198,6 +1198,16 @@ paused, already quiesced session is excluded until Resume. The critical
 more than 10 minutes past due (overdue > 5 min held for 5 min), so sustained
 429s that always keep some session in backoff do not page. Never alert on the
 backlog count alone.
+The workflow-wake reaper also repairs `quiescence_missing` sessions: when the
+closing activity died before its receipt (or the workflow saw a still-leased
+activity and closed), nothing else revisits the session. A bounded,
+identity-only inventory (`list_quiescence_receipt_wake_repairs_v1`, migration
+0701) finds attempts closed more than two minutes ago with no undelivered
+wake and no wake in the last ten minutes; the scoped repair rechecks them under
+the session locks and registers one ordinary queue wake. It writes no receipt:
+the woken workflow still proves through Temporal that the exact activity is
+gone and rechecks both writer gates before `reconcileSessionAttemptQuiescence`
+commits. A paused session then parks idle for Resume as usual.
 The initial session status and replay cursor come from one SQL statement
 snapshot, so a concurrent revival cannot pair an old failed status with a cursor
 that skips the revival event. Diagnostic text is decoded through the lossless
