@@ -32,6 +32,8 @@ const subscriptionCoreMigrations = [
   "0679_codex_extra_credit_consent.sql",
   "0688_subscription_core_codex_writers.sql",
   "0689_subscription_core_codex_cutover.sql",
+  "0691_subscription_core_codex_disconnect.sql",
+  "0695_subscription_model_catalog_observations.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {
