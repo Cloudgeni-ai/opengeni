@@ -33,10 +33,45 @@ const response: OrganizationCodexAccountsResponse = {
     activeCredentialId: activeAccountId,
   },
 };
+let usageNeedsReconnect = false;
 
 const requestJson = mock(async (method: string, path: string, _body?: unknown) => {
+  if (method === "GET" && path.endsWith("/usage")) {
+    if (usageNeedsReconnect) {
+      response.accounts[1] = { ...response.accounts[1]!, status: "needs_relogin" };
+      return {
+        status: "error",
+        usage: {
+          status: "error",
+          reason: "needs_relogin",
+          planType: null,
+          fiveHour: null,
+          weekly: null,
+          limitReached: false,
+          fetchedAt: new Date().toISOString(),
+        },
+      };
+    }
+    return {
+      status: "ok",
+      usage: {
+        status: "ok",
+        planType: "pro",
+        fiveHour: null,
+        weekly: null,
+        limitReached: false,
+        fetchedAt: new Date().toISOString(),
+        credits: {
+          balance: "120.50",
+          hasCredits: true,
+          unlimited: false,
+          overageLimitReached: false,
+        },
+      },
+    };
+  }
   if (method === "GET" && path === `/v1/organizations/${organizationId}/codex/accounts`) {
-    return response;
+    return structuredClone(response);
   }
   if (
     method === "PATCH" &&
@@ -88,6 +123,8 @@ const context = {
   clientConfig: { claudeSubscriptionEnabled: false },
   client: {
     requestJson,
+    organizationCodexAccountUsage: (orgId: string, id: string) =>
+      requestJson("GET", `/v1/organizations/${orgId}/codex/accounts/${id}/usage`),
     getModelConnectionAccess: mock(async () => access),
     listOrganizationSuperGrokAccounts: mock(async () => ({
       accounts: [],
@@ -199,6 +236,49 @@ function button(container: HTMLElement, text: string | RegExp) {
 }
 
 describe("organization Codex subscriptions", () => {
+  test("usage sign-in failure refreshes account health and offers reconnection", async () => {
+    usageNeedsReconnect = true;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness accountId={inactiveAccountId} />));
+      await flush();
+      expect(button(container, "Sign in again")).toBeDefined();
+      expect(container.textContent).toContain("Sign in to ChatGPT again to check usage.");
+      expect(container.textContent).toContain("Not reported");
+      expect(container.textContent).not.toContain("Try again in a moment");
+    } finally {
+      usageNeedsReconnect = false;
+      response.accounts[1] = account(inactiveAccountId, "Backup subscription", false);
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+  test("a paused account shows live credits without workspace assignment or consent changes", async () => {
+    response.accounts[1] = { ...response.accounts[1]!, allocatorEnabled: false };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const before = requestJson.mock.calls.length;
+    try {
+      await act(async () => root.render(<Harness accountId={inactiveAccountId} />));
+      await flush();
+      expect(container.textContent).toContain("Extra credits");
+      expect(container.textContent).toContain("120.50");
+      expect(container.textContent).toContain("Paused");
+      expect(requestJson.mock.calls.slice(before).every(([method]) => method === "GET")).toBe(true);
+      expect(
+        container
+          .querySelector('[aria-label="Use extra credits on Backup subscription"]')
+          ?.getAttribute("aria-checked"),
+      ).toBe("false");
+    } finally {
+      response.accounts[1] = account(inactiveAccountId, "Backup subscription", false);
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
   test("a conflicting pause refreshes the account before the next change", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);

@@ -41,7 +41,6 @@ import {
   CodexConnectPage,
   CodexPoolNotice,
   CodexSettingRows,
-  CodexUsage,
   codexListedCount,
   codexSectionVisible,
   type CodexPlaces,
@@ -844,16 +843,11 @@ export function WorkspaceModelsPageBody({
         );
     }
   } else if (key?.provider === "codex" && key.organization) {
-    // Usage shows while new work here uses the account.
-    const inUse = codex.accounts.find(
-      (candidate) => candidate.id === key.id && candidate.source === "organization",
-    );
     page = (
       <OrgCodexAccountPage
         codex={orgCodex}
         accountId={key.id}
         places={orgCodexPlaces}
-        usage={inUse ? <CodexUsage codex={codex} account={inUse} /> : undefined}
         resets={
           (codex.overviewMap[key.id]?.resetCredits.availableCount ?? 0) > 0 ? (
             <OrganizationResetsNote

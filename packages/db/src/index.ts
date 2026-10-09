@@ -1,4 +1,5 @@
 import { sessionRetentionFromRow } from "./session-archive";
+import { readOrganizationCodexUsage } from "./organization-codex-usage";
 export * from "./organization-slack-bots";
 export * from "./voice-transcription-settlement";
 import {
@@ -24563,6 +24564,28 @@ export async function ensureOrganizationCodexRotationSettings(
       .values({ accountId: input.organizationId })
       .onConflictDoNothing({ target: schema.organizationCodexRotationSettings.accountId });
   });
+}
+
+export async function fetchOrganizationCodexUsageForAccount(
+  db: Database,
+  settings: Settings,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    credentialId: string;
+    mode: "legacy" | "core";
+  },
+  fetchImpl: CodexFetch = fetch,
+  refresh?: CodexAuthDeps["refresh"],
+) {
+  return await readOrganizationCodexUsage(
+    db,
+    settings,
+    input,
+    (targetDb, use) => withOrganizationCodexAdministrator(targetDb, input, use),
+    fetchImpl,
+    refresh,
+  );
 }
 
 export async function upsertOrganizationCodexSubscriptionCredential(

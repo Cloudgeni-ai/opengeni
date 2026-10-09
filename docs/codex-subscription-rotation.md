@@ -91,8 +91,14 @@ requests have their own admission paths.
 
 Account usage details display the provider's extra-credit balance without
 inventing a currency or converting missing data to zero. This balance is
-separate from earned usage-limit resets. Accounts outside the current
-workspace's usage visibility still have only their existing cached projection.
+separate from earned usage-limit resets. Organization administrators can inspect
+live usage through `GET /v1/organizations/:organizationId/codex/accounts/:accountId/usage`,
+including paused accounts and accounts assigned to no workspace. This read uses
+organization administration authority, not a workspace's inference pool. It may
+refresh the account's bearer under the existing credential lock and generation
+fence, but does not alter routing quota, credit consent, or workspace access.
+Usage is fetched when the account page opens and on manual refresh; failed reads
+show the last saved quota and an unknown credit balance.
 
 ## Organization pause
 

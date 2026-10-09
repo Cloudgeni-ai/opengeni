@@ -9486,6 +9486,17 @@ export class OpenGeniClient {
     );
   }
 
+  /** Inspect an organization account even when it is paused or assigned nowhere. */
+  async organizationCodexAccountUsage(
+    organizationId: string,
+    accountId: string,
+  ): Promise<CodexUsage> {
+    return await this.requestJson<CodexUsage>(
+      "GET",
+      `/v1/organizations/${organizationId}/codex/accounts/${encodeURIComponent(accountId)}/usage`,
+    );
+  }
+
   /** Batched live refresh across every connected account, keyed by credential id. */
   async refreshCodexUsage(workspaceId: string): Promise<{ usage: CodexUsageMap }> {
     return await this.requestJson<{ usage: CodexUsageMap }>(

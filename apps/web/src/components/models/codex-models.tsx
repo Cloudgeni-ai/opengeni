@@ -58,6 +58,7 @@ import {
 import { StatusBadge, type ProductStatus } from "@/components/ui/status-badge";
 import { Switch } from "@/components/ui/switch";
 import { UsageMeterGroup, UsageReadout } from "@/components/ui/usage-meter";
+import { CODEX_EXTRA_CREDITS_DESCRIPTION, CodexCreditBalance } from "./codex-account-usage";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
@@ -956,7 +957,7 @@ function CodexAccountDetail({
               />
               <SettingRow
                 label="Use extra credits"
-                description="Use this account's extra credits when included usage is exhausted. Automatic rotation tries other accounts' included usage first. Turning this off protects credits from the next request."
+                description={CODEX_EXTRA_CREDITS_DESCRIPTION}
                 control={
                   <Switch
                     aria-label={`Use extra credits on ${name}`}
@@ -970,11 +971,7 @@ function CodexAccountDetail({
               {codex.accounts.length > 1 ? (
                 <SettingRow
                   label="Primary account"
-                  description={
-                    account.id === codex.activeAccountId
-                      ? "New work starts here. With Primary only, it's the only account used."
-                      : "Make this the account new work starts with."
-                  }
+                  description="Used with Primary only. Spread work chooses an available account."
                   control={
                     account.id === codex.activeAccountId ? (
                       <span className="inline-flex h-8 items-center gap-1.5 text-sm font-medium text-fg-muted">
@@ -1127,17 +1124,7 @@ export function CodexUsage({
         }
         onRefresh={codex.canManage ? () => void codex.refreshAccountUsage(account.id) : undefined}
       />
-      <div className="flex items-baseline justify-between gap-4 py-3 text-sm">
-        <span className="text-fg-muted">Extra credits</span>
-        <span className="text-fg">
-          {credits?.unlimited
-            ? "Unlimited"
-            : credits?.balance !== null && credits?.balance !== undefined
-              ? credits.balance
-              : "Not reported"}
-          {credits?.overageLimitReached ? " · spending limit reached" : null}
-        </span>
-      </div>
+      <CodexCreditBalance credits={credits} />
     </>
   );
 }
