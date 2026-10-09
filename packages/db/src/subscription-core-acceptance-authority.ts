@@ -27,21 +27,21 @@ import { readSubscriptionProviderCutoverState } from "./subscription-core-reposi
  * old schemas and still accept prompts) or predates the writer itself (an
  * enabled cutover row cannot make acceptance call a routine that is not
  * there yet). Without the writer routine nothing is written, so v1 stays
- * authoritative. A present routine is cached; an absent one is re-checked,
- * since a schema only moves forward. The routine's migration comes after the
- * cutover relation's, so its presence also proves the relation.
+ * authoritative. The presence is checked on the accepting connection every
+ * time: a process can hold connections to databases at different ledger
+ * positions (the test runner does), so a process-wide positive cache would
+ * let an older database read a relation it does not have. The routine's
+ * migration comes after the cutover relation's, so its presence also proves
+ * the relation.
  */
-let acceptanceWriterPresent = false;
 async function codexAcceptanceWriterPresent(tx: Database): Promise<boolean> {
-  if (acceptanceWriterPresent) return true;
   const [row] = await rawRows<{ present: boolean }>(
     tx,
     sql`select to_regprocedure(
         'opengeni_private.subscription_codex_acceptance_authority_v2(uuid,uuid,uuid,text)'
       ) is not null as present`,
   );
-  acceptanceWriterPresent = row?.present === true;
-  return acceptanceWriterPresent;
+  return row?.present === true;
 }
 
 export async function codexSubscriptionAuthorityV2ForAcceptanceInTransaction(
