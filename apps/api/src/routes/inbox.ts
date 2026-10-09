@@ -9,7 +9,12 @@ import {
   type AccessContext,
   type InboxItem,
 } from "@opengeni/contracts";
-import { requireAccessContext, requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  inboxSubjectForContext,
+  requireAccessContext,
+  requireAccessGrant,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   getInboxItem,
   getInboxSettings,
@@ -22,12 +27,16 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 
-/** Only a person has an inbox; keys and agents act through sessions. */
+/**
+ * Only a person has an inbox: a signed-in person, or the one human of a local
+ * install. Keys, services and agents act through sessions.
+ */
 function requirePerson(context: AccessContext): string {
-  if (!context.subjectId.startsWith("user:") || context.credential) {
+  const subjectId = inboxSubjectForContext(context);
+  if (!subjectId) {
     throw new HTTPException(403, { message: "Only a signed-in person has an inbox" });
   }
-  return context.subjectId;
+  return subjectId;
 }
 
 async function personAccounts(deps: ApiRouteDeps, context: AccessContext): Promise<string[]> {

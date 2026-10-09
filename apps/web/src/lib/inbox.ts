@@ -1,6 +1,7 @@
 // The person's inbox, shared by the rail entry and the Inbox page. One poll
 // (30 s, faster while the page is open, and on focus) keeps both in step;
 // any action refreshes immediately.
+import { accessContextHasInbox } from "@opengeni/contracts";
 import type { InboxItem, ListInboxResponse, OpenGeniClient } from "@opengeni/sdk";
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 
@@ -18,13 +19,12 @@ const EMPTY: InboxState = { data: null, error: null, loading: true };
 const NO_INBOX: InboxState = { data: null, error: null, loading: false };
 
 /**
- * Only a signed-in person has an inbox (the API refuses keys, services and
- * development subjects), so nothing polls it for anyone else.
+ * Only a person has an inbox: a signed-in person, or a local install's one
+ * built-in human. The API refuses keys, services, agents and other development
+ * subjects, so nothing polls it for anyone else.
  */
-export function hasInbox(
-  context: { subjectId: string; credential?: unknown } | null | undefined,
-): boolean {
-  return Boolean(context?.subjectId.startsWith("user:") && !context.credential);
+export function hasInbox(context: Parameters<typeof accessContextHasInbox>[0]): boolean {
+  return accessContextHasInbox(context);
 }
 
 export class InboxStore {
