@@ -1,5 +1,5 @@
 /**
- * Migration 0685: the drained, one-way Codex cutover onto the shared
+ * Migration 0689: the drained, one-way Codex cutover onto the shared
  * subscription core (design 5.1.1 steps 1-8). The legacy state is seeded as
  * the database superuser (an upgrade fixture, not current admission), the
  * migration runs as the NOSUPERUSER/NOBYPASSRLS schema owner exactly as in
@@ -41,7 +41,7 @@ import {
   type DbClient,
 } from "../src";
 
-const MIGRATION = "0685_subscription_core_codex_cutover.sql";
+const MIGRATION = "0689_subscription_core_codex_cutover.sql";
 const key = Buffer.alloc(32, 72);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -689,7 +689,7 @@ const migrateCutover = (options: { key?: Uint8Array } = {}) =>
   });
 
 describe.skipIf(!realDb)(
-  "SUB-COMPAT-01 migration 0685: Codex onto the shared subscription core",
+  "SUB-COMPAT-01 migration 0689: Codex onto the shared subscription core",
   () => {
     beforeAll(async () => {
       const fixture = await acquireOwnerMigratedTestDatabase("codex-core-cutover");
@@ -813,7 +813,7 @@ describe.skipIf(!realDb)(
       await owned.admin`CREATE RULE codex_cutover_parity_probe AS ON INSERT TO subscription_leases DO INSTEAD NOTHING`;
       try {
         const error = await migrateCutover({ key }).catch((caught: Error) => caught);
-        expect((error as Error).message).toContain("0685 parity mismatch (live_leases)");
+        expect((error as Error).message).toContain("0689 parity mismatch (live_leases)");
         await noPartialCutover();
       } finally {
         await owned.admin`DROP RULE codex_cutover_parity_probe ON subscription_leases`;

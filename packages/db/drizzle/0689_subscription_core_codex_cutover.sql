@@ -14,19 +14,19 @@ DO $codex_cutover_drain$
 DECLARE roles jsonb := nullif(current_setting('opengeni.migration_application_roles', true), '')::jsonb;
 BEGIN
   IF to_regclass('pg_temp.codex_cutover_stage_0672') IS NULL THEN
-    RAISE EXCEPTION '0685 requires the codec-aware TypeScript migration runner' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0689 requires the codec-aware TypeScript migration runner' USING ERRCODE = '55000';
   END IF;
   IF roles IS NULL OR jsonb_typeof(roles) <> 'array' THEN
-    RAISE EXCEPTION '0685 requires explicit application database roles' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0689 requires explicit application database roles' USING ERRCODE = '55000';
   END IF;
   IF jsonb_array_length(roles) NOT BETWEEN 1 AND 16 OR EXISTS (
     SELECT 1 FROM jsonb_array_elements(roles) item WHERE jsonb_typeof(item) <> 'string'
       OR octet_length(item #>> '{}') NOT BETWEEN 1 AND 63
       OR item #>> '{}' <> btrim(item #>> '{}')
-  ) THEN RAISE EXCEPTION '0685 received invalid application roles' USING ERRCODE = '55000'; END IF;
+  ) THEN RAISE EXCEPTION '0689 received invalid application roles' USING ERRCODE = '55000'; END IF;
   IF EXISTS (SELECT 1 FROM pg_stat_activity a JOIN jsonb_array_elements_text(roles) r ON r.value = a.usename
     WHERE a.datname = current_database() AND a.pid <> pg_backend_pid()) THEN
-    RAISE EXCEPTION '0685 requires drained application sessions' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0689 requires drained application sessions' USING ERRCODE = '55000';
   END IF;
 END $codex_cutover_drain$;
 
@@ -94,11 +94,11 @@ DO $codex_cutover_owner_window$
 DECLARE item record;
 BEGIN
   IF (SELECT count(*) FROM codex_cutover_relations_0672) <> 35 THEN
-    RAISE EXCEPTION '0685 could not resolve every cutover relation' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0689 could not resolve every cutover relation' USING ERRCODE = '55000';
   END IF;
   IF EXISTS (SELECT 1 FROM codex_cutover_relations_0672 r JOIN pg_class c ON c.oid = r.oid
     WHERE c.relowner <> (SELECT oid FROM pg_roles WHERE rolname = current_user)) THEN
-    RAISE EXCEPTION '0685 requires the schema owner' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0689 requires the schema owner' USING ERRCODE = '55000';
   END IF;
   FOR item IN SELECT * FROM codex_cutover_relations_0672 ORDER BY oid LOOP
     EXECUTE format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE', item.oid::regclass);
@@ -150,7 +150,7 @@ DO $codex_cutover_owner_window_open$
 BEGIN
   IF EXISTS (SELECT 1 FROM codex_cutover_relations_0672 r JOIN pg_class c ON c.oid = r.oid
     WHERE c.relforcerowsecurity) THEN
-    RAISE EXCEPTION '0685 owner window did not open' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0689 owner window did not open' USING ERRCODE = '55000';
   END IF;
 END $codex_cutover_owner_window_open$;
 
@@ -163,7 +163,7 @@ BEGIN
   BEGIN
     EXECUTE format('ALTER TABLE %s VALIDATE CONSTRAINT codex_cutover_empty_probe', relation);
   EXCEPTION WHEN check_violation THEN
-    RAISE EXCEPTION '0685 counted zero rows in a non-empty relation' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0689 counted zero rows in a non-empty relation' USING ERRCODE = '55000';
   END;
   EXECUTE format('ALTER TABLE %s DROP CONSTRAINT codex_cutover_empty_probe', relation);
 END $codex_cutover_assert_empty$;
@@ -240,7 +240,7 @@ BEGIN
     OR EXISTS (SELECT 1 FROM subscription_capacity_waiters WHERE provider = 'codex')
     OR EXISTS (SELECT 1 FROM subscription_operation_leases WHERE provider = 'codex')
   THEN
-    RAISE EXCEPTION '0685 refuses pre-existing core Codex state' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0689 refuses pre-existing core Codex state' USING ERRCODE = '55000';
   END IF;
   -- Ambiguous session ownership on live work aborts activation (step 6).
   IF EXISTS (
@@ -256,7 +256,7 @@ BEGIN
             AND membership.id = session.owner_organization_membership_id
             AND membership.subject_id = session.owner_subject_id)))
   ) THEN
-    RAISE EXCEPTION '0685 refused ambiguous session ownership on live work (session_owner_ambiguous)'
+    RAISE EXCEPTION '0689 refused ambiguous session ownership on live work (session_owner_ambiguous)'
       USING ERRCODE = '55000';
   END IF;
 END $codex_cutover_preflight$;
@@ -266,7 +266,7 @@ END $codex_cutover_preflight$;
 DO $codex_cutover_codec_receipt$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_temp.codex_cutover_stage_0672 WHERE completed) THEN
-    RAISE EXCEPTION '0685 codec stage did not complete' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0689 codec stage did not complete' USING ERRCODE = '55000';
   END IF;
 END $codex_cutover_codec_receipt$;
 
@@ -510,7 +510,7 @@ BEGIN
     GROUP BY attempt.workspace_id, map.connection_id, attempt.credit_id
     HAVING count(*) > 1
   ) THEN
-    RAISE EXCEPTION '0685 refused ambiguous reset-credit redemption history (reset_redemption_credit_ambiguous)'
+    RAISE EXCEPTION '0689 refused ambiguous reset-credit redemption history (reset_redemption_credit_ambiguous)'
       USING ERRCODE = '55000';
   END IF;
 END $codex_cutover_reset_ledger$;
@@ -646,7 +646,7 @@ BEGIN
       WHERE source_digest <> target_digest)
     OR (SELECT count(*) FROM pg_temp.codex_cutover_readability)
       <> (SELECT count(DISTINCT connection_id) FROM pg_temp.codex_cutover_connection_map) THEN
-    RAISE EXCEPTION '0685 parity mismatch (secret_readability)' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0689 parity mismatch (secret_readability)' USING ERRCODE = '55000';
   END IF;
 END $codex_cutover_readability$;
 UPDATE codex_subscription_credentials SET credential_encrypted = ''
@@ -959,19 +959,19 @@ BEGIN
   SELECT string_agg(DISTINCT metric, ', ' ORDER BY metric) INTO mismatches
   FROM codex_cutover_parity WHERE legacy_count <> core_count;
   IF mismatches IS NOT NULL THEN
-    RAISE EXCEPTION '0685 parity mismatch (%)', mismatches USING ERRCODE = '55000';
+    RAISE EXCEPTION '0689 parity mismatch (%)', mismatches USING ERRCODE = '55000';
   END IF;
   -- Zero-row success is invalid: a source with rows must yield a non-empty
   -- target, and every counted source was counted inside the owner window.
   IF EXISTS (SELECT 1 FROM codex_cutover_inventory WHERE legacy_count > 0
       AND metric LIKE 'credentials_%')
     AND NOT EXISTS (SELECT 1 FROM subscription_connections WHERE provider = 'codex') THEN
-    RAISE EXCEPTION '0685 parity mismatch (zero_row_backfill)' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0689 parity mismatch (zero_row_backfill)' USING ERRCODE = '55000';
   END IF;
   IF EXISTS (SELECT 1 FROM session_turns
       WHERE status IN ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
         AND subscription_authority IS NULL) THEN
-    RAISE EXCEPTION '0685 parity mismatch (live_turn_authority)' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0689 parity mismatch (live_turn_authority)' USING ERRCODE = '55000';
   END IF;
 END $codex_cutover_parity_check$;
 
@@ -991,7 +991,7 @@ BEGIN
   END LOOP;
   IF EXISTS (SELECT 1 FROM codex_cutover_relations_0672 r JOIN pg_class c ON c.oid = r.oid
     WHERE r.relforcerowsecurity AND NOT c.relforcerowsecurity) THEN
-    RAISE EXCEPTION '0685 could not restore FORCE row security' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0689 could not restore FORCE row security' USING ERRCODE = '55000';
   END IF;
 END $codex_cutover_restore$;
 

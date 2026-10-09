@@ -778,10 +778,10 @@ Never infer private authority from a session creator or present browser user,
 and never rotate permission, suspension, safety or validation failures. See
 docs/model-providers.md and docs/deployment.md.
 
-Codex moves onto the shared subscription core at maintenance migration 0680.
+Codex moves onto the shared subscription core at maintenance migration 0689.
 Drain every old and new runtime login, run the codec-aware migrator with the
 existing environments encryption key, and start only binaries that carry the
-0680 receipt; never restart an older image, never roll back (fix forward). Every
+0689 receipt; never restart an older image, never roll back (fix forward). Every
 organization is born with an enabled Codex cutover row; turning it off is
 fail-closed maintenance, never the legacy tables. Legacy Codex code is
 unreachable and is deleted in M3 PR 4. Runbook: docs/deployment.md; design:

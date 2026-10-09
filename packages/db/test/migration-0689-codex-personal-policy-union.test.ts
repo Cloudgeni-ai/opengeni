@@ -13,7 +13,7 @@ import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 
-const migration = "0685_subscription_core_codex_cutover.sql";
+const migration = "0689_subscription_core_codex_cutover.sql";
 const key = Buffer.alloc(32, 87);
 const cases: Array<{
   name: string;

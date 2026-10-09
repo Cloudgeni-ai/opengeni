@@ -132,7 +132,7 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
   "drop_subscription_codex_owner_capabilities(uuid)",
   "derive_scheduled_revision_subscription_authority()",
-  // Migration 0680: the owner-only Codex cutover receipt and the trigger that
+  // Migration 0689: the owner-only Codex cutover receipt and the trigger that
   // seeds organizations created later onto the shared core.
   "subscription_codex_cutover_v1_active()",
   "seed_subscription_codex_cutover()",
@@ -742,7 +742,7 @@ export const SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES = [
   "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
   "drop_subscription_codex_owner_capabilities(uuid)",
   "derive_scheduled_revision_subscription_authority()",
-  // Migration 0680: the cutover receipt and the two owner-run trigger
+  // Migration 0689: the cutover receipt and the two owner-run trigger
   // functions. Readiness only looks the receipt up; triggers fire without
   // the caller holding EXECUTE.
   "subscription_codex_cutover_v1_active()",
@@ -1956,7 +1956,7 @@ export type RuntimeDatabasePosture = {
   subscriptionOwnerRoutines?: RuntimeRoutinePosture[];
   sessionVariableSetAttachmentsCutoverPresent: boolean;
   claudeSubscriptionPoolActivationPresent: boolean;
-  /** Migration 0680: Codex runs on the shared subscription core. */
+  /** Migration 0689: Codex runs on the shared subscription core. */
   subscriptionCodexCutoverActivationPresent: boolean;
 };
 
@@ -2484,7 +2484,7 @@ export function evaluateRuntimeDatabasePosture(
 
   if (!posture.subscriptionCodexCutoverActivationPresent)
     violations.push(
-      "database is missing the 0680 Codex subscription-core cutover receipt; run the drained migration first",
+      "database is missing the 0689 Codex subscription-core cutover receipt; run the drained migration first",
     );
 
   if (!posture.sessionVariableSetAttachmentsCutoverPresent) {

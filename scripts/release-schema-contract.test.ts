@@ -86,10 +86,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0685_subscription_core_codex_cutover.sql",
+        (migration) => migration.path === "0689_subscription_core_codex_cutover.sql",
       ),
     ).toMatchObject({
-      path: "0685_subscription_core_codex_cutover.sql",
+      path: "0689_subscription_core_codex_cutover.sql",
       deploymentMode: "maintenance",
     });
   });
@@ -331,7 +331,7 @@ describe("release schema contract", () => {
       expect(subscriptionCoreCodexWriters.deploymentMode).toBe("rolling");
     }
     const subscriptionCoreCodexCutover = sourceContract.migrations.find(
-      (migration) => migration.path === "0685_subscription_core_codex_cutover.sql",
+      (migration) => migration.path === "0689_subscription_core_codex_cutover.sql",
     );
     if (subscriptionCoreCodexCutover) {
       expect(subscriptionCoreCodexCutover.deploymentMode).toBe("maintenance");
@@ -2245,7 +2245,7 @@ describe("release schema contract", () => {
     }
     const appendedMigrationPaths = [
       "0686_target_tool_approval_bindings.sql",
-      "0685_subscription_core_codex_cutover.sql",
+      "0689_subscription_core_codex_cutover.sql",
       "0671_subscription_core_codex_operations.sql",
       "0688_subscription_core_codex_writers.sql",
       "0670_subscription_core_codex_apps.sql",
