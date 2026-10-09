@@ -1737,7 +1737,7 @@ Steps, as implemented:
    person's token to the other's Apps designation). Decision: merge only rows
    that are provably the same person. Distinct people stay distinct
    connections, each with its own credential, assignments, designations and
-   pins; the core identity (`provider_subject_id`, added by 0682, part of the
+   pins; the core identity (`provider_subject_id`, added by 0684, part of the
    unique key) records the person. A row whose person is unknown, or whose
    stored email contradicts another row of the same person, is kept as its own
    connection (`legacy:<id>` as its person key when it shares the upstream
@@ -1899,14 +1899,14 @@ connection the workspace cannot see stays NULL); and a child agent's first
 turn copies its causal parent turn's frozen v2 value.
 
 The writers this cutover needs already exist, dormant, from PR 3b (migration
-0682, which lands first): connect start/poll and disconnect on the core with
+0684, which lands first): connect start/poll and disconnect on the core with
 the redemption share lock and the `subscription-refresh:<id>` key,
 organization-level reset redemption fenced per (connection, credit) across
 workspaces (it re-files the person's own lapsed attempt that 0685 keeps in its
 legacy workspace, and refuses another workspace's open or consumed attempt),
 personal connections in the owner's views, and the v2 writers at acceptance
 for scheduled tasks and firings, internal updates and child-result notices,
-agent messages and Steer. 0685 backfills the v2 slots 0682 added for work
+agent messages and Steer. 0685 backfills the v2 slots 0684 added for work
 accepted before it; enabling the cutover switches those writers on.
 
 Assignment-change wakes need no writer yet: no route edits workspace

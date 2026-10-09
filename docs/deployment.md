@@ -4076,7 +4076,7 @@ cutover. It moves every organization's Codex (ChatGPT subscription) state onto
 the shared subscription core and enables the Codex cutover for every
 organization in the same transaction. Design record:
 [subscription core, PR 3](design/subscription-core-2026-10-07.md#pr-3-the-drained-codex-cutover).
-The dormant core Codex writers (rolling migration 0682, after 0679 credit consent) ship before it, so
+The dormant core Codex writers (rolling migration 0684, after 0679 credit consent) ship before it, so
 connect, disconnect and redemption keep working on the core once 0685
 enables the cutover.
 
@@ -4092,7 +4092,7 @@ Scheduled-task renames and pause/resume preserve execution digests both before
 and after authority backfill; firings consume the accepted revision's frozen
 authority, with no personal entry for a missing human authorizer.
 
-Rolling 0682 keeps owner-only writer implementations outside the previous
+Rolling 0684 keeps owner-only writer implementations outside the previous
 binary's runtime capability inventory, in `opengeni_subscription_internal`.
 Never grant that schema or its functions to runtime roles to repair readiness.
 Old and new binaries remain compatible before 0685; after 0685, only matching
