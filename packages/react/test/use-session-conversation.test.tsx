@@ -15,11 +15,19 @@ test("stock view retains host connection actions and empty presentation", async 
   const renderConnection = (item: { serverId: string | null }) => (
     <button>Connect {item.serverId}</button>
   );
-  function Host({ connected }: { connected: boolean }) {
+  function Host({ connected, wider = false }: { connected: boolean; wider?: boolean }) {
     const conversation = useSessionConversation(f.sessionId, {
       client: f.client,
       workspaceId: WORKSPACE_ID,
     });
+    // Structurally typed shared objects may carry extra fields. Presentation
+    // must never replace the controller's authoritative events or items.
+    const presentation = {
+      ...(wider ? { items: [], events: [] } : {}),
+      turnSummary: { rolling: false },
+      emptyState: <p>Choose a support task</p>,
+      renderAuthNeeded: renderConnection,
+    };
     return (
       <SessionConversationView
         conversation={{
@@ -43,11 +51,7 @@ test("stock view retains host connection actions and empty presentation", async 
               ]
             : [],
         }}
-        timelineProps={{
-          turnSummary: { rolling: false },
-          emptyState: <p>Choose a support task</p>,
-          renderAuthNeeded: renderConnection,
-        }}
+        timelineProps={presentation}
       />
     );
   }
@@ -58,6 +62,10 @@ test("stock view retains host connection actions and empty presentation", async 
     await view.rerender(<Host connected />);
     await flush(50);
     expect(view.container.textContent).toContain("Connect acme");
+    await view.rerender(<Host connected wider />);
+    await flush(50);
+    expect(view.container.textContent).toContain("Connect acme");
+    expect(view.container.textContent).not.toContain("Choose a support task");
     expect(view.container.querySelector("textarea")).not.toBeNull();
     expect(f.streams()).toBe(1);
   } finally {

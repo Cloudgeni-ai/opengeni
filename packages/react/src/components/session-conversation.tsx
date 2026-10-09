@@ -500,8 +500,9 @@ function ConversationView({
           {...(resolveSessionTitle ? { resolveSessionTitle } : {})}
           events={feed.events}
           items={conversation.timeline}
-          turnSummary={{ rolling: true }}
-          {...timelineProps}
+          turnSummary={timelineProps?.turnSummary ?? { rolling: true }}
+          renderAuthNeeded={timelineProps?.renderAuthNeeded}
+          emptyState={timelineProps?.emptyState}
           status={status}
           hasOlder={feed.hasOlder}
           loadingOlder={feed.loadingOlder}
