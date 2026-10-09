@@ -12,6 +12,7 @@ import {
   sandboxAutomaticRecoveryOutcome,
   recordSandboxProviderMissingBeforeCapture,
   recordSandboxRotationBacklogGauges,
+  recordSandboxCheckpointStalenessGauges,
   runtimeMetricsHooksForObservability,
 } from "../src/observability-metrics";
 import { recordWorkspaceCaptureCompleted } from "../src/activities/workspace-capture";
@@ -57,6 +58,31 @@ describe("sandbox checkpoint and deadline metrics", () => {
     );
     expect(metrics).not.toContain("private-provider");
     expect(metrics).not.toContain("secret-reason");
+    await observability.flush();
+  });
+  test("checkpoint staleness publishes fixed buckets and a bounded max age", async () => {
+    const observability = workerObservability();
+    recordSandboxCheckpointStalenessGauges(observability, {
+      dirty: 3,
+      stale4h: 2,
+      stale12h: 1,
+      maxAgeSeconds: 47_000,
+    });
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_sandbox_checkpoint_staleness\{[^}]*kind="dirty"[^}]*\} 3/);
+    expect(metrics).toMatch(
+      /opengeni_sandbox_checkpoint_staleness\{[^}]*kind="stale_12h"[^}]*\} 1/,
+    );
+    expect(metrics).toMatch(/opengeni_sandbox_checkpoint_age_max_seconds(\{[^}]*\})? 47000/);
+    recordSandboxCheckpointStalenessGauges(observability, {
+      dirty: 0,
+      stale4h: 0,
+      stale12h: 0,
+      maxAgeSeconds: Number.NaN,
+    });
+    expect(await observability.prometheusMetrics()).toMatch(
+      /opengeni_sandbox_checkpoint_age_max_seconds(\{[^}]*\})? 0/,
+    );
     await observability.flush();
   });
   test("physical and logical capture timings coexist in one worker registry", async () => {

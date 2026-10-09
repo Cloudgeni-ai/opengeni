@@ -67,6 +67,7 @@ import {
   reapStaleLeaseHoldersGlobal,
   requestDueSandboxRotationsGlobal,
   readSandboxRotationBacklog,
+  readSandboxCheckpointStaleness,
   readRecentSandboxRecoveryObservations,
   workspaceArchiveCaptureDeadlineElapsed,
   retainedProcessReconciliationProof,
@@ -182,6 +183,7 @@ import {
   recordSandboxProviderMissingBeforeCapture,
   recordSandboxRecoveryObservationGauges,
   recordSandboxRotationBacklogGauges,
+  recordSandboxCheckpointStalenessGauges,
   recordTurnsQueuedGauge,
   recordVerifiedSignupTrialDeploymentFlagGauge,
   recordManagedAuthNewSignupsSwitchGauge,
@@ -2685,6 +2687,17 @@ async function refreshQueueLeaseAndCreditGauges(
       "rotation-backlog",
       async () => {
         recordSandboxRotationBacklogGauges(observability, await readSandboxRotationBacklog(db));
+      },
+    ),
+    refreshSandboxInventoryGauge(
+      observability,
+      "checkpoint_staleness",
+      "checkpoint-staleness",
+      async () => {
+        recordSandboxCheckpointStalenessGauges(
+          observability,
+          await readSandboxCheckpointStaleness(db),
+        );
       },
     ),
     refreshSandboxInventoryGauge(

@@ -88,6 +88,20 @@ spec:
               and on (job, instance)
               (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="rotation_backlog"} < {{ $inventoryFreshnessSeconds }})
             )
+        - record: opengeni:sandbox_checkpoint_staleness:fresh_max
+          expr: |
+            max by (kind) (
+              opengeni_sandbox_checkpoint_staleness{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
+              and on (job, instance)
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="checkpoint_staleness"} < {{ $inventoryFreshnessSeconds }})
+            )
+        - record: opengeni:sandbox_checkpoint_age_max_seconds:fresh_max
+          expr: |
+            max(
+              opengeni_sandbox_checkpoint_age_max_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
+              and on (job, instance)
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="checkpoint_staleness"} < {{ $inventoryFreshnessSeconds }})
+            )
         - record: opengeni:retained_processes_active:fresh_max
           expr: |
             max by (owner_state) (
@@ -1161,6 +1175,18 @@ spec:
             user_impact: 'No impact yet; if unresolved, the sandbox may be killed together with the command.'
             next_step: 'Inspect the blocking process and its owner; let it finish or settle before the deadline.'
             description: A provider-deadline rotation has been process-blocked for 10m. Inspect the current process, owner settlement, deadline cancellation and checkpoint capture while the provider is still available.
+        - alert: OpenGeniSandboxCheckpointStale
+          expr: opengeni:sandbox_checkpoint_staleness:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},kind="stale_12h"} > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'A live sandbox has held uncaptured workspace changes for over 12 hours.'
+            headline: 'Sandbox changes unsaved for 12h+'
+            value: '{{ "{{ printf `%.0f` $value }}" }} sandbox(es) stale'
+            user_impact: 'If the provider ends this sandbox before its next checkpoint, the user loses the changes made since the first unsaved write.'
+            next_step: 'Find the lease with the runbook query in docs/application-observability.md, then check skipped-capture reasons and what holds the box (open requests, supervised commands, a turn held on wait_for_input).'
+            description: A live Modal sandbox has had a write its last checkpoint did not capture for over 12 hours (half the default 24h provider lifetime). The deadline save still runs before the provider ends the box, so this is risk from an unplanned provider loss, not certain loss. A box kept warm while idle (an open tab after a short turn, or a held wait_for_input with a running command) is not checkpointed between turns and can also raise this.
         - alert: OpenGeniModalProviderMissingBeforeCapture
           # A newly created counter may have only one sample after its first
           # loss, so increase() alone would miss that first observation. The
