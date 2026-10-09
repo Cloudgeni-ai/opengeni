@@ -771,8 +771,8 @@ function InboxSettingsSections() {
         )}
       </Section>
       <Section
-        title="Who can tidy your inbox"
-        description="Agents never answer or approve for you. This only decides who may remove items."
+        title="What agents can do here"
+        description="Agents never answer or approve for you. This decides what they may see, snooze and clear."
       >
         {settings === null ? (
           <div className="grid gap-3 pt-1" aria-busy="true">
@@ -782,20 +782,25 @@ function InboxSettingsSections() {
         ) : (
           <ChoiceCards
             variant="list"
-            aria-label="Who can tidy your inbox"
+            aria-label="What agents can do here"
             value={settings.tidyPolicy}
             disabled={saving}
             onValueChange={(value) => void change({ tidyPolicy: value as InboxTidyPolicy })}
           >
             <ChoiceCard
               value="own_sessions"
-              title="The agent that posted it"
-              description="Or the sessions that started that agent."
+              title="Clear their own notes"
+              description="An agent's notes can be cleared by it or the sessions that started it."
             />
             <ChoiceCard
               value="any_agent"
-              title="Any agent working for you"
-              description="Lets one agent look after your inbox and clear what's done."
+              title="Tidy any agent's notes"
+              description="Any agent working for you can clear notes that are done."
+            />
+            <ChoiceCard
+              value="full_access"
+              title="Full access"
+              description="Any agent working for you can see everything here, including questions and replies, and snooze or clear it. Ask one to catch you up."
             />
           </ChoiceCards>
         )}

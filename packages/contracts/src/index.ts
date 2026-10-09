@@ -14705,14 +14705,20 @@ export const UpdateInboxItemRequest = z
 export type UpdateInboxItemRequest = z.infer<typeof UpdateInboxItemRequest>;
 
 /**
- * Which agents may withdraw or dismiss the person's notifications. Agents never
- * answer or approve on the person's behalf, whatever this says.
+ * What agents may do in the person's inbox. Agents never answer or approve on
+ * the person's behalf, whatever this says.
  */
 export const InboxTidyPolicy = z.enum([
-  /** The session that posted an item, and the sessions above it. */
+  /** Notifications: the session that posted one, and the sessions above it. */
   "own_sessions",
-  /** Any agent acting for the person. */
+  /** Notifications: any agent acting for the person. */
   "any_agent",
+  /**
+   * Any agent acting for the person sees every open item (questions,
+   * approvals, paused goals, replies and notifications) and may snooze,
+   * unsnooze or dismiss it.
+   */
+  "full_access",
 ]);
 export type InboxTidyPolicy = z.infer<typeof InboxTidyPolicy>;
 

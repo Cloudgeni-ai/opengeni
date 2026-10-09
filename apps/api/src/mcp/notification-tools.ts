@@ -2,8 +2,9 @@
 // it stays in the timeline, reaches webhook subscribers, opens an item in the
 // person's inbox and, when new, alerts their phones. Posting the same key again
 // updates that item in place without a new alert. Agents can withdraw their own
-// notifications and, as the person allows, tidy others' — but never answer a
-// question or decide an approval on the person's behalf.
+// notifications and, as the person allows, tidy others' or look after the whole
+// inbox (see, snooze and dismiss any item) — but never answer a question or
+// decide an approval on the person's behalf.
 import {
   NOTIFICATION_BODY_MAX_CHARS,
   NOTIFICATION_FACT_LABEL_MAX_CHARS,
@@ -23,7 +24,9 @@ import {
   getInboxTidyPolicy,
   getSession,
   getSessionInboxRecipient,
+  getSessionTitles,
   listInboxItems,
+  updateInboxItemAttention,
   type InboxItemRow,
 } from "@opengeni/db";
 import { appendAndPublishEvents, appendAndPublishTurnEventsFenced } from "@opengeni/events";
@@ -50,6 +53,11 @@ export type RegisterNotificationToolsInput = {
   attempt: () => AttemptClaims;
   json: JsonResult;
 };
+
+/** Questions, approvals and paused goals wait on the person; replies and notes don't. */
+function needsPerson(item: InboxItemRow): boolean {
+  return item.kind === "question" || item.kind === "approval" || item.kind === "goal_paused";
+}
 
 /** The person a session works for (its owner, else who started it), or null when no person does. */
 async function sessionOwner(
@@ -197,18 +205,35 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
     "inbox_tidy",
     {
       description:
-        "See and tidy the notifications in the inbox of the person who started this session. Lists the open agent notifications you may tidy: by default those from this session and sessions under it; every session's when the person allows any agent to tidy. Pass dismissItemIds to dismiss stale or duplicate ones. Questions, approvals and paused goals are never listed: only the person settles those.",
+        "See and look after the inbox of the person this session works for. Lists the open items you may manage: by default the agent notifications from this session and sessions under it; every session's notifications when the person lets any agent tidy; and, when the person gives agents full access, every open item (questions, approvals, paused goals, replies and notifications) with its session, so you can keep them up to date. Pass dismissItemIds to dismiss items that are done, stale or duplicated, snooze to hide items until a time, and unsnoozeItemIds to bring snoozed ones back. Dismissing a question or approval only clears it from the inbox; its session still waits. Never answer a question or decide an approval for the person: tell them, and they settle it.",
       inputSchema: {
         dismissItemIds: z.array(z.string().uuid()).max(50).default([]),
+        snooze: z
+          .array(
+            z.object({
+              itemId: z.string().uuid(),
+              until: z
+                .string()
+                .datetime({ offset: true })
+                .describe("ISO time to hide the item until"),
+            }),
+          )
+          .max(50)
+          .default([]),
+        unsnoozeItemIds: z.array(z.string().uuid()).max(50).default([]),
       },
     },
-    async ({ dismissItemIds }) => {
+    async ({ dismissItemIds, snooze, unsnoozeItemIds }) => {
       await authorize();
       const owner = await sessionOwner(deps, grant.workspaceId, sessionId);
-      if (!owner) return json({ ok: true, notifications: [], dismissed: [] });
+      if (!owner) {
+        return json({ ok: true, items: [], dismissed: [], snoozed: [], unsnoozed: [] });
+      }
       const scope = { accountId: grant.accountId, subjectId: owner.subjectId };
       const policy = await getInboxTidyPolicy(deps.db, scope);
+      const fullAccess = policy === "full_access";
       const allowed = async (item: InboxItemRow): Promise<boolean> => {
+        if (fullAccess) return true;
         if (item.kind !== "notification") return false;
         if (policy === "any_agent") return true;
         return (
@@ -217,12 +242,20 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
         );
       };
       const items = await listInboxItems(deps.db, scope);
-      const tidyable: InboxItemRow[] = [];
-      for (const item of items) if (await allowed(item)) tidyable.push(item);
+      const manageable: InboxItemRow[] = [];
+      for (const item of items) if (await allowed(item)) manageable.push(item);
+      const find = (itemId: string) => manageable.find((candidate) => candidate.id === itemId);
       const dismissed: string[] = [];
       for (const itemId of dismissItemIds) {
-        const item = tidyable.find((candidate) => candidate.id === itemId);
+        const item = find(itemId);
         if (!item) continue;
+        if (item.kind !== "notification") {
+          // Clears it from the inbox only; the question or approval stays open in its session.
+          if (await updateInboxItemAttention(deps.db, { itemId, ...scope, dismissed: true })) {
+            dismissed.push(itemId);
+          }
+          continue;
+        }
         if (await dismissInboxNotification(deps.db, { itemId, ...scope })) {
           dismissed.push(itemId);
           // Record the tidy on the posting session, so its timeline and hosts see it.
@@ -237,19 +270,86 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
           ] as Parameters<typeof appendAndPublishEvents>[4]);
         }
       }
-      return json({
-        ok: true,
-        policy,
-        dismissed,
-        notifications: tidyable
-          .filter((item) => !dismissed.includes(item.id))
-          .map((item) => ({
+      const snoozed: Array<{ itemId: string; until: string }> = [];
+      for (const { itemId, until } of snooze) {
+        if (dismissed.includes(itemId) || !find(itemId)) continue;
+        const at = new Date(until);
+        if (Number.isNaN(at.getTime()) || at.getTime() <= Date.now()) {
+          throw new Error(`Snooze time for ${itemId} must be in the future`);
+        }
+        const iso = at.toISOString();
+        if (await updateInboxItemAttention(deps.db, { itemId, ...scope, snoozedUntil: iso })) {
+          snoozed.push({ itemId, until: iso });
+        }
+      }
+      const unsnoozed: string[] = [];
+      for (const itemId of unsnoozeItemIds) {
+        const item = find(itemId);
+        if (!item || dismissed.includes(itemId) || item.snoozedUntil === null) continue;
+        if (await updateInboxItemAttention(deps.db, { itemId, ...scope, snoozedUntil: null })) {
+          unsnoozed.push(itemId);
+        }
+      }
+      const remaining = manageable.filter((item) => !dismissed.includes(item.id));
+      const snoozeOf = (item: InboxItemRow): string | null => {
+        if (unsnoozed.includes(item.id)) return null;
+        return snoozed.find((each) => each.itemId === item.id)?.until ?? item.snoozedUntil;
+      };
+      if (!fullAccess) {
+        return json({
+          ok: true,
+          policy,
+          dismissed,
+          snoozed,
+          unsnoozed,
+          notifications: remaining.map((item) => ({
             itemId: item.id,
             sessionId: item.sessionId,
             title: item.title,
             message: item.body,
+            snoozedUntil: snoozeOf(item),
             updatedAt: item.updatedAt,
           })),
+        });
+      }
+      const titles = new Map<string, string | null>();
+      const byWorkspace = new Map<string, string[]>();
+      for (const item of remaining) {
+        byWorkspace.set(item.workspaceId, [
+          ...(byWorkspace.get(item.workspaceId) ?? []),
+          item.sessionId,
+        ]);
+      }
+      for (const [workspaceId, sessionIds] of byWorkspace) {
+        const found = await getSessionTitles(deps.db, workspaceId, [...new Set(sessionIds)]);
+        for (const [id, title] of found) titles.set(id, title);
+      }
+      return json({
+        ok: true,
+        policy,
+        dismissed,
+        snoozed,
+        unsnoozed,
+        // Needs-you items first, then replies and notes; newest first within each.
+        items: [
+          ...remaining.filter((item) => needsPerson(item)),
+          ...remaining.filter((item) => !needsPerson(item)),
+        ].map((item) => ({
+          itemId: item.id,
+          kind: item.kind,
+          needsPerson: needsPerson(item),
+          sessionId: item.sessionId,
+          sessionTitle: titles.get(item.sessionId) ?? null,
+          title: item.title,
+          ...(item.subtitle ? { subtitle: item.subtitle } : {}),
+          message: item.body,
+          ...(item.facts.length > 0 ? { facts: item.facts } : {}),
+          ...(item.choices.length > 0 ? { choices: item.choices.map((each) => each.label) } : {}),
+          urgency: item.urgency,
+          unread: item.unread,
+          snoozedUntil: snoozeOf(item),
+          updatedAt: item.updatedAt,
+        })),
       });
     },
   );

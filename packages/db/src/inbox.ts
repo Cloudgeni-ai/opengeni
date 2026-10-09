@@ -208,7 +208,7 @@ export async function dismissInboxNotification(
   return Boolean(row?.id);
 }
 
-export type InboxTidyPolicyValue = "own_sessions" | "any_agent";
+export type InboxTidyPolicyValue = "own_sessions" | "any_agent" | "full_access";
 
 export async function getInboxTidyPolicy(
   db: Database,

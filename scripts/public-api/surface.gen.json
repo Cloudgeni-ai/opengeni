@@ -15481,7 +15481,7 @@
         "input"
       ],
       "shape": {
-        "$": "enum=[\"\\\"any_agent\\\"\",\"\\\"own_sessions\\\"\"]"
+        "$": "enum=[\"\\\"any_agent\\\"\",\"\\\"full_access\\\"\",\"\\\"own_sessions\\\"\"]"
       }
     },
     "IncidentTelemetryDataRoute": {
@@ -28057,6 +28057,7 @@
       "OrganizationAdministrationMember": "type",
       "OrganizationAdministrationMemberWorkspaceAccess": "type",
       "OrganizationAdministrationOverview": "type",
+      "OrganizationAgentAdminAccess": "type",
       "OrganizationApiKeyAccess": "type",
       "OrganizationCodexAccountsResponse": "type",
       "OrganizationCredentialProvider": "type",
@@ -28308,6 +28309,7 @@
       "Session": "type",
       "SESSION_EVENT_TYPES": "value",
       "SESSION_SCOPE_HEADER": "value",
+      "SessionAdminAccess": "type",
       "SessionApprovalRequest": "type",
       "SessionBackgroundCommand": "type",
       "SessionBackgroundCommandActivity": "type",
@@ -28574,6 +28576,7 @@
       "UpdateMemorySlackPublicationConfigurationRequest": "type",
       "UpdateNetworkRouteRequest": "type",
       "UpdateOpenGeniSlackBotOrganizationAccess": "type",
+      "UpdateOrganizationAgentAdminAccessRequest": "type",
       "UpdateOrganizationApiKeyRequest": "type",
       "UpdateOrganizationMcpConnectionRequest": "type",
       "UpdateOrganizationModelDefaultsRequest": "type",
