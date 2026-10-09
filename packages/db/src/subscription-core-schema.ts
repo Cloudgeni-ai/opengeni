@@ -34,6 +34,8 @@ export const subscriptionConnections = pgTable(
     refreshGeneration: bigint("refresh_generation", { mode: "number" }).notNull().default(1),
     version: integer("version").notNull().default(1),
     status: text("status").notNull().default("active"),
+    /** Irreversible local secret removal; retained rows are nonsecret history. */
+    disconnectedAt: timestamp("disconnected_at", { withTimezone: true }),
     lastError: text("last_error"),
     /** When a time-bound health quarantine (status error) ends. */
     healthRetryAt: timestamp("health_retry_at", { withTimezone: true }),
@@ -94,6 +96,12 @@ export const subscriptionConnections = pgTable(
     providerValid: check(
       "subscription_connections_provider_chk",
       sql`${table.provider} in ('codex', 'claude', 'xai')`,
+    ),
+    disconnectedSecret: check(
+      "subscription_disconnected_secret_chk",
+      sql`${table.disconnectedAt} is null or (${table.status} = 'disabled'
+        and ${table.credentialEncrypted} = '' and ${table.providerAccountId} is null
+        and not ${table.allocatorEnabled})`,
     ),
   }),
 );
@@ -301,6 +309,11 @@ export const subscriptionOperationLeases = pgTable(
     operationId: uuid("operation_id").notNull(),
     attemptId: uuid("attempt_id").notNull(),
     operationKind: text("operation_kind").notNull(),
+    requestId: text("request_id"),
+    transportAttempt: integer("transport_attempt"),
+    requestReservedAt: timestamp("request_reserved_at", { withTimezone: true }),
+    requestOutcome: text("request_outcome"),
+    requestObservedAt: timestamp("request_observed_at", { withTimezone: true }),
     sessionId: uuid("session_id"),
     turnId: uuid("turn_id"),
     provider: text("provider").notNull(),
@@ -325,12 +338,26 @@ export const subscriptionOperationLeases = pgTable(
       .where(sql`${table.sessionId} is not null`),
     operationKindValid: check(
       "subscription_operation_leases_kind_chk",
-      sql`${table.operationKind} in ('image', 'realtime', 'transcription')`,
+      sql`${table.operationKind} in ('image', 'realtime', 'transcription', 'model', 'credential_request', 'apps')`,
+    ),
+    requestIdentity: uniqueIndex("subscription_operation_request_identity_uq")
+      .on(table.accountId, table.requestId, table.transportAttempt)
+      .where(sql`${table.requestId} is not null`),
+    requestShape: check(
+      "subscription_operation_request_shape_chk",
+      sql`(${table.requestId} is null and ${table.transportAttempt} is null
+        and ${table.requestReservedAt} is null and ${table.requestOutcome} is null
+        and ${table.requestObservedAt} is null)
+        or (${table.requestId} is not null and ${table.transportAttempt} is not null
+          and ${table.requestOutcome} is not null and length(${table.requestId}) between 1 and 512
+          and ${table.transportAttempt} > 0 and ${table.requestReservedAt} is not null
+          and ${table.requestOutcome} in ('reserved', 'response_received', 'refused', 'unknown'))`,
     ),
     referenceShape: check(
       "subscription_operation_leases_reference_chk",
       sql`(${table.turnId} is null or ${table.sessionId} is not null)
-        and (${table.sessionId} is not null or (${table.turnId} is null and ${table.operationKind} = 'transcription'))`,
+        and (${table.sessionId} is not null or (${table.turnId} is null and ${table.operationKind} in ('transcription', 'credential_request', 'apps')))
+        and (${table.operationKind} <> 'model' or ${table.turnId} is not null)`,
     ),
   }),
 );

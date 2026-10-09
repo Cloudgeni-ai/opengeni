@@ -16,6 +16,14 @@ import {
   createSession,
   disconnectAllSubscriptionCoreCodexConnections,
   disconnectSubscriptionCoreCodexConnection,
+  reserveSubscriptionCoreCodexRequest,
+  settleSubscriptionCoreCodexRequest,
+  reserveSubscriptionCoreCodexOperationRequest,
+  settleSubscriptionCoreCodexOperationRequest,
+  SubscriptionCoreCodexSourceDisconnectedError,
+  SubscriptionCoreCodexLeaseLostError,
+  reserveSubscriptionCoreCodexAppsRequest,
+  settleSubscriptionCoreCodexAppsRequest,
   enqueueSessionTurn,
   ensureManagedAccessForUser,
   fenceSubscriptionCoreCodexResetCredit,
@@ -234,13 +242,62 @@ async function row(connectionId: string) {
       refresh_generation::text as refresh_generation, credential_encrypted, owner_subject_id,
       authority_generation::text as authority_generation, authority_id::text as authority_id,
       allow_personal_workspaces, connected_by_subject_id
-    from subscription_connections where id = ${connectionId}::uuid`;
+    from subscription_connections where id = ${connectionId}::uuid and disconnected_at is null`;
   return found ?? null;
 }
 
 function accessToken(encrypted: string): string {
   return (JSON.parse(decryptEnvironmentValue(key, encrypted)) as { access_token: string })
     .access_token;
+}
+
+async function disconnectDesignationCase() {
+  const org = await organization();
+  await setCutover(org.accountId, true);
+  const connected = await connect(org, org.ownerSubjectId, null, "designation-drain");
+  if (connected.kind !== "connected") throw new Error("connect failed");
+  await shared!.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`insert into subscription_apps_designations(account_id, workspace_id, connection_id, updated_by_subject_id)
+      values (${org.accountId}::uuid, ${org.otherWorkspaceId}::uuid, ${connected.id}::uuid, ${org.ownerSubjectId})`;
+  });
+  const target = {
+    accountId: org.accountId,
+    workspaceId: org.otherWorkspaceId,
+    connectionId: connected.id,
+  };
+  const reserved = await reserveSubscriptionCoreCodexAppsRequest(client!.db, target, {
+    requestId: crypto.randomUUID(),
+    transportAttempt: 1,
+  });
+  await expect(
+    reserveSubscriptionCoreCodexAppsRequest(
+      client!.db,
+      { ...target, workspaceId: org.sharedWorkspaceId },
+      { requestId: crypto.randomUUID(), transportAttempt: 1 },
+    ),
+  ).rejects.toThrow();
+  expect((await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome).toBe("removed");
+  await expect(
+    reserveSubscriptionCoreCodexAppsRequest(client!.db, target, {
+      requestId: crypto.randomUUID(),
+      transportAttempt: 1,
+    }),
+  ).rejects.toBeInstanceOf(SubscriptionCoreCodexSourceDisconnectedError);
+  await settleSubscriptionCoreCodexAppsRequest(client!.db, target, {
+    operationId: reserved.operationId,
+    outcome: "response_received",
+  });
+  expect(
+    Array.from(
+      await shared!.admin`select connection_id from subscription_apps_designations
+    where account_id = ${org.accountId}::uuid and workspace_id = ${org.otherWorkspaceId}::uuid`,
+    ),
+  ).toEqual([]);
+  const [source] = await shared!
+    .admin`select credential_encrypted, disconnected_at is not null as disconnected
+    from subscription_connections where id = ${connected.id}::uuid`;
+  expect(source).toEqual({ credential_encrypted: "", disconnected: true });
 }
 
 /**
@@ -267,6 +324,229 @@ async function insertLease(input: {
 }
 
 describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
+  test(
+    "disconnect clears the exact Apps designation in another workspace",
+    disconnectDesignationCase,
+  );
+  test("one-shot nonturn reservation, unknown crash outcome, reconnect and RLS isolation", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const connected = await connect(org, org.ownerSubjectId, null, "request-custody");
+    if (connected.kind !== "connected") throw new Error("connect failed");
+    const scope = {
+      kind: "workspace" as const,
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      subjectId: org.ownerSubjectId,
+    };
+    const request = { requestId: crypto.randomUUID(), transportAttempt: 1 };
+    const receipt = await reserveSubscriptionCoreCodexOperationRequest(
+      client!.db,
+      scope,
+      null,
+      connected.id,
+      request,
+    );
+    await expect(
+      reserveSubscriptionCoreCodexOperationRequest(client!.db, scope, null, connected.id, request),
+    ).rejects.toThrow();
+    const other = await organization();
+    await expect(
+      reserveSubscriptionCoreCodexOperationRequest(
+        client!.db,
+        {
+          ...scope,
+          accountId: other.accountId,
+          workspaceId: other.sharedWorkspaceId,
+          subjectId: other.ownerSubjectId,
+        },
+        null,
+        connected.id,
+        { ...request, requestId: crypto.randomUUID() },
+      ),
+    ).rejects.toThrow();
+    await settleSubscriptionCoreCodexOperationRequest(client!.db, scope, {
+      operationId: receipt.operationId,
+      outcome: "unknown",
+    });
+    await shared!
+      .admin`update subscription_operation_leases set leased_until = now() - interval '1 hour'
+      where operation_id = ${receipt.operationId}::uuid`;
+    expect((await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome).toBe("removed");
+    expect((await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome).toBe("removed");
+    await expect(
+      reserveSubscriptionCoreCodexOperationRequest(client!.db, scope, null, connected.id, {
+        ...request,
+        transportAttempt: 2,
+      }),
+    ).rejects.toBeInstanceOf(SubscriptionCoreCodexSourceDisconnectedError);
+    const [retained] = await shared!.admin`select request_outcome from subscription_operation_leases
+      where operation_id = ${receipt.operationId}::uuid`;
+    expect(retained!.request_outcome).toBe("unknown");
+    const [secret] = await shared!
+      .admin`select credential_encrypted from subscription_connections where id = ${connected.id}::uuid`;
+    expect(secret!.credential_encrypted).toBe("");
+    // Neither an old refresh nor a reconnect-by-update can rehydrate history.
+    const lateWrite = await shared!
+      .admin`update subscription_connections set credential_encrypted = 'late-refresh'
+      where id = ${connected.id}::uuid`.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(String(lateWrite)).toContain("disconnected subscription identity");
+    const reconnected = await connect(org, org.ownerSubjectId, null, "request-custody");
+    if (reconnected.kind !== "connected") throw new Error("reconnect failed");
+    expect(reconnected.id).not.toBe(connected.id);
+    const projected = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+      getSubscriptionCoreOrganizationCodexProjection(client!.db, {
+        organizationId: org.accountId,
+        subjectId: org.ownerSubjectId,
+      }),
+    );
+    expect(projected.accounts.map((account) => account.id)).toEqual([reconnected.id]);
+  });
+
+  test("reserve versus disconnect linearizes in both lock orders", async () => {
+    for (const first of ["reserve", "disconnect"] as const) {
+      const org = await organization();
+      await setCutover(org.accountId, true);
+      const connected = await connect(org, org.ownerSubjectId, null, `race-${first}`);
+      if (connected.kind !== "connected") throw new Error("connect failed");
+      const scope = {
+        kind: "workspace" as const,
+        accountId: org.accountId,
+        workspaceId: org.sharedWorkspaceId,
+        subjectId: org.ownerSubjectId,
+      };
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const reserve = (db = client!.db) =>
+        reserveSubscriptionCoreCodexOperationRequest(db, scope, null, connected.id, {
+          requestId: crypto.randomUUID(),
+          transportAttempt: 1,
+        });
+      const remove = (db = client!.db) =>
+        disconnectSubscriptionCoreCodexConnection(db, {
+          accountId: org.accountId,
+          workspaceId: null,
+          subjectId: org.ownerSubjectId,
+          connectionId: connected.id,
+        });
+      const holding = withSessionRlsActorContext(
+        { subjectId: org.ownerSubjectId, initiatingHumanSubjectId: org.ownerSubjectId },
+        () =>
+          withRlsContext(
+            client!.db,
+            {
+              accountId: org.accountId,
+              workspaceId: first === "reserve" ? org.sharedWorkspaceId : null,
+            },
+            async (tx) => {
+              if (first === "reserve") await reserve(tx);
+              else await remove(tx);
+              entered.resolve();
+              await release.promise;
+            },
+          ),
+      );
+      await entered.promise;
+      let completed = false;
+      const waiting = withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, async () =>
+        first === "reserve" ? await remove() : await reserve(),
+      )
+        .then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        )
+        .finally(() => {
+          completed = true;
+        });
+      // Observe actual PostgreSQL lock contention, not a sleep-as-proof.
+      for (let tries = 0; tries < 100; tries++) {
+        const [locks] = await shared!.admin`select count(*)::int as pending from pg_locks
+          where locktype = 'advisory' and not granted and database = (select oid from pg_database where datname = current_database())`;
+        if (locks!.pending > 0) break;
+        if (tries === 99) {
+          release.resolve();
+          throw new Error("no competing database lock observed");
+        }
+        await Bun.sleep(5);
+      }
+      expect(completed).toBe(false);
+      release.resolve();
+      await holding;
+      const result = await waiting;
+      if (first === "reserve") expect(result).toMatchObject({ value: { outcome: "removed" } });
+      else
+        expect("error" in result && result.error).toBeInstanceOf(
+          SubscriptionCoreCodexSourceDisconnectedError,
+        );
+    }
+  });
+
+  test("refresh serialization scrubs the winning token and cannot resurrect a disconnected generation", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const connected = await connect(org, org.ownerSubjectId, null, "refresh-drain");
+    if (connected.kind !== "connected") throw new Error("connect failed");
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const refreshing = withSessionRlsActorContext(
+      { subjectId: org.ownerSubjectId, initiatingHumanSubjectId: org.ownerSubjectId },
+      () =>
+        withRlsContext(
+          client!.db,
+          { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+          async (tx) => {
+            const [started] = await rawRows<{ refresh_generation: number | string }>(
+              tx,
+              sql`select refresh_generation from opengeni_private.begin_subscription_codex_connection_refresh(
+            ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${connected.id}::uuid,
+            null, null, null, null)`,
+            );
+            expect(started).toBeDefined();
+            entered.resolve();
+            await release.promise;
+            const [persisted] = await rawRows<{ persisted: boolean }>(
+              tx,
+              sql`select opengeni_private.persist_subscription_codex_connection_refresh(
+            ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${connected.id}::uuid,
+            ${Number(started!.refresh_generation)}::bigint, ${encryptEnvironmentValue(key, JSON.stringify({ access_token: "synthetic-rotated" }))},
+            now() + interval '1 hour', now()) as persisted`,
+            );
+            expect(persisted!.persisted).toBe(true);
+          },
+        ),
+    );
+    await entered.promise;
+    const removing = disconnect(org, org.ownerSubjectId, null, connected.id);
+    release.resolve();
+    await refreshing;
+    expect((await removing).outcome).toBe("removed");
+    const [stored] = await shared!
+      .admin`select credential_encrypted, disconnected_at is not null as disconnected
+      from subscription_connections where id = ${connected.id}::uuid`;
+    expect(stored).toEqual({ credential_encrypted: "", disconnected: true });
+    await withSessionRlsActorContext(
+      { subjectId: org.ownerSubjectId, initiatingHumanSubjectId: org.ownerSubjectId },
+      () =>
+        withRlsContext(
+          client!.db,
+          { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+          async (tx) => {
+            expect(
+              await rawRows(
+                tx,
+                sql`select refresh_generation from opengeni_private.begin_subscription_codex_connection_refresh(
+          ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${connected.id}::uuid,
+          null, null, null, null)`,
+              ),
+            ).toEqual([]);
+          },
+        ),
+    );
+  });
+
   test("personal extra-credit consent is owner-only, OCC-fenced, preserved and immediately revocable", async () => {
     const org = await organization();
     await setCutover(org.accountId, true);
@@ -726,7 +1006,7 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     await personalCase();
   });
 
-  test("disconnect waits for no ledger: an unresolved redemption in any workspace and a live lease refuse it", async () => {
+  test("disconnect scrubs secrets with a live exact request and unknown redemption, then preserves response custody", async () => {
     const org = await organization();
     await setCutover(org.accountId, true);
     const connected = await connect(org, org.ownerSubjectId, null, "guarded");
@@ -738,11 +1018,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       ) values (${attempt}::uuid, ${org.accountId}::uuid, ${org.otherWorkspaceId}::uuid,
         ${connected.id}::uuid, ${org.ownerSubjectId}, 'browser', 'credit-guarded',
         'provider_started', now() + interval '5 minutes', now())`;
-    expect((await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome).toBe(
-      "unresolved_redemption",
-    );
-    await shared!.admin`delete from codex_reset_redemption_attempts where id = ${attempt}::uuid`;
-
     // A chat lease on a running turn.
     const session = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
       createSession(client!.db, {
@@ -794,25 +1069,82 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       turnId: turn.id,
       connectionId: connected.id,
     });
-    expect((await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome).toBe("in_use");
-    expect(await row(connected.id)).not.toBeNull();
+    const identity = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+      readSubscriptionCoreTurnIdentity(client!.db, {
+        accountId: org.accountId,
+        workspaceId: org.sharedWorkspaceId,
+        sessionId: session.id,
+        turnId: turn.id,
+      }),
+    );
+    if (!identity) throw new Error("missing accepted identity");
+    const [fence] = await shared!.admin<{ attempt_id: string; generation: number }[]>`
+      select active_attempt_id::text as attempt_id, execution_generation::int as generation
+      from session_turns where id = ${turn.id}::uuid`;
+    const ref = { connectionId: connected.id, holderId: "writers-holder", generation: 1 };
+    const request = {
+      requestId: crypto.randomUUID(),
+      transportAttempt: 1,
+      attemptId: fence!.attempt_id,
+      executionGeneration: fence!.generation,
+    };
+    await expect(
+      reserveSubscriptionCoreCodexRequest(
+        client!.db,
+        identity,
+        { ...ref, holderId: "stale-holder" },
+        request,
+      ),
+    ).rejects.toBeInstanceOf(SubscriptionCoreCodexLeaseLostError);
+    const reserved = await reserveSubscriptionCoreCodexRequest(client!.db, identity, ref, request);
+    await expect(
+      reserveSubscriptionCoreCodexRequest(client!.db, identity, ref, request),
+    ).rejects.toThrow();
+    expect((await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome).toBe("removed");
+    expect(await row(connected.id)).toBeNull();
+    const [scrubbed] = await shared!.admin`select credential_encrypted, status, allocator_enabled,
+      disconnected_at is not null as disconnected from subscription_connections where id = ${connected.id}::uuid`;
+    expect(scrubbed).toEqual({
+      credential_encrypted: "",
+      status: "disabled",
+      allocator_enabled: false,
+      disconnected: true,
+    });
+    await expect(
+      reserveSubscriptionCoreCodexRequest(client!.db, identity, ref, {
+        ...request,
+        requestId: crypto.randomUUID(),
+      }),
+    ).rejects.toBeInstanceOf(SubscriptionCoreCodexSourceDisconnectedError);
+    // Expiry does not delete response custody or manufacture remote completion.
     await shared!
       .admin`update subscription_leases set leased_until = now() - interval '1 hour' where turn_id = ${turn.id}::uuid`;
-    await shared!.admin.begin(async (tx) => {
-      await tx`set local session_replication_role = replica`;
-      await tx`insert into subscription_operation_leases
-        (account_id, workspace_id, operation_id, attempt_id, operation_kind, provider, connection_id, holder_id, generation, leased_until)
-        values (${org.accountId}::uuid, ${org.otherWorkspaceId}::uuid, ${crypto.randomUUID()}::uuid,
-          ${crypto.randomUUID()}::uuid, 'transcription', 'codex', ${connected.id}::uuid, 'operation-holder', 1, now() + interval '5 minutes')`;
-    });
-    expect((await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome).toBe("in_use");
     await shared!
       .admin`update subscription_operation_leases set leased_until = now() - interval '1 hour' where connection_id = ${connected.id}::uuid`;
     expect((await disconnect(org, org.ownerSubjectId, null, connected.id)).outcome).toBe("removed");
     const [leases] = await shared!.admin`select
       (select count(*) from subscription_leases where connection_id = ${connected.id}::uuid)::int as chat,
       (select count(*) from subscription_operation_leases where connection_id = ${connected.id}::uuid)::int as operation`;
-    expect(leases).toEqual({ chat: 0, operation: 0 });
+    expect(leases).toEqual({ chat: 1, operation: 1 });
+    const [unknown] = await shared!.admin`select request_outcome, request_observed_at
+      from subscription_operation_leases where operation_id = ${reserved.operationId}::uuid`;
+    expect(unknown).toEqual({ request_outcome: "reserved", request_observed_at: null });
+    // Reconnect is a new identity, even with exactly the same upstream person.
+    const replacement = await connect(org, org.ownerSubjectId, null, "guarded");
+    if (replacement.kind !== "connected") throw new Error("reconnect failed");
+    expect(replacement.id).not.toBe(connected.id);
+    await settleSubscriptionCoreCodexRequest(client!.db, identity, ref, {
+      ...request,
+      operationId: reserved.operationId,
+      outcome: "response_received",
+    });
+    expect(await row(replacement.id)).not.toBeNull();
+    const [receipt] = await shared!.admin`select request_outcome from subscription_operation_leases
+      where operation_id = ${reserved.operationId}::uuid`;
+    expect(receipt!.request_outcome).toBe("response_received");
+    const [redemption] = await shared!
+      .admin`select status from codex_reset_redemption_attempts where id = ${attempt}::uuid`;
+    expect(redemption!.status).toBe("provider_started");
   });
 
   test("organization-level reset redemption: authority and one credit across workspaces", async () => {
@@ -901,7 +1233,7 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     }
   });
 
-  test("canonical and aliased resolve and refused personal disconnect never change settings", async () => {
+  test("canonical and aliased resolve and repeated personal disconnect never change unrelated settings", async () => {
     const org = await organization();
     await setCutover(org.accountId, true);
     const a = await connect(org, org.ownerSubjectId, org.personalWorkspaceId, "resolve-A");
@@ -949,7 +1281,7 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       expect(await snapshot()).toEqual(before);
       expect(
         (await disconnect(org, org.ownerSubjectId, org.personalWorkspaceId, target)).outcome,
-      ).toBe("in_use");
+      ).toBe("removed");
       expect(await snapshot()).toEqual(before);
     }
   });
@@ -986,6 +1318,7 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       const posture = await inspectRuntimeDatabasePosture(ownerClient!.db, options);
       expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
       expect(posture.subscriptionOwnerRoutines).toHaveLength(4);
+      await disconnectDesignationCase();
       for (const routine of posture.subscriptionOwnerRoutines!) {
         expect(posture.privateRoutines.some((entry) => entry.name === routine.name)).toBe(false);
       }

@@ -272,6 +272,7 @@ export async function projectSubscriptionCoreCodexWorkspace(
       on quota.account_id = connection.account_id and quota.connection_id = connection.id
     where connection.account_id = ${input.accountId}::uuid
       and connection.provider = 'codex' and connection.kind = 'subscription'
+      and connection.disconnected_at is null
       and connection.ownership = 'shared'
       and (connection.scope_kind = 'organization'
         or (connection.scope_kind = 'workspaces' and (
@@ -393,6 +394,15 @@ export async function getSubscriptionCoreCodexWorkspaceProjection(
         workspaceId: input.workspaceId,
         subjectId: input.viewerSubjectId,
       });
+      // Personal rows are intentionally visible only through the owner reader,
+      // so sanitize the historical primary pointer after that projection joins.
+      if (
+        ![...projection.accounts, ...personal].some(
+          (account) => account.id === projection.rotation.activeCredentialId,
+        )
+      ) {
+        projection.rotation.activeCredentialId = null;
+      }
       return personal.length === 0
         ? projection
         : {
@@ -480,7 +490,7 @@ export async function getSubscriptionCoreOrganizationCodexProjection(
         from subscription_settings
         where account_id = ${input.organizationId}::uuid and workspace_id is null`,
       );
-      const primaryConnectionId = org?.primary_id ?? null;
+      let primaryConnectionId = org?.primary_id ?? null;
       const rows = await rawRows<ConnectionRow>(
         tx,
         sql`select ${CONNECTION_COLUMNS}
@@ -489,9 +499,11 @@ export async function getSubscriptionCoreOrganizationCodexProjection(
         on quota.account_id = connection.account_id and quota.connection_id = connection.id
       where connection.account_id = ${input.organizationId}::uuid
         and connection.provider = 'codex' and connection.kind = 'subscription'
+        and connection.disconnected_at is null
         and connection.ownership = 'shared' and connection.managed_by_workspace_id is null
       order by connection.created_at, connection.id`,
       );
+      if (!rows.some((row) => row.id === primaryConnectionId)) primaryConnectionId = null;
       return {
         accounts: rows.map((row) =>
           projectAccount(row, {

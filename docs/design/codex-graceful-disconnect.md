@@ -1,125 +1,92 @@
-# Codex graceful disconnect — implementation boundary
+# Codex graceful local disconnect (OPE-766)
 
-Status: proposed; **not implemented or deployed**. Applies to the October 9,
-2026 disconnect report, tracked as OPE-766. This is a follow-up to OPE-700, not the active
-credential-writer security repair in PRs #3895/#3896.
+Status: implementation candidate; **not merged or deployed**. Follow-up to
+OPE-700/OPE-717. The integration base is corrected cutover
+`4d22d97da851870b6e40f926f3cfa5a9751f6bbc`, stacked on writers
+`de5e7755b216f1ec16e3dc2f7693f4c379e7fbe4`. Those upstream changes have separate
+ownership and approval. This candidate does not change their branches.
 
-Architecture decision (October 9, 11:02 UTC): reuse the corrected OPE-717
-shared-core operation/settlement seam. Do not build a parallel legacy operation
-ledger or activate a chat-only drain. Implementation depends on the coordinator
-releasing stable writers and cutover heads. Live legacy disconnect remains
-unfixed until the integrated change is verified and delivered.
+The reported organization DELETE returned HTTP 409 because the live-lease FK
+prevented deletion. Expired-lease pruning did not fix graceful disconnect: a
+lease timeout is not evidence that an upstream request stopped. The UI promise
+requires a persistent fence, not removal of the guard or cancellation of work.
 
-## Existing behavior and reusable boundaries
+## Approved request boundary
 
-At base `b194e3149f9f97018d8d0acdfba98f8063e57cd7`, organization DELETE calls
-`disconnectOrganizationCodexAccount` in `packages/db/src/index.ts`. It takes
-the complete organization workspace tenancy/source prefix, captures accepted
-source bindings, locks rotation settings and deletes the credential.
-`prevent_organization_codex_disconnect_with_live_leases` rejects the deletion
-with SQLSTATE 55006; the HTTP adapter maps that to 409. The dialog's promise
-that running work finishes is therefore not implemented.
+The October 9, 12:53 UTC architecture decision defines **one atomic durable
+request reservation** as the admission linearization boundary. It is not proof
+that the network call has already started. A successful reservation permits
+exactly one physical request by the exact attempt/holder, not a whole agent turn,
+a session, a batch, or a reusable bearer. A replacement attempt cannot replay
+the reservation. An authentication retry is another physical request.
 
-The existing guard counts only unexpired leases. Expiry is neither an attempt
-quiescence receipt nor provider-operation settlement. Removing this guard, or
-first deleting expired leases, cannot implement a drain.
+The shared core is the sole lifecycle owner. No second legacy ledger or
+chat-only drain is introduced. The deployment requires matching request-aware
+binaries and the existing core cutover; migration 0686 is maintenance-only.
 
-Reuse these existing boundaries:
+## Local removal and request custody
 
-- Turn admission: `acquireCodexCredentialLease` and its source/pool locks;
-  the shared-core equivalent is `placeSubscriptionCoreCodexTurn`.
-- Exact execution: turn, attempt, execution generation, holder and lease
-  generation; a session ID or accepted source snapshot is insufficient.
-- Token refresh: the existing per-credential single-flight lock and version CAS.
-  Token-refresh version is **not** a connection lifecycle generation.
-- Physical completion: the canonical `session_turn_attempts.quiesced_at`
-  receipt and its recovery path, not `closed_at`, turn status or lease expiry.
-- Core non-turn operations: `subscription_operation_leases` and the corrected
-  operation admission/credential seams. These must provide durable settlement
-  separate from lease liveness before disconnect can use them as drain proof.
-- Recovery scheduling: an existing control-worker maintenance activity may
-  consume bounded, durable pending-disconnect work. Do not make HTTP retries,
-  a browser refresh, or the original administrator's continued membership the
-  only way to finalize an accepted disconnect.
+Disconnect keeps the reviewed organization-administrator/personal-owner
+authorization and exact owner-only capability. Under the same connection lock
+as refresh and admission it irreversibly records `disconnected_at`, disables
+placement, scrubs encrypted credentials, and clears the upstream identity used
+for reconnect matching. New reservations, token loads and refreshes cannot use
+that identity. Allocator pause remains a separate operation, not a revocation.
 
-## Required protocol
+The nonsecret connection row, native leases and request observations remain as
+history. Secret removal is completed atomically, including with no active work;
+it needs neither browser retries nor a future maintenance worker, and cannot
+retain secrets indefinitely after an API/worker crash. Repeated authorized
+disconnect is harmless. Reconnect creates a distinct connection ID; stale
+refresh/finalization cannot rehydrate or remove the new connection.
 
-1. An authorized disconnect transaction locks the canonical tenancy/source/pool
-   prefix, then the exact connection lifecycle row. It marks that generation
-   `disconnecting` and records its immutable disconnect request identity.
-2. The same commit fences **all new admissions**, including explicit pins,
-   active pointers, same-session later turns, capacity refresh, Apps, usage,
-   model discovery, images, transcription and realtime negotiation. Allocator
-   pause is not the fence: it deliberately preserves other use.
-3. Atomically capture the exact already-admitted execution identities. A chat
-   admission names account/workspace/session/turn/attempt/execution generation,
-   holder and lease generation. An operation admission names its complete
-   operation/attempt/holder/generation identity and connection generation.
-   Only those identities may continue using/refreshing that generation.
-   Existing unrelated membership/control revocation still wins; disconnect
-   must not become a permission override.
-4. Repeated DELETE returns the same accepted request and truthful lifecycle.
-   No holders means immediate finalization in that transaction. Otherwise
-   return success with `disconnecting`, never the old active-use 409.
-5. Release/settlement records durable progress. A maintenance retry finalizes
-   only when every captured identity has positive settlement proof. An expired
-   lease stops authority to dispatch but does not synthesize that proof. Crash
-   recovery must consume the native exact-owner/physical-writer recovery path.
-6. Finalization removes encrypted credential material and dependent pointers
-   under the same generation fence. An old finalizer or refresh CAS must not
-   remove or overwrite a later reconnect. Do not retain secret tombstones.
-7. Reconnect while draining must not overwrite the draining generation. Either
-   keep a distinct new connection identity or explicitly reject replacement
-   until safe completion. Pick the corrected core's native identity policy,
-   not a second legacy-only generation protocol.
+An already reserved physical request retains its process-local bearer and
+response consumer. Disconnect does not revoke its turn lease or cancel its
+stream. The existing response rendezvous and durable conversation checkpoint
+must retain model response and tool progress before the same continuation is
+re-placed. Subsequent model requests use an eligible source, or enter the native
+durable wait when policy/pins provide none. Graceful removal is not a quota
+refusal and must not consume refusal budgets or quarantine the subscription.
 
-Selection and metadata projections must distinguish connected, disconnecting
-and absent. Running exact work may retain its historical identity, while
-pickers/pins/new requests cannot admit it. A visible draining state must use the
-actual existing components and receive the required component preview.
+`subscription_operation_leases` carries immutable single-request identity and
+observations. `reserved` means admission only; `response_received` means the
+local response was consumed, not provider-side physical quiescence;
+`refused` records definitive refusal; `unknown` preserves ambiguity. Neither
+expiry nor process death synthesizes a completed response. Ordinary lease
+release cannot erase these records. Normal workspace/session retention may
+remove their nonsecret history. Existing unrelated authorization revocation
+still wins: disconnect creates no override of session visibility or control.
 
-## Why core integration is a prerequisite, not a guard patch
+Non-chat consumers use the same request seam: images, realtime negotiation,
+transcription, usage, discovery, Apps and reset redemption. A returned Response
+header is not body completion; in particular transcription must consume its
+body before releasing custody. Refresh is serialized with disconnect and late
+credential writes are generation-fenced and cannot reactivate a tombstone.
 
-The legacy non-turn paths load a bearer without a durable operation identity:
-`apps/api/src/codex-realtime.ts`,
-`apps/api/src/transcription/providers/codex-subscription.ts`,
-`packages/core/src/codex-model-availability.ts`, and the legacy usage/reset
-helpers in `packages/db/src/codex-token-resolver.ts`. The token resolver can
-re-read/refresh, but it cannot prove which physical operation was admitted
-before a disconnect fence or that it settled after a crash.
+## Limits that must remain explicit
 
-Adding only a credential timestamp and filtering the allocator therefore
-leaves either post-fence non-turn use or broken already-running operations.
-The corrected shared core is the existing native home for this missing
-identity, so its stable interfaces must be supplied before choosing whether
-the legacy bridge can reuse it without crossing the cutover world boundary.
-Do not activate a partial legacy drain or claim the operation/crash criteria
-from chat-only tests.
+- Local removal does not revoke an upstream OAuth token, erase copies already
+  in process memory, or prove that a provider stopped work.
+- Hard upstream revocation can prevent a current request from completing.
+  Definitive authentication refusal can safely trigger new placement; a lost
+  response or ambiguous transport outcome cannot be blindly replayed.
+- Unknown reset-redemption outcomes retain their nonsecret idempotency record.
+  Removing credentials does not promise reconciliation without supported
+  successor authorization or a provider outcome-query mechanism.
+- Existing frozen pins retain their policy. Removing a source does not silently
+  authorize fallback to another owner or billing route.
 
-Historical heads `7eede9882de84a7e466c12d50d5b90d116cdbe65` and
-`e3b19eef28023bcf081d5511a11b36e81ed5a879` are not integration permission.
-The security-repair owner retains exclusive ownership of its branches.
+## Verification and delivery
 
-## Verification matrix
+Use fake encrypted credentials and the independently isolated PostgreSQL
+cluster, never a customer account. Tests must include restricted application
+roles and a NOBYPASSRLS migration owner, both reserve/disconnect lock orders,
+single-use/exact-holder admission, current request completion, refresh races,
+unknown crash/expiry custody, reconnect/stale completion, unauthorized tenants,
+personal ownership, source projections, stream continuation, and pinned/no-source
+wait behavior. Characterization tests describe the historical legacy defect,
+not successful native-core behavior.
 
-Use encrypted fake credentials and a disposable fully migrated PostgreSQL
-database. Exercise application roles (including private/Personal workspace
-rules); superuser fixture setup is not evidence of runtime authorization.
-
-| Case | Required result |
-| --- | --- |
-| Disconnect vs acquire in both lock orders | Exactly one admission side wins; no post-fence new holder |
-| Existing exact turn/operation | Continues and refreshes only its admitted generation |
-| New turn in same session, pin, capacity refresh, new operation | Cannot use draining generation |
-| No active work, repeated DELETE | Immediate removal; stable idempotent response |
-| Holder expiry without physical receipt | New dispatch fenced; no fabricated settlement/deletion |
-| Worker/API crash and maintenance restart | Native exact proof consumed; automatic recoverable finalization |
-| Concurrent refresh and reconnect | Old result cannot overwrite or delete new generation |
-| Organization administrator vs member/foreign organization | Existing management and RLS boundary preserved |
-| Personal credential/organization inheritance | Same lifecycle rule; no broader revocation/ownership semantics |
-| Status and picker projections | Truthful draining state; unavailable for new selection |
-
-Run independent Sol 6.1 review against the exact eventual implementation head.
-OpenGeni PR CI is disabled by owner policy; retain proportional local results,
-including real PostgreSQL concurrency/RLS evidence. PR delivery is not merge
-or deployment authority.
+Independent Sol 6.1 review is required against the final implementation head.
+Owner-disabled PR CI is not a reason to skip local database and targeted runtime
+validation. PR delivery is not merge/deployment authority.

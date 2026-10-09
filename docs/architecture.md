@@ -1237,6 +1237,12 @@ Claude account pools: [setup and quotas](model-providers.md#claude-subscription-
 
 Codex requires exact live credential leases and frozen accepted source/rotation
 policy; recovery preserves that policy while current health governs capacity.
+Shared-core local disconnect fences each physical request at an exact one-shot
+reservation, removes persisted secrets atomically, and preserves already-admitted
+response custody. Expiry and unknown outcomes are not remote completion receipts;
+the next request checkpoints and re-places the same continuation. See
+[`request-level disconnect`](design/codex-graceful-disconnect.md) for the admission
+boundary, reconnect isolation and unsupported provider recovery.
 [Allocator and picker rules](codex-subscription-rotation.md).
 [Migration 0492 rollout](codex-subscription-rotation.md) requires drained processes and matching binaries.
 
