@@ -1139,8 +1139,12 @@ API or Site host, set `toolGatewayMode: "catalog"` explicitly on the client;
 there is no automatic downgrade or retry after an unknown invocation outcome.
 The targeted SDK caches bounded per-target metadata, shares only resolution
 loads, and retries at most once after a typed pre-execution
-`tool_definition_stale`. Explicit pins are not silently advanced. An approved
-call requires reapproval after definition drift. Operation IDs are correlation
+`tool_definition_stale`; explicit nonretryable or outcome-unknown flags veto
+replay even when a transport labels an error stale. Explicit pins are not
+silently advanced. An approved call uses the server's executable-effect and
+private-authority binding, not an implicit full-public-entry pin; supply
+`expectedDefinitionDigest` when that additional precondition is wanted.
+Changed executable effect or private authority requires reapproval. Operation IDs are correlation
 keys, not general idempotency for unapproved calls.
 
 ```ts
@@ -1150,9 +1154,13 @@ const documents = await tools.docs.search({ query: "launch plan" });
 
 An approval-required call needs a server-issued capability. A trusted host
 shows its approval UI first, then asks for one token bound to the current human,
-workspace, operation id, exact tool identity, definition, executable authority,
-and arguments. Targeted approvals use a distinct version-2 binding, never a v1
+workspace, operation id, exact tool identity, executable effect, Site context,
+private authority and arguments. Targeted approvals use a distinct version-2 binding, never a v1
 catalog digest.
+An Ask-to-Allow policy transition can settle matching pending provenance with
+or without the token, but never ignores a supplied invalid token or a consumed
+operation. Public definition pins remain optional and may reject policy/prose
+drift without consuming the pending approval.
 The token expires after five minutes, is stored only as a hash, and is consumed
 once by the matching call.
 

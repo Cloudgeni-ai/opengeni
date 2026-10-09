@@ -1,10 +1,12 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mock } from "bun:test";
+import { mock, spyOn } from "bun:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { AccessGrant, ConnectionMetadata, ToolGatewayCatalog } from "@opengeni/contracts";
 import type {
   ApiIntegrationRuntime,
   Database,
   ResolveConnectionCredentialInput,
+  ConnectorActionPolicySnapshotEntry,
 } from "@opengeni/db";
 import type { AccessGrantAuthorization, ApiRouteDeps } from "@opengeni/core";
 import { startTestMcpServer, testSettings, type TestMcpServer } from "@opengeni/testing";
@@ -23,11 +25,18 @@ const real = {
   availableMcpAccountBindings: core.availableMcpAccountBindings,
   buildConnectionTokenResolver: dbModule.buildConnectionTokenResolver,
   listConnectorToolPermissionPolicies: dbModule.listConnectorToolPermissionPolicies,
+  getWorkspaceSiteSessionOrigin: dbModule.getWorkspaceSiteSessionOrigin,
+  bootstrapWorkspace: dbModule.bootstrapWorkspace,
 };
 type Fixture = {
   connections: ConnectionMetadata[];
   integrations: ApiIntegrationRuntime[];
   resolved: ResolveConnectionCredentialInput[];
+  policies?: ConnectorActionPolicySnapshotEntry[];
+  onCredential?: (input: ResolveConnectionCredentialInput) => Promise<void>;
+  onPhysical?: () => Promise<void>;
+  revokedCaller?: boolean;
+  callerReads?: number;
 };
 const fixtures = new Map<Database, Fixture>();
 mock.module("@opengeni/core", () => ({
@@ -59,15 +68,33 @@ mock.module("@opengeni/core", () => ({
 }));
 mock.module("@opengeni/db", () => ({
   ...dbModule,
+  bootstrapWorkspace: (...args: Parameters<typeof real.bootstrapWorkspace>) => {
+    const f = fixtures.get(args[0]);
+    if (!f) return real.bootstrapWorkspace(...args);
+    f.callerReads = (f.callerReads ?? 0) + 1;
+    return Promise.resolve({
+      mode: "local",
+      subjectId: "dev",
+      accountGrants: [{ accountId, subjectId: "dev", permissions: [] }],
+      workspaceGrants: [
+        { ...grantFor("dev"), permissions: f.revokedCaller ? [] : ["workspace:read"] },
+      ],
+    });
+  },
+  getWorkspaceSiteSessionOrigin: (...args: Parameters<typeof real.getWorkspaceSiteSessionOrigin>) =>
+    fixtures.has(args[0]) ? Promise.resolve(null) : real.getWorkspaceSiteSessionOrigin(...args),
   listConnectorToolPermissionPolicies: (
     ...args: Parameters<typeof real.listConnectorToolPermissionPolicies>
   ) =>
-    fixtures.has(args[0]) ? Promise.resolve([]) : real.listConnectorToolPermissionPolicies(...args),
+    fixtures.has(args[0])
+      ? Promise.resolve(fixtures.get(args[0])!.policies ?? [])
+      : real.listConnectorToolPermissionPolicies(...args),
   buildConnectionTokenResolver: (...args: Parameters<typeof real.buildConnectionTokenResolver>) => {
     const fixture = fixtures.get(args[0]);
     if (!fixture) return real.buildConnectionTokenResolver(...args);
     return async (input: ResolveConnectionCredentialInput) => {
       fixture.resolved.push(input);
+      await fixture.onCredential?.(input);
       const connection = fixture.connections.find(
         (candidate) =>
           candidate.id === input.connectionRef.connectionId &&
@@ -84,7 +111,10 @@ mock.module("@opengeni/db", () => ({
         status: "ok" as const,
         connectionId: connection.id,
         headers: { authorization: `Bearer ${connection.id}` },
-        authorizeProviderRequest: async () => connection.status === "active",
+        authorizeProviderRequest: async () => {
+          await fixture.onPhysical?.();
+          return connection.status === "active";
+        },
       };
     };
   },
@@ -112,6 +142,7 @@ const {
   callWorkspaceToolGatewayForCaller,
   prepareAttestedWorkspaceToolGateway,
   prepareWorkspaceToolGatewayForGrant,
+  prepareWorkspaceToolGateway,
   workspaceToolGatewayAttestationScope,
   workspaceToolGatewayServerTiming,
 } = await import("../src/workspace-tool-gateway");
@@ -144,12 +175,7 @@ function targetAuthorization(subject = subjectId) {
 function targetOptions(extra: TargetGatewayOptions = {}): TargetGatewayOptions {
   return {
     prepare: async (deps, authorization, options = {}) =>
-      await prepareWorkspaceToolGatewayForGrant(
-        deps,
-        authorization.grant,
-        options.allowedIdentities,
-        options,
-      ),
+      await prepareWorkspaceToolGateway(deps, authorization, options),
     begin: async () => true,
     ...extra,
   };
@@ -232,12 +258,17 @@ type DelayedProvider = TestMcpServer & { extraTools: string[] };
 /** A remote MCP provider whose every HTTP request takes `delayMs`. */
 function delayedProvider(
   delayMs: number,
-  options: { requireBearer?: boolean; baseTools?: string[] } = {},
+  options: {
+    requireBearer?: boolean;
+    baseTools?: string[];
+    onRequest?: (method: string | null) => Promise<void>;
+  } = {},
 ) {
   const extraTools: string[] = [];
   const provider = startTestMcpServer({
     toolsForAuthorization: () => [...(options.baseTools ?? []), ...extraTools],
     validateAuthorization: async (value) => {
+      await options.onRequest?.(provider.requests.at(-1)?.jsonRpcMethod ?? null);
       if (delayMs > 0) await Bun.sleep(delayMs);
       return options.requireBearer ? value?.startsWith("Bearer ") === true : true;
     },
@@ -246,12 +277,18 @@ function delayedProvider(
 }
 
 function createFixture(
-  input: { delayMs?: number; unrelatedConnectors?: number; firstParty?: boolean } = {},
+  input: {
+    delayMs?: number;
+    unrelatedConnectors?: number;
+    firstParty?: boolean;
+    onRequest?: (method: string | null) => Promise<void>;
+  } = {},
 ) {
   const delayMs = input.delayMs ?? 0;
   const grafana = delayedProvider(delayMs, {
     requireBearer: true,
     baseTools: ["query_prometheus"],
+    ...(input.onRequest ? { onRequest: input.onRequest } : {}),
   });
   const unrelated = Array.from({ length: input.unrelatedConnectors ?? 3 }, () =>
     delayedProvider(delayMs),
@@ -564,6 +601,221 @@ describe("portable known-tool calls", () => {
       expect(f.unrelatedSetupRequests()).toBe(0);
     } finally {
       f.close();
+    }
+  });
+  test("installed physical credential callbacks fence Site revocation during awaited native authorization, including manifests", async () => {
+    for (const manifest of [false, true]) {
+      const f = createFixture();
+      let admitted = manifest;
+      let revoked = false;
+      let physical = 0;
+      let closes = 0;
+      f.state.onPhysical = async () => {
+        if (!admitted) return;
+        await Promise.resolve();
+        physical++;
+        revoked = true;
+      };
+      const options = targetOptions({
+        authorizeSite: async (_db, _grant, context) => {
+          expect(context).toEqual({
+            siteArtifactId: artifactId,
+            siteVersionId: versionId,
+            identity: f.identity(f.shared),
+          });
+          if (revoked) throw Object.assign(new Error("site revoked"), { status: 403 });
+        },
+        begin: async () => {
+          admitted = true;
+          return true;
+        },
+        prepare: async (...args) => {
+          const prepared = await prepareWorkspaceToolGateway(...args);
+          return {
+            ...prepared,
+            close: async () => {
+              closes++;
+              await prepared.close();
+            },
+          };
+        },
+      });
+      try {
+        const host = { siteArtifactId: artifactId, siteVersionId: versionId };
+        const outcome = await (
+          manifest
+            ? resolveWorkspaceToolManifest(
+                f.deps,
+                targetAuthorization(),
+                { ...host, identities: [f.identity(f.shared)] },
+                options,
+              )
+            : invokeWorkspaceToolTarget(
+                f.deps,
+                targetAuthorization(),
+                {
+                  ...host,
+                  target: { identity: f.identity(f.shared) },
+                  operationId: crypto.randomUUID(),
+                  arguments: {},
+                },
+                options,
+              )
+        ).then(
+          (value) => value,
+          () => null,
+        );
+        if (outcome) expect(outcome).toMatchObject({ result: { isError: true } });
+        expect(physical).toBeGreaterThan(0);
+        expect(f.grafana.calls).toHaveLength(0);
+        expect(
+          f.grafana.requests.filter((request) => request.jsonRpcMethod === "tools/call"),
+        ).toHaveLength(0);
+        if (!manifest) expect(closes).toBe(1);
+        expect(f.unrelatedSetupRequests()).toBe(0);
+      } finally {
+        f.close();
+      }
+    }
+  });
+  test("selected live policy Allow to Ask or Block during physical credential acquisition prevents dispatch", async () => {
+    for (const decision of ["ask", "block"] as const) {
+      const f = createFixture();
+      let admitted = false;
+      let changed = false;
+      f.state.onCredential = async () => {
+        if (!admitted) return;
+        await Promise.resolve();
+        changed = true;
+        f.state.policies = [
+          {
+            id: crypto.randomUUID(),
+            connectionId: f.shared.id,
+            serverId: "grafana",
+            toolName: "query_prometheus",
+            actionName: "*",
+            policy: decision,
+            version: 1,
+          },
+        ];
+      };
+      try {
+        const outcome = await invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          {
+            target: { identity: f.identity(f.shared) },
+            operationId: crypto.randomUUID(),
+            arguments: {},
+          },
+          targetOptions({
+            begin: async () => {
+              admitted = true;
+              return true;
+            },
+          }),
+        ).then(
+          (value) => value,
+          () => null,
+        );
+        if (outcome) expect(outcome.result.isError).toBe(true);
+        expect(changed).toBe(true);
+        expect(f.grafana.calls).toHaveLength(0);
+        expect(
+          f.grafana.requests.filter((request) => request.jsonRpcMethod === "tools/call"),
+        ).toHaveLength(0);
+        expect(f.unrelatedSetupRequests()).toBe(0);
+      } finally {
+        f.close();
+      }
+    }
+  });
+  test("authenticated HTTP route re-resolves its caller after in-flight credentials, through the production preparation wrapper", async () => {
+    const f = createFixture();
+    const { createApp } = await import("../src/app");
+    const app = createApp({
+      settings: f.settings,
+      db: f.deps.db,
+      bus: {} as never,
+      workflowClient: {} as never,
+    });
+    f.state.onCredential = async () => {
+      await Promise.resolve();
+      f.state.revokedCaller = true;
+    };
+    try {
+      const response = await app.request(
+        `http://localhost/v1/workspaces/${workspaceId}/tools/invoke`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            target: { identity: f.identity(f.shared) },
+            operationId: crypto.randomUUID(),
+            arguments: {},
+          }),
+        },
+      );
+      expect(response.status).toBe(403);
+      expect(f.state.resolved.length).toBeGreaterThan(0);
+      expect(f.state.callerReads).toBeGreaterThan(1);
+      expect(f.grafana.calls).toHaveLength(0);
+      expect(f.unrelatedSetupRequests()).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+  test("cancellation during connect, list, native preflight and call closes preparation without replay", async () => {
+    for (const phase of ["initialize", "tools/list", "preflight", "tools/call"] as const) {
+      const controller = new AbortController();
+      let reached = false;
+      const f = createFixture({
+        onRequest: async (method) => {
+          if (method !== phase) return;
+          await Promise.resolve();
+          reached = true;
+          controller.abort();
+        },
+      });
+      const close = spyOn(Client.prototype, "close");
+      let admitted = false;
+      if (phase === "preflight")
+        f.state.onPhysical = async () => {
+          if (!admitted) return;
+          await Promise.resolve();
+          reached = true;
+          controller.abort();
+        };
+      try {
+        await expect(
+          invokeWorkspaceToolTarget(
+            f.deps,
+            targetAuthorization(),
+            {
+              target: { identity: f.identity(f.shared) },
+              operationId: crypto.randomUUID(),
+              arguments: {},
+            },
+            targetOptions({
+              signal: controller.signal,
+              begin: async () => {
+                admitted = true;
+                return true;
+              },
+            }),
+          ),
+        ).rejects.toThrow();
+        expect(reached).toBe(true);
+        expect(close).toHaveBeenCalled();
+        expect(
+          f.grafana.requests.filter((request) => request.jsonRpcMethod === "tools/call").length,
+        ).toBe(phase === "tools/call" ? 1 : 0);
+        expect(f.grafana.calls.length).toBeLessThanOrEqual(phase === "tools/call" ? 1 : 0);
+        expect(f.unrelatedSetupRequests()).toBe(0);
+      } finally {
+        close.mockRestore();
+        f.close();
+      }
     }
   });
   test("authorization revocation after resolution fails closed at dispatch", async () => {

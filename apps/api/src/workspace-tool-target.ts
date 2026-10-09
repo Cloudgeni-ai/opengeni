@@ -132,35 +132,54 @@ async function withTarget<T>(
   options.signal?.throwIfAborted();
   await options.reauthorize?.();
   const target = await siteTarget(deps, authorization, request, options);
+  // Preparation installs this exact callback at credential/physical request
+  // boundaries. A later outer check cannot fence an awaited native preflight.
+  const authorizeTarget = async () => {
+    options.signal?.throwIfAborted();
+    await options.reauthorize?.();
+    if (request.siteArtifactId && request.siteVersionId && "identity" in target)
+      await (options.authorizeSite ?? requireWorkspaceSiteToolAuthorization)(
+        deps.db,
+        authorization.grant,
+        {
+          siteArtifactId: request.siteArtifactId,
+          siteVersionId: request.siteVersionId,
+          identity: target.identity,
+        },
+      );
+    options.signal?.throwIfAborted();
+  };
   const prepared = await (options.prepare ?? prepareWorkspaceToolGateway)(deps, authorization, {
     target,
     firstPartySettings: "caller",
     ...(options.signal ? { signal: options.signal } : {}),
-    ...(options.reauthorize ? { reauthorize: options.reauthorize } : {}),
+    reauthorize: authorizeTarget,
   });
   try {
     options.signal?.throwIfAborted();
     const tool = resolvedTool(prepared, target);
     const reauthorize = async () => {
-      options.signal?.throwIfAborted();
-      await options.reauthorize?.();
       await prepared.reauthorize?.();
-      if (request.siteArtifactId && request.siteVersionId)
-        await (options.authorizeSite ?? requireWorkspaceSiteToolAuthorization)(
-          deps.db,
-          authorization.grant,
-          {
-            siteArtifactId: request.siteArtifactId,
-            siteVersionId: request.siteVersionId,
-            identity: tool.entry.identity,
-          },
-        );
-      options.signal?.throwIfAborted();
+      await authorizeTarget();
     };
     await reauthorize();
     return await use(prepared, tool, reauthorize);
   } finally {
+    await closeTargetPreparation(deps, prepared);
+  }
+}
+
+async function closeTargetPreparation(deps: ApiRouteDeps, prepared: PreparedWorkspaceToolGateway) {
+  try {
     await prepared.close();
+  } catch {
+    // Cleanup cannot replace a confirmed result or an outcome-unknown receipt.
+    // Neither provider exception text nor tool/caller content belongs in logs.
+    try {
+      deps.observability?.warn("target_tool_cleanup_failed");
+    } catch {
+      /* Observability is not settlement authority. */
+    }
   }
 }
 
@@ -185,15 +204,15 @@ function assertDefinition(tool: ToolGatewayResolvedTool, expected: string | unde
 }
 
 function approvalBinding(
-  tool: ToolGatewayResolvedTool,
   call: PreparedToolGatewayCall,
   request: { siteArtifactId?: string | undefined; siteVersionId?: string | undefined },
 ) {
+  if (!call.effectDigest)
+    throw new HTTPException(503, { message: "tool_effect_binding_unavailable" });
   return digestCanonicalJson({
     domain: "opengeni.target-tool-approval",
     version: 2,
-    definitionDigest: tool.definitionDigest,
-    effectDigest: call.effectDigest ?? null,
+    effectDigest: call.effectDigest,
     siteArtifactId: request.siteArtifactId ?? null,
     siteVersionId: request.siteVersionId ?? null,
   });
@@ -249,7 +268,7 @@ export async function invokeWorkspaceToolTarget(
           ...authorization.grant,
           operationId: request.operationId,
           identity: tool.entry.identity,
-          targetBindingDigest: approvalBinding(tool, call, request),
+          targetBindingDigest: approvalBinding(call, request),
           argumentsDigest: digestCanonicalJson(request.arguments),
           approvalAuthorityDigest: call.approvalAuthorityDigest,
           approvalRequired,
@@ -327,7 +346,7 @@ export async function approveWorkspaceToolTarget(
         await (options.issue ?? issueToolGatewayApproval)(deps.db, {
           ...authorization.grant,
           bindingVersion: 2,
-          targetBindingDigest: approvalBinding(tool, call, request),
+          targetBindingDigest: approvalBinding(call, request),
           tokenHash: hashToken(approvalToken),
           operationId: request.operationId,
           identity: tool.entry.identity,
@@ -363,6 +382,8 @@ export async function resolveWorkspaceToolManifest(
     ...new Map(request.identities.map((identity) => [key(identity), identity])).values(),
   ];
   const authorizeManifest = async () => {
+    options.signal?.throwIfAborted();
+    await options.reauthorize?.();
     if (identities.length === 0 && request.siteArtifactId && request.siteVersionId) {
       try {
         const { status, version } = await getWorkspaceArtifactContentRef(
@@ -378,13 +399,14 @@ export async function resolveWorkspaceToolManifest(
     }
     for (const identity of identities)
       await siteTarget(deps, authorization, { ...request, target: { identity } }, options);
+    options.signal?.throwIfAborted();
   };
   await authorizeManifest();
   const prepared = await (options.prepare ?? prepareWorkspaceToolGateway)(deps, authorization, {
     allowedIdentities: identities,
     firstPartySettings: "caller",
     ...(options.signal ? { signal: options.signal } : {}),
-    ...(options.reauthorize ? { reauthorize: options.reauthorize } : {}),
+    reauthorize: authorizeManifest,
   });
   try {
     options.signal?.throwIfAborted();
@@ -401,6 +423,6 @@ export async function resolveWorkspaceToolManifest(
       tools,
     };
   } finally {
-    await prepared.close();
+    await closeTargetPreparation(deps, prepared);
   }
 }

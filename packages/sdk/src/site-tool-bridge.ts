@@ -218,6 +218,8 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
         } catch (error) {
           if (
             error instanceof OpenGeniApiError &&
+            error.retryable !== false &&
+            !error.outcomeUnknown &&
             error.details?.code === "tool_definition_stale"
           ) {
             projectedCatalog.invalidate(request.catalogDigest);

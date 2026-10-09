@@ -126,9 +126,13 @@ approval admission or execution. A selected MCP server may still need its own
 paginated `tools/list`; no provider revision atomicity is promised between that
 listing and its physical call.
 
-`POST tools/target-approvals` issues a version-2 binding over that definition,
-the existing executable effect digest, Site tuple and separately checked private
-authority. The shared operation namespace and consumed tombstones survive policy
+`POST tools/target-approvals` issues a version-2 binding over the existing
+executable effect digest and Site tuple. Exact caller, identity, arguments and
+private authority are checked separately. The full public definition digest is
+only an optional invocation precondition, not approval provenance: changing
+Ask to Allow changes its public approval field without changing the approved
+effect. Missing executable effect digests fail closed. The shared operation
+namespace and consumed tombstones survive policy
 Ask-to-Allow and protocol changes. Supplied tokens cannot be silently ignored.
 Allow-only calls without approval provenance are not generally idempotent.
 Unknown dispatch outcomes never replay automatically.
@@ -137,7 +141,11 @@ Only the selected provider is constructed, credentialed, connected or listed.
 Registry/account/integration inventory remains O(N) metadata; target execution
 does not imply constant-time database work. External targets skip unrelated
 model-catalog loading, while first-party handlers retain complete caller settings.
-Live grant, metadata and native credential checks run again at dispatch; no
+Live caller, exact pinned Site, metadata and native credential checks run again
+at the installed physical-request boundary, including after awaited native
+preflight. Targeted current-human calls also re-read the selected action policy:
+Allow becoming Ask or Block before physical dispatch prevents the request.
+This does not change frozen worker/Codemode approval decisions. No
 credential cache, sticky session or cross-replica warm-up is required.
 `opengeni_tool_target_operations_total`,
 `opengeni_tool_target_duration_seconds` and `Server-Timing: gw-target`
@@ -149,10 +157,19 @@ Saved legacy Site bundles use `POST tools/manifest` (at most 256 requested
 identities) through an upgraded host, which translates retained manifest pins
 into targeted calls. Modern clients negotiate direct targeted calls; older hosts
 require explicit SDK catalog mode. Local preview keeps frozen attempt/Codemode
-authority. OAuth and explicit catalog/declarations discovery are unchanged.
-Apply rolling migration `0680_target_tool_approval_bindings.sql` before the API;
-upgrade API readers before enabling v2 writers across the fleet, then release
-the matching SDK/React host and generated Site runtime. Old clients remain v1.
+authority, fencing the entry again after any pre-submission catalog refresh.
+OAuth and explicit catalog/declarations discovery are unchanged.
+For a mixed-version fleet, apply rolling migration
+`0680_target_tool_approval_bindings.sql` first. Bring up a fully upgraded API pool
+and route all four new endpoints (`resolve`, `invoke`, `target-approvals`, and
+`manifest`) exclusively to that pool before sending new-protocol traffic.
+Existing v1 endpoints may still reach older replicas during the rollout. If
+endpoint-specific routing is unavailable, finish upgrading the entire API pool
+before releasing clients. Neither route relies on sticky sessions or a warm-up
+catalog request. Release the matching SDK/React host and generated Site runtime
+only after this API routing gate; old clients remain v1. Do not fall back to v1
+after a failed targeted invocation. Cleanup failures preserve the original
+success/error/unknown outcome and produce only a content-free warning.
 
 Legacy workspace HTTP/SDK/Site calls avoid re-preparing every connector on a warm replica.
 Each complete catalog preparation (`tools/catalog`, `tools/declarations`, or a

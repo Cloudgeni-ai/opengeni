@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
 import { OpenGeniToolReapprovalRequiredError } from "../src/tools";
+import { createKnownWorkspaceTools } from "../src/known-tools";
 import { createSiteToolBridge } from "../src/site-tool-bridge";
 import type { ToolGatewayResolvedTool, ToolGatewayInvokeRequest } from "../src/types";
 
@@ -145,7 +146,15 @@ describe("known tools SDK", () => {
     const approval = await f.tools.$approveTarget(identity);
     resolved = tool("b".repeat(64));
     await expect(
-      f.tools.$call(identity, {}, { operationId: approval.operationId, approvalToken: token }),
+      f.tools.$call(
+        identity,
+        {},
+        {
+          operationId: approval.operationId,
+          approvalToken: token,
+          expectedDefinitionDigest: approval.tool.definitionDigest,
+        },
+      ),
     ).rejects.toBeInstanceOf(OpenGeniToolReapprovalRequiredError);
     expect(f.requests.filter((request) => request.path === "invoke")).toHaveLength(1);
     expect(f.requests.some((request) => request.path === "catalog")).toBe(false);
@@ -156,6 +165,107 @@ describe("known tools SDK", () => {
     });
     await expect(f.tools.$call(identity)).rejects.toMatchObject({ outcomeUnknown: true });
     expect(f.requests.map((request) => request.path)).toEqual(["invoke"]);
+  });
+  test("approval provenance is not implicitly pinned to its public Ask presentation", async () => {
+    const token = `ogta_${"a".repeat(43)}`;
+    const asked = tool();
+    asked.entry.approval = "human";
+    const allowed = tool("b".repeat(64));
+    const f = fixture((path, body) => {
+      if (path === "resolve") return response(asked);
+      if (path === "target-approvals")
+        return response({
+          bindingVersion: 2,
+          tool: asked,
+          operationId: body.operationId,
+          approvalToken: token,
+          expiresAt: "2027-01-01T00:00:00Z",
+        });
+      expect(body.expectedDefinitionDigest).toBeUndefined();
+      return response(result(body, allowed));
+    });
+    const approved = await f.tools.$approveTarget(identity);
+    expect(
+      await f.tools.$call(
+        identity,
+        {},
+        { approvalToken: token, operationId: approved.operationId },
+      ),
+    ).toEqual({ count: 1 });
+    expect(f.requests.map(({ path }) => path)).toEqual(["resolve", "target-approvals", "invoke"]);
+  });
+  test("contradictory stale flags veto replay at both HTTP and bridge transport seams", async () => {
+    for (const flags of [
+      { retryable: false, outcomeUnknown: false },
+      { retryable: true, outcomeUnknown: true },
+      { retryable: false, outcomeUnknown: true },
+    ]) {
+      const f = fixture((path) =>
+        path === "resolve"
+          ? response(tool())
+          : response(
+              {
+                error: {
+                  code: "conflict",
+                  details: { code: "tool_definition_stale" },
+                  ...flags,
+                },
+              },
+              409,
+            ),
+      );
+      await f.tools.$resolve({ identity });
+      await expect(f.tools.$call(identity)).rejects.toMatchObject(flags);
+      expect(f.requests.map(({ path }) => path)).toEqual(["resolve", "invoke"]);
+      let effects = 0;
+      const tools = createKnownWorkspaceTools(
+        {
+          requestJson: async (_method, path) => {
+            if (path.endsWith("/resolve")) return tool() as never;
+            effects++;
+            throw Object.assign(new Error("contradictory bridge failure"), {
+              code: "tool_definition_stale",
+              ...flags,
+            });
+          },
+        },
+        "workspace",
+        () => {
+          throw new Error("no legacy");
+        },
+      );
+      await tools.$resolve({ identity });
+      await expect(tools.$call(identity)).rejects.toMatchObject(flags);
+      expect(effects).toBe(1);
+    }
+  });
+  test("newer cold invocation metadata wins over an older late result", async () => {
+    let finishOld!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      finishOld = resolve;
+    });
+    let calls = 0;
+    const fresh = tool("b".repeat(64));
+    const f = fixture(async (path, body) => {
+      expect(path).toBe("invoke");
+      if (++calls === 1) {
+        entered();
+        await gate;
+        return response(result(body));
+      }
+      return response(result(body, fresh));
+    });
+    const old = f.tools.$call(identity);
+    await started;
+    await f.tools.$call(identity);
+    finishOld();
+    await old;
+    await f.tools.$call(identity);
+    expect(f.requests[2]!.body.expectedDefinitionDigest).toBe(fresh.definitionDigest);
   });
   test("one cancelled resolver does not cancel its sibling", async () => {
     let providerAborted = false;

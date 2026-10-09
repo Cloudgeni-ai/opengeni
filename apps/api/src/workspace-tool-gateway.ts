@@ -225,7 +225,7 @@ export async function prepareWorkspaceToolGateway(
   try {
     await reauthorizeCaller();
   } catch (error) {
-    await prepared.close();
+    await prepared.close().catch(() => undefined);
     throw error;
   }
   return {
@@ -494,7 +494,11 @@ export function withWorkspaceConnectionAuthorization(
       authorizeProviderRequest: async () => {
         try {
           await reauthorize();
-          return result.authorizeProviderRequest ? await result.authorizeProviderRequest() : true;
+          const allowed = result.authorizeProviderRequest
+            ? await result.authorizeProviderRequest()
+            : true;
+          await reauthorize();
+          return allowed;
         } catch {
           return false;
         }
@@ -586,6 +590,9 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     allowedIdentities,
   );
   const gatewayServerIds = new Set(gatewaySettings.mcpServers.map((server) => server.id));
+  // Only targeted current-human requests use live policy fencing. Frozen
+  // attempt/Codemode decisions retain their existing lifecycle semantics.
+  let reauthorizeActionPolicy: (() => Promise<void>) | undefined;
   // Metadata only. Never construct/list another provider to recheck a target.
   const authorizeTargetMetadata = options.target
     ? async () => {
@@ -637,6 +644,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
             digestCanonicalJson(integrationSnapshot(integrations, accountBindings))
         )
           throw new HTTPException(403, { message: "tool_access_changed" });
+        await reauthorizeActionPolicy?.();
         options.signal?.throwIfAborted();
       }
     : undefined;
@@ -777,7 +785,9 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       workspaceId: grant.workspaceId,
       subjectId: grant.subjectId,
       ...(options.signal ? { requestSignal: options.signal } : {}),
-      ...(authorizeTargetMetadata ? { authorizeProviderRequest: authorizeTargetMetadata } : {}),
+      ...((authorizeTargetMetadata ?? reauthorize)
+        ? { authorizeProviderRequest: authorizeTargetMetadata ?? reauthorize! }
+        : {}),
       credentialSubjectId: grant.subjectId,
       mcpAccountLabels: accountRoutes.accountLabels,
       resolveCredential,
@@ -808,24 +818,36 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
             (entry.approval === "human" ? "ask" : "allow");
           const target = policyTargets.get(entry.identity.serverId);
           if (!target) return defaultDecision;
-          const policies = await listConnectorToolPermissionPolicies(routeDeps.db, {
-            ...grant,
-            connectionId: target.connectionId,
-          });
-          const resolved = resolveConnectorActionPolicy(policies, {
-            ...target,
-            toolName: entry.identity.toolName,
-            defaultDecision,
-            actionName: toolPolicyActionName(
-              entry.identity.toolName,
-              entry.inputSchema,
-              call.arguments,
-            ),
-          });
+          const resolveSelectedPolicy = async () =>
+            resolveConnectorActionPolicy(
+              await listConnectorToolPermissionPolicies(routeDeps.db, {
+                ...grant,
+                connectionId: target.connectionId,
+              }),
+              {
+                ...target,
+                toolName: entry.identity.toolName,
+                defaultDecision,
+                actionName: toolPolicyActionName(
+                  entry.identity.toolName,
+                  entry.inputSchema,
+                  call.arguments,
+                ),
+              },
+            );
+          const resolved = await resolveSelectedPolicy();
           const decision = !resolved.managed
             ? defaultDecision
             : connectorActionPolicyDecision(resolved);
           recordToolApproval(decision, resolved.managed ? resolved.source : "default");
+          if (options.target)
+            reauthorizeActionPolicy = async () => {
+              const live = await resolveSelectedPolicy();
+              const current = live.managed ? connectorActionPolicyDecision(live) : defaultDecision;
+              if (current === "block") throw new ToolGatewayBlockedError();
+              if (current === "ask" && decision !== "ask")
+                throw new ToolGatewayApprovalRequiredError();
+            };
           return decision;
         },
         filterDefinition: (definition) => {
@@ -847,7 +869,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     throw new Error("workspace tool gateway preparation did not produce a gateway");
   }
   if (options.signal?.aborted) {
-    await prepared.close();
+    await prepared.close().catch(() => undefined);
     options.signal.throwIfAborted();
   }
   return {

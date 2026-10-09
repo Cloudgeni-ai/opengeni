@@ -79,6 +79,7 @@ export function createCodemodeSiteRequestHandler(
         request.signal.throwIfAborted();
         const result = await active.call(entry.identity, input.arguments, {
           operationId: input.operationId,
+          expectedDefinitionDigest: tool.definitionDigest,
           signal: request.signal,
         });
         return Response.json({ operationId: input.operationId, tool, result });
@@ -134,8 +135,15 @@ export function createCodemodeSiteRequestHandler(
           return siteError(409, "catalog_stale", "The local Site tool catalog changed", true);
         }
         const operationId = body.operationId ?? randomUUID();
+        const entry = catalog.entries.find(
+          (entry) =>
+            entry.identity.serverId === body.identity.serverId &&
+            entry.identity.toolName === body.identity.toolName,
+        );
+        if (!entry) return siteError(404, "tool_unavailable", "Tool unavailable");
         const result = await active.call(body.identity, body.arguments, {
           operationId,
+          expectedDefinitionDigest: digestToolGatewayDefinition(catalog, entry),
           signal: request.signal,
         });
         return Response.json({
@@ -147,9 +155,14 @@ export function createCodemodeSiteRequestHandler(
       return siteError(404, "not_found", "Local Site tool endpoint not found");
     } catch (error) {
       if (error instanceof CodemodeTransportError) {
+        const staleLegacyPin =
+          new URL(request.url).pathname === `${CODEMODE_SITE_LOCAL_PATH}/calls` &&
+          error.remoteCode === "tool_definition_stale" &&
+          error.retryable === true &&
+          error.outcomeUnknown === false;
         return siteError(
           error.status && error.status >= 400 && error.status <= 599 ? error.status : 502,
-          error.remoteCode ?? error.code,
+          staleLegacyPin ? "catalog_stale" : (error.remoteCode ?? error.code),
           error.message,
           error.retryable === true,
           error.outcomeUnknown === true,

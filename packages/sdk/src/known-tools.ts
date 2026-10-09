@@ -23,13 +23,20 @@ const targetKey = (target: ToolGatewayTarget) =>
   "identity" in target
     ? JSON.stringify(["identity", target.identity.serverId, target.identity.toolName])
     : JSON.stringify(["path", ...target.path]);
-export const isToolDefinitionStale = (error: unknown) =>
-  error instanceof OpenGeniApiError
+export const isToolDefinitionStale = (error: unknown) => {
+  if (typeof error !== "object" || error === null) return false;
+  if (
+    ("outcomeUnknown" in error && error.outcomeUnknown === true) ||
+    ("retryable" in error && error.retryable === false)
+  )
+    return false;
+  return error instanceof OpenGeniApiError
     ? error.status === 409 && error.details?.code === "tool_definition_stale"
     : typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      error.code === "tool_definition_stale";
+        error !== null &&
+        "code" in error &&
+        error.code === "tool_definition_stale";
+};
 
 /** Per-facade metadata only. Never coalesce invocations or retain credentials. */
 export function createKnownWorkspaceTools(
@@ -134,16 +141,18 @@ export function createKnownWorkspaceTools(
     options.signal?.throwIfAborted();
     const operationId = options.operationId ?? crypto.randomUUID();
     const key = targetKey(target);
+    const revision = advance(key);
+    if (options.refreshCatalog) snapshots.delete(key);
     let tool = options.refreshCatalog
-      ? await resolve(target, {
+      ? await loader(target).load({
           refresh: true,
           ...(options.signal ? { signal: options.signal } : {}),
         })
       : snapshots.get(key);
-    const revision = revisions.get(key) ?? advance(key);
     const approved = options.approvalToken ? approvals.get(options.approvalToken) : undefined;
     const expected =
-      options.expectedDefinitionDigest ?? approved?.tool.definitionDigest ?? tool?.definitionDigest;
+      options.expectedDefinitionDigest ??
+      (options.approvalToken ? undefined : tool?.definitionDigest);
     if (
       approved &&
       (approved.operationId !== operationId ||
@@ -171,11 +180,10 @@ export function createKnownWorkspaceTools(
       response = await send(expected);
     } catch (error) {
       if (!isToolDefinitionStale(error) || expected === undefined) throw error;
-      snapshots.delete(key);
+      if (revisions.get(key) === revision) snapshots.delete(key);
       if (options.expectedDefinitionDigest && !options.approvalToken) throw error;
-      const nextRevision = advance(key);
       tool = await loader(target).reloadAfterStale(expected, options.signal);
-      remember(target, tool, nextRevision);
+      remember(target, tool, revision);
       if (options.approvalToken || options.expectedDefinitionDigest)
         throw new OpenGeniToolReapprovalRequiredError(
           operationId,

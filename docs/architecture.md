@@ -1486,7 +1486,10 @@ route before provider construction, then use the shared gateway's schema,
 preflight, policy and execution pipeline. Cold calls use the current definition;
 optional full-entry definition pins reject drift before approval consumption.
 The pin is not authority and requires no shared cache or previous discovery.
-Version-2 approvals share the permanent operation tombstone namespace with v1.
+Version-2 approvals bind executable effect and Site context, not the public
+approval display field, and share the permanent operation tombstone namespace
+with v1. Physical targeted dispatch rechecks the caller, exact pinned Site and
+selected live action policy after awaited native credential authorization.
 Legacy HTTP calls may rebuild only the
 target identity's connector when their complete catalog digest has a
 content-free per-process attestation for the same caller scope and the live

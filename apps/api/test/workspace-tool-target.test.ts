@@ -7,6 +7,7 @@ import {
   approveWorkspaceToolTarget,
   invokeWorkspaceToolTarget,
   resolveWorkspaceToolTarget,
+  resolveWorkspaceToolManifest,
   type TargetGatewayOptions,
 } from "../src/workspace-tool-target";
 
@@ -38,6 +39,7 @@ function fixture() {
     ask: false,
     invalidOutput: false,
     failAfterEffect: false,
+    failClose: false,
   };
   const options: TargetGatewayOptions = {
     prepare: async () => {
@@ -81,6 +83,7 @@ function fixture() {
         toolGatewayCatalog: catalog,
         close: async () => {
           state.closes++;
+          if (state.failClose) throw new Error("secret cleanup detail");
         },
       };
     },
@@ -225,5 +228,85 @@ describe("targeted gateway contract and settlement", () => {
       expect(f.state.admissions).toBe(1);
       expect(f.state.closes).toBe(1);
     }
+  });
+
+  test("cleanup failures preserve success, preexecution errors and uncertain outcomes without leaking content", async () => {
+    for (const failure of [null, "invalidOutput", "failAfterEffect"] as const) {
+      const f = fixture();
+      f.state.failClose = true;
+      const logs: unknown[] = [];
+      const loggingDeps = {
+        observability: { warn: (...args: unknown[]) => logs.push(args) },
+      } as unknown as ApiRouteDeps;
+      if (failure) {
+        f.state[failure] = true;
+        await expect(
+          invokeWorkspaceToolTarget(loggingDeps, authorization, f.request(), f.options),
+        ).rejects.toMatchObject({ status: 502, retryable: false, outcomeUnknown: true });
+      } else {
+        expect(
+          (await invokeWorkspaceToolTarget(loggingDeps, authorization, f.request(), f.options))
+            .result.structuredContent,
+        ).toEqual({ ok: true });
+      }
+      expect(f.state.effects).toBe(1);
+      expect(f.state.closes).toBe(1);
+      expect(logs).toEqual([["target_tool_cleanup_failed"]]);
+      await expect(
+        invokeWorkspaceToolTarget(
+          loggingDeps,
+          authorization,
+          { ...f.request(), arguments: {} },
+          f.options,
+        ),
+      ).rejects.toMatchObject({ status: 422 });
+      expect(
+        (
+          await resolveWorkspaceToolTarget(
+            loggingDeps,
+            authorization,
+            { target: { identity } },
+            f.options,
+          )
+        ).entry.identity,
+      ).toEqual(identity);
+      expect(
+        (
+          await resolveWorkspaceToolManifest(
+            loggingDeps,
+            authorization,
+            { identities: [identity] },
+            f.options,
+          )
+        ).tools,
+      ).toHaveLength(1);
+    }
+  });
+  test("missing trustworthy executable effect binding fails closed before admission or approval issuance", async () => {
+    const f = fixture();
+    f.state.ask = true;
+    let issued = 0;
+    const prepare = f.options.prepare!;
+    f.options.prepare = async (...args) => {
+      const prepared = await prepare(...args);
+      const original = prepared.toolGateway.prepareCall.bind(prepared.toolGateway);
+      prepared.toolGateway.prepareCall = async (...args) => {
+        const { effectDigest: _effect, ...call } = await original(...args);
+        return call;
+      };
+      return prepared;
+    };
+    f.options.issue = async () => {
+      issued++;
+    };
+    await expect(
+      invokeWorkspaceToolTarget(deps, authorization, f.request(), f.options),
+    ).rejects.toMatchObject({ status: 503 });
+    await expect(
+      approveWorkspaceToolTarget(deps, authorization, { ...f.request(), identity }, f.options),
+    ).rejects.toMatchObject({ status: 503 });
+    expect(f.state.effects).toBe(0);
+    expect(f.state.admissions).toBe(0);
+    expect(issued).toBe(0);
   });
 });

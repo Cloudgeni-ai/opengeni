@@ -30,6 +30,7 @@ import {
   ToolGatewayPathCollisionError as AttemptToolPathCollisionError,
   ToolGatewayToolNotFoundError as AttemptToolNotFoundError,
   digestCanonicalJson,
+  digestToolGatewayDefinition,
   prepareToolGatewayDefinitions,
   type PreparedToolGatewayCall,
   type ToolGatewayCallLifecycle,
@@ -172,6 +173,8 @@ export type CodemodeClientOptions = {
 
 export type CodemodeCallOptions = {
   operationId?: string;
+  /** Optional public entry pin, checked again after a pre-submission stale refresh. */
+  expectedDefinitionDigest?: string;
   /** Stops client observation only; it never cancels an already-created server operation. */
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -272,6 +275,18 @@ export class CodemodeClient {
     let catalog = await this.catalog(options.signal ? { signal: options.signal } : {});
     let entry = resolveEntry(catalog);
     if (!entry) throw new AttemptToolNotFoundError();
+    const assertDefinition = () => {
+      if (
+        options.expectedDefinitionDigest !== undefined &&
+        options.expectedDefinitionDigest !== digestToolGatewayDefinition(catalog, entry!)
+      )
+        throw new CodemodeTransportError("The tool definition changed before execution", 409, {
+          code: "tool_definition_stale",
+          retryable: true,
+          outcomeUnknown: false,
+        });
+    };
+    assertDefinition();
     const operationId = options.operationId ?? randomUUID();
     const deadline =
       Date.now() + boundedPositiveInteger(options.timeoutMs ?? this.timeoutMs, 1_000, 60 * 60_000);
@@ -306,6 +321,8 @@ export class CodemodeClient {
             operation === null &&
             !staleRefreshAttempted &&
             error instanceof CodemodeTransportError &&
+            error.outcomeUnknown !== true &&
+            error.retryable !== false &&
             error.remoteCode === "codemode_catalog_stale"
           ) {
             staleRefreshAttempted = true;
@@ -315,6 +332,7 @@ export class CodemodeClient {
             });
             entry = resolveEntry(catalog);
             if (!entry) throw new AttemptToolNotFoundError();
+            assertDefinition();
             submitted = false;
             nextNotifyAt = 0;
             continue;

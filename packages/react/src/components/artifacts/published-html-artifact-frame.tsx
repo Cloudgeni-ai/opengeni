@@ -346,7 +346,7 @@ export function openGeniSiteBridgePortFromBootstrap(
   return ports.length === 1 ? ports[0]! : null;
 }
 
-async function handleSiteBridgeRequest(
+export async function handleSiteBridgeRequest(
   bridge: PublishedHtmlArtifactToolBridge | undefined,
   message: OpenGeniSiteBridgeRequestMessage,
   signal: AbortSignal,
@@ -385,9 +385,19 @@ export function siteBridgeError(error: unknown): {
     message?: unknown;
     retryable?: unknown;
     outcomeUnknown?: unknown;
+    details?: { code?: unknown };
   };
+  const nestedCode = candidate?.details?.code;
+  const stale =
+    candidate?.retryable === true &&
+    candidate?.outcomeUnknown === false &&
+    (nestedCode === "tool_definition_stale" || nestedCode === "catalog_stale");
   return {
-    code: typeof candidate?.code === "string" ? candidate.code : "site_tool_call_failed",
+    code: stale
+      ? nestedCode
+      : typeof candidate?.code === "string"
+        ? candidate.code
+        : "site_tool_call_failed",
     message:
       typeof candidate?.message === "string" ? candidate.message : "Site tool request failed",
     retryable: candidate?.retryable === true,
