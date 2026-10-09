@@ -76,6 +76,7 @@ import {
   subscriptionCoreLeaseBusyExhaustedFailure,
 } from "./codex-core-errors";
 import { recordCoreCodexRefusal } from "./codex-core-settlement";
+import { failOverCoreCodexTurn } from "./codex-core-failover";
 import { createTurnHistorySink } from "./history-sink";
 
 import { BudgetExhaustedError } from "./admission";
@@ -924,10 +925,11 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // failure that idles the session (settled below).
   let coreAccountRefusal: SubscriptionCoreCodexTurnError | null = null;
   if (coreCodex) {
-    // Core turns record the refusal against the leased connection (quota
-    // observation and failure receipt) and then settle through the
-    // provider-neutral paths below. Connection health and quarantine for
-    // auth/403/entitlement refusals, and in-turn re-placement, are PR 2.
+    // Core turns record the refusal against the leased connection (failure
+    // receipt, plus the quota, health or model-cooldown state that keeps
+    // placement away from it) and re-place the same turn within the per-turn
+    // failover bound (M3 PR 2a). Without a recorded refusal or a durable
+    // checkpoint they settle through the typed paths below instead.
     const coreFailure = classifyCodexCredentialFailure(error);
     // Only explicit plan evidence is an entitlement refusal; an unexplained
     // 400 keeps the generic typed "request rejected" copy.
@@ -937,13 +939,18 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       coreFailure ??
       (planEntitlement ? { kind: "plan_entitlement" as const, cooldownSeconds: null } : null);
     if (refusal) {
-      await recordCoreCodexRefusal({
+      const recorded = await recordCoreCodexRefusal({
         db,
         core: coreCodex,
         lease: leases.codex,
         failure: refusal,
         credentialVersion: providerTurn.effectiveCodexCredentialVersion,
-      }).catch(() => undefined);
+        modelId: providerTurn.codexProductModelId ?? null,
+      }).catch(() => ({ receipt: false, health: false }));
+      if (recorded.receipt && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
+        const settled = await failOverCoreCodexTurn(deps, coreCodex, refusal);
+        if (settled) return settled;
+      }
     }
     coreAccountRefusal = hasErrorInCauseChain(error, SubscriptionCoreCodexAccessLostError)
       ? subscriptionCoreAccountRefusedFailure("access_lost")

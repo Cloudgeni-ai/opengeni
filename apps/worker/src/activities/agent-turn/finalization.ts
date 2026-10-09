@@ -43,6 +43,7 @@ import {
 } from "../../sandbox-resume";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { coreCodexModelCallCompletedAt, finalizeCoreCodexUsage } from "./codex-core-settlement";
+import { wakeSubscriptionCoreCodexWaitersAndDeliver } from "../subscription-core-codex-waits";
 import { drainPhysicalSandboxResumes } from "./sandbox-provision";
 import { safeErrorDiagnostic, safeErrorForTelemetry } from "./errors";
 import {
@@ -460,7 +461,7 @@ async function finalizeTurnAttemptSteps(
       // leased connection and a completed model call advances the binding's
       // cache clock. The legacy Codex usage cache never sees a core id.
       if (attempt.turnId && leases.codex.held) {
-        await waitForTurnFinalizerStep(
+        const finalized = await waitForTurnFinalizerStep(
           finalizeCoreCodexUsage({
             db,
             core: coreCodex,
@@ -471,6 +472,17 @@ async function finalizeTurnAttemptSteps(
           }).catch(() => undefined),
           finalizerSignal,
         );
+        // An observation that ended a stored exhaustion is a capacity change
+        // for every core waiter of the account (EP-T10).
+        if (finalized?.capacityRecovered) {
+          await waitForTurnFinalizerStep(
+            wakeSubscriptionCoreCodexWaitersAndDeliver(
+              { db, signalCodexCapacityWorkflow },
+              { accountId: input.accountId, reason: "quota_observed_available" },
+            ),
+            finalizerSignal,
+          ).catch(() => undefined);
+        }
       }
     } else if (providerTurn.effectiveCodexCredentialId) {
       // Part A: the latest scraped usage-header snapshot → the P2 usage cache. A

@@ -600,6 +600,32 @@ export async function persistSubscriptionCodexRefresh(
   return row?.persisted === true;
 }
 
+/**
+ * persistSubscriptionCodexRefresh plus the plan the rotated id_token carries
+ * (M3 PR 2a). Same one-shot authorization, advisory lock and
+ * refresh-generation compare-and-swap; a NULL plan keeps the recorded plan,
+ * and a changed plan clears the connection's model cooldowns.
+ */
+export async function persistSubscriptionCodexRefreshWithPlan(
+  db: Database,
+  input: Parameters<typeof persistSubscriptionCodexRefresh>[1] & { planType: string | null },
+): Promise<boolean> {
+  assertPositiveGeneration(input.expectedRefreshGeneration);
+  const trimmed = input.planType?.trim() ?? "";
+  const planType = /^[A-Za-z0-9_.-]{1,64}$/.test(trimmed) ? trimmed : null;
+  const [row] = await rawRows<{ persisted: boolean }>(
+    db,
+    sql`select opengeni_private.persist_subscription_codex_refresh_with_plan(
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+      ${input.sessionId}::uuid, ${input.turnId}::uuid,
+      ${input.connectionId}::uuid, ${input.expectedRefreshGeneration}::bigint,
+      ${input.credentialEncrypted}, ${input.expiresAt?.toISOString() ?? null}::timestamptz,
+      ${input.lastRefreshAt.toISOString()}::timestamptz, ${planType}
+    ) as persisted`,
+  );
+  return row?.persisted === true;
+}
+
 /** Renew only the exact, still-live chat-turn lease generation. */
 export async function renewSubscriptionTurnLease(
   db: Database,
@@ -977,6 +1003,8 @@ export type SubscriptionCapacityWakeDelivery = {
   generation: number;
   wakeRevision: number;
   claimGeneration: number;
+  /** Delivery attempts including this claim. */
+  attemptCount: number;
 };
 
 /**
@@ -999,6 +1027,7 @@ export async function claimSubscriptionCapacityWakeDeliveries(
     generation: number | string;
     wake_revision: number | string;
     claim_generation: number | string;
+    attempt_count: number | string;
   }>(
     db,
     sql`with due as (
@@ -1017,7 +1046,7 @@ export async function claimSubscriptionCapacityWakeDeliveries(
     returning outbox.id::text as id, outbox.account_id::text as account_id,
       outbox.workspace_id::text as workspace_id, outbox.session_id::text as session_id,
       outbox.waiter_id::text as waiter_id, outbox.generation, outbox.wake_revision,
-      outbox.claim_generation`,
+      outbox.claim_generation, outbox.attempt_count`,
   ).then((rows) =>
     rows.map((row) => ({
       id: row.id,
@@ -1028,6 +1057,7 @@ export async function claimSubscriptionCapacityWakeDeliveries(
       generation: Number(row.generation),
       wakeRevision: Number(row.wake_revision),
       claimGeneration: Number(row.claim_generation),
+      attemptCount: Number(row.attempt_count),
     })),
   );
 }
@@ -1065,6 +1095,29 @@ export async function retrySubscriptionCapacityWakeDelivery(
     sql`update subscription_capacity_wake_outbox
       set next_attempt_at = clock_timestamp() + (${input.retryInMs} * interval '1 millisecond'),
           last_error = ${input.failureCode}
+      where id = ${input.id}::uuid and claim_generation = ${input.claimGeneration}
+        and delivered_at is null
+      returning id::text as id`,
+  );
+  return rows.length === 1;
+}
+
+/**
+ * Stop retrying one typed wake signal after its bounded attempts. The waiter's
+ * wake revision stays unobserved, and the same commit also queued the generic
+ * session workflow wake, so the workflow still re-evaluates the waiter; only
+ * the typed fast path is given up.
+ */
+export async function abandonSubscriptionCapacityWakeDelivery(
+  db: Database,
+  input: { id: string; claimGeneration: number; failureCode: string },
+): Promise<boolean> {
+  if (!/^[a-z][a-z0-9_]{0,63}$/.test(input.failureCode))
+    throw new Error("Subscription wake failure code must be a bounded identifier");
+  const rows = await rawRows<{ id: string }>(
+    db,
+    sql`update subscription_capacity_wake_outbox
+      set delivered_at = clock_timestamp(), last_error = ${input.failureCode}
       where id = ${input.id}::uuid and claim_generation = ${input.claimGeneration}
         and delivered_at is null
       returning id::text as id`,

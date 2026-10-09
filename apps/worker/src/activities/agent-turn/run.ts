@@ -675,7 +675,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   // account fails closed, exactly as before multi-account).
                   const coreCodex = providerTurn.codexSubscriptionCore;
                   const resolver = coreCodex
-                    ? buildCoreCodexRequestTokenResolver(db, runSettings, coreCodex, leases.codex)
+                    ? buildCoreCodexRequestTokenResolver(db, runSettings, coreCodex, leases.codex, {
+                        signalCodexCapacityWorkflow,
+                      })
                     : buildCodexTokenResolver(
                         db,
                         runSettings,

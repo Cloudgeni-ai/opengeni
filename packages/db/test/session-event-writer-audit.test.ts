@@ -128,6 +128,22 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
     requiresControlRevalidation: true,
   },
+  // The shared-core Codex waiter (M3 PR 2a) mirrors the legacy Codex arm,
+  // reconcile and supersession lock contracts exactly.
+  "packages/db/src/index.ts#armSubscriptionCoreCodexCapacityWait": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
+  "packages/db/src/index.ts#supersedeSubscriptionCoreCodexCapacityWaitInTransaction": {
+    inserts: 1,
+    contract: "owned_suffix",
+  },
+  "packages/db/src/index.ts#reconcileSubscriptionCoreCodexCapacityWait": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
   "packages/db/src/index.ts#reconcileCompletedSandboxSetup": {
     inserts: 1,
     contract: "canonical",
@@ -391,6 +407,9 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   appendTimeline: ["importArchivedSession", "appendArchivedSessionEvents"],
   cancelSessionSubtreeInTransaction: ["mutateSessionControlInTransaction"],
   supersedeCodexCapacityWaitInTransaction: ["reconcileCodexCapacityWait"],
+  supersedeSubscriptionCoreCodexCapacityWaitInTransaction: [
+    "reconcileSubscriptionCoreCodexCapacityWait",
+  ],
   supersedeXaiCapacityWaitInTransaction: ["reconcileXaiCapacityWait"],
   projectPausedRecovery: ["commitSessionAttemptQuiescence"],
   recordSessionAttemptQuiescenceInTransaction: [
@@ -404,6 +423,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   ],
   closePendingSessionToolCallsInTransaction: [
     "armCodexCapacityWait",
+    "armSubscriptionCoreCodexCapacityWait",
     "armXaiCapacityWait",
     "cancelSessionSubtreeInTransaction",
     "failSessionWorkBeforeAttemptClaim",
@@ -445,6 +465,7 @@ const expectedFailedChildOutboxCallers = [
   // arm owns the canonical child-lifecycle prefix (including parent session)
   // before atomically emitting a false-capacity-recovery terminal boundary.
   "armCodexCapacityWait",
+  "armSubscriptionCoreCodexCapacityWait",
   "failSessionWorkBeforeAttemptClaim",
   "recoverSessionOwner",
   "settleCodexCredentialFailover",
@@ -478,7 +499,11 @@ const expectedChildLifecycleNoticeProducers: Record<string, string[]> = {
     "applySessionTurnSettlement",
     "failSessionWorkBeforeAttemptClaim",
   ],
-  enqueueChildWaitingCapacityOutboxTx: ["armCodexCapacityWait", "armXaiCapacityWait"],
+  enqueueChildWaitingCapacityOutboxTx: [
+    "armCodexCapacityWait",
+    "armSubscriptionCoreCodexCapacityWait",
+    "armXaiCapacityWait",
+  ],
   enqueueChildProgressOutboxTx: ["recordSessionGoalProgressWithEvent"],
 };
 const expectedControlPlaneChildOutboxWrappers: Record<string, string[]> = {

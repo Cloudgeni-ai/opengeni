@@ -595,6 +595,7 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
       kind: "wait",
       reason: "pinned_account_unavailable",
       earliestResetAt: new Date(resetAt),
+      healthRetryAt: null,
       explicitConnectionId: pinned,
     });
     expect(await leaseRows(org, turn)).toEqual([]);
@@ -1034,6 +1035,7 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
       kind: "wait",
       reason: "no_eligible_capacity",
       earliestResetAt: new Date(resetAt),
+      healthRetryAt: null,
       explicitConnectionId: null,
     });
     // Without the lease, no observation or failure receipt is accepted.
