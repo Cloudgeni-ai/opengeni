@@ -1207,7 +1207,8 @@ nothing unless the account's Codex cutover is enabled.
   connection, a waiting turn only an explicit choice. Every response that
   returns a Session (GET, list, lineage ancestors and children, and every
   mutation that answers with the session, through the routes' one shared
-  response projection; and MCP `session_get`) fills
+  response projection; the organization-wide session list; and MCP
+  `session_get`) fills
   `codexPinnedCredentialId`/`codexLastCredentialId` by disposition
   (`apps/api/src/codex-session-pointers.ts`): legacy ids unchanged without a
   row; from the binding (explicit choice and bound connection) with an

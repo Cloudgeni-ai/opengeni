@@ -2,7 +2,13 @@ import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "b
 import { signDelegatedAccessToken, type AccessGrant, type Permission } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import * as opengeniDb from "@opengeni/db";
-import { bootstrapWorkspace, createDb, createSession, type DbClient } from "@opengeni/db";
+import {
+  bootstrapWorkspace,
+  createApiKey,
+  createDb,
+  createSession,
+  type DbClient,
+} from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -11,6 +17,7 @@ import {
 } from "@opengeni/testing";
 import { createApp } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { organizationReadApiKeyPermissions } from "../src/routes/api-keys";
 
 // Every response that returns a Session shows the Codex pointers by the
 // organization's cutover disposition (M3 PR 2b): legacy ids without a cutover
@@ -35,6 +42,7 @@ let workspaceId = "";
 let parentId = "";
 let childId = "";
 let connectionId = "";
+const ORGANIZATION_KEY = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
 
 class FakeWorkflowClient implements SessionWorkflowClient {
   async signalUserMessage(): Promise<void> {}
@@ -139,6 +147,14 @@ async function everySessionResponse(): Promise<Record<string, Pointers & { id: s
     content: Array<{ text: string }>;
   };
   const mcp = JSON.parse(mcpResult.content[0]!.text) as Pointers & { id: string };
+  // The organization-wide list (SDK listOrganizationSessions, MCP action catalog).
+  const organizationList = await createApp(deps() as never).request(
+    `/v1/organizations/${accountId}/sessions?limit=50`,
+    { headers: { authorization: `Bearer ${ORGANIZATION_KEY}` } },
+  );
+  const organizationItems = (
+    await json<{ sessions: Array<Pointers & { id: string }> }>(organizationList)
+  ).sessions;
   return {
     get: pointersOf(got),
     listParent: pointersOf(listItems.find((item) => item.id === parentId)!),
@@ -148,6 +164,8 @@ async function everySessionResponse(): Promise<Record<string, Pointers & { id: s
     pin: pointersOf(pinned),
     unpin: pointersOf(unpinned),
     mcp: pointersOf(mcp),
+    organizationListParent: pointersOf(organizationItems.find((item) => item.id === parentId)!),
+    organizationListChild: pointersOf(organizationItems.find((item) => item.id === childId)!),
   };
 }
 
@@ -219,6 +237,22 @@ beforeAll(async () => {
       'chatgpt-pointers'
     ) returning id::text as id`;
   connectionId = connection!.id;
+  const keyHash = Array.from(
+    new Uint8Array(
+      await crypto.subtle.digest("SHA-256", new TextEncoder().encode(ORGANIZATION_KEY)),
+    ),
+  )
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  await createApiKey(client.db, {
+    accountId,
+    workspaceId: null,
+    name: "Codex pointers organization key",
+    prefix: ORGANIZATION_KEY.slice(0, 14),
+    keyHash,
+    permissions: organizationReadApiKeyPermissions,
+    credentialKind: "organization",
+  });
   // Fixture rows written directly: the legacy pointer columns as legacy wrote
   // them, a child link, and a core binding for the parent only.
   await shared.admin.begin(async (tx) => {
