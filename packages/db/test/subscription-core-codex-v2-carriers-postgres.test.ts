@@ -5,6 +5,7 @@
 // recomputed; non-human acceptance freezes the empty value; nothing is
 // written before the cutover.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import type { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 import {
@@ -33,7 +34,7 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 const key = Buffer.alloc(32, 59);
 const MODEL = "codex/gpt-5.5";
-const EMPTY = { version: 2, personal: [] };
+const EMPTY: SubscriptionPersonalAuthorityV2 = { version: 2, personal: [] };
 
 beforeAll(async () => {
   if (!realDb) return;
@@ -126,7 +127,7 @@ async function personalConnection(org: Org): Promise<string> {
   return connected.id;
 }
 
-function personal(org: Org, generation = 1) {
+function personal(org: Org, generation = 1): SubscriptionPersonalAuthorityV2 {
   return {
     version: 2,
     personal: [

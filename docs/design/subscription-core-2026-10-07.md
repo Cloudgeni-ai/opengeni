@@ -726,6 +726,12 @@ the shared core, dormant behind the disabled provider switch;
 (2) the remaining Codex-specific consumers (compaction, transcription,
 realtime, media, tool gateway and billing attribution) and their compatibility
 route/SDK/event projections, still behind the switch;
+(2b, "PR 3b") the remaining Codex writers, still dormant behind the switch:
+connect and disconnect, organization-level reset redemption, personal
+connections in their owner's views, and the v2 writers on every remaining
+accepted-work carrier. It lands before (3), because main is continuously
+deployable and (3) without it would leave Codex connect and disconnect
+answering 409 for every organization;
 (3) the drained maintenance migration: v2 backfill, cutover row activation, no
 dual write, release-schema registration and deployment runbook; and
 (4) deletion of the legacy Codex decision path once (3) has made it
@@ -1510,6 +1516,131 @@ Left to PR 3:
 - **Facts repair.** The Insights repair that recreates a missing model-call
   fact from its usage event does not know the connection; a repaired fact
   has a NULL `connection_id`.
+
+##### PR 3b: the remaining Codex writers (dormant)
+
+Migration 0672 (rolling) and the matching code complete every Codex writer on
+the core before the drained cutover, so the cutover moves data and flips no
+route to a 409. Like PR 1/2 everything is dormant: no cutover row keeps the
+legacy path unchanged, a disabled row fails closed (typed 503), and every
+database routine below rechecks the enabled row itself.
+
+- **Connect and disconnect (SUB-OWN-01/04/08).** The device-code start
+  touches no state and runs unchanged (a disabled cutover still fails
+  closed). Poll writes through `connectSubscriptionCoreCodexConnection`:
+  - a new shared connection is an organization decision: only an
+    organization administrator creates one. From the organization route it
+    is organization-scoped and organization-managed; from a shared
+    workspace's route it serves and is managed by that workspace (exactly
+    the core shape the drained cutover gives a legacy workspace account),
+    with its assignment and pool policy;
+  - the same upstream account reconnects in place: a new credential, the next
+    refresh generation, active status. An organization administrator may
+    reconnect any shared connection, a workspace administrator only one their
+    workspace manages (the core update policy); an account connected and
+    managed elsewhere is never widened or taken over (`managed_elsewhere`,
+    409). SUB-OWN-08 holds by construction: one connection per organization,
+    provider account and owner;
+  - in the person's own Personal workspace, connect creates or reconnects
+    their personal connection through the owner-scoped writer
+    `connect_subscription_codex_personal`, only with personal connections
+    allowed there (SUB-OWN-05). A new personal connection carries a
+    `subscription_connection` resource authority with the owner's one current
+    generation for personal Codex connections (1 for the first), so frozen
+    accepted authority keeps resolving to a single generation.
+  Every credential replacement takes the connection's refresh key
+  (`subscription-refresh:<id>`) before its row lock, so it waits for an
+  in-flight refresh and for a redemption's `FOR SHARE`.
+- **Disconnect** (`disconnect_subscription_codex_connection`): only an
+  organization administrator deletes a shared connection (a delegated
+  manager reconnects, renames and toggles allocation but does not delete,
+  SUB-OWN-04); a personal connection is deleted by its owner from their
+  Personal workspace, which revokes its resource authority. Deletion takes
+  the refresh key and the row lock (waiting for a redemption's share lock),
+  and is refused while any workspace's redemption of the connection is
+  `provider_started` (its one upstream key must stay retryable) or while a
+  chat or operation lease still names it (leases are `RESTRICT`; a stale
+  lease is not cleared here because its session's restrictive visibility
+  policy applies to the routine too). Disconnect-all removes every account
+  the workspace manages (or the person's personal connections) atomically.
+  An organization account named from a workspace route keeps the legacy 409.
+- **Personal connections in their owner's views.** The owner-only reader
+  `subscription_codex_personal_connections` returns the acting person's own
+  personal Codex connections (no credential material) for a workspace they
+  may use. Their Personal-workspace account list includes them (never an
+  Apps designation target: designations are shared-only), and a session
+  running on one shows it as "Running on" to that owner only; everyone else
+  still sees the id with no account.
+- **Organization-level reset redemption.** `subscription_codex_reset_authority`
+  also authorizes an organization administrator for an organization-managed
+  shared connection (the workspace-managed rule is unchanged), so the
+  existing prepare/redeem routes and the overview serve organization
+  accounts to organization administrators; everyone else keeps the legacy
+  409 and `managed_human_unavailable`. The per-credit fence spans
+  workspaces: `subscription_codex_reset_credit_fence` serializes one credit
+  of one connection (`subscription-reset-credit:<connection>:<credit>`), and
+  another workspace's open or consumed attempt for it refuses a second
+  logical redemption. The same person's own attempt filed in another
+  workspace (including a ledger row the cutover keeps in its legacy
+  workspace) is re-filed into the requesting workspace when its claim has
+  lapsed, so prepare adopts it and the claim resumes on its one upstream
+  idempotency key.
+- **v2 writers at acceptance (design 3.7, EP-T13..T15).** Values are copied,
+  never recomputed from current membership; non-human acceptance freezes
+  the empty value; nothing is written before the cutover:
+  - scheduled tasks freeze their value once at creation
+    (`subscription_codex_task_authority_v2`, the acceptance rule: a personal
+    entry only for the exact requesting person in their own Personal
+    workspace, or a reusable session's acceptance value). Revision
+    authorities derive theirs from the task by trigger (the empty value when
+    anyone but the owner authorized the revision). A firing copies the
+    task's value onto its first turn or its scheduled occurrence, narrowed to
+    the empty value when the accepted revision's authorizer is not the owner;
+  - Agent Message, Agent Steer and agent-submitted prompts copy the receiving
+    source's value (its execution-context turn, its latest accepted turn, or
+    a child's spawning parent turn) only when that source's exact owner is
+    the causal human, mirroring the v1 pools; otherwise the empty value;
+  - child-result notices carry the spawning parent turn's value through the
+    outbox (the claim routine's fixed columns predate the slot, so claimed
+    rows read it after the claim); background results and wait timeouts carry
+    their causal turn's value;
+  - the internal turn that delivers updates copies the receiving context
+    turn's value for informational input, otherwise the delivered update's.
+    Updates frozen with different values never share one turn; an update
+    that froze none follows the v1 compatibility rule. Once the cutover is
+    active, a missing value is the empty value.
+- **Owner-only capability policies.** The writers run as their owner under
+  FORCE RLS with two new transaction-scoped capabilities,
+  `codex_connection_owner` (the acting person's own personal connections and
+  one connection's ledger) and `codex_reset_credit_fence` (one connection's
+  ledger across workspaces), each admitted only by owner-only policies that
+  read the capability through SECURITY DEFINER helpers (policies are
+  evaluated for every caller, and the application role has no access to the
+  capability table). The writers' caller check, the capability grant and
+  drop helpers and the revision trigger function are revoked from the
+  runtime role after role provisioning's blanket grant and asserted by the
+  posture check.
+- **Placement classification.** A shared connection with no
+  assignment-policy row in a workspace keeps its management classification
+  (organization pool unless that workspace manages it), as the compatibility
+  projection and operation candidates already read it; otherwise an
+  organization-scope connection connected on the core would be hidden from
+  chat.
+
+Decisions: a workspace administrator who is not an organization
+administrator can no longer connect a new shared account on the core (the
+legacy route let them); they reconnect what their workspace manages and use
+their personal connection. Disconnect does not wait for running turns: it
+refuses with the legacy "active turns are using it" message.
+
+Tests: `packages/db/test/subscription-core-codex-writers-postgres.test.ts`
+(gate off/disabled/enabled, every principal for connect/reconnect/disconnect
+through canonical and aliased ids, RLS isolation across organizations,
+personal rules, the ledger and lease guards, organization redemption and the
+cross-workspace fence, internals not executable; the writer and fences again
+under a NOBYPASSRLS migration owner),
+`packages/db/test/subscription-core-codex-v2-carriers-postgres.test.ts` and
+`apps/api/test/codex-core-routes.test.ts`.
 
 #### Verification plan
 
