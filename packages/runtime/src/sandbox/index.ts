@@ -73,6 +73,7 @@ import { serializeManifestRecord } from "@openai/agents-core/sandbox/internal";
 import { isProviderApiThrottleError, PROVIDER_REGISTRY } from "./providers";
 import { ensureModalRegistryImage } from "./providers/modal";
 import type { ModalCreateIntent } from "./providers/modal-create-boundary";
+export { readModalCreateImagePreparation } from "./providers/modal-create-boundary";
 import type { ProviderRegistration } from "./providers/types";
 import { sandboxBackendForSdkBackendId } from "./select";
 import {
@@ -216,6 +217,7 @@ export {
 } from "./providers/modal";
 export {
   getModalCommandStartInvocation,
+  modalCommandStartCleanupIsSafe,
   withModalCommandStartSignal,
   type ModalCommandStartInvocation,
 } from "./providers/modal-command-start-errors";

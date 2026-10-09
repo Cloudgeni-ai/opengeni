@@ -19,6 +19,8 @@ import {
 import { sendCommandInput } from "./command-input";
 import {
   withPendingCommandSupervision,
+  withRequiredCommandSupervision,
+  withTurnCommandSupervision,
   ProviderCommandObservationUnavailableError,
   ProviderCommandInputOutcomeUnknownError,
   ProviderCommandStartRejectedError,
@@ -677,7 +679,7 @@ function pendingShellCancellationCommand(state: PendingShellStart): string {
  * operation. The older path performed a separate provider round trip for the
  * marker read, identity check, TERM, each grace poll, KILL, and each absence
  * poll. Modal commonly spends close to a second on each control operation, so
- * that correct-but-chatty sequence could miss the workflow's physical-
+ * that chatty sequence could miss the workflow's physical-
  * cancellation budget even though the in-box work itself takes milliseconds.
  *
  * This helper keeps the same authority boundary inside the sandbox: publish the
@@ -685,8 +687,11 @@ function pendingShellCancellationCommand(state: PendingShellStart): string {
  * require the token in that PID's command line, re-read the live PGID, then
  * signal only that isolated group. It gives TERM a short in-box grace period,
  * escalates to KILL, and returns success only after group absence. If the group
- * remains live, the entire token/identity guard is re-run before retrying;
- * malformed, mismatched, or unavailable identity never opens the fence.
+ * remains live, the entire token/identity guard is re-run before retrying.
+ * This legacy helper observes only that PGID: job-control or detached
+ * descendants are not covered. Native-owned commands bypass it and require
+ * their authenticated all-child receipt. Legacy group absence must not be
+ * described as complete descendant quiescence.
  */
 function retainedShellCancellationCommand(state: ActiveShellSession): string {
   const marker = singleQuote(state.markerPath!);
@@ -1075,7 +1080,22 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
           correlationId,
           async () =>
             await withPendingCommandSupervision(pendingStart?.supervision, () =>
-              invokeExecNative(commandInput),
+              withTurnCommandSupervision(
+                useRemoteOpCancellation
+                  ? undefined
+                  : interactive
+                    ? "native-subreaper-pty-v1"
+                    : "native-subreaper-v1",
+                () =>
+                  withRequiredCommandSupervision(
+                    !useRemoteOpCancellation && isBareInteractiveShellCommand(args.cmd)
+                      ? interactive
+                        ? "native-subreaper-pty-v1"
+                        : "native-subreaper-v1"
+                      : undefined,
+                    () => invokeExecNative(commandInput),
+                  ),
+              ),
             ),
           {
             onDurableOpOwnershipTransferStarted: (opId) => remoteExec?.startOwnershipTransfer(opId),
@@ -1468,6 +1488,12 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               await usesRemoteOperationCancellation(cancellationSession);
             if (this.cancelled) throw cancellationError(this.reason);
             const interactive = parsed.tty !== false;
+            const requiredProtocol =
+              !useRemoteOpCancellation && isBareInteractiveShellCommand(parsed.cmd)
+                ? interactive
+                  ? "native-subreaper-pty-v1"
+                  : "native-subreaper-v1"
+                : undefined;
             const remoteExec =
               cancelExecCommand && useRemoteOpCancellation
                 ? this.registerRemoteExec(
@@ -1506,7 +1532,17 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 correlationId,
                 async () =>
                   await withPendingCommandSupervision(pendingStart?.supervision, () =>
-                    tool.invoke(runContext, cancellableInput, details),
+                    withTurnCommandSupervision(
+                      useRemoteOpCancellation
+                        ? undefined
+                        : interactive
+                          ? "native-subreaper-pty-v1"
+                          : "native-subreaper-v1",
+                      () =>
+                        withRequiredCommandSupervision(requiredProtocol, () =>
+                          tool.invoke(runContext, cancellableInput, details),
+                        ),
+                    ),
                   ),
                 {
                   onDurableOpOwnershipTransferStarted: (opId) =>
@@ -2039,12 +2075,16 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     cancelProviderStart: (() => Promise<void>) | null;
   }): PendingShellStart {
     let resolveSettled!: () => void;
+    let resolvePreparation!: () => void;
+    const preparationSettled = new Promise<void>((resolve) => {
+      resolvePreparation = resolve;
+    });
     const settledPromise = new Promise<void>((resolve) => {
       resolveSettled = resolve;
     });
     const entry: PendingShellStart = {
       ...input,
-      supervision: { managed: false },
+      supervision: { managed: false, preparationSettled, settlePreparation: resolvePreparation },
       cancellationPath: shellCancellationPath(input.markerPath),
       retainedHandoff: false,
       settled: false,
@@ -2089,11 +2129,13 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       }
     }
 
-    if (state.supervision.managed) {
-      // A native start is idle until durable retention. Its exact locator is
-      // handed to shellSessions even on ambiguous promotion/release; wait for
-      // that handoff, then the ordinary drain invokes pidfd supervision. Never
-      // select a numeric-PID helper for this invocation.
+    if (state.supervision.preparing) await state.supervision.preparationSettled;
+    if (state.supervision.managed || state.supervision.notDispatched) {
+      // Preparation may prove this original start was never dispatched. A
+      // native start stays idle until durable retention and hands its exact
+      // locator to shellSessions even on ambiguous promotion/release. Join the
+      // original settlement in either case; the ordinary native drain owns
+      // dispatched children. Never select a numeric-PID helper here.
       await state.settledPromise;
       return;
     }
@@ -2111,6 +2153,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     // retrying a new ordinary mutation here can be fenced forever after Steer.
     // An already-issued helper must PHYSICALLY settle before making that handoff.
     while (!state.retainedHandoff) {
+      if (state.supervision.preparing) await state.supervision.preparationSettled;
+      if (state.supervision.managed || state.supervision.notDispatched) {
+        await state.settledPromise;
+        return;
+      }
       try {
         const output = await this.invokePendingShellCancellationCommand(state);
         if (typeof output === "string" && parseExecBannerExitCode(output) === 0) break;
@@ -2140,13 +2187,15 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     // it does not bypass the writer fence or select a different backend.
     const observation = Promise.resolve()
       .then(async () =>
-        state.session?.execCommand
-          ? await state.session.execCommand(shellHelperArgs(command), {
-              onMutationAdmissionRefused: (error) => {
-                dispatchProof.admissionRefusal = { error };
-              },
-            })
-          : await state.execInvoke(state.runContext, shellHelperInput(command), undefined),
+        withPendingCommandSupervision(undefined, async () =>
+          state.session?.execCommand
+            ? await state.session.execCommand(shellHelperArgs(command), {
+                onMutationAdmissionRefused: (error) => {
+                  dispatchProof.admissionRefusal = { error };
+                },
+              })
+            : state.execInvoke(state.runContext, shellHelperInput(command), undefined),
+        ),
       )
       .then(
         (output) => ({ kind: "fulfilled" as const, output }),

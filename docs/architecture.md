@@ -588,8 +588,10 @@ then releases the fenced host workspace directory, because the cold commit is
 archive-only and nothing references it afterwards. Canonical leaf:
 packages/runtime/src/sandbox/providers/docker-workspace-drain.ts.
 
-Pending cancellation accepts non-dispatch only from call-scoped routing admission
-proof or typed provider rejection. Credential command decorators preserve these
+Pending cancellation accepts non-dispatch only from call-scoped routing preparation
+or admission proof, or typed provider rejection. Preparation proof ends before
+the original provider start invocation; generic provider errors cannot prove
+non-dispatch. Credential command decorators preserve these
 invocation options up to routing, which never forwards proof callbacks to the
 provider. Issued helpers retain independent physical joins after original retained
 registration. See [run lifecycle](run-lifecycle.md).
@@ -606,6 +608,27 @@ there is no provider call, closed-origin maintenance authority, budget reset or
 native producer activation in this seam.
 
 Stock Modal non-PTY/no-`runAs` commands support native subreaper supervision.
+Permanently turn-owned bare shells require native ownership independently of
+the default-off background-launch flag. PTYs use `native-subreaper-pty-v1`, with
+an inherited controlling terminal and a separate child foreground group;
+pipe-mode shells retain v1. The forward PTY database guard and exact-instance
+protocol capability must pass before admission, with no legacy PGID fallback.
+Operator qualification records bind exact source, stock desktop digest, the
+actual authenticated Modal provider-image ID/namespace, native acceptance
+evidence, and one exact authenticated human/create-key pair. Canonical session
+INSERT freezes only the matching new explicit Modal self-group birth, copying
+its original creator kind, subject and key into an immutable receipt. Other
+users, service actors and probe keys remain unenrolled. Original provider-create
+receipts bind each physical box.
+Fresh boxes require canonical registry preparation; snapshot restores require
+the selected immutable checkpoint's qualified predecessor lineage in the same
+group and namespace. Unsupported image selectors fail before provider dispatch
+while preserving checkpoint data.
+Those groups require native ownership for every new turn command while the
+global flag stays false. Read-only scoped RPCs inspect the owner-only ledger;
+existing groups never gain retrospective qualification. Canonical source:
+`packages/db/src/native-command-qualification.ts` and maintenance migrations
+`0693`/`0694`.
 Exact-instance capability verification precedes admission; durable invocation
 retention precedes dispatch. The supervisor starts idle. Only original launch
 releases user code; reconstructed observers never release abandoned reservations.

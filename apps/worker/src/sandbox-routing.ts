@@ -16,12 +16,14 @@ import { isDeepStrictEqual } from "node:util";
 // request/reply connection.
 
 import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
+import { readImmutableServerSourceSha } from "@opengeni/config/server-source-identity";
 import {
   createProviderCommandRetainer,
   supervisedCommandProtocolReady,
 } from "@opengeni/db/retained-provider-commands";
 import {
   adoptConnectedMachineSessionBackgroundCommand,
+  inspectNativeCommandProviderQualification,
   adoptManagedSessionBackgroundCommand,
   advanceWorkspaceGenerationForRetainedProcess,
   retainedProviderCommandPersistence,
@@ -1154,6 +1156,19 @@ export function wrapTurnBoxWithRouting(
     providerCommandHandle: admittedCommandHandle,
     providerSupervisionReady: async () =>
       settings.modalCommandSupervisionEnabled && (await supervisedCommandProtocolReady(db)),
+    requiredProviderSupervisionReady: (protocol) => supervisedCommandProtocolReady(db, protocol),
+    qualifiedProviderSupervision: async (backend, protocol) => {
+      if (!ids.homeLease || backend.sandboxId !== null) return { status: "legacy" };
+      return inspectNativeCommandProviderQualification(db, {
+        accountId: ids.homeLease.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.homeLease.sandboxGroupId,
+        providerInstanceId: backend.providerInstanceId ?? "",
+        leaseEpoch: backend.leaseEpoch ?? -1,
+        protocol,
+        sourceSha: (await readImmutableServerSourceSha()) ?? "",
+      });
+    },
     ...(ids.workspaceMutationFence
       ? {
           providerCommandPersistence: (process: RoutingRetainedProcess) =>
@@ -1422,6 +1437,20 @@ export function wrapLazyTurnBoxWithRouting(
     providerCommandHandle: admittedCommandHandle,
     providerSupervisionReady: async () =>
       settings.modalCommandSupervisionEnabled && (await supervisedCommandProtocolReady(db)),
+    requiredProviderSupervisionReady: (protocol) => supervisedCommandProtocolReady(db, protocol),
+    qualifiedProviderSupervision: async (backend, protocol) => {
+      const home = ids.homeLease ?? args.homeLeaseIdentity;
+      if (!home || backend.sandboxId !== null) return { status: "legacy" };
+      return inspectNativeCommandProviderQualification(db, {
+        accountId: home.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: home.sandboxGroupId,
+        providerInstanceId: backend.providerInstanceId ?? "",
+        leaseEpoch: backend.leaseEpoch ?? -1,
+        protocol,
+        sourceSha: (await readImmutableServerSourceSha()) ?? "",
+      });
+    },
     ...(ids.workspaceMutationFence
       ? {
           providerCommandPersistence: (process: RoutingRetainedProcess) =>

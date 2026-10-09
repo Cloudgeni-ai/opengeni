@@ -212,6 +212,7 @@ import {
 } from "./credit-debit-attribution";
 import { checkWorkspaceAllowance } from "./usage-allowances";
 import { readSessionFileAttachments } from "./session-file-attachments";
+import { loadNativeCommandBirthQualification } from "./native-command-qualification";
 export {
   acceptSessionFileAttachments,
   readSessionFileAttachments,
@@ -268,6 +269,7 @@ import {
 import { createRetryFailedSessionInTransaction } from "./session-retry";
 export { SessionRetryConflictError, getSessionRetryReceiptInTransaction } from "./session-retry";
 import { retainedProviderCommandPersistence as retainedProviderCommandState } from "./retained-provider-commands";
+export * from "./native-command-qualification";
 export const retryFailedSessionInTransaction = createRetryFailedSessionInTransaction(
   sessionEffectiveSandboxRecoveryBlocked,
 );
@@ -49037,6 +49039,22 @@ export type SandboxProviderCreateAttempt = {
   requestSha256: string;
   startedAt: string;
   instanceId: string | null;
+  /** Trusted immutable group qualification selected before provider dispatch.
+   * Legacy creators omit it and cannot enroll a born-qualified physical box. */
+  nativeCommandQualification?: {
+    qualificationId: string;
+    activationGeneration: number;
+    sourceSha: string;
+    imageRef: string;
+    providerImageId: string;
+    providerBindingKey: string;
+    acceptanceEvidenceHash: string;
+  };
+  nativeImageSource?: {
+    kind: "stock-registry" | "qualified-filesystem-snapshot";
+    imageId: string;
+    checkpointArtifactId: string | null;
+  };
 };
 
 // The snake_case raw shape returned by the raw sql`` lease queries. lease_epoch
@@ -53938,6 +53956,15 @@ export async function beginModalProviderCreate(
     appId: string;
     providerName: string;
     requestSha256: string;
+    /** Immutable server build identity read from the installed source file.
+     * Never supplied by a public request, session metadata or telemetry env. */
+    nativeSourceSha?: string;
+    /** Comes only from the actual canonical Modal selector/build boundary.
+     * The worker obtains it through the original intent's opaque preparation
+     * record, never from settings or serialized caller metadata. */
+    nativeImagePreparation?:
+      | { kind: "registry-import"; imageRef: string; imageId: string }
+      | { kind: "provider-image-id" | "unqualified-image"; imageId: string };
   },
 ): Promise<void> {
   if (
@@ -53980,6 +54007,78 @@ export async function beginModalProviderCreate(
       ) {
         throw new Error("provider_create_outcome_unknown: provider attempt cannot be replayed");
       }
+      const qualification = await loadNativeCommandBirthQualification(tx, input);
+      if (
+        qualification &&
+        (qualification.sourceSha !== input.nativeSourceSha ||
+          qualification.imageRef !== input.imageRef ||
+          qualification.providerBindingKey !== input.providerBindingKey)
+      ) {
+        throw new Error(
+          "Native command qualified create requires its exact installed source and stock image",
+        );
+      }
+      let nativeImageSource: SandboxProviderCreateAttempt["nativeImageSource"];
+      if (qualification) {
+        const preparation = input.nativeImagePreparation;
+        if (!preparation || preparation.imageId !== input.imageId)
+          throw new Error("Native command create requires its actual canonical image preparation");
+        const archive = current.archive.current;
+        const nativeArchive =
+          archive?.version === 2 &&
+          (archive.provider === "modal_snapshot_filesystem" ||
+            archive.provider === "modal_snapshot_directory");
+        let artifact: { id: string; object_id: string; object_kind: string } | undefined;
+        if (nativeArchive) {
+          if (
+            !input.rematerializationId ||
+            !input.selectedRevision ||
+            !row.current_checkpoint_artifact_id
+          )
+            throw new Error(
+              "Native command snapshot create requires the canonical selected checkpoint",
+            );
+          [artifact] = await tx.execute<{ id: string; object_id: string; object_kind: string }>(sql`
+            select id, object_id, object_kind from sandbox_checkpoint_artifacts
+            where id = ${row.current_checkpoint_artifact_id}::uuid and account_id = ${input.accountId}::uuid
+              and workspace_id = ${input.workspaceId}::uuid and sandbox_group_id = ${input.sandboxGroupId}::uuid
+              and source_lease_id = ${row.id}::uuid and state = 'current' and provenance = 'native_capture'
+              and provider_backend = 'modal' and provider_binding_key = ${qualification.providerBindingKey}
+              and object_id = ${archive.snapshotId} and descriptor_revision = ${input.selectedRevision}
+              and descriptor_revision = ${archive.revision}
+          `);
+          if (!artifact) throw new Error("Native command snapshot lineage is unqualified");
+        }
+        if (nativeArchive && archive.provider === "modal_snapshot_filesystem") {
+          if (
+            preparation.kind !== "provider-image-id" ||
+            artifact?.object_kind !== "modal_filesystem_snapshot" ||
+            artifact.object_id !== input.imageId
+          )
+            throw new Error(
+              "Native command filesystem restore must use its exact selected snapshot image",
+            );
+          nativeImageSource = {
+            kind: "qualified-filesystem-snapshot",
+            imageId: preparation.imageId,
+            checkpointArtifactId: artifact.id,
+          };
+        } else {
+          if (
+            preparation.kind !== "registry-import" ||
+            preparation.imageRef !== qualification.imageRef ||
+            preparation.imageId !== qualification.providerImageId
+          )
+            throw new Error(
+              "Native command stock create requires its exact authenticated registry image",
+            );
+          nativeImageSource = {
+            kind: "stock-registry",
+            imageId: preparation.imageId,
+            checkpointArtifactId: artifact?.id ?? null,
+          };
+        }
+      }
       const attempt: SandboxProviderCreateAttempt = {
         version: 1,
         operationId: input.operationId,
@@ -53994,6 +54093,20 @@ export async function beginModalProviderCreate(
         requestSha256: input.requestSha256,
         startedAt: new Date().toISOString(),
         instanceId: null,
+        ...(qualification
+          ? {
+              nativeCommandQualification: {
+                qualificationId: qualification.id,
+                activationGeneration: qualification.activationGeneration,
+                sourceSha: qualification.sourceSha,
+                imageRef: qualification.imageRef,
+                providerImageId: qualification.providerImageId,
+                providerBindingKey: qualification.providerBindingKey,
+                acceptanceEvidenceHash: qualification.acceptanceEvidenceHash,
+              },
+            }
+          : {}),
+        ...(nativeImageSource ? { nativeImageSource } : {}),
       };
       await tx.execute(sql`
         update sandbox_leases set provider_create_attempt = ${JSON.stringify(attempt)}::jsonb,

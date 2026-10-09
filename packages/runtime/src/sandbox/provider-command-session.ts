@@ -3,6 +3,7 @@ import type {
   SandboxProviderCommand,
   ModalRouterProviderCommand,
   CommandSupervisionReceipt,
+  CommandSupervisionProtocol,
 } from "@opengeni/contracts";
 
 export type ProviderCommandOutput = {
@@ -113,7 +114,9 @@ export function isProviderCommandObservationUnavailableError(error: unknown): bo
 }
 
 export type ProviderCommandSession = {
-  verifyCommandSupervisionCapability?(): Promise<{ sandboxId: string; taskId: string }>;
+  verifyCommandSupervisionCapability?(
+    protocol?: CommandSupervisionProtocol,
+  ): Promise<{ sandboxId: string; taskId: string }>;
   releaseSupervisedCommand?(handle: number): Promise<void>;
   cancelSupervisedCommand?(
     handle: number,
@@ -135,20 +138,84 @@ export type ProviderCommandSession = {
 };
 
 const admission = new AsyncLocalStorage<number | undefined>();
-export type PendingCommandSupervision = { managed: boolean };
-const pendingSupervision = new AsyncLocalStorage<PendingCommandSupervision>();
+export type PendingCommandSupervision = {
+  managed: boolean;
+  preparing?: boolean;
+  notDispatched?: boolean;
+  preparationSettled?: Promise<void>;
+  settlePreparation?: () => void;
+};
+const pendingSupervision = new AsyncLocalStorage<PendingCommandSupervision | undefined>();
 export function withPendingCommandSupervision<T>(
   state: PendingCommandSupervision | undefined,
   fn: () => T,
 ): T {
-  return state ? pendingSupervision.run(state, fn) : fn();
+  return pendingSupervision.run(state, fn);
+}
+/** Routing invokes this before resolving or admitting THIS original command.
+ * Preparation can run read-only probes, but cannot dispatch user code. */
+export function beginPendingCommandPreparation(): void {
+  const state = pendingSupervision.getStore();
+  if (state) state.preparing = true;
+}
+export function markPendingCommandNotDispatched(): void {
+  const state = pendingSupervision.getStore();
+  if (!state) return;
+  state.notDispatched = true;
+  state.preparing = false;
+  state.settlePreparation?.();
+}
+export async function preparePendingCommandStart<T>(prepare: () => Promise<T>): Promise<T> {
+  try {
+    return await prepare();
+  } catch (error) {
+    // This wrapper ends before the user-command provider function is invoked.
+    // This is call-scoped dispatch proof, not an inference from an error name.
+    markPendingCommandNotDispatched();
+    throw error;
+  }
+}
+export function completePendingCommandPreparation(managed: boolean): void {
+  const state = pendingSupervision.getStore();
+  if (!state) return;
+  state.managed = managed;
+  state.preparing = false;
+  state.settlePreparation?.();
 }
 /** Called only by the provider adapter before dispatching an idle supervisor. */
 export function markPendingCommandSupervised(): void {
   const state = pendingSupervision.getStore();
-  if (state) state.managed = true;
+  if (state) {
+    state.managed = true;
+    state.preparing = false;
+    state.settlePreparation?.();
+  }
 }
-const supervisionReady = new AsyncLocalStorage<boolean>();
+const supervisionReady = new AsyncLocalStorage<CommandSupervisionProtocol | undefined>();
+const requiredSupervision = new AsyncLocalStorage<CommandSupervisionProtocol | undefined>();
+const turnCommandSupervision = new AsyncLocalStorage<CommandSupervisionProtocol | undefined>();
+/** Shape of a trusted turn command, not an enrollment or model-supplied
+ * qualification. Only the server's immutable group birth may opt it in. */
+export function withTurnCommandSupervision<T>(
+  protocol: CommandSupervisionProtocol | undefined,
+  fn: () => T,
+): T {
+  return turnCommandSupervision.run(protocol, fn);
+}
+export function turnCommandSupervisionProtocol(): CommandSupervisionProtocol | undefined {
+  return turnCommandSupervision.getStore();
+}
+/** Only trusted turn ownership selects this requirement, before provider Start.
+ * It is not a model argument or permission to adopt a background command. */
+export function withRequiredCommandSupervision<T>(
+  protocol: CommandSupervisionProtocol | undefined,
+  fn: () => T,
+): T {
+  return requiredSupervision.run(protocol, fn);
+}
+export function requiredCommandSupervisionProtocol(): CommandSupervisionProtocol | undefined {
+  return requiredSupervision.getStore();
+}
 type SupervisedLaunchReservation = {
   reserve(command: ModalRouterProviderCommand): Promise<void>;
 };
@@ -164,11 +231,18 @@ export async function reserveSupervisedLaunch(command: ModalRouterProviderComman
   if (!reservation) throw new Error("Supervised launch requires durable pre-dispatch reservation");
   await reservation.reserve(command);
 }
-export function withCommandSupervisionReady<T>(ready: boolean, fn: () => T): T {
-  return supervisionReady.run(ready, fn);
+export function withCommandSupervisionReady<T>(
+  ready: boolean,
+  fn: () => T,
+  protocol: CommandSupervisionProtocol = "native-subreaper-v1",
+): T {
+  return supervisionReady.run(ready ? protocol : undefined, fn);
 }
 export function admittedCommandSupervisionReady(): boolean {
-  return supervisionReady.getStore() === true;
+  return supervisionReady.getStore() !== undefined;
+}
+export function admittedCommandSupervisionProtocol(): CommandSupervisionProtocol | undefined {
+  return supervisionReady.getStore();
 }
 export const MAX_PROVIDER_COMMAND_HANDLE = 2147483647;
 
@@ -188,5 +262,9 @@ export function admittedProviderCommandHandle(): number | undefined {
 /** Private staging and read-only commands are not the surrounding workspace
  * mutation. Do not lend them its one-shot retained invocation alias. */
 export function withoutProviderCommandHandle<T>(fn: () => T): T {
-  return admission.run(undefined, () => withCommandSupervisionReady(false, fn));
+  return admission.run(undefined, () =>
+    withTurnCommandSupervision(undefined, () =>
+      withRequiredCommandSupervision(undefined, () => withCommandSupervisionReady(false, fn)),
+    ),
+  );
 }

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import type { ModalRouterProviderCommand } from "@opengeni/contracts";
+import type { CommandSupervisionProtocol, ModalRouterProviderCommand } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
   createDb,
@@ -50,6 +50,7 @@ async function fixture(
   supervised = true,
   beforeAttach?: (leaseId: string) => Promise<void>,
   beforeRetention?: (leaseId: string) => Promise<void>,
+  protocol: CommandSupervisionProtocol = "native-subreaper-v1",
 ) {
   const session = await createSession(client.db, {
     accountId,
@@ -69,7 +70,7 @@ async function fixture(
   const admissionId = crypto.randomUUID(),
     actorId = crypto.randomUUID();
   const supervision = {
-    protocol: "native-subreaper-v1" as const,
+    protocol,
     invocationId: crypto.randomUUID(),
     nonce: "a".repeat(64),
     controlPath: `/tmp/opengeni-supervision/${crypto.randomUUID()}.sock`,
@@ -79,6 +80,7 @@ async function fixture(
     sandboxId: "sb-test",
     taskId: "task-test",
     execId: crypto.randomUUID(),
+    ...(protocol === "native-subreaper-pty-v1" ? { pty: true } : {}),
     ...(supervised ? { supervision } : {}),
     streams: {
       stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
@@ -212,6 +214,56 @@ test("readiness requires all five active database gates including capture and de
   } finally {
     await shared.admin`alter table sandbox_retained_processes enable trigger supervised_provider_loss_commit_guard`;
   }
+});
+
+test("PTY readiness distinguishes the forward guard from the five legacy trigger names", async () => {
+  expect(await supervisedCommandProtocolReady(client.db, "native-subreaper-pty-v1")).toBe(true);
+  await shared.admin`comment on function opengeni_private.supervised_command_guard() is null`;
+  try {
+    expect(await supervisedCommandProtocolReady(client.db)).toBe(true);
+    expect(await supervisedCommandProtocolReady(client.db, "native-subreaper-pty-v1")).toBe(false);
+  } finally {
+    await shared.admin`comment on function opengeni_private.supervised_command_guard() is 'native-subreaper-pty-v1'`;
+  }
+});
+
+test("native PTY terminal, old SQL writers and protocol substitution stay fenced until exact receipt and output", async () => {
+  const f = await fixture(true, undefined, undefined, "native-subreaper-pty-v1");
+  const end = terminal(f.command);
+  await captureRetainedRouterOutput(client.db, f.scope, {
+    expected: f.command,
+    command: end,
+    stdout: "",
+    stderr: "",
+  });
+  await expect(f.settle()).rejects.toThrow();
+  await rejects(
+    shared.admin`update sandbox_retained_processes set state='exited', settled_at=now(), exit_code=7 where id=${f.scope.processId}`,
+  );
+  await rejects(shared.admin`delete from sandbox_lease_holders where lease_id=${f.leaseId}`);
+  await expect(
+    f.persistence.recordSupervisionReceipt({ ...f.receipt, protocol: "native-subreaper-v1" }),
+  ).rejects.toThrow();
+  const stripped = { ...end, supervision: undefined };
+  await rejects(
+    shared.admin`update sandbox_retained_processes set provider_command=${shared.admin.json(stripped)} where id=${f.scope.processId}`,
+  );
+  await f.persistence.recordSupervisionReceipt(f.receipt);
+  await f.settle();
+  expect((await getRetainedProcess(client.db, f.scope))?.state).toBe("exited");
+});
+
+test("a committed legacy PTY cannot acquire retrospective native ownership", async () => {
+  const f = await fixture(false);
+  const upgraded = {
+    ...f.command,
+    pty: true,
+    supervision: { ...f.supervision, protocol: "native-subreaper-pty-v1" },
+  };
+  await rejects(
+    shared.admin`update sandbox_retained_processes set provider_command=${shared.admin.json(upgraded)} where id=${f.scope.processId}`,
+    "initial retention",
+  );
 });
 
 test("natural terminal observation cannot settle before immutable quiescence", async () => {

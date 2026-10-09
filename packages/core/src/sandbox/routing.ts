@@ -12,11 +12,13 @@
 // over the events bus) lives here, not in the leaf (which stays db-free).
 
 import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
+import { readImmutableServerSourceSha } from "@opengeni/config/server-source-identity";
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import {
   createProviderCommandRetainer,
   supervisedCommandProtocolReady,
 } from "@opengeni/db/retained-provider-commands";
+import { inspectNativeCommandProviderQualification } from "@opengeni/db";
 import {
   advanceWorkspaceGenerationForDirectRequest,
   retainedProviderCommandPersistence,
@@ -589,6 +591,19 @@ export function wrapChannelABoxWithRouting(
   const proxy = new RoutingSandboxSession({
     providerSupervisionReady: async () =>
       settings.modalCommandSupervisionEnabled && (await supervisedCommandProtocolReady(db)),
+    requiredProviderSupervisionReady: (protocol) => supervisedCommandProtocolReady(db, protocol),
+    qualifiedProviderSupervision: async (backend, protocol) => {
+      if (!homeLease || backend.sandboxId !== null) return { status: "legacy" };
+      return inspectNativeCommandProviderQualification(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: homeLease.sandboxGroupId,
+        providerInstanceId: backend.providerInstanceId ?? "",
+        leaseEpoch: backend.leaseEpoch ?? -1,
+        protocol,
+        sourceSha: (await readImmutableServerSourceSha()) ?? "",
+      });
+    },
     providerCommandHandle: (value) =>
       value && typeof value === "object"
         ? (value as PersistableMutationAdmission).admission?.workspaceGeneration

@@ -18,6 +18,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./server-source-identity": {
+      "types": "./src/server-source-identity.ts",
+      "default": "./src/server-source-identity.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"

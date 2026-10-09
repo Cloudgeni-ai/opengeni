@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   createModalProviderCreateBoundary,
   modalCreateOperationName,
+  readModalCreateImagePreparation,
 } from "../src/sandbox/providers/modal-create-boundary";
 
 const operationId = "11111111-1111-4111-8111-111111111111";
@@ -34,6 +35,48 @@ async function invoke(
 }
 
 describe("Modal physical-create boundary", () => {
+  test("only the original intent carries actual preparation and a different wire image never dispatches", async () => {
+    let observed = false,
+      dispatched = 0;
+    const boundary = createModalProviderCreateBoundary({
+      operationId,
+      imagePreparation: () => ({
+        kind: "registry-import",
+        imageRef: "stock@sha256:fixture",
+        imageId: "im-test",
+      }),
+      beforeDispatch: async (intent) => {
+        observed = true;
+        expect(readModalCreateImagePreparation(intent)).toEqual({
+          kind: "registry-import",
+          imageRef: "stock@sha256:fixture",
+          imageId: "im-test",
+        });
+        expect(readModalCreateImagePreparation({ ...intent })).toBeUndefined();
+      },
+      onReceipt: async () => {},
+    });
+    await expect(
+      invoke(
+        boundary,
+        async () => {
+          dispatched++;
+          return { sandboxId: "sb-test" };
+        },
+        {
+          request: { ...request(), definition: { imageId: "im-unrelated" } },
+        },
+      ),
+    ).rejects.toThrow("actual native preparation");
+    expect(observed).toBe(false);
+    expect(dispatched).toBe(0);
+    await invoke(boundary, async () => {
+      dispatched++;
+      return { sandboxId: "sb-test" };
+    });
+    expect(observed).toBe(true);
+    expect(dispatched).toBe(1);
+  });
   test("persists intent before dispatch and receipt before returning; preserves unrelated fields", async () => {
     const events: string[] = [];
     const boundary = createModalProviderCreateBoundary({

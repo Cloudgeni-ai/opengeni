@@ -23,7 +23,10 @@ import {
 } from "../src/sandbox/routing/routing-session";
 import { createSandboxClientForBackend } from "../src/index";
 import { testSettings } from "@opengeni/testing";
-import { markPendingCommandSupervised } from "../src/sandbox/provider-command-session";
+import {
+  markPendingCommandSupervised,
+  requiredCommandSupervisionProtocol,
+} from "../src/sandbox/provider-command-session";
 import { ModalCommandStartNotDispatchedError } from "../src/sandbox/providers/modal-command-router-wire";
 import { SandboxChannelAService } from "../src/sandbox/channel-a";
 import { synchronousNativeOutputFixture } from "./synchronous-output-fixture";
@@ -533,6 +536,134 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(signals).toEqual(["TERM", "KILL"]);
     expect(processAlive).toBe(false);
   });
+
+  test("trusted bare REPL ownership selects native PTY before Start and retains cancellation through Steer", async () => {
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    let alive = true;
+    let cancellations = 0;
+    let adoptions = 0;
+    const exec = functionTool("exec_command", async () => {
+      expect(requiredCommandSupervisionProtocol()).toBe("native-subreaper-pty-v1");
+      markPendingCommandSupervised();
+      return running(125);
+    });
+    const [wrapped] = controller.wrapTools([exec], {
+      hasRetainedProcess: () => alive,
+      canAdoptRetainedProcessAsBackgroundCommand: () => true,
+      adoptRetainedProcessAsBackgroundCommand: async () => {
+        adoptions++;
+      },
+      cancelSupervisedCommand: async (id, reason) => {
+        expect(id).toBe(125);
+        expect(reason).toBe("explicit_stop");
+        cancellations++;
+        alive = false;
+        return true;
+      },
+      execCommandForProcessControl: async () => {
+        throw new Error("numeric helper must not run");
+      },
+      writeStdinForProcessControl: async () => (alive ? running(125) : exited(137)),
+    }) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+    const output = await wrapped!.invoke(
+      runContext,
+      JSON.stringify({ cmd: "bash", tty: true, yield_time_ms: 0 }),
+    );
+    expect(output).toContain("turn-scoped");
+    expect(adoptions).toBe(0);
+    expect(requiredCommandSupervisionProtocol()).toBeUndefined();
+    abort.abort(new Error("steered"));
+    await controller.waitForQuiescence();
+    expect(cancellations).toBe(1);
+    expect(alive).toBe(false);
+  });
+
+  test.each(["mandatory", "cohort_capability", "cohort_selection"] as const)(
+    "Steer during native preparation rejection drains without a legacy helper (%s)",
+    async (mode) => {
+      const controller = createTurnToolCancellationController();
+      let enterCapability!: () => void;
+      let finishCapability!: () => void;
+      const capabilityEntered = new Promise<void>((resolve) => {
+        enterCapability = resolve;
+      });
+      const capabilityPending = new Promise<void>((resolve) => {
+        finishCapability = resolve;
+      });
+      let allowLegacyHelper = false;
+      let helperAdmissions = 0;
+      const backend = {
+        sandboxId: null,
+        kind: "modal",
+        activeEpoch: 0,
+        session: {
+          supportsPty: () => true,
+          verifyCommandSupervisionCapability: async () => {
+            enterCapability();
+            await capabilityPending;
+            throw new Error("native capability unsupported");
+          },
+          execCommand: async () => exited(0),
+          cancelPendingExecCommand: async () => {},
+        },
+      };
+      const routed = new RoutingSandboxSession({
+        defaultResolved: backend,
+        readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+        resolveActiveBackend: async () => backend,
+        requiredProviderSupervisionReady: async () => true,
+        qualifiedProviderSupervision: async () => {
+          if (mode === "cohort_selection") {
+            enterCapability();
+            await capabilityPending;
+            return { status: "blocked", reason: "physical_binding_unqualified" };
+          }
+          return mode === "cohort_capability" ? { status: "enrolled" } : { status: "legacy" };
+        },
+        beforeMutation: async () => {
+          helperAdmissions++;
+          if (!allowLegacyHelper) throw new Error("closed attempt admission");
+        },
+        afterMutation: async () => {},
+        providerCommandPersistence: () => ({
+          load: async () => null,
+          acknowledge: async (value) => value,
+          reserveInput: async () => 0,
+        }),
+      });
+      const exec = functionTool("exec_command", async (_context, input) =>
+        routed.execCommand(JSON.parse(input)),
+      );
+      const [wrapped] = controller.wrapTools([exec], routed) as Array<
+        Extract<Tool<unknown>, { type: "function" }>
+      >;
+      const invoking = wrapped!.invoke(
+        runContext,
+        JSON.stringify({
+          cmd: mode === "mandatory" ? "bash" : "preview-server",
+          tty: true,
+          yield_time_ms: 0,
+        }),
+      );
+      const observed = invoking.catch(() => undefined);
+      await capabilityEntered;
+      controller.cancel(new Error("steered"));
+      finishCapability();
+      await observed;
+      const draining = controller.waitForQuiescence();
+      const drained = await Promise.race([
+        draining.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+      ]);
+      // Release the fake legacy path even on failure so this regression owns no
+      // lingering test promises. Production must never need this admission.
+      allowLegacyHelper = true;
+      await draining;
+      expect(drained).toBe(true);
+      expect(helperAdmissions).toBe(0);
+    },
+  );
 
   test("failed background adoption never exposes a live process receipt", async () => {
     const controller = createTurnToolCancellationController();
