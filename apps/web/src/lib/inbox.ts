@@ -156,3 +156,40 @@ export function inboxAttentionCount(data: ListInboxResponse | null): number {
       (isNeedsYouKind(item.kind) || item.unread),
   ).length;
 }
+
+/**
+ * Looking at a session reads its replies and agent notes in the inbox (they
+ * stay until cleared): on opening it and on leaving it, so a reply that
+ * arrived while it was open is read too. Needs-you items are untouched.
+ */
+export function useReadSessionInbox(sessionId: string) {
+  const context = useAppContext();
+  const personal = hasInbox(context.accessContext);
+  const client = context.client;
+  useEffect(() => {
+    if (!personal) return;
+    const store = storeFor(client);
+    const read = async () => {
+      const data = await client.listInbox().catch(() => null);
+      const unread = (data?.items ?? []).filter(
+        (item) =>
+          item.sessionId === sessionId &&
+          item.unread &&
+          (item.kind === "reply" || item.kind === "notification"),
+      );
+      if (unread.length === 0) return;
+      await Promise.all(
+        unread.map((item) =>
+          client.updateInboxItem(item.id, { seen: true }).catch(() => undefined),
+        ),
+      );
+      store.patchItems((items) =>
+        items.map((item) =>
+          unread.some((each) => each.id === item.id) ? { ...item, unread: false } : item,
+        ),
+      );
+    };
+    void read();
+    return () => void read();
+  }, [client, personal, sessionId]);
+}
