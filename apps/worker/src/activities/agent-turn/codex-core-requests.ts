@@ -138,5 +138,9 @@ export function createCoreCodexRequests(deps: {
     canRecover(): boolean {
       return !uncertain && !reserving && requests.size === 0;
     },
+    /** Preserve an observed unknown outcome even when the SDK throws a plain HTTP error. */
+    hasUnknownOutcome(): boolean {
+      return uncertain;
+    },
   };
 }

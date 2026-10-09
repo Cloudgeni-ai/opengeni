@@ -1148,7 +1148,7 @@ describe("core Codex failure settlement", () => {
     const refusal = spy(db, "recordSubscriptionCoreCodexTurnFailure");
     spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
     expect(await settleTurnFailure(deps as never)).toMatchObject({
-      status: thrown instanceof db.SubscriptionCoreCodexSourceDisconnectedError ? "idle" : "failed",
+      status: "failed",
     });
     expect(recovery).not.toHaveBeenCalled();
     expect(refusal).not.toHaveBeenCalled();
@@ -1199,6 +1199,50 @@ describe("core Codex failure settlement", () => {
       );
     },
   );
+
+  test.each([
+    [503, "requests"],
+    [507, "requests"],
+    [503, "titleRequests"],
+    [507, "titleRequests"],
+  ] as const)("HTTP %s with unknown %s custody reports the replay fence", async (status, lane) => {
+    const requests = createCoreCodexRequests({
+      reserve: async () => ({ operationId: "op" }),
+      settle: async () => {},
+    });
+    await requests.reserve({ requestId: "r", transportAttempt: 1 });
+    await requests.observe({ requestId: "r", transportAttempt: 1, outcome: "unknown" });
+    // The provider error has no native outcome error in its cause chain.
+    // The physical request tracker is the evidence that blocks replay.
+    const error = Object.assign(new Error(`${status} upstream unavailable`), {
+      status,
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+    });
+    const { deps, settle } = failureDeps(error, { ...core, [lane]: requests });
+    const checkpoint = mock(async (_options?: unknown) => undefined);
+    deps.historySink.reconcileConversationTruth = checkpoint;
+    const recovery = spy(db, "requestSessionTurnRecovery");
+    const refusal = spy(db, "recordSubscriptionCoreCodexTurnFailure");
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+    expect(checkpoint).toHaveBeenCalledWith({ requireDurable: true });
+    expect(recovery).not.toHaveBeenCalled();
+    expect(refusal).not.toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledWith(
+      expect.objectContaining({
+        events: expect.arrayContaining([
+          {
+            type: "turn.failed",
+            payload: expect.objectContaining({
+              code: "subscription_core_request_outcome_unknown",
+              retryable: false,
+            }),
+          },
+        ]),
+      }),
+    );
+  });
 
   test.each([
     ["provider quota refusal", () => usageCap()],
