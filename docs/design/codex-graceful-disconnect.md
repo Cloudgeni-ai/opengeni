@@ -1,10 +1,11 @@
 # Codex graceful local disconnect (OPE-766)
 
 Status: implementation candidate; **not merged or deployed**. Follow-up to
-OPE-700/OPE-717. The integration base is corrected cutover
-`4d22d97da851870b6e40f926f3cfa5a9751f6bbc`, stacked on writers
-`de5e7755b216f1ec16e3dc2f7693f4c379e7fbe4`. Those upstream changes have separate
-ownership and approval. This candidate does not change their branches.
+OPE-700/OPE-717. The integration base is landed cutover
+`2bd5590c5f0f8f31cb4dd62ce3df7a2c51168ca1` (migration 0689), including writers
+`3aa398dd5209eef4bc6f71781ed378be2183019f` (migration 0688). Those upstream
+changes have separate ownership and approval. Source landing does not imply
+production deployment. This candidate does not change their branches.
 
 The reported organization DELETE returned HTTP 409 because the live-lease FK
 prevented deletion. Expired-lease pruning did not fix graceful disconnect: a
@@ -22,7 +23,7 @@ the reservation. An authentication retry is another physical request.
 
 The shared core is the sole lifecycle owner. No second legacy ledger or
 chat-only drain is introduced. The deployment requires matching request-aware
-binaries and the existing core cutover; migration 0686 is maintenance-only.
+binaries and the existing core cutover; migration 0690 is maintenance-only.
 
 ## Local removal and request custody
 

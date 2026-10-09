@@ -149,7 +149,7 @@ describeRealDatabase("legacy Codex disconnect: known pre-fix behavior", () => {
       // Preserve the original superuser-owned migration baseline here; the
       // positive core suite separately exercises the NOBYPASSRLS owner posture.
       await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-      await owner`insert into schema_migrations(name) values ('0685_subscription_core_codex_cutover.sql')`;
+      await owner`insert into schema_migrations(name) values ('0689_subscription_core_codex_cutover.sql')`;
       await migrate(owned.databaseUrl);
       await provisionRoles(owned.databaseUrl, { appPassword: owned.appPassword });
     } finally {
