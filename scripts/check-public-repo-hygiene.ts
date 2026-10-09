@@ -147,6 +147,15 @@ const LEGACY_MIGRATION_REFERENCE_ALLOWLIST = new Set([
   "packages/db/drizzle/0074_session_activity_revisions.sql",
   "packages/db/drizzle/0120_durable_goal_wake.sql",
 ]);
+// This already-released migration cannot be rewritten. Retain only its exact
+// historical issue marker; edited bytes, other paths and all other rules remain
+// checked. Unlike the older filename allowlist, this grants no future exemption.
+const FROZEN_MIGRATION_ISSUE = {
+  file: "packages/db/drizzle/0691_subscription_core_codex_disconnect.sql",
+  bytes: 16960,
+  sha256: "663c19d4e7935d043f3483d76363085ed188dec133817cc295a2c0f6c02a37f3",
+  offset: 35,
+};
 const CATALOG_SNAPSHOT = "data/catalog/integrations-snapshot.json";
 const PUBLIC_FITNESS_DOMAIN = ["one", "pelo", "ton", ".com"].join("");
 const PUBLIC_FITNESS_NAME = ["Pelo", "ton"].join("");
@@ -189,7 +198,18 @@ export function auditPublicText(file: string, source: string): Finding[] {
   }
 
   if (!LEGACY_MIGRATION_REFERENCE_ALLOWLIST.has(file)) {
-    collectMatches(file, source, INTERNAL_ISSUE_REFERENCE, "internal issue reference", findings);
+    const frozenMigrationMatches =
+      file === FROZEN_MIGRATION_ISSUE.file &&
+      Buffer.byteLength(source, "utf8") === FROZEN_MIGRATION_ISSUE.bytes &&
+      createHash("sha256").update(source, "utf8").digest("hex") === FROZEN_MIGRATION_ISSUE.sha256;
+    collectMatches(
+      file,
+      source,
+      INTERNAL_ISSUE_REFERENCE,
+      "internal issue reference",
+      findings,
+      (match) => frozenMigrationMatches && match.index === FROZEN_MIGRATION_ISSUE.offset,
+    );
     collectMatches(file, source, PRIVATE_AGENT_DOC, "private .agent document reference", findings);
     collectMatches(
       file,

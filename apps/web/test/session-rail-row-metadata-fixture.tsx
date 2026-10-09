@@ -13,10 +13,8 @@ import { createRoot } from "react-dom/client";
 import { SessionHeader } from "../src/components/rail/session-header";
 import { sessionStateLabel } from "../src/lib/session-rail";
 import { RowQuickActions } from "../src/components/rail/session-list";
-import {
-  SessionRowContent,
-  SessionRowHoverDetails,
-} from "../src/components/rail/session-row-content";
+import { SessionRowContent } from "../src/components/rail/session-row-content";
+import { SessionRowHoverDetails } from "../src/components/rail/session-row-hover-details";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "../src/components/ui/hover-card";
 import { cn } from "../src/lib/utils";
 import type { Session } from "../src/types";
@@ -138,8 +136,8 @@ function SessionRailRowMetadataFixture() {
                           ? null
                           : {
                               kind: "subject",
-                              subjectId: "user:bendik",
-                              label: "Bendik Nyheim",
+                              subjectId: "user:example-owner",
+                              label: "Example Owner",
                             }
                       }
                     />
@@ -152,14 +150,20 @@ function SessionRailRowMetadataFixture() {
                         ? "Long_unbroken_session_title_".repeat(8)
                         : longTitle
                     }
-                    createdAt={new Date(Date.now() - 13 * 3_600_000).toISOString()}
-                    createdBy={{
-                      kind: "subject",
-                      subjectId: "user:bendik",
-                      label:
-                        scenario.id === "overflow"
-                          ? "opengeni-workbench-acceptance-".repeat(6)
-                          : "Bendik Nyheim",
+                    session={{
+                      ...waitSession,
+                      id: `hover-${scenario.id}`,
+                      inputWait: null,
+                      createdAt: new Date(Date.now() - 13 * 3_600_000).toISOString(),
+                      updatedAt: new Date(Date.now() - 3_600_000).toISOString(),
+                      createdBy: {
+                        kind: "subject",
+                        subjectId: "user:example-owner",
+                        label:
+                          scenario.id === "overflow"
+                            ? "opengeni-workbench-acceptance-".repeat(6)
+                            : "Example Owner",
+                      },
                     }}
                     descendantCount={3}
                     descendantCountTruncated={false}
