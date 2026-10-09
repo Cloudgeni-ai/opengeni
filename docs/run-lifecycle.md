@@ -4004,7 +4004,16 @@ strips provider item ids from every model-call input by default
 (`OPENGENI_OPENAI_PROVIDER_ITEM_IDS=strip`) and round-trips
 `reasoning.encrypted_content` instead
 (`OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT=true`), so requests are
-self-contained and reasoning continuity does not hinge on provider storage.
+self-contained for reasoning continuity rather than depending on provider storage.
+Hosted web search needs a separate include-backed projection: Azure otherwise
+hides its search evidence behind the stored `ws_` ID even when results are inline.
+When native search is attached, the Azure request policy requests sources and,
+with enabled reasoning, result snippets. `hosted-search-evidence.ts` exposes only
+actually returned URLs/titles/snippets as one bounded, explicitly untrusted
+assistant historical-fact message before model and portable-compaction accounting.
+Canonical hosted records remain unchanged. Missing legacy includes cannot be
+reconstructed; sources alone cannot supply page facts, and native citations are
+not guaranteed. See [hosted evidence across tool calls](web-search.md#hosted-evidence-across-tool-calls).
 New history rows omit Responses output-only item `status` at persist
 (`canonicalizePersistedHistoryItem`); pairing is `call_id`. The Codex
 subscription fetch still strips leftover item `status` on the wire for
@@ -4012,8 +4021,9 @@ already-stored SuperGrok rows and mid-turn SDK items because the
 ChatGPT/Codex input schema 400s `Unknown parameter: 'input[N].status'`. That
 strip is request-local and does not rewrite stored history. Hosted tool calls
 (web/file search, code interpreter and image generation) retain their actual
-`status` at both boundaries because it is required replay data, not an
-output-only annotation. Missing historical evidence is not invented or
+`status` at persistence and native replay because it is required replay data, not an
+output-only annotation. Projected search evidence carries the known status as a
+historical fact instead. Missing historical evidence is not invented or
 backfilled by normalization.
 If Codex nevertheless rejects that exact opaque artifact with its recognized
 HTTP-400 encrypted-content family, the current attempt atomically marks only
@@ -4049,9 +4059,11 @@ the same identifiers instead of the generic "request it again to retry" copy,
 which only applies to a transient failure.
 
 Subscription, model, and provider-route changes never alter canonical history
-or a saved approval RunState. Responses consumes canonical history directly;
-Chat Completions receives one request-local transcript projection only for item
-types its wire protocol cannot represent. Historical `tool_search` and other
+or a saved approval RunState. Responses consumes canonical protocol history with
+narrow request-local compatibility projections. Included hosted-search evidence
+is projected into bounded untrusted historical facts on every API; Chat Completions
+also receives a request-local transcript view for item types its wire protocol
+cannot represent. Historical `tool_search` and other
 tool call/output pairs are completed facts, not authorization to execute again.
 The projection is discarded after the request. Portable sessions may switch
 between supported providers; `remote_v2` sessions remain Codex-only.
