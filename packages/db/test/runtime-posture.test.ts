@@ -16,6 +16,7 @@ import {
   RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
+  SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES,
   SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES,
   SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES,
   ARTIFACT_PIN_RUNTIME_ROUTINES,
@@ -620,6 +621,36 @@ function safePosture(): RuntimeDatabasePosture {
 }
 
 describe("runtime database posture evaluator", () => {
+  test("rejects a runtime role that can execute an owner-only M3 helper", () => {
+    for (const name of SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES) {
+      const revoked = safePosture();
+      revoked.privateRoutines.push({
+        name,
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+      });
+      expect(evaluateRuntimeDatabasePosture(revoked, options)).toEqual([]);
+      for (const unsafe of [{ execute: true }, { publicExecute: true }]) {
+        const posture = safePosture();
+        posture.privateRoutines.push({
+          name,
+          owner: "opengeni_migrator",
+          execute: false,
+          publicExecute: false,
+          securityDefiner: true,
+          configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+          ...unsafe,
+        });
+        expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+          `subscription M3 owner-only private routine ${name} is executable`,
+        );
+      }
+    }
+  });
+
   test("requires exact private M3 precursor capabilities and hardened ownership/ACL/search path", () => {
     expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
     for (const name of SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES) {

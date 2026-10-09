@@ -58,13 +58,36 @@ async function claimWithCutover(
   const context = createTurnContext({ settings, cancellationRequestedAt: null });
   const stop = new Error("fixture stopped after the Codex claim overlay");
   const legacyActive = spyOn(db, "workspaceCodexSubscriptionActive").mockResolvedValue(true);
-  const legacyApps = spyOn(core, "resolveCodexAppsCredentialIdForRun").mockResolvedValue(
-    "legacy-apps-credential",
-  );
+  // The legacy Apps designation's own reads (behind the core resolver).
+  const legacyApps = spyOn(db, "getCodexAppsCredentialAuthorizationForRun").mockResolvedValue({
+    credentialId: "legacy-apps-credential",
+    ownerSubjectId: "user:owner",
+  } as Awaited<ReturnType<typeof db.getCodexAppsCredentialAuthorizationForRun>>);
+  const legacyAppsGrant = spyOn(db, "getWorkspaceGrant").mockResolvedValue({
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    subjectId: "user:owner",
+    permissions: ["connections:write"],
+  } as Awaited<ReturnType<typeof db.getWorkspaceGrant>>);
+  // The claim knows its organization and has read its cutover row: the Apps
+  // resolver must not look either up again.
+  const workspaceLookup = spyOn(db, "rlsContextForWorkspace");
+  const dispositionRead = spyOn(db, "readCodexCutoverDisposition");
+  const cutoverRead = spyOn(db, "readSubscriptionProviderCutoverState").mockResolvedValue(cutover);
+  let overlayCodexApps: unknown;
   const overlay = spyOn(capabilities, "settingsWithCodexCredential").mockResolvedValue(settings);
+  const coreApps = spyOn(db, "resolveSubscriptionCoreCodexAppsDesignation").mockResolvedValue({
+    connectionId: "core-apps-connection",
+    status: "active",
+  });
   restores.push(
     legacyActive,
     legacyApps,
+    legacyAppsGrant,
+    workspaceLookup,
+    dispositionRead,
+    cutoverRead,
+    coreApps,
     overlay,
     spyOn(core, "resolveCatalogSettings").mockResolvedValue({ settings } as Awaited<
       ReturnType<typeof core.resolveCatalogSettings>
@@ -92,8 +115,12 @@ async function claimWithCutover(
       async (_db: unknown, _context: unknown, callback: (scoped: never) => Promise<unknown>) =>
         await callback({} as never),
     ),
-    spyOn(db, "readSubscriptionProviderCutoverState").mockResolvedValue(cutover),
-    spyOn(capabilities, "settingsWithEnabledCapabilityMcpServers").mockResolvedValue(settings),
+    spyOn(capabilities, "settingsWithEnabledCapabilityMcpServers").mockImplementation(
+      async (_db: unknown, _workspaceId: unknown, _settings: unknown, options?: unknown) => {
+        overlayCodexApps = (options as { codexApps?: unknown } | undefined)?.codexApps;
+        return settings;
+      },
+    ),
     spyOn(capabilities, "settingsWithWorkspaceGatewayCredential").mockResolvedValue(settings),
     spyOn(capabilities, "settingsWithWorkspaceOpenRouterCredential").mockResolvedValue(settings),
     spyOn(capabilities, "settingsWithWorkspaceOpperCredential").mockResolvedValue(settings),
@@ -122,6 +149,11 @@ async function claimWithCutover(
   return {
     legacyActiveCalls: legacyActive.mock.calls.length,
     legacyAppsCalls: legacyApps.mock.calls.length,
+    coreAppsCalls: coreApps.mock.calls.length,
+    cutoverReads: cutoverRead.mock.calls.length,
+    workspaceLookups: workspaceLookup.mock.calls.length,
+    dispositionReads: dispositionRead.mock.calls.length,
+    overlayCodexApps,
     codexActive: overlay.mock.calls[0]?.[3],
     subscriptionLeaseBusy: context.attempt.subscriptionLeaseBusy,
   };
@@ -132,8 +164,23 @@ describe("claim-time Codex cutover", () => {
     const result = await claimWithCutover("not_configured", codexPolicy);
     expect(result.legacyActiveCalls).toBe(1);
     expect(result.legacyAppsCalls).toBe(1);
+    expect(result.coreAppsCalls).toBe(0);
     expect(result.codexActive).toBe(true);
   });
+
+  test.each(["not_configured", "enabled", "disabled"] as const)(
+    "a claim with a %s cutover reads the cutover row once and never looks up its organization",
+    async (cutover) => {
+      const result = await claimWithCutover(cutover, ordinaryPolicy);
+      expect(result.cutoverReads).toBe(1);
+      expect(result.workspaceLookups).toBe(0);
+      expect(result.dispositionReads).toBe(0);
+      // The capability overlay reuses the claim's one Apps designation read.
+      expect(result.overlayCodexApps).toBeInstanceOf(Promise);
+      expect(result.legacyAppsCalls).toBe(cutover === "not_configured" ? 1 : 0);
+      expect(result.coreAppsCalls).toBe(cutover === "enabled" ? 1 : 0);
+    },
+  );
 
   test.each(["enabled", "disabled"] as const)(
     "a %s cutover row stops every legacy Codex read for a Codex turn",
@@ -150,6 +197,8 @@ describe("claim-time Codex cutover", () => {
     async (cutover) => {
       const result = await claimWithCutover(cutover, ordinaryPolicy);
       expect(result.legacyAppsCalls).toBe(0);
+      // Only an enabled cutover resolves the core designation.
+      expect(result.coreAppsCalls).toBe(cutover === "enabled" ? 1 : 0);
     },
   );
 

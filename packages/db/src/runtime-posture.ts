@@ -122,6 +122,8 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "claude_subscription_pool_protocol_v1_active()",
+  // M3 PR 2b: run only by the Codex Apps routines as their owner.
+  "subscription_codex_apps_designation_target(uuid, uuid)",
   "read_sender_connection(uuid, uuid, uuid, text)",
   // Lifecycle fact writers (migrations 0532 and 0565): owner-run trigger
   // functions and the migration-owner backfill. Runtime roles may still hold
@@ -685,6 +687,18 @@ export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   "recover_subscription_codex_connection_health(uuid, uuid, uuid, uuid)",
   "persist_subscription_codex_refresh_with_plan(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone, text)",
   "subscription_codex_acceptance_authority_v2(uuid, uuid, uuid, text)",
+  // M3 PR 2b: the Codex Apps designation on the core.
+  "resolve_subscription_codex_apps_designation(uuid, uuid)",
+  "read_subscription_codex_apps_credential(uuid, uuid, uuid)",
+  "begin_subscription_codex_apps_refresh(uuid, uuid, uuid)",
+  "persist_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text)",
+] as const;
+
+/** Owner-only private helpers the runtime role must never be able to execute. */
+export const SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES = [
+  // M3 PR 2b: returns a full connection row to the Apps routines that run as its owner.
+  "subscription_codex_apps_designation_target(uuid, uuid)",
 ] as const;
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [
@@ -2489,6 +2503,12 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(
         `subscription M3 precursor private routine ${expectedRoutine} is missing or unsafe`,
       );
+    }
+  }
+  for (const ownerOnly of SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES) {
+    const routine = posture.privateRoutines.find((candidate) => candidate.name === ownerOnly);
+    if (routine && (routine.execute || routine.publicExecute)) {
+      violations.push(`subscription M3 owner-only private routine ${ownerOnly} is executable`);
     }
   }
   if (tableByName.has("organization_integration_policies")) {

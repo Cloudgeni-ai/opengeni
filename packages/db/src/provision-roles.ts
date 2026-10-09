@@ -2092,6 +2092,11 @@ BEGIN
       'recover_subscription_codex_connection_health(uuid,uuid,uuid,uuid)',
       'persist_subscription_codex_refresh_with_plan(uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz,text)',
       'subscription_codex_acceptance_authority_v2(uuid,uuid,uuid,text)',
+      'resolve_subscription_codex_apps_designation(uuid,uuid)',
+      'read_subscription_codex_apps_credential(uuid,uuid,uuid)',
+      'begin_subscription_codex_apps_refresh(uuid,uuid,uuid)',
+      'persist_subscription_codex_apps_refresh(uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)',
+      'fail_subscription_codex_apps_refresh(uuid,uuid,uuid,bigint,text)',
       'subscription_organization_admin(uuid)',
       'subscription_people_assignment_visible(uuid,uuid,uuid,text,text)',
       'subscription_person_preference_visible(uuid,uuid,text,text)',
@@ -2110,6 +2115,14 @@ BEGIN
         );
       END IF;
     END LOOP;
+    -- The Codex Apps designation target helper returns a full connection row;
+    -- only its owner-run callers may execute it, never the runtime role.
+    IF to_regprocedure('opengeni_private.subscription_codex_apps_designation_target(uuid,uuid)') IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.subscription_codex_apps_designation_target(uuid,uuid) FROM %I',
+        ${literal(role)}
+      );
+    END IF;
     -- This exact content-free repair inventory shares the existing global
     -- wake dispatcher's authority. Converge custom-role and migrate-then-
     -- provision installs without opening a generic owner/posture exception.

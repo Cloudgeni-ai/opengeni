@@ -42,8 +42,15 @@ import {
   getCapabilityCatalogItem,
   getCapabilityInstallation,
   getConnectionMetadata,
+  codexAppsRequestAuth,
   getCodexAppsCredentialAuthorizationForRun,
   getWorkspaceGrant,
+  readCodexCutoverDisposition,
+  resolveSubscriptionCoreCodexAppsDesignation,
+  rlsContextForWorkspace,
+  subscriptionCoreCodexAppsRequestAuth,
+  type CodexAppsRequestAuth,
+  type CodexCutoverDisposition,
   getStoredCapabilityHeaderCiphertext,
   listCapabilityCatalogItems,
   listCapabilityInstallations,
@@ -84,6 +91,8 @@ export async function buildCapabilityCatalog(input: {
   workspaceId: string;
   settings: Settings;
   subjectId?: string | null;
+  /** The workspace's organization, when the caller knows it (skips a lookup). */
+  accountId?: string;
 }): Promise<CapabilityCatalogResponse> {
   const [
     persistedItems,
@@ -92,7 +101,7 @@ export async function buildCapabilityCatalog(input: {
     workspaceConnections,
     curatedLibrarySkills,
     installedSkills,
-    codexAppsCredentialId,
+    codexAppsDesignation,
     runnableMcpServers,
   ] = await Promise.all([
     listCapabilityCatalogItems(input.db, input.workspaceId),
@@ -102,7 +111,11 @@ export async function buildCapabilityCatalog(input: {
     discoverCuratedSkillLibraryItems(),
     listInstalledSkills(input.db, input.workspaceId),
     input.settings.codexConnectedAppsEnabled
-      ? resolveCodexAppsCredentialIdForRun(input.db, input.workspaceId)
+      ? resolveCodexAppsDesignationForRun(
+          input.db,
+          input.workspaceId,
+          input.accountId ? { accountId: input.accountId } : {},
+        )
       : Promise.resolve(null),
     listEnabledMcpCapabilityServers(input.db, input.workspaceId),
   ]);
@@ -132,7 +145,7 @@ export async function buildCapabilityCatalog(input: {
       .map(installedSkillCatalogItem),
   ];
   const codexApps = input.settings.codexConnectedAppsEnabled
-    ? codexAppsCatalogItem(codexAppsCredentialId !== null)
+    ? codexAppsCatalogItem(codexAppsDesignation !== null)
     : null;
   const items = dedupeCatalogItems([
     ...builtIns,
@@ -931,6 +944,11 @@ export async function settingsWithEnabledCapabilityMcpServers(
     subjectId?: string;
     personalConnectionDelegations?: readonly McpPersonalConnectionDelegation[];
     onResolvedApiIntegrations?: (integrations: readonly ApiIntegrationRuntime[]) => void;
+    /**
+     * The Codex Apps designation the caller already resolves (a claim reads
+     * its cutover once), or what it knows for resolving it here.
+     */
+    codexApps?: Promise<CodexAppsDesignationForRun | null> | CodexAppsRunContext;
   },
 ): Promise<Settings> {
   const apiIntegrationsPromise = options?.subjectId
@@ -940,10 +958,16 @@ export async function settingsWithEnabledCapabilityMcpServers(
         workspaceId,
         options?.personalConnectionDelegations ?? [],
       );
-  const [enabled, apiIntegrations, codexAppsCredentialId] = await Promise.all([
+  const [enabled, apiIntegrations, codexAppsDesignation] = await Promise.all([
     listEnabledMcpCapabilityServers(db, workspaceId),
     apiIntegrationsPromise,
-    resolveCodexAppsCredentialIdForRun(db, workspaceId),
+    // Registration is dropped below when Apps are off for the deployment, so
+    // resolving the designation then would be pure cost.
+    !settings.codexConnectedAppsEnabled
+      ? Promise.resolve(null)
+      : options?.codexApps instanceof Promise
+        ? options.codexApps
+        : resolveCodexAppsDesignationForRun(db, workspaceId, options?.codexApps ?? {}),
   ]);
   options?.onResolvedApiIntegrations?.(apiIntegrations);
   return settingsWithCodexAppsMcpServer(
@@ -951,7 +975,7 @@ export async function settingsWithEnabledCapabilityMcpServers(
       settingsWithMcpCapabilityServers(settings, enabled),
       apiIntegrations,
     ),
-    codexAppsCredentialId !== null,
+    codexAppsDesignation !== null,
   );
 }
 
@@ -1031,10 +1055,88 @@ export function settingsWithApiIntegrationServers(
 }
 
 /**
- * Resolve executable Apps authority. The connector must remain active and its
- * exact owner must still hold workspace connection-management permission.
+ * The workspace's executable Codex Apps designation. Without a Codex cutover
+ * row this is the legacy designation (`resolveCodexAppsCredentialIdForRun`).
+ * With an enabled cutover it is the core designation, which the database
+ * rechecks (designated shared Codex connection, still in the workspace's
+ * scope, active). A disabled cutover row designates nothing and reads no
+ * legacy Codex table.
+ */
+export type CodexAppsDesignationForRun =
+  | { source: "legacy"; credentialId: string }
+  | { source: "core"; accountId: string; connectionId: string };
+
+/**
+ * What the caller already knows, so the resolver does not read it again: the
+ * workspace's organization (skips the workspace lookup) and the organization's
+ * Codex cutover disposition (skips the cutover read; a claim has read it).
+ */
+export type CodexAppsRunContext = {
+  accountId?: string;
+  disposition?: CodexCutoverDisposition | Promise<CodexCutoverDisposition>;
+};
+
+export async function resolveCodexAppsDesignationForRun(
+  db: Database,
+  workspaceId: string,
+  known: CodexAppsRunContext = {},
+): Promise<CodexAppsDesignationForRun | null> {
+  let owner = known.accountId;
+  const accountId = async () =>
+    (owner ??= (await rlsContextForWorkspace(db, workspaceId)).accountId);
+  const disposition =
+    known.disposition !== undefined
+      ? await known.disposition
+      : await readCodexCutoverDisposition(db, await accountId(), workspaceId);
+  if (disposition === "maintenance") return null;
+  if (disposition === "core") {
+    const coreAccountId = await accountId();
+    const designation = await resolveSubscriptionCoreCodexAppsDesignation(db, {
+      accountId: coreAccountId,
+      workspaceId,
+    });
+    return designation?.status === "active"
+      ? { source: "core", accountId: coreAccountId, connectionId: designation.connectionId }
+      : null;
+  }
+  const credentialId = await resolveLegacyCodexAppsCredentialIdForRun(db, workspaceId);
+  return credentialId ? { source: "legacy", credentialId } : null;
+}
+
+/** Runtime Apps authentication for whichever designation `resolveCodexAppsDesignationForRun` returned. */
+export function codexAppsRequestAuthForDesignation(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  designation: CodexAppsDesignationForRun,
+): CodexAppsRequestAuth {
+  return designation.source === "core"
+    ? subscriptionCoreCodexAppsRequestAuth(db, settings, {
+        accountId: designation.accountId,
+        workspaceId,
+        connectionId: designation.connectionId,
+      })
+    : codexAppsRequestAuth(db, settings, { workspaceId, credentialId: designation.credentialId });
+}
+
+/**
+ * Resolve the legacy executable Apps authority. Organizations with a Codex
+ * cutover row (enabled or disabled) have none here: their designation lives
+ * on the core (`resolveCodexAppsDesignationForRun`).
  */
 export async function resolveCodexAppsCredentialIdForRun(
+  db: Database,
+  workspaceId: string,
+): Promise<string | null> {
+  const designation = await resolveCodexAppsDesignationForRun(db, workspaceId);
+  return designation?.source === "legacy" ? designation.credentialId : null;
+}
+
+/**
+ * The legacy designation: the connector must remain active and its exact
+ * owner must still hold workspace connection-management permission.
+ */
+async function resolveLegacyCodexAppsCredentialIdForRun(
   db: Database,
   workspaceId: string,
 ): Promise<string | null> {

@@ -247,6 +247,21 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import type { Context, Hono } from "hono";
+import {
+  codexRouteDisposition,
+  coreCodexAccounts,
+  coreCodexActivate,
+  coreCodexAllocator,
+  coreCodexClearApps,
+  coreCodexDesignateApps,
+  coreCodexRename,
+  coreCodexRouteUnsupported,
+  coreCodexSetRotation,
+  coreCodexSetSource,
+  coreCodexSource,
+  coreCodexStatus,
+  coreOrganizationCodexAccounts,
+} from "./codex-core";
 import { HTTPException } from "hono/http-exception";
 import {
   agentActingAsPerson,
@@ -547,7 +562,7 @@ async function requireRedemptionHuman(
   return { human, accountId: grant.accountId };
 }
 
-async function requireCodexAppsHuman(
+export async function requireCodexAppsHuman(
   c: Context,
   deps: ApiRouteDeps,
   workspaceId: string,
@@ -885,7 +900,10 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/codex/source", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    if ((await codexRouteDisposition(deps, grant.accountId)) === "core") {
+      return await coreCodexSource(c, deps, grant.accountId, workspaceId);
+    }
     return c.json(await getWorkspaceCodexSubscriptionSource(db, workspaceId));
   });
 
@@ -900,6 +918,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!parsed.success) {
       throw new HTTPException(400, {
         message: "a valid Codex source mode is required",
+      });
+    }
+    if ((await codexRouteDisposition(deps, grant.accountId)) === "core") {
+      return await coreCodexSetSource(c, deps, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        mode: parsed.data.mode,
       });
     }
     try {
@@ -926,6 +952,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/organizations/:organizationId/codex/accounts", async (c) => {
     const organizationId = c.req.param("organizationId");
     const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    if ((await codexRouteDisposition(deps, organizationId)) === "core") {
+      return await coreOrganizationCodexAccounts(c, deps, organizationId, human.subjectId);
+    }
     const [accounts, rotation] = await Promise.all([
       listOrganizationCodexAccountStatuses(db, {
         organizationId,
@@ -953,6 +982,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const human = await requireOrganizationCodexHuman(c, deps, organizationId, {
       providerConsent: true,
     });
+    if ((await codexRouteDisposition(deps, organizationId)) === "core") coreCodexRouteUnsupported();
     let start: Awaited<ReturnType<typeof startDeviceCode>>;
     try {
       start = await startDeviceCode();
@@ -981,6 +1011,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const human = await requireOrganizationCodexHuman(c, deps, organizationId, {
       providerConsent: true,
     });
+    if ((await codexRouteDisposition(deps, organizationId)) === "core") coreCodexRouteUnsupported();
     const { state } = (await c.req.json().catch(() => null)) as {
       state?: string;
     };
@@ -1090,6 +1121,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     requireSameOriginBrowserMutation(c, deps);
     const human = await requireOrganizationCodexHuman(c, deps, organizationId);
     const credentialId = c.req.param("accountId");
+    if ((await codexRouteDisposition(deps, organizationId)) === "core") {
+      return await coreCodexActivate(
+        c,
+        deps,
+        { accountId: organizationId, workspaceId: null, subjectId: human.subjectId },
+        credentialId,
+      );
+    }
     const activation = await setActiveOrganizationCodexCredential(db, {
       organizationId,
       actorSubjectId: human.subjectId,
@@ -1112,6 +1151,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!parsed.success) {
       throw new HTTPException(400, { message: "rotationEnabled is required" });
     }
+    if ((await codexRouteDisposition(deps, organizationId)) === "core") {
+      return await coreCodexSetRotation(
+        c,
+        deps,
+        { accountId: organizationId, workspaceId: null, subjectId: human.subjectId },
+        parsed.data.rotationEnabled,
+      );
+    }
     const updated = await updateOrganizationCodexRotationSettings(db, {
       organizationId,
       actorSubjectId: human.subjectId,
@@ -1133,6 +1180,15 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const body = (await c.req.json().catch(() => null)) as {
       label?: unknown;
     } | null;
+    if ((await codexRouteDisposition(deps, organizationId)) === "core") {
+      return await coreCodexRename(
+        c,
+        deps,
+        { accountId: organizationId, workspaceId: null, subjectId: human.subjectId },
+        c.req.param("accountId"),
+        typeof body?.label === "string" ? body.label : null,
+      );
+    }
     const renamed = await renameOrganizationCodexAccount(db, {
       organizationId,
       actorSubjectId: human.subjectId,
@@ -1153,6 +1209,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const organizationId = c.req.param("organizationId");
     requireSameOriginBrowserMutation(c, deps);
     const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    if ((await codexRouteDisposition(deps, organizationId)) === "core") coreCodexRouteUnsupported();
     let result: Awaited<ReturnType<typeof disconnectOrganizationCodexAccount>>;
     try {
       result = await disconnectOrganizationCodexAccount(db, {
@@ -1182,7 +1239,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // signed state that carries the device_auth_id back to `poll`.
   app.post("/v1/workspaces/:workspaceId/codex/connect/start", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    if ((await codexRouteDisposition(deps, grant.accountId)) === "core")
+      coreCodexRouteUnsupported();
     let start: Awaited<ReturnType<typeof startDeviceCode>>;
     try {
       start = await startDeviceCode();
@@ -1209,6 +1268,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/codex/connect/poll", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    if ((await codexRouteDisposition(deps, grant.accountId)) === "core")
+      coreCodexRouteUnsupported();
     const { state } = (await c.req.json()) as { state?: string };
     const payload = (state
       ? readSignedState(state, githubStateSecret)
@@ -1348,7 +1409,16 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // the token is accepted). Never runs a generation. Never returns the token.
   app.get("/v1/workspaces/:workspaceId/codex/status", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    if ((await codexRouteDisposition(deps, grant.accountId)) === "core") {
+      return await coreCodexStatus(
+        c,
+        deps,
+        grant.accountId,
+        workspaceId,
+        (await resolveCatalogSettings(db, settings)).settings,
+      );
+    }
     const [status, accounts, source, rotation] = await Promise.all([
       getCodexCredentialStatus(db, workspaceId),
       listCodexAccountStatuses(db, workspaceId),
@@ -1423,6 +1493,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/codex/accounts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    if ((await codexRouteDisposition(deps, grant.accountId)) === "core") {
+      return await coreCodexAccounts(c, deps, grant, workspaceId);
+    }
     const [accounts, rotation, apps, human, source] = await Promise.all([
       listCodexAccountStatuses(db, workspaceId),
       getCodexRotationSettings(db, workspaceId),
@@ -1465,13 +1538,19 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/codex/apps", async (c) => {
     const workspaceId = c.req.param("workspaceId");
+    // Authenticate the designating human before any organization state is
+    // read, so an unauthenticated caller learns nothing about the cutover row.
+    // An organization with a cutover row then never reads the legacy source.
+    const { human, accountId } = await requireCodexAppsHuman(c, deps, workspaceId);
+    if ((await codexRouteDisposition(deps, accountId)) === "core") {
+      return await coreCodexDesignateApps(c, deps, workspaceId, { human, accountId });
+    }
     await requireWorkspaceCodexManagementSource(deps, workspaceId);
     if (!settings.codexConnectedAppsEnabled) {
       throw new HTTPException(409, {
         message: "Codex Apps is disabled for this deployment",
       });
     }
-    const { human, accountId } = await requireCodexAppsHuman(c, deps, workspaceId);
     const parsed = z
       .object({
         accountId: z.string().uuid(),
@@ -1524,6 +1603,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     // disabled subscriptions) must still be able to turn Apps off. Clearing
     // only removes authority; the owner/permission checks below still apply.
     const { human, accountId } = await requireCodexAppsHuman(c, deps, workspaceId);
+    if ((await codexRouteDisposition(deps, accountId)) === "core") {
+      return await coreCodexClearApps(c, deps, workspaceId, { human, accountId });
+    }
     const parsed = z
       .object({ expectedVersion: z.number().int().nonnegative() })
       .safeParse(await c.req.json().catch(() => null));
@@ -1554,7 +1636,15 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // Pure pointer flip; in-flight turns pick it up on their next token fetch.
   app.post("/v1/workspaces/:workspaceId/codex/accounts/:accountId/activate", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    if ((await codexRouteDisposition(deps, grant.accountId)) === "core") {
+      return await coreCodexActivate(
+        c,
+        deps,
+        { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+        c.req.param("accountId"),
+      );
+    }
     await requireWorkspaceCodexManagementSource(deps, workspaceId);
     const accountId = c.req.param("accountId");
     const mutation = await withCodexCapacityMutation(
@@ -1581,7 +1671,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.patch("/v1/workspaces/:workspaceId/codex/settings", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-    await requireWorkspaceCodexManagementSource(deps, workspaceId);
+    const codexDisposition = await codexRouteDisposition(deps, grant.accountId);
+    if (codexDisposition === "legacy")
+      await requireWorkspaceCodexManagementSource(deps, workspaceId);
     const body = (await c.req.json().catch(() => ({}))) as {
       rotationEnabled?: unknown;
       rotationStrategy?: unknown;
@@ -1600,6 +1692,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         rotationStrategy: "sharded",
         rotationStrategyDeprecated: true,
       });
+    }
+    if (codexDisposition === "core") {
+      return await coreCodexSetRotation(
+        c,
+        deps,
+        { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+        patch.rotationEnabled,
+      );
     }
     await ensureCodexRotationSettings(db, grant.accountId, workspaceId);
     const mutation = await withCodexCapacityMutation(
@@ -1628,11 +1728,22 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // Rename an account (label only in P1).
   app.patch("/v1/workspaces/:workspaceId/codex/accounts/:accountId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "connections:write");
-    await requireWorkspaceCodexManagementSource(deps, workspaceId);
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const codexDisposition = await codexRouteDisposition(deps, grant.accountId);
+    if (codexDisposition === "legacy")
+      await requireWorkspaceCodexManagementSource(deps, workspaceId);
     const accountId = c.req.param("accountId");
     const body = (await c.req.json()) as { label?: string | null };
     const label = typeof body.label === "string" ? body.label : null;
+    if (codexDisposition === "core") {
+      return await coreCodexRename(
+        c,
+        deps,
+        { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+        accountId,
+        label,
+      );
+    }
     const renamed = await renameCodexAccount(db, workspaceId, accountId, label);
     if (!renamed) {
       throw new HTTPException(404, { message: "codex account not found" });
@@ -1651,7 +1762,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.patch("/v1/workspaces/:workspaceId/codex/accounts/:accountId/allocator", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-    await requireWorkspaceCodexManagementSource(deps, workspaceId);
+    const codexDisposition = await codexRouteDisposition(deps, grant.accountId);
+    if (codexDisposition === "legacy")
+      await requireWorkspaceCodexManagementSource(deps, workspaceId);
     const parsed = z
       .object({
         enabled: z.boolean(),
@@ -1662,6 +1775,15 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(400, {
         message: "enabled and expectedVersion are required",
       });
+    }
+    if (codexDisposition === "core") {
+      return await coreCodexAllocator(
+        c,
+        deps,
+        { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+        c.req.param("accountId"),
+        parsed.data,
+      );
     }
     const mutation = await updateCodexAllocatorEligibility(db, {
       accountId: grant.accountId,
@@ -1690,6 +1812,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.delete("/v1/workspaces/:workspaceId/codex/accounts/:accountId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    if ((await codexRouteDisposition(deps, grant.accountId)) === "core")
+      coreCodexRouteUnsupported();
     await requireWorkspaceCodexManagementSource(deps, workspaceId);
     const accountId = c.req.param("accountId");
     const mutation = await withCodexCapacityMutation(
@@ -1719,6 +1843,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.delete("/v1/workspaces/:workspaceId/codex", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    if ((await codexRouteDisposition(deps, grant.accountId)) === "core")
+      coreCodexRouteUnsupported();
     await requireWorkspaceCodexManagementSource(deps, workspaceId);
     const mutation = await withCodexCapacityMutation(
       db,
@@ -1744,7 +1870,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // stale access token. Deprecated in favor of the /accounts + /usage/refresh pair.
   app.get("/v1/workspaces/:workspaceId/codex/usage", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    if ((await codexRouteDisposition(deps, grant.accountId)) === "core")
+      coreCodexRouteUnsupported();
     const status = await getCodexCredentialStatus(db, workspaceId);
     if (!status?.credentialId) {
       throw new HTTPException(404, {
@@ -1760,7 +1888,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // bearer, hit /wham/usage, write the cache columns, return the normalized payload.
   app.get("/v1/workspaces/:workspaceId/codex/accounts/:accountId/usage", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    if ((await codexRouteDisposition(deps, grant.accountId)) === "core")
+      coreCodexRouteUnsupported();
     const accountId = c.req.param("accountId");
     // Constrain to a real account in this workspace (RLS already scopes, but a 404
     // for an unknown id is friendlier than an opaque needs_relogin payload).
@@ -1780,7 +1910,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // staleness check call — NEVER a browser interval.
   app.post("/v1/workspaces/:workspaceId/codex/usage/refresh", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    if ((await codexRouteDisposition(deps, grant.accountId)) === "core")
+      coreCodexRouteUnsupported();
     const accounts = await listCodexAccountStatuses(db, workspaceId);
     const usage: Record<string, { status: CodexUsagePayload["status"]; usage: CodexUsagePayload }> =
       {};
@@ -1824,6 +1956,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/codex/overview", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    if ((await codexRouteDisposition(deps, grant.accountId)) === "core")
+      coreCodexRouteUnsupported();
     const human = await managedHumanOrAgent(c, deps);
     const accounts = await listCodexAccountStatuses(db, workspaceId);
     const ownerRecoveries =
@@ -1962,6 +2096,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       const workspaceId = c.req.param("workspaceId");
       const credentialId = c.req.param("accountId");
       const { human, accountId } = await requireRedemptionHuman(c, deps, workspaceId);
+      if ((await codexRouteDisposition(deps, accountId)) === "core") coreCodexRouteUnsupported();
       c.header("cache-control", "no-store");
       const parsed = redemptionPrepareBody.safeParse(await c.req.json().catch(() => null));
       if (!parsed.success) {
@@ -2076,6 +2211,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       const workspaceId = c.req.param("workspaceId");
       const credentialId = c.req.param("accountId");
       const { human, accountId } = await requireRedemptionHuman(c, deps, workspaceId);
+      if ((await codexRouteDisposition(deps, accountId)) === "core") coreCodexRouteUnsupported();
       c.header("cache-control", "no-store");
       const parsed = redemptionBody.safeParse(await c.req.json().catch(() => null));
       if (!parsed.success) {

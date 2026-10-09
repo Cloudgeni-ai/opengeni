@@ -272,11 +272,30 @@ import {
   mergeCodexPlanEntitlementExclusion,
   readCodexPlanEntitlementExclusion,
   serializeCodexPlanEntitlementExclusion,
-  type CodexPlanEntitlementExclusion,
 } from "./codex-plan-entitlement";
 export * from "./codex-plan-entitlement";
 export * from "./legacy-subscription-world";
 export * from "./subscription-core-codex";
+export * from "./subscription-core-codex-apps";
+export * from "./subscription-core-codex-compat";
+import type {
+  CodexAccountStatus,
+  CodexRotationSettings,
+  EffectiveCodexSubscriptionSource,
+  WorkspaceCodexSubscriptionMode,
+  WorkspaceCodexSubscriptionSource,
+} from "./codex-account-types";
+export type {
+  CodexAccountStatus,
+  CodexRotationSettings,
+  EffectiveCodexSubscriptionSource,
+  WorkspaceCodexSubscriptionMode,
+  WorkspaceCodexSubscriptionSource,
+} from "./codex-account-types";
+import {
+  projectSubscriptionCoreCodexWorkspace,
+  type SubscriptionCoreCodexWake,
+} from "./subscription-core-codex-compat";
 export * from "./scheduled-task-access";
 export { buildSlackApiRateLimiter } from "./slack-api-rate-limits";
 export * from "./scheduled-human-wait";
@@ -306,7 +325,12 @@ import {
   withSubscriptionPoolSessionAccess,
   withTemporaryPoolSessionAccessInTransaction,
 } from "./subscription-session-access";
-import { readSubscriptionProviderCutoverState as readCoreProviderCutoverState } from "./subscription-core-repository";
+import {
+  readSubscriptionProviderCutoverState as readCoreProviderCutoverState,
+  readSubscriptionSessionBinding as readCoreSessionBinding,
+  resolveSubscriptionConnectionId as resolveCoreConnectionId,
+  writeSubscriptionSessionBinding as writeCoreSessionBinding,
+} from "./subscription-core-repository";
 import { codexSubscriptionAuthorityV2ForAcceptanceInTransaction } from "./subscription-core-acceptance-authority";
 export { codexSubscriptionAuthorityV2ForAcceptanceInTransaction } from "./subscription-core-acceptance-authority";
 export { SessionMessageSearchCursorError } from "./session-message-search";
@@ -23997,23 +24021,6 @@ export type WorkspaceEnvironmentForRun = VariableSetForRun;
 // `getCodexCredentialStatus` returns metadata only (never the secret column).
 // ---------------------------------------------------------------------------
 
-export type WorkspaceCodexSubscriptionMode =
-  | "automatic"
-  | "workspace"
-  | "organization"
-  | "disabled";
-export type EffectiveCodexSubscriptionSource = "workspace" | "organization" | "disabled";
-
-export type WorkspaceCodexSubscriptionSource = {
-  accountId: string;
-  workspaceId: string;
-  workspaceKind: "personal" | "shared";
-  mode: WorkspaceCodexSubscriptionMode;
-  effectiveSource: EffectiveCodexSubscriptionSource;
-  workspaceAvailable: boolean;
-  organizationAvailable: boolean;
-};
-
 const workspaceCodexOrganizationInheritanceAvailable = new Map<string, boolean>();
 
 function rememberWorkspaceCodexOrganizationInheritance(
@@ -25947,48 +25954,6 @@ export async function isCodexBilledTurn(input: {
 // ---------------------------------------------------------------------------
 // Multi-account (P1) metadata accessors. All metadata-only — NEVER decrypt.
 // ---------------------------------------------------------------------------
-
-export type CodexAccountStatus = {
-  allowedModelIds?: string[] | null;
-  id: string;
-  source: Exclude<EffectiveCodexSubscriptionSource, "disabled">;
-  chatgptAccountId: string | null;
-  label: string | null;
-  accountEmail: string | null;
-  planType: string | null;
-  /** Last provider plan observation; absent on pre-plan-tracking fixtures. */
-  planCheckedAt?: Date | null;
-  /** Plan before the most recent observed plan change, and when it was seen. */
-  planPreviousType?: string | null;
-  planChangedAt?: Date | null;
-  /** Models the current plan was proven not to include (see codex-plan-entitlement). */
-  planEntitlementExclusion?: CodexPlanEntitlementExclusion | null;
-  status: string; // active | needs_relogin | error
-  /** New automatic allocations only; health/refresh and existing turns remain independent. */
-  allocatorEnabled: boolean;
-  allocatorVersion: number;
-  allocatorUpdatedBySubjectId: string | null;
-  allocatorUpdatedAt: Date | null;
-  resetCreditAvailableCount: number | null;
-  resetCreditsCheckedAt: Date | null;
-  connectedBySubjectId: string | null;
-  isActive: boolean;
-  expiresAt: Date | null;
-  lastRefreshAt: Date | null;
-  lastError: string | null;
-  // P2 cached usage (plaintext metadata; rides along on this metadata-only read
-  // with ZERO provider calls and ZERO decrypts). null until the first refresh.
-  primaryUsedPercent: number | null;
-  primaryResetAt: Date | null;
-  secondaryUsedPercent: number | null;
-  secondaryResetAt: Date | null;
-  usageCheckedAt: Date | null;
-  // P3 rotation cooldown: when set and in the future, this account is cooling-down
-  // (rotated-off after a usage cap) and the engine skips it. null ⇒ not cooling.
-  exhaustedUntil: Date | null;
-  /** Typed provider-refusal provenance; null for legacy/cleared cooldowns. */
-  exhaustedKind: CodexCredentialCooldownKind | null;
-};
 
 /**
  * A metadata-only scheduling candidate observed while the workspace's rotation
@@ -29404,10 +29369,24 @@ export type SubscriptionCoreCodexWakeScope = { accountId: string; workspaceId: s
  */
 export async function wakeSubscriptionCoreCodexCapacityWaiters(
   db: Database,
-  input: { accountId: string; reason: string; workspaceIds?: readonly string[] },
+  input: {
+    accountId: string;
+    reason: string;
+    workspaceIds?: readonly string[];
+    /**
+     * Wake only these sessions' waiters (for example a session pin, which
+     * changes nothing another session can place on). Requires exactly one
+     * workspace in `workspaceIds`.
+     */
+    sessionIds?: readonly string[];
+  },
 ): Promise<SubscriptionCoreCodexWakeScope[]> {
   if (!/^[a-z][a-z0-9_]{0,127}$/.test(input.reason))
     throw new Error("Core Codex wake reason must be a bounded identifier");
+  if (input.sessionIds !== undefined && input.workspaceIds?.length !== 1)
+    throw new Error("A session-scoped core Codex wake names exactly one workspace");
+  const sessionIds = input.sessionIds ? [...new Set(input.sessionIds)] : null;
+  if (sessionIds !== null && sessionIds.length === 0) return [];
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: null }, async (tx) =>
     withPoolWakeServiceScopeInTransaction(tx, async () => {
       const cutover = await readCoreProviderCutoverState(tx, {
@@ -29446,6 +29425,14 @@ export async function wakeSubscriptionCoreCodexCapacityWaiters(
                 updated_at = clock_timestamp()
             where account_id = ${input.accountId}::uuid
               and workspace_id = ${workspaceId}::uuid and provider = 'codex'
+              ${
+                sessionIds === null
+                  ? sql``
+                  : sql`and session_id in (${sql.join(
+                      sessionIds.map((id) => sql`${id}::uuid`),
+                      sql`, `,
+                    )})`
+              }
             returning session_id::text as session_id, waiter_id::text as waiter_id,
               generation, wake_revision`,
         );
@@ -32606,13 +32593,6 @@ async function mutateCodexAccountUsage(
   );
 }
 
-export type CodexRotationSettings = {
-  activeCredentialId: string | null;
-  /** False keeps new allocations on the active account; true permits pool failover. */
-  rotationEnabled: boolean;
-  rotationStrategy: string; // P1: 'most_remaining' (unused)
-};
-
 /**
  * Per-workspace model/provider availability policy. NULL fields = unrestricted
  * (identical to no row — the default for every workspace). Non-null
@@ -33500,6 +33480,334 @@ export async function recordSubscriptionCoreCodexSelectionForTurnAttempt(
     if (!appended.accepted) throw new CodexCredentialLeaseAttemptFencedError();
     return { events: appended.events, diagnostics };
   });
+}
+
+/**
+ * The session Codex projection (`GET .../sessions/:id/codex-accounts`) for an
+ * organization whose Codex cutover is enabled: the same shape as
+ * `getSessionCodexAccounts`, projected from the session's core binding, the
+ * active turn's core lease and the workspace's core account pool. The
+ * "Running on" account of a running turn is its live core lease; a waiting
+ * turn shows only an explicit choice. Never reads a legacy Codex table.
+ */
+export async function getSubscriptionCoreSessionCodexAccounts(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+) {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => {
+      const [session] = await tx
+        .select({
+          id: schema.sessions.id,
+          activeTurnId: schema.sessions.activeTurnId,
+        })
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        )
+        .limit(1);
+      if (!session) return null;
+      const projection = await projectSubscriptionCoreCodexWorkspace(tx, input);
+      const binding = await readCoreSessionBinding(tx, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      });
+      const codexBinding = binding?.provider === "codex" ? binding : null;
+      const [turn] = session.activeTurnId
+        ? await rawRows<{ id: string; status: string; connection_id: string | null }>(
+            tx,
+            sql`select turn.id::text as id, turn.status, lease.connection_id::text as connection_id
+              from session_turns turn
+              left join subscription_leases lease
+                on lease.account_id = turn.account_id and lease.workspace_id = turn.workspace_id
+                  and lease.turn_id = turn.id and lease.provider = 'codex'
+                  and lease.leased_until > clock_timestamp()
+              where turn.account_id = ${input.accountId}::uuid
+                and turn.workspace_id = ${input.workspaceId}::uuid
+                and turn.session_id = ${input.sessionId}::uuid
+                and turn.id = ${session.activeTurnId}::uuid
+                and turn.status in ('running', 'recovering', 'waiting_capacity', 'requires_action')
+                and turn.model like 'codex/%'
+              limit 1`,
+          )
+        : [];
+      const waiting = turn?.status === "waiting_capacity";
+      const pinnedAccountId =
+        codexBinding?.choice === "explicit" ? codexBinding.connectionId : null;
+      const currentSelection = turn
+        ? { waiting, credentialId: waiting ? pinnedAccountId : turn.connection_id }
+        : null;
+      return {
+        accounts: projection.accounts,
+        rotation: projection.rotation,
+        currentSelection,
+        currentAccount:
+          projection.accounts.find((account) => account.id === currentSelection?.credentialId) ??
+          null,
+        pinnedAccountId,
+        lastAccountId: codexBinding?.connectionId ?? null,
+      };
+    },
+  );
+}
+
+/**
+ * The legacy session pointers (`codexPinnedCredentialId`,
+ * `codexLastCredentialId`) of core sessions, projected from their bindings.
+ * A core session without a Codex binding projects nulls: the legacy columns
+ * are never written with core ids and are not shown after the cutover.
+ */
+export async function getSubscriptionCoreCodexSessionPointers(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionIds: readonly string[] },
+): Promise<Map<string, { pinnedCredentialId: string | null; lastCredentialId: string | null }>> {
+  const pointers = new Map<
+    string,
+    { pinnedCredentialId: string | null; lastCredentialId: string | null }
+  >();
+  const ids = [...new Set(input.sessionIds)];
+  for (const id of ids) pointers.set(id, { pinnedCredentialId: null, lastCredentialId: null });
+  if (ids.length === 0) return pointers;
+  const rows = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) =>
+      await rawRows<{ session_id: string; connection_id: string | null; choice: string }>(
+        tx,
+        sql`select session_id::text as session_id, connection_id::text as connection_id, choice
+          from subscription_session_bindings
+          where account_id = ${input.accountId}::uuid
+            and workspace_id = ${input.workspaceId}::uuid and provider = 'codex'
+            and session_id in (${sql.join(
+              ids.map((id) => sql`${id}::uuid`),
+              sql`, `,
+            )})`,
+      ),
+  );
+  for (const row of rows) {
+    pointers.set(row.session_id, {
+      pinnedCredentialId: row.choice === "explicit" ? row.connection_id : null,
+      lastCredentialId: row.connection_id,
+    });
+  }
+  return pointers;
+}
+
+/**
+ * Explicit session account choice on the core: a uuid makes the session's
+ * binding `explicit` on that connection; `null` ("auto") returns it to
+ * automatic placement. The binding guard enforces that the connection is
+ * active and eligible for this session (personal connections only in their
+ * owner's own session). Emits the legacy `codex.account.selection.changed`
+ * receipt. A waiting turn re-places at its next check, which the returned
+ * wake triggers; a running attempt keeps its account.
+ */
+export async function pinSubscriptionCoreSessionCodexAccount(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    connectionId: string | null;
+    subjectId: string;
+  },
+): Promise<{
+  result: { changed: boolean; appliedTo: "waiting_turn" | "next_turn"; events: SessionEvent[] };
+  wake: SubscriptionCoreCodexWake | null;
+}> {
+  return await withWorkspaceSubjectSessionActivityRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (scopedDb) => {
+      const tx = scopedDb as unknown as Database;
+      // The binding guard authorizes the choosing human.
+      await tx.execute(
+        sql`select set_config('opengeni.initiating_human_subject_id', ${input.subjectId}, true)`,
+      );
+      // The legacy pin's lock contract: a preference change admits no
+      // inference (waiter reconciliation rechecks Pause), so the canonical
+      // session-events lock is taken without the workspace control prefix.
+      const locks = await lockSessionEventWriteRows(tx, {
+        workspaceId: input.workspaceId,
+        controlLock: "none",
+        sessionIds: [input.sessionId],
+        sessionLock: "no_key_update",
+      });
+      const session = locks.sessions.find((row) => row.id === input.sessionId);
+      const unchanged = {
+        result: { changed: false, appliedTo: "next_turn" as const, events: [] },
+        wake: null,
+      };
+      if (!session || session.accountId !== input.accountId) return unchanged;
+      // Lock the binding: a running turn's placement or cache-warmth touch
+      // (`writeSubscriptionSessionBinding`, `touchSubscriptionCoreCodexBinding`)
+      // advances its version, and an unlocked read would lose the version
+      // compare-and-swap below to it and report the choice as not found.
+      const [lockedBinding] = await rawRows<{ choice: string; version: number | string }>(
+        tx,
+        sql`select choice, version from subscription_session_bindings
+          where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
+          for update`,
+      );
+      const binding = lockedBinding
+        ? { choice: lockedBinding.choice, version: Number(lockedBinding.version) }
+        : null;
+      let connectionId: string | null = null;
+      if (input.connectionId !== null) {
+        // Canonical or visible alias; otherwise the raw id, which the binding
+        // guard alone judges (a personal connection is invisible here until
+        // the guard grants this exact session's owner access to it).
+        connectionId =
+          (await resolveCoreConnectionId(tx, {
+            accountId: input.accountId,
+            provider: "codex",
+            connectionId: input.connectionId,
+          })) ?? input.connectionId;
+      }
+      try {
+        const written = await tx.transaction(async (savepoint) => {
+          const scoped = savepoint as unknown as Database;
+          if (connectionId === null) {
+            if (!binding || binding.choice !== "explicit") return true;
+            // Leave connection_id alone: only the choice changes, so the
+            // connection guard (which needs an active connection) is not run.
+            const rows = await rawRows<{ version: number | string }>(
+              scoped,
+              sql`update subscription_session_bindings
+                set choice = 'automatic', version = version + 1
+                where workspace_id = ${input.workspaceId}::uuid
+                  and session_id = ${input.sessionId}::uuid and version = ${binding.version}
+                returning version`,
+            );
+            return rows.length > 0;
+          }
+          if (binding) {
+            const rows = await rawRows<{ version: number | string }>(
+              scoped,
+              sql`update subscription_session_bindings
+                set provider = 'codex', connection_id = ${connectionId}::uuid,
+                    choice = 'explicit', last_switch_reason = 'explicit_choice',
+                    version = version + 1
+                where workspace_id = ${input.workspaceId}::uuid
+                  and session_id = ${input.sessionId}::uuid and version = ${binding.version}
+                returning version`,
+            );
+            return rows.length > 0;
+          }
+          const version = await writeCoreSessionBinding(scoped, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            provider: "codex",
+            connectionId,
+            modelId: session.model,
+            choice: "explicit",
+            onlyThisModel: false,
+            lastModelCallAt: null,
+            lastSwitchReason: "explicit_choice",
+          });
+          return version !== null;
+        });
+        if (!written) return unchanged;
+      } catch (error) {
+        const code =
+          (error as { code?: unknown } | null)?.code ??
+          (error as { cause?: { code?: unknown } } | null)?.cause?.code;
+        // The guard refuses a connection this session may not use.
+        if (code === "42501") return unchanged;
+        throw error;
+      }
+      const appliedTo: "waiting_turn" | "next_turn" =
+        session.status === "waiting_capacity" && session.activeTurnId
+          ? "waiting_turn"
+          : "next_turn";
+      const inserted = await tx
+        .insert(schema.sessionEvents)
+        .values(
+          withLosslessContentWriteVersion(
+            [
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                sequence: session.lastSequence + 1,
+                type: "codex.account.selection.changed",
+                payload: {
+                  credentialId: connectionId,
+                  appliedTo,
+                  turnId: appliedTo === "waiting_turn" ? session.activeTurnId : null,
+                  subjectId: input.subjectId,
+                },
+                occurredAt: new Date(),
+              },
+            ],
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
+        .returning();
+      await tx
+        .update(schema.sessions)
+        .set({ lastSequence: session.lastSequence + 1, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        );
+      return {
+        result: { changed: true, appliedTo, events: inserted.map(mapEvent) },
+        // Legacy woke only this session: a pin changes nothing another
+        // session's waiter can place on.
+        wake: {
+          accountId: input.accountId,
+          reason: "core_codex_session_pin_changed",
+          workspaceIds: [input.workspaceId],
+          sessionIds: [input.sessionId],
+        },
+      };
+    },
+  );
+}
+
+/**
+ * Deliver a core Codex wake after the mutation that caused it committed. A
+ * failed wake never fails the committed change: every core waiter also has
+ * its own bounded recheck, so the change is observed at the latest then. The
+ * failure is logged (identifiers and error class only).
+ */
+export async function deliverSubscriptionCoreCodexWake(
+  db: Database,
+  wake: SubscriptionCoreCodexWake | null,
+): Promise<void> {
+  if (!wake) return;
+  try {
+    await wakeSubscriptionCoreCodexCapacityWaiters(db, {
+      accountId: wake.accountId,
+      reason: wake.reason,
+      ...(wake.workspaceIds ? { workspaceIds: wake.workspaceIds } : {}),
+      ...(wake.sessionIds ? { sessionIds: wake.sessionIds } : {}),
+    });
+  } catch (error) {
+    // Bounded waiter recheck is the backstop (see above).
+    console.warn("core Codex wake delivery failed; waiters recheck on their own timer", {
+      accountId: wake.accountId,
+      reason: wake.reason,
+      workspaceIds: wake.workspaceIds ?? null,
+      sessionIds: wake.sessionIds ?? null,
+      error: error instanceof Error ? error.name : typeof error,
+      code:
+        (error as { code?: unknown } | null)?.code ??
+        (error as { cause?: { code?: unknown } } | null)?.cause?.code ??
+        null,
+    });
+  }
 }
 
 export async function recordSessionActiveCodexCredential(
