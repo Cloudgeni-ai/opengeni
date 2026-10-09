@@ -179,6 +179,16 @@ schema was already in context; it now searches only when the schema is missing.
 + Saying or verifying that the work is done does not complete the goal: call opengeni__goal_complete by its exact name, and search for a goal tool only when its input schema is not in context.
 ```
 
+Standing attachments. A file attached to the session is mounted on every
+turn, so after compaction an agent could open a weeks-old screenshot and treat
+it as something the user just sent. The attachments module now says such files
+may be old and belong to the current request only when the latest message
+refers to them.
+
+```diff
++ Files attached to the session stay mounted on every turn and may be old; treat one as part of the current request only when the latest message refers to it.
+```
+
 Session targets. Conversations about another session now keep a remembered
 target and read, send to, or steer that session through the session tools, so
 session coordination says how to select it and follow a sent update to its
