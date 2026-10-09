@@ -144,5 +144,5 @@ export const embeddingMigrationTail = [
 
   // Rewrites the inbox projection and push triggers after 0674 and resolves
   // the session's person through 0661; replay after both so its bodies win.
-  "0677_inbox_mute_session_replies.sql",
+  "0678_inbox_mute_session_replies.sql",
 ];

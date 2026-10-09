@@ -410,7 +410,7 @@ async function sessionAccount(
 }
 
 /**
- * Whether this person muted the session's replies (0677), or null when the
+ * Whether this person muted the session's replies (0678), or null when the
  * session is not in the workspace.
  */
 export async function getSessionRepliesMuted(
@@ -428,7 +428,7 @@ export async function getSessionRepliesMuted(
 }
 
 /**
- * Mute or unmute the session's replies for this person (0677). Muting takes
+ * Mute or unmute the session's replies for this person (0678). Muting takes
  * its current reply out of their inbox. Null when the session is not in the
  * workspace.
  */

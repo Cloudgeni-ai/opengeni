@@ -2572,8 +2572,7 @@ describe("release schema contract", () => {
       "0675_inbox_subagent_turn_push.sql",
       "0676_sandbox_deadline_forced_capture.sql",
       "0677_local_human_inbox_recipient.sql",
-
-      "0677_inbox_mute_session_replies.sql",
+      "0678_inbox_mute_session_replies.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

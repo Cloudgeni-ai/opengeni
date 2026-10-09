@@ -273,7 +273,7 @@ describe("0639 native app push", () => {
     ]);
   });
 
-  test("a session whose replies the person muted still asks them questions (0677)", async () => {
+  test("a session whose replies the person muted still asks them questions (0678)", async () => {
     if (!client) return;
     const person = await personWithAppSession("muted");
     await registerNativePushDevice(db(), {

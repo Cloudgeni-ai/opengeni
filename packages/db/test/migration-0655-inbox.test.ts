@@ -349,7 +349,7 @@ describe("0655 inbox", () => {
       ["Round 6 is in", true],
     ]);
     // Muting the session takes its reply away and keeps new ones out, while
-    // what the agent sends on purpose still arrives (0677).
+    // what the agent sends on purpose still arrives (0678).
     const muteFor = {
       workspaceId: person.scope.workspaceId,
       sessionId: person.session.id,
