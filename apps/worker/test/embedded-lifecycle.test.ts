@@ -747,6 +747,7 @@ describe("embedded worker lifecycle contract", () => {
           "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)",
           "begin_subscription_codex_refresh(uuid, uuid, uuid, uuid, text, text, uuid, text, bigint)",
           "persist_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+          "fail_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text)",
         ].map((name) => ({
           name,
           owner: "opengeni_migrator",

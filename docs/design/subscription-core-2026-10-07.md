@@ -758,6 +758,154 @@ independent reviews (authorization/RLS and correctness/compatibility), validated
 findings fixed, exact-head re-review, full green CI, head-SHA recheck, then
 protected merge. Rerun only failed jobs for verified transient failures.
 
+##### PR 1: Codex chat selector and credential materialization (dormant)
+
+PR 1 implements inventory EP-T01..T08 for Codex chat turns only: turn claim
+and model policy, placement, credential materialization, leases and dispatch
+fencing, failure settlement, finalization, usage and release. The EP-T09/T10
+wait, recovery and wake path is deferred to PR 2; until then a placement wait
+fails closed (below). PR 1 is reachable only when an organization's Codex
+cutover row is enabled, which no migration does before PR 3; the legacy
+selector is unchanged when no row exists. Each strict default below is the
+fail-closed reading of this plan and the contract where they were silent.
+
+- **Gate.** No row: the legacy path, byte-for-byte. Disabled row: the turn
+  fails with typed copy (`subscription_core_cutover_disabled`) and reads no
+  legacy Codex table. Enabled row: the core places the turn. Placement,
+  credential reads, refresh, quota observations and failure receipts re-check
+  the gate in their own transaction, so switch-off fails closed mid-turn. At
+  claim, an accepted Codex turn of an organization with any row no longer
+  reads the legacy active-credential flag (the catalog provider is installed
+  when enabled), and no turn of such an organization, whatever its model,
+  resolves the legacy Codex Apps designation. The claim reads the row with the
+  legacy read's bounded retry.
+- **Accepted authority.** Placement reads only the exact turn's immutable
+  `subscription_authority`; NULL is no personal authority. The owner tuple is
+  the session's recorded owner and membership and the turn's initiating human,
+  never a viewer, creator or live-membership inference. The core service
+  actor shows the session owner as its initiating human for a
+  service-initiated turn only so the owner's session rows are visible;
+  personal access follows the stored turn human, which stays NULL, so a
+  service turn never leases, reads or refreshes a personal connection. PR 1
+  adds no v2 writer, so post-cutover turns run on shared capacity only.
+- **Placement.** `withSubscriptionCorePlacementWorld` + `decidePlacement` over
+  the turn's accepted product model only (provider `codex`), with
+  cross-provider failover and fallback order forced off. Explicit choices run
+  on their account or wait (D-24); stickiness uses the binding's
+  `last_model_call_at`.
+- **Lease.** The lease generation is the turn's execution generation and the
+  holder is the existing per-attempt holder id. A retry of the same attempt
+  reuses its live lease while the connection can still serve (an expired one
+  is released and acquired afresh); any other holder of the same or a newer
+  generation is fenced; an older attempt's live lease is never taken over
+  before it expires (the core contract). That case
+  (`subscription_lease_busy`) recovers the same turn with its own pacing, at
+  the older lease's expiry plus up to five seconds of jitter and never more
+  than one lease TTL, outside the provider recovery budget. Lease renewal is
+  not fenced on the turn's current attempt, so the chain is bounded: the turn
+  records when a consecutive lease-busy chain started (it continues only from
+  the immediately previous execution generation), and after about three
+  lease TTLs the turn stops with typed copy and an idle session. A database
+  failure while recording that recovery keeps the turn recoverable, as on the
+  provider recovery path. Legacy took over immediately; this is the stricter
+  reading. Renewal, the pre-dispatch check
+  and release run under the core service actor for the exact turn.
+- **Binding.** Written only through the version compare-and-swap, only when
+  the connection or model changes, preserving `choice` and `only_this_model`;
+  a conflict retries placement at most three times. Ownerless sessions never
+  write a binding (the database refuses one without an exact turn).
+  Finalization advances `last_model_call_at` only after a model call that
+  produced a response.
+- **Events.** `codex.credential.selected` and `codex.account.switched` keep
+  their payload shape and attempt-fenced idempotency; the previous account
+  comes from the binding and `strategy` is the rotation mode. The legacy
+  `sessions.codex_last_credential_id` pointer is never written with a core id.
+- **Credential plaintext (the PR 3 mapping target).** `credential_encrypted`
+  is the same `encryptEnvironmentValue` blob as the legacy tables over the JSON
+  object `{access_token, refresh_token, id_token}`; `provider_account_id` is
+  the ChatGPT account id, `provider_state.isFedramp` the FedRAMP flag (absent
+  means false) and `plan_type` the recorded plan. The bearer snapshot keeps
+  the legacy `CodexCredentialTokenSnapshot` shape; its `credentialVersion` is
+  the connection's `refresh_generation`, which fences quota observations. A
+  credential that cannot be decoded fails with fixed text and no cause, so no
+  plaintext reaches an error message (the legacy decoder is fixed the same
+  way).
+- **Reads and refresh.** Every credential read requires the exact accepted
+  turn, the live lease and, for a personal connection, the frozen v2 entry
+  (through the v2 personal-placement helper). Ownerless turns never read a
+  personal or people-scoped connection. Refresh goes only through the
+  begin/persist seam, persisting immediately after the provider returns.
+  Concurrent refreshes in one process share one provider call per connection
+  and generation, but only connection-level outcomes (refreshed, superseded,
+  revoked sign-in, provider error) are shared; a lost lease or refused
+  authorization belongs to the turn that hit it, and a waiting turn refreshes
+  under its own lease instead. A permanent OAuth refusal marks the connection
+  `needs_relogin` through `fail_subscription_codex_refresh` (migration
+  0668), which consumes the same one-shot authorization as persist and writes
+  under the refresh-generation compare-and-swap.
+- **Personal authority repair.** The lease guard and
+  `begin_subscription_codex_refresh` authorized personal connections only
+  from the v1 Codex snapshot, so a v2-authorized personal placement could
+  never lease or refresh. Migration 0668 makes
+  `authorize_subscription_personal_access` use the exact v2 entry (owner
+  membership and current authority generation, personal connections allowed)
+  for Codex once its cutover is enabled. A Codex cutover row that exists but
+  is disabled grants no personal authority at all. Every other provider, and
+  Codex while no cutover row exists, keep the v1 check.
+- **Wait.** No core wake delivery loop exists yet, so a placement wait fails
+  the turn with typed copy (`subscription_capacity_unavailable` with the wait
+  reason and known reset), leaves the session idle for the next message and
+  wakes a waiting parent, instead of parking on a waiter nothing would wake.
+  No core waiter row is written.
+- **Failure, usage and release.** Core turns never reach the legacy Codex
+  settlement. Lease loss recovers the same turn (`codex_lease_lost`), as for
+  Claude and SuperGrok. Quota and rate-limit refusals record a
+  generation-fenced quota observation and a turn failure receipt on the leased
+  connection (both require the live lease and the enabled gate), then settle
+  through the existing typed copy. A revoked sign-in, a 403 that survives
+  refresh, or an explicit plan-entitlement refusal records a receipt and fails
+  the turn with typed copy (`subscription_account_refused`), idling the
+  session and waking a waiting parent. Losing access mid-turn (the connection
+  or the turn's authority over it is no longer visible, enabled or usable) is
+  a distinct typed error with its own copy, never reported as a revoked
+  sign-in. Usage headers become a quota
+  observation at finalization, and the lease is released through
+  `releaseCurrent()`.
+- **Consumers still on PR 2.** A core Codex compaction turn fails closed
+  (`subscription_core_unsupported`); the Codex image tool is not exposed on a
+  core turn; the worker resolves no legacy Apps designation for a cutover
+  organization; the legacy model-connection check is skipped because placement
+  already enforced the connection and workspace model policy. In-turn remote
+  compaction and title generation use the core bearer and touch no legacy
+  table.
+
+Deferred to PR 2 (all behind the same gate):
+
+- core capacity waiters, the wake delivery loop and both-shape workflow
+  reconciliation (EP-T09/T10);
+- in-turn re-placement after a refusal, with the per-turn failover bound;
+- connection health and quarantine for 403 and plan-entitlement refusals
+  (today the connection stays active and sticky placement can return to it;
+  the next turn fails again with the same typed copy);
+- the v2 accepted-authority writer at acceptance;
+- persisting the plan carried by a rotated id_token (the refresh seam has no
+  plan column);
+- re-selection points (compaction completed, model changed);
+- the Codex Apps designation on the core;
+- the "Running on" session display and the legacy
+  `sessions.codex_last_credential_id` pointer, which core turns do not write;
+- compaction, transcription, realtime, image/video, reset credits, billing
+  attribution and the route/SDK/React compatibility projections.
+
+PR 3 precondition: `apps/api/src/workspace-tool-gateway.ts` and the
+`packages/core` capability overlays still resolve the legacy Codex Apps
+designation and active-credential state. PR 2 must move them to the core (or
+gate them on the cutover row as the worker does) before PR 3 enables any
+organization.
+
+Migration 0668 follows the precursor's 0667; renumber with
+`scripts/renumber-migration.ts` if the shared ledger moves again.
+
 #### Verification plan
 
 - Run `bun install` first. Test Codex adapter conformance without network using

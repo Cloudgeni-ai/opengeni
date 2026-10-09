@@ -679,6 +679,7 @@ export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
   "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)",
   "begin_subscription_codex_refresh(uuid, uuid, uuid, uuid, text, text, uuid, text, bigint)",
   "persist_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+  "fail_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text)",
 ] as const;
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [

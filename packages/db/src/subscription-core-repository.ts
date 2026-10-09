@@ -253,7 +253,7 @@ function groupStrings<
   return grouped;
 }
 
-function decodeSubscriptionQuota(row: {
+export function decodeSubscriptionQuota(row: {
   quota: unknown;
   quota_revision: number | string | null;
   quota_observed_refresh_generation: number | string | null;

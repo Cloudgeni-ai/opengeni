@@ -98,6 +98,11 @@ import { settleTurnFailure } from "./failure-settlement";
 import { runTurnStreamAttempt } from "./stream-attempt";
 import { claimTurnAttempt } from "./claim";
 import { selectCodexTurnCapacity, type CapacityPhaseDeps } from "./codex-capacity";
+import {
+  assertTurnModelConnection,
+  buildCoreCodexRequestTokenResolver,
+} from "./codex-core-capacity";
+import { observeCodexResponseCompletion } from "./codex-core-settlement";
 import { prepareGovernanceAndModel } from "./governance-model";
 import { prepareCompaction, runPostAgentCompaction } from "./compaction-prep";
 import { createSandboxTurnRuntime } from "./sandbox-runtime";
@@ -616,7 +621,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             requiredGeneratedVideoFiles,
           });
           if ("exit" in governance) return governance.exit;
-          await assertModelConnectionAllowsTurn(db, {
+          await assertTurnModelConnection(db, providerTurn, {
             workspaceId: input.workspaceId,
             subjectId: turn.initiatingHumanSubjectId ?? "worker:model-access",
             modelId: turnExecutionPolicy.productModelId,
@@ -668,18 +673,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   // The empty-string fallback yields no row → null credential → the
                   // existing CodexReloginRequired path (a codex turn with no usable
                   // account fails closed, exactly as before multi-account).
-                  const resolver = buildCodexTokenResolver(
-                    db,
-                    runSettings,
-                    input.workspaceId,
-                    providerTurn.effectiveCodexCredentialId ?? "",
-                    undefined,
-                    {
-                      turnId: turn.id,
-                      holderId: leases.codex.holderId!,
-                      generation: leases.codex.generation!,
-                    },
-                  );
+                  const coreCodex = providerTurn.codexSubscriptionCore;
+                  const resolver = coreCodex
+                    ? buildCoreCodexRequestTokenResolver(db, runSettings, coreCodex, leases.codex)
+                    : buildCodexTokenResolver(
+                        db,
+                        runSettings,
+                        input.workspaceId,
+                        providerTurn.effectiveCodexCredentialId ?? "",
+                        undefined,
+                        {
+                          turnId: turn.id,
+                          holderId: leases.codex.holderId!,
+                          generation: leases.codex.generation!,
+                        },
+                      );
                   const resolveTrackedToken = async (
                     resolve: () => ReturnType<typeof resolver.getToken>,
                   ) => {
@@ -737,6 +745,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     onModelRequestDiagnostic: (event) => {
                       if (event.phase === "started")
                         sandboxState.firstProviderRequestStarted = true;
+                      // Only a call that produced a response advances the core
+                      // binding's cache clock at finalization.
+                      observeCodexResponseCompletion(providerTurn, event);
                       if (
                         event.phase === "started" &&
                         eventing.firstModelRequestPreparationStartedAt !== null &&

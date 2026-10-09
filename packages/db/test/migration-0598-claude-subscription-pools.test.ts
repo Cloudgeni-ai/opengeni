@@ -24,6 +24,7 @@ const subscriptionCoreMigrations = [
   "0645_subscription_core_runtime.sql",
   "0646_subscription_core_people_assignment_read.sql",
   "0667_subscription_authority_refresh_contract.sql",
+  "0668_subscription_core_codex_chat_authority.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {
